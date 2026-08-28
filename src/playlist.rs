@@ -74,6 +74,14 @@ impl Queue {
     pub fn push_back(&mut self, id: TrackId) {
         self.entries.push_back(id);
     }
+    /// The next queued track, without consuming it.
+    ///
+    /// `next()` is pure, so it reports what the queue would give; popping is
+    /// the caller's job once it commits to playing.
+    pub fn front(&self) -> Option<TrackId> {
+        self.entries.front().copied()
+    }
+
     pub fn pop_front(&mut self) -> Option<TrackId> {
         self.entries.pop_front()
     }

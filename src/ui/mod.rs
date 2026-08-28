@@ -18,9 +18,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
+use crate::audio::PlayerHandle;
 use crate::library::Library;
+use crate::next::{self, ActiveSource, Playback, Source};
 use crate::playlist::{Playlist, Queue};
-use crate::store::Store;
+use crate::store::{Store, TrackId};
 use tree::{Pane, TreeState};
 
 /// The five views M4 covers. cmus numbers them, and so do we — the digits are
@@ -131,6 +133,14 @@ pub struct Ui {
     pub queue_sel: usize,
     pub browser: BrowserState,
     pub status: String,
+    /// Views 3 and 4 live here rather than in the application, because the UI
+    /// is what mutates them.
+    pub playlist: Playlist,
+    pub queue: Queue,
+    pub playback: Playback,
+    /// Shown briefly after a volume change, so the level is visible without a
+    /// permanent indicator taking up room.
+    pub volume_hint: Option<f32>,
     quit: bool,
 }
 
@@ -144,7 +154,30 @@ impl Ui {
             queue_sel: 0,
             browser: BrowserState::at(start_dir),
             status: String::new(),
+            playlist: Playlist::new(),
+            queue: Queue::new(),
+            playback: Playback::default(),
+            volume_hint: None,
             quit: false,
+        }
+    }
+
+    /// The track the cursor is on in the current view, if any.
+    pub fn selected_track(&self, ctx: &Context<'_>) -> Option<TrackId> {
+        match self.view {
+            View::Tree => {
+                let tracks = self.tree.tracks_for(ctx.library, ctx.store);
+                match self.tree.pane {
+                    // With the tree pane focused, Enter plays the first track
+                    // of whatever is selected rather than doing nothing.
+                    Pane::Tree => tracks.first().copied(),
+                    Pane::Tracks => tracks.get(self.tree.track_selected).copied(),
+                }
+            }
+            View::Sorted => ctx.library.sorted().get(self.sorted).copied(),
+            View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
+            View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
+            View::Browser => None,
         }
     }
 }
@@ -154,8 +187,8 @@ impl Ui {
 pub struct Context<'a> {
     pub store: &'a Store,
     pub library: &'a Library,
-    pub playlist: &'a Playlist,
-    pub queue: &'a Queue,
+    /// `None` in tests, which have no audio device.
+    pub player: Option<&'a PlayerHandle>,
 }
 
 /// Run the event loop until the user quits.
@@ -165,16 +198,89 @@ where
 {
     while !ui.quit {
         terminal.draw(|frame| draw(frame, ui, ctx))?;
-        // Poll rather than block, so a future status refresh (M5's position
-        // display) has somewhere to happen.
-        if event::poll(Duration::from_millis(250))?
+        // Poll rather than block: the position display has to tick even when
+        // nobody is pressing anything.
+        if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
             && key.is_press()
         {
             handle_key(key, ui, ctx);
         }
+        drain_player_events(ui, ctx);
     }
     Ok(())
+}
+
+/// Turn player events into UI state, and advance when a track ends.
+fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(player) = ctx.player else { return };
+    let mut finished = false;
+    while let Ok(event) = player.events().try_recv() {
+        match event {
+            crate::audio::PlayerEvent::Finished => finished = true,
+            crate::audio::PlayerEvent::Error(e) => ui.status = format!("error: {e}"),
+            crate::audio::PlayerEvent::DeviceLost(e) => ui.status = format!("device lost: {e}"),
+            crate::audio::PlayerEvent::Loaded { .. } => {}
+        }
+    }
+    if finished {
+        advance(ui, ctx, true);
+    }
+}
+
+/// Resolve and start the next (or previous) track.
+///
+/// The queue pop lives here rather than in `next()`, which stays pure — see
+/// DESIGN §5 and the note on [`Source::Queue`].
+fn advance(ui: &mut Ui, ctx: &Context<'_>, forward: bool) {
+    let decision = if forward {
+        next::next_with_source(next_input(ui, ctx))
+    } else {
+        next::prev(next_input(ui, ctx)).map(|id| (id, Source::Pool))
+    };
+
+    let Some((id, source)) = decision else {
+        ui.status = "end of pool".into();
+        ui.playback.current = None;
+        return;
+    };
+
+    match source {
+        Source::Queue => {
+            ui.queue.pop_front();
+        }
+        // A shuffled lap that wrapped would otherwise replay in the same
+        // order; reseed so the next pass differs.
+        Source::Wrapped if ui.playback.shuffle => ui.playback.reshuffle(),
+        _ => {}
+    }
+    play(ui, ctx, id);
+}
+
+fn next_input<'a>(ui: &'a Ui, ctx: &'a Context<'_>) -> next::NextInput<'a> {
+    next::NextInput {
+        queue: &ui.queue,
+        active: ui.playback.active,
+        library: ctx.library,
+        playlist: &ui.playlist,
+        current: ui.playback.current,
+        aaa_mode: ui.playback.aaa_mode,
+        shuffle: ui.playback.shuffle,
+        repeat: ui.playback.repeat,
+        repeat_current: ui.playback.repeat_current,
+        rng_state: ui.playback.rng_state,
+    }
+}
+
+fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
+    let Some(track) = ctx.store.get(id) else {
+        return;
+    };
+    ui.playback.current = Some(id);
+    ui.status.clear();
+    if let Some(player) = ctx.player {
+        player.load(track.path.clone());
+    }
 }
 
 fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
@@ -229,11 +335,77 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
         }
         KeyCode::Enter => match ui.view {
             View::Browser => ui.browser.enter(),
-            // Playback is wired up in M5; saying so beats doing nothing.
-            _ => ui.status = "playback lands in M5".into(),
+            _ => {
+                // Playing from a view makes it the active source, so `next`
+                // walks the list you started from.
+                ui.playback.active = match ui.view {
+                    View::Playlist => ActiveSource::Playlist,
+                    _ => ActiveSource::Library,
+                };
+                if let Some(id) = ui.selected_track(ctx) {
+                    if ui.view == View::Queue {
+                        ui.queue.pop_front();
+                    }
+                    play(ui, ctx, id);
+                }
+            }
         },
+        // Transport, per §6's default bindings.
+        KeyCode::Char('x') => {
+            if ui.playback.current.is_some() {
+                if let Some(p) = ctx.player {
+                    p.play();
+                }
+            } else if let Some(id) = ui.selected_track(ctx) {
+                play(ui, ctx, id);
+            }
+        }
+        KeyCode::Char('c') => {
+            if let Some(p) = ctx.player {
+                p.toggle();
+            }
+        }
+        KeyCode::Char('v') => {
+            if let Some(p) = ctx.player {
+                p.stop();
+            }
+            ui.playback.current = None;
+        }
+        KeyCode::Char('b') => advance(ui, ctx, true),
+        KeyCode::Char('z') => advance(ui, ctx, false),
+        // Mode toggles.
+        KeyCode::Char('s') => {
+            ui.playback.shuffle = !ui.playback.shuffle;
+            ui.playback.reshuffle();
+        }
+        KeyCode::Char('r') => ui.playback.repeat = !ui.playback.repeat,
+        KeyCode::Char('R') => ui.playback.repeat_current = !ui.playback.repeat_current,
+        KeyCode::Char('m') => ui.playback.aaa_mode = ui.playback.aaa_mode.cycle(),
+        // Seek and volume.
+        KeyCode::Left | KeyCode::Right | KeyCode::Char('<' | '>') => {
+            if let Some(p) = ctx.player {
+                let secs = match key.code {
+                    KeyCode::Left => -10.0,
+                    KeyCode::Right => 10.0,
+                    KeyCode::Char('<') => -60.0,
+                    _ => 60.0,
+                };
+                p.seek(crate::audio::SeekTo::Relative(secs));
+            }
+        }
+        KeyCode::Char('-' | '+' | '=') => {
+            if let Some(p) = ctx.player {
+                let delta = if key.code == KeyCode::Char('-') {
+                    -0.05
+                } else {
+                    0.05
+                };
+                p.set_volume(p.volume() + delta);
+                ui.volume_hint = Some(p.volume() * 100.0);
+            }
+        }
         KeyCode::Char('E') if ui.view == View::Tree => ui.tree.expand_all(ctx.library),
-        KeyCode::Char('C') if ui.view == View::Tree => {
+        KeyCode::Backspace if ui.view == View::Tree => {
             ui.tree.collapse_all();
             ui.tree.selected = 0;
         }
@@ -248,8 +420,8 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
             Pane::Tracks => ui.tree.tracks_for(ctx.library, ctx.store).len(),
         },
         View::Sorted => ctx.library.sorted().len(),
-        View::Playlist => ctx.playlist.len(),
-        View::Queue => ctx.queue.len(),
+        View::Playlist => ui.playlist.len(),
+        View::Queue => ui.queue.len(),
         View::Browser => ui.browser.entries.len(),
     }
 }
@@ -312,12 +484,12 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
             body,
             ui,
             ctx,
-            ctx.playlist.entries(),
+            ui.playlist.entries(),
             ui.playlist_sel,
             "playlist",
         ),
         View::Queue => {
-            let entries: Vec<_> = ctx.queue.entries().copied().collect();
+            let entries: Vec<_> = ui.queue.entries().copied().collect();
             draw_tracks(frame, body, ui, ctx, &entries, ui.queue_sel, "queue")
         }
         View::Browser => draw_browser(frame, body, ui),
@@ -544,12 +716,10 @@ mod tests {
     #[test]
     fn tree_view_renders_artists_collapsed() {
         let (store, library) = fixture();
-        let (playlist, queue) = (Playlist::new(), Queue::new());
         let ctx = Context {
             store: &store,
             library: &library,
-            playlist: &playlist,
-            queue: &queue,
+            player: None,
         };
         let ui = Ui::new(PathBuf::from("/m"));
         let out = render(&ui, &ctx, 74, 12);
@@ -570,12 +740,10 @@ mod tests {
     #[test]
     fn compilation_stays_one_artist_with_every_track() {
         let (store, library) = fixture();
-        let (playlist, queue) = (Playlist::new(), Queue::new());
         let ctx = Context {
             store: &store,
             library: &library,
-            playlist: &playlist,
-            queue: &queue,
+            player: None,
         };
         let mut ui = Ui::new(PathBuf::from("/m"));
         // Select "Various Artists" and expand it.
@@ -597,12 +765,10 @@ mod tests {
     #[test]
     fn multi_disc_album_does_not_interleave() {
         let (store, library) = fixture();
-        let (playlist, queue) = (Playlist::new(), Queue::new());
         let ctx = Context {
             store: &store,
             library: &library,
-            playlist: &playlist,
-            queue: &queue,
+            player: None,
         };
         let mut ui = Ui::new(PathBuf::from("/m"));
         let rows = ui.tree.rows(&library, &store);
@@ -620,12 +786,10 @@ mod tests {
     #[test]
     fn untagged_track_shows_its_file_name() {
         let (store, library) = fixture();
-        let (playlist, queue) = (Playlist::new(), Queue::new());
         let ctx = Context {
             store: &store,
             library: &library,
-            playlist: &playlist,
-            queue: &queue,
+            player: None,
         };
         let mut ui = Ui::new(PathBuf::from("/m"));
         let rows = ui.tree.rows(&library, &store);
@@ -642,12 +806,10 @@ mod tests {
     #[test]
     fn empty_playlist_says_so_rather_than_rendering_blank() {
         let (store, library) = fixture();
-        let (playlist, queue) = (Playlist::new(), Queue::new());
         let ctx = Context {
             store: &store,
             library: &library,
-            playlist: &playlist,
-            queue: &queue,
+            player: None,
         };
         let mut ui = Ui::new(PathBuf::from("/m"));
         ui.view = View::Playlist;
@@ -659,12 +821,10 @@ mod tests {
     #[test]
     fn navigation_clamps_at_both_ends() {
         let (store, library) = fixture();
-        let (playlist, queue) = (Playlist::new(), Queue::new());
         let ctx = Context {
             store: &store,
             library: &library,
-            playlist: &playlist,
-            queue: &queue,
+            player: None,
         };
         let mut ui = Ui::new(PathBuf::from("/m"));
         let rows = ui.tree.rows(&library, &store).len();
@@ -683,12 +843,10 @@ mod tests {
     #[test]
     fn tab_moves_focus_and_digits_switch_views() {
         let (store, library) = fixture();
-        let (playlist, queue) = (Playlist::new(), Queue::new());
         let ctx = Context {
             store: &store,
             library: &library,
-            playlist: &playlist,
-            queue: &queue,
+            player: None,
         };
         let mut ui = Ui::new(PathBuf::from("/m"));
         assert_eq!(ui.tree.pane, Pane::Tree);
@@ -713,12 +871,10 @@ mod tests {
     #[test]
     fn moving_the_tree_cursor_resets_the_track_pane() {
         let (store, library) = fixture();
-        let (playlist, queue) = (Playlist::new(), Queue::new());
         let ctx = Context {
             store: &store,
             library: &library,
-            playlist: &playlist,
-            queue: &queue,
+            player: None,
         };
         let mut ui = Ui::new(PathBuf::from("/m"));
         handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
@@ -728,5 +884,156 @@ mod tests {
         handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
         handle_key(KeyEvent::from(KeyCode::Char('j')), &mut ui, &ctx);
         assert_eq!(ui.tree.track_selected, 0, "stale track cursor after moving");
+    }
+    // ---- playback wiring (M5) -------------------------------------------
+    //
+    // `ctx.player` is None here: these cover the decisions the UI makes, which
+    // is where the bugs are. Whether cpal then makes a sound is M1/M2's ground.
+
+    fn ctx_of<'a>(store: &'a Store, library: &'a Library) -> Context<'a> {
+        Context {
+            store,
+            library,
+            player: None,
+        }
+    }
+
+    #[test]
+    fn enter_in_the_track_pane_plays_the_selected_track() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+
+        handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx); // focus tracks
+        handle_key(KeyEvent::from(KeyCode::Char('j')), &mut ui, &ctx);
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+
+        let played = ui.playback.current.expect("nothing started playing");
+        let expected = ui.tree.tracks_for(&library, &store)[1];
+        assert_eq!(played, expected);
+    }
+
+    #[test]
+    fn enter_on_an_artist_row_starts_that_artists_first_track() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+
+        let played = ui.playback.current.expect("nothing started playing");
+        let first = ui.tree.tracks_for(&library, &store)[0];
+        assert_eq!(played, first, "Enter on a tree row should not be a no-op");
+    }
+
+    #[test]
+    fn b_and_z_walk_forwards_and_backwards() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        let first = ui.playback.current.unwrap();
+
+        handle_key(KeyEvent::from(KeyCode::Char('b')), &mut ui, &ctx);
+        let second = ui.playback.current.unwrap();
+        assert_ne!(first, second);
+
+        handle_key(KeyEvent::from(KeyCode::Char('z')), &mut ui, &ctx);
+        assert_eq!(ui.playback.current, Some(first), "z should come back");
+    }
+
+    #[test]
+    fn mode_keys_toggle_and_show_in_the_status_line() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+
+        assert!(!ui.playback.shuffle);
+        handle_key(KeyEvent::from(KeyCode::Char('s')), &mut ui, &ctx);
+        assert!(ui.playback.shuffle);
+        handle_key(KeyEvent::from(KeyCode::Char('r')), &mut ui, &ctx);
+        assert!(ui.playback.repeat);
+        handle_key(KeyEvent::from(KeyCode::Char('m')), &mut ui, &ctx);
+        assert_eq!(ui.playback.aaa_mode, crate::next::AaaMode::Artist);
+
+        let out = render(&ui, &ctx, 90, 8);
+        assert!(out.contains("[artist]"), "{out}");
+        assert!(out.contains("[shuffle]"), "{out}");
+        assert!(out.contains("[repeat]"), "{out}");
+    }
+
+    /// The queue outranks the library, and playing from it consumes it — the
+    /// §5 rule that most often goes wrong in a UI.
+    #[test]
+    fn finishing_a_track_takes_from_the_queue_and_pops_it() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+
+        let sorted = library.sorted();
+        ui.playback.current = Some(sorted[0]);
+        let queued = sorted[4];
+        ui.queue.push_back(queued);
+
+        advance(&mut ui, &ctx, true);
+
+        assert_eq!(ui.playback.current, Some(queued));
+        assert!(ui.queue.is_empty(), "the queue was not consumed");
+
+        // With the queue drained, playback resumes after the library cursor —
+        // which the queued track must not have moved.
+        advance(&mut ui, &ctx, true);
+        assert_eq!(ui.playback.current, Some(sorted[5]));
+    }
+
+    #[test]
+    fn running_off_the_end_stops_rather_than_looping() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        let last = *library.sorted().last().unwrap();
+        ui.playback.current = Some(last);
+
+        advance(&mut ui, &ctx, true);
+        assert_eq!(ui.playback.current, None);
+        assert!(ui.status.contains("end of pool"), "{}", ui.status);
+
+        // With repeat on, the same position wraps instead.
+        ui.playback.current = Some(last);
+        ui.playback.repeat = true;
+        advance(&mut ui, &ctx, true);
+        assert_eq!(ui.playback.current, Some(library.sorted()[0]));
+    }
+
+    #[test]
+    fn playing_from_the_playlist_view_makes_it_the_active_source() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        let sorted = library.sorted();
+        ui.playlist.push(sorted[3]);
+        ui.playlist.push(sorted[1]);
+
+        ui.view = View::Playlist;
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        assert_eq!(ui.playback.active, ActiveSource::Playlist);
+        assert_eq!(ui.playback.current, Some(sorted[3]));
+
+        // `next` now walks the playlist, not the library.
+        advance(&mut ui, &ctx, true);
+        assert_eq!(ui.playback.current, Some(sorted[1]));
+    }
+
+    #[test]
+    fn now_playing_replaces_the_library_summary() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        let out = render(&ui, &ctx, 90, 8);
+        assert!(out.contains("7 tracks"), "{out}");
+
+        ui.playback.current = Some(library.sorted()[0]);
+        let out = render(&ui, &ctx, 90, 8);
+        assert!(!out.contains("7 tracks"), "summary should give way:\n{out}");
+        assert!(out.contains("Anderson .Paak"), "{out}");
     }
 }

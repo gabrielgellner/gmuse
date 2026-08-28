@@ -11,6 +11,7 @@ mod audio;
 mod cache;
 mod cli;
 mod library;
+mod next;
 mod playlist;
 mod repl;
 mod scan;
@@ -26,7 +27,6 @@ use clap::Parser;
 use audio::{PlayerEvent, PlayerHandle, State};
 use cli::Cli;
 use library::Library;
-use playlist::{Playlist, Queue};
 use repl::Line;
 use store::Store;
 
@@ -169,8 +169,6 @@ fn run(app: &mut App, cmd: Line) {
 /// panic mid-render leaves a usable terminal rather than a wedged one.
 fn run_tui(app: &App, smart_artist_sort: bool) -> Result<(), Box<dyn std::error::Error>> {
     let library = Library::rebuild(&app.store, smart_artist_sort);
-    let playlist = Playlist::new();
-    let queue = Queue::new();
     let start_dir = app
         .roots
         .first()
@@ -181,8 +179,7 @@ fn run_tui(app: &App, smart_artist_sort: bool) -> Result<(), Box<dyn std::error:
     let ctx = ui::Context {
         store: &app.store,
         library: &library,
-        playlist: &playlist,
-        queue: &queue,
+        player: Some(&app.player),
     };
     let mut state = ui::Ui::new(start_dir);
 

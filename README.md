@@ -103,8 +103,10 @@ gmuse [OPTIONS] [FILE]
 ```
 
 The TUI opens on the library tree. `1`-`5` switch views (library, sorted, playlist, queue, browser), `j`/`k` move,
-`space` expands an artist, `tab` swaps pane, `E`/`C` expand/collapse all, `q` quits. It is read-only until M5 wires
-playback in — use `--repl` to actually play something in the meantime.
+`space` expands an artist, `tab` swaps pane, `E`/`Backspace` expand/collapse all, `q` quits.
+
+Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
+`<`/`>` seek 60s, `-`/`+` adjust volume. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `m` cycles all/artist/album.
 
 The library is scanned on startup and cached at `$XDG_CACHE_HOME/gmuse/library.postcard`, so later runs need no
 `--library`. Rescans are incremental by mtime: 20,000 tracks scan cold in 0.86s and rescan in 0.08s.

@@ -131,6 +131,37 @@ impl Library {
     pub fn contains(&self, id: TrackId) -> bool {
         self.members.contains(&id)
     }
+
+    /// Which artist and album a track sits under.
+    ///
+    /// `aaa_mode` needs this to narrow the candidate pool, and getting it from
+    /// the tree rather than the `Store` keeps `next()`'s inputs to exactly what
+    /// DESIGN §5 lists.
+    pub fn locate(&self, id: TrackId) -> Option<(&SortKey, &SortKey)> {
+        self.tree.iter().find_map(|(artist, albums)| {
+            albums
+                .iter()
+                .find(|(_, tracks)| tracks.contains(&id))
+                .map(|(album, _)| (artist, album))
+        })
+    }
+
+    /// Every track by one artist, in album then disc/track order.
+    pub fn artist_tracks(&self, artist: &SortKey) -> Vec<TrackId> {
+        self.tree
+            .get(artist)
+            .map(|albums| albums.values().flatten().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// One album's tracks, in disc/track order.
+    pub fn album_tracks(&self, artist: &SortKey, album: &SortKey) -> &[TrackId] {
+        self.tree
+            .get(artist)
+            .and_then(|albums| albums.get(album))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
 }
 
 /// Ordering of tracks inside one album: disc, then track number, then title.

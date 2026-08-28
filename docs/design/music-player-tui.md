@@ -368,8 +368,9 @@ mtime. No UI. Verify against a real library — measure scan time and memory on 
 **M4 — the views.** ✅ _done 2026-08-27._ ratatui, views 1–5, navigation, `Tab`, `Space` expand. Read-only, no playback
 wired in. Verify: tree renders correctly for compilations, multi-disc albums, and missing tags.
 
-**M5 — next() and playback wiring.** Implement `next.rs` with its full test table, wire views to `PlayerHandle`. Verify:
-every row in the test table, then listen for an hour.
+**M5 — next() and playback wiring.** ✅ _implemented 2026-08-27; the hour of listening is still owed._ Implement
+`next.rs` with its full test table, wire views to `PlayerHandle`. Verify: every row in the test table, then listen for
+an hour.
 
 **M6 — command layer.** `Command`, rc parsing, `:` line, `Bindings`, view 7. Verify: every default binding, plus
 rebinding round-trips through the rc file.
@@ -578,6 +579,29 @@ Append here as decisions are made. Format: date, decision, rationale.
   carry three different `artist` tags stays one artist with all its tracks; a multi-disc album inserted disc-2-first
   renders disc 1 above disc 2; and a file with no tags at all appears under "Unknown Artist" showing its file name.
   Navigation clamping, `Tab` focus and view switching are covered by driving `handle_key` directly.
+
+- **2026-08-27** **`next()` does not pop the queue.** §5 requires a pure function, and popping is a mutation. So
+  `next_with_source` reports _where_ the track came from and the caller consumes the queue once it commits. `next()`
+  keeps the exact signature §5 specifies and delegates.
+- **2026-08-27** **Shuffle is a seeded permutation, not a played-set.** §5 describes "pick unplayed-at-random, tracking
+  a played-set per pool". A Fisher-Yates permutation seeded from `rng_state` gives the same guarantee — nothing repeats
+  until the pool is exhausted — while keeping `next()` pure, which §5 demands in the same paragraph. A played-set would
+  have to be threaded in and out of every call and invalidated whenever the pool changed; a permutation simply _is_ the
+  play order. Cost: repeating a shuffled pool would replay the same order, so `Source::Wrapped` tells the caller to
+  reseed. `split_mix64` inline avoids taking a dependency on `rand` for one use.
+- **2026-08-27** **`aaa_mode` narrowing resolves against the library tree, not the `Store`.** `Library::locate` finds
+  the current track's artist and album, so `NextInput` needs exactly the fields §5 lists and no more.
+- **2026-08-27** Two behaviours §5 left open, decided: **narrowing with nothing playing falls back to the whole
+  library** (there is no artist to narrow to, and returning nothing would deadlock playback), and **a `current` that is
+  not in the pool restarts the pool** rather than stopping — it happens whenever a queued track finishes or the mode
+  changes under playback.
+- **2026-08-27** A duplicate entry in a playlist resolves to its _first_ occurrence, because position is found by id.
+  Playback advances rather than sticking, but the second copy is skipped. Fixing it properly means identifying a
+  playlist position by index rather than by `TrackId`; deferred, and covered by a test that documents the behaviour.
+- **2026-08-27** `C` moved from collapse-all to free the key for cmus's "continue"; collapse-all is `Backspace`.
+- **2026-08-27** **M5 verification is partial.** Every row of the §5 table is covered — 26 tests in `next.rs`, plus 8
+  more driving the UI's own decisions (queue consumption, end-of-pool, active-source switching). What has **not** been
+  done is §9's "then listen for an hour". That is a human check and it is still outstanding.
 
 ---
 
