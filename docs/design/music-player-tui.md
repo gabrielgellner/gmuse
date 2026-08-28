@@ -867,6 +867,18 @@ Append here as decisions are made. Format: date, decision, rationale.
   `win-down-in-tree`-style variants. This is why §5's issue said to design both halves together: doing `h`/`l` alone
   would not have forced the question.
 
+- **2026-08-28** **The pending-key indicator is derived, not stored.** It was written into `status` with no expiry, so a
+  completed `gg` left its own `g` behind for ever and hid the now-playing line. `status` was doing two unrelated jobs —
+  transient notices, which expire, and a live indicator, which should vanish the moment the state it reflects does — and
+  they fought.
+
+  It now renders from `pending`/`count` directly (`Ui::pending_label`), which is vim's `showcmd`. Nothing to clear, so
+  nothing can be forgotten. It also fixed a gap nobody had reported: a bare count (`12` with no chord yet) showed
+  **nothing at all**, because the digit branch returned early without touching `status`.
+
+  The general shape, and the third time this session: **state that is a view of other state should be computed, not
+  mirrored.** The two copies always eventually disagree.
+
 ---
 
 ## 14. Prior art worth reading

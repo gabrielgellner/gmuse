@@ -97,6 +97,15 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
     spans.push(Span::raw("   "));
     spans.push(Span::styled(modes(ui), theme.get(Role::StatusModes)));
 
+    // Keys typed so far, as vim's showcmd. Derived from state, so a completed
+    // chord leaves nothing behind.
+    if let Some(pending) = ui.pending_label() {
+        spans.push(Span::styled(
+            format!("  {pending}"),
+            theme.get(Role::PromptSigil),
+        ));
+    }
+
     // Ring starvation is the difference between "the OS hiccuped" and "we did
     // not feed the device fast enough". It costs one span and it is the only
     // way to tell those apart after the fact.

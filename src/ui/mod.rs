@@ -278,6 +278,22 @@ impl Ui {
         }
     }
 
+    /// The keys typed so far, for the status line — vim's `showcmd`.
+    ///
+    /// Derived rather than stored. An earlier version wrote this into
+    /// `status`, which meant a completed chord left its own indicator behind
+    /// for ever and hid the now-playing line.
+    pub fn pending_label(&self) -> Option<String> {
+        if self.pending.is_empty() && self.count.is_none() {
+            return None;
+        }
+        let keys = crate::cmd::keys::format_seq(&self.pending);
+        Some(match self.count {
+            Some(n) => format!("{n}{keys}"),
+            None => keys,
+        })
+    }
+
     /// Show a message for a few seconds, then get out of the way.
     pub fn notify(&mut self, message: impl Into<String>) {
         self.status = message.into();
@@ -485,21 +501,13 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             ui.pending.clear();
             execute_counted(ui, ctx, cmd, count);
         }
-        // Wait for the rest of the chord. Showing it is what stops a
-        // half-typed `g` feeling like a dropped keypress.
-        bind::Resolved::Prefix => {
-            let so_far = crate::cmd::keys::format_seq(&ui.pending);
-            let prefix = match ui.count {
-                Some(n) => format!("{n}{so_far}"),
-                None => so_far,
-            };
-            ui.status = prefix;
-            ui.status_until = None;
-        }
+        // Wait for the rest of the chord. The status line renders the pending
+        // keys straight from this state — see `Ui::pending_label` — rather than
+        // being written into, so there is nothing left to clear afterwards.
+        bind::Resolved::Prefix => {}
         bind::Resolved::None => {
             ui.pending.clear();
             ui.count = None;
-            ui.status.clear();
         }
     }
 }
@@ -2482,13 +2490,56 @@ mod tests {
 
         handle_key(KeyEvent::from(KeyCode::Char('g')), &mut ui, &ctx);
         assert_eq!(ui.pending.len(), 1);
-        assert_eq!(ui.status, "g");
+        assert_eq!(ui.pending_label().as_deref(), Some("g"));
+        assert!(render(&ui, &ctx, 100, 10).contains(" g"), "not shown");
 
         // An unmatched follow-up clears rather than firing something random.
         handle_key(KeyEvent::from(KeyCode::Char('q')), &mut ui, &ctx);
         assert!(ui.pending.is_empty());
         assert!(!ui.quit, "the q leaked to its own binding");
-        assert!(ui.status.is_empty());
+        assert_eq!(ui.pending_label(), None);
+    }
+
+    /// The bug this replaced: a completed chord left its indicator behind for
+    /// ever, hiding the now-playing line.
+    #[test]
+    fn a_completed_chord_leaves_no_indicator() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "g g");
+        assert_eq!(ui.pending_label(), None, "the chord left a trace");
+
+        let out = render(&ui, &ctx, 100, 10);
+        assert!(!out.contains("  g "), "a stale `g` is still drawn:\n{out}");
+        // And the normal indicators are back.
+        assert!(
+            out.contains("7 tracks"),
+            "the summary did not return:\n{out}"
+        );
+        assert!(
+            out.contains("[all]"),
+            "the mode flags did not return:\n{out}"
+        );
+    }
+
+    /// A bare count had no indicator at all before, because the digit branch
+    /// returned early without touching anything.
+    #[test]
+    fn a_bare_count_is_shown() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "1");
+        press(&mut ui, &ctx, "2");
+        assert_eq!(ui.pending_label().as_deref(), Some("12"));
+        assert!(render(&ui, &ctx, 100, 10).contains("12"));
+
+        // Consumed by the motion it precedes.
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.pending_label(), None);
     }
 
     #[test]
@@ -2498,7 +2549,7 @@ mod tests {
         let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, "4");
         handle_key(KeyEvent::from(KeyCode::Char('g')), &mut ui, &ctx);
-        assert_eq!(ui.status, "4g");
+        assert_eq!(ui.pending_label().as_deref(), Some("4g"));
     }
 
     /// An exact match must win over being a prefix of something longer, or `G`
