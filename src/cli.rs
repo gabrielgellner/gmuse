@@ -36,6 +36,28 @@ pub struct Cli {
     /// Initial volume, 0.0 to 2.0.
     #[arg(short = 'v', long, default_value_t = 1.0)]
     pub volume: f32,
+
+    /// Library root to scan. Repeat for several. Remembered in the cache, so
+    /// later runs need no argument.
+    #[arg(
+        short = 'L',
+        long = "library",
+        env = "GMUSE_LIBRARY",
+        value_delimiter = ':'
+    )]
+    pub library: Vec<PathBuf>,
+
+    /// Re-read every file, ignoring the mtime fast path.
+    #[arg(long)]
+    pub rescan: bool,
+
+    /// Do not read or write the library cache.
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Where the library cache lives.
+    #[arg(long, env = "GMUSE_CACHE")]
+    pub cache: Option<PathBuf>,
 }
 
 impl Cli {

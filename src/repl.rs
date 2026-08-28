@@ -21,6 +21,12 @@ pub enum Line {
     Seek(SeekTo),
     Volume(f32),
     Status,
+    /// Scan a directory into the library, or rescan the known roots.
+    Scan(Option<PathBuf>),
+    /// Summarise the library.
+    Library,
+    /// List tracks whose artist/album/title contains the query.
+    Find(String),
     Help,
     Quit,
     /// Blank input: do nothing, without complaining.
@@ -90,6 +96,16 @@ pub fn parse(line: &str) -> Result<Line, ParseError> {
             Ok(Line::Volume(v))
         }
         "status" | "st" => Ok(Line::Status),
+        "scan" | "u" => Ok(Line::Scan(
+            (!rest.is_empty()).then(|| PathBuf::from(unquote(rest))),
+        )),
+        "library" | "lib" => Ok(Line::Library),
+        "find" | "f" | "/" => {
+            if rest.is_empty() {
+                return Err(ParseError::MissingArg { cmd: "find" });
+            }
+            Ok(Line::Find(rest.to_string()))
+        }
         "help" | "h" | "?" => Ok(Line::Help),
         "quit" | "q" | "exit" => Ok(Line::Quit),
         other => Err(ParseError::Unknown(other.to_string())),
@@ -120,6 +136,9 @@ commands:
   seek -10        seek backwards 10s
   vol 0.5         set volume, 0.0-2.0             (v)
   status          position, state, underruns      (st)
+  scan [dir]      scan a dir, or rescan the roots (u)
+  library         library summary                 (lib)
+  find <text>     search artist/album/title       (f, /)
   help            this                            (h, ?)
   quit            exit                            (q)";
 
@@ -182,6 +201,30 @@ mod tests {
         assert_eq!(
             parse("load /a b/c.mp3").unwrap(),
             Line::Load(PathBuf::from("/a b/c.mp3"))
+        );
+    }
+
+    #[test]
+    fn library_commands() {
+        assert_eq!(parse("scan").unwrap(), Line::Scan(None));
+        assert_eq!(
+            parse("scan /music").unwrap(),
+            Line::Scan(Some(PathBuf::from("/music")))
+        );
+        assert_eq!(
+            parse(r#"scan "/my music""#).unwrap(),
+            Line::Scan(Some(PathBuf::from("/my music")))
+        );
+        assert_eq!(parse("library").unwrap(), Line::Library);
+        assert_eq!(parse("find burial").unwrap(), Line::Find("burial".into()));
+        // The query keeps its spaces and case.
+        assert_eq!(
+            parse("find Night Bus").unwrap(),
+            Line::Find("Night Bus".into())
+        );
+        assert_eq!(
+            parse("find").unwrap_err(),
+            ParseError::MissingArg { cmd: "find" }
         );
     }
 

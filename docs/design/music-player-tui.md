@@ -362,8 +362,8 @@ completion. No UI, no library. Verify: no clicks, no dropouts, over a full album
 `PlayerEvent` stream. Drive it from a `main` that reads stdin lines. Verify: seek is sample-accurate and the position
 display doesn't jump on seek.
 
-**M3 — store and scan.** `walkdir` + `lofty` into `Store`, postcard cache, incremental rescan by mtime. No UI. Verify
-against a real library — measure scan time and memory on ~20k tracks.
+**M3 — store and scan.** ✅ _done 2026-08-27._ `walkdir` + `lofty` into `Store`, postcard cache, incremental rescan by
+mtime. No UI. Verify against a real library — measure scan time and memory on ~20k tracks.
 
 **M4 — the views.** ratatui, views 1–5, navigation, `Tab`, `Space` expand. Read-only, no playback wired in. Verify: tree
 renders correctly for compilations, multi-disc albums, and missing tags.
@@ -525,6 +525,34 @@ Append here as decisions are made. Format: date, decision, rationale.
   **Target: keep steady-state playback under ~1% of one core**, i.e. at or below `afplay`. Everything except the sinc
   path already clears it. The UI render loop is the next thing that will spend CPU; budget for it when M4 lands and
   re-measure rather than assuming.
+
+- **2026-08-27** Added `lofty`, `walkdir`, `serde` and `postcard` for M3, all already budgeted in §2.
+- **2026-08-27** **§11.4's `albumartist` fallback rule, decided:** `albumartist` → `artist` → the literal "Unknown
+  Artist". Filing by `artist` would scatter a compilation across a dozen one-track entries and split a normal album the
+  moment one track carries a guest credit — which `Anderson .Paak/Malibu` in the test library does on 5 of its 16
+  tracks. A missing title falls back to the file name, not "Unknown": the file name is almost always the more useful
+  thing to show.
+- **2026-08-27** **Removal is a tombstone (`Vec<Option<Track>>`), with an explicit `compact()` rebuild.** §4 forbids an
+  index shift because it would invalidate every `TrackId` held in a playlist or the queue. `upsert` updates in place, so
+  a rescan of a file whose tags changed keeps its id. `compact()` returns an old→new remap and is deliberately not
+  called anywhere yet — nothing holds ids across a rescan until M4/M5.
+- **2026-08-27** **The cache has no compatibility story.** postcard behind a magic + `FORMAT_VERSION`; a version bump or
+  any parse failure returns `Ok(None)` and the next run rescans. A rescan costs under a second, so a migration path for
+  a derived cache would cost more to maintain than it could save. Saves are write-to-temp-then-rename, so an interrupted
+  save leaves the previous cache intact. Tombstones are compacted away on save: nothing holds a `TrackId` across a
+  restart, so persisting them would grow the file and the id space for ever.
+- **2026-08-27** **M3 measured on 20,000 tracks** (hard links to the 148 real files, so tag parsing is real work but
+  costs no disk), M5 MacBook Air:
+
+  | operation                      | time  | notes                         |
+  | ------------------------------ | ----- | ----------------------------- |
+  | cold scan, 20k tracks          | 0.86s | ~23,000 tracks/second         |
+  | incremental rescan (unchanged) | 0.08s | a `stat` per file, no reopen  |
+  | full rescan (`--rescan`)       | 0.92s | ignores the mtime fast path   |
+  | 2,025 files touched            | 0.15s | only the changed ones re-read |
+
+  Peak RSS **78 MB**, cache **7.7 MB** (~385 bytes/track). The real library (148 tracks) scans in 0.09s. `walkdir` is
+  comfortably fast enough that the §2 note about swapping in `jwalk` can be ignored.
 
 ---
 
