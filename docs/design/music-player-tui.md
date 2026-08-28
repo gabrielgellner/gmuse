@@ -961,6 +961,16 @@ Append here as decisions are made. Format: date, decision, rationale.
   Two lessons. The counter must distinguish _"we failed to keep up"_ from _"the track ended"_, or it reports the second
   and hides the first. And a metric with no test is a metric that can silently invert — pinned now.
 
+- **2026-08-28** **The cursor landing on the playing track keeps the playing colour** (`Role::SelectionPlaying`: the
+  selection's surface, the playing green). Otherwise the selection masks the one thing a listening test is watching for
+  — and the row you are most likely to be parked on is the one that is playing.
+
+  Only while the pane is focused. An unfocused pane should still read as unfocused, and its dim selection is the only
+  thing saying so.
+
+  This is the general shape of the earlier `status` collision: two pieces of information competing for one cell, where
+  the answer is a third style rather than letting one silently win.
+
 ---
 
 ## 14. Prior art worth reading

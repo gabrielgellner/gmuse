@@ -61,3 +61,4 @@ binding_key         = { fg = "yellow" }
 album_header        = { fg = "teal", mods = ["bold"] }
 gutter              = { fg = "overlay0" }
 playing             = { fg = "green", mods = ["bold"] }
+selection_playing   = { fg = "green", bg = "surface1", mods = ["bold"] }

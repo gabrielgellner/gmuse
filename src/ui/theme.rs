@@ -36,6 +36,7 @@ pub enum Role {
     AlbumHeader,
     Gutter,
     Playing,
+    SelectionPlaying,
 }
 
 impl Role {
@@ -60,6 +61,7 @@ impl Role {
             Role::AlbumHeader => "album_header",
             Role::Gutter => "gutter",
             Role::Playing => "playing",
+            Role::SelectionPlaying => "selection_playing",
         }
     }
 
@@ -87,6 +89,7 @@ impl Role {
         Role::AlbumHeader,
         Role::Gutter,
         Role::Playing,
+        Role::SelectionPlaying,
     ];
 }
 
@@ -195,6 +198,13 @@ impl Default for Theme {
                 // The same green as the status line's play indicator, so
                 // "playing" means one thing wherever it appears.
                 Role::Playing => Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+                // The cursor sitting on the playing track must not hide which
+                // track is playing: keep the green, take the surface from the
+                // selection.
+                Role::SelectionPlaying => Style::default()
+                    .bg(surface)
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             };

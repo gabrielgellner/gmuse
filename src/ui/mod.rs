@@ -1483,10 +1483,21 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
     );
     let mut state =
         ListState::default().with_selected(list::row_of_track(&rows, spec.selected).or(Some(0)));
+    // A selection landing on the playing track keeps the playing colour, or
+    // the cursor hides the one thing you are watching for. Only while focused:
+    // an unfocused pane should still read as unfocused.
+    let on_playing = ui.playback.current.is_some()
+        && spec.ids.get(spec.selected).copied() == ui.playback.current;
+    let selection = if on_playing && spec.focused {
+        ui.theme.get(theme::Role::SelectionPlaying)
+    } else {
+        highlight(&ui.theme, spec.focused)
+    };
+
     frame.render_stateful_widget(
         List::new(items)
             .block(pane_block(&ui.theme, spec.title, spec.focused))
-            .highlight_style(highlight(&ui.theme, spec.focused)),
+            .highlight_style(selection),
         area,
         &mut state,
     );
@@ -3267,5 +3278,80 @@ mod tests {
             .find(|(text, _)| text.contains(&title))
             .expect("not drawn in the playlist");
         assert!(row.1, "not marked in the playlist: {:?}", row.0);
+    }
+    /// Colours of the row the cursor is on, as actually rendered.
+    fn cursor_row_colours(
+        ui: &Ui,
+        ctx: &Context<'_>,
+        needle: &str,
+    ) -> (ratatui::style::Color, ratatui::style::Color) {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(90, 20)).unwrap();
+        terminal.draw(|f| draw(f, ui, ctx)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        for y in 0..buf.area.height {
+            let text: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if text.contains(needle) {
+                // A cell inside the title, not the border.
+                let x = (0..buf.area.width)
+                    .find(|x| buf[(*x, y)].symbol() != " " && buf[(*x, y)].symbol() != "│")
+                    .unwrap_or(1);
+                let cell = &buf[(x, y)];
+                return (cell.fg, cell.bg);
+            }
+        }
+        panic!("row containing {needle:?} was not drawn");
+    }
+
+    /// The cursor landing on the playing track must not hide which track is
+    /// playing — the selection colour would otherwise mask it.
+    #[test]
+    fn the_cursor_keeps_the_playing_colour() {
+        use ratatui::style::Color;
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        let playing = ui.library.sorted()[1];
+        let title = store.get(playing).unwrap().display_title().to_string();
+        ui.playback.current = Some(playing);
+
+        // Cursor elsewhere: ordinary selection colour on that other row.
+        ui.sorted = 0;
+        let other = store
+            .get(ui.library.sorted()[0])
+            .unwrap()
+            .display_title()
+            .to_string();
+        let (fg, bg) = cursor_row_colours(&ui, &ctx, &other);
+        assert_eq!(fg, Color::Magenta, "the normal selection changed");
+
+        // Cursor on the playing track: green kept, surface kept.
+        ui.sorted = 1;
+        let (fg2, bg2) = cursor_row_colours(&ui, &ctx, &title);
+        assert_eq!(fg2, Color::Green, "the cursor masked the playing mark");
+        assert_eq!(bg2, bg, "the selection surface should be unchanged");
+    }
+
+    /// An unfocused pane should still read as unfocused, even sitting on the
+    /// playing track.
+    #[test]
+    fn an_unfocused_pane_keeps_its_dim_selection() {
+        use ratatui::style::Color;
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // Tree focused, so the track pane is not.
+        let tracks = ui.tree.tracks_for(&ui.library, &store);
+        ui.playback.current = tracks.first().copied();
+        ui.tree.track_selected = 0;
+        ui.tree.pane = Pane::Tree;
+
+        let title = store.get(tracks[0]).unwrap().display_title().to_string();
+        let (fg, _) = cursor_row_colours(&ui, &ctx, &title);
+        assert_ne!(fg, Color::Green, "an unfocused pane looked focused");
     }
 }
