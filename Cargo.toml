@@ -1,0 +1,23 @@
+[package]
+name = "gmuse"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.18.2"
+rtrb = "0.4.0"
+rubato = "5.0.0"
+symphonia = { version = "0.6.1", features = [
+    # not enabled by default; defaults already give us opt-simd, all-meta,
+    # adpcm, flac, mkv, ogg, pcm, vorbis and wav.
+    "aac", "alac", "mp3", "isomp4",
+] }
+# Opus via bundled libopus (statically linked). DESIGN §13.
+symphonia-adapter-libopus = { version = "0.3.0", optional = true }
+thiserror = "2.0.20"
+
+[features]
+default = ["opus"]
+# Opus support. Compiles and statically links libopus; needs `cmake` at build
+# time. The only C dependency in the project.
+opus = ["dep:symphonia-adapter-libopus"]
