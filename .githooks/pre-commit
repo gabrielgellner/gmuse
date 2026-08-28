@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fast gate: formatting only, so committing stays quick. The full `just ci`
+# runs on push instead (see .githooks/pre-push).
+#
+# Install: just hooks-install
+# Bypass:  git commit --no-verify   (use sparingly, and say why)
+set -euo pipefail
+
+if ! command -v just >/dev/null 2>&1; then
+    echo "pre-commit: 'just' is not on PATH — cannot check formatting." >&2
+    echo "pre-commit: install just, or bypass with 'git commit --no-verify'." >&2
+    exit 1
+fi
+
+echo "pre-commit: running 'just fmt-check'..."
+if ! just fmt-check; then
+    echo "" >&2
+    echo "pre-commit: formatting check failed. Run 'just fmt' and stage the result." >&2
+    exit 1
+fi

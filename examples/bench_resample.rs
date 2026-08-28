@@ -52,28 +52,73 @@ fn run(name: &str, mut r: Box<dyn Resampler<f32>>, block_frames: usize) {
 fn main() {
     let ratio = 44_100.0 / 48_000.0;
     for &block in &[960usize, 4096] {
-        println!("\ninput blocks of {block} frames ({}ms of 48k audio):", block * 1000 / 48_000);
+        println!(
+            "\ninput blocks of {block} frames ({}ms of 48k audio):",
+            block * 1000 / 48_000
+        );
 
         let p = SincInterpolationParameters::default(); // sinc_len 256, BH2, cubic
-        run("sinc 256 cubic (current)",
-            Box::new(Async::<f32>::new_sinc(ratio, 1.1, &p, 1024, CH, FixedAsync::Input).unwrap()), block);
+        run(
+            "sinc 256 cubic (current)",
+            Box::new(Async::<f32>::new_sinc(ratio, 1.1, &p, 1024, CH, FixedAsync::Input).unwrap()),
+            block,
+        );
 
         let p128 = SincInterpolationParameters::new(128, WindowFunction::BlackmanHarris2);
-        run("sinc 128 cubic",
-            Box::new(Async::<f32>::new_sinc(ratio, 1.1, &p128, 1024, CH, FixedAsync::Input).unwrap()), block);
+        run(
+            "sinc 128 cubic",
+            Box::new(
+                Async::<f32>::new_sinc(ratio, 1.1, &p128, 1024, CH, FixedAsync::Input).unwrap(),
+            ),
+            block,
+        );
 
         let p64l = SincInterpolationParameters::new(64, WindowFunction::BlackmanHarris2)
             .interpolation(SincInterpolationType::Linear);
-        run("sinc 64 linear",
-            Box::new(Async::<f32>::new_sinc(ratio, 1.1, &p64l, 1024, CH, FixedAsync::Input).unwrap()), block);
+        run(
+            "sinc 64 linear",
+            Box::new(
+                Async::<f32>::new_sinc(ratio, 1.1, &p64l, 1024, CH, FixedAsync::Input).unwrap(),
+            ),
+            block,
+        );
 
-        run("poly cubic",
-            Box::new(Async::<f32>::new_poly(ratio, 1.1, PolynomialDegree::Cubic, 1024, CH, FixedAsync::Input).unwrap()), block);
+        run(
+            "poly cubic",
+            Box::new(
+                Async::<f32>::new_poly(
+                    ratio,
+                    1.1,
+                    PolynomialDegree::Cubic,
+                    1024,
+                    CH,
+                    FixedAsync::Input,
+                )
+                .unwrap(),
+            ),
+            block,
+        );
 
-        run("poly septic",
-            Box::new(Async::<f32>::new_poly(ratio, 1.1, PolynomialDegree::Septic, 1024, CH, FixedAsync::Input).unwrap()), block);
+        run(
+            "poly septic",
+            Box::new(
+                Async::<f32>::new_poly(
+                    ratio,
+                    1.1,
+                    PolynomialDegree::Septic,
+                    1024,
+                    CH,
+                    FixedAsync::Input,
+                )
+                .unwrap(),
+            ),
+            block,
+        );
 
-        run("FFT (fixed ratio)",
-            Box::new(Fft::<f32>::new(IN_RATE, 44_100, 1024, CH, FixedSync::Input).unwrap()), block);
+        run(
+            "FFT (fixed ratio)",
+            Box::new(Fft::<f32>::new(IN_RATE, 44_100, 1024, CH, FixedSync::Input).unwrap()),
+            block,
+        );
     }
 }

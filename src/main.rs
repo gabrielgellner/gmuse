@@ -43,7 +43,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
-    if let Some(ext) = std::path::Path::new(&path).extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
         hint.with_extension(ext);
     }
 
@@ -66,8 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone();
 
     let codecs = codec_registry();
-    let mut decoder =
-        codecs.make_audio_decoder(&audio_params, &AudioDecoderOptions::default())?;
+    let mut decoder = codecs.make_audio_decoder(&audio_params, &AudioDecoderOptions::default())?;
 
     // Decode the first packet up front. The codec parameters can lack a sample
     // rate (some MP3s), but a decoded buffer always knows its own spec, so this
@@ -153,7 +155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cb_shared = Arc::clone(&shared);
     let channels_usize = channels;
     let stream = device.build_output_stream(
-        config.clone(),
+        config,
         move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
             let want = out.len();
             let got = match consumer.read_chunk(want.min(consumer.slots())) {
@@ -191,7 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let decode_thread = std::thread::spawn(move || -> Result<(), String> {
         let mut resampler = resampler;
         let mut scratch: Vec<f32> = Vec::new(); // decoded, source rate
-        let mut staged: Vec<f32> = Vec::new();  // device rate, ready to push
+        let mut staged: Vec<f32> = Vec::new(); // device rate, ready to push
         let mut first = Some(first_chunk);
         let mut resample_time = Duration::ZERO;
         let mut resample_calls = 0u64;
@@ -228,7 +230,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match resampler.as_mut() {
                     Some(r) => {
                         let t0 = std::time::Instant::now();
-                        r.process(&scratch, &mut staged).map_err(|e| e.to_string())?;
+                        r.process(&scratch, &mut staged)
+                            .map_err(|e| e.to_string())?;
                         resample_time += t0.elapsed();
                         resample_calls += 1;
                         resample_frames += scratch.len() / channels;
@@ -347,7 +350,9 @@ fn pick_config(
     });
 
     // GMUSE_RATE forces a device rate, to measure resampling cost in isolation.
-    let forced = std::env::var("GMUSE_RATE").ok().and_then(|v| v.parse::<u32>().ok());
+    let forced = std::env::var("GMUSE_RATE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok());
     let (chosen_rate, range) = match forced {
         Some(f) => candidates
             .iter()

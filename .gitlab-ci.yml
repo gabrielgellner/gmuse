@@ -1,0 +1,53 @@
+# GitLab CI does nothing unless you start it by hand.
+#
+# The `workflow:` rules below mean **no pipeline is even created** for a push,
+# a merge request, or a tag — only for a run you start yourself from
+# CI/CD > Pipelines > "Run pipeline" (or via an API trigger). Marking jobs
+# `when: manual` is not enough on its own: that still creates a pipeline per
+# push, which shows up as noise in the MR and pipeline list.
+#
+# The quality gate is local: `just ci`, enforced by the pre-push hook
+# (`just hooks-install`). A Rust job on a shared runner pays for apt-get, a
+# rustup toolchain and a cold cargo registry before it compiles a line, only to
+# repeat what the hook already ran — not worth the minutes for a solo project.
+#
+# This is a hosting decision, not a design one. Nothing about the test suite is
+# shaped to fit a runner budget. When there are minutes to spend, add
+#   - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+# to the workflow rules to get a check on every MR.
+
+workflow:
+  rules:
+    # Started by hand from the UI.
+    - if: $CI_PIPELINE_SOURCE == "web"
+    # Started via an API trigger token.
+    - if: $CI_PIPELINE_SOURCE == "trigger"
+    # Everything else — push, merge request, tag, schedule — creates nothing.
+    - when: never
+
+stages:
+  - verify
+
+# Runs automatically, but only inside a pipeline you started yourself.
+verify:
+  stage: verify
+  image: rust:1-slim
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq cmake curl >/dev/null
+    - curl -fsSL https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+    - rustup component add rustfmt clippy
+  script:
+    # prettier is not in this image, so this is the Rust half of `just ci`.
+    - cargo fmt --all -- --check
+    - cargo clippy --all-targets --all-features -- -D warnings
+    - cargo test --release
+    - cargo build --release
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/
+      - target/
+  variables:
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"

@@ -10,8 +10,7 @@
 
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{
-    Async, Fft, FixedAsync, FixedSync, Indexing, PolynomialDegree, Resampler as _,
-    SincInterpolationParameters,
+    Async, Fft, FixedAsync, FixedSync, Indexing, PolynomialDegree, SincInterpolationParameters,
 };
 
 /// The `resample_quality` setting DESIGN §11.5 calls for.
@@ -179,7 +178,8 @@ impl Resampler {
             out.extend_from_slice(&self.scratch[skip * ch..frames_out * ch]);
 
             let consumed = frames_in.max(partial.unwrap_or(0));
-            self.staging.drain(..(consumed * ch).min(self.staging.len()));
+            self.staging
+                .drain(..(consumed * ch).min(self.staging.len()));
 
             if partial.is_some() {
                 self.staging.clear();
@@ -229,7 +229,10 @@ mod tests {
         // The delay is trimmed, so the very start should already be signal
         // rather than a long run of zeros.
         let leading_zeros = out.iter().take_while(|v| v.abs() < 1e-6).count();
-        assert!(leading_zeros < 64, "{leading_zeros} leading zeros, delay not trimmed");
+        assert!(
+            leading_zeros < 64,
+            "{leading_zeros} leading zeros, delay not trimmed"
+        );
     }
 
     /// Spectral check: resample a pure tone and measure how much energy lands
@@ -258,7 +261,8 @@ mod tests {
                 si += *v as f64 * (k * i as f64).sin();
             }
             let tone = (sr * sr + si * si).sqrt() / seg.len() as f64 * 2.0;
-            let total: f64 = seg.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / seg.len() as f64;
+            let total: f64 =
+                seg.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / seg.len() as f64;
             let total_rms = total.sqrt();
             let ratio = tone / (total_rms * std::f64::consts::SQRT_2);
             println!("  {q:?}: tone/total = {ratio:.4}");
