@@ -62,7 +62,9 @@ Because merges are fast-forward, an MR that has fallen behind `main` needs a reb
 for the config, `:bind` and the `:` line, per §6. Adding a setting means adding a `SettingKey`, not a new config path.
 
 The UI must never name a colour. Ask `theme.get(Role::…)` and add a `Role` if none fits; `Color::` literals belong only
-in `theme.rs`'s defaults. See `docs/inspiration/` for where this came from and what else is worth stealing.
+in `theme.rs`'s defaults. See `docs/inspiration/` for where this came from. That folder is read for **navigation and
+layout, keybindings, and TUI architecture only** — the player and audio path are settled by §1–§5, and nothing there is
+adopted for storage, streaming or audio backends.
 
 ### Formatting
 

@@ -1,56 +1,53 @@
 # eilmeldung
 
-<https://github.com/christo-auer/eilmeldung> — a TUI RSS reader in Rust on ratatui, GPL-3.0.
+<https://github.com/christo-auer/eilmeldung> — TUI RSS reader, Rust + ratatui, GPL-3.0.
 
-Read for its configuration and theming architecture, which is what a modern TUI does that cmus does not.
+## Layout and navigation — the strongest ideas here
 
-## The idea that changed our config
+Three columns: feed list, article list, article content.
 
-Its keybindings live in TOML, but **the values are still command strings**:
+`h`/`l` move between panes; `j`/`k` move within one. Straightforward, and already better than our `Tab`, which works for
+two panes and stops scaling at three.
+
+The genuinely novel part is what it does **without changing focus**:
+
+> "Navigate to the article list and use `C-j`/`C-k` to move down/up in the feed list and use `M-k`/`M-j` to scroll the
+> article content down/up."
+
+So from one pane you can drive all three. The modifier says _which pane_, the letter says _what to do_. Applied to
+gmuse's tree view: from the track pane, `C-j`/`C-k` would step album to album, refilling the track list, without a `Tab`
+over and a `Tab` back each time. That is exactly the motion browsing a library is made of, and it is the single idea
+here most worth stealing.
+
+## Keybindings
+
+| Key         | Action                 | Note for us                                            |
+| ----------- | ---------------------- | ------------------------------------------------------ |
+| `h` `l`     | move between panes     | we have only `Tab`                                     |
+| `?`         | show all keybindings   | a popup, not a view switch — ours is view 7            |
+| `:`         | command line           | same as ours                                           |
+| `/`         | search                 | same as ours                                           |
+| `c f`       | create feed            | a `c` prefix namespace                                 |
+| `z`         | zen mode               | hide the chrome; interesting for a player left running |
+| `1` `2` `3` | toggle display _scope_ | note: **not** view switching, as ours are              |
+
+`?` and `z` are both worth having. `?` conflicts with our reverse-search binding, which would have to move.
+
+## Config and theming — already adopted
+
+Its keybindings live in TOML but the **values are command strings**:
 
 ```toml
 "j"   = ["down"]
-"g g" = ["gotofirst"]
 "o"   = ["open", "in articles read", "in articles nextunread"]
 ```
 
-TOML did not replace their command language — it became the container for it. That reframed our question from "rc format
-_or_ TOML" into "what holds the commands", and the answer is that both belong: commands are imperative and need a
-language, settings and themes are declarative and want structure.
+That reframed our config question from "rc **or** TOML" to "what holds the commands", and is why `config.toml` holds a
+command language rather than replacing it. A list value is a macro, which we now have.
 
-A list value is a macro, which we get for free.
-
-## Two-level theming
-
-```toml
-[theme.color_palette]
-background = "black"
-highlight  = "yellow"
-
-[theme.style_set]
-header   = { fg = "accent_primary" }
-selected = { mods = ["reversed"] }
-```
-
-Styles name a _semantic role_ and reference palette entries rather than colours. That indirection is the whole trick: a
-theme becomes data, and the widget code never names a colour. We had 21 hardcoded `Color::` literals before adopting
-this.
-
-## Saved queries as views
-
-```toml
-feed_list = [
-  'query: "Today Unread" today unread',
-  "feeds",
-]
-```
-
-A labelled filter appears in the list as a pseudo-folder. This maps directly onto §7's filter language: once that lands,
-`query: "Recently Added" added<1w` in the library tree is nearly free, and it is a genuine enrichment over cmus's
-transient view-6 filters.
+Its two-level theming — a palette of named colours, and styles naming a semantic role — is what `ui/theme.rs` is
+modelled on. Both landed in !9.
 
 ## Not taken
 
-- **Multi-key sequences** (`"g g"`) need a pending-prefix state machine. Worth having; kept separate from the config
-  change.
-- Its `[icon_set]` / `[border_theme]` granularity is more configurability than this project wants yet.
+Its `[icon_set]` and `[border_theme]` granularity is more configurability than this project wants yet.

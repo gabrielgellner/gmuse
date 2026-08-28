@@ -1,48 +1,55 @@
 # spotify-player
 
-<https://github.com/aome510/spotify-player> — a Spotify TUI client in Rust on ratatui, MIT.
+<https://github.com/aome510/spotify-player> — Spotify TUI client, Rust + ratatui, MIT.
 
-The most feature-complete of the three, and the least directly applicable: it is a network client for a streaming
-service, where §1 rules out network sources and album art outright. Read it for the shape of its _edges_ — how it is
-driven from outside, how its config scales — rather than its middle.
+Everything it does over the network is out of scope. Read for its **command vocabulary** and its **UI structure**, which
+are the richest of the three.
 
-## It validates M9
+## Prefix namespaces — the idea to take
 
-> A remote control socket (`cmus-remote` equivalent) for media keys and status bars — §1
+Bindings are sequences, and the first key is a namespace:
 
-spotify-player does exactly this and goes further: a CLI (`get`, `playback`, `search`) that speaks to a socket, **JSON
-output for scripting**, and a **daemon mode** where the playback thread runs with no UI at all. Its thread split — UI /
-playback / client socket — is the same shape as our UI / decoder / callback, with the socket added.
+| Binding     | Command       |
+| ----------- | ------------- |
+| `g n`       | NextTrack     |
+| `g p`       | PreviousTrack |
+| `g A`       | GoToArtist    |
+| `g B`       | GoToAlbum     |
+| `M-enter`   | ResumePause   |
+| `C-c C-x /` | Search        |
 
-Two things worth stealing when M9 comes round:
+`g` is "go to". That is how a command set grows past what single keys can hold — and ours is already at 40-odd bindings
+on a flat alphabet, with filters, playlists and remote still to come.
 
-- **JSON output.** `gmuse-remote --status --json` is far more useful to a status bar than parsing a formatted line, and
-  it costs one serde derive on state we already have.
-- **Daemon mode falls out of the socket.** If the socket can drive everything, running without a UI is not a separate
-  mode, it is just nobody attaching one. Our `PlayerHandle` is already independent of the UI, so this is mostly free.
+`g A` / `g B` in particular have a direct meaning here: **jump to the artist or album of the track that is playing**,
+from anywhere. cmus has no such motion and it is an obvious thing to want after ten minutes of shuffle.
 
-It also does **MPRIS on Linux and OS media-key events on macOS/Windows**, which §9 lists as "MPRIS if wanted".
+It also supports **count prefixes** (`5j`) and lets a binding be set to `None` to remove it — we have `unbind`.
 
-## Themes as separate, switchable files
+Both need the pending-prefix state machine in issue #1, which is why chords and counts are one piece of work.
 
-Its themes live in their own file rather than inline in the main config, and can be switched by name. Ours are a
-`[theme]` table inside `config.toml`, which is right while there is one theme and wrong as soon as there are three.
-Worth revisiting when a second theme exists — not before.
+## Layout and UI structure
 
-## Count prefixes
+- **Playback window** at top _or_ bottom, configurable, with a **format string** for its contents:
+  `"{status} {track} • {artists} {liked}\n{album} • {genres}\n{metadata}"`. That is §7's format-string language arriving
+  in M8, applied to more than one line.
+- **Two library panels** with configurable width percentages (`album_percent`, `playlist_percent`, both 40 by default).
+  We hardcode a 40/60 split.
+- **`page_size_in_rows`**, default 20. We hardcode 10.
+- **Relative line numbers** for lists and popups, optionally, for `5j`-style motion.
 
-`5j` moves down five. That needs the same pending-prefix state machine as eilmeldung's `g g` chords, so the two are one
-piece of work in the key handler, not two.
+Three settings we currently hardcode, each now a one-line `SettingKey` since settings became data.
 
-## Popups for context actions
+## Pages and popups
 
-A popup menu of what can be done to the thing under the cursor. cmus has no such concept, and it is a real answer to a
-question we will hit: where does "add this album to a playlist, but which one?" live, once there is more than one
-playlist.
+Its UI is organised as _pages_ with a _popup_ system layered over them, rather than our flat "seven views, one at a
+time". The popups carry **actions**: a context menu of secondary commands on the item under the cursor.
 
-## Not applicable
+This is the answer to a question we cannot express today — "add this album to _which_ playlist" — and it generalises:
+sort order, jump-to, remove-from. Worth introducing when a second playlist exists.
 
-- Image rendering (Kitty/iTerm2/Sixel protocols) — §1 excludes album art in any form, deliberately.
-- OAuth, token caching, `librespot` — no network sources.
-- Audio backends behind compile-time features. We drive cpal directly and have exactly one optional feature (`opus`),
-  which is the whole point of §2's dependency discipline.
+A help popup is the same machinery, which is how eilmeldung's `?` overlay would land too.
+
+## Not taken
+
+Streaming, OAuth, image rendering, audio backends behind feature flags. All settled or excluded by §1–§2.

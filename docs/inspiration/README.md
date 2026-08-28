@@ -1,29 +1,51 @@
 # Inspiration
 
-Projects worth learning from, and what specifically to take from each.
+Projects worth learning from, read for three things only:
 
-cmus remains the _behavioural_ specification — see [the design brief](../design/music-player-tui.md) §14. This folder is
-for everything else: architecture, configuration, and the parts of a modern TUI that cmus predates.
+1. **Navigation and layout** — how panes are arranged and moved between
+2. **Keybindings** — anything richer than cmus's flat single keys
+3. **TUI architecture** — how the interface is structured internally
 
-**On licences.** Copyright covers expression, not ideas. Reading a GPL project and adopting its _architecture_ — "two
-levels of theme table", "saved queries as pseudo-folders" — creates no obligation. Copying its code does. gmuse is
-GPL-3.0-or-later by choice, not by contagion; nothing here has been copied.
+The player and audio path are settled: see [the design brief](../design/music-player-tui.md) §1–§5. Nothing here is read
+for storage, streaming, or audio backends. cmus remains the _behavioural_ specification; this folder is for the parts of
+a modern TUI it predates.
 
-| Project                     | What it is                     | What we took                                                                   |
-| --------------------------- | ------------------------------ | ------------------------------------------------------------------------------ |
-| [eilmeldung](eilmeldung.md) | TUI RSS reader, Rust + ratatui | TOML config holding command strings; two-level theming; saved queries as views |
-| [russ](russ.md)             | TUI RSS reader, Rust + SQLite  | Non-eager refresh; the SQLite-vs-cache question                                |
+**On licences.** Copyright covers expression, not ideas. Adopting "a `g` prefix for go-to commands" or "two levels of
+theme table" creates no obligation. Copying code does. gmuse is GPL-3.0-or-later by choice; nothing here is copied.
 
-## Open questions these raise
+| Project                             | Read for                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------ |
+| [eilmeldung](eilmeldung.md)         | Three-pane layout; **driving other panes without leaving focus**; config and theming |
+| [spotify-player](spotify-player.md) | **Prefix namespaces** (`g n`, `g A`); pages and popups; configurable layout          |
+| [russ](russ.md)                     | Two-pane `hjkl`; modal editing (and why not)                                         |
 
-- **Should the library live in SQLite rather than a postcard cache?** russ puts everything in SQLite. That would make
-  M8's filter language a query translation rather than a scan, and make saved views cheap. Against: it is a real
-  dependency, and 20k tracks currently scan in 0.86s and load from cache instantly, so nothing hurts yet.
-- **Should scanning be eager?** We rescan every startup. russ refuses to do anything on a timer and makes the user ask.
-  Ours is fast enough not to notice, but the principle is sound for a library on a network mount.
-- **Multi-key chords** (`g g`) and **count prefixes** (`5j`) need the same pending-prefix state machine in the key
-  handler — one piece of work, not two. Tracked as an issue.
-- **Themes as separate switchable files** rather than a table inside `config.toml`. Right once there is more than one
-  theme; not before.
-- **Popup action menus** for the thing under the cursor. cmus has no such concept, and it is the natural answer to "add
-  this album to _which_ playlist" once there is more than one.
+## What gmuse should take, roughly in order of value
+
+**1. `h`/`l` to move between panes, not just `Tab`.** Both RSS readers use them; we bind neither. `Tab` is fine for two
+panes and stops scaling at three, and the tree view already has two with more coming.
+
+**2. Drive other panes without changing focus.** eilmeldung's best idea: from the article list, `C-j`/`C-k` move the
+_feed_ selection and `M-j`/`M-k` scroll the _content_. Applied here, that means stepping album-to-album from the track
+pane without a `Tab` round trip each time — the exact motion browsing a library is made of.
+
+**3. A `?` help overlay.** eilmeldung and russ both have one. We have view 7, which is a whole view switch and loses
+your place. A popup is faster. Note `?` is currently bound to reverse-search, which would have to move.
+
+**4. Prefix namespaces for a growing command set.** spotify-player's `g n` / `g p` / `g A` (go to artist) / `g B` (go to
+album), eilmeldung's `c f`. cmus's flat single keys are already crowded at 40-odd bindings, and this is how you add 50
+more without running out of alphabet. Needs the chord machinery in #1.
+
+**5. Popups as a first-class UI concept.** spotify-player's "actions" — a menu of secondary commands on the item under
+the cursor. This is the natural answer to "add this album to _which_ playlist", which we cannot express today.
+
+**6. Configurable page size and pane widths.** We hardcode a 10-row page and a 40/60 split. spotify-player makes both
+settings, and it costs a `SettingKey` each now that settings are data.
+
+**7. Vim-style relative line numbers** as an option, for `5j`-style motion. Pairs with counts in #1.
+
+## Deliberately not taken
+
+- **Modal editing** (russ). Right for an app whose main text entry is a URL; wrong for a player driven by single keys.
+  We have a prompt line, which is the useful half.
+- **Anything network** — streaming, OAuth, feed sync. §1 rules it out.
+- **Image rendering.** §1 excludes album art in any form.

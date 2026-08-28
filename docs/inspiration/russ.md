@@ -1,41 +1,47 @@
 # russ
 
-<https://github.com/ckampfe/russ> — a TUI RSS reader in Rust, "local-first, offline-first", GPL-3.0.
+<https://github.com/ckampfe/russ> — TUI RSS reader, Rust, GPL-3.0.
 
-A useful counterweight to eilmeldung: where that one is richly configurable, russ is deliberately spare. Its interesting
-choices are about _data_ and _when work happens_.
+The spare one. Two panes, few keys, no configuration file to speak of. Useful mostly as a check on the other two: almost
+everything here is something we already do, which is reassuring about the shape we picked.
 
-## SQLite as the store
+## Layout and navigation
 
-Everything lives in a SQLite database (`feeds.db`, under the platform data dir), with `rusqlite` bundling SQLite itself.
+Two panes — feeds left, entries right — and selecting an entry expands it to scrollable content.
 
-This is the road not taken for our library. We use a postcard cache: a flat `Vec<Track>` serialised whole. The
-comparison matters at M8, when the filter language arrives:
+`hjkl` does double duty: vertical movement within a pane, horizontal movement between panes. Same conclusion as
+eilmeldung from a much smaller design, which is a decent argument that `h`/`l` should not stay unbound in gmuse.
 
-|             | postcard cache (ours)           | SQLite (russ)                                             |
-| ----------- | ------------------------------- | --------------------------------------------------------- |
-| Load        | whole file, instantly           | query on demand                                           |
-| Filtering   | scan every track                | indexes, and the query language is nearly written for you |
-| Saved views | recompute each time             | a view                                                    |
-| Cost        | none — no dependency, no schema | a real dependency, migrations, a schema to keep in step   |
+`ctrl-u` / `ctrl-d` page while reading. We use `C-f` / `C-b`, from cmus.
 
-Nothing hurts yet: 20k tracks scan cold in 0.86s and load from cache instantly. But "filter runs over the whole library
-on every keystroke" (§7) is a scan today, and would be an index lookup there.
+## Keybindings
+
+| Key                 | Action                                         |
+| ------------------- | ---------------------------------------------- |
+| `hjkl` / arrows     | navigate panes and scroll                      |
+| `Enter`             | open the selected entry                        |
+| `?`                 | show/hide help                                 |
+| `q` / `Esc`         | quit                                           |
+| `r`                 | refresh feed _or_ mark read, depending on pane |
+| `ctrl-u` / `ctrl-d` | page up/down                                   |
+
+`?` for help again — that is two of three projects, against our view-7 switch.
+
+`r` doing different things in different panes is the same idea as our per-context bindings, reached without a binding
+table: the key is one command that reads the focused pane. Ours is more general and costs a line of config rather than a
+branch.
+
+## Modal editing — considered and rejected
+
+Normal mode for browsing, insert mode (`i`) for typing a feed URL, `Esc` back.
+
+Right for an app whose main text entry is a URL. Wrong for a player driven by single keys, where modes would mean a mode
+indicator and a class of "why is nothing happening" bugs. Our `:` and `/` prompts are the useful half of this — they
+capture input while open, then get out of the way.
 
 ## Non-eager by principle
 
 > "It will not automatically refresh your feeds on a timer, it will not automatically mark entries as read."
 
-Everything happens because the user asked. We rescan on every startup, which is fine at 0.08s on a local disk and would
-not be on a network mount or a spinning drive. Worth making explicit rather than incidental.
-
-## Modal editing
-
-Normal mode for navigating, insert mode for entering a feed URL. We have a prompt line but no modes, and cmus is not
-modal — so this is noted rather than adopted. It is the right answer for an app whose main text entry is a URL, and the
-wrong one for a player whose main input is single keys.
-
-## Platform data directories
-
-russ uses `~/Library/Application Support` on macOS. We deliberately use the XDG layout everywhere, matching cmus and
-keeping a dotfile-synced setup portable — a decision, not an oversight.
+We rescan the library on every startup. At 0.08s on a local disk nobody notices; on a network mount they would. Worth
+knowing the principle exists, though it is a scanning decision rather than a UI one.
