@@ -936,6 +936,14 @@ Append here as decisions are made. Format: date, decision, rationale.
   duplicate short flags and malformed defaults that are otherwise a runtime panic. **A CLI surface needs tests for the
   same reason a parser does: it is a boundary, and the compiler checks none of it.**
 
+- **2026-08-28** The playing track is emphasised in every list it appears in (`Role::Playing`, bold and the same green
+  as the status line's play indicator, so "playing" means one thing wherever it shows). Useful during a long listen,
+  where the question "is this still the track I started" otherwise means reading the status bar.
+
+  **Known limit:** on the _selected_ row the mark is indistinguishable, because the selection style is bold too. A
+  marker glyph in the gutter would separate them, at the cost of a column; bold was what was asked for and the overlap
+  only affects the one row the cursor is already on.
+
 ---
 
 ## 14. Prior art worth reading

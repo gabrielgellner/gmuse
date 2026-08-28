@@ -1475,9 +1475,10 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
         &ui.theme,
         ctx.store,
         &rows,
-        list::Gutter {
+        list::RowStyle {
             relative: ui.relative_numbers,
             selected: spec.selected,
+            playing: ui.playback.current,
         },
     );
     let mut state =
@@ -3168,5 +3169,103 @@ mod tests {
         tab(&mut ui, &ctx);
         // There is no closed vocabulary to complete a search against.
         assert_eq!(typed(&ui), "bur");
+    }
+    /// Rows as `(text, any cell bold)`.
+    ///
+    /// Cells are indexed by character, not byte — the `│` border alone is
+    /// three bytes in UTF-8, so a `str::find` offset is not a column.
+    fn rows_with_bold(ui: &Ui, ctx: &Context<'_>, w: u16, h: u16) -> Vec<(String, bool)> {
+        use ratatui::style::Modifier;
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, ui, ctx)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                let text: String = (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect();
+                let bold =
+                    (0..buf.area.width).any(|x| buf[(x, y)].modifier.contains(Modifier::BOLD));
+                (text.trim_end().to_string(), bold)
+            })
+            .collect()
+    }
+
+    /// Spotting what is playing without reading the status bar — the point of
+    /// the whole thing during a long listen.
+    #[test]
+    fn the_playing_track_is_marked_in_the_list() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        let playing = ui.library.sorted()[2];
+        ui.playback.current = Some(playing);
+        // Cursor elsewhere, so the mark cannot be the selection highlight.
+        ui.sorted = 0;
+
+        let title = store.get(playing).unwrap().display_title().to_string();
+        let rows = rows_with_bold(&ui, &ctx, 90, 20);
+        let row = rows
+            .iter()
+            .find(|(text, _)| text.contains(&title))
+            .unwrap_or_else(|| panic!("the playing track was not drawn:\n{rows:#?}"));
+        assert!(row.1, "the playing track is not emphasised: {:?}", row.0);
+    }
+
+    /// Counted rather than checked row by row, because the *selected* row is
+    /// bold too — the selection style says so. What the mark adds is one more
+    /// emphasised track, and that is what this measures.
+    #[test]
+    fn nothing_playing_means_no_extra_emphasis() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 0;
+
+        let bold_tracks = |ui: &Ui| {
+            rows_with_bold(ui, &ctx, 90, 20)
+                .into_iter()
+                .filter(|(text, bold)| *bold && text.starts_with('│') && !text.contains("──"))
+                .count()
+        };
+
+        ui.playback.current = None;
+        assert_eq!(
+            bold_tracks(&ui),
+            1,
+            "only the cursor row should be emphasised"
+        );
+
+        ui.playback.current = Some(ui.library.sorted()[2]);
+        assert_eq!(
+            bold_tracks(&ui),
+            2,
+            "the playing track should add exactly one more"
+        );
+    }
+
+    /// A track can be in the library, a playlist and the queue at once, and
+    /// should be marked wherever it appears.
+    #[test]
+    fn the_mark_follows_the_track_into_other_lists() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let playing = ui.library.sorted()[1];
+        ui.playlist.push(playing);
+        ui.playback.current = Some(playing);
+        ui.view = View::Playlist;
+
+        let title = store.get(playing).unwrap().display_title().to_string();
+        let rows = rows_with_bold(&ui, &ctx, 90, 12);
+        let row = rows
+            .iter()
+            .find(|(text, _)| text.contains(&title))
+            .expect("not drawn in the playlist");
+        assert!(row.1, "not marked in the playlist: {:?}", row.0);
     }
 }

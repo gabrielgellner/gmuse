@@ -60,3 +60,4 @@ binding_context     = { fg = "overlay0" }
 binding_key         = { fg = "yellow" }
 album_header        = { fg = "teal", mods = ["bold"] }
 gutter              = { fg = "overlay0" }
+playing             = { fg = "green", mods = ["bold"] }

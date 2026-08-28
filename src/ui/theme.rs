@@ -35,6 +35,7 @@ pub enum Role {
     BindingKey,
     AlbumHeader,
     Gutter,
+    Playing,
 }
 
 impl Role {
@@ -58,6 +59,7 @@ impl Role {
             Role::BindingKey => "binding_key",
             Role::AlbumHeader => "album_header",
             Role::Gutter => "gutter",
+            Role::Playing => "playing",
         }
     }
 
@@ -84,6 +86,7 @@ impl Role {
         Role::BindingKey,
         Role::AlbumHeader,
         Role::Gutter,
+        Role::Playing,
     ];
 }
 
@@ -189,6 +192,11 @@ impl Default for Theme {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
                 Role::Gutter => Style::default().fg(Color::DarkGray),
+                // The same green as the status line's play indicator, so
+                // "playing" means one thing wherever it appears.
+                Role::Playing => Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             };
             styles.insert(role, style);
         }

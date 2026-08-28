@@ -5,6 +5,7 @@
 //! line but no index, so cursors, counts and motions all address tracks and
 //! never have to know headers exist (issues #6, #7).
 
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
@@ -116,24 +117,28 @@ pub fn row_of_track(rows: &[Row], track_index: usize) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// How to draw the left gutter.
-#[derive(Debug, Clone, Copy)]
-pub struct Gutter {
-    /// Off entirely when false.
+/// How to draw a list's rows.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RowStyle {
+    /// Show the relative-distance gutter.
     pub relative: bool,
     /// Which **track** the cursor is on. Distances are measured in tracks, not
     /// screen rows, so a divider between two tracks never makes `3j` wrong.
     pub selected: usize,
+    /// The track currently playing, marked wherever it appears — which may be
+    /// several lists at once, since a track can be in the library, a playlist
+    /// and the queue.
+    pub playing: Option<TrackId>,
 }
 
 /// Render rows as `NN  Title            m:ss`, with dividers styled apart.
-pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], gutter: Gutter) -> Vec<ListItem<'a>> {
+pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], style: RowStyle) -> Vec<ListItem<'a>> {
     let mut track_index = 0usize;
     rows.iter()
         .map(|row| {
             // The gutter counts tracks; a divider gets blank space so the
             // column still lines up.
-            let lead = if !gutter.relative {
+            let lead = if !style.relative {
                 String::new()
             } else if matches!(row, Row::Header(_)) {
                 "    ".to_string()
@@ -142,10 +147,10 @@ pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], gutter: Gutter) -> 
                 track_index += 1;
                 // Vim's hybrid: absolute on the cursor line, relative
                 // elsewhere. The absolute number is what a count for `G` takes.
-                if n == gutter.selected {
+                if n == style.selected {
                     format!("{:<4}", n + 1)
                 } else {
-                    format!("{:>3} ", n.abs_diff(gutter.selected))
+                    format!("{:>3} ", n.abs_diff(style.selected))
                 }
             };
             (lead, row)
@@ -163,12 +168,19 @@ pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], gutter: Gutter) -> 
                     .tracknumber
                     .map(|n| format!("{n:>2}"))
                     .unwrap_or_else(|| "  ".into());
+                // The playing track is marked in every list it appears in, so
+                // you can see where you are without consulting the status bar.
+                let body = if style.playing == Some(*id) {
+                    theme.get(Role::Playing)
+                } else {
+                    Style::default()
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(lead, theme.get(Role::Gutter)),
-                    Span::raw(format!("{num}  ")),
-                    Span::raw(track.display_title().to_string()),
-                    Span::raw("  "),
-                    Span::raw(fmt_duration(track.duration)),
+                    Span::styled(format!("{num}  "), body),
+                    Span::styled(track.display_title().to_string(), body),
+                    Span::styled("  ", body),
+                    Span::styled(fmt_duration(track.duration), body),
                 ]))
             }
         })

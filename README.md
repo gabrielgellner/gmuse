@@ -111,7 +111,8 @@ The TUI opens on the library tree. Views are nvim-style tabs: `gt`/`gT` step, `3
 returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `space` expands
 an artist, `tab` swaps pane, `q` quits.
 
-`:set relative_numbers=true` adds a vim-style distance gutter, counting tracks so album dividers never shift it.
+`:set relative_numbers=true` adds a vim-style distance gutter, counting tracks so album dividers never shift it. The
+playing track is emphasised in every list it appears in.
 
 Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
 `<`/`>` seek 60s, `-`/`+` adjust volume. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m` cycles
