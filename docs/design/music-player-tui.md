@@ -182,6 +182,28 @@ pub struct Queue    { entries: VecDeque<TrackId> }   // consumed on pop
 `ArtistKey`/`AlbumKey` are normalised sort keys (case-folded, leading article stripped per a `smart_artist_sort`
 setting), not the raw display strings. Keep display strings on the `Track`.
 
+### Catalogs — planned, and why the model already allows it
+
+Several separate bodies of music (general, electronica, classical, jazz), with one, a subset, or all of them active at a
+time. See [issue #3](https://gitlab.com/gabrielgellner/gmuse/-/issues/3).
+
+This is recorded here rather than only in the issue because it constrains what §4 and §5 may become, and both are
+INVARIANT.
+
+`members` above is the whole reason it fits: `Store` holds every track ever scanned and `Library` is a projection over a
+_subset_ of it. A catalog is therefore a membership rule, and:
+
+- **`next()` needs no change.** §5 builds its pool from the library, so confining the library confines shuffle,
+  `aaa_mode` and repeat with it. Anything that starts computing pools from the `Store` instead would break this, and
+  should be treated as a mistake.
+- **Playlists and the queue cut across catalogs for free**, because they hold `TrackId`s straight into the `Store`. They
+  must **not** be filtered by the active set — a playlist is an explicit choice, and crossing themes is the point.
+- **One scan, one cache.** Catalogs partition what is _shown_, never what is indexed.
+
+The open question is how membership is defined: scan roots (works today) or a filter expression (needs §7). Since a
+catalog is close to being a named, persistent filter, **catalogs and the filter language should be designed together in
+M8** rather than becoming two mechanisms for one idea.
+
 Removal from the library is a tombstone or a rebuild, never an index shift — shifting invalidates every `TrackId` held
 elsewhere.
 
@@ -725,6 +747,15 @@ Append here as decisions are made. Format: date, decision, rationale.
   as the store, non-eager refresh). It records the open questions those raise — chiefly whether the library should move
   from a postcard cache to SQLite before §7's filter language lands in M8, since "filter runs over the whole library on
   every keystroke" is a scan today and would be an index lookup there.
+
+- **2026-08-28** **Catalogs are planned and recorded in §4**
+  ([issue #3](https://gitlab.com/gabrielgellner/gmuse/-/issues/3)): several separate bodies of music, one or a subset
+  active at a time, with playlists still crossing between them. It is written into §4 rather than left in the issue
+  because it constrains what §4 and §5 may become, and both are INVARIANT — specifically, **nothing may start building a
+  pool from the `Store` instead of the `Library`**, or confining the library would stop confining shuffle.
+- **2026-08-28** **Catalogs and §7's filter language must be designed together in M8.** A catalog defined by a filter
+  expression is a named, persistent filter; building the filter language first without that in mind risks two mechanisms
+  for one idea.
 
 ---
 
