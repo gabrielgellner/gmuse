@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::store::Store;
 
 /// Bump on any change to `Track`, `Store`, or this envelope.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const MAGIC: &[u8; 5] = b"gmuse";
 
 #[derive(Serialize, Deserialize)]
@@ -22,6 +22,10 @@ struct Envelope {
     version: u32,
     roots: Vec<PathBuf>,
     store: Store,
+    /// Which catalogs were active. Persisted so a choice survives a restart;
+    /// the *definitions* come from the config, not from here.
+    #[serde(default)]
+    active: crate::catalog::Active,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,23 +47,44 @@ pub fn default_path() -> PathBuf {
     base.join("gmuse").join("library.postcard")
 }
 
-/// Load a cache. A missing, stale or corrupt file is `Ok(None)` — the caller
-/// rescans, which is always correct, just slower.
-pub fn load(path: &Path) -> Result<Option<(Store, Vec<PathBuf>)>, CacheError> {
+/// What came back from a cache read.
+#[derive(Debug)]
+pub enum Outcome {
+    /// No cache file yet.
+    Missing,
+    /// A cache existed but could not be used — wrong version, or corrupt.
+    ///
+    /// Distinguished from `Missing` because it costs the user a rescan and
+    /// they should be told, rather than silently starting from nothing.
+    Discarded,
+    Loaded {
+        store: Store,
+        roots: Vec<PathBuf>,
+        active: crate::catalog::Active,
+    },
+}
+
+/// Load a cache. Never an error the caller has to handle: a cache that cannot
+/// be read just means a rescan.
+pub fn load(path: &Path) -> Result<Outcome, CacheError> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Outcome::Missing),
         Err(e) => return Err(e.into()),
     };
 
     if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
-        return Ok(None);
+        return Ok(Outcome::Discarded);
     }
 
     match postcard::from_bytes::<Envelope>(&bytes[MAGIC.len()..]) {
-        Ok(env) if env.version == FORMAT_VERSION => Ok(Some((env.store, env.roots))),
+        Ok(env) if env.version == FORMAT_VERSION => Ok(Outcome::Loaded {
+            store: env.store,
+            roots: env.roots,
+            active: env.active,
+        }),
         // Wrong version or unparseable: not an error, just a rescan.
-        Ok(_) | Err(_) => Ok(None),
+        Ok(_) | Err(_) => Ok(Outcome::Discarded),
     }
 }
 
@@ -67,7 +92,12 @@ pub fn load(path: &Path) -> Result<Option<(Store, Vec<PathBuf>)>, CacheError> {
 ///
 /// Writes to a temporary file and renames, so an interrupted save leaves the
 /// previous cache intact rather than a truncated one.
-pub fn save(path: &Path, store: &Store, roots: &[PathBuf]) -> Result<(), CacheError> {
+pub fn save(
+    path: &Path,
+    store: &Store,
+    roots: &[PathBuf],
+    active: &crate::catalog::Active,
+) -> Result<(), CacheError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -76,6 +106,7 @@ pub fn save(path: &Path, store: &Store, roots: &[PathBuf]) -> Result<(), CacheEr
         version: FORMAT_VERSION,
         roots: roots.to_vec(),
         store: Store::clone_for_save(store),
+        active: active.clone(),
     };
 
     let mut bytes = MAGIC.to_vec();
@@ -124,9 +155,16 @@ mod tests {
 
         let store = sample_store();
         let roots = vec![PathBuf::from("/m")];
-        save(&path, &store, &roots).unwrap();
+        save(&path, &store, &roots, &crate::catalog::Active::All).unwrap();
 
-        let (loaded, loaded_roots) = load(&path).unwrap().unwrap();
+        let Outcome::Loaded {
+            store: loaded,
+            roots: loaded_roots,
+            ..
+        } = load(&path).unwrap()
+        else {
+            panic!("should have loaded")
+        };
         assert_eq!(loaded_roots, roots);
         assert_eq!(loaded.len(), 2);
         let id = loaded.id_for_path(Path::new("/m/a.mp3")).unwrap();
@@ -138,11 +176,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A catalog choice must survive a restart, or picking one would be a
+    /// per-session chore.
+    #[test]
+    fn the_active_set_round_trips() {
+        let dir = std::env::temp_dir().join("gmuse-cache-test-active");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.postcard");
+
+        let active = crate::catalog::Active::Only(
+            ["jazz".to_string(), "classical".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        save(&path, &sample_store(), &[], &active).unwrap();
+        let Outcome::Loaded { active: back, .. } = load(&path).unwrap() else {
+            panic!("should have loaded")
+        };
+        assert_eq!(back, active);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn missing_file_is_not_an_error() {
         let path = std::env::temp_dir().join("gmuse-cache-does-not-exist.postcard");
         let _ = std::fs::remove_file(&path);
-        assert!(load(&path).unwrap().is_none());
+        assert!(matches!(load(&path).unwrap(), Outcome::Missing));
     }
 
     #[test]
@@ -153,15 +213,17 @@ mod tests {
         // Not ours at all.
         let foreign = dir.join("foreign");
         std::fs::write(&foreign, b"this is not a gmuse cache").unwrap();
-        assert!(load(&foreign).unwrap().is_none());
+        assert!(matches!(load(&foreign).unwrap(), Outcome::Discarded));
 
         // Ours, but truncated mid-record.
         let truncated = dir.join("truncated");
         let store = sample_store();
-        save(&truncated, &store, &[]).unwrap();
+        save(&truncated, &store, &[], &crate::catalog::Active::All).unwrap();
         let bytes = std::fs::read(&truncated).unwrap();
         std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
-        assert!(load(&truncated).unwrap().is_none());
+        // Discarded, not Missing: the user is about to pay for a rescan and
+        // should be told why.
+        assert!(matches!(load(&truncated).unwrap(), Outcome::Discarded));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -174,9 +236,11 @@ mod tests {
 
         let mut store = sample_store();
         store.remove_path(Path::new("/m/a.mp3"));
-        save(&path, &store, &[]).unwrap();
+        save(&path, &store, &[], &crate::catalog::Active::All).unwrap();
 
-        let (loaded, _) = load(&path).unwrap().unwrap();
+        let Outcome::Loaded { store: loaded, .. } = load(&path).unwrap() else {
+            panic!("should have loaded")
+        };
         assert_eq!(loaded.len(), 1);
         assert_eq!(
             loaded.tombstones(),

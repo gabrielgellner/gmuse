@@ -86,9 +86,9 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
         spans.push(Span::styled(
             format!(
                 "{} tracks  {} artists  {} albums",
-                ctx.library.len(),
-                ctx.library.artist_count(),
-                ctx.library.album_count()
+                ui.library.len(),
+                ui.library.artist_count(),
+                ui.library.album_count()
             ),
             theme.get(Role::StatusText),
         ));
@@ -114,7 +114,13 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
 /// Mode indicators, in the order cmus shows them. Only what is on appears, so
 /// the common case stays quiet.
 fn modes(ui: &Ui) -> String {
-    let mut out = vec![format!("[{}]", ui.playback.aaa_mode.label())];
+    let mut out = Vec::new();
+    // Which catalogs are in force comes first: without it, "half my music is
+    // missing" is a puzzle rather than a glance.
+    if let Some(label) = ui.catalogs.label() {
+        out.push(format!("[{label}]"));
+    }
+    out.push(format!("[{}]", ui.playback.aaa_mode.label()));
     if ui.playback.shuffle {
         out.push("[shuffle]".into());
     }

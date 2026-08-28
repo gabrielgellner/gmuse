@@ -1,11 +1,20 @@
 # gmuse configuration — $XDG_CONFIG_HOME/gmuse/config.toml
 #
+# NOTE: top-level keys must come BEFORE any [table] header. TOML attaches a
+# bare key written after one to that table, so `active_catalogs` placed at the
+# bottom of this file would be read as part of the last [catalogs.*] table.
+#
 # Settings and theming are declarative, so they are TOML tables. Key bindings
 # hold *commands*, which are the same language the `:` line takes — so anything
 # you can type at the prompt, you can bind.
 #
 # Unknown tables and settings are errors, not silence: a typo is reported with
 # where it is, and the rest of the file still loads.
+
+# Where your music is. This is the durable home for library roots — the cache
+# is derived data and is discarded whenever its format changes, so roots that
+# live only there are lost on an upgrade.
+library = ["~/Music"]
 
 # Run once at startup, after everything below is applied.
 startup_commands = ["view 1"]
@@ -18,6 +27,21 @@ continue = true
 smart_artist_sort = true    # sort "The Beatles" under B
 aaa_mode = "all"            # all | artist | album
 resample_quality = "balanced" # fast | balanced | high
+
+# Catalogs are separate bodies of music. Browsing and shuffle stay inside the
+# active ones; playlists and the queue cross them freely. Everything is scanned
+# whatever is active, so switching is instant.
+#
+# A track belongs to a catalog when its path is under one of these roots.
+# Tracks under no catalog at all still appear when everything is active.
+#
+# [catalogs.general]
+# roots = ["~/Music/General"]
+#
+# [catalogs.electronica]
+# roots = ["~/Music/Electronic", "~/Music/Ambient"]
+#
+# active_catalogs = ["general"]   # omit, or ["all"], for everything
 
 # Contexts: common, library, sorted, playlist, queue, browser, filters, settings
 # A binding in a view's own context wins over the same key in `common`.

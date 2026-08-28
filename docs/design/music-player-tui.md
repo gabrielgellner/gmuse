@@ -185,7 +185,7 @@ setting), not the raw display strings. Keep display strings on the `Track`.
 ### Catalogs — planned, and why the model already allows it
 
 Several separate bodies of music (general, electronica, classical, jazz), with one, a subset, or all of them active at a
-time. See [issue #3](https://gitlab.com/gabrielgellner/gmuse/-/issues/3).
+time. **Implemented 2026-08-28** — `src/catalog.rs`.
 
 This is recorded here rather than only in the issue because it constrains what §4 and §5 may become, and both are
 INVARIANT.
@@ -756,6 +756,57 @@ Append here as decisions are made. Format: date, decision, rationale.
 - **2026-08-28** **Catalogs and §7's filter language must be designed together in M8.** A catalog defined by a filter
   expression is a named, persistent filter; building the filter language first without that in mind risks two mechanisms
   for one idea.
+
+- **2026-08-28** **Catalogs implemented** (`src/catalog.rs`), closing issue #3. A catalog is a set of scan roots; a
+  track belongs to it when its path is under one of them, compared **by path component** so `/m/rock` does not sweep in
+  `/m/rockabilly`.
+
+  The prediction in §4 held: `next()` needed **no change at all**. Confining `Library` confines shuffle, `aaa_mode` and
+  repeat, because §5 builds its pool from the library. The test that guards this walks 40 shuffled tracks and asserts
+  every one is inside the active catalog — it would fail the moment anything started building pools from the `Store`.
+
+- **2026-08-28** **`Library` moved from `Context` into `Ui`.** It was borrowed immutably for the whole run loop, which
+  made it impossible to rebuild. Owning it is also what lets `smart_artist_sort` take effect immediately rather than
+  reporting "applies on the next rescan", which is what it used to do.
+
+- **2026-08-28** **Scanning covers every catalog root regardless of what is active**, so switching is instant rather
+  than a rescan. Catalogs partition what is _shown_, never what is indexed — one scan, one cache.
+
+- **2026-08-28** **`all` includes tracks no catalog claims.** Otherwise scanning a stray folder would make music vanish
+  with no indication why. Adjusting from `all` (`:catalog -jazz`) starts from everything, which is the only sensible
+  reading.
+
+- **2026-08-28** **Mixing bare names with `+`/`-` in `:catalog` is rejected rather than guessed.** `:catalog jazz -rock`
+  could mean "just jazz, minus rock" or "add jazz, remove rock"; being silently wrong is worse than asking again.
+
+- **2026-08-28** The active set is **persisted in the cache** (`FORMAT_VERSION` 2) so a choice survives a restart, and
+  names that no longer exist are dropped on load. Definitions still come from the config, not the cache.
+
+- **2026-08-28** **Library roots belong in the config, not only the cache.** Bumping `FORMAT_VERSION` to 2 for catalogs
+  discarded the old cache — and the roots lived _inside_ it, so there was nothing left to rescan from. The app then
+  wrote an empty cache over the good one, making the loss permanent. A `just ui` with no arguments showed a blank
+  library and no explanation.
+
+  Three fixes, and the general lesson is the middle one:
+
+  1. `library = ["~/Music"]` in `config.toml` is the durable home for roots. **The cache is derived data and may be
+     thrown away at any time; nothing that cannot be recomputed may live only there.**
+  2. **Never write an empty cache.** With no roots and no tracks there is nothing to record, and overwriting a good
+     cache with an empty one destroys what it held.
+  3. `cache::Outcome` distinguishes `Missing` from `Discarded`, so a version bump reports "discarded; rescanning"
+     instead of silently starting from nothing.
+
+  An empty library now also explains itself in both the TUI and the prompt, rather than rendering a blank pane.
+
+- **2026-08-28** **A sentinel value cannot stand in for "the user did not say".** The remembered catalog choice was
+  allowed to override the config only when the config's value looked like the default (`Active::All`) — but
+  `active_catalogs = ["all"]` produces exactly that value, so writing it explicitly silently lost to whatever the last
+  session had remembered. `Loaded::active_specified` now records _whether the key was present_, separately from what it
+  resolved to. The general shape: **presence and value are different questions, and one field cannot answer both.**
+  Found only because the prompt's `library` command was made to report the active catalogs, which turned an invisible
+  behaviour into a number.
+- **2026-08-28** The prompt's `library` command reports what the **active catalogs** cover rather than the whole store,
+  which is what the views show. Previously the two contradicted each other.
 
 ---
 

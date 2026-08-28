@@ -72,6 +72,26 @@ pub struct Config {
     /// Commands run once at startup, after everything else is applied.
     #[serde(default)]
     pub startup_commands: Vec<String>,
+    /// `[catalogs.general] roots = [...]`.
+    #[serde(default)]
+    pub catalogs: HashMap<String, CatalogTable>,
+    /// Which catalogs start active. Omit, or `["all"]`, for everything.
+    #[serde(default)]
+    pub active_catalogs: Vec<String>,
+    /// Library roots, for when you do not want named catalogs.
+    ///
+    /// The durable home for roots: the cache is derived data and is thrown
+    /// away whenever its format changes, so roots that live only there are
+    /// lost on an upgrade.
+    #[serde(default)]
+    pub library: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogTable {
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +111,14 @@ impl std::fmt::Display for ConfigError {
 pub struct Loaded {
     pub commands: Vec<Command>,
     pub theme: Theme,
+    pub catalogs: crate::catalog::Catalogs,
+    /// Whether the config named `active_catalogs` at all.
+    ///
+    /// Kept separate from its *value*, because `["all"]` is a legitimate
+    /// explicit choice and is indistinguishable from the default if you only
+    /// look at the resulting `Active`. Without this, writing `["all"]` would
+    /// silently lose to whatever was remembered from the last session.
+    pub active_specified: bool,
     pub errors: Vec<ConfigError>,
 }
 
@@ -182,6 +210,54 @@ pub fn parse_text(text: &str) -> Loaded {
         });
     }
 
+    if !config.library.is_empty() {
+        out.catalogs.define(
+            crate::catalog::DEFAULT,
+            config.library.iter().map(|r| expand_tilde(r)).collect(),
+        );
+    }
+
+    // Catalogs. `~` is expanded here because a config file is where people
+    // write it, and nothing downstream would know what to do with it.
+    let mut defined: Vec<(String, Vec<PathBuf>)> = config
+        .catalogs
+        .iter()
+        .map(|(name, table)| {
+            (
+                name.clone(),
+                table.roots.iter().map(|r| expand_tilde(r)).collect(),
+            )
+        })
+        .collect();
+    // HashMap order is arbitrary; the label and the settings view read better
+    // in a stable one.
+    defined.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, roots) in defined {
+        if roots.is_empty() {
+            out.errors.push(ConfigError {
+                where_: format!("catalogs.{name}"),
+                message: "has no roots".into(),
+            });
+            continue;
+        }
+        out.catalogs.define(&name, roots);
+    }
+
+    out.active_specified = !config.active_catalogs.is_empty();
+    if !config.active_catalogs.is_empty() {
+        let spec = if config.active_catalogs.iter().any(|n| n == "all") {
+            crate::catalog::Spec::All
+        } else {
+            crate::catalog::Spec::Only(config.active_catalogs.clone())
+        };
+        if let Err(e) = out.catalogs.apply(spec) {
+            out.errors.push(ConfigError {
+                where_: "active_catalogs".into(),
+                message: e,
+            });
+        }
+    }
+
     for text in &config.startup_commands {
         match parse::command(text) {
             Ok(cmd) => out.commands.push(cmd),
@@ -193,6 +269,16 @@ pub fn parse_text(text: &str) -> Loaded {
     }
 
     out
+}
+
+fn expand_tilde(path: &Path) -> PathBuf {
+    let Ok(rest) = path.strip_prefix("~") else {
+        return path.to_path_buf();
+    };
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join(rest),
+        None => path.to_path_buf(),
+    }
 }
 
 /// Read and parse the config. A missing file is not an error.
@@ -389,5 +475,78 @@ mod tests {
             panic!("not a bind")
         };
         assert_eq!(**cmd, Command::Seek(SeekSpec::Relative(30.0)));
+    }
+    /// `["all"]` is an explicit choice, not an absence of one.
+    ///
+    /// The two were told apart by inspecting the resulting `Active`, which
+    /// cannot distinguish them — so writing `["all"]` silently lost to
+    /// whatever the last session had remembered.
+    #[test]
+    fn choosing_all_explicitly_is_recorded_as_a_choice() {
+        let named = parse_text(
+            r#"
+            active_catalogs = ["all"]
+            [catalogs.a]
+            roots = ["/a"]
+            "#,
+        );
+        assert!(
+            named.active_specified,
+            "explicit [\"all\"] must be a choice"
+        );
+        assert_eq!(named.catalogs.active(), &crate::catalog::Active::All);
+
+        let silent = parse_text(
+            r#"
+            [catalogs.a]
+            roots = ["/a"]
+            "#,
+        );
+        assert!(!silent.active_specified, "an absent key is not a choice");
+        // Same resulting value, which is exactly why the flag has to be
+        // separate from it.
+        assert_eq!(silent.catalogs.active(), &crate::catalog::Active::All);
+    }
+
+    #[test]
+    fn a_named_subset_is_also_a_choice() {
+        let loaded = parse_text(
+            r#"
+            active_catalogs = ["a"]
+            [catalogs.a]
+            roots = ["/a"]
+            [catalogs.b]
+            roots = ["/b"]
+            "#,
+        );
+        assert!(loaded.active_specified);
+        assert_eq!(loaded.catalogs.active_names(), vec!["a"]);
+    }
+
+    /// Top-level keys must precede tables in TOML. Worth a test because the
+    /// failure is confusing: the key silently joins the preceding table.
+    #[test]
+    fn a_top_level_key_after_a_table_is_rejected_clearly() {
+        let loaded = parse_text(
+            r#"
+            [catalogs.a]
+            roots = ["/a"]
+            active_catalogs = ["a"]
+            "#,
+        );
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert!(
+            loaded.errors[0].message.contains("active_catalogs"),
+            "{:?}",
+            loaded.errors[0]
+        );
+    }
+
+    #[test]
+    fn library_roots_become_the_default_catalog() {
+        let loaded = parse_text(r#"library = ["/music"]"#);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.catalogs.defined().len(), 1);
+        assert_eq!(loaded.catalogs.defined()[0].name, crate::catalog::DEFAULT);
     }
 }

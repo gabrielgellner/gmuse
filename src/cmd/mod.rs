@@ -240,6 +240,7 @@ pub enum Command {
     },
     // views
     View(ViewId),
+    Catalog(crate::catalog::Spec),
     Search {
         pattern: String,
         dir: SearchDir,

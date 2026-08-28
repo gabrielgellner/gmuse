@@ -149,10 +149,51 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         },
         "search-next" => Command::SearchNext,
         "search-prev" => Command::SearchPrev,
+        "catalog" | "cat" => Command::Catalog(catalog_spec(rest)?),
         "quit" | "q" | "exit" => Command::Quit,
 
         other => return Err(ParseError::UnknownCommand(other.to_string())),
     })
+}
+
+/// `all`, a list of names, or a run of `+name` / `-name` adjustments.
+///
+/// Mixing bare names with adjustments is rejected rather than guessed at:
+/// `:catalog jazz -rock` could mean either "just jazz, minus rock" or "add
+/// jazz, remove rock", and being wrong silently is worse than asking again.
+fn catalog_spec(rest: &str) -> Result<crate::catalog::Spec, ParseError> {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    if words.is_empty() {
+        return Err(ParseError::Missing {
+            cmd: "catalog",
+            what: "a catalog name, a list, +name/-name, or `all`",
+        });
+    }
+    if words.len() == 1 && words[0] == "all" {
+        return Ok(crate::catalog::Spec::All);
+    }
+
+    let adjusting = words.iter().any(|w| w.starts_with(['+', '-']));
+    let bare = words.iter().any(|w| !w.starts_with(['+', '-']));
+    if adjusting && bare {
+        return Err(ParseError::Bad(
+            rest.into(),
+            "catalog list — use either names or +/- adjustments, not both",
+        ));
+    }
+
+    if adjusting {
+        Ok(crate::catalog::Spec::Adjust(
+            words
+                .iter()
+                .map(|w| (w.starts_with('+'), w[1..].to_string()))
+                .collect(),
+        ))
+    } else {
+        Ok(crate::catalog::Spec::Only(
+            words.iter().map(|w| w.to_string()).collect(),
+        ))
+    }
 }
 
 fn split_word(s: &str) -> (&str, &str) {
@@ -301,6 +342,18 @@ pub fn format(cmd: &Command) -> String {
         }
         Command::Unbind { ctx, key } => format!("unbind {} {}", ctx.name(), key),
         Command::View(v) => format!("view {}", *v as u8),
+        Command::Catalog(spec) => match spec {
+            crate::catalog::Spec::All => "catalog all".into(),
+            crate::catalog::Spec::Only(names) => format!("catalog {}", names.join(" ")),
+            crate::catalog::Spec::Adjust(deltas) => format!(
+                "catalog {}",
+                deltas
+                    .iter()
+                    .map(|(add, n)| format!("{}{n}", if *add { "+" } else { "-" }))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        },
         Command::Search { pattern, dir } => match dir {
             SearchDir::Forward => format!("search {pattern}"),
             SearchDir::Backward => format!("rsearch {pattern}"),

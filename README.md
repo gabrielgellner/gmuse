@@ -135,6 +135,29 @@ accent = "magenta"
 border_focused = { fg = "accent", mods = ["bold"] }
 ```
 
+## Catalogs
+
+Separate bodies of music, so shuffling never crosses from a string quartet into a house track:
+
+```toml
+[catalogs.general]
+roots = ["~/Music/General"]
+
+[catalogs.electronica]
+roots = ["~/Music/Electronic", "~/Music/Ambient"]
+
+[catalogs.classical]
+roots = ["~/Music/Classical"]
+
+active_catalogs = ["general"]   # or ["all"]
+```
+
+`:catalog electronica` activates one, `:catalog folk pop` a subset, `:catalog +jazz` / `-jazz` adjusts, `:catalog all`
+restores everything. The active set shows in the status line and survives a restart.
+
+Catalogs confine **browsing and shuffle**. Playlists and the queue hold tracks directly and cross catalogs freely — that
+is the point of a playlist. Everything is scanned once whatever is active, so switching is instant.
+
 Unknown tables, settings and styles are **errors**, reported with where they are — `keys.common.^n` — and the rest of
 the file still loads. See [`examples/config.toml`](examples/config.toml) for every option, and view 7 in the app for
 every setting and binding currently in force.
@@ -142,6 +165,12 @@ every setting and binding currently in force.
 ## Licence
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+Put your roots in the config so they survive a cache format change:
+
+```toml
+library = ["~/Music"]
+```
 
 The library is scanned on startup and cached at `$XDG_CACHE_HOME/gmuse/library.postcard`, so later runs need no
 `--library`. Rescans are incremental by mtime: 20,000 tracks scan cold in 0.86s and rescan in 0.08s.

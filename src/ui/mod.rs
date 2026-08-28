@@ -196,6 +196,10 @@ pub struct Ui {
     pub last_search: Option<(String, SearchDir)>,
     pub settings_sel: usize,
     pub theme: theme::Theme,
+    /// The library projection. Owned rather than borrowed, because changing
+    /// the active catalogs — or `smart_artist_sort` — rebuilds it.
+    pub library: Library,
+    pub catalogs: crate::catalog::Catalogs,
     /// Keep playing past the end of the current album/artist pool. Stored here
     /// because it is a setting the user toggles, not a property of a track.
     pub continue_playing: bool,
@@ -208,7 +212,7 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(start_dir: PathBuf) -> Self {
+    pub fn new(start_dir: PathBuf, library: Library) -> Self {
         Self {
             view: View::Tree,
             tree: TreeState::default(),
@@ -226,6 +230,8 @@ impl Ui {
             last_search: None,
             settings_sel: 0,
             theme: theme::Theme::default(),
+            library,
+            catalogs: crate::catalog::Catalogs::default(),
             continue_playing: true,
             smart_artist_sort: true,
             status_until: None,
@@ -253,7 +259,7 @@ impl Ui {
     pub fn selected_track(&self, ctx: &Context<'_>) -> Option<TrackId> {
         match self.view {
             View::Tree => {
-                let tracks = self.tree.tracks_for(ctx.library, ctx.store);
+                let tracks = self.tree.tracks_for(&self.library, ctx.store);
                 match self.tree.pane {
                     // With the tree pane focused, Enter plays the first track
                     // of whatever is selected rather than doing nothing.
@@ -261,7 +267,7 @@ impl Ui {
                     Pane::Tracks => tracks.get(self.tree.track_selected).copied(),
                 }
             }
-            View::Sorted => ctx.library.sorted().get(self.sorted).copied(),
+            View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
             View::Browser | View::Filters | View::Settings => None,
@@ -273,7 +279,6 @@ impl Ui {
 /// application's, not the UI's.
 pub struct Context<'a> {
     pub store: &'a Store,
-    pub library: &'a Library,
     /// `None` in tests, which have no audio device.
     pub player: Option<&'a PlayerHandle>,
 }
@@ -323,9 +328,9 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
 /// DESIGN §5 and the note on [`Source::Queue`].
 fn advance(ui: &mut Ui, ctx: &Context<'_>, forward: bool) {
     let decision = if forward {
-        next::next_with_source(next_input(ui, ctx))
+        next::next_with_source(next_input(ui))
     } else {
-        next::prev(next_input(ui, ctx)).map(|id| (id, Source::Pool))
+        next::prev(next_input(ui)).map(|id| (id, Source::Pool))
     };
 
     let Some((id, source)) = decision else {
@@ -346,11 +351,11 @@ fn advance(ui: &mut Ui, ctx: &Context<'_>, forward: bool) {
     play(ui, ctx, id);
 }
 
-fn next_input<'a>(ui: &'a Ui, ctx: &'a Context<'_>) -> next::NextInput<'a> {
+fn next_input(ui: &Ui) -> next::NextInput<'_> {
     next::NextInput {
         queue: &ui.queue,
         active: ui.playback.active,
-        library: ctx.library,
+        library: &ui.library,
         playlist: &ui.playlist,
         current: ui.playback.current,
         aaa_mode: ui.playback.aaa_mode,
@@ -476,12 +481,12 @@ pub fn execute(ui: &mut Ui, ctx: &Context<'_>, cmd: Command) {
         }
         Command::WinToggle => {
             if ui.view == View::Tree && ui.tree.pane == Pane::Tree {
-                ui.tree.toggle(ctx.library, ctx.store);
+                ui.tree.toggle(&ui.library, ctx.store);
             }
         }
         Command::WinExpandAll => {
             if ui.view == View::Tree {
-                ui.tree.expand_all(ctx.library);
+                ui.tree.expand_all(&ui.library);
             }
         }
         Command::WinCollapseAll => {
@@ -623,8 +628,33 @@ pub fn execute(ui: &mut Ui, ctx: &Context<'_>, cmd: Command) {
             };
             run_search(ui, ctx, &pattern, dir);
         }
+        Command::Catalog(spec) => match ui.catalogs.apply(spec) {
+            Ok(()) => {
+                rebuild_library(ui, ctx);
+                match ui.catalogs.label() {
+                    Some(label) => ui.notify(format!("catalog: {label}")),
+                    None => ui.notify("catalog: all"),
+                }
+            }
+            Err(e) => ui.notify(e),
+        },
         Command::Quit => ui.quit = true,
     }
+}
+
+/// Rebuild the library projection and put the cursors back somewhere valid.
+///
+/// Called whenever membership or ordering changes — a catalog switch, or
+/// `smart_artist_sort`. The cursors have to be clamped: the row they pointed at
+/// may not exist any more.
+fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
+    let members = ui.catalogs.members(ctx.store);
+    ui.library = Library::from_members(ctx.store, members, ui.smart_artist_sort);
+    ui.tree.selected = 0;
+    ui.tree.track_selected = 0;
+    ui.sorted = 0;
+    // Playlists and the queue are deliberately untouched: they hold TrackIds
+    // straight into the Store and are meant to cross catalogs.
 }
 
 fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: SettingValue) {
@@ -639,9 +669,8 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
         (SettingKey::Continue, SettingValue::Bool(v)) => ui.continue_playing = v,
         (SettingKey::SmartArtistSort, SettingValue::Bool(v)) => {
             ui.smart_artist_sort = v;
-            // The library projection is rebuilt by the caller; say so rather
-            // than pretending the tree reordered itself.
-            ui.notify("smart_artist_sort applies on the next rescan");
+            // The projection is ours now, so this takes effect immediately.
+            rebuild_library(ui, ctx);
         }
         (SettingKey::ResampleQuality, SettingValue::Quality(_)) => {
             let _ = ctx;
@@ -657,7 +686,7 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
     let ids: Vec<crate::store::TrackId> = match ui.view {
         // From the tree, add everything the cursor covers — an album or an
         // artist — which is the whole point of adding from a tree.
-        View::Tree if ui.tree.pane == Pane::Tree => ui.tree.tracks_for(ctx.library, ctx.store),
+        View::Tree if ui.tree.pane == Pane::Tree => ui.tree.tracks_for(&ui.library, ctx.store),
         _ => ui.selected_track(ctx).into_iter().collect(),
     };
     if ids.is_empty() {
@@ -728,18 +757,18 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
         View::Tree => match ui.tree.pane {
             Pane::Tree => ui
                 .tree
-                .rows(ctx.library, ctx.store)
+                .rows(&ui.library, ctx.store)
                 .iter()
                 .map(|r| r.label().to_lowercase())
                 .collect(),
             Pane::Tracks => ui
                 .tree
-                .tracks_for(ctx.library, ctx.store)
+                .tracks_for(&ui.library, ctx.store)
                 .iter()
                 .map(describe)
                 .collect(),
         },
-        View::Sorted => ctx.library.sorted().iter().map(describe).collect(),
+        View::Sorted => ui.library.sorted().iter().map(describe).collect(),
         View::Playlist => ui.playlist.entries().iter().map(describe).collect(),
         View::Queue => ui.queue.entries().map(describe).collect(),
         View::Browser => ui
@@ -755,15 +784,17 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
 fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
     match ui.view {
         View::Tree => match ui.tree.pane {
-            Pane::Tree => ui.tree.rows(ctx.library, ctx.store).len(),
-            Pane::Tracks => ui.tree.tracks_for(ctx.library, ctx.store).len(),
+            Pane::Tree => ui.tree.rows(&ui.library, ctx.store).len(),
+            Pane::Tracks => ui.tree.tracks_for(&ui.library, ctx.store).len(),
         },
-        View::Sorted => ctx.library.sorted().len(),
+        View::Sorted => ui.library.sorted().len(),
         View::Playlist => ui.playlist.len(),
         View::Queue => ui.queue.len(),
         View::Browser => ui.browser.entries.len(),
         View::Filters => 0,
-        View::Settings => bind::sorted(&ui.bindings).len() + SettingKey::ALL.len(),
+        View::Settings => {
+            bind::sorted(&ui.bindings).len() + SettingKey::ALL.len() + ui.catalogs.defined().len()
+        }
     }
 }
 
@@ -831,7 +862,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
             body,
             ui,
             ctx,
-            ctx.library.sorted(),
+            ui.library.sorted(),
             ui.sorted,
             "sorted",
         ),
@@ -888,6 +919,29 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
         ])));
     }
 
+    if !ui.catalogs.defined().is_empty() {
+        let active: Vec<&str> = ui.catalogs.active_names();
+        for catalog in ui.catalogs.defined() {
+            let on = active.contains(&catalog.name.as_str());
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<20}", format!("catalog {}", catalog.name)),
+                    ui.theme.get(theme::Role::SettingKey),
+                ),
+                Span::raw(format!(
+                    "{}  {}",
+                    if on { "active" } else { "  off " },
+                    catalog
+                        .roots
+                        .iter()
+                        .map(|r| r.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            ])));
+        }
+    }
+
     for (bctx, key, cmd) in bind::sorted(&ui.bindings) {
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
@@ -913,10 +967,35 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
 }
 
 fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
+    if ui.library.is_empty() {
+        let dim = ui.theme.get(theme::Role::StatusDim);
+        let lines = if ui.catalogs.defined().is_empty() {
+            vec![
+                Line::from(""),
+                Line::from(Span::styled("  no library yet", dim)),
+                Line::from(Span::styled(
+                    "  start gmuse with --library <dir>, or set library = [\"~/Music\"] in your config",
+                    dim,
+                )),
+            ]
+        } else {
+            vec![
+                Line::from(""),
+                Line::from(Span::styled("  nothing in the active catalogs", dim)),
+                Line::from(Span::styled("  :catalog all  shows everything", dim)),
+            ]
+        };
+        frame.render_widget(
+            Paragraph::new(lines).block(pane_block(&ui.theme, "library", true)),
+            area,
+        );
+        return;
+    }
+
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
 
-    let rows = ui.tree.rows(ctx.library, ctx.store);
+    let rows = ui.tree.rows(&ui.library, ctx.store);
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| ListItem::new(Line::from(row.label())))
@@ -932,7 +1011,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         &mut state,
     );
 
-    let tracks = ui.tree.tracks_for(ctx.library, ctx.store);
+    let tracks = ui.tree.tracks_for(&ui.library, ctx.store);
     let items = list::track_items(ctx.store, &tracks);
     let mut state = ListState::default().with_selected(Some(ui.tree.track_selected));
     frame.render_stateful_widget(
@@ -1046,7 +1125,7 @@ mod tests {
 
     /// A library with the three things §9 says the tree must get right: a
     /// compilation, a multi-disc album, and a track with no tags at all.
-    fn fixture() -> (Store, Library) {
+    fn fixture() -> Store {
         let mut store = Store::new();
 
         // A normal album, with a guest credit on one track — the case that
@@ -1108,8 +1187,7 @@ mod tests {
             ..Default::default()
         });
 
-        let lib = Library::rebuild(&store, true);
-        (store, lib)
+        store
     }
 
     fn render(ui: &Ui, ctx: &Context<'_>, w: u16, h: u16) -> String {
@@ -1130,13 +1208,12 @@ mod tests {
 
     #[test]
     fn tree_view_renders_artists_collapsed() {
-        let (store, library) = fixture();
+        let store = fixture();
         let ctx = Context {
             store: &store,
-            library: &library,
             player: None,
         };
-        let ui = Ui::new(PathBuf::from("/m"));
+        let ui = ui_of(&store, true);
         let out = render(&ui, &ctx, 74, 12);
 
         // Smart sort files "The Wall Builders" under W, so it comes last.
@@ -1154,20 +1231,21 @@ mod tests {
 
     #[test]
     fn compilation_stays_one_artist_with_every_track() {
-        let (store, library) = fixture();
+        let store = fixture();
         let ctx = Context {
             store: &store,
-            library: &library,
             player: None,
         };
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let mut ui = ui_of(&store, true);
         // Select "Various Artists" and expand it.
-        let rows = ui.tree.rows(&library, &store);
+        let rows = ui.tree.rows(&ui.library, &store);
         ui.tree.selected = rows
             .iter()
             .position(|r| r.label().contains("Various Artists"))
             .unwrap();
-        ui.tree.toggle(&library, &store);
+        let lib = std::mem::take(&mut ui.library);
+        ui.tree.toggle(&lib, &store);
+        ui.library = lib;
 
         let out = render(&ui, &ctx, 74, 12);
         assert!(out.contains("▾ Various Artists"), "{out}");
@@ -1179,14 +1257,13 @@ mod tests {
 
     #[test]
     fn multi_disc_album_does_not_interleave() {
-        let (store, library) = fixture();
+        let store = fixture();
         let ctx = Context {
             store: &store,
-            library: &library,
             player: None,
         };
-        let mut ui = Ui::new(PathBuf::from("/m"));
-        let rows = ui.tree.rows(&library, &store);
+        let mut ui = ui_of(&store, true);
+        let rows = ui.tree.rows(&ui.library, &store);
         ui.tree.selected = rows
             .iter()
             .position(|r| r.label().contains("Wall Builders"))
@@ -1200,14 +1277,13 @@ mod tests {
 
     #[test]
     fn untagged_track_shows_its_file_name() {
-        let (store, library) = fixture();
+        let store = fixture();
         let ctx = Context {
             store: &store,
-            library: &library,
             player: None,
         };
-        let mut ui = Ui::new(PathBuf::from("/m"));
-        let rows = ui.tree.rows(&library, &store);
+        let mut ui = ui_of(&store, true);
+        let rows = ui.tree.rows(&ui.library, &store);
         ui.tree.selected = rows
             .iter()
             .position(|r| r.label().contains("Unknown Artist"))
@@ -1220,13 +1296,12 @@ mod tests {
 
     #[test]
     fn empty_playlist_says_so_rather_than_rendering_blank() {
-        let (store, library) = fixture();
+        let store = fixture();
         let ctx = Context {
             store: &store,
-            library: &library,
             player: None,
         };
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let mut ui = ui_of(&store, true);
         ui.view = View::Playlist;
         let out = render(&ui, &ctx, 74, 10);
         assert!(out.contains("the playlist is empty"), "{out}");
@@ -1235,14 +1310,13 @@ mod tests {
 
     #[test]
     fn navigation_clamps_at_both_ends() {
-        let (store, library) = fixture();
+        let store = fixture();
         let ctx = Context {
             store: &store,
-            library: &library,
             player: None,
         };
-        let mut ui = Ui::new(PathBuf::from("/m"));
-        let rows = ui.tree.rows(&library, &store).len();
+        let mut ui = ui_of(&store, true);
+        let rows = ui.tree.rows(&ui.library, &store).len();
 
         for _ in 0..rows * 2 {
             handle_key(KeyEvent::from(KeyCode::Char('j')), &mut ui, &ctx);
@@ -1257,13 +1331,12 @@ mod tests {
 
     #[test]
     fn tab_moves_focus_and_digits_switch_views() {
-        let (store, library) = fixture();
+        let store = fixture();
         let ctx = Context {
             store: &store,
-            library: &library,
             player: None,
         };
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let mut ui = ui_of(&store, true);
         assert_eq!(ui.tree.pane, Pane::Tree);
         handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
         assert_eq!(ui.tree.pane, Pane::Tracks);
@@ -1285,13 +1358,12 @@ mod tests {
     /// point into a different album's list.
     #[test]
     fn moving_the_tree_cursor_resets_the_track_pane() {
-        let (store, library) = fixture();
+        let store = fixture();
         let ctx = Context {
             store: &store,
-            library: &library,
             player: None,
         };
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let mut ui = ui_of(&store, true);
         handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
         handle_key(KeyEvent::from(KeyCode::Char('j')), &mut ui, &ctx);
         assert_eq!(ui.tree.track_selected, 1);
@@ -1305,46 +1377,50 @@ mod tests {
     // `ctx.player` is None here: these cover the decisions the UI makes, which
     // is where the bugs are. Whether cpal then makes a sound is M1/M2's ground.
 
-    fn ctx_of<'a>(store: &'a Store, library: &'a Library) -> Context<'a> {
+    fn ctx_of(store: &Store) -> Context<'_> {
         Context {
             store,
-            library,
             player: None,
         }
     }
 
+    /// A `Ui` over the whole fixture library.
+    fn ui_of(store: &Store, smart: bool) -> Ui {
+        Ui::new(PathBuf::from("/m"), Library::rebuild(store, smart))
+    }
+
     #[test]
     fn enter_in_the_track_pane_plays_the_selected_track() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
 
         handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx); // focus tracks
         handle_key(KeyEvent::from(KeyCode::Char('j')), &mut ui, &ctx);
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
 
         let played = ui.playback.current.expect("nothing started playing");
-        let expected = ui.tree.tracks_for(&library, &store)[1];
+        let expected = ui.tree.tracks_for(&ui.library, &store)[1];
         assert_eq!(played, expected);
     }
 
     #[test]
     fn enter_on_an_artist_row_starts_that_artists_first_track() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
 
         let played = ui.playback.current.expect("nothing started playing");
-        let first = ui.tree.tracks_for(&library, &store)[0];
+        let first = ui.tree.tracks_for(&ui.library, &store)[0];
         assert_eq!(played, first, "Enter on a tree row should not be a no-op");
     }
 
     #[test]
     fn b_and_z_walk_forwards_and_backwards() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
         let first = ui.playback.current.unwrap();
 
@@ -1358,9 +1434,9 @@ mod tests {
 
     #[test]
     fn mode_keys_toggle_and_show_in_the_status_line() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
 
         assert!(!ui.playback.shuffle);
         handle_key(KeyEvent::from(KeyCode::Char('s')), &mut ui, &ctx);
@@ -1380,11 +1456,11 @@ mod tests {
     /// §5 rule that most often goes wrong in a UI.
     #[test]
     fn finishing_a_track_takes_from_the_queue_and_pops_it() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
 
-        let sorted = library.sorted();
+        let sorted: Vec<_> = ui.library.sorted().to_vec();
         ui.playback.current = Some(sorted[0]);
         let queued = sorted[4];
         ui.queue.push_back(queued);
@@ -1402,10 +1478,10 @@ mod tests {
 
     #[test]
     fn running_off_the_end_stops_rather_than_looping() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
-        let last = *library.sorted().last().unwrap();
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let last = *ui.library.sorted().last().unwrap();
         ui.playback.current = Some(last);
 
         advance(&mut ui, &ctx, true);
@@ -1416,15 +1492,15 @@ mod tests {
         ui.playback.current = Some(last);
         ui.playback.repeat = true;
         advance(&mut ui, &ctx, true);
-        assert_eq!(ui.playback.current, Some(library.sorted()[0]));
+        assert_eq!(ui.playback.current, Some(ui.library.sorted()[0]));
     }
 
     #[test]
     fn playing_from_the_playlist_view_makes_it_the_active_source() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
-        let sorted = library.sorted();
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let sorted: Vec<_> = ui.library.sorted().to_vec();
         ui.playlist.push(sorted[3]);
         ui.playlist.push(sorted[1]);
 
@@ -1440,22 +1516,22 @@ mod tests {
 
     #[test]
     fn now_playing_replaces_the_library_summary() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         let out = render(&ui, &ctx, 90, 8);
         assert!(out.contains("7 tracks"), "{out}");
 
-        ui.playback.current = Some(library.sorted()[0]);
+        ui.playback.current = Some(ui.library.sorted()[0]);
         let out = render(&ui, &ctx, 90, 8);
         assert!(!out.contains("7 tracks"), "summary should give way:\n{out}");
         assert!(out.contains("Anderson .Paak"), "{out}");
     }
     #[test]
     fn a_transient_notice_expires_instead_of_sticking() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
 
         ui.notify("audio output changed");
         assert!(render(&ui, &ctx, 90, 8).contains("audio output changed"));
@@ -1471,9 +1547,9 @@ mod tests {
 
     #[test]
     fn a_device_reroute_is_not_reported_as_an_error() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         ui.notify("audio output changed");
         let out = render(&ui, &ctx, 90, 8);
         // Switching headphones in must not look like a failure.
@@ -1484,9 +1560,9 @@ mod tests {
     /// loaded across a stop, so the UI has to as well or the two desync.
     #[test]
     fn stop_keeps_the_current_track() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
 
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
         let playing = ui.playback.current.expect("nothing started");
@@ -1535,8 +1611,8 @@ mod tests {
     /// that parses but resolves to nothing is exactly the failure this catches.
     #[test]
     fn every_default_binding_resolves_and_runs() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
+        let store = fixture();
+        let ctx = ctx_of(&store);
 
         for line in crate::cmd::bind::DEFAULTS {
             let Command::Bind {
@@ -1548,7 +1624,7 @@ mod tests {
                 panic!("{line:?} is not a bind")
             };
 
-            let mut ui = Ui::new(PathBuf::from("/m"));
+            let mut ui = ui_of(&store, true);
             // The binding must be reachable through lookup from a real view.
             let view = match bctx {
                 crate::cmd::Context::Common => View::Tree,
@@ -1574,9 +1650,9 @@ mod tests {
 
     #[test]
     fn digits_switch_views_through_the_bindings() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         for (key, want) in [
             ("2", View::Sorted),
             ("4", View::Queue),
@@ -1591,9 +1667,9 @@ mod tests {
 
     #[test]
     fn the_command_line_runs_a_command() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
         assert!(ui.prompt.is_some(), "colon should open the prompt");
@@ -1604,9 +1680,9 @@ mod tests {
 
     #[test]
     fn a_bad_command_line_reports_rather_than_dying() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "frobnicate");
         assert!(ui.status.contains("frobnicate"), "{}", ui.status);
@@ -1614,9 +1690,9 @@ mod tests {
 
     #[test]
     fn escape_abandons_the_prompt() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, ":");
         handle_key(KeyEvent::from(KeyCode::Char('q')), &mut ui, &ctx);
         handle_key(KeyEvent::from(KeyCode::Esc), &mut ui, &ctx);
@@ -1627,9 +1703,9 @@ mod tests {
     /// A rebinding through `:bind` must take effect immediately.
     #[test]
     fn rebinding_at_runtime_takes_effect() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
 
         // `j` moves down by default.
         press(&mut ui, &ctx, "j");
@@ -1650,9 +1726,9 @@ mod tests {
 
     #[test]
     fn a_context_binding_only_applies_to_its_view() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "bind queue j win-bottom");
 
@@ -1663,15 +1739,15 @@ mod tests {
 
     #[test]
     fn search_moves_the_cursor_and_n_repeats() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         ui.view = View::Sorted;
 
         press(&mut ui, &ctx, "/");
         type_line(&mut ui, &ctx, "years");
         let first = ui.sorted;
-        let track = ctx.library.sorted()[first];
+        let track = ui.library.sorted()[first];
         assert_eq!(store.get(track).unwrap().display_title(), "Years");
 
         // `n` with a single match wraps back to it rather than losing it.
@@ -1681,9 +1757,9 @@ mod tests {
 
     #[test]
     fn a_search_with_no_match_says_so() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         ui.view = View::Sorted;
         press(&mut ui, &ctx, "/");
         type_line(&mut ui, &ctx, "zzzznotthere");
@@ -1692,12 +1768,12 @@ mod tests {
 
     #[test]
     fn add_from_the_tree_takes_the_whole_selection() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
 
         // Artist row selected: `y` adds everything under it.
-        let expected = ui.tree.tracks_for(&library, &store).len();
+        let expected = ui.tree.tracks_for(&ui.library, &store).len();
         press(&mut ui, &ctx, "y");
         assert_eq!(ui.playlist.len(), expected);
         assert!(expected > 1, "the fixture should have a multi-track artist");
@@ -1708,9 +1784,9 @@ mod tests {
 
     #[test]
     fn remove_deletes_from_the_playlist_only() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, "y");
         let before = ui.playlist.len();
 
@@ -1727,9 +1803,9 @@ mod tests {
 
     #[test]
     fn toggles_go_through_the_settings_layer() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, "s");
         assert!(ui.playback.shuffle);
@@ -1746,9 +1822,9 @@ mod tests {
 
     #[test]
     fn view_seven_lists_settings_and_bindings() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         ui.view = View::Settings;
         let out = render(&ui, &ctx, 100, 24);
         assert!(out.contains("aaa_mode"), "{out}");
@@ -1771,9 +1847,9 @@ mod tests {
 
     #[test]
     fn the_prompt_replaces_the_status_line_while_open() {
-        let (store, library) = fixture();
-        let ctx = ctx_of(&store, &library);
-        let mut ui = Ui::new(PathBuf::from("/m"));
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, ":");
         for c in "vol 50%".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
@@ -1781,5 +1857,190 @@ mod tests {
         let out = render(&ui, &ctx, 100, 10);
         assert!(out.contains(":vol 50%"), "{out}");
         assert!(!out.contains("7 tracks"), "status should be hidden:\n{out}");
+    }
+    // ---- catalogs --------------------------------------------------------
+
+    use crate::catalog::{Catalogs, Spec};
+
+    /// A fixture split into two catalogs by directory.
+    fn catalog_ui(store: &Store) -> Ui {
+        let mut catalogs = Catalogs::default();
+        catalogs.define("paak", vec![PathBuf::from("/m/paak")]);
+        catalogs.define("va", vec![PathBuf::from("/m/va")]);
+        let mut ui = Ui::new(
+            PathBuf::from("/m"),
+            Library::from_members(store, catalogs.members(store), true),
+        );
+        ui.catalogs = catalogs;
+        ui
+    }
+
+    #[test]
+    fn switching_catalogs_narrows_the_library() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+        let everything = ui.library.len();
+
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Catalog(Spec::Only(vec!["paak".into()])),
+        );
+        assert!(ui.library.len() < everything, "library did not narrow");
+        for (_, track) in ui
+            .library
+            .sorted()
+            .iter()
+            .filter_map(|id| store.get(*id).map(|t| (id, t)))
+        {
+            assert!(
+                track.path.starts_with("/m/paak"),
+                "{:?} leaked in",
+                track.path
+            );
+        }
+    }
+
+    /// The whole point: shuffle must not cross a catalog boundary. §5 builds
+    /// its pool from the library, so this is really a test that nothing has
+    /// started building pools from the Store instead.
+    #[test]
+    fn playback_stays_inside_the_active_catalog() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Catalog(Spec::Only(vec!["paak".into()])),
+        );
+
+        ui.playback.shuffle = true;
+        ui.playback.repeat = true;
+        ui.playback.current = ui.library.sorted().first().copied();
+
+        for _ in 0..40 {
+            advance(&mut ui, &ctx, true);
+            let Some(id) = ui.playback.current else { break };
+            let path = &store.get(id).unwrap().path;
+            assert!(
+                path.starts_with("/m/paak"),
+                "shuffle escaped the catalog to {path:?}"
+            );
+        }
+    }
+
+    /// Playlists are explicit choices and must cross catalogs.
+    #[test]
+    fn a_playlist_still_plays_tracks_outside_the_active_catalog() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+
+        // Queue something from the "va" catalog while "paak" is active.
+        let va = store
+            .iter()
+            .find(|(_, t)| t.path.starts_with("/m/va"))
+            .map(|(id, _)| id)
+            .unwrap();
+        ui.playlist.push(va);
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Catalog(Spec::Only(vec!["paak".into()])),
+        );
+
+        assert_eq!(ui.playlist.len(), 1, "the playlist was filtered");
+        ui.view = View::Playlist;
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        assert_eq!(
+            ui.playback.current,
+            Some(va),
+            "a playlist entry outside the catalog must still play"
+        );
+    }
+
+    #[test]
+    fn the_queue_also_crosses_catalogs() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+        let va = store
+            .iter()
+            .find(|(_, t)| t.path.starts_with("/m/va"))
+            .map(|(id, _)| id)
+            .unwrap();
+        ui.queue.push_back(va);
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Catalog(Spec::Only(vec!["paak".into()])),
+        );
+        assert_eq!(ui.queue.len(), 1);
+
+        ui.playback.current = ui.library.sorted().first().copied();
+        advance(&mut ui, &ctx, true);
+        assert_eq!(ui.playback.current, Some(va), "the queue was skipped");
+    }
+
+    #[test]
+    fn an_unknown_catalog_name_is_reported() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+        let before = ui.library.len();
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Catalog(Spec::Only(vec!["nosuch".into()])),
+        );
+        assert!(ui.status.contains("nosuch"), "{}", ui.status);
+        assert_eq!(ui.library.len(), before, "a bad name changed the library");
+    }
+
+    #[test]
+    fn the_status_line_says_which_catalogs_are_active() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Catalog(Spec::Only(vec!["paak".into()])),
+        );
+        ui.status.clear();
+        let out = render(&ui, &ctx, 110, 10);
+        assert!(out.contains("[paak]"), "{out}");
+    }
+
+    #[test]
+    fn switching_catalogs_resets_the_cursors() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+        ui.view = View::Sorted;
+        ui.sorted = ui.library.sorted().len() - 1;
+
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Catalog(Spec::Only(vec!["paak".into()])),
+        );
+        // The old row may not exist any more; leaving the cursor there would
+        // index past the end.
+        assert_eq!(ui.sorted, 0);
+        assert!(ui.sorted < ui.library.sorted().len());
+    }
+
+    #[test]
+    fn catalogs_show_in_view_seven() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+        ui.view = View::Settings;
+        let out = render(&ui, &ctx, 110, 24);
+        assert!(out.contains("catalog paak"), "{out}");
+        assert!(out.contains("catalog va"), "{out}");
     }
 }

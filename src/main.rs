@@ -9,6 +9,7 @@
 
 mod audio;
 mod cache;
+mod catalog;
 mod cli;
 mod cmd;
 mod config;
@@ -38,6 +39,7 @@ struct App {
     store: Store,
     roots: Vec<PathBuf>,
     cache_path: Option<PathBuf>,
+    catalogs: catalog::Catalogs,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,21 +47,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let player = PlayerHandle::new(args.player_config())?;
     println!("gmuse — device at {} Hz", player.device_rate());
 
+    // Read the config first: it defines the catalogs, which decide what to
+    // scan.
+    let loaded = if args.no_config {
+        config::Loaded::default()
+    } else {
+        config::load(&args.config.clone().unwrap_or_else(config::default_path))
+    };
+
     let cache_path =
         (!args.no_cache).then(|| args.cache.clone().unwrap_or_else(cache::default_path));
 
     // Load the cached library, then reconcile it with the roots we were given.
-    let (store, mut roots) = match cache_path.as_deref().map(cache::load) {
-        Some(Ok(Some((store, roots)))) => (store, roots),
+    let (store, mut roots, cached_active) = match cache_path.as_deref().map(cache::load) {
+        Some(Ok(cache::Outcome::Loaded {
+            store,
+            roots,
+            active,
+        })) => (store, roots, Some(active)),
+        Some(Ok(cache::Outcome::Discarded)) => {
+            // Costs a rescan, so say so. Silently starting from nothing is how
+            // a library appears to vanish.
+            eprintln!("cache: discarded (wrong version or corrupt); rescanning");
+            (Store::new(), Vec::new(), None)
+        }
         Some(Err(e)) => {
             eprintln!("cache: {e}");
-            (Store::new(), Vec::new())
+            (Store::new(), Vec::new(), None)
         }
-        _ => (Store::new(), Vec::new()),
+        _ => (Store::new(), Vec::new(), None),
     };
-    for root in &args.library {
-        if !roots.contains(root) {
-            roots.push(root.clone());
+    // Catalogs come from the config; `--library` roots join an implicit
+    // "default" catalog so a user who configures none sees no change.
+    let mut catalogs = loaded.catalogs.clone();
+    let config_chose_catalogs = loaded.active_specified;
+    if !args.library.is_empty() {
+        catalogs.define(
+            catalog::DEFAULT,
+            args.library.iter().map(|p| p.to_path_buf()).collect(),
+        );
+    }
+    // A remembered choice wins over the config default, unless the config
+    // names one explicitly — otherwise picking a catalog would not stick.
+    if let Some(active) = cached_active
+        && !config_chose_catalogs
+    {
+        catalogs.set_active(active);
+    }
+
+    // Scanning covers every catalog root regardless of what is active, so
+    // switching catalogs later needs no rescan.
+    for root in catalogs.all_roots() {
+        if !roots.contains(&root) {
+            roots.push(root);
         }
     }
 
@@ -68,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         store,
         roots,
         cache_path,
+        catalogs,
     };
 
     if !app.roots.is_empty() {
@@ -82,15 +123,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         save_cache(&app);
     } else if !app.store.is_empty() {
         println!("library: {} tracks (cached)", app.store.len());
-    }
-
-    // Read the config before the terminal is taken over, so its errors are
-    // visible rather than painted under the UI.
-    let loaded = if args.no_config {
-        config::Loaded::default()
     } else {
-        config::load(&args.config.clone().unwrap_or_else(config::default_path))
-    };
+        println!(
+            "library: empty — scan one with `gmuse --library <dir>`, or set\n\
+             `library = [\"~/Music\"]` in {}",
+            config::default_path().display()
+        );
+    }
 
     if !args.repl {
         // A file named on the command line still plays, even though the views
@@ -194,7 +233,11 @@ fn run_tui(
     smart_artist_sort: bool,
     loaded: config::Loaded,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let library = Library::rebuild(&app.store, smart_artist_sort);
+    let library = Library::from_members(
+        &app.store,
+        app.catalogs.members(&app.store),
+        smart_artist_sort,
+    );
     let start_dir = app
         .roots
         .first()
@@ -204,10 +247,10 @@ fn run_tui(
 
     let ctx = ui::Context {
         store: &app.store,
-        library: &library,
         player: Some(&app.player),
     };
-    let mut state = ui::Ui::new(start_dir);
+    let mut state = ui::Ui::new(start_dir, library);
+    state.catalogs = app.catalogs.clone();
 
     state.theme = loaded.theme;
     // The config's bindings and settings are commands, so they run through the
@@ -231,8 +274,15 @@ fn run_tui(
 }
 
 fn save_cache(app: &App) {
+    // Never write an empty cache. With no roots there is nothing to record,
+    // and overwriting a good cache with an empty one loses the roots stored in
+    // it — which is exactly how a working library turns into an empty one
+    // after a format bump.
+    if app.store.is_empty() && app.roots.is_empty() {
+        return;
+    }
     if let Some(path) = &app.cache_path
-        && let Err(e) = cache::save(path, &app.store, &app.roots)
+        && let Err(e) = cache::save(path, &app.store, &app.roots, app.catalogs.active())
     {
         eprintln!("cache: {e}");
     }
@@ -256,7 +306,16 @@ fn print_library(app: &App) {
     let mut total = Duration::ZERO;
     let mut untagged = 0usize;
 
-    for (_, t) in app.store.iter() {
+    // Report what the active catalogs actually cover, not the whole store —
+    // otherwise this contradicts what the views show.
+    let members = app.catalogs.members(&app.store);
+    let mut counted = 0usize;
+
+    for (id, t) in app.store.iter() {
+        if !members.contains(&id) {
+            continue;
+        }
+        counted += 1;
         artists.insert(t.file_under());
         albums.insert((t.file_under(), t.album_or_unknown()));
         total += t.duration;
@@ -267,7 +326,7 @@ fn print_library(app: &App) {
 
     println!(
         "{} tracks, {} albums, {} artists, {:.1} hours",
-        app.store.len(),
+        counted,
         albums.len(),
         artists.len(),
         total.as_secs_f64() / 3600.0
@@ -281,6 +340,9 @@ fn print_library(app: &App) {
             app.store.tombstones(),
             app.store.capacity()
         );
+    }
+    if let Some(label) = app.catalogs.label() {
+        println!("  catalogs: {label}");
     }
     for root in &app.roots {
         println!("  root: {}", root.display());

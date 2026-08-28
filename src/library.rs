@@ -60,13 +60,24 @@ pub struct Library {
 impl Library {
     /// Rebuild both projections from every track in the store.
     pub fn rebuild(store: &Store, smart_artist_sort: bool) -> Self {
+        Self::from_members(
+            store,
+            store.iter().map(|(id, _)| id).collect(),
+            smart_artist_sort,
+        )
+    }
+
+    /// Rebuild from an explicit membership.
+    ///
+    /// This is how catalogs work: §4 makes the library a projection over a
+    /// *subset* of the store, so confining the subset confines browsing,
+    /// shuffle and `aaa_mode` without `next()` knowing catalogs exist.
+    pub fn from_members(store: &Store, members: HashSet<TrackId>, smart_artist_sort: bool) -> Self {
         let mut lib = Library {
+            members,
             smart_artist_sort,
             ..Default::default()
         };
-        for (id, _) in store.iter() {
-            lib.members.insert(id);
-        }
         lib.reindex(store);
         lib
     }
