@@ -11,7 +11,6 @@
 pub mod bind;
 pub mod keys;
 pub mod parse;
-pub mod rc;
 
 use std::path::PathBuf;
 

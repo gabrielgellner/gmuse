@@ -698,6 +698,34 @@ Append here as decisions are made. Format: date, decision, rationale.
   is resolved through `bind::lookup` from its own context and then executed, so a binding that parses but resolves to
   nothing — or panics when run — fails rather than waiting to be discovered by hand.
 
+- **2026-08-28** **The rc file is replaced by TOML, and the command language survives intact.** Taken from eilmeldung
+  (`docs/inspiration/eilmeldung.md`), whose bindings live in TOML but whose _values_ are command strings. That reframes
+  "rc **or** TOML" into "what holds the commands": commands are imperative and need a language, settings and themes are
+  declarative and want structure. §6's "one mechanism" is untouched — `:bind`, the `:` line and the config all still go
+  through one parser and one `execute`.
+
+  Gained: `deny_unknown_fields`, so a typo is an error located to `keys.common.^n` rather than a line that silently does
+  nothing; a list value as a **macro** (`o = ["add-queue", "player-next"]`), which the flat file could not express;
+  nested tables for theming, which it could not express either.
+
+- **2026-08-28** **Theming is two levels: a palette of named colours, and styles that name a semantic role.** Widgets
+  ask for `Role::BorderFocused`, never for cyan. Before this the UI had **21 hardcoded `Color::` literals across two
+  files**, each one somewhere a theme could not reach; there are now zero outside `theme.rs`'s defaults. A palette name
+  deliberately wins over a colour name, so a theme can rename anything. A config overrides only the roles it names, so a
+  two-line theme is valid.
+
+- **2026-08-28** Config problems are **collected, not fatal on the first**: a file with three typos reports three. Same
+  reasoning as the rc file it replaces, kept.
+
+- **2026-08-28** **gmuse is GPL-3.0-or-later.** Chosen, not inherited: copyright covers expression, not ideas, so
+  reading eilmeldung and russ for architecture created no obligation. Nothing has been copied from either. Before this
+  the project had no licence at all, which meant all-rights-reserved by default.
+
+- **2026-08-28** Started `docs/inspiration/`, with notes on eilmeldung (config, theming, saved queries) and russ (SQLite
+  as the store, non-eager refresh). It records the open questions those raise — chiefly whether the library should move
+  from a postcard cache to SQLite before §7's filter language lands in M8, since "filter runs over the whole library on
+  every keystroke" is a scan today and would be an index lookup there.
+
 ---
 
 ## 14. Prior art worth reading

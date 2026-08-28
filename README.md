@@ -113,17 +113,35 @@ all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue, `
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/gmuse/rc` is a list of the same commands the `:` line takes, run at startup:
+`$XDG_CONFIG_HOME/gmuse/config.toml`. Settings and theming are TOML tables; key bindings hold **commands**, the same
+language the `:` line takes — so anything you can type at the prompt, you can bind.
 
-```
-# ~/.config/gmuse/rc
-set shuffle=true
-set aaa_mode=album
-bind common ^n player-next
-unbind common q
+```toml
+startup_commands = ["view 1"]
+
+[settings]
+shuffle = true
+aaa_mode = "album"          # all | artist | album
+
+[keys.common]
+"^n" = "player-next"
+o = ["add-queue", "player-next"]   # a list is a macro
+"M-f" = "seek +30"
+
+[theme.palette]
+accent = "magenta"
+
+[theme.styles]
+border_focused = { fg = "accent", mods = ["bold"] }
 ```
 
-A bad line is reported with its number and skipped; the rest of the file still loads.
+Unknown tables, settings and styles are **errors**, reported with where they are — `keys.common.^n` — and the rest of
+the file still loads. See [`examples/config.toml`](examples/config.toml) for every option, and view 7 in the app for
+every setting and binding currently in force.
+
+## Licence
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).
 
 The library is scanned on startup and cached at `$XDG_CACHE_HOME/gmuse/library.postcard`, so later runs need no
 `--library`. Rescans are incremental by mtime: 20,000 tracks scan cold in 0.86s and rescan in 0.08s.

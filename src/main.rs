@@ -11,6 +11,7 @@ mod audio;
 mod cache;
 mod cli;
 mod cmd;
+mod config;
 mod library;
 mod next;
 mod playlist;
@@ -83,12 +84,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("library: {} tracks (cached)", app.store.len());
     }
 
-    // Read the rc file before the terminal is taken over, so its errors are
+    // Read the config before the terminal is taken over, so its errors are
     // visible rather than painted under the UI.
-    let (rc_commands, rc_errors) = if args.no_rc {
-        (Vec::new(), Vec::new())
+    let loaded = if args.no_config {
+        config::Loaded::default()
     } else {
-        cmd::rc::load(&args.rc.clone().unwrap_or_else(cmd::rc::default_path))
+        config::load(&args.config.clone().unwrap_or_else(config::default_path))
     };
 
     if !args.repl {
@@ -98,19 +99,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(path) = &args.file {
             app.player.load(path.clone());
         }
-        return run_tui(&app, args.smart_artist_sort, rc_commands, rc_errors);
+        return run_tui(&app, args.smart_artist_sort, loaded);
     }
 
-    // The rc file configures UI state, which the line prompt does not have.
-    // Say so rather than loading it and silently doing nothing.
-    if !rc_commands.is_empty() {
+    // The config sets up UI state, which the line prompt does not have. Say so
+    // rather than loading it and silently doing nothing.
+    if !loaded.commands.is_empty() {
         println!(
-            "note: {} rc command(s) ignored — the rc file applies to the TUI, not --repl",
-            rc_commands.len()
+            "note: {} config command(s) ignored — the config applies to the TUI, not --repl",
+            loaded.commands.len()
         );
     }
-    for e in &rc_errors {
-        eprintln!("rc: {e}");
+    for e in &loaded.errors {
+        eprintln!("config: {e}");
     }
 
     match &args.file {
@@ -191,8 +192,7 @@ fn run(app: &mut App, cmd: Line) {
 fn run_tui(
     app: &App,
     smart_artist_sort: bool,
-    rc_commands: Vec<cmd::Command>,
-    rc_errors: Vec<cmd::rc::RcError>,
+    loaded: config::Loaded,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let library = Library::rebuild(&app.store, smart_artist_sort);
     let start_dir = app
@@ -209,15 +209,17 @@ fn run_tui(
     };
     let mut state = ui::Ui::new(start_dir);
 
-    // The rc file is just commands, so it runs through the same execute() a
-    // keypress does — there is no separate configuration path to keep in step.
-    for cmd in rc_commands {
+    state.theme = loaded.theme;
+    // The config's bindings and settings are commands, so they run through the
+    // same execute() a keypress does — there is no second configuration path
+    // to keep in step.
+    for cmd in loaded.commands {
         ui::execute(&mut state, &ctx, cmd);
     }
-    if !rc_errors.is_empty() {
-        state.notify(format!("{} problem(s) in the rc file", rc_errors.len()));
-        for e in &rc_errors {
-            eprintln!("rc: {e}");
+    if !loaded.errors.is_empty() {
+        state.notify(format!("{} problem(s) in the config", loaded.errors.len()));
+        for e in &loaded.errors {
+            eprintln!("config: {e}");
         }
     }
 

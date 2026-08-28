@@ -5,6 +5,7 @@
 
 pub mod list;
 pub mod statusline;
+pub mod theme;
 pub mod tree;
 
 use std::io;
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
@@ -194,6 +195,7 @@ pub struct Ui {
     /// The last search, for `n` and `N`.
     pub last_search: Option<(String, SearchDir)>,
     pub settings_sel: usize,
+    pub theme: theme::Theme,
     /// Keep playing past the end of the current album/artist pool. Stored here
     /// because it is a setting the user toggles, not a property of a track.
     pub continue_playing: bool,
@@ -223,6 +225,7 @@ impl Ui {
             prompt: None,
             last_search: None,
             settings_sel: 0,
+            theme: theme::Theme::default(),
             continue_playing: true,
             smart_artist_sort: true,
             status_until: None,
@@ -807,10 +810,10 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     ])
     .areas(frame.area());
 
-    frame.render_widget(statusline::tabs(ui.view), tabs);
+    frame.render_widget(statusline::tabs(&ui.theme, ui.view), tabs);
     match &ui.prompt {
         Some(prompt) => {
-            frame.render_widget(statusline::prompt_line(prompt), status);
+            frame.render_widget(statusline::prompt_line(&ui.theme, prompt), status);
             // Park the cursor after the typed text, so the line looks like the
             // input it is.
             frame.set_cursor_position((
@@ -851,10 +854,10 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 Line::from(""),
                 Line::from(Span::styled(
                     "  filters arrive with the filter language in M8",
-                    Style::default().fg(Color::DarkGray),
+                    ui.theme.get(theme::Role::StatusDim),
                 )),
             ])
-            .block(pane_block("filters", true)),
+            .block(pane_block(&ui.theme, "filters", true)),
             body,
         ),
         View::Settings => draw_settings(frame, body, ui),
@@ -879,7 +882,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
                 format!("{:<20}", key.name()),
-                Style::default().fg(Color::Cyan),
+                ui.theme.get(theme::Role::SettingKey),
             ),
             Span::raw(value),
         ])));
@@ -889,11 +892,11 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
                 format!("{:<10}", bctx.name()),
-                Style::default().fg(Color::DarkGray),
+                ui.theme.get(theme::Role::BindingContext),
             ),
             Span::styled(
                 format!("{:<10}", key.to_string()),
-                Style::default().fg(Color::Yellow),
+                ui.theme.get(theme::Role::BindingKey),
             ),
             Span::raw(parse::format(cmd)),
         ])));
@@ -902,8 +905,8 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
     let mut state = ListState::default().with_selected(Some(ui.settings_sel));
     frame.render_stateful_widget(
         List::new(items)
-            .block(pane_block("settings and bindings", true))
-            .highlight_style(highlight(true)),
+            .block(pane_block(&ui.theme, "settings and bindings", true))
+            .highlight_style(highlight(&ui.theme, true)),
         area,
         &mut state,
     );
@@ -923,8 +926,8 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
     let mut state = ListState::default().with_selected(Some(ui.tree.selected));
     frame.render_stateful_widget(
         List::new(items)
-            .block(pane_block("artist / album", focused))
-            .highlight_style(highlight(focused)),
+            .block(pane_block(&ui.theme, "artist / album", focused))
+            .highlight_style(highlight(&ui.theme, focused)),
         left,
         &mut state,
     );
@@ -934,8 +937,8 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
     let mut state = ListState::default().with_selected(Some(ui.tree.track_selected));
     frame.render_stateful_widget(
         List::new(items)
-            .block(pane_block("tracks", !focused))
-            .highlight_style(highlight(!focused)),
+            .block(pane_block(&ui.theme, "tracks", !focused))
+            .highlight_style(highlight(&ui.theme, !focused)),
         right,
         &mut state,
     );
@@ -944,7 +947,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
 fn draw_tracks(
     frame: &mut Frame,
     area: Rect,
-    _ui: &Ui,
+    ui: &Ui,
     ctx: &Context<'_>,
     ids: &[crate::store::TrackId],
     selected: usize,
@@ -952,7 +955,7 @@ fn draw_tracks(
 ) {
     if ids.is_empty() {
         frame.render_widget(
-            Paragraph::new(empty_hint(title)).block(pane_block(title, true)),
+            Paragraph::new(empty_hint(&ui.theme, title)).block(pane_block(&ui.theme, title, true)),
             area,
         );
         return;
@@ -961,8 +964,8 @@ fn draw_tracks(
     let mut state = ListState::default().with_selected(Some(selected));
     frame.render_stateful_widget(
         List::new(items)
-            .block(pane_block(title, true))
-            .highlight_style(highlight(true)),
+            .block(pane_block(&ui.theme, title, true))
+            .highlight_style(highlight(&ui.theme, true)),
         area,
         &mut state,
     );
@@ -990,49 +993,48 @@ fn draw_browser(frame: &mut Frame, area: Rect, ui: &Ui) {
     let mut state = ListState::default().with_selected(Some(ui.browser.selected));
     frame.render_stateful_widget(
         List::new(items)
-            .block(pane_block(&ui.browser.cwd.display().to_string(), true))
-            .highlight_style(highlight(true)),
+            .block(pane_block(
+                &ui.theme,
+                &ui.browser.cwd.display().to_string(),
+                true,
+            ))
+            .highlight_style(highlight(&ui.theme, true)),
         area,
         &mut state,
     );
 }
 
-fn empty_hint(title: &str) -> Vec<Line<'static>> {
+fn empty_hint(theme: &theme::Theme, title: &str) -> Vec<Line<'static>> {
+    let dim = theme.get(theme::Role::StatusDim);
     vec![
         Line::from(""),
+        Line::from(Span::styled(format!("  the {title} is empty"), dim)),
         Line::from(Span::styled(
-            format!("  the {title} is empty"),
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(Span::styled(
-            "  adding lands with the command layer in M6",
-            Style::default().fg(Color::DarkGray),
+            "  add to it with `a`, `y` or `e` from the library",
+            dim,
         )),
     ]
 }
 
-fn pane_block(title: &str, focused: bool) -> Block<'_> {
+fn pane_block<'a>(theme: &theme::Theme, title: &'a str, focused: bool) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
         .title(format!(" {title} "))
-        .border_style(if focused {
-            Style::default().fg(Color::Cyan)
+        .border_style(theme.get(if focused {
+            theme::Role::BorderFocused
         } else {
-            Style::default().fg(Color::DarkGray)
-        })
+            theme::Role::BorderUnfocused
+        }))
 }
 
 /// The unfocused pane keeps a dimmer highlight rather than losing it, so you
 /// can still see where you left the cursor after `Tab`.
-fn highlight(focused: bool) -> Style {
-    if focused {
-        Style::default()
-            .bg(Color::Cyan)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD)
+fn highlight(theme: &theme::Theme, focused: bool) -> Style {
+    theme.get(if focused {
+        theme::Role::SelectionFocused
     } else {
-        Style::default().add_modifier(Modifier::REVERSED | Modifier::DIM)
-    }
+        theme::Role::SelectionUnfocused
+    })
 }
 
 #[cfg(test)]

@@ -59,13 +59,13 @@ pub struct Cli {
     #[arg(long, env = "GMUSE_CACHE")]
     pub cache: Option<PathBuf>,
 
-    /// Config file of commands to run at startup. Same syntax as the `:` line.
-    #[arg(long, env = "GMUSE_RC")]
-    pub rc: Option<PathBuf>,
+    /// TOML config file. Defaults to $XDG_CONFIG_HOME/gmuse/config.toml.
+    #[arg(long, env = "GMUSE_CONFIG")]
+    pub config: Option<PathBuf>,
 
-    /// Skip the rc file entirely.
+    /// Skip the config file entirely.
     #[arg(long)]
-    pub no_rc: bool,
+    pub no_config: bool,
 
     /// Use the line-based prompt instead of the TUI.
     ///

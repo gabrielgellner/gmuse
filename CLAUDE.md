@@ -56,6 +56,14 @@ fast-forward merges with squash always on, and source branches delete themselves
 
 Because merges are fast-forward, an MR that has fallen behind `main` needs a rebase before it can merge.
 
+### Configuration and theming
+
+`config.toml` holds **settings** and **theme** as TOML, and **key bindings as command strings** — one command language
+for the config, `:bind` and the `:` line, per §6. Adding a setting means adding a `SettingKey`, not a new config path.
+
+The UI must never name a colour. Ask `theme.get(Role::…)` and add a `Role` if none fits; `Color::` literals belong only
+in `theme.rs`'s defaults. See `docs/inspiration/` for where this came from and what else is worth stealing.
+
 ### Formatting
 
 - **Rust** — `cargo fmt`, edition 2024 (`rustfmt.toml`)

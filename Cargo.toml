@@ -2,6 +2,9 @@
 name = "gmuse"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
+description = "Gabriel's MUSical Experience — a cmus-shaped terminal music player"
+repository = "https://gitlab.com/gabrielgellner/gmuse"
 
 [dependencies]
 clap = { version = "4.6.6", features = ["derive", "env"] }
@@ -22,6 +25,7 @@ symphonia = { version = "0.6.1", features = [
 # Opus via bundled libopus (statically linked). DESIGN §13.
 symphonia-adapter-libopus = { version = "0.3.0", optional = true }
 thiserror = "2.0.20"
+toml = "1.1.4"
 walkdir = "2.5.0"
 
 [features]

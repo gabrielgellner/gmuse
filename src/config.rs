@@ -1,0 +1,393 @@
+//! The TOML config file.
+//!
+//! Settings and theming are declarative and want structure; commands are
+//! imperative and want a language. So the file is TOML, and the *values* of
+//! its key bindings are command strings run through the §6 parser — the same
+//! one `:bind` and the `:` line use. There is still exactly one command
+//! language, and now something sensible holds it.
+//!
+//! Borrowed from eilmeldung; see `docs/inspiration/eilmeldung.md`.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+
+use crate::cmd::{Command, Context, keys, parse};
+use crate::ui::theme::{StyleSpec, Theme};
+
+/// `$XDG_CONFIG_HOME/gmuse/config.toml`, falling back to `~/.config`.
+pub fn default_path() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("gmuse").join("config.toml")
+}
+
+/// One binding's value: a single command, or a list run in order.
+///
+/// A list is a macro, which falls out of TOML for free.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Binding {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Binding {
+    fn commands(&self) -> Vec<&str> {
+        match self {
+            Binding::One(s) => vec![s.as_str()],
+            Binding::Many(v) => v.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeTable {
+    #[serde(default)]
+    pub palette: HashMap<String, String>,
+    #[serde(default)]
+    pub styles: HashMap<String, StyleSpec>,
+}
+
+/// The whole file.
+///
+/// `deny_unknown_fields` throughout: a typo in a config should be an error you
+/// are told about, not a setting that silently does nothing. This is the main
+/// thing TOML buys us over the old line-oriented rc file.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// `settings.shuffle = true` and friends, as `set key=value` commands.
+    #[serde(default)]
+    pub settings: HashMap<String, toml::Value>,
+    /// `[keys.common] j = "win-down"`.
+    #[serde(default)]
+    pub keys: HashMap<String, HashMap<String, Binding>>,
+    #[serde(default)]
+    pub theme: ThemeTable,
+    /// Commands run once at startup, after everything else is applied.
+    #[serde(default)]
+    pub startup_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigError {
+    pub where_: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.where_, self.message)
+    }
+}
+
+/// What a loaded config turns into: commands to run, and a theme to draw with.
+#[derive(Debug, Default)]
+pub struct Loaded {
+    pub commands: Vec<Command>,
+    pub theme: Theme,
+    pub errors: Vec<ConfigError>,
+}
+
+/// Parse config text into commands and a theme.
+///
+/// Every problem is collected rather than fatal: one bad line should not cost
+/// the rest of the file.
+pub fn parse_text(text: &str) -> Loaded {
+    let mut out = Loaded {
+        theme: Theme::default(),
+        ..Default::default()
+    };
+
+    let config: Config = match toml::from_str(text) {
+        Ok(c) => c,
+        Err(e) => {
+            out.errors.push(ConfigError {
+                where_: "config".into(),
+                message: e.message().to_string(),
+            });
+            return out;
+        }
+    };
+
+    // Settings become `set` commands, so they go through exactly the same
+    // typed parsing and the same execute() a `:set` does.
+    for (key, value) in &config.settings {
+        let text = match value {
+            toml::Value::String(s) => s.clone(),
+            toml::Value::Boolean(b) => b.to_string(),
+            toml::Value::Integer(i) => i.to_string(),
+            toml::Value::Float(f) => f.to_string(),
+            other => {
+                out.errors.push(ConfigError {
+                    where_: format!("settings.{key}"),
+                    message: format!("cannot be {other}"),
+                });
+                continue;
+            }
+        };
+        match parse::command(&format!("set {key}={text}")) {
+            Ok(cmd) => out.commands.push(cmd),
+            Err(e) => out.errors.push(ConfigError {
+                where_: format!("settings.{key}"),
+                message: e.to_string(),
+            }),
+        }
+    }
+
+    for (ctx_name, table) in &config.keys {
+        let Some(ctx) = Context::parse(ctx_name) else {
+            out.errors.push(ConfigError {
+                where_: format!("keys.{ctx_name}"),
+                message: "unknown context".into(),
+            });
+            continue;
+        };
+        for (key_name, binding) in table {
+            let key = match keys::parse(key_name) {
+                Ok(k) => k,
+                Err(e) => {
+                    out.errors.push(ConfigError {
+                        where_: format!("keys.{ctx_name}.{key_name}"),
+                        message: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            for text in binding.commands() {
+                match parse::command(text) {
+                    Ok(cmd) => out.commands.push(Command::Bind {
+                        ctx,
+                        key,
+                        cmd: Box::new(cmd),
+                    }),
+                    Err(e) => out.errors.push(ConfigError {
+                        where_: format!("keys.{ctx_name}.{key_name}"),
+                        message: e.to_string(),
+                    }),
+                }
+            }
+        }
+    }
+
+    for e in out.theme.apply(&config.theme.palette, &config.theme.styles) {
+        out.errors.push(ConfigError {
+            where_: "theme".into(),
+            message: e.to_string(),
+        });
+    }
+
+    for text in &config.startup_commands {
+        match parse::command(text) {
+            Ok(cmd) => out.commands.push(cmd),
+            Err(e) => out.errors.push(ConfigError {
+                where_: "startup_commands".into(),
+                message: e.to_string(),
+            }),
+        }
+    }
+
+    out
+}
+
+/// Read and parse the config. A missing file is not an error.
+pub fn load(path: &Path) -> Loaded {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_text(&text),
+        Err(_) => Loaded {
+            theme: Theme::default(),
+            ..Default::default()
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::{SeekSpec, SettingKey, SettingValue};
+    use ratatui::style::Color;
+
+    #[test]
+    fn settings_become_set_commands() {
+        let loaded = parse_text(
+            r#"
+            [settings]
+            shuffle = true
+            aaa_mode = "album"
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert!(loaded.commands.contains(&Command::Set {
+            key: SettingKey::Shuffle,
+            value: SettingValue::Bool(true)
+        }));
+        assert!(loaded.commands.contains(&Command::Set {
+            key: SettingKey::AaaMode,
+            value: SettingValue::Aaa(crate::next::AaaMode::Album)
+        }));
+    }
+
+    #[test]
+    fn a_key_holds_a_command_string() {
+        let loaded = parse_text(
+            r#"
+            [keys.common]
+            "^n" = "player-next"
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.commands.len(), 1);
+        let Command::Bind { ctx, key, cmd } = &loaded.commands[0] else {
+            panic!("not a bind")
+        };
+        assert_eq!(*ctx, Context::Common);
+        assert_eq!(key.to_string(), "^n");
+        assert_eq!(**cmd, Command::PlayerNext);
+    }
+
+    /// A list value is a macro. That falls out of TOML for free, and it is the
+    /// main thing the flat rc file could not express.
+    #[test]
+    fn a_list_binds_several_commands_to_one_key() {
+        let loaded = parse_text(
+            r#"
+            [keys.library]
+            o = ["add-queue", "player-next"]
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.commands.len(), 2, "both commands should bind");
+        for cmd in &loaded.commands {
+            let Command::Bind { ctx, .. } = cmd else {
+                panic!("not a bind")
+            };
+            assert_eq!(*ctx, Context::Library);
+        }
+    }
+
+    #[test]
+    fn the_theme_resolves_through_the_palette() {
+        let loaded = parse_text(
+            r#"
+            [theme.palette]
+            accent = "magenta"
+            [theme.styles]
+            border_focused = { fg = "accent", mods = ["bold"] }
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(
+            loaded.theme.get(crate::ui::theme::Role::BorderFocused).fg,
+            Some(Color::Magenta)
+        );
+    }
+
+    #[test]
+    fn startup_commands_run_last() {
+        let loaded = parse_text(
+            r#"
+            startup_commands = ["view 2", "toggle shuffle"]
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.commands.len(), 2);
+        assert_eq!(
+            loaded.commands[0],
+            Command::View(crate::cmd::ViewId::Sorted)
+        );
+    }
+
+    /// A typo in a config should be reported, not silently ignored. This is
+    /// the main thing TOML plus `deny_unknown_fields` buys over the rc file,
+    /// where an unknown line was only ever a parse error.
+    #[test]
+    fn an_unknown_table_is_rejected() {
+        let loaded = parse_text(
+            r#"
+            [setings]
+            shuffle = true
+            "#,
+        );
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert!(
+            loaded.errors[0].message.contains("unknown field"),
+            "{:?}",
+            loaded.errors[0]
+        );
+    }
+
+    #[test]
+    fn problems_are_located_and_do_not_stop_the_rest() {
+        let loaded = parse_text(
+            r#"
+            [settings]
+            shuffle = true
+            nosuchsetting = 1
+
+            [keys.common]
+            "^n" = "frobnicate"
+            j = "win-down"
+
+            [keys.nosuchcontext]
+            x = "quit"
+
+            [theme.styles]
+            no_such_style = { fg = "red" }
+            "#,
+        );
+        // The good lines still loaded.
+        assert!(loaded.commands.iter().any(|c| matches!(
+            c,
+            Command::Set {
+                key: SettingKey::Shuffle,
+                ..
+            }
+        )));
+        assert!(loaded.commands.iter().any(|c| matches!(
+            c,
+            Command::Bind { cmd, .. } if **cmd == Command::WinDown
+        )));
+
+        // And each problem is reported with where it is.
+        let places: Vec<&str> = loaded.errors.iter().map(|e| e.where_.as_str()).collect();
+        assert!(places.contains(&"settings.nosuchsetting"), "{places:?}");
+        assert!(places.contains(&"keys.common.^n"), "{places:?}");
+        assert!(places.contains(&"keys.nosuchcontext"), "{places:?}");
+        assert!(places.contains(&"theme"), "{places:?}");
+    }
+
+    #[test]
+    fn a_missing_file_is_not_an_error() {
+        let loaded = load(Path::new("/definitely/not/here/config.toml"));
+        assert!(loaded.commands.is_empty());
+        assert!(loaded.errors.is_empty());
+    }
+
+    #[test]
+    fn an_empty_config_is_valid() {
+        let loaded = parse_text("");
+        assert!(loaded.errors.is_empty());
+        assert!(loaded.commands.is_empty());
+    }
+
+    /// Seek arguments survive the trip through TOML quoting.
+    #[test]
+    fn command_arguments_survive() {
+        let loaded = parse_text(
+            r#"
+            [keys.common]
+            "M-f" = "seek +30"
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let Command::Bind { cmd, .. } = &loaded.commands[0] else {
+            panic!("not a bind")
+        };
+        assert_eq!(**cmd, Command::Seek(SeekSpec::Relative(30.0)));
+    }
+}

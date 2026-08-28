@@ -1,0 +1,66 @@
+# gmuse configuration — $XDG_CONFIG_HOME/gmuse/config.toml
+#
+# Settings and theming are declarative, so they are TOML tables. Key bindings
+# hold *commands*, which are the same language the `:` line takes — so anything
+# you can type at the prompt, you can bind.
+#
+# Unknown tables and settings are errors, not silence: a typo is reported with
+# where it is, and the rest of the file still loads.
+
+# Run once at startup, after everything below is applied.
+startup_commands = ["view 1"]
+
+[settings]
+shuffle = false
+repeat = false
+repeat_current = false
+continue = true
+smart_artist_sort = true    # sort "The Beatles" under B
+aaa_mode = "all"            # all | artist | album
+resample_quality = "balanced" # fast | balanced | high
+
+# Contexts: common, library, sorted, playlist, queue, browser, filters, settings
+# A binding in a view's own context wins over the same key in `common`.
+#
+# Key names: a character, or space/enter/tab/backspace/delete/insert/home/end/
+# pageup/pagedown/up/down/left/right/escape/f1-f12. Prefix with ^ for control
+# and M- for alt.
+[keys.common]
+# A single command.
+"^n" = "player-next"
+"^p" = "player-prev"
+
+# A list is a macro, run in order — this queues the selection and skips to it.
+o = ["add-queue", "player-next"]
+
+# Anything the `:` line accepts works here.
+"M-f" = "seek +30"
+"M-b" = "seek -30"
+
+[keys.playlist]
+# Only in the playlist view: D removes, and here so does x.
+x = "win-remove"
+
+# Colours may be names ("cyan", "lightblue"), #rrggbb, or a palette entry
+# defined below. A palette name wins over a colour name, so you can rename
+# anything.
+[theme.palette]
+accent = "cyan"
+muted = "darkgray"
+
+# Styles name a role, not a widget, so a theme is data and the UI never names a
+# colour. Anything you leave out keeps its default — a two-line theme is valid.
+#
+# Roles: tab_active tab_inactive border_focused border_unfocused
+#        selection_focused selection_unfocused status_text status_dim
+#        status_playing status_notice status_modes status_underrun
+#        prompt_sigil setting_key binding_context binding_key
+[theme.styles]
+tab_active = { fg = "black", bg = "accent", mods = ["bold"] }
+tab_inactive = { fg = "muted" }
+border_focused = { fg = "accent" }
+border_unfocused = { fg = "muted" }
+selection_focused = { fg = "black", bg = "accent", mods = ["bold"] }
+selection_unfocused = { mods = ["reversed", "dim"] }
+status_playing = { fg = "green" }
+status_underrun = { fg = "red" }
