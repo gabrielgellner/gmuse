@@ -77,13 +77,20 @@ pub(super) fn run(
 ) {
     let codecs = codec_registry();
     let mut track: Option<Track> = None;
+    // Device-rate frames decoded but not yet written to the ring, because a
+    // command interrupted the write. Must survive until they are written, or
+    // the stream has a hole in it.
+    let mut outbox: Vec<f32> = Vec::new();
 
     loop {
-        // Surface device loss once, as an event.
+        // Surface device state changes once each, as events.
         if shared.device_lost.swap(false, Ordering::AcqRel) {
             let _ = events.try_send(PlayerEvent::DeviceLost(
                 "output stream reported an error".into(),
             ));
+        }
+        if shared.device_rerouted.swap(false, Ordering::AcqRel) {
+            let _ = events.try_send(PlayerEvent::DeviceChanged);
         }
 
         let state = State::from_u8(shared.state.load(Ordering::Relaxed));
@@ -108,6 +115,7 @@ pub(super) fn run(
             match cmd {
                 PlayerCmd::Shutdown => return,
                 PlayerCmd::Load(path) => {
+                    outbox.clear();
                     flush(&shared, 0);
                     match open(&path, &codecs, device_rate, device_channels, quality) {
                         Ok(t) => {
@@ -150,6 +158,7 @@ pub(super) fn run(
                 }
                 PlayerCmd::Stop => {
                     shared.state.store(State::Stopped as u8, Ordering::Relaxed);
+                    outbox.clear();
                     flush(&shared, 0);
                     if let Some(t) = track.as_mut() {
                         t.pushed_frames = 0;
@@ -173,6 +182,7 @@ pub(super) fn run(
 
                         match seek_to_frame(t, target, device_rate) {
                             Ok(landed) => {
+                                outbox.clear();
                                 flush(&shared, landed);
                                 t.base_frames = landed;
                                 t.pushed_frames = 0;
@@ -192,6 +202,20 @@ pub(super) fn run(
         // No command pending. Decode if we should.
         let Some(t) = track.as_mut() else { continue };
 
+        // Anything left over from an earlier write goes first, or it would be
+        // a gap in the stream.
+        if !outbox.is_empty() {
+            let written = push(producer, &outbox, &cmds);
+            outbox.drain(..written);
+            t.pushed_frames += (written / device_channels) as u64;
+            if !outbox.is_empty() && cmds.is_empty() {
+                // The ring is full: wait for the callback to drain some. This
+                // is the only place the decoder waits on backpressure.
+                std::thread::sleep(BACKPRESSURE_POLL);
+            }
+            continue;
+        }
+
         if t.drained {
             // Everything is pushed; wait for the ring to play out.
             let played = shared.position_frames.load(Ordering::Relaxed);
@@ -207,11 +231,12 @@ pub(super) fn run(
 
         match decode_chunk(t) {
             Ok(Some(frames)) => {
-                if !push(producer, &frames, &cmds, &shared) {
-                    // A command arrived, or we are shutting down; loop round.
-                    continue;
+                let written = push(producer, &frames, &cmds);
+                t.pushed_frames += (written / device_channels) as u64;
+                if written < frames.len() {
+                    // Interrupted by a command: keep the rest for next time.
+                    outbox.extend_from_slice(&frames[written..]);
                 }
-                t.pushed_frames += (frames.len() / device_channels) as u64;
             }
             Ok(None) => {
                 // End of stream: drain the resampler tail, then wait it out.
@@ -220,8 +245,11 @@ pub(super) fn run(
                     && r.flush(&mut tail).is_ok()
                     && !tail.is_empty()
                 {
-                    push(producer, &tail, &cmds, &shared);
-                    t.pushed_frames += (tail.len() / device_channels) as u64;
+                    let written = push(producer, &tail, &cmds);
+                    t.pushed_frames += (written / device_channels) as u64;
+                    if written < tail.len() {
+                        outbox.extend_from_slice(&tail[written..]);
+                    }
                 }
                 t.drained = true;
             }
@@ -258,23 +286,30 @@ fn flush(shared: &Shared, position: u64) {
 /// Returns `false` if a command is waiting, so the caller can go and service
 /// it instead of sitting on backpressure — this is what makes `stop` and
 /// `seek` feel immediate with a full second of audio buffered.
-fn push(
-    producer: &mut rtrb::Producer<f32>,
-    data: &[f32],
-    cmds: &Receiver<PlayerCmd>,
-    _shared: &Shared,
-) -> bool {
+/// Write as much of `data` into the ring as fits, without blocking.
+///
+/// Returns how many samples were written. It stops short when the ring is full
+/// or a command is waiting — the latter so `stop` and `seek` feel immediate
+/// with a second of audio already buffered.
+///
+/// The caller **must** keep the remainder and write it next time. Dropping it
+/// splices a gap into the stream, heard as a click whenever playback reaches
+/// it, typically well after the command that caused it.
+///
+/// Non-blocking by design: waiting for the callback to make room belongs in
+/// the run loop, where the wait can be interrupted, and it keeps this function
+/// testable without a concurrent consumer.
+fn push(producer: &mut rtrb::Producer<f32>, data: &[f32], cmds: &Receiver<PlayerCmd>) -> usize {
     let mut offset = 0;
     while offset < data.len() {
         // Never *receive* here: taking a command off the channel to detect it
         // would consume it, and the caller would never act on it. Peek only.
-        if !cmds.is_empty() || cmds.is_full() {
-            return false;
+        if !cmds.is_empty() {
+            break;
         }
         let free = producer.slots();
         if free == 0 {
-            std::thread::sleep(BACKPRESSURE_POLL);
-            continue;
+            break;
         }
         let n = free.min(data.len() - offset);
         match producer.write_chunk_uninit(n) {
@@ -282,10 +317,10 @@ fn push(
                 chunk.fill_from_iter(data[offset..offset + n].iter().copied());
                 offset += n;
             }
-            Err(_) => std::thread::sleep(BACKPRESSURE_POLL),
+            Err(_) => break,
         }
     }
-    true
+    offset
 }
 
 /// Decode one packet, resampled to the device rate. `Ok(None)` at end of stream.
@@ -631,5 +666,77 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+    // ---- the ring write path ---------------------------------------------
+
+    use crossbeam_channel::bounded;
+
+    /// An interrupted or backpressured write must lose nothing. Dropping the
+    /// tail of a chunk splices a gap into the stream, heard as a click once
+    /// playback reaches it — typically a beat *after* the command that caused
+    /// it, since the ring holds about a second.
+    #[test]
+    fn no_audio_is_lost_across_interruptions_and_a_full_ring() {
+        // Deliberately smaller than the data, so writes must be resumed.
+        let (mut producer, mut consumer) = rtrb::RingBuffer::<f32>::new(64);
+        let (tx, rx) = bounded::<PlayerCmd>(8);
+
+        let data: Vec<f32> = (0..1000).map(|i| i as f32).collect();
+        let mut outbox: Vec<f32> = Vec::new();
+        let mut drained: Vec<f32> = Vec::new();
+
+        // First write: a command is already waiting, so nothing goes in.
+        tx.send(PlayerCmd::Pause).unwrap();
+        let written = push(&mut producer, &data, &rx);
+        outbox.extend_from_slice(&data[written..]);
+        let _ = rx.recv();
+
+        // Now alternate writing and draining, interrupting periodically, the
+        // way a user hammering pause would.
+        for round in 0..500 {
+            if round % 7 == 3 {
+                tx.send(PlayerCmd::Toggle).unwrap();
+            }
+            let n = push(&mut producer, &outbox, &rx);
+            outbox.drain(..n);
+            let _ = rx.try_recv();
+
+            let slots = consumer.slots();
+            if slots > 0
+                && let Ok(chunk) = consumer.read_chunk(slots)
+            {
+                let (a, b) = chunk.as_slices();
+                drained.extend_from_slice(a);
+                drained.extend_from_slice(b);
+                chunk.commit_all();
+            }
+            if outbox.is_empty() && consumer.slots() == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            drained.len(),
+            data.len(),
+            "{} samples went missing",
+            data.len() as i64 - drained.len() as i64
+        );
+        assert_eq!(drained, data, "samples were reordered or corrupted");
+    }
+
+    #[test]
+    fn push_stops_short_rather_than_blocking_or_dropping() {
+        let (mut producer, _consumer) = rtrb::RingBuffer::<f32>::new(128);
+        let (tx, rx) = bounded::<PlayerCmd>(8);
+        let data = vec![1.0f32; 500];
+
+        // Ring smaller than the data: write what fits and report it, never
+        // block and never silently discard.
+        let written = push(&mut producer, &data, &rx);
+        assert_eq!(written, 128, "should fill the ring exactly");
+
+        // A waiting command preempts the write entirely.
+        tx.send(PlayerCmd::Stop).unwrap();
+        assert_eq!(push(&mut producer, &data, &rx), 0);
     }
 }

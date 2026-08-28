@@ -89,6 +89,17 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
     spans.push(Span::raw("   "));
     spans.push(Span::styled(modes(ui), Style::default().fg(Color::Magenta)));
 
+    // Ring starvation is the difference between "the OS hiccuped" and "we did
+    // not feed the device fast enough". It costs one span and it is the only
+    // way to tell those apart after the fact.
+    let underruns = ctx.player.map(|p| p.underruns()).unwrap_or(0);
+    if underruns > 0 {
+        spans.push(Span::styled(
+            format!("  [underruns {underruns}]"),
+            Style::default().fg(Color::Red),
+        ));
+    }
+
     Paragraph::new(Line::from(spans))
 }
 

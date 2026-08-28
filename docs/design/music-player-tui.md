@@ -1,6 +1,6 @@
 # DESIGN.md — a cmus-shaped music player in Rust
 
-Working title: `rcmus` (rename before first commit).
+Working title: `gmuse`.
 
 This document is the project brief. It is written to be read by an implementing agent at the start of a session and to
 be kept up to date as decisions are made. Sections marked **INVARIANT** are not to be revised without an explicit
@@ -602,6 +602,79 @@ Append here as decisions are made. Format: date, decision, rationale.
 - **2026-08-27** **M5 verification is partial.** Every row of the §5 table is covered — 26 tests in `next.rs`, plus 8
   more driving the UI's own decisions (queue consumption, end-of-pool, active-source switching). What has **not** been
   done is §9's "then listen for an hour". That is a human check and it is still outstanding.
+
+- **2026-08-27** **§11.2 is smaller than feared on the default device.** cpal 0.18 reports a route change as
+  `ErrorKind::DeviceChanged` and documents the stream as _"automatically rerouted, remains active, no rebuild required"_
+  — but only for a stream built from the **default** device, which is what `preferred_config` does unless `--device` is
+  passed. Switching speakers → headphones mid-track therefore just works. The rebuild-at-the-same-position problem §11.2
+  describes still applies to a stream pinned to a specific device with `--device`, where a disappearing device reports
+  `DeviceNotAvailable` instead. That case is still unimplemented.
+- **2026-08-27** **Nothing in the audio path may print.** The stream error callback used `eprintln!`, which wrote over
+  the alternate screen the TUI owns and corrupted the display on every route change. Errors are now classified in the
+  callback into an atomic flag, turned into a `PlayerEvent` by the decoder, and shown in the status line.
+  `DeviceChanged` is informational; `Xrun`, `RealtimeDenied` and `DeviceBusy` are advisory and ignored (they are not
+  ring underruns and must not pollute that counter); everything else is treated as device loss. **The rule is general:
+  once a TUI owns the screen, a stray `println!` anywhere below it is a rendering bug.**
+- **2026-08-27** Status-line notices expire after 4 seconds, so a one-off message stops hiding the now-playing line for
+  the rest of the session.
+
+- **2026-08-27** **Stop does not clear the current track.** The decoder keeps the track loaded and merely rewinds it, so
+  clearing `playback.current` in the UI desynced the two: `c` resumed real audio while the status line insisted nothing
+  was playing. Stopped means stopped _at_ a track — which is also the cursor `b`/`z` step from. The general shape of
+  this bug is worth remembering: the UI holds a shadow copy of player state, and every place the two can diverge is a
+  defect waiting to be reported.
+- **2026-08-27** The underrun counter is shown in the status line when non-zero. It is the only way to tell "the OS
+  hiccuped during a route change" from "we failed to feed the device", after the fact and without a debugger.
+
+- **2026-08-27** **Transport changes use an 8ms raised-cosine declick ramp, not zero-crossing detection.** Cutting
+  straight to silence on pause leaves a step discontinuity, which is broadband by definition — that is the pop, and
+  rapid pause/resume makes one per press.
+
+  Zero-crossing is the classic wrong answer for this. It is the right tool for _splicing_ two waveforms (editing, loop
+  points), but for transport: it removes the jump in value and not in slope, so a softer click survives; stereo channels
+  rarely cross zero on the same sample, so at best one channel is clean; and the wait is unbounded — a bass-heavy
+  passage can sit 25ms from a crossing and DC-offset material may never cross at all. A fixed ramp is bounded, applies
+  to every channel at once, and a raised cosine is continuous in both value and slope where a linear ramp still has a
+  corner at each end. This is what the Web Audio guidance means by preferring `linearRampToValueAtTime` over
+  `setValueAtTime`, and what DAWs apply on transport.
+
+  8ms is under the ~20ms at which a fade starts to read as a fade, so pausing still feels instant. The cost is that a
+  pause consumes ~8ms of audio into the fade, so it lands fractionally later than the keypress — the trade the ear
+  wants.
+
+  The ramp also fires on **seek**: audio either side of a seek is unrelated, so `Fade::cut` drops to silence and the new
+  position fades in rather than splicing. Volume is folded into the same per-frame multiply, so the buffer is walked
+  once. All of it is float arithmetic on callback-local state, so the §3 invariant holds.
+
+- **2026-08-27** **The declick ramp has to cover ring starvation, not just transport.** The first version faded on
+  pause, resume and seek but left the underrun path cutting straight to silence: the last real sample sat at full level
+  and the next was zero, then playback jumped back to full level when the ring recovered. Two clicks per underrun, and
+  one at the end of every track, since a track ends by draining the ring.
+
+  `Fade::fade_to_silence` scales the step to the frames actually available, so it lands on zero at the last real sample
+  however little audio is left, and leaves the fade silent so playback ramps back in.
+
+  The lesson is about where the test was pointed, not about the ramp: `Fade` had seven tests and all of them passed
+  against the broken code, because the discontinuity lived in the buffer handling _around_ the ramp. Splitting
+  `fill_output` out of the stream closure made the starvation path reachable from a test; verified by restoring the old
+  behaviour, which fails the new test with a step of 0.64.
+
+- **2026-08-27** **An interrupted ring write must keep its remainder.** `push` stops short when a command is waiting, so
+  `stop` and `seek` stay responsive with a second of audio buffered — but the caller was discarding whatever had not
+  been written. That spliced a **gap into the ring itself**, heard as a click when playback reached it, which is a
+  second or so _after_ the command that caused it. That delay is what made it look like a fade bug rather than a
+  producer bug: the transition sounded clean and the pop arrived later.
+
+  The decoder now keeps an `outbox` of frames not yet written and drains it before decoding anything new. It is cleared
+  wherever the ring is flushed (load, stop, seek), because those frames belong to the old position.
+
+  `push` is also now **non-blocking**: it returns what fits and the run loop owns the one backpressure sleep. Waiting
+  inside `push` made it untestable without a concurrent consumer — the first attempt at a test deadlocked — and put a
+  sleep somewhere that had no way to be interrupted.
+
+- **2026-08-27** Three clicks, three different layers, all reported as "a pop": the transport transition (no ramp), ring
+  starvation (unramped cut at the buffer boundary), and a dropped chunk (a hole in the data). **A single audible symptom
+  is not a single bug**, and the delay between action and pop is the clue to which layer it came from.
 
 ---
 

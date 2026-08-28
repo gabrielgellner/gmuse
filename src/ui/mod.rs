@@ -9,7 +9,7 @@ pub mod tree;
 
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -141,6 +141,10 @@ pub struct Ui {
     /// Shown briefly after a volume change, so the level is visible without a
     /// permanent indicator taking up room.
     pub volume_hint: Option<f32>,
+    /// When the transient `status` message should stop being shown. Without
+    /// this a one-off notice sits in the status line for the rest of the
+    /// session, hiding what is actually playing.
+    status_until: Option<Instant>,
     quit: bool,
 }
 
@@ -158,7 +162,24 @@ impl Ui {
             queue: Queue::new(),
             playback: Playback::default(),
             volume_hint: None,
+            status_until: None,
             quit: false,
+        }
+    }
+
+    /// Show a message for a few seconds, then get out of the way.
+    pub fn notify(&mut self, message: impl Into<String>) {
+        self.status = message.into();
+        self.status_until = Some(Instant::now() + Duration::from_secs(4));
+    }
+
+    fn expire_status(&mut self) {
+        if let Some(until) = self.status_until
+            && Instant::now() >= until
+        {
+            self.status.clear();
+            self.status_until = None;
+            self.volume_hint = None;
         }
     }
 
@@ -207,6 +228,7 @@ where
             handle_key(key, ui, ctx);
         }
         drain_player_events(ui, ctx);
+        ui.expire_status();
     }
     Ok(())
 }
@@ -218,8 +240,9 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
     while let Ok(event) = player.events().try_recv() {
         match event {
             crate::audio::PlayerEvent::Finished => finished = true,
-            crate::audio::PlayerEvent::Error(e) => ui.status = format!("error: {e}"),
-            crate::audio::PlayerEvent::DeviceLost(e) => ui.status = format!("device lost: {e}"),
+            crate::audio::PlayerEvent::Error(e) => ui.notify(format!("error: {e}")),
+            crate::audio::PlayerEvent::DeviceLost(e) => ui.notify(format!("device lost: {e}")),
+            crate::audio::PlayerEvent::DeviceChanged => ui.notify("audio output changed"),
             crate::audio::PlayerEvent::Loaded { .. } => {}
         }
     }
@@ -240,7 +263,7 @@ fn advance(ui: &mut Ui, ctx: &Context<'_>, forward: bool) {
     };
 
     let Some((id, source)) = decision else {
-        ui.status = "end of pool".into();
+        ui.notify("end of pool");
         ui.playback.current = None;
         return;
     };
@@ -369,7 +392,11 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             if let Some(p) = ctx.player {
                 p.stop();
             }
-            ui.playback.current = None;
+            // `current` deliberately survives a stop. The decoder keeps the
+            // track loaded and merely rewinds it, so clearing it here would
+            // desync the two: `c` would resume real audio while the status
+            // line insisted nothing was playing. Stopped means stopped *at* a
+            // track — which is also what `b`/`z` need to step from.
         }
         KeyCode::Char('b') => advance(ui, ctx, true),
         KeyCode::Char('z') => advance(ui, ctx, false),
@@ -402,6 +429,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
                 };
                 p.set_volume(p.volume() + delta);
                 ui.volume_hint = Some(p.volume() * 100.0);
+                ui.notify("");
             }
         }
         KeyCode::Char('E') if ui.view == View::Tree => ui.tree.expand_all(ctx.library),
@@ -627,7 +655,7 @@ mod tests {
     use super::*;
     use crate::store::Track;
     use ratatui::backend::TestBackend;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// A library with the three things §9 says the tree must get right: a
     /// compilation, a multi-disc album, and a track with no tags at all.
@@ -1035,5 +1063,61 @@ mod tests {
         let out = render(&ui, &ctx, 90, 8);
         assert!(!out.contains("7 tracks"), "summary should give way:\n{out}");
         assert!(out.contains("Anderson .Paak"), "{out}");
+    }
+    #[test]
+    fn a_transient_notice_expires_instead_of_sticking() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+
+        ui.notify("audio output changed");
+        assert!(render(&ui, &ctx, 90, 8).contains("audio output changed"));
+
+        // Pretend the deadline passed.
+        ui.status_until = Some(Instant::now() - Duration::from_secs(1));
+        ui.expire_status();
+        let out = render(&ui, &ctx, 90, 8);
+        assert!(!out.contains("audio output changed"), "{out}");
+        // The library summary comes back once the notice clears.
+        assert!(out.contains("7 tracks"), "{out}");
+    }
+
+    #[test]
+    fn a_device_reroute_is_not_reported_as_an_error() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        ui.notify("audio output changed");
+        let out = render(&ui, &ctx, 90, 8);
+        // Switching headphones in must not look like a failure.
+        assert!(!out.contains("error"), "{out}");
+        assert!(!out.contains("device lost"), "{out}");
+    }
+    /// `v` then `c` must not lose the title: the decoder keeps the track
+    /// loaded across a stop, so the UI has to as well or the two desync.
+    #[test]
+    fn stop_keeps_the_current_track() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        let playing = ui.playback.current.expect("nothing started");
+        assert!(render(&ui, &ctx, 90, 8).contains("Anderson .Paak"));
+
+        handle_key(KeyEvent::from(KeyCode::Char('v')), &mut ui, &ctx);
+        assert_eq!(
+            ui.playback.current,
+            Some(playing),
+            "stop must leave the track current, or resuming loses the title"
+        );
+
+        // Still named in the status line while stopped.
+        let out = render(&ui, &ctx, 90, 8);
+        assert!(out.contains("Anderson .Paak"), "{out}");
+
+        // And `b` still steps from where we stopped, rather than restarting.
+        handle_key(KeyEvent::from(KeyCode::Char('b')), &mut ui, &ctx);
+        assert_ne!(ui.playback.current, Some(playing));
     }
 }

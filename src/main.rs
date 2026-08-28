@@ -316,6 +316,7 @@ fn drain_events(player: &PlayerHandle) {
             PlayerEvent::Finished => println!("\nfinished"),
             PlayerEvent::Error(e) => println!("\nerror: {e}"),
             PlayerEvent::DeviceLost(e) => println!("\ndevice lost: {e}"),
+            PlayerEvent::DeviceChanged => println!("\naudio output changed"),
         }
     }
 }

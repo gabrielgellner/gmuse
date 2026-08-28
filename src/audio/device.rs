@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use cpal::{SampleFormat, StreamConfig, SupportedBufferSize};
+use cpal::{ErrorKind, SampleFormat, StreamConfig, SupportedBufferSize};
 
 use super::{AudioError, PlayerConfig, Shared, State};
 
@@ -70,6 +71,125 @@ pub(super) fn preferred_config(
     Ok((device, config))
 }
 
+/// Time spent ramping between silence and full level on a transport change.
+///
+/// Long enough to remove the discontinuity, short enough that pausing still
+/// feels instant: 8ms is under the ~20ms at which a fade starts to read *as* a
+/// fade.
+const FADE: Duration = Duration::from_millis(8);
+
+/// A declick ramp for transport changes.
+///
+/// Cutting straight to silence on pause leaves a step discontinuity, which is
+/// broadband by definition — that is the pop, and rapid pause/resume makes one
+/// per press. Ramping over a few milliseconds removes the discontinuity in
+/// both value and slope.
+///
+/// Also applied on seek, where the audio either side is unrelated — see
+/// [`Fade::cut`].
+#[derive(Debug)]
+pub(super) struct Fade {
+    /// Current level, 0.0..=1.0, in *linear ramp position*.
+    position: f32,
+    /// Fraction of the ramp covered by one frame.
+    step: f32,
+}
+
+impl Fade {
+    pub(super) fn new(sample_rate: u32) -> Self {
+        // seconds * frames-per-second = frames.
+        let frames = FADE.as_secs_f32() * sample_rate as f32;
+        Self {
+            position: 0.0,
+            step: 1.0 / frames.max(1.0),
+        }
+    }
+
+    /// Silent and not moving, so the caller can skip the ring entirely.
+    pub(super) fn is_silent(&self, target: f32) -> bool {
+        self.position <= 0.0 && target <= 0.0
+    }
+
+    /// Drop straight to silence, for a seek — the audio either side of a seek
+    /// is unrelated, so it should fade in rather than continue.
+    pub(super) fn cut(&mut self) {
+        self.position = 0.0;
+    }
+
+    /// Apply the ramp in place, advancing toward `target` (0.0 or 1.0).
+    ///
+    /// `volume` is folded in here so the buffer is only walked once.
+    pub(super) fn apply(&mut self, out: &mut [f32], channels: usize, target: f32, volume: f32) {
+        for frame in out.chunks_mut(channels.max(1)) {
+            if self.position < target {
+                self.position = (self.position + self.step).min(target);
+            } else if self.position > target {
+                self.position = (self.position - self.step).max(target);
+            }
+            let gain = raised_cosine(self.position) * volume;
+            for sample in frame.iter_mut() {
+                *sample *= gain;
+            }
+        }
+    }
+
+    /// Ramp down to silence across exactly this buffer, for a ring that ran
+    /// dry.
+    ///
+    /// The normal ramp needs a fixed number of frames; a starved callback may
+    /// have far fewer left. Scaling the step to what is actually available
+    /// still lands on zero at the last real sample, so the gap is entered
+    /// smoothly instead of stepping off a cliff.
+    pub(super) fn fade_to_silence(&mut self, out: &mut [f32], channels: usize, volume: f32) {
+        let channels = channels.max(1);
+        let frames = (out.len() / channels).max(1);
+        let step = self.position / frames as f32;
+        for frame in out.chunks_mut(channels) {
+            self.position = (self.position - step).max(0.0);
+            let gain = raised_cosine(self.position) * volume;
+            for sample in frame.iter_mut() {
+                *sample *= gain;
+            }
+        }
+        self.position = 0.0;
+    }
+}
+
+/// Raised cosine over `0.0..=1.0`. Continuous in slope at both ends, where a
+/// linear ramp still has a corner.
+fn raised_cosine(position: f32) -> f32 {
+    (1.0 - (position * std::f32::consts::PI).cos()) * 0.5
+}
+
+/// Produce one callback's worth of output from `got` frames of real audio.
+///
+/// Split out from the stream closure so the starvation path can be tested:
+/// that is where the discontinuity lived, and it is invisible to a test that
+/// only drives [`Fade`] directly.
+///
+/// Returns whether the ring ran dry.
+pub(super) fn fill_output(
+    out: &mut [f32],
+    got: usize,
+    channels: usize,
+    target: f32,
+    volume: f32,
+    fade: &mut Fade,
+) -> bool {
+    if got < out.len() {
+        // Starved. Ramp the audio we do have down into the gap rather than
+        // cutting, and leave the fade silent so playback ramps back up when
+        // the ring recovers — otherwise every underrun costs two clicks, one
+        // going quiet and one coming back.
+        fade.fade_to_silence(&mut out[..got], channels, volume);
+        out[got..].fill(0.0);
+        true
+    } else {
+        fade.apply(out, channels, target, volume);
+        false
+    }
+}
+
 /// Build the output stream.
 ///
 /// **INVARIANT (DESIGN §3).** Inside the callback: no allocation, no locking,
@@ -82,10 +202,12 @@ pub(super) fn build_stream(
     shared: Arc<Shared>,
 ) -> Result<cpal::Stream, AudioError> {
     let channels = config.channels as usize;
+    let sample_rate = config.sample_rate;
     let err_shared = Arc::clone(&shared);
 
     // The last flush the callback has serviced. Callback-local, so no atomic.
     let mut serviced: u64 = 0;
+    let mut fade = Fade::new(sample_rate);
 
     let stream = device.build_output_stream(
         config,
@@ -107,6 +229,9 @@ pub(super) fn build_stream(
                 );
                 serviced = requested;
                 shared.flush_ack.store(requested, Ordering::Release);
+                // Audio either side of a seek is unrelated; fade in rather
+                // than splice, or the seek itself clicks.
+                fade.cut();
                 out.fill(0.0);
                 return;
             }
@@ -114,7 +239,15 @@ pub(super) fn build_stream(
             // Paused and stopped both hold the device open and emit silence.
             // Stopping the stream instead would risk a click on resume, and
             // would drop the ring contents we want to resume from.
-            if State::from_u8(shared.state.load(Ordering::Relaxed)) != State::Playing {
+            let target = if State::from_u8(shared.state.load(Ordering::Relaxed)) == State::Playing {
+                1.0
+            } else {
+                0.0
+            };
+
+            // Fully faded out: emit silence without touching the ring, so a
+            // pause holds its place rather than draining.
+            if fade.is_silent(target) {
                 out.fill(0.0);
                 return;
             }
@@ -132,16 +265,9 @@ pub(super) fn build_stream(
                 Err(_) => 0,
             };
 
-            if got < want {
-                out[got..].fill(0.0);
+            let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
+            if fill_output(out, got, channels, target, volume, &mut fade) {
                 shared.underruns.fetch_add(1, Ordering::Relaxed);
-            }
-
-            let gain = f32::from_bits(shared.volume.load(Ordering::Relaxed));
-            if gain != 1.0 {
-                for s in out[..got].iter_mut() {
-                    *s *= gain;
-                }
             }
 
             shared
@@ -149,14 +275,275 @@ pub(super) fn build_stream(
                 .fetch_add((got / channels) as u64, Ordering::Relaxed);
         },
         move |err| {
-            // Also forbidden to allocate here in principle, but this fires on
-            // device loss, not per period, and the decoder turns the flag into
-            // a real event.
-            err_shared.device_lost.store(true, Ordering::Release);
-            eprintln!("stream error: {err}");
+            // **Never print from here.** The TUI owns the alternate screen, so
+            // anything written to stdout or stderr lands on top of the drawn
+            // frame and corrupts it. Set a flag; the decoder turns it into a
+            // `PlayerEvent` and the UI shows it in the status line.
+            match err.kind() {
+                // The OS rerouted us — headphones went in, or the default
+                // output changed. cpal documents the stream as still active
+                // and needing no rebuild, so this is news, not a failure.
+                ErrorKind::DeviceChanged => {
+                    err_shared.device_rerouted.store(true, Ordering::Release);
+                }
+                // Advisory: audio keeps playing, possibly with a glitch. Not
+                // counted as a ring underrun, which measures something else.
+                ErrorKind::Xrun | ErrorKind::RealtimeDenied | ErrorKind::DeviceBusy => {}
+                // Anything else means the device is genuinely gone.
+                _ => err_shared.device_lost.store(true, Ordering::Release),
+            }
         },
         None,
     )?;
 
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: u32 = 48_000;
+    /// 8ms at 48k.
+    const RAMP_FRAMES: usize = 384;
+
+    fn ones(frames: usize, channels: usize) -> Vec<f32> {
+        vec![1.0; frames * channels]
+    }
+
+    /// The property that matters: no sample-to-sample jump big enough to hear
+    /// as a click. A hard cut to silence would show a step of 1.0 here.
+    fn largest_step(buf: &[f32], channels: usize) -> f32 {
+        buf.chunks(channels)
+            .map(|f| f[0])
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn fade_in_reaches_full_level_within_the_ramp() {
+        let mut fade = Fade::new(RATE);
+        let mut buf = ones(RAMP_FRAMES + 64, 2);
+        fade.apply(&mut buf, 2, 1.0, 1.0);
+        let last = *buf.last().unwrap();
+        assert!(
+            (last - 1.0).abs() < 1e-3,
+            "ended at {last}, expected full level"
+        );
+        assert!(
+            buf[0].abs() < 0.05,
+            "should start near silence, got {}",
+            buf[0]
+        );
+    }
+
+    #[test]
+    fn fade_out_reaches_silence_and_then_stays_there() {
+        let mut fade = Fade::new(RATE);
+        // Get to full level first.
+        fade.apply(&mut ones(RAMP_FRAMES, 2), 2, 1.0, 1.0);
+
+        let mut buf = ones(RAMP_FRAMES + 64, 2);
+        fade.apply(&mut buf, 2, 0.0, 1.0);
+        assert!(buf.last().unwrap().abs() < 1e-3, "did not reach silence");
+        assert!(fade.is_silent(0.0), "should report silence once faded out");
+    }
+
+    /// The whole point: a transport change must not produce a step.
+    #[test]
+    fn ramping_never_steps_more_than_a_hair() {
+        for target in [0.0f32, 1.0] {
+            let mut fade = Fade::new(RATE);
+            if target == 0.0 {
+                fade.apply(&mut ones(RAMP_FRAMES, 2), 2, 1.0, 1.0);
+            }
+            let mut buf = ones(RAMP_FRAMES * 2, 2);
+            fade.apply(&mut buf, 2, target, 1.0);
+            let step = largest_step(&buf, 2);
+            assert!(
+                step < 0.02,
+                "target {target}: largest jump {step}, that is audible"
+            );
+        }
+    }
+
+    /// Rapid pause/resume — the case that surfaced this — must stay smooth
+    /// even when the direction reverses mid-ramp.
+    #[test]
+    fn reversing_mid_ramp_is_still_smooth() {
+        let mut fade = Fade::new(RATE);
+        fade.apply(&mut ones(RAMP_FRAMES, 2), 2, 1.0, 1.0);
+
+        let mut all = Vec::new();
+        // Fade out only part way, then reverse, repeatedly.
+        for target in [0.0f32, 1.0, 0.0, 1.0] {
+            let mut buf = ones(RAMP_FRAMES / 3, 2);
+            fade.apply(&mut buf, 2, target, 1.0);
+            all.extend_from_slice(&buf);
+        }
+        let step = largest_step(&all, 2);
+        assert!(step < 0.02, "reversal produced a jump of {step}");
+    }
+
+    #[test]
+    fn volume_scales_without_disturbing_the_ramp() {
+        let mut fade = Fade::new(RATE);
+        let mut buf = ones(RAMP_FRAMES * 2, 2);
+        fade.apply(&mut buf, 2, 1.0, 0.5);
+        let last = *buf.last().unwrap();
+        assert!((last - 0.5).abs() < 1e-3, "volume not applied: {last}");
+        assert!(largest_step(&buf, 2) < 0.02);
+    }
+
+    /// A seek cuts to silence deliberately: the audio either side is
+    /// unrelated, so it must fade in rather than splice.
+    #[test]
+    fn cut_forces_a_fade_in_after_a_seek() {
+        let mut fade = Fade::new(RATE);
+        fade.apply(&mut ones(RAMP_FRAMES, 2), 2, 1.0, 1.0);
+        fade.cut();
+        assert!(fade.is_silent(0.0));
+
+        let mut buf = ones(RAMP_FRAMES * 2, 2);
+        fade.apply(&mut buf, 2, 1.0, 1.0);
+        assert!(buf[0].abs() < 0.05, "should start from silence");
+        assert!(largest_step(&buf, 2) < 0.02);
+    }
+
+    #[test]
+    fn mono_and_multichannel_ramp_together() {
+        for channels in [1usize, 2, 6] {
+            let mut fade = Fade::new(RATE);
+            let mut buf = ones(RAMP_FRAMES, channels);
+            fade.apply(&mut buf, channels, 1.0, 1.0);
+            // Every channel in a frame gets the same gain, so the last frame
+            // must be uniform.
+            let last: Vec<f32> = buf.chunks(channels).next_back().unwrap().to_vec();
+            for v in &last {
+                assert!((v - last[0]).abs() < 1e-6, "channels drifted: {last:?}");
+            }
+        }
+    }
+    // ---- the callback's own fill path ------------------------------------
+    //
+    // These drive `fill_output`, not `Fade`, because the discontinuity that
+    // prompted them lived in the buffer handling *around* the ramp and was
+    // invisible to a test that only drove the ramp.
+
+    /// A full-scale signal, so any step shows at its worst.
+    fn signal(frames: usize, channels: usize, phase: &mut f32) -> Vec<f32> {
+        let mut out = Vec::with_capacity(frames * channels);
+        for _ in 0..frames {
+            let v = (*phase).sin() * 0.8;
+            *phase += 0.05;
+            for _ in 0..channels {
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    /// Feed `fill_output` a sequence of (available frames, playing) periods and
+    /// return every sample of channel 0 that came out.
+    fn run_periods(periods: &[(usize, bool)], period_frames: usize, channels: usize) -> Vec<f32> {
+        let mut fade = Fade::new(RATE);
+        let mut phase = 0.0f32;
+        let mut produced = Vec::new();
+        for &(got, playing) in periods {
+            let mut buf = signal(period_frames, channels, &mut phase);
+            let target = if playing { 1.0 } else { 0.0 };
+            fill_output(&mut buf, got * channels, channels, target, 1.0, &mut fade);
+            produced.extend(buf.chunks(channels).map(|f| f[0]));
+        }
+        produced
+    }
+
+    /// The bug this file was opened for: a ring that runs dry mid-playback used
+    /// to cut the last real sample straight to zero, and jump back to full
+    /// level when it recovered. Two clicks per underrun.
+    #[test]
+    fn ring_starvation_ramps_instead_of_cutting() {
+        let period = 256;
+        let out = run_periods(
+            &[
+                (period, true), // playing normally
+                (period, true),
+                (64, true),     // ring runs dry part way through
+                (0, true),      // fully dry
+                (period, true), // recovered
+                (period, true),
+            ],
+            period,
+            2,
+        );
+        let step = out
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            step < 0.05,
+            "starvation produced a jump of {step}; that is the click"
+        );
+    }
+
+    #[test]
+    fn recovery_after_starvation_fades_back_in() {
+        let period = 256;
+        let out = run_periods(&[(period, true), (0, true), (period, true)], period, 2);
+        // The first sample of the recovered period must start from silence,
+        // not resume at full level.
+        let recovered = &out[period * 2..];
+        assert!(
+            recovered[0].abs() < 0.05,
+            "recovery jumped straight back to {}",
+            recovered[0]
+        );
+    }
+
+    #[test]
+    fn a_full_period_is_untouched_apart_from_the_ramp() {
+        let period = 512;
+        let out = run_periods(&[(period, true), (period, true), (period, true)], period, 2);
+        // By the third period the ramp is long finished, so amplitude should be
+        // the signal's own 0.8 peak rather than anything attenuated.
+        let peak = out[period * 2..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            peak > 0.7,
+            "steady-state playback is attenuated: peak {peak}"
+        );
+    }
+
+    #[test]
+    fn pause_and_resume_across_periods_stays_smooth() {
+        let period = 256;
+        let out = run_periods(
+            &[
+                (period, true),
+                (period, true),
+                (period, false), // pause
+                (period, false),
+                (period, true), // resume
+                (period, true),
+            ],
+            period,
+            2,
+        );
+        let step = out
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(step < 0.05, "pause/resume produced a jump of {step}");
+    }
+
+    #[test]
+    fn starvation_is_reported() {
+        let mut fade = Fade::new(RATE);
+        let mut buf = vec![0.5f32; 512];
+        assert!(fill_output(&mut buf, 100, 2, 1.0, 1.0, &mut fade));
+
+        let mut buf = vec![0.5f32; 512];
+        assert!(!fill_output(&mut buf, 512, 2, 1.0, 1.0, &mut fade));
+    }
 }

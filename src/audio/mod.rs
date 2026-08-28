@@ -95,6 +95,9 @@ pub enum PlayerEvent {
     Error(String),
     /// The output device went away (unplugged, or the stream errored).
     DeviceLost(String),
+    /// The OS moved playback to a different output and the stream survived.
+    /// Worth telling the user; not worth treating as a failure.
+    DeviceChanged,
 }
 
 /// State shared with the real-time callback.
@@ -116,8 +119,13 @@ pub(crate) struct Shared {
     pub flush_ack: AtomicU64,
     /// Position to adopt when servicing the flush. Written before `flush_seq`.
     pub flush_position: AtomicU64,
-    /// Set by the stream error callback; the decoder turns it into an event.
+    /// Set by the stream error callback for a *fatal* device failure; the
+    /// decoder turns it into an event.
     pub device_lost: AtomicBool,
+    /// Set when the OS rerouted the stream to a different output (headphones
+    /// plugged in, default device switched). Informational: playback carries
+    /// on, so this must not be reported as an error.
+    pub device_rerouted: AtomicBool,
 }
 
 impl Shared {
@@ -131,6 +139,7 @@ impl Shared {
             flush_ack: AtomicU64::new(0),
             flush_position: AtomicU64::new(0),
             device_lost: AtomicBool::new(false),
+            device_rerouted: AtomicBool::new(false),
         }
     }
 }
