@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4.6.6", features = ["derive", "env"] }
 cpal = "0.18.2"
+crossbeam-channel = "0.5.16"
 rtrb = "0.4.0"
 rubato = "5.0.0"
 symphonia = { version = "0.6.1", features = [

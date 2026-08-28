@@ -108,16 +108,20 @@ Two lessons already paid for, recorded in the design doc's Decision Log:
 
 Verify playback against `ffprobe` durations and require an underrun count of zero.
 
-## Environment variables
+## CLI
 
-Temporary development affordances, to be replaced by real settings in M6:
+Options are parsed with clap (derive), and each also reads an env var as a fallback:
 
-| Variable         | Effect                                           |
-| ---------------- | ------------------------------------------------ |
-| `GMUSE_DEVICE`   | Select an output device by id substring          |
-| `GMUSE_RATE`     | Force a device sample rate (to measure SRC cost) |
-| `GMUSE_RESAMPLE` | `fast`, `balanced`, or `high`                    |
-| `GMUSE_STATS`    | Print resampler timing on exit                   |
+| Flag             | Env              | Effect                                             |
+| ---------------- | ---------------- | -------------------------------------------------- |
+| `-d, --device`   | `GMUSE_DEVICE`   | Output device, matched by substring on the id      |
+| `-r, --rate`     | `GMUSE_RATE`     | Force the device sample rate (to measure SRC cost) |
+| `-q, --resample` | `GMUSE_RESAMPLE` | `fast`, `balanced`, or `high`                      |
+| `-v, --volume`   | —                | Initial volume, 0.0–2.0                            |
+
+**Use clap with the derive API for anything CLI-shaped.** Parsing belongs at the boundary (§12): flags become typed
+values in `cli.rs` and travel down as `PlayerConfig`, so nothing below reads the environment or handles a raw string.
+The same rule applies to the stdin driver in `repl.rs` — a line becomes a typed `Line` before anything acts on it.
 
 ## Building
 

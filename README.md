@@ -20,7 +20,8 @@ Early. The audio path works; there is no UI yet.
 | M2 — the audio API (`PlayerHandle`)       | next                                     |
 | M3–M9 — library, views, commands, gapless | not started                              |
 
-Today `gmuse <file>` decodes one file and plays it to completion, reporting position and an underrun count.
+Today `gmuse <file>` plays a file, and a line-based prompt drives the player — load, play, pause, stop, seek, volume,
+status. Type `help` at the prompt. This stands in for the UI until M4.
 
 ## Building
 
@@ -81,16 +82,19 @@ Steady-state playback, measured on an M5 MacBook Air:
 
 The target is to stay at or below `afplay` — this is meant to run in the background while you work.
 
-## Environment variables
+## CLI
 
-Temporary development affordances, to be replaced by real settings in M6.
+```
+gmuse [OPTIONS] [FILE]
 
-| Variable         | Effect                                                     |
-| ---------------- | ---------------------------------------------------------- |
-| `GMUSE_DEVICE`   | Select an output device by id substring                    |
-| `GMUSE_RATE`     | Force a device sample rate (for measuring conversion cost) |
-| `GMUSE_RESAMPLE` | `fast`, `balanced`, or `high`                              |
-| `GMUSE_STATS`    | Print resampler timing on exit                             |
+  -d, --device <DEVICE>      output device, matched by substring on the id  [env: GMUSE_DEVICE]
+  -r, --rate <RATE>          force the device sample rate                   [env: GMUSE_RATE]
+  -q, --resample <QUALITY>   fast | balanced | high                         [env: GMUSE_RESAMPLE]
+  -v, --volume <VOLUME>      initial volume, 0.0-2.0
+```
+
+At the prompt: `load <path>`, `play`, `pause`, `toggle`, `stop`, `seek 90`, `seek +10`, `seek -10`, `vol 0.5`, `status`,
+`help`, `quit`.
 
 [Symphonia]: https://github.com/pdeljanov/Symphonia
 [`symphonia-adapter-libopus`]: https://crates.io/crates/symphonia-adapter-libopus

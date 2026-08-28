@@ -358,8 +358,9 @@ Build in this order. Each is independently verifiable; do not start the next unt
 31.686009s, 0 underruns._ Hardcode a file path, decode with Symphonia, push through rtrb to a cpal callback, play to
 completion. No UI, no library. Verify: no clicks, no dropouts, over a full album, with the underrun counter at zero.
 
-**M2 — the audio API.** Wrap M1 in `PlayerHandle` with play/pause/stop/seek/ volume and a `PlayerEvent` stream. Drive it
-from a `main` that reads stdin lines. Verify: seek is sample-accurate and the position display doesn't jump on seek.
+**M2 — the audio API.** ✅ _done 2026-08-27._ Wrap M1 in `PlayerHandle` with play/pause/stop/seek/ volume and a
+`PlayerEvent` stream. Drive it from a `main` that reads stdin lines. Verify: seek is sample-accurate and the position
+display doesn't jump on seek.
 
 **M3 — store and scan.** `walkdir` + `lofty` into `Store`, postcard cache, incremental rescan by mtime. No UI. Verify
 against a real library — measure scan time and memory on ~20k tracks.

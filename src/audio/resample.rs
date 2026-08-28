@@ -27,22 +27,16 @@ use rubato::{
 ///
 /// `Balanced` is the default: for the fixed rate ratios a music player deals
 /// in, the FFT resampler is both cheaper and cleaner than a mid-length sinc.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Quality {
+    /// Polynomial. Cheapest, with artefacts on some material.
     Fast,
+    /// FFT. Transparent for fixed ratios, and the cheapest of the three here.
     #[default]
     Balanced,
+    /// Sinc. Same quality as `balanced` at ~16x the cost; only worth it for a
+    /// drifting clock, which a file-to-device conversion never has.
     High,
-}
-
-impl Quality {
-    pub fn from_env() -> Self {
-        match std::env::var("GMUSE_RESAMPLE").as_deref() {
-            Ok("fast") => Self::Fast,
-            Ok("high") => Self::High,
-            _ => Self::Balanced,
-        }
-    }
 }
 
 /// Input frames handed to rubato per call. Small enough to keep latency low,
@@ -127,6 +121,17 @@ impl Resampler {
     pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), ResampleError> {
         self.staging.extend_from_slice(input);
         self.run(out, false)
+    }
+
+    /// Discard all buffered state, for a seek.
+    ///
+    /// The staged input and the filter's internal history both belong to the
+    /// old position; carrying them across a seek would smear a fragment of the
+    /// previous audio into the new one.
+    pub fn reset(&mut self) {
+        self.inner.reset();
+        self.staging.clear();
+        self.delay_left = self.inner.output_delay();
     }
 
     /// Drain the remaining staged frames and the filter tail.
