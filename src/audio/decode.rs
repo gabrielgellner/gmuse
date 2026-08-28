@@ -116,6 +116,7 @@ pub(super) fn run(
                 PlayerCmd::Shutdown => return,
                 PlayerCmd::Load(path) => {
                     outbox.clear();
+                    shared.draining.store(false, Ordering::Release);
                     flush(&shared, 0);
                     match open(&path, &codecs, device_rate, device_channels, quality) {
                         Ok(t) => {
@@ -159,6 +160,7 @@ pub(super) fn run(
                 PlayerCmd::Stop => {
                     shared.state.store(State::Stopped as u8, Ordering::Relaxed);
                     outbox.clear();
+                    shared.draining.store(false, Ordering::Release);
                     flush(&shared, 0);
                     if let Some(t) = track.as_mut() {
                         t.pushed_frames = 0;
@@ -183,6 +185,9 @@ pub(super) fn run(
                         match seek_to_frame(t, target, device_rate) {
                             Ok(landed) => {
                                 outbox.clear();
+                                // Seeking backwards out of the tail means the
+                                // track is no longer ending.
+                                shared.draining.store(false, Ordering::Release);
                                 flush(&shared, landed);
                                 t.base_frames = landed;
                                 t.pushed_frames = 0;
@@ -252,6 +257,7 @@ pub(super) fn run(
                     }
                 }
                 t.drained = true;
+                shared.draining.store(true, Ordering::Release);
             }
             Err(e) => {
                 shared.state.store(State::Stopped as u8, Ordering::Relaxed);

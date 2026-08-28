@@ -126,6 +126,13 @@ pub(crate) struct Shared {
     /// Set by the stream error callback for a *fatal* device failure; the
     /// decoder turns it into an event.
     pub device_lost: AtomicBool,
+    /// The decoder has pushed the last of the current track and is waiting for
+    /// the ring to play out.
+    ///
+    /// The ring going dry then is the *end of the track*, not a failure to
+    /// keep up, and counting it makes the underrun figure meaningless: it
+    /// becomes a count of tracks played.
+    pub draining: AtomicBool,
     /// Set when the OS rerouted the stream to a different output (headphones
     /// plugged in, default device switched). Informational: playback carries
     /// on, so this must not be reported as an error.
@@ -145,6 +152,7 @@ impl Shared {
             flush_position: AtomicU64::new(0),
             device_lost: AtomicBool::new(false),
             device_rerouted: AtomicBool::new(false),
+            draining: AtomicBool::new(false),
         }
     }
 }

@@ -944,6 +944,23 @@ Append here as decisions are made. Format: date, decision, rationale.
   marker glyph in the gutter would separate them, at the cost of a column; bold was what was asked for and the overlap
   only affects the one row the cursor is already on.
 
+- **2026-08-28** **An end-of-track drain is not an underrun, and counting it made the figure meaningless.** The first
+  logged listening session — 45 minutes, 11 Burial tracks — recorded exactly one underrun per track, every one at a
+  position equal to that track's own duration, sharing a timestamp with its `finished` line. The counter had become a
+  count of tracks played.
+
+  **This is a regression, and the log is what caught it.** M1 had the guard — _"only count it as an underrun if the
+  decoder still owes us audio; a short final callback at end-of-stream is normal"_ — and it was lost when the callback
+  moved into `device.rs` in M2. Restored as a `draining` flag the decoder sets when it has pushed the last frame and
+  clears on load, seek and stop. The fade still runs, so the gap is entered smoothly either way; only the count changes.
+
+  **The genuinely good news in that log: zero underruns during playback.** 45 continuous minutes, no mid-track
+  starvation at all. The audio path keeps up comfortably, and the ~200ms gap between tracks is the non-gapless behaviour
+  M7 exists to remove.
+
+  Two lessons. The counter must distinguish _"we failed to keep up"_ from _"the track ended"_, or it reports the second
+  and hides the first. And a metric with no test is a metric that can silently invert — pinned now.
+
 ---
 
 ## 14. Prior art worth reading

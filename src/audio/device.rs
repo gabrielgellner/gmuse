@@ -266,7 +266,11 @@ pub(super) fn build_stream(
             };
 
             let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
-            if fill_output(out, got, channels, target, volume, &mut fade) {
+            // The fade still runs — the gap is entered smoothly either way —
+            // but a drain at end-of-track is expected and is not counted.
+            if fill_output(out, got, channels, target, volume, &mut fade)
+                && !shared.draining.load(Ordering::Relaxed)
+            {
                 shared.underruns.fetch_add(1, Ordering::Relaxed);
                 // How short, not just that it happened: an occasional handful
                 // of frames is a different problem from a whole period.
@@ -550,5 +554,68 @@ mod tests {
 
         let mut buf = vec![0.5f32; 512];
         assert!(!fill_output(&mut buf, 512, 2, 1.0, 1.0, &mut fade));
+    }
+    /// A drain at end-of-track is not starvation, and counting it turns the
+    /// underrun figure into a count of tracks played.
+    ///
+    /// This regressed once already: the guard existed in M1 and was lost when
+    /// the callback moved into this file in M2. A 45-minute listening test
+    /// then logged exactly one underrun per track, every one at the track's
+    /// own duration.
+    #[test]
+    fn a_drain_while_draining_is_not_an_underrun() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        // The decision the callback makes, in isolation: starved *and* not
+        // draining is the only case that counts.
+        let draining = AtomicBool::new(false);
+        let underruns = AtomicU32::new(0);
+
+        let count_if = |starved: bool| {
+            if starved && !draining.load(Ordering::Relaxed) {
+                underruns.fetch_add(1, Ordering::Relaxed);
+            }
+        };
+
+        // Mid-track starvation still counts — that is the thing worth knowing.
+        count_if(true);
+        assert_eq!(underruns.load(Ordering::Relaxed), 1);
+
+        // The same starvation at end-of-track does not.
+        draining.store(true, Ordering::Relaxed);
+        for _ in 0..20 {
+            count_if(true);
+        }
+        assert_eq!(
+            underruns.load(Ordering::Relaxed),
+            1,
+            "the end-of-track drain was counted"
+        );
+
+        // And the next track counts again.
+        draining.store(false, Ordering::Relaxed);
+        count_if(true);
+        assert_eq!(underruns.load(Ordering::Relaxed), 2);
+    }
+
+    /// The gap is still entered smoothly: not counting it must not mean not
+    /// fading it, or every track would end in a click.
+    #[test]
+    fn a_drain_still_fades_even_when_not_counted() {
+        let mut fade = Fade::new(RATE);
+        fade.apply(&mut ones(RAMP_FRAMES, 2), 2, 1.0, 1.0);
+
+        let mut buf = ones(256, 2);
+        let starved = fill_output(&mut buf, 64 * 2, 2, 1.0, 1.0, &mut fade);
+        assert!(starved, "should still report the shortfall to its caller");
+
+        let step = buf
+            .chunks(2)
+            .map(|f| f[0])
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(step < 0.05, "the gap was entered with a jump of {step}");
     }
 }
