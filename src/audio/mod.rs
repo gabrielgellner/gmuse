@@ -71,6 +71,12 @@ pub enum PlayerCmd {
     Toggle,
     Stop,
     Seek(SeekTo),
+    /// The answer to [`PlayerEvent::NeedNext`]: what follows the current
+    /// track, or `None` if nothing does.
+    ///
+    /// Sent *in reply*, never speculatively, so the resolution is made at the
+    /// moment it is needed and cannot go stale — see `decode::run`.
+    SetNext(Option<PathBuf>),
     Shutdown,
 }
 
@@ -81,6 +87,12 @@ pub enum PlayerCmd {
 /// than being driven by a message per frame.
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
+    /// A track became audible.
+    ///
+    /// For an ordinary load this is immediate. For a gapless transition it is
+    /// deliberately held back until the playhead crosses the join, so it
+    /// always means "this is what you are hearing now" rather than "this is
+    /// what the decoder is working on" — the two are a ring's depth apart.
     Loaded {
         path: PathBuf,
         duration: Option<Duration>,
@@ -89,7 +101,15 @@ pub enum PlayerEvent {
         /// True when the file's rate differs from the device's and is being converted.
         resampling: bool,
     },
-    /// The loaded track played to its end.
+    /// The current track has been decoded to its end and the ring still holds
+    /// the last of it. Reply with [`PlayerCmd::SetNext`] to have the next
+    /// track spliced on without a gap; reply `None` to let playback stop.
+    ///
+    /// The reply is needed within [`decode::NEXT_REPLY_TIMEOUT`]; after that
+    /// the decoder gives up and finishes the track, which is simply the
+    /// non-gapless behaviour rather than a failure.
+    NeedNext,
+    /// The loaded track played to its end and nothing followed it.
     Finished,
     /// Decoding or demuxing failed; the track was abandoned.
     Error(String),
@@ -105,8 +125,16 @@ pub enum PlayerEvent {
 /// **INVARIANT (DESIGN §3):** the callback may touch nothing but these atomics
 /// and the ring buffer. No allocation, no locks, no syscalls, no panics.
 pub(crate) struct Shared {
-    /// Authoritative playback position, in device-rate frames.
+    /// Authoritative playback position, in device-rate frames, counted since
+    /// the last flush rather than since the start of the current track.
+    ///
+    /// A gapless transition deliberately does *not* flush, so this keeps
+    /// running across the join; `track_base` says where the current track
+    /// began, and [`PlayerHandle::position`] is the difference.
     pub position_frames: AtomicU64,
+    /// The value of `position_frames` at which the current track started.
+    /// Zero except between a gapless transition and the next flush.
+    pub track_base: AtomicU64,
     /// Times the ring ran dry while audio was still owed.
     pub underruns: AtomicU32,
     /// Frames missing at the most recent underrun, and the ring's capacity in
@@ -143,6 +171,7 @@ impl Shared {
     fn new() -> Self {
         Self {
             position_frames: AtomicU64::new(0),
+            track_base: AtomicU64::new(0),
             underruns: AtomicU32::new(0),
             last_short_frames: AtomicU32::new(0),
             state: AtomicU8::new(State::Stopped as u8),
@@ -263,6 +292,10 @@ impl PlayerHandle {
     pub fn seek(&self, to: SeekTo) {
         self.send(PlayerCmd::Seek(to));
     }
+    /// Answer a [`PlayerEvent::NeedNext`]. Ignored at any other time.
+    pub fn set_next(&self, path: Option<PathBuf>) {
+        self.send(PlayerCmd::SetNext(path));
+    }
 
     /// Events from the decoder. Drain with `try_recv` from a render loop.
     pub fn events(&self) -> &Receiver<PlayerEvent> {
@@ -280,7 +313,11 @@ impl PlayerHandle {
     /// A seek repositions the counter as part of the flush handshake, so this
     /// never reports a stale position afterwards.
     pub fn position(&self) -> Duration {
-        let frames = self.shared.position_frames.load(Ordering::Relaxed);
+        let frames = self
+            .shared
+            .position_frames
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.shared.track_base.load(Ordering::Relaxed));
         Duration::from_secs_f64(frames as f64 / self.device_rate as f64)
     }
 

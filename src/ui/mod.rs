@@ -231,6 +231,11 @@ pub struct Ui {
     pub audit: crate::audit::Audit,
     /// Underruns already logged, so only new ones are recorded.
     seen_underruns: u32,
+    /// The track handed to the player for a gapless splice, held until the
+    /// playhead reaches it. It is not `playback.current` yet — the listener is
+    /// still hearing the track before it — but the pool has already moved on,
+    /// so this is where the answer lives in between.
+    pending_next: Option<TrackId>,
     pub settings_sel: usize,
     pub theme: theme::Theme,
     /// The library projection. Owned rather than borrowed, because changing
@@ -272,6 +277,7 @@ impl Ui {
             count: None,
             previous_view: View::Tree,
             relative_numbers: false,
+            pending_next: None,
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
             settings_sel: 0,
@@ -424,8 +430,28 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
     let mut finished = false;
     while let Ok(event) = player.events().try_recv() {
         match event {
+            // Answered the moment it is asked, so the resolution reflects the
+            // pool as it stands right now. Nothing is announced ahead of time
+            // and nothing can go stale between announcing and playing.
+            crate::audio::PlayerEvent::NeedNext => {
+                let path = announce_next(ui, ctx);
+                ui.audit.line(
+                    "next",
+                    &match path.as_ref() {
+                        Some(p) => format!("splicing {}", p.display()),
+                        None => "end of pool, letting playback stop".into(),
+                    },
+                );
+                player.set_next(path);
+            }
             crate::audio::PlayerEvent::Finished => {
                 ui.audit.line("finished", "track played to its end");
+                // A track announced but never played means the player could
+                // not open it. Adopt it so `advance` resolves past it rather
+                // than handing back the same broken file.
+                if let Some(id) = ui.pending_next.take() {
+                    ui.playback.current = Some(id);
+                }
                 finished = true;
             }
             crate::audio::PlayerEvent::Error(e) => {
@@ -458,6 +484,12 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
                         if resampling { ", resampling" } else { "" },
                     ),
                 );
+                // A `Loaded` arrives when a track becomes audible, so this is
+                // the moment a gapless splice actually takes effect.
+                if let Some(id) = ui.pending_next.take() {
+                    ui.playback.current = Some(id);
+                    ui.status.clear();
+                }
             }
         }
     }
@@ -495,6 +527,26 @@ fn advance(ui: &mut Ui, ctx: &Context<'_>, forward: bool) {
     play(ui, ctx, id);
 }
 
+/// Resolve what follows the current track and hand back its path.
+///
+/// This is [`advance`] minus the load: the pool side effects happen here, so
+/// the queue is popped and a wrapped shuffle reseeded exactly once, at the
+/// point the decision is made. `playback.current` deliberately stays put —
+/// the track it names is still the one being heard.
+fn announce_next(ui: &mut Ui, ctx: &Context<'_>) -> Option<PathBuf> {
+    let (id, source) = next::next_with_source(next_input(ui))?;
+    match source {
+        Source::Queue => {
+            ui.queue.pop_front();
+        }
+        Source::Wrapped if ui.playback.shuffle => ui.playback.reshuffle(),
+        _ => {}
+    }
+    let path = ctx.store.get(id)?.path.clone();
+    ui.pending_next = Some(id);
+    Some(path)
+}
+
 fn next_input(ui: &Ui) -> next::NextInput<'_> {
     next::NextInput {
         queue: &ui.queue,
@@ -516,6 +568,9 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
     };
     ui.playback.current = Some(id);
     ui.status.clear();
+    // An explicit play discards whatever was queued up to be spliced on; the
+    // player drops it too, on `Load`.
+    ui.pending_next = None;
     if let Some(player) = ctx.player {
         player.load(track.path.clone());
     }

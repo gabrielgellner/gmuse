@@ -390,15 +390,16 @@ mtime. No UI. Verify against a real library — measure scan time and memory on 
 **M4 — the views.** ✅ _done 2026-08-27._ ratatui, views 1–5, navigation, `Tab`, `Space` expand. Read-only, no playback
 wired in. Verify: tree renders correctly for compilations, multi-disc albums, and missing tags.
 
-**M5 — next() and playback wiring.** ✅ _implemented 2026-08-27; the hour of listening is still owed._ Implement
-`next.rs` with its full test table, wire views to `PlayerHandle`. Verify: every row in the test table, then listen for
-an hour.
+**M5 — next() and playback wiring.** ✅ _done 2026-08-28._ Implement `next.rs` with its full test table, wire views to
+`PlayerHandle`. Verify: every row in the test table, then listen for an hour. The hour was logged — see the Decision Log
+entry for 2026-08-28.
 
 **M6 — command layer.** ✅ _done 2026-08-27._ `Command`, rc parsing, `:` line, `Bindings`, view 7. Verify: every default
 binding, plus rebinding round-trips through the rc file.
 
-**M7 — gapless.** Pre-decode next track into a second buffer, transition without draining to silence. Verify on a
-continuous-mix album — this is the acid test.
+**M7 — gapless.** ✅ _done 2026-08-28._ Pre-decode next track into a second buffer, transition without draining to
+silence. Verify on a continuous-mix album — this is the acid test. Verified on Anderson .Paak's _Malibu_; see the
+Decision Log.
 
 **M8 — filters and format strings.**
 
@@ -426,9 +427,10 @@ without it on a 44.1k-only output device._
 
 Ranked by how much time they will actually take:
 
-1. **Gapless.** Needs encoder delay/padding handled (Symphonia reports it for MP3 and Vorbis) _and_ the next track
-   decoded and resampled into a second buffer before the current one drains. Getting the transition sample-exact is the
-   fiddliest part of the project.
+1. **Gapless.** ✅ Done 2026-08-28. The encoder delay/padding half turned out to be free — Symphonia 0.6 applies the
+   trim inside the decoder, and the packet's `trim_start`/`trim_end` are informational (see the Decision Log). What was
+   left was the splice itself, and the fiddly part was not the transition but the _resampler_: the filter has to be fed
+   continuously across the join rather than flushed and rebuilt.
 2. **Device hotplug.** USB DAC disappears, the cpal stream errors, and the app must rebuild the stream at the same
    playback position without dropping state. Test by physically unplugging.
 3. **Seek coherence.** Symphonia's `seek()` is the easy half. Flushing the ring buffer, resetting resampler state,
@@ -970,6 +972,153 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   This is the general shape of the earlier `status` collision: two pieces of information competing for one cell, where
   the answer is a third style rather than letting one silently win.
+
+- **2026-08-28** **M5's hour of listening, logged.** 56 minutes, 19 tracks, 15 played to their end, on the built-in 48
+  kHz output with mixed paths — resampled 44.1 kHz MP3s interleaved with native 48 kHz Opus. **Zero underruns.**
+
+  The three logged sessions together are what makes that number mean anything:
+
+  | session | device rate | track ends | underruns | build          |
+  | ------- | ----------- | ---------- | --------- | -------------- |
+  | 2       | 44100 Hz    | 13         | 14        | before the fix |
+  | 3       | 48000 Hz    | 1          | 1         | before the fix |
+  | 4       | 48000 Hz    | 15         | **0**     | after the fix  |
+
+  Sessions 2 and 3 recorded one underrun per track end, which is the signature of the miscount fixed in `!22`, not of
+  starvation. Session 4 is the acceptance criterion met. §9's M5 is now closed.
+
+- **2026-08-28** **Encoder delay and padding are already handled — do not handle them again.** §11.1 listed this as half
+  of the gapless work on the strength of Symphonia 0.5, where `FormatOptions::enable_gapless` was an opt-in the caller
+  had to set. That option does not exist in 0.6, and the behaviour changed with it: the **decoder** applies the trim,
+  and `Packet::trim_start`/`trim_end` are there to be read, not to be acted on.
+
+  Measured, rather than assumed, on real files:
+
+  | file        | packet | `dur` | `trim_start` | `trim_end` | frames decoded |
+  | ----------- | ------ | ----- | ------------ | ---------- | -------------- |
+  | MP3, first  | 0      | 1152  | 1105         | 0          | **47**         |
+  | MP3, last   | 8343   | 1152  | 0            | 323        | **829**        |
+  | Opus, first | 0      | 960   | 0            | 0          | **648**        |
+
+  47 = 1152 − 1105 and 829 = 1152 − 323, so the MP3 decoder has already applied both. Opus reports no trim at all
+  because libopus consumes the 312-frame pre-skip internally; the packet fields never mention it. Implementing the
+  documented "apply the trim" step would have cut a further 25 ms off the head of every MP3 — a bug that listens as a
+  clipped attack and that no test comparing our own output to our own output could have caught.
+
+  Note also that `dur` is reported as the nominal block duration (1152 uniformly), not the "valid frames" the trait
+  documentation describes. Nothing here depends on it — frame counts come from the decoded buffer — but it is not a
+  field to trust.
+
+- **2026-08-28** **`open()` no longer rewinds, because rewinding un-trims the first packet.** It used to decode one
+  packet to learn the sample rate — codec parameters can omit it — then seek back to zero and throw that audio away. The
+  seek is what broke it: a decoder applies its encoder-delay trim only while positioned at the head of the stream.
+
+  Measured on the same Opus file, before and after `seek(0)` + `reset()`:
+
+  |                 | `trim_start` | frames decoded |
+  | --------------- | ------------ | -------------- |
+  | fresh decoder   | 0            | **648**        |
+  | after rewinding | 0            | **960**        |
+
+  So every Opus file was playing its 312-frame pre-skip — 6.5 ms of decoder ramp-up — at the head of every track. MP3
+  survives the rewind (1105/47 both times), which is why this hid for so long: the format that reports the trim keeps
+  it, and the format that does not, loses it.
+
+  It was inaudible on an ordinary load only because the 8 ms transport fade ramps straight over it. A gapless join has
+  no fade, which is what surfaced it. The fix removes work rather than adding it: keep the probe packet's audio as the
+  head of the track instead of seeking back past it.
+
+  The one case left is `Stop`, which rewinds through `seek_to_frame(0)` and so still re-emits the pre-skip on Opus. It
+  stays under the fade, and recovering the decoder's stream-start state would mean reopening the file.
+
+- **2026-08-28** **M7 — gapless, and why the resampler was the hard part.** The transition is a splice in the decoder:
+  at end of stream it keeps the same ring, the same device and the same producer, opens the next track, and carries on
+  pushing. No flush, no drain to silence, no gap. §3's "the device is opened once" was the prerequisite.
+
+  Three things had to be got right, and only the first was expected.
+
+  **The resampler must be carried across the join, not flushed and rebuilt.** `flush()` zero-pads the final chunk to
+  complete it, and that padding is up to 1024 frames — 23 ms at 44.1 kHz — of silence spliced into the join, with the
+  new track's filter then discarding its own delay on top. Fed continuously instead, one filter resamples the two tracks
+  as the single signal they are, which is exactly what gapless means. Only done when the ratio is unchanged; a rate
+  change flushes the old tail first, because that tail is still the end of the outgoing track.
+
+  **The head of a track cannot be resampled at open time.** `open()` decodes a probe packet before the resampler is
+  settled, and a spliced track _inherits_ the previous track's filter. Running the head through the track's own filter
+  first discarded that filter's delay and swallowed 160 frames at the join. The head is now kept in source frames and
+  resampled on first use, once it is known which filter it belongs to.
+
+  **`Loaded` had to be held back.** The decoder crosses the join a ring's depth — about a second — before the listener
+  hears it. Announcing at splice time would put the next title on screen a second early and jump the elapsed time before
+  the audio moved. `Loaded` is now queued against the frame position of the join and emitted when the playhead reaches
+  it, which also makes it mean the same thing it always did: _this is what you are hearing_.
+
+  Position follows from that: `position_frames` is not reset at a join, since there is no flush, so `track_base` marks
+  where the current track began and `PlayerHandle::position` is the difference. Every flush clears it.
+
+- **2026-08-28** **The next track is resolved when it is needed, not announced in advance.** The obvious design — tell
+  the player what comes next as soon as a track starts — has a staleness problem with no clean answer: toggling shuffle
+  or editing the queue mid-track invalidates the announcement, and once the decoder has committed to it there is no
+  well-defined meaning for a replacement.
+
+  Inverted instead. At end of stream the decoder emits `NeedNext` and keeps decoding nothing while the ring still holds
+  its last second; the UI answers with `SetNext(Some(path))` or `SetNext(None)`. The resolution therefore happens at the
+  moment it is used and cannot go stale, `next()` stays pure, and the queue is popped exactly once by whoever answers.
+  No generation counters, no revision protocol.
+
+  The reply budget is bounded by two numbers that were already fixed: the UI's 200 ms poll and the ring's 1000 ms depth.
+  500 ms sits between them. Missing the window is not a fault — it is the pre-M7 behaviour, a gap.
+
+- **2026-08-28** **A test whose expectation is built from the code under test proves nothing.** The first gapless tests
+  compared the spliced output against `open()` + `decode_chunk()` of the same two files. Deleting the head of every
+  track — a real bug, 47 frames of MP3 and 648 of Opus — broke the expectation in exactly the same way and the tests
+  stayed green. The reference is now derived from the generator that wrote the test WAV, so it depends on nothing the
+  decoder does.
+
+  The other two both had the same shape. Checking for runs of exact zeroes at the join found nothing when the resampler
+  _was_ being flushed, because zero padding comes back out of an FFT filter as ringing rather than silence — the right
+  assertion is equality against resampling the concatenation as one signal. And the event-timing test could not fail
+  while the test sink drained the ring instantly, which kept the decoder and the playhead in lockstep and made "a second
+  early" indistinguishable from "on time"; the sink is now paced.
+
+  All four are now confirmed by mutation: breaking the resampler carry, the held-back `Loaded`, the head handling, or
+  the splice itself each fails the test that claims to cover it. This is the fourth time this project has produced a
+  test aimed at the mechanism rather than the outcome — after the seek, the removal, the dividers and the playing mark.
+  Writing the assertion against something the implementation cannot influence is the only reliable defence.
+
+- **2026-08-28** **M7's acid test, passed — and how to find one.** §9 asks for a continuous-mix album and the library
+  turned out not to advertise which of its albums that is. There is no reliable metadata for it: encoder delay/padding
+  is on every file regardless of intent, iTunes' "part of a gapless album" flag (`pgap` in MP4, `iTunPGAP` in ID3) is
+  absent here, and there are no CUE sheets. The answer is measured, not read — decode the last 150 ms of one track and
+  the first 150 ms of the next, and a join where neither is silent was meant to be continuous:
+
+  | album                        | continuous joins |
+  | ---------------------------- | ---------------- |
+  | Anderson .Paak — _Malibu_    | **12 of 15**     |
+  | Lewis Del Mar — _AUGUST_     | 4 of 14          |
+  | Mr. Oizo — _The Church_      | 4 of 9           |
+  | Burial — _S/T_               | 0 of 12          |
+  | Christian Löffler — _A Life_ | 0 of 10          |
+
+  The hardest join available is _Put Me Thru_ → _Am I Wrong_: −5.8 dB out, 0.0 dB in, both effectively full scale, so a
+  gap would be a hole punched in loud music. Reported smooth.
+
+  The log then measured the other half of the claim, in the running player rather than in a test:
+
+  | splice             | `next splicing` | `loaded`     | lag        |
+  | ------------------ | --------------- | ------------ | ---------- |
+  | Burial 01→02       | 00:00:46.797    | 00:00:47.806 | 1.009s     |
+  | Malibu 05→06       | 00:07:17.149    | 00:07:18.160 | **1.011s** |
+  | Malibu 05→06 again | 00:09:05.265    | 00:09:06.275 | 1.010s     |
+
+  All three land on the ring's depth (`DEPTH_MS = 1000`). That is the held-back `Loaded` doing exactly what it is for:
+  the decoder crosses the join a second before the listener does, and the title changes with the audio. Zero underruns
+  throughout, across both resampled 44.1 kHz paths and a manual restart mid-album.
+
+  Worth keeping the near-miss on record too. The first pass of the boundary scan reported _every_ album 100% continuous,
+  because `ffmpeg -v error` suppressed `volumedetect`'s output and the comparison read the empty string as `0 > -40`. A
+  missing measurement scored as a passing one — the same shape as the test failures earlier in this milestone, in a
+  throwaway shell script rather than in the code. Default a missing reading to the failing value.
 
 ---
 

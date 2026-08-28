@@ -449,6 +449,10 @@ fn drain_events(player: &PlayerHandle) {
                 let conv = if resampling { " (resampling)" } else { "" };
                 println!("\n♪ {name}  [{len}]  {source_rate} Hz, {channels} ch{conv}");
             }
+            // `--repl` plays whatever file it was handed, one at a time. It
+            // has no pool to resolve a successor from, so decline the splice
+            // and let the track finish.
+            PlayerEvent::NeedNext => player.set_next(None),
             PlayerEvent::Finished => println!("\nfinished"),
             PlayerEvent::Error(e) => println!("\nerror: {e}"),
             PlayerEvent::DeviceLost(e) => println!("\ndevice lost: {e}"),
