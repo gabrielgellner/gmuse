@@ -915,6 +915,18 @@ Append here as decisions are made. Format: date, decision, rationale.
   type is an argument; and **nothing matching leaves the line untouched** with a notice, because completion must never
   eat what was typed.
 
+- **2026-08-28** **A session log (`--log`), because underruns are the one defect a test cannot catch.** §3 says they
+  show up only in listening, and by the time the counter is noticed the moment has passed. The log records loads,
+  finishes, device reroutes, errors, and every underrun with **when, in which track, and how many frames short** — the
+  last being the difference between a handful of frames and a whole period, which a bare count cannot tell you.
+
+  **Nothing is written from the audio callback.** It stores `last_short_frames` as a plain atomic; the UI loop polls the
+  counter every 200ms and writes. A 200ms tick is ample: which track and roughly when is what matters, not the exact
+  millisecond.
+
+  Off by default — a player that writes to disk every session without being asked is a surprise. Every line is flushed
+  as it is written, because a session that ends by being killed is exactly the one worth having a log of.
+
 ---
 
 ## 14. Prior art worth reading

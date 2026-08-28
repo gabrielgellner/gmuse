@@ -227,6 +227,10 @@ pub struct Ui {
     pub previous_view: View,
     /// Show a relative-distance gutter beside list rows.
     pub relative_numbers: bool,
+    /// Session log. Disabled unless `--log` was given.
+    pub audit: crate::audit::Audit,
+    /// Underruns already logged, so only new ones are recorded.
+    seen_underruns: u32,
     pub settings_sel: usize,
     pub theme: theme::Theme,
     /// The library projection. Owned rather than borrowed, because changing
@@ -268,6 +272,8 @@ impl Ui {
             count: None,
             previous_view: View::Tree,
             relative_numbers: false,
+            audit: crate::audit::Audit::disabled(),
+            seen_underruns: 0,
             settings_sel: 0,
             theme: theme::Theme::default(),
             library,
@@ -372,9 +378,44 @@ where
             handle_key(key, ui, ctx);
         }
         drain_player_events(ui, ctx);
+        audit_underruns(ui, ctx);
         ui.expire_status();
     }
     Ok(())
+}
+
+/// Record any underruns since the last tick.
+///
+/// Polled from the UI loop rather than pushed from the callback, which may not
+/// allocate or write. A 200ms tick is plenty: what matters is which track and
+/// roughly when, not the exact millisecond.
+fn audit_underruns(ui: &mut Ui, ctx: &Context<'_>) {
+    if !ui.audit.is_enabled() {
+        return;
+    }
+    let Some(player) = ctx.player else { return };
+    let total = player.underruns();
+    if total <= ui.seen_underruns {
+        return;
+    }
+    let new = total - ui.seen_underruns;
+    ui.seen_underruns = total;
+
+    let track = ui
+        .playback
+        .current
+        .and_then(|id| ctx.store.get(id))
+        .map(|t| format!("{} — {}", t.file_under(), t.display_title()))
+        .unwrap_or_else(|| "nothing playing".into());
+
+    ui.audit.line(
+        "underrun",
+        &format!(
+            "+{new} (total {total}) at {:.3}s, {} frames short, in {track}",
+            player.position().as_secs_f64(),
+            player.last_short_frames(),
+        ),
+    );
 }
 
 /// Turn player events into UI state, and advance when a track ends.
@@ -383,11 +424,41 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
     let mut finished = false;
     while let Ok(event) = player.events().try_recv() {
         match event {
-            crate::audio::PlayerEvent::Finished => finished = true,
-            crate::audio::PlayerEvent::Error(e) => ui.notify(format!("error: {e}")),
-            crate::audio::PlayerEvent::DeviceLost(e) => ui.notify(format!("device lost: {e}")),
-            crate::audio::PlayerEvent::DeviceChanged => ui.notify("audio output changed"),
-            crate::audio::PlayerEvent::Loaded { .. } => {}
+            crate::audio::PlayerEvent::Finished => {
+                ui.audit.line("finished", "track played to its end");
+                finished = true;
+            }
+            crate::audio::PlayerEvent::Error(e) => {
+                ui.audit.line("error", &e);
+                ui.notify(format!("error: {e}"));
+            }
+            crate::audio::PlayerEvent::DeviceLost(e) => {
+                ui.audit.line("device", &format!("lost: {e}"));
+                ui.notify(format!("device lost: {e}"));
+            }
+            crate::audio::PlayerEvent::DeviceChanged => {
+                ui.audit.line("device", "output rerouted by the OS");
+                ui.notify("audio output changed");
+            }
+            crate::audio::PlayerEvent::Loaded {
+                path,
+                duration,
+                source_rate,
+                channels,
+                resampling,
+            } => {
+                ui.audit.line(
+                    "loaded",
+                    &format!(
+                        "{} — {source_rate} Hz, {channels} ch, {}{}",
+                        path.display(),
+                        duration
+                            .map(|d| format!("{:.1}s", d.as_secs_f64()))
+                            .unwrap_or_else(|| "unknown length".into()),
+                        if resampling { ", resampling" } else { "" },
+                    ),
+                );
+            }
         }
     }
     if finished {

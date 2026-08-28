@@ -35,6 +35,33 @@ play file:
 repl:
     cargo run --release -- --repl
 
+# Launch the TUI with session logging, for a listening test
+[group('dev')]
+listen dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{ dir }}" ]; then
+        cargo run --release -- --log --library "{{ dir }}"
+    else
+        cargo run --release -- --log
+    fi
+
+# Show what the last listening session recorded
+[group('dev')]
+log:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    LOG="${XDG_STATE_HOME:-$HOME/.local/state}/gmuse/session.log"
+    if [ ! -f "$LOG" ]; then
+        echo "no log yet — run 'just listen' first"
+        exit 0
+    fi
+    echo "$LOG"
+    echo
+    tail -50 "$LOG"
+    echo
+    echo "underruns recorded: $(grep -c '^\[.*underrun' "$LOG" || true)"
+
 # Rebuild the library cache from scratch, ignoring stored mtimes
 [group('dev')]
 rescan dir:

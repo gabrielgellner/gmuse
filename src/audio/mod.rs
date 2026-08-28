@@ -109,6 +109,10 @@ pub(crate) struct Shared {
     pub position_frames: AtomicU64,
     /// Times the ring ran dry while audio was still owed.
     pub underruns: AtomicU32,
+    /// Frames missing at the most recent underrun, and the ring's capacity in
+    /// frames. Recorded by the callback as plain atomic stores — the log is
+    /// written elsewhere, because the callback may not touch a file.
+    pub last_short_frames: AtomicU32,
     /// A `State`, as `u8`.
     pub state: AtomicU8,
     /// Linear gain, as `f32` bits.
@@ -133,6 +137,7 @@ impl Shared {
         Self {
             position_frames: AtomicU64::new(0),
             underruns: AtomicU32::new(0),
+            last_short_frames: AtomicU32::new(0),
             state: AtomicU8::new(State::Stopped as u8),
             volume: AtomicU32::new(1.0f32.to_bits()),
             flush_seq: AtomicU64::new(0),
@@ -273,6 +278,12 @@ impl PlayerHandle {
 
     pub fn underruns(&self) -> u32 {
         self.shared.underruns.load(Ordering::Relaxed)
+    }
+
+    /// Frames missing at the most recent underrun — how *badly* it starved,
+    /// which a bare count cannot tell you.
+    pub fn last_short_frames(&self) -> u32 {
+        self.shared.last_short_frames.load(Ordering::Relaxed)
     }
 
     pub fn device_rate(&self) -> u32 {

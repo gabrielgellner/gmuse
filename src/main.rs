@@ -8,6 +8,7 @@
 //! position display does not jump on seek.
 
 mod audio;
+mod audit;
 mod cache;
 mod catalog;
 mod cli;
@@ -138,7 +139,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(path) = &args.file {
             app.player.load(path.clone());
         }
-        return run_tui(&app, args.smart_artist_sort, loaded);
+        // An empty --log means "the default place".
+        let log_path = args.log.clone().map(|p| {
+            if p.as_os_str().is_empty() {
+                audit::default_path()
+            } else {
+                p
+            }
+        });
+        return run_tui(&app, args.smart_artist_sort, loaded, log_path);
     }
 
     // The config sets up UI state, which the line prompt does not have. Say so
@@ -232,6 +241,7 @@ fn run_tui(
     app: &App,
     smart_artist_sort: bool,
     loaded: config::Loaded,
+    log_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let library = Library::from_members(
         &app.store,
@@ -252,6 +262,26 @@ fn run_tui(
     let mut state = ui::Ui::new(start_dir, library);
     state.catalogs = app.catalogs.clone();
 
+    // Opened before the terminal is taken over, so a failure is visible.
+    if let Some(path) = log_path {
+        match audit::Audit::open(&path) {
+            Ok(mut audit) => {
+                audit.line("device", &format!("{} Hz output", app.player.device_rate()));
+                audit.line(
+                    "library",
+                    &format!(
+                        "{} tracks, catalogs: {}",
+                        app.store.len(),
+                        app.catalogs.label().unwrap_or_else(|| "all".into())
+                    ),
+                );
+                println!("logging to {}", path.display());
+                state.audit = audit;
+            }
+            Err(e) => eprintln!("log: cannot open {}: {e}", path.display()),
+        }
+    }
+
     state.theme = loaded.theme;
     // The config's bindings and settings are commands, so they run through the
     // same execute() a keypress does — there is no second configuration path
@@ -269,6 +299,13 @@ fn run_tui(
     let mut terminal = ratatui::init();
     let result = ui::run(&mut terminal, &mut state, &ctx);
     ratatui::restore();
+    // Written after the terminal is restored, so the summary is visible.
+    if state.audit.is_enabled() {
+        let underruns = app.player.underruns();
+        state
+            .audit
+            .line("session", &format!("ended, {underruns} underruns in total"));
+    }
     result?;
     Ok(())
 }

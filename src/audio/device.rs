@@ -268,6 +268,11 @@ pub(super) fn build_stream(
             let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
             if fill_output(out, got, channels, target, volume, &mut fade) {
                 shared.underruns.fetch_add(1, Ordering::Relaxed);
+                // How short, not just that it happened: an occasional handful
+                // of frames is a different problem from a whole period.
+                shared
+                    .last_short_frames
+                    .store(((want - got) / channels) as u32, Ordering::Relaxed);
             }
 
             shared

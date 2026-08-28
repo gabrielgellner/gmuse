@@ -67,6 +67,11 @@ pub struct Cli {
     #[arg(long)]
     pub no_config: bool,
 
+    /// Log the session for auditing playback. With no path, writes to
+    /// $XDG_STATE_HOME/gmuse/session.log.
+    #[arg(long, num_args = 0..=1, default_missing_value = "", env = "GMUSE_LOG")]
+    pub log: Option<PathBuf>,
+
     /// Use the line-based prompt instead of the TUI.
     ///
     /// The TUI is read-only until M5 wires playback into it; this keeps the

@@ -34,6 +34,11 @@ just ui                   # later runs reuse the cached library
 just play ~/path/to/a/track.mp3   # line prompt, which can actually play
 ```
 
+```sh
+just listen               # play with session logging on
+just log                  # what the last session recorded
+```
+
 `just --list` shows the rest.
 
 To build without Opus support and drop the only C dependency:
