@@ -25,6 +25,8 @@ repeat = false
 repeat_current = false
 continue = true
 smart_artist_sort = true    # sort "The Beatles" under B
+album_headers = true        # divide track lists by album
+relative_numbers = false    # vim-style distance gutter
 aaa_mode = "all"            # all | artist | album
 resample_quality = "balanced" # fast | balanced | high
 
@@ -49,7 +51,12 @@ resample_quality = "balanced" # fast | balanced | high
 # Key names: a character, or space/enter/tab/backspace/delete/insert/home/end/
 # pageup/pagedown/up/down/left/right/escape/f1-f12. Prefix with ^ for control
 # and M- for alt.
+# A key may be a chord, written space-separated. Note that a chord cannot
+# extend an already-bound key: `z` is player-prev, so "z z" would never fire.
 [keys.common]
+"g g" = "win-top"
+"g t" = "view-next"
+
 # A single command.
 "^n" = "player-next"
 "^p" = "player-prev"

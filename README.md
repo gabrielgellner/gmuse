@@ -102,8 +102,11 @@ gmuse [OPTIONS] [FILE]
       --smart-artist-sort    sort artists ignoring a leading The/A/An  [default: true]
 ```
 
-The TUI opens on the library tree. `1`-`5` switch views (library, sorted, playlist, queue, browser), `j`/`k` move,
-`space` expands an artist, `tab` swaps pane, `E`/`Backspace` expand/collapse all, `q` quits.
+The TUI opens on the library tree. Views are nvim-style tabs: `gt`/`gT` step, `3gt` jumps to view 3, and `g<Tab>`
+returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `space` expands
+an artist, `tab` swaps pane, `q` quits.
+
+`:set relative_numbers=true` adds a vim-style distance gutter, counting tracks so album dividers never shift it.
 
 Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
 `<`/`>` seek 60s, `-`/`+` adjust volume. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m` cycles

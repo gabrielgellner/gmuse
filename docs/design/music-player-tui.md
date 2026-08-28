@@ -828,6 +828,31 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   Styled through `Role::AlbumHeader`, the same row cmus styles with `color_trackwin_album_fg`.
 
+- **2026-08-28** **Vim motion layer (issue #6), and with it the chord machinery from #1.** Bindings are keyed on a
+  _sequence_ of keys rather than one, written space-separated and quoted: `bind common "g g" win-top`. A separator
+  character was not available — `-` and `+` are themselves bindable.
+
+  - **Counts.** `3j`, `12G`. Digits `1`–`9` start a count; **`0` only ever continues one**, because in vim `0` is a
+    motion of its own and here it would otherwise swallow the keypress.
+  - **`count` is an `Option`, not a defaulted `1`.** `gt` is "next view" while `1gt` is "view 1" — the presence of a
+    count changes the meaning, so collapsing the two would lose it. Same shape as the `active_catalogs` bug earlier:
+    presence and value are different questions.
+  - **The digits are freed**, so views move to nvim's tab model: `gt` / `gT` step, `<count>gt` jumps, and **`g<Tab>`
+    returns to the previous view** — an alt-tab between library and queue that cmus has no equivalent for.
+  - **An exact match beats a prefix.** `G` fires immediately rather than waiting to see whether a `G x` binding was
+    meant. The consequence is that **a chord cannot extend an already-bound key**: binding `z z` while `z` is
+    `player-prev` makes the chord unreachable. Pinned by a test, because it looks like the chord is simply broken.
+  - **A part-typed chord shows in the status line** (`4g`), or it feels like a dropped keypress.
+
+- **2026-08-28** **The relative-number gutter counts tracks, not screen rows** — the decision made when album dividers
+  landed, now load-bearing. A divider gets blank gutter space, so a relative `3` is always three `j` presses. Vim's
+  hybrid: absolute on the cursor row, relative elsewhere. Off by default.
+
+- **2026-08-28** `Role::ALL` and `SettingKey::ALL` became `&'static [T]` slices. Rust refuses `[T; _]` in an item
+  signature — inference is allowed in a function body, but a const's length is part of its public signature — and the
+  count carried no meaning, unlike the `[Month; 12]` and `[Weekday; 7]` in the registry, where twelve and seven _are_
+  the fact being stated. Ours grow; theirs cannot.
+
 ---
 
 ## 14. Prior art worth reading

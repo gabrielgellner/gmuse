@@ -34,6 +34,7 @@ pub enum Role {
     BindingContext,
     BindingKey,
     AlbumHeader,
+    Gutter,
 }
 
 impl Role {
@@ -56,14 +57,15 @@ impl Role {
             Role::BindingContext => "binding_context",
             Role::BindingKey => "binding_key",
             Role::AlbumHeader => "album_header",
+            Role::Gutter => "gutter",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|r| r.name() == s)
+        Self::ALL.iter().copied().find(|r| r.name() == s)
     }
 
-    pub const ALL: [Role; 17] = [
+    pub const ALL: &'static [Role] = &[
         Role::TabActive,
         Role::TabInactive,
         Role::BorderFocused,
@@ -81,6 +83,7 @@ impl Role {
         Role::BindingContext,
         Role::BindingKey,
         Role::AlbumHeader,
+        Role::Gutter,
     ];
 }
 
@@ -120,7 +123,7 @@ impl Default for Theme {
     fn default() -> Self {
         let mut styles = HashMap::new();
         let accent = Color::Cyan;
-        for role in Role::ALL {
+        for role in Role::ALL.iter().copied() {
             let style = match role {
                 Role::TabActive => Style::default()
                     .bg(accent)
@@ -149,6 +152,7 @@ impl Default for Theme {
                 // cmus styles its track-window album line separately; this is
                 // the same row, and the reason color_trackwin_album_fg exists.
                 Role::AlbumHeader => Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                Role::Gutter => Style::default().fg(Color::DarkGray),
             };
             styles.insert(role, style);
         }
@@ -256,7 +260,7 @@ mod tests {
     #[test]
     fn every_role_has_a_default() {
         let theme = Theme::default();
-        for role in Role::ALL {
+        for role in Role::ALL.iter().copied() {
             // `get` cannot fail, but an unset role would silently render as
             // plain text, which is the bug this guards.
             assert!(
@@ -269,7 +273,7 @@ mod tests {
 
     #[test]
     fn role_names_round_trip() {
-        for role in Role::ALL {
+        for role in Role::ALL.iter().copied() {
             assert_eq!(Role::parse(role.name()), Some(role));
         }
         assert_eq!(Role::parse("no_such_role"), None);

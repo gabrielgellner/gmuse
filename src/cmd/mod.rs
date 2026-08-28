@@ -125,6 +125,7 @@ pub enum SettingKey {
     SmartArtistSort,
     ResampleQuality,
     AlbumHeaders,
+    RelativeNumbers,
 }
 
 impl SettingKey {
@@ -138,6 +139,7 @@ impl SettingKey {
             SettingKey::SmartArtistSort => "smart_artist_sort",
             SettingKey::ResampleQuality => "resample_quality",
             SettingKey::AlbumHeaders => "album_headers",
+            SettingKey::RelativeNumbers => "relative_numbers",
         }
     }
 
@@ -151,11 +153,12 @@ impl SettingKey {
             "smart_artist_sort" => SettingKey::SmartArtistSort,
             "resample_quality" => SettingKey::ResampleQuality,
             "album_headers" => SettingKey::AlbumHeaders,
+            "relative_numbers" => SettingKey::RelativeNumbers,
             _ => return None,
         })
     }
 
-    pub const ALL: [SettingKey; 8] = [
+    pub const ALL: &'static [SettingKey] = &[
         SettingKey::AaaMode,
         SettingKey::Shuffle,
         SettingKey::Repeat,
@@ -164,6 +167,7 @@ impl SettingKey {
         SettingKey::SmartArtistSort,
         SettingKey::ResampleQuality,
         SettingKey::AlbumHeaders,
+        SettingKey::RelativeNumbers,
     ];
 }
 
@@ -235,15 +239,18 @@ pub enum Command {
     Toggle(SettingKey),
     Bind {
         ctx: Context,
-        key: keys::Key,
+        key: keys::Seq,
         cmd: Box<Command>,
     },
     Unbind {
         ctx: Context,
-        key: keys::Key,
+        key: keys::Seq,
     },
     // views
     View(ViewId),
+    ViewNext,
+    ViewPrev,
+    ViewLast,
     Catalog(crate::catalog::Spec),
     Search {
         pattern: String,

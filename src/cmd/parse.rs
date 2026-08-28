@@ -101,12 +101,12 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             Command::Toggle(key)
         }
         "bind" => {
-            // bind <context> <key> <command...>
+            // bind <context> <keys> <command...>
             let (ctx_word, rest) = split_word(rest);
-            let (key_word, cmd_text) = split_word(rest.trim());
+            let (key_word, cmd_text) = take_keys(rest.trim());
             let ctx = Context::parse(ctx_word)
                 .ok_or_else(|| ParseError::Bad(ctx_word.into(), "context"))?;
-            let key = keys::parse(key_word)?;
+            let key = keys::parse_seq(&key_word)?;
             if cmd_text.trim().is_empty() {
                 return Err(ParseError::Missing {
                     cmd: "bind",
@@ -120,12 +120,13 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             }
         }
         "unbind" => {
-            let (ctx_word, key_word) = split_word(rest);
+            let (ctx_word, rest) = split_word(rest);
+            let (key_word, _) = take_keys(rest.trim());
             let ctx = Context::parse(ctx_word)
                 .ok_or_else(|| ParseError::Bad(ctx_word.into(), "context"))?;
             Command::Unbind {
                 ctx,
-                key: keys::parse(key_word.trim())?,
+                key: keys::parse_seq(&key_word)?,
             }
         }
 
@@ -139,6 +140,9 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
                     .ok_or_else(|| ParseError::Bad(rest.into(), "view number"))?,
             )
         }
+        "view-next" => Command::ViewNext,
+        "view-prev" => Command::ViewPrev,
+        "view-last" => Command::ViewLast,
         "search" => Command::Search {
             pattern: rest.to_string(),
             dir: SearchDir::Forward,
@@ -194,6 +198,22 @@ fn catalog_spec(rest: &str) -> Result<crate::catalog::Spec, ParseError> {
             words.iter().map(|w| w.to_string()).collect(),
         ))
     }
+}
+
+/// Take the key field, which may be a quoted sequence (`"g g"`) or a single
+/// key. Returns the key text and whatever follows.
+///
+/// Quoting is what makes a chord expressible on one line: without it there is
+/// no way to tell where the keys stop and the command starts.
+fn take_keys(s: &str) -> (String, &str) {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix('"')
+        && let Some(end) = rest.find('"')
+    {
+        return (rest[..end].to_string(), rest[end + 1..].trim_start());
+    }
+    let (word, rest) = split_word(s);
+    (word.to_string(), rest)
 }
 
 fn split_word(s: &str) -> (&str, &str) {
@@ -338,10 +358,27 @@ pub fn format(cmd: &Command) -> String {
         Command::Set { key, value } => format!("set {}={}", key.name(), value),
         Command::Toggle(key) => format!("toggle {}", key.name()),
         Command::Bind { ctx, key, cmd } => {
-            format!("bind {} {} {}", ctx.name(), key, format(cmd))
+            let keys = keys::format_seq(key);
+            let quoted = if key.len() > 1 {
+                format!("\"{keys}\"")
+            } else {
+                keys
+            };
+            format!("bind {} {} {}", ctx.name(), quoted, format(cmd))
         }
-        Command::Unbind { ctx, key } => format!("unbind {} {}", ctx.name(), key),
+        Command::Unbind { ctx, key } => {
+            let keys = keys::format_seq(key);
+            let quoted = if key.len() > 1 {
+                format!("\"{keys}\"")
+            } else {
+                keys
+            };
+            format!("unbind {} {}", ctx.name(), quoted)
+        }
         Command::View(v) => format!("view {}", *v as u8),
+        Command::ViewNext => "view-next".into(),
+        Command::ViewPrev => "view-prev".into(),
+        Command::ViewLast => "view-last".into(),
         Command::Catalog(spec) => match spec {
             crate::catalog::Spec::All => "catalog all".into(),
             crate::catalog::Spec::Only(names) => format!("catalog {}", names.join(" ")),
@@ -484,7 +521,7 @@ mod tests {
             got,
             Command::Bind {
                 ctx: Context::Common,
-                key: keys::Key::ctrl(KeyCode::Char('n')),
+                key: vec![keys::Key::ctrl(KeyCode::Char('n'))],
                 cmd: Box::new(Command::PlayerNext),
             }
         );
@@ -563,17 +600,17 @@ mod tests {
             Command::Toggle(SettingKey::Repeat),
             Command::Bind {
                 ctx: Context::Library,
-                key: keys::Key::ctrl(KeyCode::Char('n')),
+                key: vec![keys::Key::ctrl(KeyCode::Char('n'))],
                 cmd: Box::new(Command::PlayerNext),
             },
             Command::Bind {
                 ctx: Context::Common,
-                key: keys::Key::new(KeyCode::F(5)),
+                key: vec![keys::Key::new(KeyCode::F(5))],
                 cmd: Box::new(Command::Seek(SeekSpec::Relative(30.0))),
             },
             Command::Unbind {
                 ctx: Context::Queue,
-                key: keys::Key::new(KeyCode::Char(' ')),
+                key: vec![keys::Key::new(KeyCode::Char(' '))],
             },
             Command::View(ViewId::Settings),
             Command::Search {

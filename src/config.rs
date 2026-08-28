@@ -177,7 +177,7 @@ pub fn parse_text(text: &str) -> Loaded {
             continue;
         };
         for (key_name, binding) in table {
-            let key = match keys::parse(key_name) {
+            let key = match keys::parse_seq(key_name) {
                 Ok(k) => k,
                 Err(e) => {
                     out.errors.push(ConfigError {
@@ -191,7 +191,7 @@ pub fn parse_text(text: &str) -> Loaded {
                 match parse::command(text) {
                     Ok(cmd) => out.commands.push(Command::Bind {
                         ctx,
-                        key,
+                        key: key.clone(),
                         cmd: Box::new(cmd),
                     }),
                     Err(e) => out.errors.push(ConfigError {
@@ -332,7 +332,7 @@ mod tests {
             panic!("not a bind")
         };
         assert_eq!(*ctx, Context::Common);
-        assert_eq!(key.to_string(), "^n");
+        assert_eq!(keys::format_seq(key), "^n");
         assert_eq!(**cmd, Command::PlayerNext);
     }
 

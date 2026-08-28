@@ -94,6 +94,29 @@ fn code_name(code: KeyCode) -> String {
 #[error("not a key name: {0:?}")]
 pub struct KeyParseError(pub String);
 
+/// A bound key sequence: one key, or a chord like `g g`.
+///
+/// Written space-separated, as in eilmeldung's `"g g"`. A separator character
+/// was not an option — `-` and `+` are themselves bindable keys.
+pub type Seq = Vec<Key>;
+
+/// Parse a whitespace-separated key sequence.
+pub fn parse_seq(s: &str) -> Result<Seq, KeyParseError> {
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(KeyParseError(s.to_string()));
+    }
+    parts.iter().map(|p| parse(p)).collect()
+}
+
+/// Render a sequence back to text.
+pub fn format_seq(seq: &[Key]) -> String {
+    seq.iter()
+        .map(|k| k.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Parse a key name. Accepts `j`, `space`, `f5`, `^f`, `M-x`, `M-^f`.
 pub fn parse(s: &str) -> Result<Key, KeyParseError> {
     let original = s;
@@ -198,11 +221,31 @@ mod tests {
     }
 
     #[test]
+    fn sequences_round_trip() {
+        for text in ["j", "g g", "g t", "^f", "M-x", "g space", "g f5"] {
+            let seq = parse_seq(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+            assert_eq!(format_seq(&seq), text, "{text:?} did not round trip");
+        }
+    }
+
+    #[test]
+    fn a_sequence_of_one_is_just_a_key() {
+        assert_eq!(parse_seq("j").unwrap(), vec![Key::new(KeyCode::Char('j'))]);
+    }
+
+    #[test]
+    fn extra_whitespace_is_forgiven() {
+        assert_eq!(parse_seq("  g   g  ").unwrap().len(), 2);
+    }
+
+    #[test]
     fn rejects_nonsense() {
         assert!(parse("").is_err());
         assert!(parse("   ").is_err());
         assert!(parse("notakey").is_err());
         assert!(parse("f13").is_err());
+        assert!(parse_seq("").is_err());
+        assert!(parse_seq("g notakey").is_err());
     }
 
     /// The property the rc file depends on: a saved binding must parse back to

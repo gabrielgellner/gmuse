@@ -70,6 +70,29 @@ impl View {
     }
 
     /// The binding context this view looks up keys in.
+    /// The next view in the tab strip, wrapping.
+    pub fn next(self) -> Self {
+        let all = Self::ALL;
+        let i = all.iter().position(|v| *v == self).unwrap_or(0);
+        all[(i + 1) % all.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let all = Self::ALL;
+        let i = all.iter().position(|v| *v == self).unwrap_or(0);
+        all[(i + all.len() - 1) % all.len()]
+    }
+
+    pub const ALL: &'static [View] = &[
+        View::Tree,
+        View::Sorted,
+        View::Playlist,
+        View::Queue,
+        View::Browser,
+        View::Filters,
+        View::Settings,
+    ];
+
     pub fn context(self) -> crate::cmd::Context {
         use crate::cmd::Context as C;
         match self {
@@ -194,6 +217,14 @@ pub struct Ui {
     pub prompt: Option<Prompt>,
     /// The last search, for `n` and `N`.
     pub last_search: Option<(String, SearchDir)>,
+    /// Keys typed so far that have not resolved to a binding, and the count
+    /// prefix in front of them.
+    pub pending: Vec<Key>,
+    pub count: Option<usize>,
+    /// The view before the current one, for `g<Tab>`.
+    pub previous_view: View,
+    /// Show a relative-distance gutter beside list rows.
+    pub relative_numbers: bool,
     pub settings_sel: usize,
     pub theme: theme::Theme,
     /// The library projection. Owned rather than borrowed, because changing
@@ -231,6 +262,10 @@ impl Ui {
             bindings: bind::defaults(),
             prompt: None,
             last_search: None,
+            pending: Vec::new(),
+            count: None,
+            previous_view: View::Tree,
+            relative_numbers: false,
             settings_sel: 0,
             theme: theme::Theme::default(),
             library,
@@ -421,8 +456,51 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     }
 
     let key = Key::from_event(key);
-    if let Some(cmd) = bind::lookup(&ui.bindings, ui.view.context(), key).cloned() {
-        execute(ui, ctx, cmd);
+
+    // A digit starts or extends a count, but only while no chord is part-typed
+    // and only from 1-9 — `0` continues a count and is a motion of its own in
+    // vim, so it may never start one.
+    if ui.pending.is_empty()
+        && let KeyCode::Char(c) = key.code
+        && !key.ctrl
+        && !key.alt
+        && c.is_ascii_digit()
+        && (c != '0' || ui.count.is_some())
+    {
+        let digit = c.to_digit(10).unwrap() as usize;
+        ui.count = Some(
+            ui.count
+                .unwrap_or(0)
+                .saturating_mul(10)
+                .saturating_add(digit),
+        );
+        return;
+    }
+
+    ui.pending.push(key);
+    match bind::resolve(&ui.bindings, ui.view.context(), &ui.pending) {
+        bind::Resolved::Exact(cmd) => {
+            let cmd = cmd.clone();
+            let count = ui.count.take();
+            ui.pending.clear();
+            execute_counted(ui, ctx, cmd, count);
+        }
+        // Wait for the rest of the chord. Showing it is what stops a
+        // half-typed `g` feeling like a dropped keypress.
+        bind::Resolved::Prefix => {
+            let so_far = crate::cmd::keys::format_seq(&ui.pending);
+            let prefix = match ui.count {
+                Some(n) => format!("{n}{so_far}"),
+                None => so_far,
+            };
+            ui.status = prefix;
+            ui.status_until = None;
+        }
+        bind::Resolved::None => {
+            ui.pending.clear();
+            ui.count = None;
+            ui.status.clear();
+        }
     }
 }
 
@@ -463,18 +541,31 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
 
 /// The one place all state mutation happens (DESIGN §6).
 pub fn execute(ui: &mut Ui, ctx: &Context<'_>, cmd: Command) {
+    execute_counted(ui, ctx, cmd, None);
+}
+
+/// As [`execute`], with a vim-style count prefix.
+///
+/// `None` and `Some(1)` differ: `gt` is "next view" while `1gt` is "view 1",
+/// exactly as in vim. A command that ignores counts treats both the same.
+pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Option<usize>) {
     let len = current_len(ui, ctx);
     let cursor = current_cursor(ui);
+    let n = count.unwrap_or(1).max(1);
     let page = 10usize;
 
     match cmd {
         // ---- navigation
-        Command::WinDown => set_cursor(ui, (cursor + 1).min(len.saturating_sub(1))),
-        Command::WinUp => set_cursor(ui, cursor.saturating_sub(1)),
+        Command::WinDown => set_cursor(ui, (cursor + n).min(len.saturating_sub(1))),
+        Command::WinUp => set_cursor(ui, cursor.saturating_sub(n)),
         Command::WinTop => set_cursor(ui, 0),
-        Command::WinBottom => set_cursor(ui, len.saturating_sub(1)),
-        Command::WinPageDown => set_cursor(ui, (cursor + page).min(len.saturating_sub(1))),
-        Command::WinPageUp => set_cursor(ui, cursor.saturating_sub(page)),
+        // `G` goes to the end; `<count>G` goes to that row, 1-based, as in vim.
+        Command::WinBottom => match count {
+            Some(row) => set_cursor(ui, row.saturating_sub(1).min(len.saturating_sub(1))),
+            None => set_cursor(ui, len.saturating_sub(1)),
+        },
+        Command::WinPageDown => set_cursor(ui, (cursor + page * n).min(len.saturating_sub(1))),
+        Command::WinPageUp => set_cursor(ui, cursor.saturating_sub(page * n)),
         Command::WinNextPane => {
             if ui.view == View::Tree {
                 ui.tree.pane = match ui.tree.pane {
@@ -548,8 +639,16 @@ pub fn execute(ui: &mut Ui, ctx: &Context<'_>, cmd: Command) {
                 p.stop();
             }
         }
-        Command::PlayerNext => advance(ui, ctx, true),
-        Command::PlayerPrev => advance(ui, ctx, false),
+        Command::PlayerNext => {
+            for _ in 0..n {
+                advance(ui, ctx, true);
+            }
+        }
+        Command::PlayerPrev => {
+            for _ in 0..n {
+                advance(ui, ctx, false);
+            }
+        }
         Command::Seek(spec) => {
             if let Some(p) = ctx.player {
                 p.seek(match spec {
@@ -585,6 +684,7 @@ pub fn execute(ui: &mut Ui, ctx: &Context<'_>, cmd: Command) {
                 SettingKey::RepeatCurrent => SettingValue::Bool(!ui.playback.repeat_current),
                 SettingKey::Continue => SettingValue::Bool(!ui.continue_playing),
                 SettingKey::AlbumHeaders => SettingValue::Bool(!ui.album_headers),
+                SettingKey::RelativeNumbers => SettingValue::Bool(!ui.relative_numbers),
                 SettingKey::SmartArtistSort => SettingValue::Bool(!ui.smart_artist_sort),
                 SettingKey::ResampleQuality => {
                     ui.notify("resample_quality needs :set, it is not a toggle");
@@ -601,16 +701,28 @@ pub fn execute(ui: &mut Ui, ctx: &Context<'_>, cmd: Command) {
             ui.bindings.insert((bctx, key), *cmd);
         }
         Command::Unbind { ctx: bctx, key } => {
-            if ui.bindings.remove(&(bctx, key)).is_none() {
-                ui.notify(format!("{key} is not bound in {}", bctx.name()));
+            if ui.bindings.remove(&(bctx, key.clone())).is_none() {
+                ui.notify(format!(
+                    "{} is not bound in {}",
+                    crate::cmd::keys::format_seq(&key),
+                    bctx.name()
+                ));
             }
         }
 
         // ---- views
-        Command::View(id) => {
-            ui.view = View::from_id(id);
-            ui.status.clear();
-        }
+        Command::View(id) => switch_view(ui, View::from_id(id)),
+        // `gt` steps forward; `<count>gt` goes straight to that view.
+        Command::ViewNext => match count {
+            Some(n) => {
+                if let Some(id) = ViewId::from_number(n as u8) {
+                    switch_view(ui, View::from_id(id));
+                }
+            }
+            None => switch_view(ui, ui.view.next()),
+        },
+        Command::ViewPrev => switch_view(ui, ui.view.prev()),
+        Command::ViewLast => switch_view(ui, ui.previous_view),
         Command::Search { pattern, dir } => {
             if pattern.is_empty() {
                 return;
@@ -662,6 +774,15 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // straight into the Store and are meant to cross catalogs.
 }
 
+/// Change view, remembering where we came from so `g<Tab>` can go back.
+fn switch_view(ui: &mut Ui, view: View) {
+    if view != ui.view {
+        ui.previous_view = ui.view;
+    }
+    ui.view = view;
+    ui.status.clear();
+}
+
 fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: SettingValue) {
     match (key, value) {
         (SettingKey::AaaMode, SettingValue::Aaa(mode)) => ui.playback.aaa_mode = mode,
@@ -673,6 +794,7 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
         (SettingKey::RepeatCurrent, SettingValue::Bool(v)) => ui.playback.repeat_current = v,
         (SettingKey::Continue, SettingValue::Bool(v)) => ui.continue_playing = v,
         (SettingKey::AlbumHeaders, SettingValue::Bool(v)) => ui.album_headers = v,
+        (SettingKey::RelativeNumbers, SettingValue::Bool(v)) => ui.relative_numbers = v,
         (SettingKey::SmartArtistSort, SettingValue::Bool(v)) => {
             ui.smart_artist_sort = v;
             // The projection is ours now, so this takes effect immediately.
@@ -926,7 +1048,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
 fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
     let mut items: Vec<ListItem> = Vec::new();
 
-    for key in SettingKey::ALL {
+    for key in SettingKey::ALL.iter().copied() {
         let value = match key {
             SettingKey::AaaMode => ui.playback.aaa_mode.label().to_string(),
             SettingKey::Shuffle => ui.playback.shuffle.to_string(),
@@ -936,6 +1058,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
             SettingKey::SmartArtistSort => ui.smart_artist_sort.to_string(),
             SettingKey::ResampleQuality => "balanced".into(),
             SettingKey::AlbumHeaders => ui.album_headers.to_string(),
+            SettingKey::RelativeNumbers => ui.relative_numbers.to_string(),
         };
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
@@ -1090,7 +1213,15 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
     } else {
         spec.ids.iter().copied().map(list::Row::Track).collect()
     };
-    let items = list::items(&ui.theme, ctx.store, &rows);
+    let items = list::items(
+        &ui.theme,
+        ctx.store,
+        &rows,
+        list::Gutter {
+            relative: ui.relative_numbers,
+            selected: spec.selected,
+        },
+    );
     let mut state =
         ListState::default().with_selected(list::row_of_track(&rows, spec.selected).or(Some(0)));
     frame.render_stateful_widget(
@@ -1382,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_moves_focus_and_digits_switch_views() {
+    fn tab_moves_focus_between_panes() {
         let store = fixture();
         let ctx = Context {
             store: &store,
@@ -1394,16 +1525,6 @@ mod tests {
         assert_eq!(ui.tree.pane, Pane::Tracks);
         handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
         assert_eq!(ui.tree.pane, Pane::Tree);
-
-        for (c, want) in [
-            ('2', View::Sorted),
-            ('4', View::Queue),
-            ('5', View::Browser),
-            ('1', View::Tree),
-        ] {
-            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
-            assert_eq!(ui.view, want);
-        }
     }
 
     /// Moving in the tree must reset the track cursor: the old index would
@@ -1640,16 +1761,20 @@ mod tests {
     use crate::cmd::keys;
     use ratatui::crossterm::event::KeyModifiers;
 
-    fn press(ui: &mut Ui, ctx: &Context<'_>, key: &str) {
-        let k = keys::parse(key).unwrap_or_else(|e| panic!("bad test key {key:?}: {e}"));
-        let mut mods = KeyModifiers::NONE;
-        if k.ctrl {
-            mods |= KeyModifiers::CONTROL;
+    /// Feed a key sequence, e.g. `"j"`, `"g g"`, `"^f"`.
+    fn press(ui: &mut Ui, ctx: &Context<'_>, keys_text: &str) {
+        let seq = keys::parse_seq(keys_text)
+            .unwrap_or_else(|e| panic!("bad test key {keys_text:?}: {e}"));
+        for k in seq {
+            let mut mods = KeyModifiers::NONE;
+            if k.ctrl {
+                mods |= KeyModifiers::CONTROL;
+            }
+            if k.alt {
+                mods |= KeyModifiers::ALT;
+            }
+            handle_key(KeyEvent::new(k.code, mods), ui, ctx);
         }
-        if k.alt {
-            mods |= KeyModifiers::ALT;
-        }
-        handle_key(KeyEvent::new(k.code, mods), ui, ctx);
     }
 
     fn type_line(ui: &mut Ui, ctx: &Context<'_>, line: &str) {
@@ -1692,7 +1817,7 @@ mod tests {
                 }),
             };
             ui.view = view;
-            let found = crate::cmd::bind::lookup(&ui.bindings, view.context(), key);
+            let found = crate::cmd::bind::lookup(&ui.bindings, view.context(), &key);
             assert_eq!(found, Some(&*cmd), "{line:?} did not resolve");
 
             // And running it must not panic, whatever the view state.
@@ -1701,20 +1826,56 @@ mod tests {
     }
 
     #[test]
-    fn digits_switch_views_through_the_bindings() {
+    fn gt_steps_through_the_views_and_wraps() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        for (key, want) in [
-            ("2", View::Sorted),
-            ("4", View::Queue),
-            ("7", View::Settings),
-            ("6", View::Filters),
-            ("1", View::Tree),
-        ] {
-            press(&mut ui, &ctx, key);
-            assert_eq!(ui.view, want, "key {key}");
+
+        press(&mut ui, &ctx, "g t");
+        assert_eq!(ui.view, View::Sorted);
+        press(&mut ui, &ctx, "g t");
+        assert_eq!(ui.view, View::Playlist);
+        press(&mut ui, &ctx, "g T");
+        assert_eq!(ui.view, View::Sorted);
+
+        // Wrapping, so you can always get anywhere with one key.
+        for _ in 0..6 {
+            press(&mut ui, &ctx, "g t");
         }
+        assert_eq!(ui.view, View::Tree);
+    }
+
+    /// `1gt` is view 1 while `gt` is "next" — the count changes the meaning,
+    /// which is why a count is `Option` rather than defaulting to 1.
+    #[test]
+    fn a_count_before_gt_selects_a_view_directly() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "4");
+        press(&mut ui, &ctx, "g t");
+        assert_eq!(ui.view, View::Queue);
+
+        press(&mut ui, &ctx, "1");
+        press(&mut ui, &ctx, "g t");
+        assert_eq!(ui.view, View::Tree, "1gt must mean view 1, not next");
+    }
+
+    #[test]
+    fn g_tab_returns_to_the_previous_view() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "4");
+        press(&mut ui, &ctx, "g t");
+        assert_eq!(ui.view, View::Queue);
+        press(&mut ui, &ctx, "g tab");
+        assert_eq!(ui.view, View::Tree);
+        // And back again — it is an alt-tab, not a one-way trip.
+        press(&mut ui, &ctx, "g tab");
+        assert_eq!(ui.view, View::Queue);
     }
 
     #[test]
@@ -2196,5 +2357,199 @@ mod tests {
             dividers(&out).is_empty(),
             "the playlist was divided:\n{out}"
         );
+    }
+    // ---- counts and chords (#6) ------------------------------------------
+
+    #[test]
+    fn a_count_multiplies_a_motion() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "3");
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.sorted, 3);
+
+        press(&mut ui, &ctx, "2");
+        press(&mut ui, &ctx, "k");
+        assert_eq!(ui.sorted, 1);
+    }
+
+    #[test]
+    fn a_multi_digit_count_accumulates() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        let len = ui.library.sorted().len();
+
+        for c in "12".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        press(&mut ui, &ctx, "j");
+        // Clamped at the end rather than running off it.
+        assert_eq!(ui.sorted, (12).min(len - 1));
+    }
+
+    /// `0` continues a count but may never start one — in vim it is a motion
+    /// of its own, and here it would otherwise swallow the keypress.
+    #[test]
+    fn zero_cannot_start_a_count() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "0");
+        assert_eq!(ui.count, None, "0 started a count");
+
+        // But it extends one.
+        press(&mut ui, &ctx, "1");
+        press(&mut ui, &ctx, "0");
+        assert_eq!(ui.count, Some(10));
+    }
+
+    #[test]
+    fn count_g_goes_to_that_row_and_bare_g_goes_to_the_end() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        let len = ui.library.sorted().len();
+
+        press(&mut ui, &ctx, "3");
+        press(&mut ui, &ctx, "G");
+        assert_eq!(ui.sorted, 2, "counts are 1-based, as in vim");
+
+        press(&mut ui, &ctx, "G");
+        assert_eq!(ui.sorted, len - 1);
+
+        press(&mut ui, &ctx, "g g");
+        assert_eq!(ui.sorted, 0);
+    }
+
+    #[test]
+    fn a_count_is_consumed_by_the_command_it_precedes() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "3");
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.count, None, "the count outlived its command");
+
+        // So the next motion is a single step, not another three.
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.sorted, 4);
+    }
+
+    /// A half-typed chord must show itself, or it feels like a dropped key.
+    #[test]
+    fn a_pending_chord_is_visible_and_abandonable() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        handle_key(KeyEvent::from(KeyCode::Char('g')), &mut ui, &ctx);
+        assert_eq!(ui.pending.len(), 1);
+        assert_eq!(ui.status, "g");
+
+        // An unmatched follow-up clears rather than firing something random.
+        handle_key(KeyEvent::from(KeyCode::Char('q')), &mut ui, &ctx);
+        assert!(ui.pending.is_empty());
+        assert!(!ui.quit, "the q leaked to its own binding");
+        assert!(ui.status.is_empty());
+    }
+
+    #[test]
+    fn a_count_shows_beside_a_pending_chord() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "4");
+        handle_key(KeyEvent::from(KeyCode::Char('g')), &mut ui, &ctx);
+        assert_eq!(ui.status, "4g");
+    }
+
+    /// An exact match must win over being a prefix of something longer, or `G`
+    /// would wait to see whether a `G x` binding was meant.
+    #[test]
+    fn an_exact_match_fires_immediately() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "bind common \"G x\" win-top");
+
+        press(&mut ui, &ctx, "G");
+        assert!(ui.pending.is_empty(), "G waited instead of firing");
+        assert_eq!(ui.sorted, ui.library.sorted().len() - 1);
+    }
+
+    #[test]
+    fn chords_can_be_bound_at_runtime() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, ":");
+        // `w` is unbound, so it can start a chord.
+        type_line(&mut ui, &ctx, "bind common \"w w\" win-bottom");
+        press(&mut ui, &ctx, "w w");
+        assert_eq!(ui.sorted, ui.library.sorted().len() - 1);
+    }
+
+    /// Binding a chord onto an already-bound key makes the chord unreachable:
+    /// the shorter binding is an exact match and fires first. Worth pinning,
+    /// because it looks like the chord simply does not work.
+    #[test]
+    fn a_chord_cannot_extend_an_already_bound_key() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        // `z` is player-prev by default.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "bind common \"z z\" win-bottom");
+        press(&mut ui, &ctx, "z z");
+        assert_eq!(ui.sorted, 0, "the chord fired despite `z` being bound");
+
+        // Freeing the key makes the chord reachable.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "unbind common z");
+        press(&mut ui, &ctx, "z z");
+        assert_eq!(ui.sorted, ui.library.sorted().len() - 1);
+    }
+
+    #[test]
+    fn the_relative_gutter_counts_tracks_not_rows() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.relative_numbers = true;
+        press(&mut ui, &ctx, "j");
+
+        let out = render(&ui, &ctx, 100, 24);
+        // The cursor row shows its absolute position, others their distance —
+        // and dividers must not be counted, or `3j` would not be three away.
+        assert!(
+            out.contains(" 2  "),
+            "no absolute number on the cursor row:\n{out}"
+        );
+        assert!(out.contains("  1 "), "no relative distance:\n{out}");
+    }
+
+    #[test]
+    fn the_gutter_is_off_by_default() {
+        let store = fixture();
+        let ui = ui_of(&store, true);
+        assert!(!ui.relative_numbers, "the gutter must be opt-in");
     }
 }

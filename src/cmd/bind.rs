@@ -5,10 +5,21 @@
 
 use std::collections::HashMap;
 
-use super::keys::Key;
+use super::keys::{self, Key, Seq};
 use super::{Command, Context, parse};
 
-pub type Bindings = HashMap<(Context, Key), Command>;
+pub type Bindings = HashMap<(Context, Seq), Command>;
+
+/// What a partially typed key sequence means so far.
+#[derive(Debug, PartialEq)]
+pub enum Resolved<'a> {
+    /// A complete binding. Run it and clear the pending keys.
+    Exact(&'a Command),
+    /// The start of at least one longer binding. Keep waiting.
+    Prefix,
+    /// Nothing can match. Clear the pending keys.
+    None,
+}
 
 /// The default bindings, written in rc-file syntax.
 ///
@@ -17,20 +28,16 @@ pub type Bindings = HashMap<(Context, Key), Command>;
 /// could not be expressed in the file — or that the parser gets wrong — fails
 /// a test instead of shipping.
 pub const DEFAULTS: &[&str] = &[
-    // views
-    "bind common 1 view 1",
-    "bind common 2 view 2",
-    "bind common 3 view 3",
-    "bind common 4 view 4",
-    "bind common 5 view 5",
-    "bind common 6 view 6",
-    "bind common 7 view 7",
+    // views — nvim tab style, because a count prefix needs the digits
+    "bind common \"g t\" view-next",
+    "bind common \"g T\" view-prev",
+    "bind common \"g tab\" view-last",
     // navigation
     "bind common j win-down",
     "bind common k win-up",
     "bind common down win-down",
     "bind common up win-up",
-    "bind common g win-top",
+    "bind common \"g g\" win-top",
     "bind common G win-bottom",
     "bind common home win-top",
     "bind common end win-bottom",
@@ -93,11 +100,31 @@ pub fn defaults() -> Bindings {
     bindings
 }
 
-/// Find the command for a key, falling back to `Common`.
-pub fn lookup(bindings: &Bindings, ctx: Context, key: Key) -> Option<&Command> {
+/// Find the command for a key sequence, falling back to `Common`.
+pub fn lookup<'a>(bindings: &'a Bindings, ctx: Context, keys: &[Key]) -> Option<&'a Command> {
     bindings
-        .get(&(ctx, key))
-        .or_else(|| bindings.get(&(Context::Common, key)))
+        .get(&(ctx, keys.to_vec()))
+        .or_else(|| bindings.get(&(Context::Common, keys.to_vec())))
+}
+
+/// Resolve a partially typed sequence.
+///
+/// An exact match wins even when longer bindings share it as a prefix — `G`
+/// must fire immediately rather than waiting to see whether a `G something`
+/// binding was meant. Bind chords that extend an existing key only if you are
+/// willing to lose the shorter one.
+pub fn resolve<'a>(bindings: &'a Bindings, ctx: Context, keys: &[Key]) -> Resolved<'a> {
+    if let Some(cmd) = lookup(bindings, ctx, keys) {
+        return Resolved::Exact(cmd);
+    }
+    let is_prefix = bindings.keys().any(|(c, seq)| {
+        (*c == ctx || *c == Context::Common) && seq.len() > keys.len() && seq.starts_with(keys)
+    });
+    if is_prefix {
+        Resolved::Prefix
+    } else {
+        Resolved::None
+    }
 }
 
 /// Every binding, sorted for display in view 7.
@@ -105,15 +132,12 @@ pub fn lookup(bindings: &Bindings, ctx: Context, key: Key) -> Option<&Command> {
 /// Sorted by context then key *name*, because `KeyCode` has no meaningful
 /// ordering of its own and a settings view that reshuffles itself between
 /// frames would be unusable.
-pub fn sorted(bindings: &Bindings) -> Vec<(Context, Key, &Command)> {
-    let mut rows: Vec<(Context, Key, &Command)> = bindings
+pub fn sorted(bindings: &Bindings) -> Vec<(Context, String, &Command)> {
+    let mut rows: Vec<(Context, String, &Command)> = bindings
         .iter()
-        .map(|((ctx, key), cmd)| (*ctx, *key, cmd))
+        .map(|((ctx, seq), cmd)| (*ctx, keys::format_seq(seq), cmd))
         .collect();
-    rows.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
-    });
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     rows
 }
 
@@ -144,23 +168,23 @@ mod tests {
     #[test]
     fn lookup_falls_back_to_common() {
         let mut bindings = defaults();
-        let key = keys::Key::new(KeyCode::Char('j'));
+        let key = vec![keys::Key::new(KeyCode::Char('j'))];
 
         // Nothing library-specific: the common binding answers.
         assert_eq!(
-            lookup(&bindings, Context::Library, key),
+            lookup(&bindings, Context::Library, &key),
             Some(&Command::WinDown)
         );
 
         // A context-specific binding wins over it.
-        bindings.insert((Context::Library, key), Command::PlayerNext);
+        bindings.insert((Context::Library, key.clone()), Command::PlayerNext);
         assert_eq!(
-            lookup(&bindings, Context::Library, key),
+            lookup(&bindings, Context::Library, &key),
             Some(&Command::PlayerNext)
         );
         // ...and only in that context.
         assert_eq!(
-            lookup(&bindings, Context::Queue, key),
+            lookup(&bindings, Context::Queue, &key),
             Some(&Command::WinDown)
         );
     }
@@ -168,7 +192,7 @@ mod tests {
     #[test]
     fn unbound_keys_return_nothing() {
         let bindings = defaults();
-        assert!(lookup(&bindings, Context::Common, keys::Key::new(KeyCode::F(9))).is_none());
+        assert!(lookup(&bindings, Context::Common, &[keys::Key::new(KeyCode::F(9))]).is_none());
     }
 
     /// §9's M6 criterion: a rebinding must survive the rc file.
@@ -186,7 +210,14 @@ mod tests {
         // Write the whole table out the way view 7 and a saved rc would.
         let text: Vec<String> = sorted(&bindings)
             .iter()
-            .map(|(ctx, key, cmd)| format!("bind {} {} {}", ctx.name(), key, parse::format(cmd)))
+            .map(|(ctx, key, cmd)| {
+                let quoted = if key.contains(' ') {
+                    format!("\"{key}\"")
+                } else {
+                    key.clone()
+                };
+                format!("bind {} {} {}", ctx.name(), quoted, parse::format(cmd))
+            })
             .collect();
 
         // Read it back.
@@ -211,8 +242,8 @@ mod tests {
     #[test]
     fn sorted_is_stable() {
         let bindings = defaults();
-        let a: Vec<String> = sorted(&bindings).iter().map(|r| r.1.to_string()).collect();
-        let b: Vec<String> = sorted(&bindings).iter().map(|r| r.1.to_string()).collect();
+        let a: Vec<String> = sorted(&bindings).iter().map(|r| r.1.clone()).collect();
+        let b: Vec<String> = sorted(&bindings).iter().map(|r| r.1.clone()).collect();
         assert_eq!(a, b, "view 7 would reshuffle between frames");
     }
 }

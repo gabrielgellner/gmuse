@@ -116,14 +116,45 @@ pub fn row_of_track(rows: &[Row], track_index: usize) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// How to draw the left gutter.
+#[derive(Debug, Clone, Copy)]
+pub struct Gutter {
+    /// Off entirely when false.
+    pub relative: bool,
+    /// Which **track** the cursor is on. Distances are measured in tracks, not
+    /// screen rows, so a divider between two tracks never makes `3j` wrong.
+    pub selected: usize,
+}
+
 /// Render rows as `NN  Title            m:ss`, with dividers styled apart.
-pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row]) -> Vec<ListItem<'a>> {
+pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], gutter: Gutter) -> Vec<ListItem<'a>> {
+    let mut track_index = 0usize;
     rows.iter()
-        .map(|row| match row {
-            Row::Header(text) => ListItem::new(Line::from(Span::styled(
-                format!("── {text} "),
-                theme.get(Role::AlbumHeader),
-            ))),
+        .map(|row| {
+            // The gutter counts tracks; a divider gets blank space so the
+            // column still lines up.
+            let lead = if !gutter.relative {
+                String::new()
+            } else if matches!(row, Row::Header(_)) {
+                "    ".to_string()
+            } else {
+                let n = track_index;
+                track_index += 1;
+                // Vim's hybrid: absolute on the cursor line, relative
+                // elsewhere. The absolute number is what a count for `G` takes.
+                if n == gutter.selected {
+                    format!("{:<4}", n + 1)
+                } else {
+                    format!("{:>3} ", n.abs_diff(gutter.selected))
+                }
+            };
+            (lead, row)
+        })
+        .map(|(lead, row)| match row {
+            Row::Header(text) => ListItem::new(Line::from(vec![
+                Span::raw(lead),
+                Span::styled(format!("── {text} "), theme.get(Role::AlbumHeader)),
+            ])),
             Row::Track(id) => {
                 let Some(track) = store.get(*id) else {
                     return ListItem::new(Line::from("<missing>"));
@@ -133,6 +164,7 @@ pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row]) -> Vec<ListItem<'a>
                     .map(|n| format!("{n:>2}"))
                     .unwrap_or_else(|| "  ".into());
                 ListItem::new(Line::from(vec![
+                    Span::styled(lead, theme.get(Role::Gutter)),
                     Span::raw(format!("{num}  ")),
                     Span::raw(track.display_title().to_string()),
                     Span::raw("  "),
