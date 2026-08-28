@@ -117,6 +117,39 @@ pub fn format_seq(seq: &[Key]) -> String {
         .join(" ")
 }
 
+/// Every named key, for completion. Single characters are not listed: there
+/// are too many and they are their own names.
+pub const NAMES: &[&str] = &[
+    "space",
+    "enter",
+    "tab",
+    "backtab",
+    "backspace",
+    "delete",
+    "insert",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "up",
+    "down",
+    "left",
+    "right",
+    "escape",
+    "f1",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "f6",
+    "f7",
+    "f8",
+    "f9",
+    "f10",
+    "f11",
+    "f12",
+];
+
 /// Parse a key name. Accepts `j`, `space`, `f5`, `^f`, `M-x`, `M-^f`.
 pub fn parse(s: &str) -> Result<Key, KeyParseError> {
     let original = s;
@@ -236,6 +269,13 @@ mod tests {
     #[test]
     fn extra_whitespace_is_forgiven() {
         assert_eq!(parse_seq("  g   g  ").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn every_named_key_parses() {
+        for name in NAMES {
+            parse(name).unwrap_or_else(|e| panic!("{name:?} does not parse: {e}"));
+        }
     }
 
     #[test]

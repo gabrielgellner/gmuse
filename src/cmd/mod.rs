@@ -9,6 +9,7 @@
 //! happens in a single function rather than being spread across key handlers.
 
 pub mod bind;
+pub mod complete;
 pub mod keys;
 pub mod parse;
 

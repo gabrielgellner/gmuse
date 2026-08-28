@@ -112,7 +112,8 @@ Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are
 `<`/`>` seek 60s, `-`/`+` adjust volume. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m` cycles
 all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue, `D` removes.
 
-`:` opens the command line, `/` and `?` search, `n`/`N` repeat the search. View 7 lists every setting and binding.
+`:` opens the command line — `Tab` completes verbs and their arguments, including catalog names, setting keys and the
+values each key accepts. `/` and `?` search, `n`/`N` repeat the search. View 7 lists every setting and binding.
 
 Track lists are divided by album, and by disc within a multi-disc album. Turn it off with `:set album_headers=false`.
 

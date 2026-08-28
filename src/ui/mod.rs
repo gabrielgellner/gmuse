@@ -118,6 +118,8 @@ pub enum PromptKind {
 pub struct Prompt {
     pub kind: PromptKind,
     pub buffer: String,
+    /// Candidates from the last `Tab`, shown as a menu until the line changes.
+    pub candidates: Vec<String>,
 }
 
 impl Prompt {
@@ -275,6 +277,22 @@ impl Ui {
             smart_artist_sort: true,
             status_until: None,
             quit: false,
+        }
+    }
+
+    /// What completion can offer, from the running application.
+    pub fn completion_world(&self) -> crate::cmd::complete::World {
+        crate::cmd::complete::World {
+            catalogs: self
+                .catalogs
+                .defined()
+                .iter()
+                .map(|c| c.name.clone())
+                .collect(),
+            bound: bind::sorted(&self.bindings)
+                .into_iter()
+                .map(|(ctx, key, _)| (ctx, key))
+                .collect(),
         }
     }
 
@@ -451,6 +469,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Command,
                 buffer: String::new(),
+                candidates: Vec::new(),
             });
             return;
         }
@@ -458,6 +477,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Search(SearchDir::Forward),
                 buffer: String::new(),
+                candidates: Vec::new(),
             });
             return;
         }
@@ -465,6 +485,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Search(SearchDir::Backward),
                 buffer: String::new(),
+                candidates: Vec::new(),
             });
             return;
         }
@@ -519,12 +540,50 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     match key.code {
         KeyCode::Esc => ui.prompt = None,
         KeyCode::Backspace => {
+            prompt.candidates.clear();
             if prompt.buffer.pop().is_none() {
                 // Backspacing past the sigil closes the line, as in vi.
                 ui.prompt = None;
             }
         }
-        KeyCode::Char(c) => prompt.buffer.push(c),
+        KeyCode::Char(c) => {
+            prompt.buffer.push(c);
+            // The menu describes a line that no longer exists.
+            prompt.candidates.clear();
+        }
+        // Tab completes. Search has no closed vocabulary to complete against,
+        // so it is left alone.
+        KeyCode::Tab if prompt.kind == PromptKind::Command => {
+            let buffer = prompt.buffer.clone();
+            let world = ui.completion_world();
+            // `set key=value` is one word, so its value half needs separate
+            // handling — the key/value split is inside the word, not at a
+            // space.
+            let last = buffer.rsplit(char::is_whitespace).next().unwrap_or("");
+            let done = if last.contains('=') {
+                crate::cmd::complete::complete_setting_value(last).map(|c| {
+                    let head = &buffer[..buffer.len() - last.len()];
+                    (format!("{head}{}", c.line), c.options)
+                })
+            } else {
+                crate::cmd::complete::complete(&buffer, &world).map(|c| (c.line, c.options))
+            };
+            match done {
+                Some((line, options)) => {
+                    if let Some(prompt) = ui.prompt.as_mut() {
+                        prompt.buffer = line;
+                        // One candidate is already applied, so a menu of one
+                        // would be noise.
+                        prompt.candidates = if options.len() > 1 {
+                            options
+                        } else {
+                            Vec::new()
+                        };
+                    }
+                }
+                None => ui.notify("no completion"),
+            }
+        }
         KeyCode::Enter => {
             let prompt = ui.prompt.take().expect("checked above");
             match prompt.kind {
@@ -998,12 +1057,27 @@ fn set_cursor(ui: &mut Ui, next: usize) {
 }
 
 pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
-    let [tabs, body, status] = Layout::vertical([
+    // A completion menu takes room from the bottom of the body, so the view
+    // above stays visible rather than being replaced.
+    let menu_height = ui
+        .prompt
+        .as_ref()
+        .map(|p| menu_height(p, frame.area().width))
+        .unwrap_or(0);
+
+    let [tabs, body, menu, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
+        Constraint::Length(menu_height),
         Constraint::Length(1),
     ])
     .areas(frame.area());
+
+    if menu_height > 0
+        && let Some(prompt) = &ui.prompt
+    {
+        draw_completions(frame, menu, ui, prompt);
+    }
 
     frame.render_widget(statusline::tabs(&ui.theme, ui.view), tabs);
     match &ui.prompt {
@@ -1149,6 +1223,83 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
             .highlight_style(highlight(&ui.theme, true)),
         area,
         &mut state,
+    );
+}
+
+/// Rows the completion menu needs, borders included. Zero when there is
+/// nothing to show.
+fn menu_height(prompt: &Prompt, width: u16) -> u16 {
+    if prompt.candidates.is_empty() {
+        return 0;
+    }
+    let rows = completion_rows(&prompt.candidates, width).len() as u16;
+    // Capped, so a 63-verb list cannot swallow the view it is helping you
+    // navigate.
+    (rows + 2).min(10)
+}
+
+/// Lay candidates out in columns, as a shell does — a single column of 63
+/// verbs is unreadable and does not fit.
+fn completion_rows(candidates: &[String], width: u16) -> Vec<String> {
+    let widest = candidates
+        .iter()
+        .map(|c| c.chars().count())
+        .max()
+        .unwrap_or(1);
+    let column = widest + 2;
+    let usable = width.saturating_sub(4).max(1) as usize;
+    let columns = (usable / column).max(1);
+    let rows = candidates.len().div_ceil(columns);
+
+    (0..rows)
+        .map(|r| {
+            (0..columns)
+                .filter_map(|c| candidates.get(c * rows + r))
+                .map(|item| format!("{item:<column$}"))
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+fn draw_completions(frame: &mut Frame, area: Rect, ui: &Ui, prompt: &Prompt) {
+    let rows = completion_rows(&prompt.candidates, area.width);
+    let available = (area.height.saturating_sub(2)) as usize;
+    // Reserve a row for the overflow notice, or it is drawn outside the block
+    // and silently clipped.
+    let shown = if rows.len() > available {
+        available.saturating_sub(1)
+    } else {
+        available
+    };
+    let mut lines: Vec<Line> = rows
+        .iter()
+        .take(shown)
+        .map(|r| {
+            Line::from(Span::styled(
+                r.clone(),
+                ui.theme.get(theme::Role::StatusText),
+            ))
+        })
+        .collect();
+    if rows.len() > shown {
+        let hidden: usize = rows[shown..]
+            .iter()
+            .map(|r| r.split_whitespace().count())
+            .sum();
+        lines.push(Line::from(Span::styled(
+            format!("… {hidden} more"),
+            ui.theme.get(theme::Role::StatusDim),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(pane_block(
+            &ui.theme,
+            &format!("{} completions", prompt.candidates.len()),
+            true,
+        )),
+        area,
     );
 }
 
@@ -2731,5 +2882,220 @@ mod tests {
         press(&mut ui, &ctx, "l");
         press(&mut ui, &ctx, "^j");
         assert_eq!(ui.sorted, 1);
+    }
+    // ---- completion (#4) --------------------------------------------------
+
+    fn typed(ui: &Ui) -> String {
+        ui.prompt
+            .as_ref()
+            .map(|p| p.buffer.clone())
+            .unwrap_or_default()
+    }
+
+    fn tab(ui: &mut Ui, ctx: &Context<'_>) {
+        handle_key(KeyEvent::from(KeyCode::Tab), ui, ctx);
+    }
+
+    #[test]
+    fn tab_completes_a_verb() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        for c in "qui".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        assert_eq!(typed(&ui), "quit ");
+        // And it did not run: Tab completes, Enter commits.
+        assert!(!ui.quit);
+    }
+
+    #[test]
+    fn tab_lists_the_options_when_ambiguous() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        for c in "win-p".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        assert_eq!(typed(&ui), "win-pa", "extended past the divergence");
+
+        let out = render(&ui, &ctx, 100, 20);
+        assert!(out.contains("win-page-up"), "{out}");
+        assert!(out.contains("win-pane-left"), "{out}");
+        assert!(out.contains("completions"), "no menu drawn:\n{out}");
+    }
+
+    /// `:` then Tab is the "what can I even type" case, and 63 verbs joined
+    /// into a status line was useless.
+    #[test]
+    fn tab_on_an_empty_line_shows_a_menu() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        tab(&mut ui, &ctx);
+
+        let count = ui.prompt.as_ref().unwrap().candidates.len();
+        assert_eq!(count, crate::cmd::parse::VERBS.len());
+
+        let out = render(&ui, &ctx, 100, 20);
+        assert!(out.contains("63 completions"), "{out}");
+        // Laid out in columns, so several verbs share a line.
+        assert!(out.contains("activate"), "{out}");
+        assert!(out.contains("quit"), "{out}");
+        // Capped, with the remainder counted rather than silently dropped.
+        assert!(out.contains("more"), "no overflow notice:\n{out}");
+    }
+
+    /// The two-step the report described: `c` extends, then Tab lists.
+    #[test]
+    fn extending_then_listing_is_two_presses() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        handle_key(KeyEvent::from(KeyCode::Char('c')), &mut ui, &ctx);
+        tab(&mut ui, &ctx);
+        // "cat" and "catalog" agree this far.
+        assert_eq!(typed(&ui), "cat");
+
+        tab(&mut ui, &ctx);
+        let candidates = &ui.prompt.as_ref().unwrap().candidates;
+        assert!(candidates.contains(&"cat".to_string()), "{candidates:?}");
+        assert!(
+            candidates.contains(&"catalog".to_string()),
+            "{candidates:?}"
+        );
+    }
+
+    #[test]
+    fn typing_dismisses_the_menu() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        tab(&mut ui, &ctx);
+        assert!(!ui.prompt.as_ref().unwrap().candidates.is_empty());
+
+        // The menu described a line that no longer exists.
+        handle_key(KeyEvent::from(KeyCode::Char('q')), &mut ui, &ctx);
+        assert!(ui.prompt.as_ref().unwrap().candidates.is_empty());
+        assert!(!render(&ui, &ctx, 100, 20).contains("completions"));
+    }
+
+    #[test]
+    fn a_unique_completion_shows_no_menu() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        for c in "qui".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        assert_eq!(typed(&ui), "quit ");
+        // A menu of one would be noise: it is already applied.
+        assert!(ui.prompt.as_ref().unwrap().candidates.is_empty());
+    }
+
+    #[test]
+    fn the_menu_is_capped_and_says_how_many_were_hidden() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        tab(&mut ui, &ctx);
+        // Narrow, so every verb needs its own row and they cannot all fit.
+        let out = render(&ui, &ctx, 30, 20);
+        assert!(out.contains("more"), "no overflow notice:\n{out}");
+    }
+
+    /// Completion has to see the catalogs the application actually has.
+    #[test]
+    fn tab_completes_a_catalog_name() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+
+        press(&mut ui, &ctx, ":");
+        for c in "catalog pa".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        assert_eq!(typed(&ui), "catalog paak ");
+    }
+
+    #[test]
+    fn tab_completes_a_setting_value_after_the_equals() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        for c in "set aaa_mode=ar".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        assert_eq!(typed(&ui), "set aaa_mode=artist");
+
+        // And the completed line still parses and runs.
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        assert_eq!(ui.playback.aaa_mode, crate::next::AaaMode::Artist);
+    }
+
+    #[test]
+    fn tab_completes_a_nested_command_after_bind() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        for c in "bind common Z player-pl".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        assert_eq!(typed(&ui), "bind common Z player-play ");
+    }
+
+    #[test]
+    fn tab_says_so_when_nothing_matches() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        for c in "frobni".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        // The typed text survives: completion must never eat what you wrote.
+        assert_eq!(typed(&ui), "frobni");
+        assert!(ui.status.contains("no completion"), "{}", ui.status);
+    }
+
+    #[test]
+    fn tab_does_nothing_in_the_search_prompt() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "/");
+        for c in "bur".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        // There is no closed vocabulary to complete a search against.
+        assert_eq!(typed(&ui), "bur");
     }
 }

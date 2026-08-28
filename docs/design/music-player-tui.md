@@ -898,6 +898,23 @@ Append here as decisions are made. Format: date, decision, rationale.
   A role added in code and forgotten in the example would silently keep its default, which is the kind of gap nobody
   notices until a theme looks half-applied.
 
+- **2026-08-28** **`:` completion (issue #4), and the vocabulary problem it forced.** Completion needs an enumerable
+  list of verbs; the parser's match arms are not one. Rather than restructure the parser around a table, `parse::VERBS`
+  sits beside it and **a test scans the source** to prove the two agree. Blunt, but it is the only thing that catches a
+  verb added to the match and forgotten in the table — which would silently make it uncompletable rather than fail.
+
+- **2026-08-28** **Completion is prefix-based, not fuzzy, and that is deliberate.** The `:` line is a small closed
+  vocabulary the user is trying to type exactly, where a prefix match is predictable and a fuzzy one is a guess. Fuzzy
+  matching belongs on `/` search, over titles — which is where `nucleo-matcher` from §2 will eventually earn its place.
+
+- **2026-08-28** Arguments complete per verb, and **`set` values depend on the key already typed** — the same
+  key-directed typing the parser does in `setting_value`. `set key=value` is one word, so the value half needs its own
+  entry point: the split is inside the word, not at a space.
+
+- **2026-08-28** Two smaller rules that fell out: a **single match gains a trailing space**, because the next thing you
+  type is an argument; and **nothing matching leaves the line untouched** with a notice, because completion must never
+  eat what was typed.
+
 ---
 
 ## 14. Prior art worth reading

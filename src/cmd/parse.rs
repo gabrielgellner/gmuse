@@ -27,6 +27,78 @@ pub enum ParseError {
     Key(#[from] keys::KeyParseError),
 }
 
+/// Every verb `command` accepts, aliases included.
+///
+/// Completion needs an enumerable vocabulary and the parser's match arms are
+/// not one. Rather than restructure the parser around a table, this list sits
+/// beside it and a test scans the source to prove the two agree — a verb added
+/// to one and not the other fails rather than silently going uncompletable.
+pub const VERBS: &[&str] = &[
+    "activate",
+    "add",
+    "add-playlist",
+    "add-queue",
+    "append",
+    "bind",
+    "bottom",
+    "cat",
+    "catalog",
+    "down",
+    "enqueue",
+    "exit",
+    "in",
+    "next",
+    "page-down",
+    "page-up",
+    "pane",
+    "pause",
+    "play",
+    "player-next",
+    "player-pause",
+    "player-play",
+    "player-prev",
+    "player-stop",
+    "prev",
+    "previous",
+    "q",
+    "quit",
+    "remove",
+    "rescan",
+    "rsearch",
+    "search",
+    "search-next",
+    "search-prev",
+    "seek",
+    "set",
+    "stop",
+    "toggle",
+    "top",
+    "unbind",
+    "up",
+    "update",
+    "view",
+    "view-last",
+    "view-next",
+    "view-prev",
+    "vol",
+    "volume",
+    "win-activate",
+    "win-bottom",
+    "win-collapse-all",
+    "win-down",
+    "win-expand-all",
+    "win-next-pane",
+    "win-page-down",
+    "win-page-up",
+    "win-pane-left",
+    "win-pane-right",
+    "win-remove",
+    "win-toggle",
+    "win-top",
+    "win-up",
+    "win-update",
+];
+
 /// Parse one line. Blank lines and `#` comments give `Ok(None)`, so the rc
 /// file and the `:` line can share this without either special-casing.
 pub fn line(input: &str) -> Result<Option<Command>, ParseError> {
@@ -657,6 +729,69 @@ mod tests {
             let back = command(&text)
                 .unwrap_or_else(|e| panic!("{cmd:?} formatted as {text:?} and failed: {e}"));
             assert_eq!(back, cmd, "{text:?} did not round trip");
+        }
+    }
+
+    /// The vocabulary table and the parser must not drift. Scanning the source
+    /// is blunt, but it is the only way to catch a verb added to the match and
+    /// forgotten in `VERBS`, which would silently make it uncompletable.
+    #[test]
+    fn the_verb_table_matches_the_parser() {
+        let src = include_str!("parse.rs");
+        let body = &src[src.find("pub fn command(").unwrap()..src.find("fn split_word(").unwrap()];
+
+        let mut found: Vec<String> = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('"') || !line.contains("=>") {
+                continue;
+            }
+            let head = &trimmed[..trimmed.find("=>").unwrap()];
+            for part in head.split('|') {
+                let part = part.trim().trim_matches('"');
+                if !part.is_empty()
+                    && part
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit())
+                {
+                    found.push(part.to_string());
+                }
+            }
+        }
+        found.sort();
+        found.dedup();
+
+        let mut listed: Vec<String> = VERBS.iter().map(|s| s.to_string()).collect();
+        listed.sort();
+
+        let missing: Vec<&String> = found.iter().filter(|v| !listed.contains(v)).collect();
+        let extra: Vec<&String> = listed.iter().filter(|v| !found.contains(v)).collect();
+        assert!(
+            missing.is_empty(),
+            "in the parser but not VERBS: {missing:?}"
+        );
+        assert!(extra.is_empty(), "in VERBS but not the parser: {extra:?}");
+    }
+
+    /// And every listed verb must actually parse, with an argument where one
+    /// is required.
+    #[test]
+    fn every_listed_verb_parses() {
+        for verb in VERBS {
+            let line = match *verb {
+                "seek" => "seek +10".to_string(),
+                "vol" | "volume" => "vol 50".to_string(),
+                "set" => "set shuffle=true".to_string(),
+                "toggle" => "toggle shuffle".to_string(),
+                "bind" => "bind common x quit".to_string(),
+                "unbind" => "unbind common x".to_string(),
+                "view" => "view 1".to_string(),
+                "catalog" | "cat" => format!("{verb} all"),
+                "in" => "in tree win-down".to_string(),
+                "search" | "rsearch" => format!("{verb} text"),
+                other => other.to_string(),
+            };
+            command(&line).unwrap_or_else(|e| panic!("{verb:?} does not parse: {e}"));
         }
     }
 
