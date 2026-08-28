@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use super::keys;
 use super::{
-    AaaMode, AddTarget, Command, Context, Quality, SearchDir, SeekSpec, SettingKey, SettingValue,
-    ViewId, VolSpec,
+    AaaMode, AddTarget, Command, Context, PaneTarget, Quality, SearchDir, SeekSpec, SettingKey,
+    SettingValue, ViewId, VolSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -55,6 +55,23 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "win-remove" | "remove" => Command::WinRemove,
         "win-update" => Command::WinUpdate,
         "win-next-pane" | "pane" => Command::WinNextPane,
+        "win-pane-left" => Command::WinPaneLeft,
+        "win-pane-right" => Command::WinPaneRight,
+        "in" => {
+            let (pane_word, cmd_text) = split_word(rest);
+            let pane = PaneTarget::parse(pane_word)
+                .ok_or_else(|| ParseError::Bad(pane_word.into(), "pane"))?;
+            if cmd_text.trim().is_empty() {
+                return Err(ParseError::Missing {
+                    cmd: "in",
+                    what: "a command to run",
+                });
+            }
+            Command::In {
+                pane,
+                cmd: Box::new(command(cmd_text)?),
+            }
+        }
         "win-expand-all" => Command::WinExpandAll,
         "win-collapse-all" => Command::WinCollapseAll,
 
@@ -330,6 +347,9 @@ pub fn format(cmd: &Command) -> String {
         Command::WinRemove => "win-remove".into(),
         Command::WinUpdate => "win-update".into(),
         Command::WinNextPane => "win-next-pane".into(),
+        Command::WinPaneLeft => "win-pane-left".into(),
+        Command::WinPaneRight => "win-pane-right".into(),
+        Command::In { pane, cmd } => format!("in {} {}", pane.name(), format(cmd)),
         Command::WinExpandAll => "win-expand-all".into(),
         Command::WinCollapseAll => "win-collapse-all".into(),
         Command::PlayerPlay => "player-play".into(),
@@ -559,6 +579,12 @@ mod tests {
             Command::WinRemove,
             Command::WinUpdate,
             Command::WinNextPane,
+            Command::WinPaneLeft,
+            Command::WinPaneRight,
+            Command::In {
+                pane: PaneTarget::Tree,
+                cmd: Box::new(Command::WinDown),
+            },
             Command::WinExpandAll,
             Command::WinCollapseAll,
             Command::PlayerPlay,

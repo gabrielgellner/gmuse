@@ -46,6 +46,12 @@ pub const DEFAULTS: &[&str] = &[
     "bind common pagedown win-page-down",
     "bind common pageup win-page-up",
     "bind common tab win-next-pane",
+    "bind common h win-pane-left",
+    "bind common l win-pane-right",
+    // Drive the tree from wherever you are, so stepping album to album does
+    // not need a Tab over and a Tab back each time.
+    "bind library ^j in tree win-down",
+    "bind library ^k in tree win-up",
     "bind common space win-toggle",
     "bind common enter win-activate",
     "bind common D win-remove",

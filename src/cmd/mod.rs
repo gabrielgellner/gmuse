@@ -100,6 +100,30 @@ pub enum VolSpec {
     Relative(f32),
 }
 
+/// A pane a command can be aimed at, rather than acting on whatever has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneTarget {
+    Tree,
+    Tracks,
+}
+
+impl PaneTarget {
+    pub fn name(self) -> &'static str {
+        match self {
+            PaneTarget::Tree => "tree",
+            PaneTarget::Tracks => "tracks",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "tree" | "left" => PaneTarget::Tree,
+            "tracks" | "right" => PaneTarget::Tracks,
+            _ => return None,
+        })
+    }
+}
+
 /// Where `:add` puts things.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddTarget {
@@ -215,6 +239,16 @@ pub enum Command {
     WinRemove,
     WinUpdate,
     WinNextPane,
+    WinPaneLeft,
+    WinPaneRight,
+    /// Run a command against a named pane instead of the focused one.
+    ///
+    /// The wrapper rather than a variant per pane per motion: it composes with
+    /// every existing command, and with the `:` line, for free.
+    In {
+        pane: PaneTarget,
+        cmd: Box<Command>,
+    },
     WinExpandAll,
     WinCollapseAll,
     // playback

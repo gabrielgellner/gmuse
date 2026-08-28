@@ -57,6 +57,11 @@ resample_quality = "balanced" # fast | balanced | high
 "g g" = "win-top"
 "g t" = "view-next"
 
+# `in <pane> <command>` aims a command at a pane without moving focus, so you
+# can step the tree while reading the track list.
+"^j" = "in tree win-down"
+"^k" = "in tree win-up"
+
 # A single command.
 "^n" = "player-next"
 "^p" = "player-prev"

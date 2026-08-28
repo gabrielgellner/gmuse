@@ -853,6 +853,20 @@ Append here as decisions are made. Format: date, decision, rationale.
   count carried no meaning, unlike the `[Month; 12]` and `[Weekday; 7]` in the registry, where twelve and seven _are_
   the fact being stated. Ours grow; theirs cannot.
 
+- **2026-08-28** **Directional pane movement and the `in <pane>` wrapper (issue #5).** `h`/`l` move between panes.
+  Directional rather than reusing the `Tab` toggle: with two panes they behave the same, but the binding says what it
+  means and keeps working when a third arrives.
+
+  The more interesting half is **aiming a command at a pane that does not have focus**, taken from eilmeldung
+  (`docs/inspiration/eilmeldung.md`). `bind library ^j in tree win-down` steps the tree while the _track_ pane keeps
+  focus — so browsing album to album no longer needs a `Tab` over and a `Tab` back for each one.
+
+  **A wrapper, not a variant per motion per pane.** `Command::In { pane, cmd }` sets the focused pane, runs the ordinary
+  command through the same `execute_counted`, and restores focus. Every existing command works through it, counts pass
+  through unchanged, and it is expressible on the `:` line (`:in tree win-bottom`) — none of which would be true of
+  `win-down-in-tree`-style variants. This is why §5's issue said to design both halves together: doing `h`/`l` alone
+  would not have forced the question.
+
 ---
 
 ## 14. Prior art worth reading

@@ -574,6 +574,34 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 };
             }
         }
+        // Directional rather than a toggle: with two panes they behave the
+        // same, but the binding says what it means and keeps working when a
+        // third arrives.
+        Command::WinPaneLeft => {
+            if ui.view == View::Tree {
+                ui.tree.pane = Pane::Tree;
+            }
+        }
+        Command::WinPaneRight => {
+            if ui.view == View::Tree {
+                ui.tree.pane = Pane::Tracks;
+            }
+        }
+        // Run a command as though the named pane had focus, then put focus
+        // back. Reusing the ordinary command rather than duplicating every
+        // motion per pane is the whole point of the wrapper.
+        Command::In { pane, cmd } => {
+            if ui.view != View::Tree {
+                return;
+            }
+            let focused = ui.tree.pane;
+            ui.tree.pane = match pane {
+                crate::cmd::PaneTarget::Tree => Pane::Tree,
+                crate::cmd::PaneTarget::Tracks => Pane::Tracks,
+            };
+            execute_counted(ui, ctx, *cmd, count);
+            ui.tree.pane = focused;
+        }
         Command::WinToggle => {
             if ui.view == View::Tree && ui.tree.pane == Pane::Tree {
                 ui.tree.toggle(&ui.library, ctx.store);
@@ -2551,5 +2579,106 @@ mod tests {
         let store = fixture();
         let ui = ui_of(&store, true);
         assert!(!ui.relative_numbers, "the gutter must be opt-in");
+    }
+    // ---- pane navigation (#5) --------------------------------------------
+
+    #[test]
+    fn h_and_l_move_between_panes() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        assert_eq!(ui.tree.pane, Pane::Tree);
+
+        press(&mut ui, &ctx, "l");
+        assert_eq!(ui.tree.pane, Pane::Tracks);
+        press(&mut ui, &ctx, "h");
+        assert_eq!(ui.tree.pane, Pane::Tree);
+
+        // Directional, not a toggle: pressing the same one twice stays put.
+        press(&mut ui, &ctx, "h");
+        assert_eq!(ui.tree.pane, Pane::Tree);
+        press(&mut ui, &ctx, "l");
+        press(&mut ui, &ctx, "l");
+        assert_eq!(ui.tree.pane, Pane::Tracks);
+    }
+
+    /// The point of the whole feature: step album to album from the track
+    /// pane, without a Tab over and a Tab back each time.
+    #[test]
+    fn ctrl_j_drives_the_tree_without_leaving_the_track_pane() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "l"); // focus the tracks
+        assert_eq!(ui.tree.pane, Pane::Tracks);
+        let first = ui.tree.tracks_for(&ui.library, &store);
+
+        press(&mut ui, &ctx, "^j");
+        assert_eq!(ui.tree.selected, 1, "the tree did not move");
+        assert_eq!(ui.tree.pane, Pane::Tracks, "focus was stolen");
+
+        // And the track pane now shows a different set.
+        let second = ui.tree.tracks_for(&ui.library, &store);
+        assert_ne!(first, second, "the track list did not follow");
+
+        press(&mut ui, &ctx, "^k");
+        assert_eq!(ui.tree.selected, 0);
+        assert_eq!(ui.tree.pane, Pane::Tracks);
+    }
+
+    #[test]
+    fn driving_the_tree_resets_the_track_cursor() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "l");
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.tree.track_selected, 1);
+
+        // Otherwise the cursor would point into the previous album's list.
+        press(&mut ui, &ctx, "^j");
+        assert_eq!(ui.tree.track_selected, 0);
+    }
+
+    #[test]
+    fn a_count_passes_through_the_pane_wrapper() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "l");
+
+        press(&mut ui, &ctx, "2");
+        press(&mut ui, &ctx, "^j");
+        assert_eq!(ui.tree.selected, 2, "the count was dropped by `in`");
+    }
+
+    #[test]
+    fn the_in_wrapper_is_expressible_on_the_command_line() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "in tree win-bottom");
+        let rows = ui.tree.rows(&ui.library, &store).len();
+        assert_eq!(ui.tree.selected, rows - 1);
+        // Focus is unchanged: `in` aims a command, it does not move you.
+        assert_eq!(ui.tree.pane, Pane::Tree);
+    }
+
+    #[test]
+    fn pane_commands_do_nothing_in_a_single_pane_view() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 1;
+
+        // No panes here, so these must not disturb anything.
+        press(&mut ui, &ctx, "h");
+        press(&mut ui, &ctx, "l");
+        press(&mut ui, &ctx, "^j");
+        assert_eq!(ui.sorted, 1);
     }
 }
