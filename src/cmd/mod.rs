@@ -124,6 +124,7 @@ pub enum SettingKey {
     Continue,
     SmartArtistSort,
     ResampleQuality,
+    AlbumHeaders,
 }
 
 impl SettingKey {
@@ -136,6 +137,7 @@ impl SettingKey {
             SettingKey::Continue => "continue",
             SettingKey::SmartArtistSort => "smart_artist_sort",
             SettingKey::ResampleQuality => "resample_quality",
+            SettingKey::AlbumHeaders => "album_headers",
         }
     }
 
@@ -148,11 +150,12 @@ impl SettingKey {
             "continue" => SettingKey::Continue,
             "smart_artist_sort" => SettingKey::SmartArtistSort,
             "resample_quality" => SettingKey::ResampleQuality,
+            "album_headers" => SettingKey::AlbumHeaders,
             _ => return None,
         })
     }
 
-    pub const ALL: [SettingKey; 7] = [
+    pub const ALL: [SettingKey; 8] = [
         SettingKey::AaaMode,
         SettingKey::Shuffle,
         SettingKey::Repeat,
@@ -160,6 +163,7 @@ impl SettingKey {
         SettingKey::Continue,
         SettingKey::SmartArtistSort,
         SettingKey::ResampleQuality,
+        SettingKey::AlbumHeaders,
     ];
 }
 

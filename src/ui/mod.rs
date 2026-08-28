@@ -203,6 +203,9 @@ pub struct Ui {
     /// Keep playing past the end of the current album/artist pool. Stored here
     /// because it is a setting the user toggles, not a property of a track.
     pub continue_playing: bool,
+    /// Divide track lists by album. cmus does; the alternative is one
+    /// undifferentiated column.
+    pub album_headers: bool,
     pub smart_artist_sort: bool,
     /// When the transient `status` message should stop being shown. Without
     /// this a one-off notice sits in the status line for the rest of the
@@ -233,6 +236,7 @@ impl Ui {
             library,
             catalogs: crate::catalog::Catalogs::default(),
             continue_playing: true,
+            album_headers: true,
             smart_artist_sort: true,
             status_until: None,
             quit: false,
@@ -580,6 +584,7 @@ pub fn execute(ui: &mut Ui, ctx: &Context<'_>, cmd: Command) {
                 SettingKey::Repeat => SettingValue::Bool(!ui.playback.repeat),
                 SettingKey::RepeatCurrent => SettingValue::Bool(!ui.playback.repeat_current),
                 SettingKey::Continue => SettingValue::Bool(!ui.continue_playing),
+                SettingKey::AlbumHeaders => SettingValue::Bool(!ui.album_headers),
                 SettingKey::SmartArtistSort => SettingValue::Bool(!ui.smart_artist_sort),
                 SettingKey::ResampleQuality => {
                     ui.notify("resample_quality needs :set, it is not a toggle");
@@ -667,6 +672,7 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
         (SettingKey::Repeat, SettingValue::Bool(v)) => ui.playback.repeat = v,
         (SettingKey::RepeatCurrent, SettingValue::Bool(v)) => ui.playback.repeat_current = v,
         (SettingKey::Continue, SettingValue::Bool(v)) => ui.continue_playing = v,
+        (SettingKey::AlbumHeaders, SettingValue::Bool(v)) => ui.album_headers = v,
         (SettingKey::SmartArtistSort, SettingValue::Bool(v)) => {
             ui.smart_artist_sort = v;
             // The projection is ours now, so this takes effect immediately.
@@ -862,22 +868,42 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
             body,
             ui,
             ctx,
-            ui.library.sorted(),
-            ui.sorted,
-            "sorted",
+            TrackList {
+                ids: ui.library.sorted(),
+                selected: ui.sorted,
+                title: "sorted",
+                focused: true,
+                divide: true,
+            },
         ),
         View::Playlist => draw_tracks(
             frame,
             body,
             ui,
             ctx,
-            ui.playlist.entries(),
-            ui.playlist_sel,
-            "playlist",
+            TrackList {
+                ids: ui.playlist.entries(),
+                selected: ui.playlist_sel,
+                title: "playlist",
+                focused: true,
+                divide: false,
+            },
         ),
         View::Queue => {
             let entries: Vec<_> = ui.queue.entries().copied().collect();
-            draw_tracks(frame, body, ui, ctx, &entries, ui.queue_sel, "queue")
+            draw_tracks(
+                frame,
+                body,
+                ui,
+                ctx,
+                TrackList {
+                    ids: &entries,
+                    selected: ui.queue_sel,
+                    title: "queue",
+                    focused: true,
+                    divide: false,
+                },
+            )
         }
         View::Browser => draw_browser(frame, body, ui),
         View::Filters => frame.render_widget(
@@ -909,6 +935,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
             SettingKey::Continue => ui.continue_playing.to_string(),
             SettingKey::SmartArtistSort => ui.smart_artist_sort.to_string(),
             SettingKey::ResampleQuality => "balanced".into(),
+            SettingKey::AlbumHeaders => ui.album_headers.to_string(),
         };
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
@@ -1012,39 +1039,64 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
     );
 
     let tracks = ui.tree.tracks_for(&ui.library, ctx.store);
-    let items = list::track_items(ctx.store, &tracks);
-    let mut state = ListState::default().with_selected(Some(ui.tree.track_selected));
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(pane_block(&ui.theme, "tracks", !focused))
-            .highlight_style(highlight(&ui.theme, !focused)),
+    draw_track_list(
+        frame,
         right,
-        &mut state,
+        ui,
+        ctx,
+        TrackList {
+            ids: &tracks,
+            selected: ui.tree.track_selected,
+            title: "tracks",
+            focused: !focused,
+            divide: true,
+        },
     );
 }
 
-fn draw_tracks(
-    frame: &mut Frame,
-    area: Rect,
-    ui: &Ui,
-    ctx: &Context<'_>,
-    ids: &[crate::store::TrackId],
+/// What to draw a track list as.
+struct TrackList<'a> {
+    ids: &'a [crate::store::TrackId],
+    /// A **track** index, not a screen row.
     selected: usize,
-    title: &str,
-) {
-    if ids.is_empty() {
+    title: &'a str,
+    focused: bool,
+    /// Divide by album. Off for the playlist and queue: they are deliberate
+    /// orderings, and dividing an interleaved one puts a header on nearly
+    /// every row.
+    divide: bool,
+}
+
+fn draw_tracks(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: TrackList<'_>) {
+    if spec.ids.is_empty() {
         frame.render_widget(
-            Paragraph::new(empty_hint(&ui.theme, title)).block(pane_block(&ui.theme, title, true)),
+            Paragraph::new(empty_hint(&ui.theme, spec.title))
+                .block(pane_block(&ui.theme, spec.title, true)),
             area,
         );
         return;
     }
-    let items = list::track_items(ctx.store, ids);
-    let mut state = ListState::default().with_selected(Some(selected));
+    draw_track_list(frame, area, ui, ctx, spec);
+}
+
+/// Draw a track list, dividing it by album where that helps.
+///
+/// `selected` is a **track** index. Album dividers occupy a screen row but no
+/// index, so this is the one place the two coordinate systems meet — every
+/// other caller counts tracks.
+fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: TrackList<'_>) {
+    let rows = if spec.divide && ui.album_headers {
+        list::rows(ctx.store, spec.ids)
+    } else {
+        spec.ids.iter().copied().map(list::Row::Track).collect()
+    };
+    let items = list::items(&ui.theme, ctx.store, &rows);
+    let mut state =
+        ListState::default().with_selected(list::row_of_track(&rows, spec.selected).or(Some(0)));
     frame.render_stateful_widget(
         List::new(items)
-            .block(pane_block(&ui.theme, title, true))
-            .highlight_style(highlight(&ui.theme, true)),
+            .block(pane_block(&ui.theme, spec.title, spec.focused))
+            .highlight_style(highlight(&ui.theme, spec.focused)),
         area,
         &mut state,
     );
@@ -2042,5 +2094,107 @@ mod tests {
         let out = render(&ui, &ctx, 110, 24);
         assert!(out.contains("catalog paak"), "{out}");
         assert!(out.contains("catalog va"), "{out}");
+    }
+    // ---- album headers (#7) ----------------------------------------------
+
+    /// Divider rows only. The pane border is also drawn with `─`, so a naive
+    /// substring search matches the frame itself.
+    fn dividers(out: &str) -> Vec<String> {
+        out.lines()
+            .filter(|l| {
+                let body = l.trim_start_matches(['│', ' ']);
+                body.starts_with("──") && !l.starts_with(['┌', '└'])
+            })
+            .map(|l| l.trim().to_string())
+            .collect()
+    }
+
+    /// Dividers are drawn, but the cursor still counts tracks — the whole
+    /// point of keeping the two coordinate systems apart.
+    #[test]
+    fn dividers_do_not_shift_the_cursor() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        // Moving down N times must land on the (N+1)th *track*, however many
+        // dividers were drawn above it.
+        for _ in 0..3 {
+            press(&mut ui, &ctx, "j");
+        }
+        assert_eq!(ui.sorted, 3);
+        let expected = ui.library.sorted()[3];
+        assert_eq!(ui.selected_track(&ctx), Some(expected));
+    }
+
+    #[test]
+    fn the_sorted_view_is_divided_by_album() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        let out = render(&ui, &ctx, 100, 24);
+        let found = dividers(&out);
+        assert!(!found.is_empty(), "no divider drawn:\n{out}");
+        // The fixture spans several artists, so headers name them.
+        assert!(
+            found.iter().any(|d| d.contains("Malibu")),
+            "{found:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn dividers_can_be_turned_off() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "set album_headers=false");
+        let out = render(&ui, &ctx, 100, 24);
+        assert!(
+            dividers(&out).is_empty(),
+            "dividers survived being turned off: {:?}\n{out}",
+            dividers(&out)
+        );
+    }
+
+    /// Every track must still be reachable with the dividers in place.
+    #[test]
+    fn every_track_is_still_selectable() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        let total = ui.library.sorted().len();
+        let mut seen = Vec::new();
+        for _ in 0..total {
+            seen.push(ui.selected_track(&ctx).expect("a divider was selectable"));
+            press(&mut ui, &ctx, "j");
+        }
+        assert_eq!(seen.len(), total);
+        assert_eq!(seen, ui.library.sorted(), "order or reachability changed");
+    }
+
+    #[test]
+    fn the_playlist_is_not_divided() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        // Add tracks from several albums.
+        for id in ui.library.sorted().to_vec() {
+            ui.playlist.push(id);
+        }
+        ui.view = View::Playlist;
+        let out = render(&ui, &ctx, 100, 24);
+        // A playlist is a deliberate ordering; a header would imply a grouping
+        // that is not there.
+        assert!(
+            dividers(&out).is_empty(),
+            "the playlist was divided:\n{out}"
+        );
     }
 }

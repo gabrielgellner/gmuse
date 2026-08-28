@@ -33,6 +33,7 @@ pub enum Role {
     SettingKey,
     BindingContext,
     BindingKey,
+    AlbumHeader,
 }
 
 impl Role {
@@ -54,6 +55,7 @@ impl Role {
             Role::SettingKey => "setting_key",
             Role::BindingContext => "binding_context",
             Role::BindingKey => "binding_key",
+            Role::AlbumHeader => "album_header",
         }
     }
 
@@ -61,7 +63,7 @@ impl Role {
         Self::ALL.into_iter().find(|r| r.name() == s)
     }
 
-    pub const ALL: [Role; 16] = [
+    pub const ALL: [Role; 17] = [
         Role::TabActive,
         Role::TabInactive,
         Role::BorderFocused,
@@ -78,6 +80,7 @@ impl Role {
         Role::SettingKey,
         Role::BindingContext,
         Role::BindingKey,
+        Role::AlbumHeader,
     ];
 }
 
@@ -143,6 +146,9 @@ impl Default for Theme {
                 Role::SettingKey => Style::default().fg(accent),
                 Role::BindingContext => Style::default().fg(Color::DarkGray),
                 Role::BindingKey => Style::default().fg(Color::Yellow),
+                // cmus styles its track-window album line separately; this is
+                // the same row, and the reason color_trackwin_album_fg exists.
+                Role::AlbumHeader => Style::default().fg(accent).add_modifier(Modifier::BOLD),
             };
             styles.insert(role, style);
         }

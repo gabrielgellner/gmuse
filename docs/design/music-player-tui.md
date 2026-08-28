@@ -808,6 +808,26 @@ Append here as decisions are made. Format: date, decision, rationale.
 - **2026-08-28** The prompt's `library` command reports what the **active catalogs** cover rather than the whole store,
   which is what the views show. Previously the two contradicted each other.
 
+- **2026-08-28** **Album dividers in track lists (issue #7), and the two coordinate systems they create.** A divider
+  occupies a screen row but **no index**: cursors, counts and motions all address _tracks_, and `list::row_of_track` is
+  the single place the two meet. That is slightly more bookkeeping in the renderer than making every motion
+  header-aware, and it is the version where nothing outside `ui/list.rs` needs to know dividers exist — which is what
+  keeps issue #6's motion layer simple.
+
+  Rules that fell out of building it:
+
+  - **A single-album list gets no divider.** The pane title or the tree selection already says which album it is; a lone
+    header at the top is a wasted line.
+  - **The artist is named only when the list spans more than one.** In a tree's track pane the artist is fixed by the
+    selection, so repeating it on every divider is noise; in the sorted view it is the useful half of the label.
+  - **A new disc divides within an album**, and a missing disc number counts as disc 1 — otherwise a partially tagged
+    album divides itself in half.
+  - **The playlist and queue are never divided.** They are deliberate orderings, and an interleaved one would get a
+    divider on nearly every row. This was found by a test, not by design: `draw_tracks` served all three views and was
+    dividing the playlist.
+
+  Styled through `Role::AlbumHeader`, the same row cmus styles with `color_trackwin_album_fg`.
+
 ---
 
 ## 14. Prior art worth reading

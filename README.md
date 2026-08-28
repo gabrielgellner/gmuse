@@ -111,6 +111,8 @@ all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue, `
 
 `:` opens the command line, `/` and `?` search, `n`/`N` repeat the search. View 7 lists every setting and binding.
 
+Track lists are divided by album, and by disc within a multi-disc album. Turn it off with `:set album_headers=false`.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/gmuse/config.toml`. Settings and theming are TOML tables; key bindings hold **commands**, the same
