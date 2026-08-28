@@ -20,8 +20,8 @@ Early. The audio path works; there is no UI yet.
 | M2 — the audio API (`PlayerHandle`)       | next                                     |
 | M3–M9 — library, views, commands, gapless | not started                              |
 
-Today `gmuse <file>` plays a file, and a line-based prompt drives the player — load, play, pause, stop, seek, volume,
-status. Type `help` at the prompt. This stands in for the UI until M4.
+Today the TUI browses a scanned library across five views, and `--repl` gives a line prompt that can actually play files
+— load, play, pause, stop, seek, volume, status. The two meet in M5.
 
 ## Building
 
@@ -29,9 +29,12 @@ Requires a Rust toolchain (edition 2024, MSRV 1.85) and **`cmake`**, which build
 
 ```sh
 brew install cmake        # or your platform's package manager
-cargo build --release
-cargo run --release -- ~/path/to/a/track.mp3
+just ui ~/MusicLibrary    # scan a library and open the TUI
+just ui                   # later runs reuse the cached library
+just play ~/path/to/a/track.mp3   # line prompt, which can actually play
 ```
+
+`just --list` shows the rest.
 
 To build without Opus support and drop the only C dependency:
 
@@ -95,7 +98,13 @@ gmuse [OPTIONS] [FILE]
       --rescan               re-read every file, ignoring mtimes
       --no-cache             do not read or write the library cache
       --cache <PATH>         where the library cache lives      [env: GMUSE_CACHE]
+      --repl                 use the line prompt instead of the TUI
+      --smart-artist-sort    sort artists ignoring a leading The/A/An  [default: true]
 ```
+
+The TUI opens on the library tree. `1`-`5` switch views (library, sorted, playlist, queue, browser), `j`/`k` move,
+`space` expands an artist, `tab` swaps pane, `E`/`C` expand/collapse all, `q` quits. It is read-only until M5 wires
+playback in — use `--repl` to actually play something in the meantime.
 
 The library is scanned on startup and cached at `$XDG_CACHE_HOME/gmuse/library.postcard`, so later runs need no
 `--library`. Rescans are incremental by mtime: 20,000 tracks scan cold in 0.86s and rescan in 0.08s.

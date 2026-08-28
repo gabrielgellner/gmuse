@@ -14,10 +14,31 @@ default:
 build:
     cargo build --release
 
-# Play a file. Example: just run ~/MusicLibrary/Burial/"Burial (S-T)"/"05 Night Bus.mp3"
+# Launch the TUI: just ui [library-root]   (the root is remembered in the cache)
 [group('dev')]
-run file:
-    cargo run --release -- "{{ file }}"
+ui dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{ dir }}" ]; then
+        cargo run --release -- --library "{{ dir }}"
+    else
+        cargo run --release
+    fi
+
+# Play one file at the line prompt (the TUI cannot start playback until M5)
+[group('dev')]
+play file:
+    cargo run --release -- --repl "{{ file }}"
+
+# Open the line prompt with nothing loaded; type `help` there
+[group('dev')]
+repl:
+    cargo run --release -- --repl
+
+# Rebuild the library cache from scratch, ignoring stored mtimes
+[group('dev')]
+rescan dir:
+    echo quit | cargo run --release -- --library "{{ dir }}" --rescan --repl
 
 # Build without Opus support, dropping the only C dependency (needs no cmake)
 [group('dev')]

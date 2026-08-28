@@ -58,6 +58,17 @@ pub struct Cli {
     /// Where the library cache lives.
     #[arg(long, env = "GMUSE_CACHE")]
     pub cache: Option<PathBuf>,
+
+    /// Use the line-based prompt instead of the TUI.
+    ///
+    /// The TUI is read-only until M5 wires playback into it; this keeps the
+    /// M2 driver available in the meantime.
+    #[arg(long)]
+    pub repl: bool,
+
+    /// Sort artists ignoring a leading "The"/"A"/"An".
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub smart_artist_sort: bool,
 }
 
 impl Cli {

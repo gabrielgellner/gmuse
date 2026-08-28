@@ -365,8 +365,8 @@ display doesn't jump on seek.
 **M3 — store and scan.** ✅ _done 2026-08-27._ `walkdir` + `lofty` into `Store`, postcard cache, incremental rescan by
 mtime. No UI. Verify against a real library — measure scan time and memory on ~20k tracks.
 
-**M4 — the views.** ratatui, views 1–5, navigation, `Tab`, `Space` expand. Read-only, no playback wired in. Verify: tree
-renders correctly for compilations, multi-disc albums, and missing tags.
+**M4 — the views.** ✅ _done 2026-08-27._ ratatui, views 1–5, navigation, `Tab`, `Space` expand. Read-only, no playback
+wired in. Verify: tree renders correctly for compilations, multi-disc albums, and missing tags.
 
 **M5 — next() and playback wiring.** Implement `next.rs` with its full test table, wire views to `PlayerHandle`. Verify:
 every row in the test table, then listen for an hour.
@@ -553,6 +553,31 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   Peak RSS **78 MB**, cache **7.7 MB** (~385 bytes/track). The real library (148 tracks) scans in 0.09s. `walkdir` is
   comfortably fast enough that the §2 note about swapping in `jwalk` can be ignored.
+
+- **2026-08-27** Added `ratatui` and `crossterm` for M4, both budgeted in §2 (at the corrected versions).
+- **2026-08-27** **View 2 is view 1 flattened, not an independently sorted list.** Building `sorted` by walking the tree
+  guarantees the two views agree on ordering; sorting a second time invites them to disagree about ties.
+- **2026-08-27** **`smart_artist_sort` applies to artists only.** "The Beatles" files under B, but the album "The Wall"
+  keeps its T — an article is noise in a name and meaningful in a title.
+- **2026-08-27** **Track order inside an album is disc, then track number, then title, then path.** A missing disc
+  counts as disc 1 (single-disc albums omit it), and a missing track number sorts _last_ rather than first, so untagged
+  strays collect at the bottom instead of displacing track 1.
+- **2026-08-27** **The tree is flattened to rows every frame** rather than kept as a persistent structure. Two levels
+  and a `HashSet` of expanded keys is less code than a parallel tree that has to be re-synced whenever the library is
+  rebuilt, and it cannot drift out of step. Revisit if profiling at 20k tracks says otherwise — it has not been measured
+  under a render loop yet.
+- **2026-08-27** **Space on an album row collapses its artist and moves the cursor to that artist.** Without the cursor
+  move the selection would be left pointing at whatever row slid into that index — usually a different artist entirely.
+  Moving the tree cursor also resets the track-pane cursor, for the same reason.
+- **2026-08-27** **The TUI is the default; `--repl` keeps the M2 line driver.** M4 is read-only by design, so making the
+  TUI the only interface would have removed the ability to play anything until M5.
+- **2026-08-27** `ratatui::init()` installs a panic hook that restores the terminal, so a panic mid-render leaves a
+  usable shell. Note that ratatui 0.30 made `Backend::Error` an associated type, so `ui::run` is bound on
+  `Backend<Error = io::Error>`; `TestBackend` is used directly in tests rather than through that bound.
+- **2026-08-27** **M4's acceptance cases are golden-file tests** over `TestBackend`, per §10: a compilation whose tracks
+  carry three different `artist` tags stays one artist with all its tracks; a multi-disc album inserted disc-2-first
+  renders disc 1 above disc 2; and a file with no tags at all appears under "Unknown Artist" showing its file name.
+  Navigation clamping, `Tab` focus and view switching are covered by driving `handle_key` directly.
 
 ---
 

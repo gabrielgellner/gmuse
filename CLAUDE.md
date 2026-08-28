@@ -18,7 +18,8 @@ decision in its Decision Log (§13). Anything in the §1 "out of scope" list sta
 just                 # list all recipes
 just hooks-install   # do this once per clone
 just ci              # the full gate: fmt + lint + typecheck + test + build
-just run <file>      # play a file
+just ui [root]       # launch the TUI
+just play <file>     # play one file at the line prompt
 just bench           # resampler comparison table
 ```
 

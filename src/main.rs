@@ -10,9 +10,12 @@
 mod audio;
 mod cache;
 mod cli;
+mod library;
+mod playlist;
 mod repl;
 mod scan;
 mod store;
+mod ui;
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -22,6 +25,8 @@ use clap::Parser;
 
 use audio::{PlayerEvent, PlayerHandle, State};
 use cli::Cli;
+use library::Library;
+use playlist::{Playlist, Queue};
 use repl::Line;
 use store::Store;
 
@@ -75,6 +80,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         save_cache(&app);
     } else if !app.store.is_empty() {
         println!("library: {} tracks (cached)", app.store.len());
+    }
+
+    if !args.repl {
+        // A file named on the command line still plays, even though the views
+        // themselves cannot start playback until M5 — silently ignoring an
+        // explicit argument would be worse than the milestone boundary.
+        if let Some(path) = &args.file {
+            app.player.load(path.clone());
+        }
+        return run_tui(&app, args.smart_artist_sort);
     }
 
     match &args.file {
@@ -146,6 +161,36 @@ fn run(app: &mut App, cmd: Line) {
         Line::Help => println!("{}", repl::HELP),
         Line::Quit | Line::Empty => {}
     }
+}
+
+/// Draw the views until the user quits.
+///
+/// The terminal is restored by the panic hook `ratatui::init` installs, so a
+/// panic mid-render leaves a usable terminal rather than a wedged one.
+fn run_tui(app: &App, smart_artist_sort: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let library = Library::rebuild(&app.store, smart_artist_sort);
+    let playlist = Playlist::new();
+    let queue = Queue::new();
+    let start_dir = app
+        .roots
+        .first()
+        .cloned()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("/"));
+
+    let ctx = ui::Context {
+        store: &app.store,
+        library: &library,
+        playlist: &playlist,
+        queue: &queue,
+    };
+    let mut state = ui::Ui::new(start_dir);
+
+    let mut terminal = ratatui::init();
+    let result = ui::run(&mut terminal, &mut state, &ctx);
+    ratatui::restore();
+    result?;
+    Ok(())
 }
 
 fn save_cache(app: &App) {
