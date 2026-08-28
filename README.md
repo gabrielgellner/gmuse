@@ -106,7 +106,24 @@ The TUI opens on the library tree. `1`-`5` switch views (library, sorted, playli
 `space` expands an artist, `tab` swaps pane, `E`/`Backspace` expand/collapse all, `q` quits.
 
 Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
-`<`/`>` seek 60s, `-`/`+` adjust volume. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `m` cycles all/artist/album.
+`<`/`>` seek 60s, `-`/`+` adjust volume. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m` cycles
+all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue, `D` removes.
+
+`:` opens the command line, `/` and `?` search, `n`/`N` repeat the search. View 7 lists every setting and binding.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/gmuse/rc` is a list of the same commands the `:` line takes, run at startup:
+
+```
+# ~/.config/gmuse/rc
+set shuffle=true
+set aaa_mode=album
+bind common ^n player-next
+unbind common q
+```
+
+A bad line is reported with its number and skipped; the rest of the file still loads.
 
 The library is scanned on startup and cached at `$XDG_CACHE_HOME/gmuse/library.postcard`, so later runs need no
 `--library`. Rescans are incremental by mtime: 20,000 tracks scan cold in 0.86s and rescan in 0.08s.

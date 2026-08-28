@@ -10,6 +10,7 @@
 mod audio;
 mod cache;
 mod cli;
+mod cmd;
 mod library;
 mod next;
 mod playlist;
@@ -82,6 +83,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("library: {} tracks (cached)", app.store.len());
     }
 
+    // Read the rc file before the terminal is taken over, so its errors are
+    // visible rather than painted under the UI.
+    let (rc_commands, rc_errors) = if args.no_rc {
+        (Vec::new(), Vec::new())
+    } else {
+        cmd::rc::load(&args.rc.clone().unwrap_or_else(cmd::rc::default_path))
+    };
+
     if !args.repl {
         // A file named on the command line still plays, even though the views
         // themselves cannot start playback until M5 — silently ignoring an
@@ -89,7 +98,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(path) = &args.file {
             app.player.load(path.clone());
         }
-        return run_tui(&app, args.smart_artist_sort);
+        return run_tui(&app, args.smart_artist_sort, rc_commands, rc_errors);
+    }
+
+    // The rc file configures UI state, which the line prompt does not have.
+    // Say so rather than loading it and silently doing nothing.
+    if !rc_commands.is_empty() {
+        println!(
+            "note: {} rc command(s) ignored — the rc file applies to the TUI, not --repl",
+            rc_commands.len()
+        );
+    }
+    for e in &rc_errors {
+        eprintln!("rc: {e}");
     }
 
     match &args.file {
@@ -167,7 +188,12 @@ fn run(app: &mut App, cmd: Line) {
 ///
 /// The terminal is restored by the panic hook `ratatui::init` installs, so a
 /// panic mid-render leaves a usable terminal rather than a wedged one.
-fn run_tui(app: &App, smart_artist_sort: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_tui(
+    app: &App,
+    smart_artist_sort: bool,
+    rc_commands: Vec<cmd::Command>,
+    rc_errors: Vec<cmd::rc::RcError>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let library = Library::rebuild(&app.store, smart_artist_sort);
     let start_dir = app
         .roots
@@ -182,6 +208,18 @@ fn run_tui(app: &App, smart_artist_sort: bool) -> Result<(), Box<dyn std::error:
         player: Some(&app.player),
     };
     let mut state = ui::Ui::new(start_dir);
+
+    // The rc file is just commands, so it runs through the same execute() a
+    // keypress does — there is no separate configuration path to keep in step.
+    for cmd in rc_commands {
+        ui::execute(&mut state, &ctx, cmd);
+    }
+    if !rc_errors.is_empty() {
+        state.notify(format!("{} problem(s) in the rc file", rc_errors.len()));
+        for e in &rc_errors {
+            eprintln!("rc: {e}");
+        }
+    }
 
     let mut terminal = ratatui::init();
     let result = ui::run(&mut terminal, &mut state, &ctx);

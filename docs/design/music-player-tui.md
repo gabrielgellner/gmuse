@@ -372,8 +372,8 @@ wired in. Verify: tree renders correctly for compilations, multi-disc albums, an
 `next.rs` with its full test table, wire views to `PlayerHandle`. Verify: every row in the test table, then listen for
 an hour.
 
-**M6 — command layer.** `Command`, rc parsing, `:` line, `Bindings`, view 7. Verify: every default binding, plus
-rebinding round-trips through the rc file.
+**M6 — command layer.** ✅ _done 2026-08-27._ `Command`, rc parsing, `:` line, `Bindings`, view 7. Verify: every default
+binding, plus rebinding round-trips through the rc file.
 
 **M7 — gapless.** Pre-decode next track into a second buffer, transition without draining to silence. Verify on a
 continuous-mix album — this is the acid test.
@@ -675,6 +675,28 @@ Append here as decisions are made. Format: date, decision, rationale.
 - **2026-08-27** Three clicks, three different layers, all reported as "a pop": the transport transition (no ramp), ring
   starvation (unramped cut at the buffer boundary), and a dropped chunk (a hole in the data). **A single audible symptom
   is not a single bug**, and the delay between action and pop is the clue to which layer it came from.
+
+- **2026-08-27** **The default bindings are stored as rc-file text, not as constructed values.** `bind::DEFAULTS` is an
+  array of `"bind common j win-down"` strings parsed at startup. The defaults therefore go through exactly the parser a
+  user's rc file does, so a default that could not be expressed in the file — or that the parser gets wrong — fails a
+  test instead of shipping. It also makes the defaults readable as documentation.
+- **2026-08-27** **`cmd::keys::Key` is not `crossterm::KeyEvent`.** The terminal type also carries a press/release kind
+  and a state bitfield, and two events a user would call "the same key" can differ in those, so a map keyed on it misses
+  lookups. `Key` holds a code plus ctrl/alt, and **shift is folded into the character**: the terminal reports `J` with
+  SHIFT set, and treating that as distinct from a bound `J` would mean no capital binding ever fired.
+- **2026-08-27** **`:`, `/` and `?` are UI modes, not commands.** They open a prompt; there is nothing to execute until
+  a line has been typed. The prompt swallows every key while open, which is what stops `q` quitting mid-command.
+- **2026-08-27** The rc file reports a bad line by number and **keeps loading**. One typo in a config should not cost
+  every binding after it.
+- **2026-08-27** Added `WinExpandAll`/`WinCollapseAll` beyond §6's list, bound to `M-e`/`M-c` — §6's table gives `E` and
+  `C` to add-targets and continue, and expanding a whole tree is worth a key.
+- **2026-08-27** **`--repl` does not apply the rc file** and says so, rather than loading it and silently doing nothing:
+  the rc configures UI state that the line prompt has none of. The prompt still has its own small parser; folding it
+  into `Command` is worthwhile once it is clear whether it survives at all.
+- **2026-08-27** **§9's M6 criteria are two round-trip tests and one coverage test.** Every `Command` and every bindable
+  `Key` must survive `parse(format(x)) == x`, or saving a config would quietly rewrite it. And every entry in `DEFAULTS`
+  is resolved through `bind::lookup` from its own context and then executed, so a binding that parses but resolves to
+  nothing — or panics when run — fails rather than waiting to be discovered by hand.
 
 ---
 

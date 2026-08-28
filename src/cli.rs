@@ -59,6 +59,14 @@ pub struct Cli {
     #[arg(long, env = "GMUSE_CACHE")]
     pub cache: Option<PathBuf>,
 
+    /// Config file of commands to run at startup. Same syntax as the `:` line.
+    #[arg(long, env = "GMUSE_RC")]
+    pub rc: Option<PathBuf>,
+
+    /// Skip the rc file entirely.
+    #[arg(long)]
+    pub no_rc: bool,
+
     /// Use the line-based prompt instead of the TUI.
     ///
     /// The TUI is read-only until M5 wires playback into it; this keeps the

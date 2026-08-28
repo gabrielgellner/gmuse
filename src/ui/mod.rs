@@ -11,7 +11,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -19,6 +19,11 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::audio::PlayerHandle;
+use crate::cmd::bind::{self, Bindings};
+use crate::cmd::keys::Key;
+use crate::cmd::{
+    AddTarget, Command, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec, parse,
+};
 use crate::library::Library;
 use crate::next::{self, ActiveSource, Playback, Source};
 use crate::playlist::{Playlist, Queue};
@@ -34,6 +39,8 @@ pub enum View {
     Playlist = 3,
     Queue = 4,
     Browser = 5,
+    Filters = 6,
+    Settings = 7,
 }
 
 impl View {
@@ -44,18 +51,58 @@ impl View {
             View::Playlist => "playlist",
             View::Queue => "queue",
             View::Browser => "browser",
+            View::Filters => "filters",
+            View::Settings => "settings",
         }
     }
 
-    fn from_digit(c: char) -> Option<Self> {
-        Some(match c {
-            '1' => View::Tree,
-            '2' => View::Sorted,
-            '3' => View::Playlist,
-            '4' => View::Queue,
-            '5' => View::Browser,
-            _ => return None,
-        })
+    pub fn from_id(id: ViewId) -> Self {
+        match id {
+            ViewId::Library => View::Tree,
+            ViewId::Sorted => View::Sorted,
+            ViewId::Playlist => View::Playlist,
+            ViewId::Queue => View::Queue,
+            ViewId::Browser => View::Browser,
+            ViewId::Filters => View::Filters,
+            ViewId::Settings => View::Settings,
+        }
+    }
+
+    /// The binding context this view looks up keys in.
+    pub fn context(self) -> crate::cmd::Context {
+        use crate::cmd::Context as C;
+        match self {
+            View::Tree => C::Library,
+            View::Sorted => C::SortedLibrary,
+            View::Playlist => C::Playlist,
+            View::Queue => C::Queue,
+            View::Browser => C::Browser,
+            View::Filters => C::Filters,
+            View::Settings => C::Settings,
+        }
+    }
+}
+
+/// What the open prompt line is collecting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    Command,
+    Search(SearchDir),
+}
+
+#[derive(Debug, Clone)]
+pub struct Prompt {
+    pub kind: PromptKind,
+    pub buffer: String,
+}
+
+impl Prompt {
+    pub fn sigil(&self) -> char {
+        match self.kind {
+            PromptKind::Command => ':',
+            PromptKind::Search(SearchDir::Forward) => '/',
+            PromptKind::Search(SearchDir::Backward) => '?',
+        }
     }
 }
 
@@ -141,6 +188,16 @@ pub struct Ui {
     /// Shown briefly after a volume change, so the level is visible without a
     /// permanent indicator taking up room.
     pub volume_hint: Option<f32>,
+    pub bindings: Bindings,
+    /// The `:` or `/` line, when one is open.
+    pub prompt: Option<Prompt>,
+    /// The last search, for `n` and `N`.
+    pub last_search: Option<(String, SearchDir)>,
+    pub settings_sel: usize,
+    /// Keep playing past the end of the current album/artist pool. Stored here
+    /// because it is a setting the user toggles, not a property of a track.
+    pub continue_playing: bool,
+    pub smart_artist_sort: bool,
     /// When the transient `status` message should stop being shown. Without
     /// this a one-off notice sits in the status line for the rest of the
     /// session, hiding what is actually playing.
@@ -162,6 +219,12 @@ impl Ui {
             queue: Queue::new(),
             playback: Playback::default(),
             volume_hint: None,
+            bindings: bind::defaults(),
+            prompt: None,
+            last_search: None,
+            settings_sel: 0,
+            continue_playing: true,
+            smart_artist_sort: true,
             status_until: None,
             quit: false,
         }
@@ -198,7 +261,7 @@ impl Ui {
             View::Sorted => ctx.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
-            View::Browser => None,
+            View::Browser | View::Filters | View::Settings => None,
         }
     }
 }
@@ -306,61 +369,128 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
     }
 }
 
+/// Route a key.
+///
+/// A prompt swallows everything while it is open. Otherwise the key is
+/// normalised, looked up in the bindings (context first, then `Common`), and
+/// the resulting [`Command`] is handed to [`execute`] — which is the only
+/// place UI state is mutated, per §6.
 fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let page = 10usize;
+    if ui.prompt.is_some() {
+        handle_prompt_key(key, ui, ctx);
+        return;
+    }
 
-    // View switching and quit are global.
+    // Opening a prompt is a UI mode, not a command: there is nothing for it to
+    // do until a line has been typed.
     match key.code {
-        KeyCode::Char(c) if View::from_digit(c).is_some() => {
-            ui.view = View::from_digit(c).unwrap();
-            ui.status.clear();
+        KeyCode::Char(':') => {
+            ui.prompt = Some(Prompt {
+                kind: PromptKind::Command,
+                buffer: String::new(),
+            });
             return;
         }
-        KeyCode::Char('q') => {
-            ui.quit = true;
+        KeyCode::Char('/') => {
+            ui.prompt = Some(Prompt {
+                kind: PromptKind::Search(SearchDir::Forward),
+                buffer: String::new(),
+            });
+            return;
+        }
+        KeyCode::Char('?') => {
+            ui.prompt = Some(Prompt {
+                kind: PromptKind::Search(SearchDir::Backward),
+                buffer: String::new(),
+            });
             return;
         }
         _ => {}
     }
 
+    let key = Key::from_event(key);
+    if let Some(cmd) = bind::lookup(&ui.bindings, ui.view.context(), key).cloned() {
+        execute(ui, ctx, cmd);
+    }
+}
+
+fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(prompt) = ui.prompt.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => ui.prompt = None,
+        KeyCode::Backspace => {
+            if prompt.buffer.pop().is_none() {
+                // Backspacing past the sigil closes the line, as in vi.
+                ui.prompt = None;
+            }
+        }
+        KeyCode::Char(c) => prompt.buffer.push(c),
+        KeyCode::Enter => {
+            let prompt = ui.prompt.take().expect("checked above");
+            match prompt.kind {
+                PromptKind::Command => match parse::line(&prompt.buffer) {
+                    Ok(Some(cmd)) => execute(ui, ctx, cmd),
+                    Ok(None) => {}
+                    Err(e) => ui.notify(e.to_string()),
+                },
+                PromptKind::Search(dir) => execute(
+                    ui,
+                    ctx,
+                    Command::Search {
+                        pattern: prompt.buffer,
+                        dir,
+                    },
+                ),
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The one place all state mutation happens (DESIGN §6).
+pub fn execute(ui: &mut Ui, ctx: &Context<'_>, cmd: Command) {
     let len = current_len(ui, ctx);
     let cursor = current_cursor(ui);
+    let page = 10usize;
 
-    let moved = match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
-            Some(cursor.saturating_add(1).min(len.saturating_sub(1)))
+    match cmd {
+        // ---- navigation
+        Command::WinDown => set_cursor(ui, (cursor + 1).min(len.saturating_sub(1))),
+        Command::WinUp => set_cursor(ui, cursor.saturating_sub(1)),
+        Command::WinTop => set_cursor(ui, 0),
+        Command::WinBottom => set_cursor(ui, len.saturating_sub(1)),
+        Command::WinPageDown => set_cursor(ui, (cursor + page).min(len.saturating_sub(1))),
+        Command::WinPageUp => set_cursor(ui, cursor.saturating_sub(page)),
+        Command::WinNextPane => {
+            if ui.view == View::Tree {
+                ui.tree.pane = match ui.tree.pane {
+                    Pane::Tree => Pane::Tracks,
+                    Pane::Tracks => Pane::Tree,
+                };
+            }
         }
-        KeyCode::Char('k') | KeyCode::Up => Some(cursor.saturating_sub(1)),
-        KeyCode::Char('g') | KeyCode::Home => Some(0),
-        KeyCode::Char('G') | KeyCode::End => Some(len.saturating_sub(1)),
-        KeyCode::Char('f') if ctrl => Some((cursor + page).min(len.saturating_sub(1))),
-        KeyCode::Char('b') if ctrl => Some(cursor.saturating_sub(page)),
-        KeyCode::PageDown => Some((cursor + page).min(len.saturating_sub(1))),
-        KeyCode::PageUp => Some(cursor.saturating_sub(page)),
-        _ => None,
-    };
-
-    if let Some(next) = moved {
-        set_cursor(ui, next);
-        return;
-    }
-
-    match key.code {
-        KeyCode::Tab if ui.view == View::Tree => {
-            ui.tree.pane = match ui.tree.pane {
-                Pane::Tree => Pane::Tracks,
-                Pane::Tracks => Pane::Tree,
-            };
+        Command::WinToggle => {
+            if ui.view == View::Tree && ui.tree.pane == Pane::Tree {
+                ui.tree.toggle(ctx.library, ctx.store);
+            }
         }
-        KeyCode::Char(' ') if ui.view == View::Tree && ui.tree.pane == Pane::Tree => {
-            ui.tree.toggle(ctx.library, ctx.store);
+        Command::WinExpandAll => {
+            if ui.view == View::Tree {
+                ui.tree.expand_all(ctx.library);
+            }
         }
-        KeyCode::Enter => match ui.view {
+        Command::WinCollapseAll => {
+            if ui.view == View::Tree {
+                ui.tree.collapse_all();
+                ui.tree.selected = 0;
+            }
+        }
+        Command::WinActivate => match ui.view {
             View::Browser => ui.browser.enter(),
+            View::Settings => {}
             _ => {
-                // Playing from a view makes it the active source, so `next`
-                // walks the list you started from.
                 ui.playback.active = match ui.view {
                     View::Playlist => ActiveSource::Playlist,
                     _ => ActiveSource::Library,
@@ -373,8 +503,21 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
                 }
             }
         },
-        // Transport, per §6's default bindings.
-        KeyCode::Char('x') => {
+        Command::WinRemove => match ui.view {
+            View::Playlist => {
+                ui.playlist.remove(ui.playlist_sel);
+                ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
+            }
+            View::Queue => {
+                ui.queue.remove(ui.queue_sel);
+                ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
+            }
+            _ => ui.notify("nothing to remove here"),
+        },
+        Command::WinUpdate | Command::Update => ui.notify("rescan lands with :update in the app"),
+
+        // ---- transport
+        Command::PlayerPlay => {
             if ui.playback.current.is_some() {
                 if let Some(p) = ctx.player {
                     p.play();
@@ -383,61 +526,226 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
                 play(ui, ctx, id);
             }
         }
-        KeyCode::Char('c') => {
+        Command::PlayerPause => {
             if let Some(p) = ctx.player {
                 p.toggle();
             }
         }
-        KeyCode::Char('v') => {
+        Command::PlayerStop => {
             if let Some(p) = ctx.player {
                 p.stop();
             }
-            // `current` deliberately survives a stop. The decoder keeps the
-            // track loaded and merely rewinds it, so clearing it here would
-            // desync the two: `c` would resume real audio while the status
-            // line insisted nothing was playing. Stopped means stopped *at* a
-            // track — which is also what `b`/`z` need to step from.
         }
-        KeyCode::Char('b') => advance(ui, ctx, true),
-        KeyCode::Char('z') => advance(ui, ctx, false),
-        // Mode toggles.
-        KeyCode::Char('s') => {
-            ui.playback.shuffle = !ui.playback.shuffle;
-            ui.playback.reshuffle();
-        }
-        KeyCode::Char('r') => ui.playback.repeat = !ui.playback.repeat,
-        KeyCode::Char('R') => ui.playback.repeat_current = !ui.playback.repeat_current,
-        KeyCode::Char('m') => ui.playback.aaa_mode = ui.playback.aaa_mode.cycle(),
-        // Seek and volume.
-        KeyCode::Left | KeyCode::Right | KeyCode::Char('<' | '>') => {
+        Command::PlayerNext => advance(ui, ctx, true),
+        Command::PlayerPrev => advance(ui, ctx, false),
+        Command::Seek(spec) => {
             if let Some(p) = ctx.player {
-                let secs = match key.code {
-                    KeyCode::Left => -10.0,
-                    KeyCode::Right => 10.0,
-                    KeyCode::Char('<') => -60.0,
-                    _ => 60.0,
-                };
-                p.seek(crate::audio::SeekTo::Relative(secs));
+                p.seek(match spec {
+                    SeekSpec::Absolute(s) => {
+                        crate::audio::SeekTo::Absolute(Duration::from_secs_f64(s.max(0.0)))
+                    }
+                    SeekSpec::Relative(s) => crate::audio::SeekTo::Relative(s),
+                });
             }
         }
-        KeyCode::Char('-' | '+' | '=') => {
+        Command::Vol(spec) => {
             if let Some(p) = ctx.player {
-                let delta = if key.code == KeyCode::Char('-') {
-                    -0.05
-                } else {
-                    0.05
+                let next = match spec {
+                    VolSpec::Absolute(v) => v,
+                    VolSpec::Relative(d) => p.volume() + d,
                 };
-                p.set_volume(p.volume() + delta);
+                p.set_volume(next);
                 ui.volume_hint = Some(p.volume() * 100.0);
                 ui.notify("");
             }
         }
-        KeyCode::Char('E') if ui.view == View::Tree => ui.tree.expand_all(ctx.library),
-        KeyCode::Backspace if ui.view == View::Tree => {
-            ui.tree.collapse_all();
-            ui.tree.selected = 0;
+
+        // ---- library
+        Command::Add { target, .. } => add_selection(ui, ctx, target),
+
+        // ---- settings
+        Command::Set { key, value } => apply_setting(ui, ctx, key, value),
+        Command::Toggle(key) => {
+            let value = match key {
+                SettingKey::AaaMode => SettingValue::Aaa(ui.playback.aaa_mode.cycle()),
+                SettingKey::Shuffle => SettingValue::Bool(!ui.playback.shuffle),
+                SettingKey::Repeat => SettingValue::Bool(!ui.playback.repeat),
+                SettingKey::RepeatCurrent => SettingValue::Bool(!ui.playback.repeat_current),
+                SettingKey::Continue => SettingValue::Bool(!ui.continue_playing),
+                SettingKey::SmartArtistSort => SettingValue::Bool(!ui.smart_artist_sort),
+                SettingKey::ResampleQuality => {
+                    ui.notify("resample_quality needs :set, it is not a toggle");
+                    return;
+                }
+            };
+            apply_setting(ui, ctx, key, value);
         }
-        _ => {}
+        Command::Bind {
+            ctx: bctx,
+            key,
+            cmd,
+        } => {
+            ui.bindings.insert((bctx, key), *cmd);
+        }
+        Command::Unbind { ctx: bctx, key } => {
+            if ui.bindings.remove(&(bctx, key)).is_none() {
+                ui.notify(format!("{key} is not bound in {}", bctx.name()));
+            }
+        }
+
+        // ---- views
+        Command::View(id) => {
+            ui.view = View::from_id(id);
+            ui.status.clear();
+        }
+        Command::Search { pattern, dir } => {
+            if pattern.is_empty() {
+                return;
+            }
+            ui.last_search = Some((pattern.clone(), dir));
+            run_search(ui, ctx, &pattern, dir);
+        }
+        Command::SearchNext | Command::SearchPrev => {
+            let Some((pattern, dir)) = ui.last_search.clone() else {
+                ui.notify("no previous search");
+                return;
+            };
+            let dir = if cmd == Command::SearchPrev {
+                match dir {
+                    SearchDir::Forward => SearchDir::Backward,
+                    SearchDir::Backward => SearchDir::Forward,
+                }
+            } else {
+                dir
+            };
+            run_search(ui, ctx, &pattern, dir);
+        }
+        Command::Quit => ui.quit = true,
+    }
+}
+
+fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: SettingValue) {
+    match (key, value) {
+        (SettingKey::AaaMode, SettingValue::Aaa(mode)) => ui.playback.aaa_mode = mode,
+        (SettingKey::Shuffle, SettingValue::Bool(v)) => {
+            ui.playback.shuffle = v;
+            ui.playback.reshuffle();
+        }
+        (SettingKey::Repeat, SettingValue::Bool(v)) => ui.playback.repeat = v,
+        (SettingKey::RepeatCurrent, SettingValue::Bool(v)) => ui.playback.repeat_current = v,
+        (SettingKey::Continue, SettingValue::Bool(v)) => ui.continue_playing = v,
+        (SettingKey::SmartArtistSort, SettingValue::Bool(v)) => {
+            ui.smart_artist_sort = v;
+            // The library projection is rebuilt by the caller; say so rather
+            // than pretending the tree reordered itself.
+            ui.notify("smart_artist_sort applies on the next rescan");
+        }
+        (SettingKey::ResampleQuality, SettingValue::Quality(_)) => {
+            let _ = ctx;
+            ui.notify("resample_quality applies to the next track loaded");
+        }
+        // The parser types values per key, so this is unreachable in practice.
+        (k, v) => ui.notify(format!("{} cannot be {v}", k.name())),
+    }
+}
+
+/// `a`/`y`/`e`: put the selection somewhere.
+fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
+    let ids: Vec<crate::store::TrackId> = match ui.view {
+        // From the tree, add everything the cursor covers — an album or an
+        // artist — which is the whole point of adding from a tree.
+        View::Tree if ui.tree.pane == Pane::Tree => ui.tree.tracks_for(ctx.library, ctx.store),
+        _ => ui.selected_track(ctx).into_iter().collect(),
+    };
+    if ids.is_empty() {
+        ui.notify("nothing selected");
+        return;
+    }
+    let count = ids.len();
+    match target {
+        AddTarget::Playlist => {
+            for id in ids {
+                ui.playlist.push(id);
+            }
+            ui.notify(format!("added {count} to the playlist"));
+        }
+        AddTarget::Queue => {
+            for id in ids {
+                ui.queue.push_back(id);
+            }
+            ui.notify(format!("queued {count}"));
+        }
+        AddTarget::Library => {
+            ui.notify("the library is what you are looking at; use :add <path> to scan more")
+        }
+    }
+}
+
+/// Move the cursor to the next row matching `pattern`, wrapping once.
+fn run_search(ui: &mut Ui, ctx: &Context<'_>, pattern: &str, dir: SearchDir) {
+    let needle = pattern.to_lowercase();
+    let haystack = search_rows(ui, ctx);
+    if haystack.is_empty() {
+        return;
+    }
+    let len = haystack.len();
+    let start = current_cursor(ui);
+
+    // Start one past the cursor so repeating a search advances.
+    for offset in 1..=len {
+        let index = match dir {
+            SearchDir::Forward => (start + offset) % len,
+            SearchDir::Backward => (start + len - (offset % len)) % len,
+        };
+        if haystack[index].contains(&needle) {
+            set_cursor(ui, index);
+            return;
+        }
+    }
+    ui.notify(format!("no match for {pattern:?}"));
+}
+
+/// Lower-cased text for each row of the current view, for searching.
+fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
+    let describe = |id: &crate::store::TrackId| {
+        ctx.store
+            .get(*id)
+            .map(|t| {
+                format!(
+                    "{} {} {}",
+                    t.file_under(),
+                    t.album_or_unknown(),
+                    t.display_title()
+                )
+                .to_lowercase()
+            })
+            .unwrap_or_default()
+    };
+    match ui.view {
+        View::Tree => match ui.tree.pane {
+            Pane::Tree => ui
+                .tree
+                .rows(ctx.library, ctx.store)
+                .iter()
+                .map(|r| r.label().to_lowercase())
+                .collect(),
+            Pane::Tracks => ui
+                .tree
+                .tracks_for(ctx.library, ctx.store)
+                .iter()
+                .map(describe)
+                .collect(),
+        },
+        View::Sorted => ctx.library.sorted().iter().map(describe).collect(),
+        View::Playlist => ui.playlist.entries().iter().map(describe).collect(),
+        View::Queue => ui.queue.entries().map(describe).collect(),
+        View::Browser => ui
+            .browser
+            .entries
+            .iter()
+            .map(|p| p.display().to_string().to_lowercase())
+            .collect(),
+        View::Filters | View::Settings => Vec::new(),
     }
 }
 
@@ -451,6 +759,8 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
         View::Playlist => ui.playlist.len(),
         View::Queue => ui.queue.len(),
         View::Browser => ui.browser.entries.len(),
+        View::Filters => 0,
+        View::Settings => bind::sorted(&ui.bindings).len() + SettingKey::ALL.len(),
     }
 }
 
@@ -464,6 +774,8 @@ fn current_cursor(ui: &Ui) -> usize {
         View::Playlist => ui.playlist_sel,
         View::Queue => ui.queue_sel,
         View::Browser => ui.browser.selected,
+        View::Filters => 0,
+        View::Settings => ui.settings_sel,
     }
 }
 
@@ -482,6 +794,8 @@ fn set_cursor(ui: &mut Ui, next: usize) {
         View::Playlist => ui.playlist_sel = next,
         View::Queue => ui.queue_sel = next,
         View::Browser => ui.browser.selected = next,
+        View::Filters => {}
+        View::Settings => ui.settings_sel = next,
     }
 }
 
@@ -494,7 +808,18 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     .areas(frame.area());
 
     frame.render_widget(statusline::tabs(ui.view), tabs);
-    frame.render_widget(statusline::status(ui, ctx), status);
+    match &ui.prompt {
+        Some(prompt) => {
+            frame.render_widget(statusline::prompt_line(prompt), status);
+            // Park the cursor after the typed text, so the line looks like the
+            // input it is.
+            frame.set_cursor_position((
+                status.x + 1 + prompt.buffer.chars().count() as u16,
+                status.y,
+            ));
+        }
+        None => frame.render_widget(statusline::status(ui, ctx), status),
+    }
 
     match ui.view {
         View::Tree => draw_tree(frame, body, ui, ctx),
@@ -521,7 +846,67 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
             draw_tracks(frame, body, ui, ctx, &entries, ui.queue_sel, "queue")
         }
         View::Browser => draw_browser(frame, body, ui),
+        View::Filters => frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  filters arrive with the filter language in M8",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+            .block(pane_block("filters", true)),
+            body,
+        ),
+        View::Settings => draw_settings(frame, body, ui),
     }
+}
+
+/// View 7. §6 promised this would cost nothing extra once bindings and
+/// settings were data, and it does: it is a rendering of both maps.
+fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
+    let mut items: Vec<ListItem> = Vec::new();
+
+    for key in SettingKey::ALL {
+        let value = match key {
+            SettingKey::AaaMode => ui.playback.aaa_mode.label().to_string(),
+            SettingKey::Shuffle => ui.playback.shuffle.to_string(),
+            SettingKey::Repeat => ui.playback.repeat.to_string(),
+            SettingKey::RepeatCurrent => ui.playback.repeat_current.to_string(),
+            SettingKey::Continue => ui.continue_playing.to_string(),
+            SettingKey::SmartArtistSort => ui.smart_artist_sort.to_string(),
+            SettingKey::ResampleQuality => "balanced".into(),
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("{:<20}", key.name()),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(value),
+        ])));
+    }
+
+    for (bctx, key, cmd) in bind::sorted(&ui.bindings) {
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("{:<10}", bctx.name()),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{:<10}", key.to_string()),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(parse::format(cmd)),
+        ])));
+    }
+
+    let mut state = ListState::default().with_selected(Some(ui.settings_sel));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(pane_block("settings and bindings", true))
+            .highlight_style(highlight(true)),
+        area,
+        &mut state,
+    );
 }
 
 fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
@@ -1119,5 +1504,280 @@ mod tests {
         // And `b` still steps from where we stopped, rather than restarting.
         handle_key(KeyEvent::from(KeyCode::Char('b')), &mut ui, &ctx);
         assert_ne!(ui.playback.current, Some(playing));
+    }
+    // ---- the command layer (M6) ------------------------------------------
+
+    use crate::cmd::keys;
+    use ratatui::crossterm::event::KeyModifiers;
+
+    fn press(ui: &mut Ui, ctx: &Context<'_>, key: &str) {
+        let k = keys::parse(key).unwrap_or_else(|e| panic!("bad test key {key:?}: {e}"));
+        let mut mods = KeyModifiers::NONE;
+        if k.ctrl {
+            mods |= KeyModifiers::CONTROL;
+        }
+        if k.alt {
+            mods |= KeyModifiers::ALT;
+        }
+        handle_key(KeyEvent::new(k.code, mods), ui, ctx);
+    }
+
+    fn type_line(ui: &mut Ui, ctx: &Context<'_>, line: &str) {
+        for c in line.chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), ui, ctx);
+        }
+        handle_key(KeyEvent::from(KeyCode::Enter), ui, ctx);
+    }
+
+    /// §9's M6 criterion: every default binding must actually fire. A binding
+    /// that parses but resolves to nothing is exactly the failure this catches.
+    #[test]
+    fn every_default_binding_resolves_and_runs() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+
+        for line in crate::cmd::bind::DEFAULTS {
+            let Command::Bind {
+                ctx: bctx,
+                key,
+                cmd,
+            } = crate::cmd::parse::command(line).unwrap()
+            else {
+                panic!("{line:?} is not a bind")
+            };
+
+            let mut ui = Ui::new(PathBuf::from("/m"));
+            // The binding must be reachable through lookup from a real view.
+            let view = match bctx {
+                crate::cmd::Context::Common => View::Tree,
+                other => View::from_id(match other {
+                    crate::cmd::Context::Library => ViewId::Library,
+                    crate::cmd::Context::SortedLibrary => ViewId::Sorted,
+                    crate::cmd::Context::Playlist => ViewId::Playlist,
+                    crate::cmd::Context::Queue => ViewId::Queue,
+                    crate::cmd::Context::Browser => ViewId::Browser,
+                    crate::cmd::Context::Filters => ViewId::Filters,
+                    crate::cmd::Context::Settings => ViewId::Settings,
+                    crate::cmd::Context::Common => unreachable!(),
+                }),
+            };
+            ui.view = view;
+            let found = crate::cmd::bind::lookup(&ui.bindings, view.context(), key);
+            assert_eq!(found, Some(&*cmd), "{line:?} did not resolve");
+
+            // And running it must not panic, whatever the view state.
+            execute(&mut ui, &ctx, *cmd);
+        }
+    }
+
+    #[test]
+    fn digits_switch_views_through_the_bindings() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        for (key, want) in [
+            ("2", View::Sorted),
+            ("4", View::Queue),
+            ("7", View::Settings),
+            ("6", View::Filters),
+            ("1", View::Tree),
+        ] {
+            press(&mut ui, &ctx, key);
+            assert_eq!(ui.view, want, "key {key}");
+        }
+    }
+
+    #[test]
+    fn the_command_line_runs_a_command() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+
+        press(&mut ui, &ctx, ":");
+        assert!(ui.prompt.is_some(), "colon should open the prompt");
+        type_line(&mut ui, &ctx, "view 3");
+        assert!(ui.prompt.is_none(), "prompt should close on enter");
+        assert_eq!(ui.view, View::Playlist);
+    }
+
+    #[test]
+    fn a_bad_command_line_reports_rather_than_dying() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "frobnicate");
+        assert!(ui.status.contains("frobnicate"), "{}", ui.status);
+    }
+
+    #[test]
+    fn escape_abandons_the_prompt() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        press(&mut ui, &ctx, ":");
+        handle_key(KeyEvent::from(KeyCode::Char('q')), &mut ui, &ctx);
+        handle_key(KeyEvent::from(KeyCode::Esc), &mut ui, &ctx);
+        assert!(ui.prompt.is_none());
+        assert!(!ui.quit, "the q went into the prompt, not to the binding");
+    }
+
+    /// A rebinding through `:bind` must take effect immediately.
+    #[test]
+    fn rebinding_at_runtime_takes_effect() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+
+        // `j` moves down by default.
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.tree.selected, 1);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "bind common j win-top");
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.tree.selected, 0, "rebinding did not take");
+
+        // And unbinding leaves the key inert.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "unbind common j");
+        press(&mut ui, &ctx, "k");
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.tree.selected, 0);
+    }
+
+    #[test]
+    fn a_context_binding_only_applies_to_its_view() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "bind queue j win-bottom");
+
+        // In the tree, j still steps down.
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.tree.selected, 1);
+    }
+
+    #[test]
+    fn search_moves_the_cursor_and_n_repeats() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "/");
+        type_line(&mut ui, &ctx, "years");
+        let first = ui.sorted;
+        let track = ctx.library.sorted()[first];
+        assert_eq!(store.get(track).unwrap().display_title(), "Years");
+
+        // `n` with a single match wraps back to it rather than losing it.
+        press(&mut ui, &ctx, "n");
+        assert_eq!(ui.sorted, first);
+    }
+
+    #[test]
+    fn a_search_with_no_match_says_so() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        ui.view = View::Sorted;
+        press(&mut ui, &ctx, "/");
+        type_line(&mut ui, &ctx, "zzzznotthere");
+        assert!(ui.status.contains("no match"), "{}", ui.status);
+    }
+
+    #[test]
+    fn add_from_the_tree_takes_the_whole_selection() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+
+        // Artist row selected: `y` adds everything under it.
+        let expected = ui.tree.tracks_for(&library, &store).len();
+        press(&mut ui, &ctx, "y");
+        assert_eq!(ui.playlist.len(), expected);
+        assert!(expected > 1, "the fixture should have a multi-track artist");
+
+        press(&mut ui, &ctx, "e");
+        assert_eq!(ui.queue.len(), expected);
+    }
+
+    #[test]
+    fn remove_deletes_from_the_playlist_only() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        press(&mut ui, &ctx, "y");
+        let before = ui.playlist.len();
+
+        ui.view = View::Playlist;
+        press(&mut ui, &ctx, "D");
+        assert_eq!(ui.playlist.len(), before - 1);
+
+        // In the tree there is nothing to remove, and it must say so rather
+        // than deleting something else.
+        ui.view = View::Tree;
+        press(&mut ui, &ctx, "D");
+        assert!(ui.status.contains("nothing to remove"), "{}", ui.status);
+    }
+
+    #[test]
+    fn toggles_go_through_the_settings_layer() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+
+        press(&mut ui, &ctx, "s");
+        assert!(ui.playback.shuffle);
+        press(&mut ui, &ctx, "r");
+        assert!(ui.playback.repeat);
+        press(&mut ui, &ctx, "m");
+        assert_eq!(ui.playback.aaa_mode, crate::next::AaaMode::Artist);
+
+        // And `:set` reaches the same state.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "set shuffle=false");
+        assert!(!ui.playback.shuffle);
+    }
+
+    #[test]
+    fn view_seven_lists_settings_and_bindings() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        ui.view = View::Settings;
+        let out = render(&ui, &ctx, 100, 24);
+        assert!(out.contains("aaa_mode"), "{out}");
+        assert!(out.contains("shuffle"), "{out}");
+        assert!(
+            out.contains("7:settings"),
+            "the tab strip should list it:\n{out}"
+        );
+
+        // Bindings render in the same list, as §6 promised — below the
+        // settings, so scroll to them.
+        ui.settings_sel = crate::cmd::SettingKey::ALL.len() + 20;
+        let out = render(&ui, &ctx, 100, 24);
+        assert!(out.contains("common"), "{out}");
+        assert!(
+            out.contains("player-") || out.contains("win-"),
+            "no bindings visible:\n{out}"
+        );
+    }
+
+    #[test]
+    fn the_prompt_replaces_the_status_line_while_open() {
+        let (store, library) = fixture();
+        let ctx = ctx_of(&store, &library);
+        let mut ui = Ui::new(PathBuf::from("/m"));
+        press(&mut ui, &ctx, ":");
+        for c in "vol 50%".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        let out = render(&ui, &ctx, 100, 10);
+        assert!(out.contains(":vol 50%"), "{out}");
+        assert!(!out.contains("7 tracks"), "status should be hidden:\n{out}");
     }
 }

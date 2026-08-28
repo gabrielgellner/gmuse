@@ -9,15 +9,17 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::{Context, Ui, View, list::fmt_duration};
+use super::{Context, Prompt, Ui, View, list::fmt_duration};
 use crate::audio::State;
 
-const VIEWS: [View; 5] = [
+const VIEWS: [View; 7] = [
     View::Tree,
     View::Sorted,
     View::Playlist,
     View::Queue,
     View::Browser,
+    View::Filters,
+    View::Settings,
 ];
 
 pub fn tabs(current: View) -> Paragraph<'static> {
@@ -37,6 +39,19 @@ pub fn tabs(current: View) -> Paragraph<'static> {
         });
     }
     Paragraph::new(Line::from(spans))
+}
+
+/// The `:` or `/` line being typed.
+pub fn prompt_line(prompt: &Prompt) -> Paragraph<'_> {
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            prompt.sigil().to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(prompt.buffer.as_str()),
+    ]))
 }
 
 /// The now-playing line: what is playing, where in it we are, and the modes
