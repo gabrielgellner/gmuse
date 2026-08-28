@@ -1,0 +1,96 @@
+# gmuse
+
+***G***abriel's ***MUS***ical ***E***xperience.
+
+A [cmus](https://cmus.github.io/)-shaped terminal music player for a local music library, written in Rust with a
+pure-Rust audio path.
+
+This is a reimplementation of cmus's _interaction model_ — its views, its next-track semantics, its command and
+keybinding layer — not a port of its C. See [`docs/design/music-player-tui.md`](docs/design/music-player-tui.md) for the
+full brief, the invariants, and the decision log.
+
+## Status
+
+Early. The audio path works; there is no UI yet.
+
+| Milestone                                 | State                                    |
+| ----------------------------------------- | ---------------------------------------- |
+| M1 — sound out of the speakers            | ✅ done                                  |
+| Resampler                                 | ✅ done (pulled forward — Opus needs it) |
+| M2 — the audio API (`PlayerHandle`)       | next                                     |
+| M3–M9 — library, views, commands, gapless | not started                              |
+
+Today `gmuse <file>` decodes one file and plays it to completion, reporting position and an underrun count.
+
+## Building
+
+Requires a Rust toolchain (edition 2024, MSRV 1.85) and **`cmake`**, which builds the bundled libopus:
+
+```sh
+brew install cmake        # or your platform's package manager
+cargo build --release
+cargo run --release -- ~/path/to/a/track.mp3
+```
+
+To build without Opus support and drop the only C dependency:
+
+```sh
+cargo build --release --no-default-features
+```
+
+## Formats
+
+MP3, FLAC, Ogg Vorbis, WAV, AAC/M4A, ALAC via [Symphonia], and Opus via [`symphonia-adapter-libopus`] (bundled libopus,
+statically linked).
+
+## Design notes
+
+Three threads, and the split is not negotiable — it is what determines whether playback is glitch-free:
+
+```
+UI thread            decoder thread              audio callback (cpal, RT)
+─────────            ──────────────              ─────────────────────────
+render/input   cmd   demux, decode, resample     drain the ring
+               ───▶  push frames to rtrb    ───▶ write to the device
+               ◀───                              update atomics only
+               evt
+```
+
+The real-time callback may only read the ring buffer, write samples, and touch atomics. No allocation, no locks, no
+syscalls, no panics. Everything expensive — decoding, sample-rate conversion — happens on the decoder thread.
+
+### Sample-rate conversion
+
+The device is opened at the file's own rate when it offers one, so the common case does no conversion. Otherwise audio
+is resampled, because output devices advertise disjoint rate sets: a Bluetooth sink may offer only 16k and 44.1k while
+every Opus file is 48k.
+
+Quality is selectable (`GMUSE_RESAMPLE=fast|balanced|high`, default `balanced`). `balanced` uses rubato's FFT resampler,
+which is both cheaper and cleaner than a long sinc for the fixed ratios a music player deals in.
+
+### Cost
+
+Steady-state playback, measured on an M5 MacBook Air:
+
+|                            | % of one core |
+| -------------------------- | ------------- |
+| gmuse, Opus + FFT resample | 0.55%         |
+| gmuse, MP3, no resample    | 0.65%         |
+| `afplay` (macOS native)    | 0.75%         |
+| `ffplay -nodisp`           | 1.00%         |
+
+The target is to stay at or below `afplay` — this is meant to run in the background while you work.
+
+## Environment variables
+
+Temporary development affordances, to be replaced by real settings in M6.
+
+| Variable         | Effect                                                     |
+| ---------------- | ---------------------------------------------------------- |
+| `GMUSE_DEVICE`   | Select an output device by id substring                    |
+| `GMUSE_RATE`     | Force a device sample rate (for measuring conversion cost) |
+| `GMUSE_RESAMPLE` | `fast`, `balanced`, or `high`                              |
+| `GMUSE_STATS`    | Print resampler timing on exit                             |
+
+[Symphonia]: https://github.com/pdeljanov/Symphonia
+[`symphonia-adapter-libopus`]: https://crates.io/crates/symphonia-adapter-libopus
