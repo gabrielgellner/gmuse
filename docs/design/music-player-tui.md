@@ -879,6 +879,25 @@ Append here as decisions are made. Format: date, decision, rationale.
   The general shape, and the third time this session: **state that is a view of other state should be computed, not
   mirrored.** The two copies always eventually disagree.
 
+- **2026-08-28** **The default theme is Catppuccin Frappé, expressed through the ANSI sixteen** (issue #2). Named
+  colours rather than hex, on purpose: a terminal themed to Frappé resolves `blue` to exactly `#8caaee`, so names give
+  the true palette _and_ follow the terminal if it is later rethemed. `examples/catppuccin-frappe.toml` carries the hex
+  variant for terminals whose palette we do not control — over SSH, or on a plain box.
+
+- **2026-08-28** **Nothing may put a dark foreground on a light background**, a rule taken verbatim from the cmus rc
+  this palette came from: the ANSI sixteen carry no colour dark enough to read against blue or pink, so a selection is a
+  _surface_ with a coloured foreground. The previous defaults broke it — black on cyan, for both the active tab and the
+  selection. Now pinned by a test that walks every role.
+
+- **2026-08-28** One deliberate deviation from that rc: it uses `black` (surface1) as the selection background, which is
+  right on a Frappé-themed terminal and **invisible on an unthemed one**, where `black` is the background. `DarkGray`
+  (surface2) is a Frappé surface too and reads on both. The hex theme uses surface1 as written, because there the
+  background is known.
+
+- **2026-08-28** Two tests keep the shipped theme honest: it must **parse cleanly**, and it must **name every `Role`**.
+  A role added in code and forgotten in the example would silently keep its default, which is the kind of gap nobody
+  notices until a theme looks half-applied.
+
 ---
 
 ## 14. Prior art worth reading

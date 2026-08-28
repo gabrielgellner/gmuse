@@ -1,0 +1,62 @@
+# Catppuccin Frappé, as exact colours.
+#
+# gmuse's built-in default is this same palette expressed through the ANSI
+# sixteen, which resolves to the true Frappé values on a terminal themed to
+# Frappé — and follows the terminal if you retheme it. Use this file instead
+# when the terminal is *not* themed: over SSH to a plain box, or in a terminal
+# whose palette you do not control.
+#
+# Copy the two tables below into your config.toml.
+
+[theme.palette]
+# https://catppuccin.com/palette — Frappé
+rosewater = "#f2d5cf"
+flamingo  = "#eebebe"
+pink      = "#f4b8e4"
+mauve     = "#ca9ee6"
+red       = "#e78284"
+maroon    = "#ea999c"
+peach     = "#ef9f76"
+yellow    = "#e5c890"
+green     = "#a6d189"
+teal      = "#81c8be"
+sky       = "#99d1db"
+sapphire  = "#85c1dc"
+blue      = "#8caaee"
+lavender  = "#babbf1"
+text      = "#c6d0f5"
+subtext1  = "#b5bfe2"
+subtext0  = "#a5adce"
+overlay2  = "#949cbb"
+overlay1  = "#838ba7"
+overlay0  = "#737994"
+surface2  = "#626880"
+surface1  = "#51576d"
+surface0  = "#414559"
+base      = "#303446"
+mantle    = "#292c3c"
+crust     = "#232634"
+
+# Nothing here puts a dark foreground on a light background: a selection is a
+# surface with a coloured foreground, which is how a dark theme wants to be
+# read. surface1 is used rather than surface2 because with real colours the
+# terminal background is known to be `base`, so the darker surface still shows.
+[theme.styles]
+tab_active          = { fg = "blue", bg = "surface1", mods = ["bold"] }
+tab_inactive        = { fg = "overlay0" }
+border_focused      = { fg = "blue" }
+border_unfocused    = { fg = "surface2" }
+selection_focused   = { fg = "pink", bg = "surface1", mods = ["bold"] }
+selection_unfocused = { fg = "subtext1", bg = "surface0" }
+status_text         = { fg = "text" }
+status_dim          = { fg = "overlay0" }
+status_playing      = { fg = "green" }
+status_notice       = { fg = "yellow" }
+status_modes        = { fg = "mauve" }
+status_underrun     = { fg = "red" }
+prompt_sigil        = { fg = "blue", mods = ["bold"] }
+setting_key         = { fg = "teal" }
+binding_context     = { fg = "overlay0" }
+binding_key         = { fg = "yellow" }
+album_header        = { fg = "teal", mods = ["bold"] }
+gutter              = { fg = "overlay0" }
