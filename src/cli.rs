@@ -69,8 +69,13 @@ pub struct Cli {
 
     /// Log the session for auditing playback. With no path, writes to
     /// $XDG_STATE_HOME/gmuse/session.log.
-    #[arg(long, num_args = 0..=1, default_missing_value = "", env = "GMUSE_LOG")]
-    pub log: Option<PathBuf>,
+    ///
+    /// `Option<Option<_>>` is clap's idiom for a flag whose value is optional:
+    /// absent is `None`, bare `--log` is `Some(None)`, and `--log <path>` is
+    /// `Some(Some(path))`. An empty `default_missing_value` does not work —
+    /// clap ignores it and then insists on a value.
+    #[arg(long, num_args = 0..=1, env = "GMUSE_LOG")]
+    pub log: Option<Option<PathBuf>>,
 
     /// Use the line-based prompt instead of the TUI.
     ///
@@ -85,6 +90,13 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// Where to write the session log, if at all.
+    pub fn log_path(&self) -> Option<PathBuf> {
+        self.log
+            .clone()
+            .map(|p| p.unwrap_or_else(crate::audit::default_path))
+    }
+
     pub fn player_config(&self) -> PlayerConfig {
         PlayerConfig {
             device: self.device.clone(),
@@ -92,5 +104,76 @@ impl Cli {
             resample: self.resample,
             volume: self.volume,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        let mut full = vec!["gmuse"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// `--log` shipped broken because nothing here was tested: clap rejected
+    /// the bare flag at runtime, which no compile or unit test could see.
+    #[test]
+    fn log_takes_an_optional_path() {
+        assert_eq!(parse(&[]).log_path(), None, "absent means no logging");
+
+        let bare = parse(&["--log"]).log_path().expect("bare --log should log");
+        assert!(
+            bare.ends_with("gmuse/session.log"),
+            "bare --log should use the default place, got {bare:?}"
+        );
+
+        assert_eq!(
+            parse(&["--log", "/tmp/x.log"]).log_path(),
+            Some(PathBuf::from("/tmp/x.log"))
+        );
+    }
+
+    #[test]
+    fn a_file_argument_still_works_beside_the_log_flag() {
+        // The optional value must not swallow the positional argument.
+        let cli = parse(&["--log", "--", "song.mp3"]);
+        assert!(cli.log_path().is_some());
+        assert_eq!(cli.file, Some(PathBuf::from("song.mp3")));
+    }
+
+    #[test]
+    fn every_flag_parses() {
+        let cli = parse(&[
+            "--device",
+            "built-in",
+            "--rate",
+            "48000",
+            "--resample",
+            "high",
+            "--volume",
+            "0.5",
+            "--library",
+            "/m",
+            "--rescan",
+            "--no-cache",
+            "--no-config",
+            "--repl",
+            "--log",
+            "/tmp/l.log",
+        ]);
+        assert_eq!(cli.device.as_deref(), Some("built-in"));
+        assert_eq!(cli.rate, Some(48_000));
+        assert_eq!(cli.volume, 0.5);
+        assert!(cli.rescan && cli.no_cache && cli.no_config && cli.repl);
+    }
+
+    /// clap's own consistency check: duplicate short flags, bad defaults and
+    /// the like are a panic at runtime otherwise.
+    #[test]
+    fn the_command_is_well_formed() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 }

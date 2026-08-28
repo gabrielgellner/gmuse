@@ -927,6 +927,15 @@ Append here as decisions are made. Format: date, decision, rationale.
   Off by default — a player that writes to disk every session without being asked is a surprise. Every line is flushed
   as it is written, because a session that ends by being killed is exactly the one worth having a log of.
 
+- **2026-08-28** **`cli.rs` had no tests, and shipped a flag that never worked.** `--log` used
+  `default_missing_value = ""`, which clap ignores — so the bare flag failed at runtime with "a value is required",
+  while compiling and passing every test. The idiom for an optional value is `Option<Option<T>>`: absent is `None`, bare
+  is `Some(None)`, with a value is `Some(Some(v))`.
+
+  `cli.rs` now has tests, including `Cli::command().debug_assert()` — clap's own consistency check, which catches
+  duplicate short flags and malformed defaults that are otherwise a runtime panic. **A CLI surface needs tests for the
+  same reason a parser does: it is a boundary, and the compiler checks none of it.**
+
 ---
 
 ## 14. Prior art worth reading

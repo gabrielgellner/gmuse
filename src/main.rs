@@ -139,15 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(path) = &args.file {
             app.player.load(path.clone());
         }
-        // An empty --log means "the default place".
-        let log_path = args.log.clone().map(|p| {
-            if p.as_os_str().is_empty() {
-                audit::default_path()
-            } else {
-                p
-            }
-        });
-        return run_tui(&app, args.smart_artist_sort, loaded, log_path);
+        return run_tui(&app, args.smart_artist_sort, loaded, args.log_path());
     }
 
     // The config sets up UI state, which the line prompt does not have. Say so
@@ -160,6 +152,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for e in &loaded.errors {
         eprintln!("config: {e}");
+    }
+    // Same shape as the config: the log records UI-loop events, which the line
+    // prompt has none of. Say so rather than opening a file nothing writes to.
+    if args.log_path().is_some() {
+        println!("note: --log applies to the TUI, not --repl");
     }
 
     match &args.file {
