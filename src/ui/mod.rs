@@ -3324,7 +3324,9 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        handle_key(KeyEvent::from(KeyCode::Char('c')), &mut ui, &ctx);
+        for c in "pl".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
         tab(&mut ui, &ctx);
         let typed = ui.prompt.as_ref().unwrap().buffer.clone();
         assert!(!ui.prompt.as_ref().unwrap().candidates.is_empty());
@@ -3432,7 +3434,10 @@ mod tests {
         assert_eq!(count, crate::cmd::parse::VERBS.len());
 
         let out = render(&ui, &ctx, 100, 20);
-        assert!(out.contains("63 completions"), "{out}");
+        // Derived, not spelled out: a hardcoded count breaks whenever the
+        // vocabulary changes, which says nothing about the menu.
+        let title = format!("{} completions", crate::cmd::parse::VERBS.len());
+        assert!(out.contains(&title), "{out}");
         // Laid out in columns, so several verbs share a line.
         assert!(out.contains("activate"), "{out}");
         assert!(out.contains("quit"), "{out}");
@@ -3448,16 +3453,18 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        handle_key(KeyEvent::from(KeyCode::Char('c')), &mut ui, &ctx);
+        for c in "pl".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
         tab(&mut ui, &ctx);
-        // "cat" and "catalog" agree this far.
-        assert_eq!(typed(&ui), "cat");
+        // `play` and the `player-*` family all agree this far.
+        assert_eq!(typed(&ui), "play");
 
         tab(&mut ui, &ctx);
         let candidates = &ui.prompt.as_ref().unwrap().candidates;
-        assert!(candidates.contains(&"cat".to_string()), "{candidates:?}");
+        assert!(candidates.contains(&"play".to_string()), "{candidates:?}");
         assert!(
-            candidates.contains(&"catalog".to_string()),
+            candidates.contains(&"player-next".to_string()),
             "{candidates:?}"
         );
     }

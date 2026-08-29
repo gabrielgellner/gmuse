@@ -1158,6 +1158,15 @@ Append here as decisions are made. Format: date, decision, rationale.
   selection assertions read what is **highlighted on the rendered buffer**, not `prompt.selected`, which is what makes
   the scrolling case testable at all.
 
+- **2026-08-29** **`cat` dropped as an alias for `catalog`.** The vocabulary is 41 distinct commands behind 62 verbs, so
+  a third of what the completion menu lists is synonyms — which is how this surfaced. Most of them earn it: the
+  `win-*`/`player-*` pairs are cmus's own names with the short forms people actually type, and `vol`/`volume`,
+  `q`/`quit`/`exit` are two spellings of one word.
+
+  `cat` was the weakest. It is not a synonym but a truncation, it collides with the best-known command name in Unix, and
+  catalogs are ours rather than cmus's — so there is no compatibility argument for it the way there is for `win-up`.
+  Whether the rest of the vocabulary is carrying cmus-shaped cruft is issue #9.
+
 ---
 
 ## 14. Prior art worth reading
