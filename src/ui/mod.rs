@@ -294,6 +294,9 @@ pub struct Ui {
     /// undifferentiated column.
     pub album_headers: bool,
     pub smart_artist_sort: bool,
+    /// Which loudness tag to follow. Harmless when files are untagged: the
+    /// gain is then 1.0 and nothing changes.
+    pub replaygain: crate::cmd::ReplayGainMode,
     /// When the transient `status` message should stop being shown. Without
     /// this a one-off notice sits in the status line for the rest of the
     /// session, hiding what is actually playing.
@@ -332,6 +335,7 @@ impl Ui {
             continue_playing: true,
             album_headers: true,
             smart_artist_sort: true,
+            replaygain: crate::cmd::ReplayGainMode::default(),
             status_until: None,
             quit: false,
         }
@@ -479,15 +483,19 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
             // pool as it stands right now. Nothing is announced ahead of time
             // and nothing can go stale between announcing and playing.
             crate::audio::PlayerEvent::NeedNext => {
-                let path = announce_next(ui, ctx);
+                let next = announce_next(ui, ctx);
                 ui.audit.line(
                     "next",
-                    &match path.as_ref() {
-                        Some(p) => format!("splicing {}", p.display()),
+                    &match next.as_ref() {
+                        Some(s) => format!(
+                            "splicing {} at {:+.1} dB",
+                            s.path.display(),
+                            20.0 * s.gain.max(f32::MIN_POSITIVE).log10()
+                        ),
                         None => "end of pool, letting playback stop".into(),
                     },
                 );
-                player.set_next(path);
+                player.set_next(next);
             }
             crate::audio::PlayerEvent::Finished => {
                 ui.audit.line("finished", "track played to its end");
@@ -578,7 +586,7 @@ fn advance(ui: &mut Ui, ctx: &Context<'_>, forward: bool) {
 /// the queue is popped and a wrapped shuffle reseeded exactly once, at the
 /// point the decision is made. `playback.current` deliberately stays put —
 /// the track it names is still the one being heard.
-fn announce_next(ui: &mut Ui, ctx: &Context<'_>) -> Option<PathBuf> {
+fn announce_next(ui: &mut Ui, ctx: &Context<'_>) -> Option<crate::audio::TrackSource> {
     let (id, source) = next::next_with_source(next_input(ui))?;
     match source {
         Source::Queue => {
@@ -587,9 +595,59 @@ fn announce_next(ui: &mut Ui, ctx: &Context<'_>) -> Option<PathBuf> {
         Source::Wrapped if ui.playback.shuffle => ui.playback.reshuffle(),
         _ => {}
     }
-    let path = ctx.store.get(id)?.path.clone();
+    let source = source_for(ui, ctx.store.get(id)?);
     ui.pending_next = Some(id);
-    Some(path)
+    Some(source)
+}
+
+/// What to play, and at what gain — the ReplayGain tags turned into a number.
+///
+/// Untagged files come back at unity, so this is inert until something has
+/// been tagged. Analysis is deliberately somebody else's job: §1 puts tag
+/// *editing* out of scope, and `rsgain` already does it well.
+fn source_for(ui: &Ui, track: &crate::store::Track) -> crate::audio::TrackSource {
+    crate::audio::TrackSource {
+        path: track.path.clone(),
+        gain: replay_gain(ui, track),
+    }
+}
+
+fn replay_gain(ui: &Ui, track: &crate::store::Track) -> f32 {
+    use crate::cmd::ReplayGainMode as Mode;
+
+    let Some(rg) = track.replaygain.as_ref() else {
+        return 1.0;
+    };
+    let mode = match ui.replaygain {
+        Mode::Off => return 1.0,
+        // Shuffle jumps between masters, so each track's own level is what
+        // matters. Playing in order, the album's internal balance is the
+        // thing worth preserving — turning it into a per-track correction
+        // would flatten exactly what the mastering engineer intended.
+        Mode::Auto if ui.playback.shuffle => Mode::Track,
+        Mode::Auto => Mode::Album,
+        m => m,
+    };
+    let (db, peak) = match mode {
+        Mode::Album => (
+            rg.album_gain.or(rg.track_gain),
+            rg.album_peak.or(rg.track_peak),
+        ),
+        _ => (
+            rg.track_gain.or(rg.album_gain),
+            rg.track_peak.or(rg.album_peak),
+        ),
+    };
+    let Some(db) = db else { return 1.0 };
+    let gain = 10f32.powf(db / 20.0);
+
+    // Never push a known peak past full scale. A positive gain on a quiet
+    // master is exactly where this bites, and clipping is worse than being a
+    // decibel under the target.
+    match peak {
+        Some(p) if p > 0.0 => gain.min(1.0 / p),
+        _ => gain,
+    }
 }
 
 fn next_input(ui: &Ui) -> next::NextInput<'_> {
@@ -617,7 +675,7 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
     // player drops it too, on `Load`.
     ui.pending_next = None;
     if let Some(player) = ctx.player {
-        player.load(track.path.clone());
+        player.load(source_for(ui, track));
     }
 }
 
@@ -1012,6 +1070,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Toggle(key) => {
             let value = match key {
                 SettingKey::AaaMode => SettingValue::Aaa(ui.playback.aaa_mode.cycle()),
+                SettingKey::ReplayGain => SettingValue::ReplayGain(ui.replaygain.cycle()),
                 SettingKey::Shuffle => SettingValue::Bool(!ui.playback.shuffle),
                 SettingKey::Repeat => SettingValue::Bool(!ui.playback.repeat),
                 SettingKey::RepeatCurrent => SettingValue::Bool(!ui.playback.repeat_current),
@@ -1119,6 +1178,7 @@ fn switch_view(ui: &mut Ui, view: View) {
 fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: SettingValue) {
     match (key, value) {
         (SettingKey::AaaMode, SettingValue::Aaa(mode)) => ui.playback.aaa_mode = mode,
+        (SettingKey::ReplayGain, SettingValue::ReplayGain(m)) => ui.replaygain = m,
         (SettingKey::Shuffle, SettingValue::Bool(v)) => {
             ui.playback.shuffle = v;
             ui.playback.reshuffle();
@@ -1399,6 +1459,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
     for key in SettingKey::ALL.iter().copied() {
         let value = match key {
             SettingKey::AaaMode => ui.playback.aaa_mode.label().to_string(),
+            SettingKey::ReplayGain => ui.replaygain.label().to_string(),
             SettingKey::Shuffle => ui.playback.shuffle.to_string(),
             SettingKey::Repeat => ui.playback.repeat.to_string(),
             SettingKey::RepeatCurrent => ui.playback.repeat_current.to_string(),
@@ -3247,6 +3308,103 @@ mod tests {
             rendered_selection(&ui, &ctx, 100, 20).as_deref(),
             Some(candidates.last().unwrap().as_str())
         );
+    }
+
+    fn tagged(gain: Option<f32>, peak: Option<f32>, album: Option<f32>) -> crate::store::Track {
+        crate::store::Track {
+            path: PathBuf::from("/x.flac"),
+            replaygain: Some(crate::store::ReplayGain {
+                track_gain: gain,
+                track_peak: peak,
+                album_gain: album,
+                album_peak: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A ReplayGain figure is decibels; the player multiplies by a linear
+    /// gain. -6 dB is half the amplitude.
+    #[test]
+    fn replaygain_decibels_become_a_linear_gain() {
+        let store = fixture();
+        let mut ui = ui_of(&store, true);
+        ui.replaygain = crate::cmd::ReplayGainMode::Track;
+
+        let track = tagged(Some(-6.0206), None, None);
+        assert!((replay_gain(&ui, &track) - 0.5).abs() < 1e-3);
+
+        let quiet = tagged(Some(6.0206), None, None);
+        assert!((replay_gain(&ui, &quiet) - 2.0).abs() < 1e-3);
+    }
+
+    /// A positive gain on a quiet master is exactly where clipping happens,
+    /// and the peak tag is there to prevent it. Being a decibel under the
+    /// target is better than being over full scale.
+    #[test]
+    fn a_known_peak_caps_the_gain() {
+        let store = fixture();
+        let mut ui = ui_of(&store, true);
+        ui.replaygain = crate::cmd::ReplayGainMode::Track;
+
+        // +6 dB wanted, but the file already peaks at 0.8: 1/0.8 = 1.25 is
+        // all that fits.
+        let track = tagged(Some(6.0206), Some(0.8), None);
+        assert!((replay_gain(&ui, &track) - 1.25).abs() < 1e-3);
+
+        // A cut is never capped — it cannot clip.
+        let cut = tagged(Some(-6.0206), Some(0.99), None);
+        assert!((replay_gain(&ui, &cut) - 0.5).abs() < 1e-3);
+    }
+
+    /// `auto` follows the play order: shuffling jumps between masters so each
+    /// track's own level is what matters, while playing an album in order
+    /// should keep the album's internal balance.
+    #[test]
+    fn auto_follows_the_play_order() {
+        let store = fixture();
+        let mut ui = ui_of(&store, true);
+        ui.replaygain = crate::cmd::ReplayGainMode::Auto;
+        let track = tagged(Some(-6.0206), None, Some(-12.041));
+
+        ui.playback.shuffle = false;
+        assert!(
+            (replay_gain(&ui, &track) - 0.25).abs() < 1e-3,
+            "in order, the album gain should win"
+        );
+
+        ui.playback.shuffle = true;
+        assert!(
+            (replay_gain(&ui, &track) - 0.5).abs() < 1e-3,
+            "shuffled, the track gain should win"
+        );
+    }
+
+    /// Off means off, and an untagged file is left alone — so turning this on
+    /// changes nothing until something has actually been tagged.
+    #[test]
+    fn untagged_and_disabled_both_play_at_unity() {
+        let store = fixture();
+        let mut ui = ui_of(&store, true);
+        let track = tagged(Some(-6.0206), None, None);
+
+        ui.replaygain = crate::cmd::ReplayGainMode::Off;
+        assert_eq!(replay_gain(&ui, &track), 1.0);
+
+        ui.replaygain = crate::cmd::ReplayGainMode::Track;
+        let untagged = crate::store::Track::default();
+        assert_eq!(replay_gain(&ui, &untagged), 1.0);
+    }
+
+    /// Album mode falls back to the track figure rather than giving up: a file
+    /// tagged by a track-only scan should still be normalised.
+    #[test]
+    fn album_mode_falls_back_to_the_track_figure() {
+        let store = fixture();
+        let mut ui = ui_of(&store, true);
+        ui.replaygain = crate::cmd::ReplayGainMode::Album;
+        let track = tagged(Some(-6.0206), None, None);
+        assert!((replay_gain(&ui, &track) - 0.5).abs() < 1e-3);
     }
 
     /// The arrows drive the menu too. Not the primary binding, but a menu

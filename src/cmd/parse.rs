@@ -365,6 +365,10 @@ fn setting_value(key: SettingKey, text: &str) -> Result<SettingValue, ParseError
             "album" => AaaMode::Album,
             _ => return Err(ParseError::Bad(text.into(), "aaa mode")),
         }),
+        SettingKey::ReplayGain => SettingValue::ReplayGain(
+            crate::cmd::ReplayGainMode::parse(text)
+                .ok_or_else(|| ParseError::Bad(text.into(), "replaygain mode"))?,
+        ),
         SettingKey::ResampleQuality => SettingValue::Quality(match text {
             "fast" => Quality::Fast,
             "balanced" => Quality::Balanced,
@@ -529,6 +533,26 @@ mod tests {
         );
         assert!(command("seek").is_err());
         assert!(command("seek soon").is_err());
+    }
+
+    #[test]
+    fn replaygain_mode_parses() {
+        use crate::cmd::ReplayGainMode;
+        for (text, want) in [
+            ("off", ReplayGainMode::Off),
+            ("track", ReplayGainMode::Track),
+            ("album", ReplayGainMode::Album),
+            ("auto", ReplayGainMode::Auto),
+        ] {
+            assert_eq!(
+                command(&format!("set replaygain={text}")).unwrap(),
+                Command::Set {
+                    key: SettingKey::ReplayGain,
+                    value: SettingValue::ReplayGain(want),
+                }
+            );
+        }
+        assert!(command("set replaygain=loud").is_err());
     }
 
     #[test]

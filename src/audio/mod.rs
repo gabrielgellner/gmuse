@@ -62,10 +62,36 @@ pub enum SeekTo {
     Relative(f64),
 }
 
+/// A track to play, and the gain to play it at.
+///
+/// The gain is applied by the *decoder*, not the callback, so it travels
+/// through the ring with the audio it belongs to. That is what makes it land
+/// exactly at a gapless join, where the decoder is a ring's depth ahead of
+/// what the listener is hearing — a per-track gain applied at the output
+/// would otherwise hit the last second of the previous track.
+///
+/// It is just a number here. The audio layer does not know it came from a
+/// ReplayGain tag.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackSource {
+    pub path: PathBuf,
+    pub gain: f32,
+}
+
+impl TrackSource {
+    /// Play a file untouched.
+    pub fn plain(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            gain: 1.0,
+        }
+    }
+}
+
 /// Commands sent to the decoder thread.
 #[derive(Debug, Clone)]
 pub enum PlayerCmd {
-    Load(PathBuf),
+    Load(TrackSource),
     Play,
     Pause,
     Toggle,
@@ -76,7 +102,7 @@ pub enum PlayerCmd {
     ///
     /// Sent *in reply*, never speculatively, so the resolution is made at the
     /// moment it is needed and cannot go stale — see `decode::run`.
-    SetNext(Option<PathBuf>),
+    SetNext(Option<TrackSource>),
     Shutdown,
 }
 
@@ -319,8 +345,8 @@ impl PlayerHandle {
         }
     }
 
-    pub fn load(&self, path: impl Into<PathBuf>) {
-        self.send(PlayerCmd::Load(path.into()));
+    pub fn load(&self, source: TrackSource) {
+        self.send(PlayerCmd::Load(source));
     }
     pub fn play(&self) {
         self.send(PlayerCmd::Play);
@@ -338,8 +364,8 @@ impl PlayerHandle {
         self.send(PlayerCmd::Seek(to));
     }
     /// Answer a [`PlayerEvent::NeedNext`]. Ignored at any other time.
-    pub fn set_next(&self, path: Option<PathBuf>) {
-        self.send(PlayerCmd::SetNext(path));
+    pub fn set_next(&self, next: Option<TrackSource>) {
+        self.send(PlayerCmd::SetNext(next));
     }
 
     /// Events from the decoder. Drain with `try_recv` from a render loop.

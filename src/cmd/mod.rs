@@ -151,6 +151,52 @@ pub enum SettingKey {
     ResampleQuality,
     AlbumHeaders,
     RelativeNumbers,
+    ReplayGain,
+}
+
+/// Which loudness tag to follow, per ReplayGain 2.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplayGainMode {
+    Off,
+    /// The track's own level. What shuffle wants: it jumps between masters.
+    Track,
+    /// The album's level, which preserves the *relative* levels within an
+    /// album — the thing a continuous mix depends on.
+    Album,
+    /// Album when playing in order, track when shuffling.
+    #[default]
+    Auto,
+}
+
+impl ReplayGainMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReplayGainMode::Off => "off",
+            ReplayGainMode::Track => "track",
+            ReplayGainMode::Album => "album",
+            ReplayGainMode::Auto => "auto",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "off" | "false" | "no" => ReplayGainMode::Off,
+            "track" => ReplayGainMode::Track,
+            "album" => ReplayGainMode::Album,
+            "auto" => ReplayGainMode::Auto,
+            _ => return None,
+        })
+    }
+
+    /// Cycled by `:toggle replaygain`, in the order they are worth trying.
+    pub fn cycle(self) -> Self {
+        match self {
+            ReplayGainMode::Off => ReplayGainMode::Auto,
+            ReplayGainMode::Auto => ReplayGainMode::Track,
+            ReplayGainMode::Track => ReplayGainMode::Album,
+            ReplayGainMode::Album => ReplayGainMode::Off,
+        }
+    }
 }
 
 impl SettingKey {
@@ -165,6 +211,7 @@ impl SettingKey {
             SettingKey::ResampleQuality => "resample_quality",
             SettingKey::AlbumHeaders => "album_headers",
             SettingKey::RelativeNumbers => "relative_numbers",
+            SettingKey::ReplayGain => "replaygain",
         }
     }
 
@@ -179,6 +226,7 @@ impl SettingKey {
             "resample_quality" => SettingKey::ResampleQuality,
             "album_headers" => SettingKey::AlbumHeaders,
             "relative_numbers" => SettingKey::RelativeNumbers,
+            "replaygain" => SettingKey::ReplayGain,
             _ => return None,
         })
     }
@@ -193,6 +241,7 @@ impl SettingKey {
         SettingKey::ResampleQuality,
         SettingKey::AlbumHeaders,
         SettingKey::RelativeNumbers,
+        SettingKey::ReplayGain,
     ];
 }
 
@@ -203,6 +252,7 @@ pub enum SettingValue {
     Bool(bool),
     Aaa(AaaMode),
     Quality(Quality),
+    ReplayGain(ReplayGainMode),
 }
 
 impl std::fmt::Display for SettingValue {
@@ -211,6 +261,7 @@ impl std::fmt::Display for SettingValue {
             SettingValue::Bool(b) => write!(f, "{b}"),
             SettingValue::Aaa(a) => write!(f, "{}", a.label()),
             SettingValue::Quality(q) => write!(f, "{}", quality_name(*q)),
+            SettingValue::ReplayGain(m) => write!(f, "{}", m.label()),
         }
     }
 }

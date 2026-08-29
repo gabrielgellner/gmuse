@@ -22,7 +22,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{Time, Timestamp};
 
 use super::resample::{Quality, Resampler};
-use super::{PlayerCmd, PlayerEvent, SeekTo, Shared, State};
+use super::{PlayerCmd, PlayerEvent, SeekTo, Shared, State, TrackSource};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
@@ -61,6 +61,10 @@ struct Track {
     track_id: u32,
     source_rate: u32,
     channels: usize,
+    /// Linear gain for this track's samples — loudness normalisation. Applied
+    /// as frames are produced, so it travels with the audio rather than being
+    /// applied at the output, where a gapless join would put it a second early.
+    gain: f32,
     resampler: Option<Resampler>,
     /// Device frames pushed into the ring since the last flush.
     pushed_frames: u64,
@@ -103,7 +107,7 @@ pub(super) fn run(
     // The reply to `NeedNext`: `None` = not answered yet, `Some(None)` =
     // answered "nothing follows". Tri-state because "no answer" and "no next
     // track" lead to different behaviour and must not be confused.
-    let mut next_answer: Option<Option<PathBuf>> = None;
+    let mut next_answer: Option<Option<TrackSource>> = None;
     let mut asked: Option<std::time::Instant> = None;
     // `Loaded` events held back until the playhead reaches the join they
     // describe. More than one can be outstanding only for a track shorter
@@ -152,7 +156,7 @@ pub(super) fn run(
                     next_answer = Some(path);
                     continue;
                 }
-                PlayerCmd::Load(path) => {
+                PlayerCmd::Load(source) => {
                     outbox.clear();
                     // A load supersedes whatever was spliced on: its own
                     // `Loaded` follows, so a held-back one would be a lie.
@@ -161,11 +165,18 @@ pub(super) fn run(
                     asked = None;
                     shared.draining.store(false, Ordering::Release);
                     flush(&shared, 0);
-                    match open(&path, &codecs, device_rate, device_channels, quality) {
+                    match open(
+                        &source.path,
+                        &codecs,
+                        device_rate,
+                        device_channels,
+                        quality,
+                        source.gain,
+                    ) {
                         Ok(t) => {
                             let duration = track_duration(&t);
                             let _ = events.try_send(PlayerEvent::Loaded {
-                                path,
+                                path: source.path,
                                 duration,
                                 source_rate: t.source_rate,
                                 channels: t.channels,
@@ -284,8 +295,15 @@ pub(super) fn run(
             // it. That second is the budget for splicing the next track on
             // without a gap (DESIGN §11.1). Ask now, and decide on the answer.
             match next_answer.take() {
-                Some(Some(path)) => {
-                    match open(&path, &codecs, device_rate, device_channels, quality) {
+                Some(Some(source)) => {
+                    match open(
+                        &source.path,
+                        &codecs,
+                        device_rate,
+                        device_channels,
+                        quality,
+                        source.gain,
+                    ) {
                         Ok(mut nt) => {
                             // Carry the resampler when the ratio is unchanged.
                             // Flushing it would zero-pad the final chunk, and
@@ -301,6 +319,9 @@ pub(super) fn run(
                                 // has to go out before the switch.
                                 let mut tail = Vec::new();
                                 if r.flush(&mut tail).is_ok() && !tail.is_empty() {
+                                    // Still the outgoing track's audio, so it
+                                    // takes the outgoing track's gain.
+                                    scale(&mut tail, t.gain);
                                     let written = push(producer, &tail, &cmds);
                                     t.pushed_frames += (written / device_channels) as u64;
                                     if written < tail.len() {
@@ -315,7 +336,7 @@ pub(super) fn run(
                             boundaries.push_back((
                                 boundary,
                                 PlayerEvent::Loaded {
-                                    path,
+                                    path: source.path,
                                     duration: track_duration(&nt),
                                     source_rate: nt.source_rate,
                                     channels: nt.channels,
@@ -352,6 +373,7 @@ pub(super) fn run(
                 && r.flush(&mut tail).is_ok()
                 && !tail.is_empty()
             {
+                scale(&mut tail, t.gain);
                 let written = push(producer, &tail, &cmds);
                 t.pushed_frames += (written / device_channels) as u64;
                 if written < tail.len() {
@@ -503,25 +525,42 @@ fn push(producer: &mut rtrb::Producer<f32>, data: &[f32], cmds: &Receiver<Player
     offset
 }
 
+/// Scale frames by a track's gain. A no-op at unity, which is the common case.
+fn scale(frames: &mut [f32], gain: f32) {
+    if gain == 1.0 {
+        return;
+    }
+    for sample in frames {
+        *sample *= gain;
+    }
+}
+
 /// Decode one packet, resampled to the device rate. `Ok(None)` at end of stream.
+///
+/// Everything it hands back is already scaled by the track's gain, so there is
+/// one place frames become audible and one place the gain is applied.
 fn decode_chunk(t: &mut Track) -> Result<Option<Vec<f32>>, DecodeError> {
     // The tail of the packet a seek landed inside comes out first.
     if !t.pending.is_empty() {
-        return Ok(Some(std::mem::take(&mut t.pending)));
+        let mut out = std::mem::take(&mut t.pending);
+        scale(&mut out, t.gain);
+        return Ok(Some(out));
     }
 
     // Then the head kept back by `open`, resampled now that the filter is
     // settled — inherited across a gapless join, or this track's own.
     if !t.head.is_empty() {
         let raw = std::mem::take(&mut t.head);
-        return match t.resampler.as_mut() {
+        let mut out = match t.resampler.as_mut() {
             Some(r) => {
                 let mut out = Vec::new();
                 r.process(&raw, &mut out)?;
-                Ok(Some(out))
+                out
             }
-            None => Ok(Some(raw)),
+            None => raw,
         };
+        scale(&mut out, t.gain);
+        return Ok(Some(out));
     }
 
     let mut raw: Vec<f32> = Vec::new();
@@ -550,14 +589,16 @@ fn decode_chunk(t: &mut Track) -> Result<Option<Vec<f32>>, DecodeError> {
         }
     }
 
-    match t.resampler.as_mut() {
+    let mut out = match t.resampler.as_mut() {
         Some(r) => {
-            let mut out = Vec::new();
-            r.process(&raw, &mut out)?;
-            Ok(Some(out))
+            let mut converted = Vec::new();
+            r.process(&raw, &mut converted)?;
+            converted
         }
-        None => Ok(Some(raw)),
-    }
+        None => raw,
+    };
+    scale(&mut out, t.gain);
+    Ok(Some(out))
 }
 
 /// Seek so that the next decoded frame is exactly `target` device frames in.
@@ -636,6 +677,7 @@ fn open(
     device_rate: u32,
     device_channels: usize,
     quality: Quality,
+    gain: f32,
 ) -> Result<Track, DecodeError> {
     let file = std::fs::File::open(path).map_err(|e| DecodeError::Open {
         path: path.to_path_buf(),
@@ -718,6 +760,7 @@ fn open(
         track_id,
         source_rate,
         channels,
+        gain,
         resampler,
         pushed_frames: 0,
         base_frames: 0,
@@ -850,12 +893,12 @@ mod tests {
         // Ground truth: decode linearly and keep 1000 frames from 123_456.
         const TARGET: usize = 123_456;
         const WINDOW: usize = 1_000;
-        let mut linear = open(&path, &codecs, rate, ch, Quality::Balanced).unwrap();
+        let mut linear = open(&path, &codecs, rate, ch, Quality::Balanced, 1.0).unwrap();
         let all = take_frames(&mut linear, TARGET + WINDOW, ch);
         let expected = &all[TARGET * ch..(TARGET + WINDOW) * ch];
 
         // Same window, reached by seeking.
-        let mut seeked = open(&path, &codecs, rate, ch, Quality::Balanced).unwrap();
+        let mut seeked = open(&path, &codecs, rate, ch, Quality::Balanced, 1.0).unwrap();
         seek_to_frame(&mut seeked, TARGET as u64, rate).unwrap();
         let got = take_frames(&mut seeked, WINDOW, ch);
 
@@ -884,11 +927,11 @@ mod tests {
 
         let codecs = codec_registry();
         let ch = channels as usize;
-        let mut linear = open(&path, &codecs, rate, ch, Quality::Balanced).unwrap();
+        let mut linear = open(&path, &codecs, rate, ch, Quality::Balanced, 1.0).unwrap();
         let all = take_frames(&mut linear, 100_100, ch);
 
         for &target in &[1usize, 4_097, 44_099, 44_101, 99_999] {
-            let mut t = open(&path, &codecs, rate, ch, Quality::Balanced).unwrap();
+            let mut t = open(&path, &codecs, rate, ch, Quality::Balanced, 1.0).unwrap();
             seek_to_frame(&mut t, target as u64, rate).unwrap();
             let got = take_frames(&mut t, 16, ch);
             let expected = &all[target * ch..(target + 16) * ch];
@@ -984,7 +1027,17 @@ mod tests {
         channels: usize,
         quality: Quality,
     ) -> (Vec<f32>, Vec<PlayerEvent>) {
-        let (samples, events) = play_through_paced(tracks, rate, channels, quality, None);
+        let sources: Vec<TrackSource> = tracks.iter().cloned().map(TrackSource::plain).collect();
+        play_sources(&sources, rate, channels, quality)
+    }
+
+    fn play_sources(
+        sources: &[TrackSource],
+        rate: u32,
+        channels: usize,
+        quality: Quality,
+    ) -> (Vec<f32>, Vec<PlayerEvent>) {
+        let (samples, events) = play_through_paced(sources, rate, channels, quality, None);
         (samples, events.into_iter().map(|(e, _)| e).collect())
     }
 
@@ -996,7 +1049,7 @@ mod tests {
     ///
     /// Each event is paired with the playback position when it arrived.
     fn play_through_paced(
-        tracks: &[PathBuf],
+        tracks: &[TrackSource],
         rate: u32,
         channels: usize,
         quality: Quality,
@@ -1065,7 +1118,7 @@ mod tests {
         };
 
         let mut events = Vec::new();
-        let mut queue: Vec<PathBuf> = tracks[1..].to_vec();
+        let mut queue: Vec<TrackSource> = tracks[1..].to_vec();
         queue.reverse();
         cmd_tx.send(PlayerCmd::Load(tracks[0].clone())).unwrap();
 
@@ -1213,7 +1266,7 @@ mod tests {
         // 20x real time: fast enough to keep the test short, slow enough that
         // the decoder stays a full ring ahead.
         let (got, events) = play_through_paced(
-            &[a, b.clone()],
+            &[TrackSource::plain(a), TrackSource::plain(b.clone())],
             rate,
             channels,
             Quality::Balanced,
@@ -1249,6 +1302,49 @@ mod tests {
         let mut expected = expected_pcm(a_frames, channels as u16, 1);
         expected.extend(expected_pcm(b_frames, channels as u16, 2));
         assert_eq!(got, expected, "paced playback lost or inserted samples");
+    }
+
+    /// A per-track gain must change exactly at the join, not when the decoder
+    /// reaches it — those are a ring's depth apart after M7.
+    ///
+    /// This is why the gain is applied in the decoder rather than at the
+    /// output: it travels with the frames it belongs to, so alignment is not
+    /// something anyone has to maintain. Applying it in the callback would put
+    /// the next track's gain on the last second of the current one, which no
+    /// test of the gain's *value* would catch.
+    #[test]
+    fn a_spliced_track_takes_its_own_gain_from_the_join() {
+        let dir = gapless_dir("gain");
+        let (rate, channels) = (44_100u32, 2usize);
+        let (a_frames, b_frames) = (30_000u32, 20_000u32);
+        let a = dir.join("a.wav");
+        let b = dir.join("b.wav");
+        write_seeded_wav(&a, a_frames, channels as u16, rate, 1);
+        write_seeded_wav(&b, b_frames, channels as u16, rate, 2);
+
+        // A at unity, B at exactly half.
+        let sources = vec![
+            TrackSource { path: a, gain: 1.0 },
+            TrackSource { path: b, gain: 0.5 },
+        ];
+        let (got, _) = play_sources(&sources, rate, channels, Quality::Balanced);
+
+        let mut expected = expected_pcm(a_frames, channels as u16, 1);
+        expected.extend(
+            expected_pcm(b_frames, channels as u16, 2)
+                .iter()
+                .map(|s| s * 0.5),
+        );
+
+        assert_eq!(got.len(), expected.len(), "the join moved");
+        let mismatch = got.iter().zip(&expected).position(|(x, y)| x != y);
+        assert_eq!(
+            mismatch,
+            None,
+            "first differing frame {} — the join is at frame {a_frames}, so a \
+             gain applied early shows up before it and one applied late after",
+            mismatch.unwrap_or(0) / channels
+        );
     }
 
     /// Answering `NeedNext` with `None` is how playback stops, and it must

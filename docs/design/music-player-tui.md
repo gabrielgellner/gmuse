@@ -1274,6 +1274,40 @@ Append here as decisions are made. Format: date, decision, rationale.
   mutation against both the linear mapping and mpv's cubic — the latter being the point, since "not linear" was never
   the requirement.
 
+- **2026-08-29** **ReplayGain applied (issue #12), and analysis deliberately left outside.** §4 has listed
+  `replaygain: Option<ReplayGain>` on `Track` since the start, and `scan.rs` has been reading all four tags through
+  lofty for as long as there has been a scanner. Nothing had ever used the field. This wires it up.
+
+  **The measurement stays out of the program.** §1 puts tag _editing_ out of scope, so we could not write results back
+  even if we computed them, and computing them means decoding every track in full — minutes for a small library, hours
+  for a large one. `rsgain` (the maintained successor to loudgain, which stopped in 2019) already does this well, and
+  its easy mode writes ReplayGain 2.0 tags at -18 LUFS with album figures and clipping protection. Reading what it wrote
+  is the whole feature. The local library had **0 of 148 files tagged**, which is why "apply the tags" alone would have
+  looked like it did nothing.
+
+  Three decisions:
+
+  **`auto` follows the play order.** Shuffling jumps between masters, so each track's own level is what matters. Playing
+  an album in order, the album figure preserves the _relative_ levels inside it — turning those into per-track
+  corrections would flatten exactly what the mastering engineer intended, and on a continuous mix it would be audible at
+  every join. Album mode falls back to the track figure rather than giving up, so a track-only scan still works.
+
+  **A known peak caps the gain.** Positive gain on a quiet master is where clipping happens; being a decibel under the
+  target is better than being over full scale. A cut is never capped, because it cannot clip.
+
+  **The gain is applied in the decoder, not the callback.** This is the opposite of the volume fader, which lives in the
+  callback precisely so a change is heard immediately. A _per-track_ gain wants the other property: it must land exactly
+  at the track boundary, and after M7 the decoder is a ring's depth ahead of what the listener is hearing. Applying it
+  at the output would put the next track's gain on the last second of the current one. Applying it as frames are
+  produced means it travels with the audio it belongs to and alignment is not something anyone maintains.
+
+  That last point is also what the test had to check, and the first two attempts at the mutation were both duds. One set
+  `t.gain` immediately before `*t = nt` — dead code, since the outgoing track is fully pushed by then. The other patched
+  the `pending` branch of `decode_chunk` rather than the `head` branch, because the two are textually identical and the
+  replacement took the first. Only the third — the spliced track's head bypassing the gain — moved the join, and the
+  failure names frame 30000 exactly. **A mutation that passes is not evidence the test is weak; it can equally mean the
+  mutation was inert.** Check which before believing either.
+
 ---
 
 ## 14. Prior art worth reading

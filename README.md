@@ -118,6 +118,11 @@ Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are
 `<`/`>` seek 60s, `-`/`+` adjust volume by 3 dB. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m`
 cycles all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue, `D` removes.
 
+Loudness is matched from ReplayGain 2.0 tags when files have them — `set replaygain=auto` follows the play order, taking
+the album figure in order and the track figure when shuffling. Analysis is deliberately somebody else's job: tag a
+library with [rsgain](https://github.com/complexlogic/rsgain) (`rsgain easy ~/Music`) and gmuse reads what it wrote.
+Untagged files play untouched, so the setting is inert until something is tagged.
+
 `:` opens the command line — `Tab` completes verbs and their arguments, including catalog names, setting keys and the
 values each key accepts. `/` and `?` search, `n`/`N` repeat the search. View 7 lists every setting and binding.
 
@@ -134,6 +139,7 @@ startup_commands = ["view 1"]
 [settings]
 shuffle = true
 aaa_mode = "album"          # all | artist | album
+replaygain = "auto"         # off | track | album | auto
 
 [keys.common]
 "^n" = "next"

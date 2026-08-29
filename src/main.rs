@@ -137,7 +137,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // themselves cannot start playback until M5 — silently ignoring an
         // explicit argument would be worse than the milestone boundary.
         if let Some(path) = &args.file {
-            app.player.load(path.clone());
+            app.player
+                .load(crate::audio::TrackSource::plain(path.clone()));
         }
         return run_tui(&app, args.smart_artist_sort, loaded, args.log_path());
     }
@@ -160,7 +161,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match &args.file {
-        Some(path) => app.player.load(path.clone()),
+        Some(path) => app
+            .player
+            .load(crate::audio::TrackSource::plain(path.clone())),
         None => println!("{}", repl::HELP),
     }
 
@@ -196,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn run(app: &mut App, cmd: Line) {
     let player = &app.player;
     match cmd {
-        Line::Load(p) => player.load(p),
+        Line::Load(p) => player.load(crate::audio::TrackSource::plain(p)),
         Line::Play => player.play(),
         Line::Pause => player.pause(),
         Line::Toggle => player.toggle(),

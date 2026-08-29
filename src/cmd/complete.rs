@@ -131,6 +131,7 @@ fn setting_values(key: SettingKey) -> Vec<String> {
     match key {
         SettingKey::AaaMode => vec!["all".into(), "artist".into(), "album".into()],
         SettingKey::ResampleQuality => vec!["fast".into(), "balanced".into(), "high".into()],
+        SettingKey::ReplayGain => vec!["off".into(), "track".into(), "album".into(), "auto".into()],
         _ => vec!["true".into(), "false".into()],
     }
 }
