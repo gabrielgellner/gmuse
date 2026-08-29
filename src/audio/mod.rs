@@ -126,6 +126,10 @@ pub enum PlayerEvent {
         channels: usize,
         /// True when the file's rate differs from the device's and is being converted.
         resampling: bool,
+        /// The gain actually being applied to this track's samples. Reported
+        /// by the decoder rather than remembered by the caller, so the log
+        /// records what happened rather than what was asked for.
+        gain: f32,
     },
     /// The current track has been decoded to its end and the ring still holds
     /// the last of it. Reply with [`PlayerCmd::SetNext`] to have the next

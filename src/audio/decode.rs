@@ -181,6 +181,7 @@ pub(super) fn run(
                                 source_rate: t.source_rate,
                                 channels: t.channels,
                                 resampling: t.resampler.is_some(),
+                                gain: t.gain,
                             });
                             track = Some(t);
                             shared.state.store(State::Playing as u8, Ordering::Relaxed);
@@ -341,6 +342,7 @@ pub(super) fn run(
                                     source_rate: nt.source_rate,
                                     channels: nt.channels,
                                     resampling: nt.resampler.is_some(),
+                                    gain: nt.gain,
                                 },
                             ));
                             asked = None;
@@ -1345,6 +1347,35 @@ mod tests {
              gain applied early shows up before it and one applied late after",
             mismatch.unwrap_or(0) / channels
         );
+    }
+
+    /// `Loaded` reports the gain the decoder is actually applying, not the one
+    /// the caller asked for. The distinction matters for a log: it should
+    /// record what happened, and the two could diverge if the splice ever
+    /// stopped carrying the gain across.
+    #[test]
+    fn loaded_reports_the_gain_the_decoder_applied() {
+        let dir = gapless_dir("loaded-gain");
+        let (rate, channels) = (44_100u32, 2usize);
+        let a = dir.join("a.wav");
+        let b = dir.join("b.wav");
+        write_seeded_wav(&a, 30_000, channels as u16, rate, 1);
+        write_seeded_wav(&b, 20_000, channels as u16, rate, 2);
+
+        let sources = vec![
+            TrackSource { path: a, gain: 1.0 },
+            TrackSource { path: b, gain: 0.5 },
+        ];
+        let (_, events) = play_sources(&sources, rate, channels, Quality::Balanced);
+
+        let gains: Vec<f32> = events
+            .iter()
+            .filter_map(|e| match e {
+                PlayerEvent::Loaded { gain, .. } => Some(*gain),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(gains, vec![1.0, 0.5], "events: {events:?}");
     }
 
     /// Answering `NeedNext` with `None` is how playback stops, and it must

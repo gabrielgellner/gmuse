@@ -1456,6 +1456,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   be usable when it is not in front of you. For an arguable feature the question is now explicit — does this make acting
   faster, or only make looking nicer?
 
+- **2026-08-29** **The log records what happened, not what was asked for (issue #17).** Reading a 75-minute session
+  found the ReplayGain figure on the `next` (splice) line and nowhere else. 21 of 27 tracks arrived by splice and had
+  their gain recorded; the 6 played by hand did not — and a manually played track is disproportionately the one being
+  investigated, because it was chosen on purpose. A diagnostic covering 78% of cases reads as complete while hiding the
+  interesting one.
+
+  The gain moved to `loaded`, which fires for every track that becomes audible, and it is now **reported by the decoder
+  rather than remembered by the caller**: `PlayerEvent::Loaded` carries the gain the decoder is actually multiplying by.
+  The two could only diverge if the splice stopped carrying the gain across — which is exactly the bug worth catching,
+  and is what the test mutates to check.
+
+  **The mode was solved by not plumbing it.** `replaygain=auto` resolves per track against `shuffle`, so the obvious
+  move is to thread the resolved choice through to the log. But the mode is a _setting_, not a property of a track:
+  logging every `apply_setting` and a summary line at startup records the whole state trajectory, and the per-load gain
+  records its effect. Together they answer the question with no per-track plumbing at all.
+
+  The startup summary is emitted **after** the config's commands have run. Written before them — which is where it first
+  went — it recorded the defaults rather than what was in force, which is a diagnostic that lies about precisely the
+  thing it exists to report.
+
+  Also noted, not fixed: `--log` with `--repl` silently does nothing, because the audit is only wired in the TUI path.
+  The line prompt prints gain and decibels in its own `status` output, so there is somewhere to look, but the flag
+  should either work or say it does not apply.
+
 ---
 
 ## 14. Prior art worth reading

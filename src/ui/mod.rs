@@ -487,11 +487,7 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
                 ui.audit.line(
                     "next",
                     &match next.as_ref() {
-                        Some(s) => format!(
-                            "splicing {} at {:+.1} dB",
-                            s.path.display(),
-                            20.0 * s.gain.max(f32::MIN_POSITIVE).log10()
-                        ),
+                        Some(s) => format!("splicing {}", s.path.display()),
                         None => "end of pool, letting playback stop".into(),
                     },
                 );
@@ -525,16 +521,18 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
                 source_rate,
                 channels,
                 resampling,
+                gain,
             } => {
                 ui.audit.line(
                     "loaded",
                     &format!(
-                        "{} — {source_rate} Hz, {channels} ch, {}{}",
+                        "{} — {source_rate} Hz, {channels} ch, {}{}, gain {}",
                         path.display(),
                         duration
                             .map(|d| format!("{:.1}s", d.as_secs_f64()))
                             .unwrap_or_else(|| "unknown length".into()),
                         if resampling { ", resampling" } else { "" },
+                        db_label(gain),
                     ),
                 );
                 // A `Loaded` arrives when a track becomes audible, so this is
@@ -598,6 +596,14 @@ fn announce_next(ui: &mut Ui, ctx: &Context<'_>) -> Option<crate::audio::TrackSo
     let source = source_for(ui, ctx.store.get(id)?);
     ui.pending_next = Some(id);
     Some(source)
+}
+
+/// A gain as decibels, for the log. Silence has no decibel value.
+fn db_label(gain: f32) -> String {
+    if gain <= 0.0 {
+        return "silent".into();
+    }
+    format!("{:+.1} dB", 20.0 * gain.log10())
 }
 
 /// What to play, and at what gain — the ReplayGain tags turned into a number.
@@ -1176,6 +1182,14 @@ fn switch_view(ui: &mut Ui, view: View) {
 }
 
 fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: SettingValue) {
+    // Every change, so the log carries the whole state trajectory rather than
+    // just its effects. `replaygain=auto` resolves per track from `shuffle`,
+    // so which figure a gain came from is only reconstructable if both are
+    // recorded — and reconstructing it from the album ordering, as had to be
+    // done once, is not a diagnostic.
+    ui.audit
+        .line("setting", &format!("{}={}", key.name(), value));
+
     match (key, value) {
         (SettingKey::AaaMode, SettingValue::Aaa(mode)) => ui.playback.aaa_mode = mode,
         (SettingKey::ReplayGain, SettingValue::ReplayGain(m)) => ui.replaygain = m,
@@ -3405,6 +3419,17 @@ mod tests {
         ui.replaygain = crate::cmd::ReplayGainMode::Album;
         let track = tagged(Some(-6.0206), None, None);
         assert!((replay_gain(&ui, &track) - 0.5).abs() < 1e-3);
+    }
+
+    /// Silence has no decibel value, and a log that printed `-inf dB` or
+    /// `NaN` for a muted track would be worse than one that said so.
+    #[test]
+    fn a_gain_renders_as_decibels_or_says_silent() {
+        assert_eq!(db_label(0.0), "silent");
+        assert_eq!(db_label(-1.0), "silent");
+        assert_eq!(db_label(1.0), "+0.0 dB");
+        assert_eq!(db_label(0.5), "-6.0 dB");
+        assert_eq!(db_label(2.0), "+6.0 dB");
     }
 
     /// The arrows drive the menu too. Not the primary binding, but a menu

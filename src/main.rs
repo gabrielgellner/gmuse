@@ -296,6 +296,20 @@ fn run_tui(
         }
     }
 
+    // *After* the config has run, or this records the defaults rather than
+    // what is actually in force. The settings that decide how loud things
+    // play: `replaygain=auto` resolves against `shuffle`, so neither alone
+    // says which figure a gain came from.
+    state.audit.line(
+        "settings",
+        &format!(
+            "replaygain={} shuffle={} aaa_mode={}",
+            state.replaygain.label(),
+            state.playback.shuffle,
+            state.playback.aaa_mode.label(),
+        ),
+    );
+
     let mut terminal = ratatui::init();
     let result = ui::run(&mut terminal, &mut state, &ctx);
     ratatui::restore();
@@ -451,6 +465,7 @@ fn drain_events(player: &PlayerHandle) {
                 source_rate,
                 channels,
                 resampling,
+                gain: _,
             } => {
                 let name = path
                     .file_name()
