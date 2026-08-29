@@ -37,6 +37,7 @@ pub enum Role {
     Gutter,
     Playing,
     SelectionPlaying,
+    CompletionSelected,
 }
 
 impl Role {
@@ -62,6 +63,7 @@ impl Role {
             Role::Gutter => "gutter",
             Role::Playing => "playing",
             Role::SelectionPlaying => "selection_playing",
+            Role::CompletionSelected => "completion_selected",
         }
     }
 
@@ -90,6 +92,7 @@ impl Role {
         Role::Gutter,
         Role::Playing,
         Role::SelectionPlaying,
+        Role::CompletionSelected,
     ];
 }
 
@@ -206,6 +209,15 @@ impl Default for Theme {
                 Role::SelectionPlaying => Style::default()
                     .bg(surface)
                     .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+                // A menu selection is not a list cursor, so it gets its own
+                // colour rather than the cursor's — a theme may well want to
+                // tell them apart. Same surface-plus-foreground shape as the
+                // selections, because a dark foreground on one of the ANSI
+                // sixteen is unreadable when the palette is the terminal's.
+                Role::CompletionSelected => Style::default()
+                    .bg(surface)
+                    .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             };
             styles.insert(role, style);

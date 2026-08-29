@@ -1120,6 +1120,44 @@ Append here as decisions are made. Format: date, decision, rationale.
   missing measurement scored as a passing one — the same shape as the test failures earlier in this milestone, in a
   throwaway shell script rather than in the code. Default a missing reading to the failing value.
 
+- **2026-08-29** **The completion menu is navigable (issue #8).** `C-n`/`C-p` walk it, `C-y` accepts, and the three open
+  questions were settled as: **`Tab` cycles once the menu is open**, as vim's wildmenu does — a second `Tab` would
+  otherwise re-complete against an unchanged candidate set and do nothing, so cycling is strictly the more useful
+  reading; **`C-y` takes the first candidate when the selection has not been moved**, which is what a shell does and
+  keeps the key from being dead most of the time the menu is up; and **the walk wraps**, in both directions.
+
+  That second rule then forced a correction. The menu first opened with _nothing_ highlighted, on the reasoning that
+  "listed" and "being navigated" were different states — but they are not, because `C-y` acts on a candidate either way.
+  The state was a fiction the screen told and the keys ignored, and it left the key's effect to be discovered by
+  pressing it. **The menu now opens on the first candidate and always shows its selection**, so `selected` is a plain
+  `usize` rather than an `Option` and the impossible state is gone with it.
+
+  This is the `v`/`c` shadow and the pending-key indicator arriving from the other direction: there, state was mirrored
+  when it should have been derived; here, the UI drew a distinction the behaviour did not honour. Both are the interface
+  disagreeing with itself.
+
+  `Esc` now closes the **menu** first and the **line** second. Dismissing a list of possibilities should not throw away
+  what has been typed.
+
+  Two things fell out of the rewrite the issue predicted. `completion_rows` used to pre-format each row into one padded
+  `String`, which made styling a single candidate impossible; it now returns candidate **indices** and the caller builds
+  the spans. That also fixed a latent bug for free — the overflow notice counted words in a rendered row, so any
+  candidate containing a space (a catalog name can) was miscounted.
+
+  And the menu is capped at eight rows, so cycling had to **scroll**: a selection that state agrees on but the screen
+  has moved past is not a selection. The offset is computed at draw time from the selected index rather than stored,
+  because it is a view of other state — the same rule as the `v`/`c` shadow and the pending-key indicator.
+
+  `Role::CompletionSelected` is new rather than reusing `SelectionFocused`: a transient menu choice and a list cursor
+  are different things and a theme may want to tell them apart. It takes the surface-plus-foreground shape the other
+  selections use — the first attempt was a dark foreground on cyan, which `no_dark_foreground_on_a_light_background`
+  rejected, correctly, because in the default theme those are the terminal's own sixteen colours.
+
+  All eight tests are mutation-checked: breaking the wrap, the scroll, the dismiss-on-accept, the `Esc` order, the `Tab`
+  cycle, the stale selection, the opening selection, or the `key=value` split each fails the test that covers it. The
+  selection assertions read what is **highlighted on the rendered buffer**, not `prompt.selected`, which is what makes
+  the scrolling case testable at all.
+
 ---
 
 ## 14. Prior art worth reading
