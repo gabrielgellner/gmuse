@@ -991,6 +991,9 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         }
         Command::Vol(spec) => {
             if let Some(p) = ctx.player {
+                // Stepping the *position*, not the gain: a step of the gain
+                // is what made `-` do almost nothing at the top of the range
+                // and fall off a cliff at the bottom.
                 let next = match spec {
                     VolSpec::Absolute(v) => v,
                     VolSpec::Relative(d) => p.volume() + d,

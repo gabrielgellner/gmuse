@@ -1233,6 +1233,47 @@ Append here as decisions are made. Format: date, decision, rationale.
   two-letter oddities are earned — `status` is `st` and `library` is `lib` only because `s` and `l` are taken by `stop`
   and `load`. That is the test the deleted aliases failed: `cat` existed for no reason but truncation.
 
+- **2026-08-29** **Volume maps linearly onto decibels, not onto amplitude (issue #11).** The percentage _was_ the
+  amplitude multiplier, handed straight to the callback. `:vol 50%` therefore meant -6dB — "slightly quieter" rather
+  than "half" — and a ±5% step moved **0.45dB at the top of the range and 6dB near the bottom**. The first few presses
+  of `-` sat below the ~1dB a listener can notice; the last were a cliff. Reported as "little impact until it drops
+  off", which is exactly what a thirteenfold spread in step size feels like.
+
+  Checked against the references rather than guessed, and the result was not what was expected:
+
+  | player                         | mapping                      | source                                                           |
+  | ------------------------------ | ---------------------------- | ---------------------------------------------------------------- |
+  | cmus                           | dB-linear table, ~48dB       | `soft_vol_db[100]`, "copied from alsa-lib src/pcm/pcm_softvol.c" |
+  | librespot (via spotify-player) | dB-linear, 60dB, the default | `VolumeCtrl::Log(DEFAULT_DB_RANGE)`, `mixer/mappings.rs`         |
+  | mpv                            | cubic, `(vol/100)^3`         | `audio_get_gain()`: `gain = pow(gain, 3)`                        |
+
+  spotify-player does no scaling of its own — it converts its percentage linearly to librespot's `u16` and defers. Nor
+  is that curve "Spotify's": the protocol carries a 0-65535 value and the client picks the shape. librespot picked one
+  citing dr-lex.be.
+
+  **The decisive finding is that a power law does not fix the unevenness at all.** With `gain = p^n` the step in dB is
+  `20n*log10((p-d)/p)`, so the exponent scales every step by the same factor. mpv's cubic has a **13.5x** spread between
+  its top and bottom step; the raw amplitude mapping has **13.4x**. Cubic makes each press three times bigger and leaves
+  the problem exactly where it was. Only a dB-linear mapping equalises the steps, and that matters here because the
+  control is incremental keys rather than a slider dragged to an absolute position — mpv's choice is defensible for a
+  GUI and does not answer our question.
+
+  So: 60dB, following librespot, which also lands a 5% step on exactly 3dB. Silence is a special case, because the
+  formula gives -60dB at the bottom and a fader wound down should be _off_.
+
+  The **ceiling is unchanged** at +6dB. This alters the shape of the control, not how loud it can get, so the fader runs
+  to 110% rather than stopping at unity.
+
+  The position is now the source of truth and the gain is derived from it. The gain is still stored in its own atomic,
+  which looks like the mirrored state this log keeps deleting and is not: the callback may not compute a power (§3), so
+  the mapping has to happen where the value is set. That is a cache with a stated reason rather than a second copy of
+  the truth.
+
+  The test that matters asserts the _step_, not the curve: every 5% move changes the level by the same 3dB, across the
+  whole range. Checking the curve's value at a few points would have passed against the old mapping. It is confirmed by
+  mutation against both the linear mapping and mpv's cubic — the latter being the point, since "not linear" was never
+  the requirement.
+
 ---
 
 ## 14. Prior art worth reading

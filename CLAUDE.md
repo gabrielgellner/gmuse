@@ -128,7 +128,7 @@ Options are parsed with clap (derive), and each also reads an env var as a fallb
 | `-d, --device`   | `GMUSE_DEVICE`   | Output device, matched by substring on the id      |
 | `-r, --rate`     | `GMUSE_RATE`     | Force the device sample rate (to measure SRC cost) |
 | `-q, --resample` | `GMUSE_RESAMPLE` | `fast`, `balanced`, or `high`                      |
-| `-v, --volume`   | —                | Initial volume, 0.0–2.0                            |
+| `-v, --volume`   | —                | Initial fader position, 1.0 is unity (see §13)     |
 
 **Use clap with the derive API for anything CLI-shaped.** Parsing belongs at the boundary (§12): flags become typed
 values in `cli.rs` and travel down as `PlayerConfig`, so nothing below reads the environment or handles a raw string.

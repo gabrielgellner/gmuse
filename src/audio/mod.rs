@@ -120,6 +120,44 @@ pub enum PlayerEvent {
     DeviceChanged,
 }
 
+/// Decibels spanned by the fader, from silence to unity.
+///
+/// The fader position maps *linearly onto decibels*, which is the only mapping
+/// that makes every step of `+`/`-` change the level by the same amount. A raw
+/// amplitude multiplier does not: at a ±5% step it moves 0.45dB at the top of
+/// the range and 6dB near the bottom, a thirteenfold spread, so the first
+/// presses are below the ~1dB a listener can notice and the last are a cliff.
+///
+/// A power law (`gain = position^n`) does not fix this either — the exponent
+/// scales every step by the same factor, leaving the unevenness untouched.
+/// This is why mpv's cubic mapping has the same 13x spread as a linear one.
+///
+/// 60dB matches librespot's default and lands a 5% step on exactly 3dB. cmus
+/// takes the same approach through a table copied from alsa-lib, over ~48dB.
+const VOLUME_DB_RANGE: f32 = 60.0;
+
+/// The largest gain the fader can reach: +6dB, or twice the amplitude.
+///
+/// Unchanged from when the fader *was* the gain — this alters the shape of the
+/// control, not how loud it can get.
+const MAX_GAIN: f32 = 2.0;
+
+/// Fader position at unity gain. Above this the fader boosts, to `MAX_GAIN`.
+const MAX_POSITION: f32 = 1.0 + 6.0206 / VOLUME_DB_RANGE;
+
+/// Linear gain for a fader position, where 1.0 is unity.
+///
+/// Zero is true silence rather than the -60dB the formula would give: a fader
+/// wound to the bottom is expected to be *off*.
+pub fn gain_for(position: f32) -> f32 {
+    let position = position.clamp(0.0, MAX_POSITION);
+    if position <= 0.0 {
+        return 0.0;
+    }
+    let db = VOLUME_DB_RANGE * (position - 1.0);
+    (10.0f32.powf(db / 20.0)).min(MAX_GAIN)
+}
+
 /// State shared with the real-time callback.
 ///
 /// **INVARIANT (DESIGN §3):** the callback may touch nothing but these atomics
@@ -143,8 +181,12 @@ pub(crate) struct Shared {
     pub last_short_frames: AtomicU32,
     /// A `State`, as `u8`.
     pub state: AtomicU8,
-    /// Linear gain, as `f32` bits.
+    /// Linear gain, as `f32` bits. Derived from `position` — the callback
+    /// reads it because it may not compute a power (DESIGN §3).
     pub volume: AtomicU32,
+    /// Fader position, as `f32` bits. The value the user set, and the one the
+    /// UI shows; the gain above is a function of it.
+    pub position: AtomicU32,
     /// Bumped by the decoder to ask the callback to discard buffered audio.
     pub flush_seq: AtomicU64,
     /// Echoed back by the callback once it has discarded and repositioned.
@@ -176,6 +218,7 @@ impl Shared {
             last_short_frames: AtomicU32::new(0),
             state: AtomicU8::new(State::Stopped as u8),
             volume: AtomicU32::new(1.0f32.to_bits()),
+            position: AtomicU32::new(1.0f32.to_bits()),
             flush_seq: AtomicU64::new(0),
             flush_ack: AtomicU64::new(0),
             flush_position: AtomicU64::new(0),
@@ -225,9 +268,11 @@ impl PlayerHandle {
 
         let (mut producer, consumer) = ring::new(device_rate, device_channels);
         let shared = Arc::new(Shared::new());
+        let position = cfg.volume.clamp(0.0, MAX_POSITION);
+        shared.position.store(position.to_bits(), Ordering::Relaxed);
         shared
             .volume
-            .store(cfg.volume.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+            .store(gain_for(position).to_bits(), Ordering::Relaxed);
 
         let stream = device::build_stream(&device, config, consumer, Arc::clone(&shared))?;
         cpal::traits::StreamTrait::play(&stream)?;
@@ -335,18 +380,31 @@ impl PlayerHandle {
         self.device_rate
     }
 
-    /// Linear gain. 1.0 is unity; values above 1.0 will clip.
+    /// Fader position, where 1.0 is unity. This is the value to show and to
+    /// step, not the gain — see [`gain_for`].
     pub fn volume(&self) -> f32 {
+        f32::from_bits(self.shared.position.load(Ordering::Relaxed))
+    }
+
+    /// The gain actually applied to samples, for tests and diagnostics.
+    pub fn gain(&self) -> f32 {
         f32::from_bits(self.shared.volume.load(Ordering::Relaxed))
     }
 
-    /// Set linear gain, clamped to a sane range.
+    /// Set the fader position, clamped to a sane range.
     ///
-    /// Applied in the callback rather than the decoder, so a change is audible
-    /// immediately instead of after the ~1s already sitting in the ring.
-    pub fn set_volume(&self, gain: f32) {
-        let gain = gain.clamp(0.0, 2.0);
-        self.shared.volume.store(gain.to_bits(), Ordering::Relaxed);
+    /// The mapping to gain happens here, so the callback only ever multiplies
+    /// by a number it was handed. Applied in the callback rather than the
+    /// decoder, so a change is audible immediately instead of after the ~1s
+    /// already sitting in the ring.
+    pub fn set_volume(&self, position: f32) {
+        let position = position.clamp(0.0, MAX_POSITION);
+        self.shared
+            .position
+            .store(position.to_bits(), Ordering::Relaxed);
+        self.shared
+            .volume
+            .store(gain_for(position).to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -356,5 +414,87 @@ impl Drop for PlayerHandle {
         if let Some(handle) = self.decoder.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db(gain: f32) -> f32 {
+        20.0 * gain.log10()
+    }
+
+    /// The property the whole change exists for: a step of the fader moves the
+    /// level by the same number of decibels wherever it is taken.
+    ///
+    /// Under the old raw-amplitude mapping this failed badly — a 5% step was
+    /// 0.45dB at the top and 6dB near the bottom — and that spread *is* the
+    /// bug. Testing the curve's shape at a few points would not have caught
+    /// it; testing the step does.
+    #[test]
+    fn every_step_of_the_fader_is_the_same_number_of_decibels() {
+        const STEP: f32 = 0.05;
+        let mut position = STEP;
+        let mut steps = Vec::new();
+        while position + STEP <= 1.0 + 1e-6 {
+            let change = db(gain_for(position + STEP)) - db(gain_for(position));
+            steps.push(change);
+            position += STEP;
+        }
+        assert!(steps.len() > 15, "not enough of the range covered");
+
+        let expected = VOLUME_DB_RANGE * STEP;
+        for change in &steps {
+            assert!(
+                (change - expected).abs() < 0.01,
+                "a {STEP} step moved {change:.3}dB, expected {expected:.3}dB; \
+                 steps were {steps:?}"
+            );
+        }
+    }
+
+    /// 5% of a 60dB range is 3dB, which is both well above the ~1dB a listener
+    /// can notice and small enough to tune with. Pinned because the range and
+    /// the default step have to be chosen together to land here.
+    #[test]
+    fn the_default_step_is_three_decibels() {
+        let change = db(gain_for(1.0)) - db(gain_for(0.95));
+        assert!((change - 3.0).abs() < 0.01, "a 5% step moved {change:.3}dB");
+    }
+
+    #[test]
+    fn the_fader_spans_sixty_decibels_below_unity() {
+        assert!(
+            (gain_for(1.0) - 1.0).abs() < 1e-6,
+            "100% must be unity gain"
+        );
+        assert!(
+            (db(gain_for(f32::EPSILON)) + VOLUME_DB_RANGE).abs() < 0.01,
+            "the bottom of the fader should be -{VOLUME_DB_RANGE}dB"
+        );
+    }
+
+    /// A fader wound to the bottom is off, not merely very quiet. The formula
+    /// alone would give -60dB, which is audible in a quiet room.
+    #[test]
+    fn zero_is_true_silence() {
+        assert_eq!(gain_for(0.0), 0.0);
+        assert_eq!(gain_for(-1.0), 0.0);
+    }
+
+    /// The change alters the shape of the control, not how loud it can get:
+    /// the ceiling is the +6dB it always was.
+    #[test]
+    fn the_ceiling_is_unchanged_at_plus_six_decibels() {
+        assert!((gain_for(MAX_POSITION) - MAX_GAIN).abs() < 1e-3);
+        assert!((db(gain_for(MAX_POSITION)) - 6.02).abs() < 0.01);
+        assert_eq!(gain_for(99.0), MAX_GAIN, "the clamp must hold");
+    }
+
+    /// Half the fader is a large cut, not the -6dB a raw multiplier gave.
+    #[test]
+    fn half_the_fader_is_half_the_range() {
+        assert!((db(gain_for(0.5)) + 30.0).abs() < 0.01);
     }
 }

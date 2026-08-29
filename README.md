@@ -98,7 +98,7 @@ gmuse [OPTIONS] [FILE]
   -d, --device <DEVICE>      output device, matched by substring on the id  [env: GMUSE_DEVICE]
   -r, --rate <RATE>          force the device sample rate                   [env: GMUSE_RATE]
   -q, --resample <QUALITY>   fast | balanced | high                         [env: GMUSE_RESAMPLE]
-  -v, --volume <VOLUME>      initial volume, 0.0-2.0
+  -v, --volume <VOLUME>      initial fader position, 1.0 is unity
   -L, --library <DIR>        library root to scan, repeatable  [env: GMUSE_LIBRARY]
       --rescan               re-read every file, ignoring mtimes
       --no-cache             do not read or write the library cache
@@ -115,8 +115,8 @@ an artist, `tab` swaps pane, `q` quits.
 playing track is emphasised in every list it appears in.
 
 Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
-`<`/`>` seek 60s, `-`/`+` adjust volume. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m` cycles
-all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue, `D` removes.
+`<`/`>` seek 60s, `-`/`+` adjust volume by 3 dB. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m`
+cycles all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue, `D` removes.
 
 `:` opens the command line — `Tab` completes verbs and their arguments, including catalog names, setting keys and the
 values each key accepts. `/` and `?` search, `n`/`N` repeat the search. View 7 lists every setting and binding.

@@ -423,10 +423,18 @@ fn print_status(player: &PlayerHandle) {
         State::Paused => "paused",
         State::Stopped => "stopped",
     };
+    // Both numbers: the fader position is what was set, the gain is what the
+    // samples are actually multiplied by, and the two are no longer the same.
+    let gain = player.gain();
+    let db = if gain > 0.0 {
+        format!("{:+.1} dB", 20.0 * gain.log10())
+    } else {
+        "silent".into()
+    };
     println!(
-        "{state}  {}  vol {:.2}  underruns {}",
+        "{state}  {}  vol {:.0}% ({db})  underruns {}",
         fmt_time(player.position()),
-        player.volume(),
+        player.volume() * 100.0,
         player.underruns()
     );
 }
