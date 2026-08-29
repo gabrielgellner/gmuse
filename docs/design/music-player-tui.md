@@ -1308,6 +1308,90 @@ Append here as decisions are made. Format: date, decision, rationale.
   failure names frame 30000 exactly. **A mutation that passes is not evidence the test is weak; it can equally mean the
   mutation was inert.** Check which before believing either.
 
+- **2026-08-29** **The library stays a postcard cache. SQLite is not needed, and the reason is measured.** The russ
+  notes left open "whether the library should move from a postcard cache to SQLite before §7's filter language lands in
+  M8, since 'filter runs over the whole library on every keystroke' is a scan today and would be an index lookup there."
+
+  That was the main argument, and it does not survive a measurement. A compiled closure over synthetic tracks with
+  realistic string fields, timed over 50 passes:
+
+  | filter                         | 20k tracks | 100k tracks |
+  | ------------------------------ | ---------: | ----------: |
+  | `bitrate>192` (numeric only)   |    0.01 ms |     0.06 ms |
+  | `genre=jazz` (string equality) |    0.02 ms |     0.11 ms |
+  | bare word across 3 text fields |    0.92 ms |     4.58 ms |
+  | text AND numeric               |    0.31 ms |     1.82 ms |
+
+  A whole-library scan per keystroke costs **under a millisecond at 20k tracks**, and the worst case — a bare word
+  substring-matched against every text field — is 46 ns per track. There is no index to be won here at any library size
+  this project will see. §7's "compile once to a closure, do not re-interpret the AST per track" is the optimisation
+  that matters, and it is already in the brief.
+
+  **What remains true is a lifecycle argument, and it points somewhere else.** The cache and per-track user state (#13,
+  #14) want opposite things:
+
+  |                    | library cache         | user state              |
+  | ------------------ | --------------------- | ----------------------- |
+  | nature             | derived               | **not** derived         |
+  | on a format change | discard and rescan    | must survive            |
+  | written            | in bulk, at scan time | incrementally, per play |
+  | if lost            | a slow startup        | gone for good           |
+
+  postcard is right for the first and wrong for the second — a whole-file rewrite, and a `FORMAT_VERSION` bump means
+  data loss, which is the roots incident again with something that cannot be rescanned. So the conclusion is **two
+  stores with different lifecycles**, not one database for everything, and it follows directly from the rule that entry
+  already established: the cache is derived data and may be discarded at any time.
+
+  For the durable half, a plain file written temp-then-rename is enough. Atomic rename alone prevents the "wrote an
+  empty cache over the good one" failure, with no dependency at all. `rusqlite` would also mean compiling SQLite from C
+  — a second C dependency, considerably larger than libopus, in a project whose §2 budget is deliberately small.
+
+  SQLite would win if we wanted ad-hoc querying with external tools, or concurrent access from a second process, which
+  M9's remote socket could eventually raise. Neither is demonstrated today. Revisit then, not now.
+
+- **2026-08-29** **Three more projects read (`docs/inspiration/`): spotatui, trollstov, audium.** The folder's rule
+  still holds — navigation, keybindings and TUI architecture only — but two of these argue with §1 rather than adding to
+  it, and that is worth recording rather than filing away.
+
+  **§1's "tag editing (reading only)" is a trade, not a law.** trollstov forbids metadata editing and then carves out
+  the rating as its single exception, because portability is the whole point of a rating: back up the music folder and
+  the ratings come with it. audium goes further and writes title, artist and album back to the files as a headline
+  feature. Neither makes §1 wrong — we do not want to be the program that corrupted someone's library — but both show
+  the carve-out is a coherent position rather than the top of a slope, and issue #14 should be read with that in mind.
+
+  **audium's storage layout independently reproduces the conclusion above**: config in `$XDG_CONFIG_HOME`, state in
+  `$XDG_STATE_HOME`, a small index in `$XDG_DATA_HOME`, and _"all writes use atomic rename operations for crash
+  safety"_. Separate stores by lifecycle, temp-then-rename instead of a database. That the same answer arrives from
+  somewhere else is mild evidence it is the right one.
+
+  Three concrete things to take, in order of value:
+
+  1. **Session resumption** (audium): queue, current track, position and modes restored on launch, **paused**. We
+     restore nothing. It is state, it belongs beside the audit log in `$XDG_STATE_HOME`, and `paused` is the detail that
+     makes it inoffensive. **Taken — issue #16**, where the gmuse-specific part is that shuffle is a seeded permutation,
+     so restoring `rng_state` restores the _sequence_ rather than merely the mode.
+  2. **Do not guess the terminal — considered and declined, 2026-08-29.** trollstov picks a light or dark palette from
+     `terminal_colorsaurus::theme_mode()`; audium falls back to 16 colours when truecolor is unavailable. Broad terminal
+     support is not a goal here, the ANSI-name palette already degrades by design, and detecting would mean a dependency
+     to solve a problem this project does not have. Recorded so it stops being rediscovered as a recommendation.
+  3. **Presentation as configuration** (spotatui): which columns a track list shows, in what order, how wide and under
+     what heading, as a config table. This is the natural home for a rating or play-count column without either needing
+     a layout decision in code, and it belongs in the M8 conversation.
+
+  Two smaller ones: spotatui's format templates use **named placeholders** (`{state}`, `{volume}`) where §7 specifies
+  cmus-style `%a`. That choice has not been made deliberately and should be — long names have room for fields like
+  `play_count` that have no letter left. And its `playbar_status_source` template has placeholders that arrive with
+  their own `| Shuffle:` prefix baked in, so the template author cannot control layout: the concrete argument for §7's
+  **conditional groups** being non-optional rather than a nicety.
+
+  A rejection was also corroborated. audium uses rodio, and its feature list has seeking, speed and loop modes but **no
+  gapless** — exactly the gap §13's "rodio's `Source` abstraction blocks gapless, precise seek, and controlling buffer
+  depth" predicted.
+
+  Finally, spotatui is worth keeping as a mirror: a well-built TUI that began as a Spotify client and now carries six
+  playback sources, synced lyrics, a visualiser, an AI DJ and a Lua plugin runtime. §1 opens by naming scope creep as
+  this project's risk; that is what the far end of the road looks like from outside.
+
 ---
 
 ## 14. Prior art worth reading

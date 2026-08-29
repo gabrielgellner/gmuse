@@ -13,11 +13,13 @@ a modern TUI it predates.
 **On licences.** Copyright covers expression, not ideas. Adopting "a `g` prefix for go-to commands" or "two levels of
 theme table" creates no obligation. Copying code does. gmuse is GPL-3.0-or-later by choice; nothing here is copied.
 
-| Project                             | Read for                                                                             |
-| ----------------------------------- | ------------------------------------------------------------------------------------ |
-| [eilmeldung](eilmeldung.md)         | Three-pane layout; **driving other panes without leaving focus**; config and theming |
-| [spotify-player](spotify-player.md) | **Prefix namespaces** (`g n`, `g A`); pages and popups; configurable layout          |
-| [russ](russ.md)                     | Two-pane `hjkl`; modal editing (and why not)                                         |
+| Project                             | Read for                                                                               |
+| ----------------------------------- | -------------------------------------------------------------------------------------- |
+| [eilmeldung](eilmeldung.md)         | Three-pane layout; **driving other panes without leaving focus**; config and theming   |
+| [spotify-player](spotify-player.md) | **Prefix namespaces** (`g n`, `g A`); pages and popups; configurable layout            |
+| [russ](russ.md)                     | Two-pane `hjkl`; modal editing (and why not)                                           |
+| [spotatui](spotatui.md)             | **Presentation as config** — table columns, format templates; and a scope-creep mirror |
+| [trollstov](trollstov.md)           | Tags as the only store; **portable ratings**; light/dark terminal detection            |
 
 ## What gmuse should take, roughly in order of value
 
@@ -28,8 +30,9 @@ panes and stops scaling at three, and the tree view already has two with more co
 _feed_ selection and `M-j`/`M-k` scroll the _content_. Applied here, that means stepping album-to-album from the track
 pane without a `Tab` round trip each time — the exact motion browsing a library is made of.
 
-**3. A `?` help overlay.** eilmeldung and russ both have one. We have view 7, which is a whole view switch and loses
-your place. A popup is faster. Note `?` is currently bound to reverse-search, which would have to move.
+**3. A `?` help overlay.** eilmeldung, russ, spotatui and audium all have one — four of five, and we are the outlier. We
+have view 7, which is a whole view switch and loses your place. A popup is faster. Note `?` is currently bound to
+reverse-search, which would have to move.
 
 **4. Prefix namespaces for a growing command set.** spotify-player's `g n` / `g p` / `g A` (go to artist) / `g B` (go to
 album), eilmeldung's `c f`. cmus's flat single keys are already crowded at 40-odd bindings, and this is how you add 50
@@ -39,7 +42,12 @@ more without running out of alphabet. Needs the chord machinery in #1.
 the cursor. This is the natural answer to "add this album to _which_ playlist", which we cannot express today.
 
 **6. Configurable page size and pane widths.** We hardcode a 10-row page and a 40/60 split. spotify-player makes both
-settings, and it costs a `SettingKey` each now that settings are data.
+settings, and it costs a `SettingKey` each now that settings are data. spotatui goes further and makes them adjustable
+_at runtime_, persisting — which is how anyone actually finds the right value.
+
+**6b. Track-list columns as config.** spotatui's `tables:` section makes which columns appear, in what order, how wide
+and under what heading all data. Ours are hardcoded. This is also where a rating (#14) or a play count (#13) would go
+without either needing a layout decision baked into code.
 
 **7. Vim-style relative line numbers** as an option, for `5j`-style motion. Pairs with counts in #1.
 
