@@ -1167,6 +1167,23 @@ Append here as decisions are made. Format: date, decision, rationale.
   catalogs are ours rather than cmus's — so there is no compatibility argument for it the way there is for `win-up`.
   Whether the rest of the vocabulary is carrying cmus-shaped cruft is issue #9.
 
+- **2026-08-29** **The arrows drive the completion menu too, and a chord is not a keystroke.** `Up`/`Down` are synonyms
+  for `C-p`/`C-n`. They are not what this UI is for, but a menu that ignores them reads as broken. Because candidates
+  run _down_ the columns, `Down` really is the next candidate rather than an approximation of it.
+
+  `Left`/`Right` are deliberately absent. They would mean one column, and the column count is computed at draw time from
+  the terminal width — the key handler does not know it. Caching it on `Prompt` would be exactly the mirrored state this
+  log keeps recording the removal of, to make an arrow key work.
+
+  Writing the test for it turned up a real bug. The first attempt asserted the arrows do nothing when no menu is open,
+  which cannot fail: `step` is already a no-op on an empty menu. Mutating the guard away broke nothing, and probing for
+  what the guard _does_ change found that `C-n` `C-p` `C-y` on a bare `:` line left **"npy"** in the buffer. The
+  `KeyCode::Char(c)` arm did not look at modifiers, so every chord typed its own letter — `C-a`, `C-w` and the rest
+  included. Guarded on ctrl now.
+
+  Worth noting how it was found: not by the test passing or failing, but by the _mutation_ passing. A test nothing can
+  break is not evidence, and asking what a guard actually changes is what turned an empty assertion into a fix.
+
 ---
 
 ## 14. Prior art worth reading

@@ -714,25 +714,41 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let menu_open = !prompt.candidates.is_empty();
 
-    // The menu keys come first: while it is open C-n/C-p/C-y belong to it, and
-    // they must not fall through to being typed into the line.
-    if menu_open && ctrl {
-        match key.code {
-            KeyCode::Char('n') => {
+    // The menu keys come first: while it is open these belong to it, and must
+    // not fall through to being typed into the line.
+    //
+    // The arrows are synonyms for C-n/C-p rather than the primary binding.
+    // They are not what this UI is for, but a menu that ignores them feels
+    // broken — and because candidates run *down* the columns, Down really is
+    // the next candidate rather than an approximation of it.
+    if menu_open {
+        let handled = match key.code {
+            KeyCode::Char('n') if ctrl => {
                 prompt.step(true);
-                return;
+                true
             }
-            KeyCode::Char('p') => {
+            KeyCode::Char('p') if ctrl => {
                 prompt.step(false);
-                return;
+                true
             }
-            KeyCode::Char('y') => {
+            KeyCode::Down => {
+                prompt.step(true);
+                true
+            }
+            KeyCode::Up => {
+                prompt.step(false);
+                true
+            }
+            KeyCode::Char('y') if ctrl => {
                 if let Some(c) = prompt.candidates.get(prompt.selected).cloned() {
                     prompt.accept(&c);
                 }
-                return;
+                true
             }
-            _ => {}
+            _ => false,
+        };
+        if handled {
+            return;
         }
     }
 
@@ -753,7 +769,10 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
                 ui.prompt = None;
             }
         }
-        KeyCode::Char(c) => {
+        // Guarded on ctrl, or every chord types its letter: `C-n` on a bare
+        // line put an "n" in the buffer, because a `Char` arm that ignores
+        // modifiers cannot tell a keystroke from a command.
+        KeyCode::Char(c) if !ctrl => {
             prompt.buffer.push(c);
             // The menu describes a line that no longer exists.
             prompt.dismiss();
@@ -3224,6 +3243,59 @@ mod tests {
             rendered_selection(&ui, &ctx, 100, 20).as_deref(),
             Some(candidates.last().unwrap().as_str())
         );
+    }
+
+    /// The arrows drive the menu too. Not the primary binding, but a menu
+    /// that ignores them reads as broken — and since candidates run down the
+    /// columns, `Down` is genuinely the next candidate.
+    #[test]
+    fn the_arrows_move_the_menu_like_ctrl_n_and_ctrl_p() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        tab(&mut ui, &ctx);
+        let candidates = ui.prompt.as_ref().unwrap().candidates.clone();
+
+        handle_key(KeyEvent::from(KeyCode::Down), &mut ui, &ctx);
+        assert_eq!(
+            rendered_selection(&ui, &ctx, 100, 20).as_deref(),
+            Some(candidates[1].as_str())
+        );
+        handle_key(KeyEvent::from(KeyCode::Up), &mut ui, &ctx);
+        assert_eq!(
+            rendered_selection(&ui, &ctx, 100, 20).as_deref(),
+            Some(candidates[0].as_str())
+        );
+        // Wrapping, the same as C-p.
+        handle_key(KeyEvent::from(KeyCode::Up), &mut ui, &ctx);
+        assert_eq!(
+            rendered_selection(&ui, &ctx, 100, 20).as_deref(),
+            Some(candidates.last().unwrap().as_str())
+        );
+        // And the line was not typed into.
+        assert_eq!(ui.prompt.as_ref().unwrap().buffer, "");
+    }
+
+    /// A chord is not a keystroke. With no menu open, the keys that drive one
+    /// must do nothing at all — before this they typed their own letters, so
+    /// `C-n` `C-p` `C-y` on an empty `:` line left "npy" in the buffer.
+    #[test]
+    fn the_menu_chords_are_not_typed_into_the_line() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        for k in ["^n", "^p", "^y", "^a"] {
+            press(&mut ui, &ctx, k);
+        }
+        handle_key(KeyEvent::from(KeyCode::Down), &mut ui, &ctx);
+        handle_key(KeyEvent::from(KeyCode::Up), &mut ui, &ctx);
+
+        let prompt = ui.prompt.as_ref().expect("the line should still be open");
+        assert_eq!(prompt.buffer, "", "a chord was typed into the line");
     }
 
     /// Cycling past the bottom of a capped menu must scroll it, or the choice
