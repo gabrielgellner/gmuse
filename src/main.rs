@@ -207,7 +207,7 @@ fn run(app: &mut App, cmd: Line) {
             println!("volume {:.2}", player.volume());
         }
         Line::Status => print_status(player),
-        Line::Scan(dir) => {
+        Line::Rescan(dir) => {
             if let Some(dir) = dir
                 && !app.roots.contains(&dir)
             {

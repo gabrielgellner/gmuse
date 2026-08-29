@@ -22,7 +22,7 @@ pub enum Line {
     Volume(f32),
     Status,
     /// Scan a directory into the library, or rescan the known roots.
-    Scan(Option<PathBuf>),
+    Rescan(Option<PathBuf>),
     /// Summarise the library.
     Library,
     /// List tracks whose artist/album/title contains the query.
@@ -60,7 +60,7 @@ pub fn parse(line: &str) -> Result<Line, ParseError> {
     };
 
     match word.to_ascii_lowercase().as_str() {
-        "load" | "open" | "l" => {
+        "load" | "l" => {
             if rest.is_empty() {
                 return Err(ParseError::MissingArg { cmd: "load" });
             }
@@ -86,7 +86,7 @@ pub fn parse(line: &str) -> Result<Line, ParseError> {
                 SeekTo::Absolute(Duration::from_secs_f64(secs.max(0.0)))
             }))
         }
-        "vol" | "volume" | "v" => {
+        "vol" | "v" => {
             if rest.is_empty() {
                 return Err(ParseError::MissingArg { cmd: "vol" });
             }
@@ -96,7 +96,7 @@ pub fn parse(line: &str) -> Result<Line, ParseError> {
             Ok(Line::Volume(v))
         }
         "status" | "st" => Ok(Line::Status),
-        "scan" | "u" => Ok(Line::Scan(
+        "rescan" | "u" => Ok(Line::Rescan(
             (!rest.is_empty()).then(|| PathBuf::from(unquote(rest))),
         )),
         "library" | "lib" => Ok(Line::Library),
@@ -107,7 +107,7 @@ pub fn parse(line: &str) -> Result<Line, ParseError> {
             Ok(Line::Find(rest.to_string()))
         }
         "help" | "h" | "?" => Ok(Line::Help),
-        "quit" | "q" | "exit" => Ok(Line::Quit),
+        "quit" | "q" => Ok(Line::Quit),
         other => Err(ParseError::Unknown(other.to_string())),
     }
 }
@@ -126,7 +126,7 @@ fn unquote(s: &str) -> String {
 
 pub const HELP: &str = "\
 commands:
-  load <path>     load a file and start playing   (l, open)
+  load <path>     load a file and start playing   (l)
   play            resume                          (p)
   pause           pause
   toggle          play/pause                      (t)
@@ -136,11 +136,11 @@ commands:
   seek -10        seek backwards 10s
   vol 0.5         set volume, 0.0-2.0             (v)
   status          position, state, underruns      (st)
-  scan [dir]      scan a dir, or rescan the roots (u)
+  rescan [dir]    scan a dir, or rescan the roots (u)
   library         library summary                 (lib)
   find <text>     search artist/album/title       (f, /)
   help            this                            (h, ?)
-  quit            exit                            (q)";
+  quit            leave the prompt                (q)";
 
 #[cfg(test)]
 mod tests {
@@ -206,14 +206,14 @@ mod tests {
 
     #[test]
     fn library_commands() {
-        assert_eq!(parse("scan").unwrap(), Line::Scan(None));
+        assert_eq!(parse("rescan").unwrap(), Line::Rescan(None));
         assert_eq!(
-            parse("scan /music").unwrap(),
-            Line::Scan(Some(PathBuf::from("/music")))
+            parse("rescan /music").unwrap(),
+            Line::Rescan(Some(PathBuf::from("/music")))
         );
         assert_eq!(
-            parse(r#"scan "/my music""#).unwrap(),
-            Line::Scan(Some(PathBuf::from("/my music")))
+            parse(r#"rescan "/my music""#).unwrap(),
+            Line::Rescan(Some(PathBuf::from("/my music")))
         );
         assert_eq!(parse("library").unwrap(), Line::Library);
         assert_eq!(parse("find burial").unwrap(), Line::Find("burial".into()));

@@ -1223,6 +1223,16 @@ Append here as decisions are made. Format: date, decision, rationale.
   Earlier entries in this log still quote `win-down` and `player-next`. They are records of what was decided when, and
   are left as written.
 
+- **2026-08-29** **The line prompt follows the same vocabulary rules.** `--repl` has its own small language — it has
+  commands the `:` line does not (`load`, `status`, `library`, `find`) — but it had the same synonyms #9 removed, so
+  `open`, `volume` and `exit` are gone and `scan` is now `rescan`, matching the `:` line, the `--rescan` flag and the
+  justfile recipe.
+
+  Its single-letter forms stay. They look like the aliases #9 deleted and are not: the repl is typed at speed with no
+  completion menu to clutter, and one letter per command is a deliberate system rather than an accumulation. Even the
+  two-letter oddities are earned — `status` is `st` and `library` is `lib` only because `s` and `l` are taken by `stop`
+  and `load`. That is the test the deleted aliases failed: `cat` existed for no reason but truncation.
+
 ---
 
 ## 14. Prior art worth reading
