@@ -18,6 +18,15 @@ layer do not map onto Rust idiom and translating them will produce worse code th
 behavioural spec. Read cmus's source to answer "what does it do in this case," never to answer "how should this be
 structured."
 
+### What the interface is for
+
+**gmuse is a way to interact with music, not a thing to look at.** It is driven from the keyboard, it is off screen most
+of the time, and its job is to make the next action cheap — not to fill a terminal with something worth watching.
+
+This is a scope rule, not a mood. It is why there are no visualizers and no album art, and it is also why a remote
+socket, media keys and session resumption matter more than they look: the interface has to be usable when it is not in
+front of you. When a feature is arguable, the question is whether it makes acting faster or only makes looking nicer.
+
 ### In scope
 
 - Local filesystem library: scan, tag-index, persist, incremental update
@@ -35,12 +44,32 @@ structured."
 - Visualizers, spectrum displays
 - Lyrics, synced or otherwise
 - Podcasts, RSS
-- Network sources: no Spotify, Subsonic, YouTube, yt-dlp, no `reqwest`
+- Commercial and scraped streaming services: no Spotify, no YouTube, no yt-dlp
 - Tag _editing_ (reading only)
 - Any async runtime. No `tokio`, no `async-std`. Threads and channels.
 
 Dropping these is a deliberate scope decision, not an oversight. They are the reason comparable projects carry 40+
 dependencies.
+
+### Local first, and one's own server — amended 2026-08-29
+
+The original rule was "no network sources", full stop. It has been **narrowed**: what stays out is _services_ — things
+with accounts, catalogues, and an interest in what you play. What is now allowed is **your own library on your own
+hardware**, reached over the network: browsing, streaming and syncing against a personal media server (Plex being the
+case in hand).
+
+The distinction is the point. A service decides what you hear; a NAS holds what you already own. The second is the same
+music this player was built for, on the other side of a socket.
+
+Three things hold regardless, and they are what keep this from being the slope §1 exists to prevent:
+
+1. **Local first is not negotiable.** Every feature must work with no network at all. Remote sources are additive; a
+   disconnected gmuse is a complete music player, not a degraded one.
+2. **No account, no catalogue, no recommendations from anyone else's server.**
+3. **Anything networked is opt-in and behind a feature flag**, so the default build stays what it is today, and an HTTP
+   client is a dependency like any other — recorded in the Decision Log with a rationale.
+
+See the Decision Log entry of 2026-08-29 for the reasoning, and the tracking issues for the work.
 
 ---
 
@@ -1391,6 +1420,41 @@ Append here as decisions are made. Format: date, decision, rationale.
   Finally, spotatui is worth keeping as a mirror: a well-built TUI that began as a Spotify client and now carries six
   playback sources, synced lyrics, a visualiser, an AI DJ and a Lua plugin runtime. §1 opens by naming scope creep as
   this project's risk; that is what the far end of the road looks like from outside.
+
+- **2026-08-29** **§1 amended: "no network sources" narrowed to "no services".** The out-of-scope list is the part of
+  this brief with the strongest instruction attached — CLAUDE.md says it stays out _"even when a crate makes it
+  trivial"_ — so weakening it is a decision recorded here rather than a line quietly deleted.
+
+  The original rule bundled two different things under one prohibition: **services** (Spotify, YouTube, yt-dlp — an
+  account, a catalogue, and an interest in what you play) and **your own library reached over a socket** (a NAS, a Plex
+  server). The first is what §1 was defending against. The second is the same music this player was built for, on other
+  hardware.
+
+  Narrowed accordingly. Streaming services stay out permanently. A personal media server — browse, stream, and sync
+  ratings and playlists back — is now in scope, with three constraints that are the actual guard rail:
+
+  1. **Local first is not negotiable.** Every feature works with no network. A disconnected gmuse is a complete player,
+     not a degraded one.
+  2. **No account, no catalogue, no recommendations from anyone else's server.**
+  3. **Opt-in, behind a feature flag**, so the default build is unchanged and an HTTP client is a dependency recorded
+     like any other.
+
+  The pattern already established twice — rsgain computes ReplayGain and we read the tags; bliss would analyse and we
+  read the result — applies here too and is the first thing to try: a **sync tool** that moves files and metadata, with
+  gmuse staying a local player, is a smaller change than a network source and preserves §1 almost entirely. See the
+  tracking issue.
+
+  Recorded honestly: this is scope growth, and §1 opens by naming scope creep as this project's failure mode. The
+  defence is that the boundary moved to a _principled_ place — one's own files versus somebody's service — rather than
+  eroding by increments. Judged by that standard, the next request should be argued against the same line.
+
+- **2026-08-29** **§1 gained a statement of what the interface is _for_**: gmuse is a way to interact with music, not a
+  thing to look at — keyboard-driven, off screen most of the time, judged by whether the next action is cheap.
+
+  Written down because it decides things. It is the reason there are no visualizers or album art, and it is equally the
+  reason the remote socket, media keys and session resumption matter more than their size suggests: the interface must
+  be usable when it is not in front of you. For an arguable feature the question is now explicit — does this make acting
+  faster, or only make looking nicer?
 
 ---
 
