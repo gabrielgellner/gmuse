@@ -1184,6 +1184,45 @@ Append here as decisions are made. Format: date, decision, rationale.
   Worth noting how it was found: not by the test passing or failing, but by the _mutation_ passing. A test nothing can
   break is not evidence, and asking what a guard actually changes is what turned an empty assertion into a fix.
 
+- **2026-08-29** **The command vocabulary audited (issue #9): 41 commands and 62 verbs became 40 and 41.** cmus is this
+  project's behavioural specification, and §14 already said to consult it for _what does it do when…_ and never for
+  structure. Command **names** sit on that line, and they had drifted onto the wrong side of it.
+
+  The `win-` and `player-` prefixes are gone. cmus namespaces because its command set is flat and large; ours is forty
+  commands, and the short forms were what anyone typed anyway — the long ones were fifteen verbs of completion noise for
+  a compatibility nobody had asked for. `:p<Tab>` offered thirteen entries covering seven commands; it now offers six.
+
+  Dropping the prefix only where a short alias already existed would have left `up`, `down`, `activate` beside
+  `win-expand-all`, so it came off everywhere. That forced two names, because the bare forms were taken:
+
+  | was             | now         | why                                                                                     |
+  | --------------- | ----------- | --------------------------------------------------------------------------------------- |
+  | `win-toggle`    | `expand`    | `toggle` belongs to settings; this pairs with `expand-all`                              |
+  | `win-update`    | —           | **deleted**: `Command::WinUpdate` and `Command::Update` were already the same match arm |
+  | `win-next-pane` | `pane-next` | so the three pane commands read alike                                                   |
+  | `update`        | `rescan`    | the CLI already has `--rescan` and the justfile a `rescan` recipe                       |
+
+  The word-for-word synonyms went too — `previous`, `volume`, `append`, `enqueue`, `exit` — leaving `q` as the only
+  alias in the language. `rsearch` stays: it is opaque, but it sits beside `search-next`/`search-prev`, which mean
+  _repeat_ forward and back, and `search-back` would read as a third member of that family.
+
+  The `Command` variants were renamed with the verbs. `Command::WinUp` describing a verb spelled `up` is exactly the
+  cruft this issue was about, one layer down.
+
+  **The tests were the interesting part.** Six broke for a reason that had nothing to do with what they were testing:
+  they needed _some_ ambiguous prefix and had reached for whichever one was nearest. `win-p` → `win-pa` became `pan` →
+  `pane-`; `pl` → `play` became `sea` → `search`. Two were worse than brittle — one asserted the settings view was
+  drawing bindings by looking for the substring `"win-"`, and one asserted the completion menu overflows, which stopped
+  being true once the vocabulary shrank enough to fit. Both now derive what they need (`parse::format`, a narrower
+  render) instead of hardcoding a fact about the vocabulary.
+
+  This is the same lesson as the gapless work, in a different costume: an assertion that depends on something the change
+  is allowed to alter is not testing what it claims to. A vocabulary audit is unusually good at finding them, because it
+  invalidates every incidental name at once.
+
+  Earlier entries in this log still quote `win-down` and `player-next`. They are records of what was decided when, and
+  are left as written.
+
 ---
 
 ## 14. Prior art worth reading

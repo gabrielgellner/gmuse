@@ -204,10 +204,11 @@ mod tests {
 
     #[test]
     fn a_verb_completes_to_its_unambiguous_extension() {
-        // Several verbs start "player-", so it stops there.
-        assert_eq!(line_of("play"), "play");
-        assert_eq!(line_of("player-pl"), "player-play ");
-        // Unique straight away.
+        // `search`, `search-next` and `search-prev` agree this far, so it
+        // stops on the bare verb without claiming to be finished.
+        assert_eq!(line_of("sea"), "search");
+        // Unique, so it is finished, and says so with a space.
+        assert_eq!(line_of("see"), "seek ");
         assert_eq!(line_of("quí"), "");
         assert_eq!(line_of("qui"), "quit ");
     }
@@ -226,10 +227,10 @@ mod tests {
 
     #[test]
     fn ambiguous_matches_extend_only_as_far_as_they_agree() {
-        let c = complete("win-p", &world()).unwrap();
-        assert_eq!(c.line, "win-pa", "should stop where they diverge");
-        assert!(c.options.contains(&"win-page-up".to_string()));
-        assert!(c.options.contains(&"win-pane-left".to_string()));
+        let c = complete("pan", &world()).unwrap();
+        assert_eq!(c.line, "pane-", "should stop where they diverge");
+        assert!(c.options.contains(&"pane-next".to_string()));
+        assert!(c.options.contains(&"pane-left".to_string()));
     }
 
     #[test]
@@ -298,7 +299,7 @@ mod tests {
 
         // The third field is a command again, recursively.
         let c = complete("bind common x play", &world()).unwrap();
-        assert!(c.options.contains(&"player-play".to_string()));
+        assert!(c.options.contains(&"play".to_string()));
     }
 
     #[test]
@@ -317,8 +318,8 @@ mod tests {
         let c = complete("in ", &world()).unwrap();
         assert_eq!(c.options, ["tree", "tracks"]);
 
-        let c = complete("in tree win-d", &world()).unwrap();
-        assert_eq!(c.line, "in tree win-down ");
+        let c = complete("in tree d", &world()).unwrap();
+        assert_eq!(c.line, "in tree down ");
     }
 
     #[test]

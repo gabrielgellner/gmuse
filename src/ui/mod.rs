@@ -858,17 +858,17 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
 
     match cmd {
         // ---- navigation
-        Command::WinDown => set_cursor(ui, (cursor + n).min(len.saturating_sub(1))),
-        Command::WinUp => set_cursor(ui, cursor.saturating_sub(n)),
-        Command::WinTop => set_cursor(ui, 0),
+        Command::Down => set_cursor(ui, (cursor + n).min(len.saturating_sub(1))),
+        Command::Up => set_cursor(ui, cursor.saturating_sub(n)),
+        Command::Top => set_cursor(ui, 0),
         // `G` goes to the end; `<count>G` goes to that row, 1-based, as in vim.
-        Command::WinBottom => match count {
+        Command::Bottom => match count {
             Some(row) => set_cursor(ui, row.saturating_sub(1).min(len.saturating_sub(1))),
             None => set_cursor(ui, len.saturating_sub(1)),
         },
-        Command::WinPageDown => set_cursor(ui, (cursor + page * n).min(len.saturating_sub(1))),
-        Command::WinPageUp => set_cursor(ui, cursor.saturating_sub(page * n)),
-        Command::WinNextPane => {
+        Command::PageDown => set_cursor(ui, (cursor + page * n).min(len.saturating_sub(1))),
+        Command::PageUp => set_cursor(ui, cursor.saturating_sub(page * n)),
+        Command::PaneNext => {
             if ui.view == View::Tree {
                 ui.tree.pane = match ui.tree.pane {
                     Pane::Tree => Pane::Tracks,
@@ -879,12 +879,12 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // Directional rather than a toggle: with two panes they behave the
         // same, but the binding says what it means and keeps working when a
         // third arrives.
-        Command::WinPaneLeft => {
+        Command::PaneLeft => {
             if ui.view == View::Tree {
                 ui.tree.pane = Pane::Tree;
             }
         }
-        Command::WinPaneRight => {
+        Command::PaneRight => {
             if ui.view == View::Tree {
                 ui.tree.pane = Pane::Tracks;
             }
@@ -904,23 +904,23 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             execute_counted(ui, ctx, *cmd, count);
             ui.tree.pane = focused;
         }
-        Command::WinToggle => {
+        Command::Expand => {
             if ui.view == View::Tree && ui.tree.pane == Pane::Tree {
                 ui.tree.toggle(&ui.library, ctx.store);
             }
         }
-        Command::WinExpandAll => {
+        Command::ExpandAll => {
             if ui.view == View::Tree {
                 ui.tree.expand_all(&ui.library);
             }
         }
-        Command::WinCollapseAll => {
+        Command::CollapseAll => {
             if ui.view == View::Tree {
                 ui.tree.collapse_all();
                 ui.tree.selected = 0;
             }
         }
-        Command::WinActivate => match ui.view {
+        Command::Activate => match ui.view {
             View::Browser => ui.browser.enter(),
             View::Settings => {}
             _ => {
@@ -936,7 +936,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 }
             }
         },
-        Command::WinRemove => match ui.view {
+        Command::Remove => match ui.view {
             View::Playlist => {
                 ui.playlist.remove(ui.playlist_sel);
                 ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
@@ -947,10 +947,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             }
             _ => ui.notify("nothing to remove here"),
         },
-        Command::WinUpdate | Command::Update => ui.notify("rescan lands with :update in the app"),
+        Command::Rescan => ui.notify("rescan lands with :rescan in the app"),
 
         // ---- transport
-        Command::PlayerPlay => {
+        Command::Play => {
             if ui.playback.current.is_some() {
                 if let Some(p) = ctx.player {
                     p.play();
@@ -959,22 +959,22 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 play(ui, ctx, id);
             }
         }
-        Command::PlayerPause => {
+        Command::Pause => {
             if let Some(p) = ctx.player {
                 p.toggle();
             }
         }
-        Command::PlayerStop => {
+        Command::Stop => {
             if let Some(p) = ctx.player {
                 p.stop();
             }
         }
-        Command::PlayerNext => {
+        Command::Next => {
             for _ in 0..n {
                 advance(ui, ctx, true);
             }
         }
-        Command::PlayerPrev => {
+        Command::Prev => {
             for _ in 0..n {
                 advance(ui, ctx, false);
             }
@@ -2398,7 +2398,7 @@ mod tests {
         assert_eq!(ui.tree.selected, 1);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "bind common j win-top");
+        type_line(&mut ui, &ctx, "bind common j top");
         press(&mut ui, &ctx, "j");
         assert_eq!(ui.tree.selected, 0, "rebinding did not take");
 
@@ -2416,7 +2416,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "bind queue j win-bottom");
+        type_line(&mut ui, &ctx, "bind queue j bottom");
 
         // In the tree, j still steps down.
         press(&mut ui, &ctx, "j");
@@ -2525,10 +2525,11 @@ mod tests {
         ui.settings_sel = crate::cmd::SettingKey::ALL.len() + 20;
         let out = render(&ui, &ctx, 100, 24);
         assert!(out.contains("common"), "{out}");
-        assert!(
-            out.contains("player-") || out.contains("win-"),
-            "no bindings visible:\n{out}"
-        );
+        // A command name from the defaults, whatever it happens to be —
+        // asserting on a naming *prefix* made this test depend on the
+        // vocabulary's shape rather than on bindings being drawn.
+        let some_verb = crate::cmd::parse::format(&crate::cmd::Command::Down);
+        assert!(out.contains(&some_verb), "no bindings visible:\n{out}");
     }
 
     #[test]
@@ -2999,7 +3000,7 @@ mod tests {
         ui.view = View::Sorted;
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "bind common \"G x\" win-top");
+        type_line(&mut ui, &ctx, "bind common \"G x\" top");
 
         press(&mut ui, &ctx, "G");
         assert!(ui.pending.is_empty(), "G waited instead of firing");
@@ -3015,7 +3016,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         // `w` is unbound, so it can start a chord.
-        type_line(&mut ui, &ctx, "bind common \"w w\" win-bottom");
+        type_line(&mut ui, &ctx, "bind common \"w w\" bottom");
         press(&mut ui, &ctx, "w w");
         assert_eq!(ui.sorted, ui.library.sorted().len() - 1);
     }
@@ -3030,9 +3031,9 @@ mod tests {
         let mut ui = ui_of(&store, true);
         ui.view = View::Sorted;
 
-        // `z` is player-prev by default.
+        // `z` is prev by default.
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "bind common \"z z\" win-bottom");
+        type_line(&mut ui, &ctx, "bind common \"z z\" bottom");
         press(&mut ui, &ctx, "z z");
         assert_eq!(ui.sorted, 0, "the chord fired despite `z` being bound");
 
@@ -3148,7 +3149,7 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "in tree win-bottom");
+        type_line(&mut ui, &ctx, "in tree bottom");
         let rows = ui.tree.rows(&ui.library, &store).len();
         assert_eq!(ui.tree.selected, rows - 1);
         // Focus is unchanged: `in` aims a command, it does not move you.
@@ -3396,7 +3397,7 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        for c in "pl".chars() {
+        for c in "sea".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
@@ -3479,15 +3480,15 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        for c in "win-p".chars() {
+        for c in "pan".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
-        assert_eq!(typed(&ui), "win-pa", "extended past the divergence");
+        assert_eq!(typed(&ui), "pane-", "extended past the divergence");
 
         let out = render(&ui, &ctx, 100, 20);
-        assert!(out.contains("win-page-up"), "{out}");
-        assert!(out.contains("win-pane-left"), "{out}");
+        assert!(out.contains("pane-next"), "{out}");
+        assert!(out.contains("pane-left"), "{out}");
         assert!(out.contains("completions"), "no menu drawn:\n{out}");
     }
 
@@ -3505,7 +3506,9 @@ mod tests {
         let count = ui.prompt.as_ref().unwrap().candidates.len();
         assert_eq!(count, crate::cmd::parse::VERBS.len());
 
-        let out = render(&ui, &ctx, 100, 20);
+        // Narrow, so the vocabulary cannot fit however small it gets — the
+        // cap is what is under test, not how many verbs there happen to be.
+        let out = render(&ui, &ctx, 60, 20);
         // Derived, not spelled out: a hardcoded count breaks whenever the
         // vocabulary changes, which says nothing about the menu.
         let title = format!("{} completions", crate::cmd::parse::VERBS.len());
@@ -3525,18 +3528,18 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        for c in "pl".chars() {
+        for c in "sea".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
-        // `play` and the `player-*` family all agree this far.
-        assert_eq!(typed(&ui), "play");
+        // `search`, `search-next` and `search-prev` agree this far.
+        assert_eq!(typed(&ui), "search");
 
         tab(&mut ui, &ctx);
         let candidates = &ui.prompt.as_ref().unwrap().candidates;
-        assert!(candidates.contains(&"play".to_string()), "{candidates:?}");
+        assert!(candidates.contains(&"search".to_string()), "{candidates:?}");
         assert!(
-            candidates.contains(&"player-next".to_string()),
+            candidates.contains(&"search-next".to_string()),
             "{candidates:?}"
         );
     }
@@ -3626,11 +3629,11 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        for c in "bind common Z player-pl".chars() {
+        for c in "bind common Z pla".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
-        assert_eq!(typed(&ui), "bind common Z player-play ");
+        assert_eq!(typed(&ui), "bind common Z play ");
     }
 
     #[test]

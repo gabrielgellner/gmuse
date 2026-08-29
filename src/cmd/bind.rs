@@ -33,37 +33,37 @@ pub const DEFAULTS: &[&str] = &[
     "bind common \"g T\" view-prev",
     "bind common \"g tab\" view-last",
     // navigation
-    "bind common j win-down",
-    "bind common k win-up",
-    "bind common down win-down",
-    "bind common up win-up",
-    "bind common \"g g\" win-top",
-    "bind common G win-bottom",
-    "bind common home win-top",
-    "bind common end win-bottom",
-    "bind common ^f win-page-down",
-    "bind common ^b win-page-up",
-    "bind common pagedown win-page-down",
-    "bind common pageup win-page-up",
-    "bind common tab win-next-pane",
-    "bind common h win-pane-left",
-    "bind common l win-pane-right",
+    "bind common j down",
+    "bind common k up",
+    "bind common down down",
+    "bind common up up",
+    "bind common \"g g\" top",
+    "bind common G bottom",
+    "bind common home top",
+    "bind common end bottom",
+    "bind common ^f page-down",
+    "bind common ^b page-up",
+    "bind common pagedown page-down",
+    "bind common pageup page-up",
+    "bind common tab pane-next",
+    "bind common h pane-left",
+    "bind common l pane-right",
     // Drive the tree from wherever you are, so stepping album to album does
     // not need a Tab over and a Tab back each time.
-    "bind library ^j in tree win-down",
-    "bind library ^k in tree win-up",
-    "bind common space win-toggle",
-    "bind common enter win-activate",
-    "bind common D win-remove",
-    "bind common u win-update",
-    "bind common M-e win-expand-all",
-    "bind common M-c win-collapse-all",
+    "bind library ^j in tree down",
+    "bind library ^k in tree up",
+    "bind common space expand",
+    "bind common enter activate",
+    "bind common D remove",
+    "bind common u rescan",
+    "bind common M-e expand-all",
+    "bind common M-c collapse-all",
     // transport
-    "bind common x player-play",
-    "bind common c player-pause",
-    "bind common v player-stop",
-    "bind common b player-next",
-    "bind common z player-prev",
+    "bind common x play",
+    "bind common c pause",
+    "bind common v stop",
+    "bind common b next",
+    "bind common z prev",
     "bind common right seek +10",
     "bind common left seek -10",
     "bind common > seek +60",
@@ -179,19 +179,19 @@ mod tests {
         // Nothing library-specific: the common binding answers.
         assert_eq!(
             lookup(&bindings, Context::Library, &key),
-            Some(&Command::WinDown)
+            Some(&Command::Down)
         );
 
         // A context-specific binding wins over it.
-        bindings.insert((Context::Library, key.clone()), Command::PlayerNext);
+        bindings.insert((Context::Library, key.clone()), Command::Next);
         assert_eq!(
             lookup(&bindings, Context::Library, &key),
-            Some(&Command::PlayerNext)
+            Some(&Command::Next)
         );
         // ...and only in that context.
         assert_eq!(
             lookup(&bindings, Context::Queue, &key),
-            Some(&Command::WinDown)
+            Some(&Command::Down)
         );
     }
 

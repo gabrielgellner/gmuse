@@ -64,7 +64,7 @@ pub struct Config {
     /// `settings.shuffle = true` and friends, as `set key=value` commands.
     #[serde(default)]
     pub settings: HashMap<String, toml::Value>,
-    /// `[keys.common] j = "win-down"`.
+    /// `[keys.common] j = "down"`.
     #[serde(default)]
     pub keys: HashMap<String, HashMap<String, Binding>>,
     #[serde(default)]
@@ -323,7 +323,7 @@ mod tests {
         let loaded = parse_text(
             r#"
             [keys.common]
-            "^n" = "player-next"
+            "^n" = "next"
             "#,
         );
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
@@ -333,7 +333,7 @@ mod tests {
         };
         assert_eq!(*ctx, Context::Common);
         assert_eq!(keys::format_seq(key), "^n");
-        assert_eq!(**cmd, Command::PlayerNext);
+        assert_eq!(**cmd, Command::Next);
     }
 
     /// A list value is a macro. That falls out of TOML for free, and it is the
@@ -343,7 +343,7 @@ mod tests {
         let loaded = parse_text(
             r#"
             [keys.library]
-            o = ["add-queue", "player-next"]
+            o = ["add-queue", "next"]
             "#,
         );
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
@@ -417,7 +417,7 @@ mod tests {
 
             [keys.common]
             "^n" = "frobnicate"
-            j = "win-down"
+            j = "down"
 
             [keys.nosuchcontext]
             x = "quit"
@@ -436,7 +436,7 @@ mod tests {
         )));
         assert!(loaded.commands.iter().any(|c| matches!(
             c,
-            Command::Bind { cmd, .. } if **cmd == Command::WinDown
+            Command::Bind { cmd, .. } if **cmd == Command::Down
         )));
 
         // And each problem is reported with where it is.

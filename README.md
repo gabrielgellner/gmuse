@@ -136,8 +136,8 @@ shuffle = true
 aaa_mode = "album"          # all | artist | album
 
 [keys.common]
-"^n" = "player-next"
-o = ["add-queue", "player-next"]   # a list is a macro
+"^n" = "next"
+o = ["add-queue", "next"]         # a list is a macro
 "M-f" = "seek +30"
 
 [theme.palette]

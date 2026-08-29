@@ -38,27 +38,23 @@ pub const VERBS: &[&str] = &[
     "add",
     "add-playlist",
     "add-queue",
-    "append",
     "bind",
     "bottom",
     "catalog",
+    "collapse-all",
     "down",
-    "enqueue",
-    "exit",
+    "expand",
+    "expand-all",
     "in",
     "next",
     "page-down",
     "page-up",
-    "pane",
+    "pane-left",
+    "pane-next",
+    "pane-right",
     "pause",
     "play",
-    "player-next",
-    "player-pause",
-    "player-play",
-    "player-prev",
-    "player-stop",
     "prev",
-    "previous",
     "q",
     "quit",
     "remove",
@@ -74,28 +70,11 @@ pub const VERBS: &[&str] = &[
     "top",
     "unbind",
     "up",
-    "update",
     "view",
     "view-last",
     "view-next",
     "view-prev",
     "vol",
-    "volume",
-    "win-activate",
-    "win-bottom",
-    "win-collapse-all",
-    "win-down",
-    "win-expand-all",
-    "win-next-pane",
-    "win-page-down",
-    "win-page-up",
-    "win-pane-left",
-    "win-pane-right",
-    "win-remove",
-    "win-toggle",
-    "win-top",
-    "win-up",
-    "win-update",
 ];
 
 /// Parse one line. Blank lines and `#` comments give `Ok(None)`, so the rc
@@ -115,19 +94,18 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
 
     Ok(match verb {
         // Navigation.
-        "win-up" | "up" => Command::WinUp,
-        "win-down" | "down" => Command::WinDown,
-        "win-page-up" | "page-up" => Command::WinPageUp,
-        "win-page-down" | "page-down" => Command::WinPageDown,
-        "win-top" | "top" => Command::WinTop,
-        "win-bottom" | "bottom" => Command::WinBottom,
-        "win-activate" | "activate" => Command::WinActivate,
-        "win-toggle" => Command::WinToggle,
-        "win-remove" | "remove" => Command::WinRemove,
-        "win-update" => Command::WinUpdate,
-        "win-next-pane" | "pane" => Command::WinNextPane,
-        "win-pane-left" => Command::WinPaneLeft,
-        "win-pane-right" => Command::WinPaneRight,
+        "up" => Command::Up,
+        "down" => Command::Down,
+        "page-up" => Command::PageUp,
+        "page-down" => Command::PageDown,
+        "top" => Command::Top,
+        "bottom" => Command::Bottom,
+        "activate" => Command::Activate,
+        "expand" => Command::Expand,
+        "remove" => Command::Remove,
+        "pane-next" => Command::PaneNext,
+        "pane-left" => Command::PaneLeft,
+        "pane-right" => Command::PaneRight,
         "in" => {
             let (pane_word, cmd_text) = split_word(rest);
             let pane = PaneTarget::parse(pane_word)
@@ -143,32 +121,32 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
                 cmd: Box::new(command(cmd_text)?),
             }
         }
-        "win-expand-all" => Command::WinExpandAll,
-        "win-collapse-all" => Command::WinCollapseAll,
+        "expand-all" => Command::ExpandAll,
+        "collapse-all" => Command::CollapseAll,
 
         // Playback. The short aliases are what a person types.
-        "player-play" | "play" => Command::PlayerPlay,
-        "player-pause" | "pause" => Command::PlayerPause,
-        "player-stop" | "stop" => Command::PlayerStop,
-        "player-next" | "next" => Command::PlayerNext,
-        "player-prev" | "prev" | "previous" => Command::PlayerPrev,
+        "play" => Command::Play,
+        "pause" => Command::Pause,
+        "stop" => Command::Stop,
+        "next" => Command::Next,
+        "prev" => Command::Prev,
         "seek" => Command::Seek(seek_spec(rest)?),
-        "vol" | "volume" => Command::Vol(vol_spec(rest)?),
+        "vol" => Command::Vol(vol_spec(rest)?),
 
         // Library.
         "add" => Command::Add {
             target: AddTarget::Library,
             path: optional_path(rest),
         },
-        "add-playlist" | "append" => Command::Add {
+        "add-playlist" => Command::Add {
             target: AddTarget::Playlist,
             path: optional_path(rest),
         },
-        "add-queue" | "enqueue" => Command::Add {
+        "add-queue" => Command::Add {
             target: AddTarget::Queue,
             path: optional_path(rest),
         },
-        "update" | "rescan" => Command::Update,
+        "rescan" => Command::Rescan,
 
         // State.
         "set" => {
@@ -242,7 +220,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "search-next" => Command::SearchNext,
         "search-prev" => Command::SearchPrev,
         "catalog" => Command::Catalog(catalog_spec(rest)?),
-        "quit" | "q" | "exit" => Command::Quit,
+        "quit" | "q" => Command::Quit,
 
         other => return Err(ParseError::UnknownCommand(other.to_string())),
     })
@@ -407,27 +385,26 @@ fn setting_value(key: SettingKey, text: &str) -> Result<SettingValue, ParseError
 /// would not be the binding that is actually in force.
 pub fn format(cmd: &Command) -> String {
     match cmd {
-        Command::WinUp => "win-up".into(),
-        Command::WinDown => "win-down".into(),
-        Command::WinPageUp => "win-page-up".into(),
-        Command::WinPageDown => "win-page-down".into(),
-        Command::WinTop => "win-top".into(),
-        Command::WinBottom => "win-bottom".into(),
-        Command::WinActivate => "win-activate".into(),
-        Command::WinToggle => "win-toggle".into(),
-        Command::WinRemove => "win-remove".into(),
-        Command::WinUpdate => "win-update".into(),
-        Command::WinNextPane => "win-next-pane".into(),
-        Command::WinPaneLeft => "win-pane-left".into(),
-        Command::WinPaneRight => "win-pane-right".into(),
+        Command::Up => "up".into(),
+        Command::Down => "down".into(),
+        Command::PageUp => "page-up".into(),
+        Command::PageDown => "page-down".into(),
+        Command::Top => "top".into(),
+        Command::Bottom => "bottom".into(),
+        Command::Activate => "activate".into(),
+        Command::Expand => "expand".into(),
+        Command::Remove => "remove".into(),
+        Command::PaneNext => "pane-next".into(),
+        Command::PaneLeft => "pane-left".into(),
+        Command::PaneRight => "pane-right".into(),
         Command::In { pane, cmd } => format!("in {} {}", pane.name(), format(cmd)),
-        Command::WinExpandAll => "win-expand-all".into(),
-        Command::WinCollapseAll => "win-collapse-all".into(),
-        Command::PlayerPlay => "player-play".into(),
-        Command::PlayerPause => "player-pause".into(),
-        Command::PlayerStop => "player-stop".into(),
-        Command::PlayerNext => "player-next".into(),
-        Command::PlayerPrev => "player-prev".into(),
+        Command::ExpandAll => "expand-all".into(),
+        Command::CollapseAll => "collapse-all".into(),
+        Command::Play => "play".into(),
+        Command::Pause => "pause".into(),
+        Command::Stop => "stop".into(),
+        Command::Next => "next".into(),
+        Command::Prev => "prev".into(),
         Command::Seek(SeekSpec::Absolute(s)) => format!("seek {s}"),
         Command::Seek(SeekSpec::Relative(s)) if *s >= 0.0 => format!("seek +{s}"),
         Command::Seek(SeekSpec::Relative(s)) => format!("seek {s}"),
@@ -445,7 +422,7 @@ pub fn format(cmd: &Command) -> String {
                 None => verb.into(),
             }
         }
-        Command::Update => "update".into(),
+        Command::Rescan => "rescan".into(),
         Command::Set { key, value } => format!("set {}={}", key.name(), value),
         Command::Toggle(key) => format!("toggle {}", key.name()),
         Command::Bind { ctx, key, cmd } => {
@@ -508,11 +485,11 @@ mod tests {
     #[test]
     fn short_aliases_and_canonical_names_agree() {
         for (short, long) in [
-            ("play", "player-play"),
-            ("pause", "player-pause"),
-            ("stop", "player-stop"),
-            ("next", "player-next"),
-            ("prev", "player-prev"),
+            ("play", "play"),
+            ("pause", "pause"),
+            ("stop", "stop"),
+            ("next", "next"),
+            ("prev", "prev"),
             ("q", "quit"),
         ] {
             assert_eq!(command(short).unwrap(), command(long).unwrap(), "{short}");
@@ -607,13 +584,13 @@ mod tests {
 
     #[test]
     fn bind_nests_a_whole_command() {
-        let got = command("bind common ^n player-next").unwrap();
+        let got = command("bind common ^n next").unwrap();
         assert_eq!(
             got,
             Command::Bind {
                 ctx: Context::Common,
                 key: vec![keys::Key::ctrl(KeyCode::Char('n'))],
-                cmd: Box::new(Command::PlayerNext),
+                cmd: Box::new(Command::Next),
             }
         );
 
@@ -639,30 +616,29 @@ mod tests {
     #[test]
     fn every_command_round_trips_through_text() {
         let samples = vec![
-            Command::WinUp,
-            Command::WinDown,
-            Command::WinPageUp,
-            Command::WinPageDown,
-            Command::WinTop,
-            Command::WinBottom,
-            Command::WinActivate,
-            Command::WinToggle,
-            Command::WinRemove,
-            Command::WinUpdate,
-            Command::WinNextPane,
-            Command::WinPaneLeft,
-            Command::WinPaneRight,
+            Command::Up,
+            Command::Down,
+            Command::PageUp,
+            Command::PageDown,
+            Command::Top,
+            Command::Bottom,
+            Command::Activate,
+            Command::Expand,
+            Command::Remove,
+            Command::PaneNext,
+            Command::PaneLeft,
+            Command::PaneRight,
             Command::In {
                 pane: PaneTarget::Tree,
-                cmd: Box::new(Command::WinDown),
+                cmd: Box::new(Command::Down),
             },
-            Command::WinExpandAll,
-            Command::WinCollapseAll,
-            Command::PlayerPlay,
-            Command::PlayerPause,
-            Command::PlayerStop,
-            Command::PlayerNext,
-            Command::PlayerPrev,
+            Command::ExpandAll,
+            Command::CollapseAll,
+            Command::Play,
+            Command::Pause,
+            Command::Stop,
+            Command::Next,
+            Command::Prev,
             Command::Seek(SeekSpec::Absolute(90.0)),
             Command::Seek(SeekSpec::Relative(10.0)),
             Command::Seek(SeekSpec::Relative(-10.0)),
@@ -681,7 +657,7 @@ mod tests {
                 target: AddTarget::Queue,
                 path: None,
             },
-            Command::Update,
+            Command::Rescan,
             Command::Set {
                 key: SettingKey::Shuffle,
                 value: SettingValue::Bool(true),
@@ -698,7 +674,7 @@ mod tests {
             Command::Bind {
                 ctx: Context::Library,
                 key: vec![keys::Key::ctrl(KeyCode::Char('n'))],
-                cmd: Box::new(Command::PlayerNext),
+                cmd: Box::new(Command::Next),
             },
             Command::Bind {
                 ctx: Context::Common,
@@ -786,7 +762,7 @@ mod tests {
                 "unbind" => "unbind common x".to_string(),
                 "view" => "view 1".to_string(),
                 "catalog" => format!("{verb} all"),
-                "in" => "in tree win-down".to_string(),
+                "in" => "in tree down".to_string(),
                 "search" | "rsearch" => format!("{verb} text"),
                 other => other.to_string(),
             };

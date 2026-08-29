@@ -229,19 +229,18 @@ pub fn quality_name(q: Quality) -> &'static str {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     // navigation
-    WinUp,
-    WinDown,
-    WinPageUp,
-    WinPageDown,
-    WinTop,
-    WinBottom,
-    WinActivate,
-    WinToggle,
-    WinRemove,
-    WinUpdate,
-    WinNextPane,
-    WinPaneLeft,
-    WinPaneRight,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+    Activate,
+    Expand,
+    Remove,
+    PaneNext,
+    PaneLeft,
+    PaneRight,
     /// Run a command against a named pane instead of the focused one.
     ///
     /// The wrapper rather than a variant per pane per motion: it composes with
@@ -250,14 +249,14 @@ pub enum Command {
         pane: PaneTarget,
         cmd: Box<Command>,
     },
-    WinExpandAll,
-    WinCollapseAll,
+    ExpandAll,
+    CollapseAll,
     // playback
-    PlayerPlay,
-    PlayerPause,
-    PlayerStop,
-    PlayerNext,
-    PlayerPrev,
+    Play,
+    Pause,
+    Stop,
+    Next,
+    Prev,
     Seek(SeekSpec),
     Vol(VolSpec),
     // library
@@ -265,7 +264,7 @@ pub enum Command {
         target: AddTarget,
         path: Option<PathBuf>,
     },
-    Update,
+    Rescan,
     // state
     Set {
         key: SettingKey,
