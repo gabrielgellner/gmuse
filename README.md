@@ -128,6 +128,10 @@ the album figure in order and the track figure when shuffling. Analysis is delib
 library with [rsgain](https://github.com/complexlogic/rsgain) (`rsgain easy ~/Music`) and gmuse reads what it wrote.
 Untagged files play untouched, so the setting is inert until something is tagged.
 
+Typing while the completion menu is open **narrows** it; `Backspace` widens it again, and a line matching nothing leaves
+the menu up saying `no matches` rather than vanishing. `C-n`/`C-p` or the arrows walk it, `C-y` accepts, `Esc` closes
+the menu and a second `Esc` the line.
+
 `:` opens the command line — `Tab` completes verbs and their arguments, including catalog names, setting keys and the
 values each key accepts. `/` and `?` search, `n`/`N` repeat the search. View 7 lists every setting and binding.
 

@@ -59,6 +59,37 @@ pub fn complete(line: &str, world: &World) -> Option<Completion> {
     })
 }
 
+/// Every candidate matching the final word, **without touching the line**.
+///
+/// [`complete`] extends the line to the longest common prefix, which is right
+/// for `Tab` and wrong for filtering as you type: silently rewriting what
+/// someone is in the middle of typing is the one thing completion must never
+/// do. This is the same matching with the rewriting removed.
+///
+/// An empty result is meaningful — "nothing matches what you have typed" — and
+/// is distinct from a closed menu, which is why the caller keeps the menu in an
+/// `Option` rather than reading emptiness as absence.
+pub fn matches(line: &str, world: &World) -> Vec<String> {
+    let (head, word) = split_last_word(line);
+
+    // `set key=value` is one word whose halves complete against different
+    // things, so the split is inside the word rather than at a space.
+    if let Some((key_text, typed)) = word.rsplit_once('=') {
+        return match SettingKey::parse(key_text) {
+            Some(key) => setting_values(key)
+                .into_iter()
+                .filter(|v| v.starts_with(typed))
+                .collect(),
+            None => Vec::new(),
+        };
+    }
+
+    candidates_for(head, word, world)
+        .into_iter()
+        .filter(|c| c.starts_with(word))
+        .collect()
+}
+
 /// Everything valid in the position `word` occupies.
 fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
     let words: Vec<&str> = head.split_whitespace().collect();

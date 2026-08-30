@@ -1510,6 +1510,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   Saving happens at every track boundary as well as on quit. On quit alone, a crash loses the whole session — which is
   precisely the session worth having, the same reasoning that made the audit log flush per line.
 
+- **2026-08-29** **The completion menu filters as you type (issue #10).** Typing used to dismiss it, which is backwards:
+  you type to home in on something, and throwing the list away is the opposite of that. Backspace widens it again, and a
+  line matching nothing leaves the menu **open** saying `no matches` — a list that simply vanished reads as a swallowed
+  keystroke.
+
+  **The structural blocker was that `candidates.is_empty()` meant "closed".** "Open with nothing matching" — the exact
+  state the notice describes — was unrepresentable. It is now `menu: Option<Vec<String>>`, where `Some(vec![])` is that
+  state and `None` is closed. Small change, but every `menu_open` check, the height calculation and the draw all read
+  from it.
+
+  **Deriving the candidates is what makes Backspace free.** The list is a view of the buffer, so it is recomputed from
+  scratch on every keystroke rather than whittled down. A shorter buffer simply matches more and there is nothing to
+  undo; filtering a stored list would have needed both the original set _and_ the prefix the menu opened on. This is the
+  same rule as the `v`/`c` shadow, the pending-key indicator and the menu's own scroll offset — the fifth time it has
+  decided a design here, which is enough to call it a house rule rather than a recurring observation.
+
+  Filtering deliberately **does not extend the line**. `Tab` is the only key that edits what was typed; narrowing that
+  silently completed for you would be the rule against eating what someone is typing, broken from the other direction.
+
+  `set key=value` needed the same split-inside-the-word that completion does, or typing a value narrows against verbs.
+  Worth recording how that surfaced: the test asserting it failed, and the failure was **the test's fault, not the
+  code's** — `Tab` had already extended `set aaa_mode=` to `set aaa_mode=a`, so the keystrokes it sent produced
+  `aaa_mode=aal`. Reading the actual buffer rather than assuming it turned a false alarm into a passing test that covers
+  the real path, and a mutation confirms the split is load-bearing.
+
 ---
 
 ## 14. Prior art worth reading

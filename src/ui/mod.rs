@@ -118,18 +118,30 @@ pub enum PromptKind {
 pub struct Prompt {
     pub kind: PromptKind,
     pub buffer: String,
-    /// Candidates from the last `Tab`, shown as a menu until the line changes.
-    pub candidates: Vec<String>,
-    /// Which candidate the menu is on. Meaningless when `candidates` is
-    /// empty; there is otherwise always a selection, because `C-y` acts on
-    /// one whether or not it has been moved — so the menu has to show which.
+    /// The completion menu: `None` when closed, `Some(vec![])` when open with
+    /// nothing matching.
+    ///
+    /// An `Option` rather than a `Vec` whose emptiness means "closed", because
+    /// those are different states: typing past the last match should leave the
+    /// menu up saying so, not silently dismiss it and look like the keystroke
+    /// was swallowed.
+    pub menu: Option<Vec<String>>,
+    /// Which candidate the menu is on. Meaningless when the menu is closed or
+    /// empty; there is otherwise always a selection, because `C-y` acts on one
+    /// whether or not it has been moved — so the menu has to show which.
     pub selected: usize,
 }
 
 impl Prompt {
+    /// The candidates on show. Empty covers both "closed" and "nothing
+    /// matches" — the distinction only matters to the renderer.
+    pub fn candidates(&self) -> &[String] {
+        self.menu.as_deref().unwrap_or_default()
+    }
+
     /// Move the menu selection by one, wrapping.
     fn step(&mut self, forward: bool) {
-        let n = self.candidates.len();
+        let n = self.candidates().len();
         if n == 0 {
             return;
         }
@@ -164,7 +176,7 @@ impl Prompt {
 
     /// Close the menu, leaving the line alone.
     fn dismiss(&mut self) {
-        self.candidates.clear();
+        self.menu = None;
         self.selected = 0;
     }
 
@@ -859,7 +871,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Command,
                 buffer: String::new(),
-                candidates: Vec::new(),
+                menu: None,
                 selected: 0,
             });
             return;
@@ -868,7 +880,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Search(SearchDir::Forward),
                 buffer: String::new(),
-                candidates: Vec::new(),
+                menu: None,
                 selected: 0,
             });
             return;
@@ -877,7 +889,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Search(SearchDir::Backward),
                 buffer: String::new(),
-                candidates: Vec::new(),
+                menu: None,
                 selected: 0,
             });
             return;
@@ -926,12 +938,37 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     }
 }
 
+/// Recompute an open menu from the line.
+///
+/// The candidate list is a **view of the buffer**, so it is derived afresh on
+/// every keystroke rather than whittled down. That is what makes Backspace
+/// restore candidates for nothing: a shorter buffer simply matches more, and
+/// there is no undo to implement. Filtering a stored list instead would need
+/// both the original set and the prefix the menu opened on.
+///
+/// Deliberately does **not** extend the line. `Tab` is the only key that edits
+/// what you typed.
+fn refilter(ui: &mut Ui) {
+    if ui.prompt.as_ref().is_none_or(|p| p.menu.is_none()) {
+        return;
+    }
+    let buffer = ui.prompt.as_ref().expect("checked above").buffer.clone();
+    let world = ui.completion_world();
+    let matches = crate::cmd::complete::matches(&buffer, &world);
+    if let Some(prompt) = ui.prompt.as_mut() {
+        // The candidate under the cursor has usually gone; starting again at
+        // the top is less surprising than landing somewhere arbitrary.
+        prompt.selected = 0;
+        prompt.menu = Some(matches);
+    }
+}
+
 fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     let Some(prompt) = ui.prompt.as_mut() else {
         return;
     };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let menu_open = !prompt.candidates.is_empty();
+    let menu_open = prompt.menu.is_some();
 
     // The menu keys come first: while it is open these belong to it, and must
     // not fall through to being typed into the line.
@@ -959,7 +996,7 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
                 true
             }
             KeyCode::Char('y') if ctrl => {
-                if let Some(c) = prompt.candidates.get(prompt.selected).cloned() {
+                if let Some(c) = prompt.candidates().get(prompt.selected).cloned() {
                     prompt.accept(&c);
                 }
                 true
@@ -982,10 +1019,12 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             }
         }
         KeyCode::Backspace => {
-            prompt.dismiss();
             if prompt.buffer.pop().is_none() {
                 // Backspacing past the sigil closes the line, as in vi.
                 ui.prompt = None;
+            } else {
+                // Widens the menu again, rather than dismissing it.
+                refilter(ui);
             }
         }
         // Guarded on ctrl, or every chord types its letter: `C-n` on a bare
@@ -993,8 +1032,9 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
         // modifiers cannot tell a keystroke from a command.
         KeyCode::Char(c) if !ctrl => {
             prompt.buffer.push(c);
-            // The menu describes a line that no longer exists.
-            prompt.dismiss();
+            // Narrows the menu rather than closing it: you type to home in on
+            // something, and throwing the list away is the opposite of that.
+            refilter(ui);
         }
         // With a menu already open Tab cycles it, as vim's wildmenu does.
         // Re-completing would be a no-op — the candidate set has not changed —
@@ -1027,11 +1067,11 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
                         // Opens on the first candidate: `C-y` acts on a
                         // selection whether or not it has been moved, so the
                         // menu must show which one that is.
-                        prompt.candidates = if options.len() > 1 {
-                            options
-                        } else {
-                            Vec::new()
-                        };
+                        //
+                        // A single match is already applied, so a menu of one
+                        // would be noise — that stays closed rather than open
+                        // and empty, which means something else now.
+                        prompt.menu = (options.len() > 1).then_some(options);
                         prompt.selected = 0;
                     }
                 }
@@ -1697,10 +1737,14 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
 /// Rows the completion menu needs, borders included. Zero when there is
 /// nothing to show.
 fn menu_height(prompt: &Prompt, width: u16) -> u16 {
-    if prompt.candidates.is_empty() {
+    let Some(candidates) = prompt.menu.as_deref() else {
         return 0;
+    };
+    // Open with nothing matching: one row for the notice, plus borders.
+    if candidates.is_empty() {
+        return 3;
     }
-    let rows = completion_rows(&prompt.candidates, width).len() as u16;
+    let rows = completion_rows(prompt.candidates(), width).len() as u16;
     // Capped, so a 63-verb list cannot swallow the view it is helping you
     // navigate.
     (rows + 2).min(10)
@@ -1741,8 +1785,21 @@ fn completion_rows(candidates: &[String], width: u16) -> Vec<Vec<usize>> {
 }
 
 fn draw_completions(frame: &mut Frame, area: Rect, ui: &Ui, prompt: &Prompt) {
-    let rows = completion_rows(&prompt.candidates, area.width);
-    let column = completion_column(&prompt.candidates);
+    // Open with nothing matching. Saying so is the whole point of keeping the
+    // menu up: a list that vanished would read as a swallowed keystroke.
+    if prompt.candidates().is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no matches",
+                ui.theme.get(theme::Role::StatusDim),
+            )))
+            .block(pane_block(&ui.theme, "completions", false)),
+            area,
+        );
+        return;
+    }
+    let rows = completion_rows(prompt.candidates(), area.width);
+    let column = completion_column(prompt.candidates());
     let available = (area.height.saturating_sub(2)) as usize;
     // Reserve a row for the overflow notice, or it is drawn outside the block
     // and silently clipped.
@@ -1774,7 +1831,7 @@ fn draw_completions(frame: &mut Frame, area: Rect, ui: &Ui, prompt: &Prompt) {
         .map(|row| {
             let mut spans = Vec::with_capacity(row.len() * 2);
             for (n, &i) in row.iter().enumerate() {
-                let item = &prompt.candidates[i];
+                let item = &prompt.candidates()[i];
                 let style = if prompt.selected == i { picked } else { text };
                 spans.push(Span::styled(item.clone(), style));
                 // Pad between columns, not after the last one, so a selection
@@ -1787,7 +1844,7 @@ fn draw_completions(frame: &mut Frame, area: Rect, ui: &Ui, prompt: &Prompt) {
             Line::from(spans)
         })
         .collect();
-    let hidden = prompt.candidates.len()
+    let hidden = prompt.candidates().len()
         - rows
             .iter()
             .skip(first)
@@ -1803,7 +1860,7 @@ fn draw_completions(frame: &mut Frame, area: Rect, ui: &Ui, prompt: &Prompt) {
     frame.render_widget(
         Paragraph::new(lines).block(pane_block(
             &ui.theme,
-            &format!("{} completions", prompt.candidates.len()),
+            &format!("{} completions", prompt.candidates().len()),
             true,
         )),
         area,
@@ -3451,7 +3508,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         tab(&mut ui, &ctx);
-        let candidates = ui.prompt.as_ref().unwrap().candidates.clone();
+        let candidates = ui.prompt.as_ref().unwrap().candidates().to_vec();
         assert!(candidates.len() > 3, "need a menu to walk");
 
         // The menu opens on the first candidate, because `C-y` would take it.
@@ -3746,7 +3803,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         tab(&mut ui, &ctx);
-        let candidates = ui.prompt.as_ref().unwrap().candidates.clone();
+        let candidates = ui.prompt.as_ref().unwrap().candidates().to_vec();
 
         handle_key(KeyEvent::from(KeyCode::Down), &mut ui, &ctx);
         assert_eq!(
@@ -3798,7 +3855,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         tab(&mut ui, &ctx);
-        let candidates = ui.prompt.as_ref().unwrap().candidates.clone();
+        let candidates = ui.prompt.as_ref().unwrap().candidates().to_vec();
         // Narrow, so the 63 verbs need far more rows than the menu can show.
         let (w, h) = (24u16, 24u16);
 
@@ -3823,14 +3880,17 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         tab(&mut ui, &ctx);
-        let second = ui.prompt.as_ref().unwrap().candidates[1].clone();
+        let second = ui.prompt.as_ref().unwrap().candidates()[1].clone();
 
         press(&mut ui, &ctx, "^n");
         press(&mut ui, &ctx, "^y");
 
         let prompt = ui.prompt.as_ref().expect("the line should still be open");
         assert_eq!(prompt.buffer, format!("{second} "));
-        assert!(prompt.candidates.is_empty(), "the menu should be dismissed");
+        assert!(
+            prompt.candidates().is_empty(),
+            "the menu should be dismissed"
+        );
         assert_eq!(rendered_selection(&ui, &ctx, 100, 20), None);
     }
 
@@ -3844,7 +3904,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         tab(&mut ui, &ctx);
-        let first = ui.prompt.as_ref().unwrap().candidates[0].clone();
+        let first = ui.prompt.as_ref().unwrap().candidates()[0].clone();
         assert_eq!(
             rendered_selection(&ui, &ctx, 100, 20).as_deref(),
             Some(first.as_str()),
@@ -3868,7 +3928,7 @@ mod tests {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
-        let first = ui.prompt.as_ref().unwrap().candidates[0].clone();
+        let first = ui.prompt.as_ref().unwrap().candidates()[0].clone();
 
         press(&mut ui, &ctx, "^y");
         assert_eq!(
@@ -3891,11 +3951,11 @@ mod tests {
         }
         tab(&mut ui, &ctx);
         let typed = ui.prompt.as_ref().unwrap().buffer.clone();
-        assert!(!ui.prompt.as_ref().unwrap().candidates.is_empty());
+        assert!(!ui.prompt.as_ref().unwrap().candidates().is_empty());
 
         handle_key(KeyEvent::from(KeyCode::Esc), &mut ui, &ctx);
         let prompt = ui.prompt.as_ref().expect("the line should survive");
-        assert!(prompt.candidates.is_empty(), "the menu should be gone");
+        assert!(prompt.candidates().is_empty(), "the menu should be gone");
         assert_eq!(prompt.buffer, typed, "the line should be untouched");
 
         handle_key(KeyEvent::from(KeyCode::Esc), &mut ui, &ctx);
@@ -3912,7 +3972,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         tab(&mut ui, &ctx);
-        let candidates = ui.prompt.as_ref().unwrap().candidates.clone();
+        let candidates = ui.prompt.as_ref().unwrap().candidates().to_vec();
 
         tab(&mut ui, &ctx);
         assert_eq!(
@@ -3929,7 +3989,7 @@ mod tests {
     /// Typing dismisses the menu, so the keys that drive it stop applying and
     /// go back to being text.
     #[test]
-    fn typing_after_a_menu_puts_the_selection_away() {
+    fn narrowing_moves_the_selection_to_the_top() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
@@ -3939,11 +3999,18 @@ mod tests {
         press(&mut ui, &ctx, "^n");
         assert!(rendered_selection(&ui, &ctx, 100, 20).is_some());
 
-        handle_key(KeyEvent::from(KeyCode::Char('q')), &mut ui, &ctx);
+        // Typing narrows rather than dismissing, so the selection moves back
+        // to the top of whatever survived rather than pointing at a candidate
+        // that is no longer there.
+        handle_key(KeyEvent::from(KeyCode::Char('s')), &mut ui, &ctx);
         let prompt = ui.prompt.as_ref().unwrap();
-        assert_eq!(prompt.buffer, "q");
+        assert_eq!(prompt.buffer, "s");
         assert_eq!(prompt.selected, 0, "a stale selection survived");
-        assert_eq!(rendered_selection(&ui, &ctx, 100, 20), None);
+        let first = prompt.candidates()[0].clone();
+        assert_eq!(
+            rendered_selection(&ui, &ctx, 100, 20).as_deref(),
+            Some(first.as_str())
+        );
     }
 
     #[test]
@@ -3992,7 +4059,7 @@ mod tests {
         press(&mut ui, &ctx, ":");
         tab(&mut ui, &ctx);
 
-        let count = ui.prompt.as_ref().unwrap().candidates.len();
+        let count = ui.prompt.as_ref().unwrap().candidates().len();
         assert_eq!(count, crate::cmd::parse::VERBS.len());
 
         // Narrow, so the vocabulary cannot fit however small it gets — the
@@ -4025,7 +4092,7 @@ mod tests {
         assert_eq!(typed(&ui), "search");
 
         tab(&mut ui, &ctx);
-        let candidates = &ui.prompt.as_ref().unwrap().candidates;
+        let candidates = &ui.prompt.as_ref().unwrap().candidates();
         assert!(candidates.contains(&"search".to_string()), "{candidates:?}");
         assert!(
             candidates.contains(&"search-next".to_string()),
@@ -4034,19 +4101,136 @@ mod tests {
     }
 
     #[test]
-    fn typing_dismisses_the_menu() {
+    fn typing_narrows_the_menu() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
         tab(&mut ui, &ctx);
-        assert!(!ui.prompt.as_ref().unwrap().candidates.is_empty());
+        let all = ui.prompt.as_ref().unwrap().candidates().len();
+        assert!(all > 10);
 
-        // The menu described a line that no longer exists.
-        handle_key(KeyEvent::from(KeyCode::Char('q')), &mut ui, &ctx);
-        assert!(ui.prompt.as_ref().unwrap().candidates.is_empty());
-        assert!(!render(&ui, &ctx, 100, 20).contains("completions"));
+        handle_key(KeyEvent::from(KeyCode::Char('s')), &mut ui, &ctx);
+        let narrowed: Vec<String> = ui.prompt.as_ref().unwrap().candidates().to_vec();
+        assert!(
+            narrowed.len() < all && !narrowed.is_empty(),
+            "typing should narrow, not dismiss: {narrowed:?}"
+        );
+        assert!(
+            narrowed.iter().all(|c| c.starts_with('s')),
+            "everything left should match what was typed: {narrowed:?}"
+        );
+        assert!(render(&ui, &ctx, 100, 20).contains("completions"));
+    }
+
+    /// The line is never rewritten by filtering. `Tab` is the only key that
+    /// edits what you typed; narrowing the list must not silently complete it.
+    #[test]
+    fn narrowing_never_rewrites_the_line() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        tab(&mut ui, &ctx);
+        // "sea" leaves search, search-next and search-prev — a common prefix
+        // of "search", which `Tab` would apply and typing must not.
+        for c in "sea".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        assert_eq!(ui.prompt.as_ref().unwrap().buffer, "sea");
+        assert!(ui.prompt.as_ref().unwrap().candidates().len() >= 3);
+    }
+
+    /// Typing past the last match leaves the menu **open**, saying so. A list
+    /// that vanished would read as a swallowed keystroke.
+    #[test]
+    fn no_matches_keeps_the_menu_open_and_says_so() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        tab(&mut ui, &ctx);
+        for c in "zzz".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        let prompt = ui.prompt.as_ref().unwrap();
+        assert!(
+            prompt.menu.is_some(),
+            "the menu closed instead of saying so"
+        );
+        assert!(prompt.candidates().is_empty());
+
+        let out = render(&ui, &ctx, 100, 20);
+        assert!(out.contains("no matches"), "{out}");
+
+        // And the line is still executable — `:seek +30` has no candidates for
+        // its argument either, and must still run.
+        assert_eq!(prompt.buffer, "zzz");
+    }
+
+    /// `set key=value` is one word whose halves complete against different
+    /// things, so filtering has to make the same split inside the word that
+    /// completion does — otherwise typing a value narrows against verbs.
+    #[test]
+    fn narrowing_works_inside_a_setting_value() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        for c in "set aaa_mode=".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        let all: Vec<String> = ui.prompt.as_ref().unwrap().candidates().to_vec();
+        // Tab extended to the common prefix of all/artist/album first.
+        assert_eq!(ui.prompt.as_ref().unwrap().buffer, "set aaa_mode=a");
+        assert_eq!(all, vec!["all", "artist", "album"]);
+
+        handle_key(KeyEvent::from(KeyCode::Char('l')), &mut ui, &ctx);
+        let narrowed: Vec<String> = ui.prompt.as_ref().unwrap().candidates().to_vec();
+        assert_eq!(
+            narrowed,
+            vec!["all".to_string(), "album".to_string()],
+            "narrowed against verbs instead of the value half?"
+        );
+
+        handle_key(KeyEvent::from(KeyCode::Char('b')), &mut ui, &ctx);
+        assert_eq!(
+            ui.prompt.as_ref().unwrap().candidates(),
+            ["album".to_string()]
+        );
+        assert_eq!(ui.prompt.as_ref().unwrap().buffer, "set aaa_mode=alb");
+    }
+
+    /// Backspace widens the list again. This is the payoff of deriving the
+    /// candidates from the buffer: there is nothing to undo.
+    #[test]
+    fn backspace_brings_the_candidates_back() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        tab(&mut ui, &ctx);
+        let all = ui.prompt.as_ref().unwrap().candidates().len();
+
+        for c in "zzz".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        assert!(ui.prompt.as_ref().unwrap().candidates().is_empty());
+
+        for _ in 0..3 {
+            handle_key(KeyEvent::from(KeyCode::Backspace), &mut ui, &ctx);
+        }
+        assert_eq!(
+            ui.prompt.as_ref().unwrap().candidates().len(),
+            all,
+            "backspacing back to an empty line should offer everything again"
+        );
     }
 
     #[test]
@@ -4062,7 +4246,7 @@ mod tests {
         tab(&mut ui, &ctx);
         assert_eq!(typed(&ui), "quit ");
         // A menu of one would be noise: it is already applied.
-        assert!(ui.prompt.as_ref().unwrap().candidates.is_empty());
+        assert!(ui.prompt.as_ref().unwrap().candidates().is_empty());
     }
 
     #[test]
