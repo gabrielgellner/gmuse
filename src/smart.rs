@@ -82,6 +82,11 @@ impl SmartPlaylists {
         self.defined.iter().find(|p| p.name == name)
     }
 
+    /// Every rule, in config order.
+    pub fn all(&self) -> impl Iterator<Item = &SmartPlaylist> {
+        self.defined.iter()
+    }
+
     pub fn names(&self) -> Vec<&str> {
         self.defined.iter().map(|p| p.name.as_str()).collect()
     }

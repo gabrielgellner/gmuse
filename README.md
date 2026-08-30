@@ -109,11 +109,15 @@ gmuse [OPTIONS] [FILE]
 ```
 
 The TUI opens on the library tree. Views are nvim-style tabs: `gt`/`gT` step, `3gt` jumps to view 3, and `g<Tab>`
-returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `space` expands
-an artist, `tab` swaps pane, `q` quits.
+returns to the last one. **View 8** lists every playlist — rules and saved files together, rules marked as such — and
+`Enter` opens the one under the cursor into view 3. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom,
+`12G` to a row. `space` expands an artist, `tab` swaps pane, `q` quits.
 
-`:set relative_numbers=true` adds a vim-style distance gutter, counting tracks so album dividers never shift it. The
-playing track is emphasised in every list it appears in.
+Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `settings`, `playlists`.
+
+`:set relative_numbers=true` adds a vim-style distance gutter — absolute on the cursor line, distance elsewhere. Track
+lists count **tracks**, so an album divider never shifts the number `3j` needs; the artist/album pane counts every row,
+because an artist and an album are both jumpable. The playing track is emphasised in every list it appears in.
 
 Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
 `<`/`>` seek 60s, `-`/`+` adjust volume by 3 dB. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m`
@@ -177,7 +181,11 @@ the menu up saying `no matches` rather than vanishing. `C-n`/`C-p` or the arrows
 the menu and a second `Esc` the line.
 
 `:` opens the command line — `Tab` completes verbs and their arguments, including catalog names, setting keys and the
-values each key accepts. `/` and `?` search, `n`/`N` repeat the search. View 7 lists every setting and binding.
+values each key accepts. `/` and `?` search, `n`/`N` repeat the search.
+
+**View 7** lists every setting, catalog and binding, and `space` or `Enter` changes the one under the cursor — booleans
+flip, named values cycle, exactly as `:toggle` does. `resample_quality` needs the device rebuilt so it says to use
+`:set`, and a binding row points at `:bind`.
 
 Track lists are divided by album, and by disc within a multi-disc album. Turn it off with `:set album_headers=false`.
 
@@ -316,6 +324,9 @@ length, keep their own history rather than risk attaching a rating to the wrong 
 
 View 3 holds one playlist at a time. `y` adds the selection, `D` removes, and **it survives a quit** — the queue always
 did, and a list you assembled deliberately deserved it more.
+
+**View 8** lists what there is: rules first, then saved files, with a track count beside each. `Enter` opens one into
+view 3. It rereads the directory whenever you enter it, so a playlist dropped in from another program appears.
 
 Named playlists are files, kept in `<data_dir>/playlists`:
 

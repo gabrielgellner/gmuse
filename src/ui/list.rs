@@ -131,6 +131,26 @@ pub struct RowStyle {
     pub playing: Option<TrackId>,
 }
 
+/// The distance gutter for one row.
+///
+/// Vim's hybrid: absolute on the cursor line, relative elsewhere. The absolute
+/// number is what a count for `G` takes, so the line you are on tells you the
+/// number to type to come back to it.
+///
+/// Shared with the tree pane, which numbers artists and albums rather than
+/// tracks — the arithmetic is the same and having two copies would let them
+/// drift apart in width, which is what makes a gutter unreadable.
+pub fn gutter(n: usize, selected: usize) -> String {
+    if n == selected {
+        format!("{:<4}", n + 1)
+    } else {
+        format!("{:>3} ", n.abs_diff(selected))
+    }
+}
+
+/// Blank space the same width, so a row with no number still lines up.
+pub const GUTTER_BLANK: &str = "    ";
+
 /// Render rows as `NN  Title            m:ss`, with dividers styled apart.
 pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], style: RowStyle) -> Vec<ListItem<'a>> {
     let mut track_index = 0usize;
@@ -141,17 +161,11 @@ pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], style: RowStyle) ->
             let lead = if !style.relative {
                 String::new()
             } else if matches!(row, Row::Header(_)) {
-                "    ".to_string()
+                GUTTER_BLANK.to_string()
             } else {
                 let n = track_index;
                 track_index += 1;
-                // Vim's hybrid: absolute on the cursor line, relative
-                // elsewhere. The absolute number is what a count for `G` takes.
-                if n == style.selected {
-                    format!("{:<4}", n + 1)
-                } else {
-                    format!("{:>3} ", n.abs_diff(style.selected))
-                }
+                gutter(n, style.selected)
             };
             (lead, row)
         })

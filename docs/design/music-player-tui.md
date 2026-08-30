@@ -2071,6 +2071,41 @@ Append here as decisions are made. Format: date, decision, rationale.
   survived. A rule-owned list is deliberately **not** captured: it is recomputed from its rule on open, and freezing a
   stale copy into the session would make it lie.
 
+- **2026-08-30** **View 8 is the playlist browser**, and it is a view rather than a pane of view 3 because the two show
+  different things: view 3 is the _open_ playlist, view 8 is the _set_. One is a list of tracks, the other a list of
+  lists. Rules and saved files appear together — they are one vocabulary (#15, #22) — with rules first, since they
+  cannot be created or renamed from inside the app and keeping them fixed stops the interesting half jumping around as
+  playlists are saved. A rule is _marked_, not hidden: opening one gives a list that cannot be edited, which is worth
+  knowing before pressing enter.
+
+  Rows are cached and rebuilt on entry and on save, not derived per frame: counting a saved playlist's tracks means
+  reading the file, and doing that at the UI tick rate would be I/O for nothing. Rebuilding on entry is also what makes
+  a playlist dropped in by another program appear.
+
+  This is the first view added since the set was inherited from cmus, and it is a partial answer to #23 — the question
+  of whether the _rest_ of that set earns its place is still open.
+
+  It also caught a latent bug: the tab strip numbered views by their position in `View::ALL` while `3gt` and `:view 3`
+  use the enum's discriminant. Equivalent only while `ALL` happens to be in id order, and silently wrong the moment a
+  view is inserted anywhere but the end. The strip now numbers from the id, and a test pins `ALL` as complete and
+  ordered — a view missing from it is unreachable by `gt` and invisible in the strip while still being a legal
+  `:view <n>` target.
+
+- **2026-08-30** **View 7 is editable, and the relative gutter reaches the tree.** A view that shows what can change and
+  refuses to change it is a _display_, and §4's argument for a view is that it is a place to do something — the test #23
+  proposes, which a read-only settings list failed. `space` and `Enter` now change the row under the cursor: booleans
+  flip, named values cycle, which is what `:toggle` already means, so this is a way in rather than a second mechanism.
+  Catalog rows toggle the same way view 6 spells it. Bindings are the one inert kind — there is nothing to cycle, and
+  the message points at `:bind`.
+
+  The distance gutter now draws in the artist/album pane too. It numbers **every row** there, unlike a track list which
+  numbers tracks and blanks its album dividers: an artist and an album are both jumpable, so there is nothing to skip.
+  One `gutter()`, shared, because two copies would drift apart in width and an uneven gutter is unreadable.
+
+  Worth recording as a testing lesson: the first version of the tree-gutter test asserted on the rendered _screen_, and
+  passed with the feature disabled — the track pane beside it has a gutter of its own and satisfied the same substrings.
+  The test that bites reads the tree pane's cell specifically.
+
 ---
 
 ## 14. Prior art worth reading

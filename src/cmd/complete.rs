@@ -103,7 +103,7 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
     };
 
     match *verb {
-        "view" if words.len() == 1 => (1..=7).map(|n| n.to_string()).collect(),
+        "view" if words.len() == 1 => (1..=8).map(|n| n.to_string()).collect(),
         "rate" if words.len() == 1 => std::iter::once("none".to_string())
             .chain((1..=5).map(|n| n.to_string()))
             .collect(),
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn view_completes_to_numbers() {
         let c = complete("view ", &world()).unwrap();
-        assert_eq!(c.options, ["1", "2", "3", "4", "5", "6", "7"]);
+        assert_eq!(c.options, ["1", "2", "3", "4", "5", "6", "7", "8"]);
     }
 
     #[test]

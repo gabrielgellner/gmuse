@@ -42,6 +42,12 @@ pub enum View {
     Browser = 5,
     Filters = 6,
     Settings = 7,
+    /// The playlist browser: what there is to open (#22).
+    ///
+    /// A separate view rather than a pane of view 3, because view 3 shows the
+    /// *open* playlist and this shows the *set* — one is a list of tracks, the
+    /// other a list of lists.
+    Playlists = 8,
 }
 
 impl View {
@@ -53,6 +59,7 @@ impl View {
             View::Queue => "queue",
             View::Browser => "browser",
             View::Filters => "filters",
+            View::Playlists => "playlists",
             View::Settings => "settings",
         }
     }
@@ -65,6 +72,7 @@ impl View {
             ViewId::Queue => View::Queue,
             ViewId::Browser => View::Browser,
             ViewId::Filters => View::Filters,
+            ViewId::Playlists => View::Playlists,
             ViewId::Settings => View::Settings,
         }
     }
@@ -91,6 +99,7 @@ impl View {
         View::Browser,
         View::Filters,
         View::Settings,
+        View::Playlists,
     ];
 
     pub fn context(self) -> crate::cmd::Context {
@@ -102,6 +111,7 @@ impl View {
             View::Queue => C::Queue,
             View::Browser => C::Browser,
             View::Filters => C::Filters,
+            View::Playlists => C::Playlists,
             View::Settings => C::Settings,
         }
     }
@@ -254,6 +264,18 @@ impl BrowserState {
     }
 }
 
+/// One row of view 8.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaylistRow {
+    pub name: String,
+    /// A track count, or the rule for a smart one — the same thing view 6
+    /// shows for a catalog, and for the same reason: a name alone does not say
+    /// what you are about to open.
+    pub detail: String,
+    /// Defined by a rule rather than saved as a file.
+    pub rule: bool,
+}
+
 /// Everything the UI draws and navigates.
 pub struct Ui {
     pub view: View,
@@ -319,6 +341,15 @@ pub struct Ui {
     pub settings_sel: usize,
     /// Cursor in view 6, the catalog list.
     pub catalog_sel: usize,
+    /// Cursor in view 8, the playlist browser.
+    pub playlists_sel: usize,
+    /// What view 8 shows, rebuilt when it is entered or when a playlist is
+    /// written.
+    ///
+    /// Cached rather than derived per frame: counting a saved playlist's
+    /// tracks means reading the file, and doing that on every redraw would be
+    /// I/O at the UI tick rate.
+    pub playlist_rows: Vec<PlaylistRow>,
     pub theme: theme::Theme,
     /// How the now-playing description is written. Parsed at config load; the
     /// status line only renders it.
@@ -394,6 +425,8 @@ impl Ui {
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
             settings_sel: 0,
+            playlists_sel: 0,
+            playlist_rows: Vec::new(),
             catalog_sel: 0,
             theme: theme::Theme::default(),
             now_playing: crate::format::Template::default(),
@@ -487,7 +520,7 @@ impl Ui {
             View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
-            View::Browser | View::Filters | View::Settings => None,
+            View::Browser | View::Filters | View::Settings | View::Playlists => None,
         }
     }
 }
@@ -1367,6 +1400,8 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 // Space turns one catalog on or off. The union of what is on
                 // is the library, so this reads as "include this too".
                 toggle_catalog_under_cursor(ui, ctx);
+            } else if ui.view == View::Settings {
+                toggle_under_cursor(ui, ctx);
             }
         }
         Command::ExpandAll => {
@@ -1382,7 +1417,15 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         }
         Command::Activate => match ui.view {
             View::Browser => ui.browser.enter(),
-            View::Settings => {}
+            View::Settings => toggle_under_cursor(ui, ctx),
+            // Enter opens the one under the cursor into view 3 and goes there,
+            // because the point of a browser is to leave it.
+            View::Playlists => {
+                let Some(row) = ui.playlist_rows.get(ui.playlists_sel).cloned() else {
+                    return;
+                };
+                open_playlist(ui, ctx, &row.name);
+            }
             // Enter makes this the only catalog — the common case, and one
             // keypress rather than clearing the others by hand.
             View::Filters => {
@@ -1653,6 +1696,51 @@ fn open_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     });
 }
 
+/// Rebuild view 8's rows.
+///
+/// Rules first, then saved files, each alphabetical — rules cannot be created
+/// or renamed from inside the app, so they are the fixed part of the list and
+/// keeping them at the top stops the interesting half jumping around as
+/// playlists are saved.
+fn refresh_playlist_rows(ui: &mut Ui) {
+    let mut rows: Vec<PlaylistRow> = Vec::new();
+    let mut rules: Vec<&crate::smart::SmartPlaylist> = ui.playlists.all().collect();
+    rules.sort_by(|a, b| a.name.cmp(&b.name));
+    for rule in rules {
+        rows.push(PlaylistRow {
+            name: rule.name.clone(),
+            detail: rule.filter.source.clone(),
+            rule: true,
+        });
+    }
+    if let Some(saved) = &ui.saved {
+        for s in saved.list() {
+            if rows.iter().any(|r| r.name == s.name) {
+                continue;
+            }
+            // Read once, here, rather than per frame. A playlist that cannot
+            // be read still gets a row: it exists, and hiding it would be
+            // stranger than saying so.
+            let detail = match crate::m3u::read(&s.path) {
+                Ok(paths) => match paths.len() {
+                    1 => "1 track".to_string(),
+                    n => format!("{n} tracks"),
+                },
+                Err(_) => "unreadable".to_string(),
+            };
+            rows.push(PlaylistRow {
+                name: s.name,
+                detail,
+                rule: false,
+            });
+        }
+    }
+    ui.playlist_rows = rows;
+    ui.playlists_sel = ui
+        .playlists_sel
+        .min(ui.playlist_rows.len().saturating_sub(1));
+}
+
 /// Every name `:playlist open` would accept.
 fn known_playlists(ui: &Ui) -> Vec<String> {
     let mut names: Vec<String> = ui
@@ -1746,6 +1834,7 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
             // detaches it, which is what `:freeze` does — so say so rather
             // than leaving the title claiming a rule still owns it.
             let was = ui.smart.take();
+            refresh_playlist_rows(ui);
             ui.notify(match was {
                 Some(rule) => format!(
                     "saved {} tracks as {name} (detached from {rule})",
@@ -1838,6 +1927,11 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
 
 /// Change view, remembering where we came from so `g<Tab>` can go back.
 fn switch_view(ui: &mut Ui, view: View) {
+    // Entering the browser is the moment its contents matter — and the moment
+    // another program may have dropped a playlist into the directory.
+    if view == View::Playlists {
+        refresh_playlist_rows(ui);
+    }
     if view != ui.view {
         ui.previous_view = ui.view;
     }
@@ -1981,6 +2075,9 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
             .map(|p| p.display().to_string().to_lowercase())
             .collect(),
         View::Filters | View::Settings => Vec::new(),
+        // Searchable by name, so `/road` finds a playlist the way it finds a
+        // track.
+        View::Playlists => ui.playlist_rows.iter().map(|r| r.name.clone()).collect(),
     }
 }
 
@@ -1995,6 +2092,7 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
         View::Queue => ui.queue.len(),
         View::Browser => ui.browser.entries.len(),
         View::Filters => ui.catalogs.defined().len(),
+        View::Playlists => ui.playlist_rows.len(),
         View::Settings => {
             bind::sorted(&ui.bindings).len() + SettingKey::ALL.len() + ui.catalogs.defined().len()
         }
@@ -2012,6 +2110,7 @@ fn current_cursor(ui: &Ui) -> usize {
         View::Queue => ui.queue_sel,
         View::Browser => ui.browser.selected,
         View::Filters => ui.catalog_sel,
+        View::Playlists => ui.playlists_sel,
         View::Settings => ui.settings_sel,
     }
 }
@@ -2032,6 +2131,7 @@ fn set_cursor(ui: &mut Ui, next: usize) {
         View::Queue => ui.queue_sel = next,
         View::Browser => ui.browser.selected = next,
         View::Filters => ui.catalog_sel = next,
+        View::Playlists => ui.playlists_sel = next,
         View::Settings => ui.settings_sel = next,
     }
 }
@@ -2042,6 +2142,82 @@ fn set_cursor(ui: &mut Ui, next: usize) {
 /// This toggles directly — space turns one on or off, enter makes it the only
 /// one — because the result is visible immediately either way and the two-step
 /// exists in cmus to batch a change you cannot see until you commit it.
+/// Change the row under the cursor in view 7.
+///
+/// A view that shows what can change and refuses to change it is a display,
+/// not a destination — and §4's whole argument for a view is that it is a
+/// place to *do* something. Booleans flip and named values cycle, which is
+/// what `:toggle` already means, so this adds a way in rather than a second
+/// mechanism.
+///
+/// Bindings are the one inert kind of row: there is nothing to cycle, and
+/// editing a key from here would be a `:bind` prompt rather than a toggle.
+fn toggle_under_cursor(ui: &mut Ui, ctx: &Context<'_>) {
+    let i = ui.settings_sel;
+    if let Some(key) = SettingKey::ALL.get(i).copied() {
+        execute(ui, ctx, Command::Toggle(key));
+        return;
+    }
+    // Catalogs are shown here too, and turning one on is the same act view 6
+    // spells with space — the same mechanism reached from a second place, not
+    // a second mechanism.
+    let catalogs = ui.catalogs.defined();
+    if let Some(catalog) = catalogs.get(i - SettingKey::ALL.len()) {
+        let name = catalog.name.clone();
+        let on = ui.catalogs.is_active(&name);
+        apply_catalog_spec(ui, ctx, crate::catalog::Spec::Adjust(vec![(!on, name)]));
+        return;
+    }
+    ui.notify("a binding is not a toggle — use `:bind` to change one");
+}
+
+/// View 8: what there is to open.
+fn draw_playlists(frame: &mut Frame, area: Rect, ui: &Ui) {
+    let theme = &ui.theme;
+    let mut lines: Vec<Line> = Vec::new();
+
+    if ui.playlist_rows.is_empty() {
+        let hint = match ui.saved.as_ref().map(|s| s.dir().display().to_string()) {
+            Some(dir) => {
+                format!("  no playlists yet — `:playlist save <name>` writes one to {dir}")
+            }
+            None => "  no playlists — set `data_dir` in the config".to_string(),
+        };
+        lines.push(Line::from(Span::styled(
+            hint,
+            theme.get(theme::Role::StatusDim),
+        )));
+    }
+
+    for (i, row) in ui.playlist_rows.iter().enumerate() {
+        let open = ui.smart.as_deref() == Some(row.name.as_str());
+        let body = if i == ui.playlists_sel {
+            theme.get(theme::Role::SelectionFocused)
+        } else {
+            theme.get(theme::Role::StatusText)
+        };
+        lines.push(Line::from(vec![
+            // A rule is marked, not hidden: opening one gives a list you
+            // cannot edit, and that is worth knowing before you press enter.
+            Span::styled(
+                if open { "  > " } else { "    " },
+                theme.get(theme::Role::StatusPlaying),
+            ),
+            Span::styled(format!("{:<20}", row.name), body),
+            Span::styled(
+                if row.rule { "rule  " } else { "      " },
+                theme.get(theme::Role::StatusNotice),
+            ),
+            Span::styled(row.detail.clone(), theme.get(theme::Role::StatusDim)),
+        ]));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).block(pane_block(theme, "playlists", true)),
+        area,
+    );
+}
+
 fn draw_catalogs(frame: &mut Frame, area: Rect, ui: &Ui) {
     let theme = &ui.theme;
     let defined = ui.catalogs.defined();
@@ -2186,6 +2362,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         }
         View::Browser => draw_browser(frame, body, ui),
         View::Filters => draw_catalogs(frame, body, ui),
+        View::Playlists => draw_playlists(frame, body, ui),
         View::Settings => draw_settings(frame, body, ui),
     }
 }
@@ -2427,9 +2604,29 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
 
     let rows = ui.tree.rows(&ui.library, ctx.store);
+    // The tree numbers every row, not every *track*: an artist and an album
+    // are both jumpable, so there is nothing here to skip the way a track list
+    // skips its album dividers.
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|row| ListItem::new(Line::from(row.label())))
+        .enumerate()
+        .map(|(i, row)| {
+            let label = Span::raw(row.label());
+            ListItem::new(Line::from(if ui.relative_numbers {
+                // Its own role, dimmed, so the numbers sit behind the names
+                // rather than competing with them — the same treatment the
+                // track pane gives its gutter.
+                vec![
+                    Span::styled(
+                        list::gutter(i, ui.tree.selected),
+                        ui.theme.get(theme::Role::Gutter),
+                    ),
+                    label,
+                ]
+            } else {
+                vec![label]
+            }))
+        })
         .collect();
 
     let focused = ui.tree.pane == Pane::Tree;
@@ -3431,6 +3628,275 @@ mod tests {
         assert!(!dir.join("playlists/nothing.m3u8").exists());
     }
 
+    /// A view that shows what can change and refuses to change it is a
+    /// display, not a destination.
+    #[test]
+    fn space_toggles_the_setting_under_the_cursor_in_view_seven() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 7");
+
+        let i = SettingKey::ALL
+            .iter()
+            .position(|k| *k == SettingKey::Shuffle)
+            .unwrap();
+        ui.settings_sel = i;
+        assert!(!ui.playback.shuffle);
+
+        press(&mut ui, &ctx, "space");
+        assert!(ui.playback.shuffle, "space did not toggle it");
+        execute(&mut ui, &ctx, Command::Activate);
+        assert!(!ui.playback.shuffle, "enter did not toggle it back");
+    }
+
+    /// Named values cycle rather than flip, which is what `:toggle` already
+    /// means — a way in, not a second mechanism.
+    #[test]
+    fn a_named_setting_cycles_in_view_seven() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Settings;
+        ui.settings_sel = SettingKey::ALL
+            .iter()
+            .position(|k| *k == SettingKey::AaaMode)
+            .unwrap();
+
+        assert_eq!(ui.playback.aaa_mode.label(), "all");
+        press(&mut ui, &ctx, "space");
+        assert_eq!(ui.playback.aaa_mode.label(), "artist");
+    }
+
+    /// `resample_quality` needs the device rebuilt, so it is not a toggle —
+    /// and view 7 has to say so rather than appearing to do nothing.
+    #[test]
+    fn a_setting_that_is_not_a_toggle_says_so() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Settings;
+        ui.settings_sel = SettingKey::ALL
+            .iter()
+            .position(|k| *k == SettingKey::ResampleQuality)
+            .unwrap();
+
+        press(&mut ui, &ctx, "space");
+        assert!(ui.status.contains(":set"), "{}", ui.status);
+    }
+
+    /// A binding row is the one inert kind: there is nothing to cycle, and the
+    /// message points at what does change one.
+    #[test]
+    fn a_binding_row_in_view_seven_points_at_bind() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Settings;
+        ui.settings_sel = SettingKey::ALL.len() + ui.catalogs.defined().len();
+
+        press(&mut ui, &ctx, "space");
+        assert!(ui.status.contains(":bind"), "{}", ui.status);
+    }
+
+    /// The tree numbers every row, because an artist and an album are both
+    /// jumpable — unlike a track list, which skips its album dividers.
+    #[test]
+    fn relative_numbers_reach_the_artist_pane() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // The *tree* pane's own cell, not the track pane beside it — which
+        // has a gutter of its own and would satisfy a looser assertion.
+        let tree_cell = |ui: &Ui, want: &str| -> String {
+            render(ui, &ctx, 100, 12)
+                .lines()
+                .find(|l| l.contains(want))
+                .and_then(|l| l.split('\u{2502}').nth(1).map(str::to_string))
+                .unwrap_or_default()
+        };
+
+        assert!(
+            !tree_cell(&ui, "Anderson .Paak").starts_with(|c: char| c.is_ascii_digit()),
+            "a gutter appeared with the setting off"
+        );
+
+        ui.relative_numbers = true;
+        // The cursor is on row 0, so it shows its *absolute* number — vim's
+        // hybrid, and the number a count for `G` takes.
+        let cursor = tree_cell(&ui, "Anderson .Paak");
+        assert!(cursor.starts_with("1   "), "{cursor:?}");
+
+        // The next artist is one row away, so it shows the distance instead,
+        // right-aligned against the absolute.
+        let next = tree_cell(&ui, "Unknown Artist");
+        assert!(next.starts_with("  1 "), "{next:?}");
+
+        // Dimmed, like the track pane's, so the numbers sit behind the names.
+        assert_eq!(
+            gutter_colour(&ui, &ctx, "Unknown Artist"),
+            ui.theme.get(theme::Role::Gutter).fg,
+            "the tree gutter is not drawn in the gutter role"
+        );
+    }
+
+    /// The colour of the gutter on the tree row naming `want`.
+    ///
+    /// Read off the rendered buffer, because a role the code passes but the
+    /// screen does not show is not a colour. Deliberately not the *cursor*
+    /// row: ratatui's row highlight covers the whole line there, including the
+    /// gutter, exactly as it does in the track pane.
+    fn gutter_colour(ui: &Ui, ctx: &Context<'_>, want: &str) -> Option<ratatui::style::Color> {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 12)).unwrap();
+        terminal.draw(|f| draw(f, ui, ctx)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            // The gutter is the first cells inside the pane's left border.
+            if line.contains(want) {
+                return Some(buf[(4, y)].fg);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn view_eight_lists_rules_and_saved_files() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "view8");
+        std::fs::create_dir_all(dir.join("playlists")).unwrap();
+        std::fs::write(
+            dir.join("playlists/roadtrip.m3u8"),
+            "#EXTM3U\n/m/a.mp3\n/m/b.mp3\n",
+        )
+        .unwrap();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 8");
+        assert_eq!(ui.view, View::Playlists);
+
+        let out = render(&ui, &ctx, 90, 12);
+        assert!(out.contains("8:playlists"), "{out}");
+        // Rules are marked rather than hidden: opening one gives a list you
+        // cannot edit, which is worth knowing before pressing enter.
+        assert!(out.contains("electronic"), "{out}");
+        assert!(out.contains("rule"), "{out}");
+        assert!(out.contains("roadtrip"), "{out}");
+        assert!(out.contains("2 tracks"), "{out}");
+    }
+
+    /// `ALL` drives `gt`/`gT` and the tab strip, so a view missing from it is
+    /// unreachable and invisible while still being a legal `:view <n>` target.
+    /// Its order must match the ids, which is what lets the strip be numbered
+    /// at all.
+    #[test]
+    fn every_view_is_in_all_exactly_once_and_in_id_order() {
+        let ids: Vec<u8> = View::ALL.iter().map(|v| *v as u8).collect();
+        assert_eq!(
+            ids,
+            (1..=View::ALL.len() as u8).collect::<Vec<_>>(),
+            "ALL is missing a view, has one twice, or is out of id order"
+        );
+        for n in 1..=View::ALL.len() as u8 {
+            let id = crate::cmd::ViewId::from_number(n).expect("a legal :view target");
+            assert!(
+                View::ALL.contains(&View::from_id(id)),
+                "view {n} unreachable"
+            );
+        }
+    }
+
+    /// The tab strip numbers from each view's own id, which is what `3gt` and
+    /// `:view 3` mean. Equivalent to numbering by position only while `ALL`
+    /// stays in id order — which the test above is what actually guarantees.
+    #[test]
+    fn the_tab_strip_numbers_match_the_view_ids() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let ui = ui_of(&store, true);
+        let out = render(&ui, &ctx, 110, 6);
+        for view in View::ALL {
+            let expected = format!("{}:{}", *view as u8, view.title());
+            assert!(out.contains(&expected), "{expected} missing from: {out}");
+        }
+    }
+
+    #[test]
+    fn enter_in_view_eight_opens_that_playlist() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "view8-enter");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 8");
+        // Rules sort first, so the cursor starts on `electronic`.
+        execute(&mut ui, &ctx, Command::Activate);
+
+        assert_eq!(ui.view, View::Playlist, "the browser is a place to leave");
+        assert_eq!(ui.smart.as_deref(), Some("electronic"));
+        assert_eq!(ui.playlist.len(), 2);
+    }
+
+    /// Saving is the one thing that changes the set from inside the app, so
+    /// the browser has to notice without being left and re-entered.
+    #[test]
+    fn saving_a_playlist_shows_up_in_view_eight() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "view8-refresh");
+        ui.playlist.push(store.iter().next().unwrap().0);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 8");
+        assert!(!ui.playlist_rows.iter().any(|r| r.name == "keepers"));
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist save keepers");
+        assert!(
+            ui.playlist_rows.iter().any(|r| r.name == "keepers"),
+            "the browser did not notice the save"
+        );
+    }
+
+    #[test]
+    fn an_empty_view_eight_says_where_playlists_would_go() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let dir = scratch("view8-empty");
+        ui.saved = Some(crate::playlist::Playlists::new(&dir));
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 8");
+        let out = render(&ui, &ctx, 100, 8);
+        assert!(out.contains("no playlists yet"), "{out}");
+        assert!(out.contains("playlists"), "{out}");
+    }
+
+    /// A file that cannot be read still gets a row — it exists, and hiding it
+    /// would be stranger than saying so.
+    #[test]
+    fn an_unreadable_playlist_is_listed_rather_than_hidden() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "view8-unreadable");
+        std::fs::create_dir_all(dir.join("playlists/broken.m3u8")).unwrap();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 8");
+        let row = ui
+            .playlist_rows
+            .iter()
+            .find(|r| r.name == "broken")
+            .expect("not listed");
+        assert_eq!(row.detail, "unreadable");
+    }
+
     #[test]
     fn tab_completes_smart_playlist_names() {
         let store = genre_fixture();
@@ -3484,6 +3950,7 @@ mod tests {
                     crate::cmd::Context::Queue => ViewId::Queue,
                     crate::cmd::Context::Browser => ViewId::Browser,
                     crate::cmd::Context::Filters => ViewId::Filters,
+                    crate::cmd::Context::Playlists => ViewId::Playlists,
                     crate::cmd::Context::Settings => ViewId::Settings,
                     crate::cmd::Context::Common => unreachable!(),
                 }),
@@ -3510,8 +3977,10 @@ mod tests {
         press(&mut ui, &ctx, "g T");
         assert_eq!(ui.view, View::Sorted);
 
-        // Wrapping, so you can always get anywhere with one key.
-        for _ in 0..6 {
+        // Wrapping, so you can always get anywhere with one key. Counted
+        // from `ALL` rather than a literal, so adding a view does not silently
+        // turn this into a test of something else.
+        for _ in 0..View::ALL.len() - 1 {
             press(&mut ui, &ctx, "g t");
         }
         assert_eq!(ui.view, View::Tree);

@@ -12,20 +12,14 @@ use super::theme::{Role, Theme};
 use super::{Context, Prompt, Ui, View, list::fmt_duration};
 use crate::audio::State;
 
-const VIEWS: [View; 7] = [
-    View::Tree,
-    View::Sorted,
-    View::Playlist,
-    View::Queue,
-    View::Browser,
-    View::Filters,
-    View::Settings,
-];
-
 pub fn tabs(theme: &Theme, current: View) -> Paragraph<'static> {
     let mut spans = Vec::new();
-    for (i, view) in VIEWS.iter().enumerate() {
-        let label = format!(" {}:{} ", i + 1, view.title());
+    // `View::ALL`, not a second list — and numbered from the view's own id
+    // rather than its position, because that id is what `3gt` and `:view 3`
+    // mean. A positional number silently disagreed the moment a view was
+    // added anywhere but the end.
+    for view in View::ALL {
+        let label = format!(" {}:{} ", *view as u8, view.title());
         spans.push(Span::styled(
             label,
             theme.get(if *view == current {
