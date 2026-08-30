@@ -315,6 +315,14 @@ pub fn read_track(path: &Path, mtime: i64, size: u64) -> Result<Track, String> {
         track.title = clean(tag.title().map(|s| s.to_string()));
         track.genre = clean(tag.genre().map(|s| s.to_string()));
         track.albumartist = clean(tag.get_string(ItemKey::AlbumArtist).map(str::to_string));
+        // `Publisher` is `TPUB` in ID3 and `ORGANIZATION` in Vorbis. `LABEL`
+        // is neither standard nor rare — Bandcamp and Picard both write it —
+        // so it is read as a fallback rather than ignored.
+        track.label = clean(
+            tag.get_string(ItemKey::Publisher)
+                .or_else(|| tag.get_string(ItemKey::Label))
+                .map(str::to_string),
+        );
         track.tracknumber = tag.track();
         track.discnumber = tag.disk();
         track.date = tag
@@ -689,6 +697,32 @@ mod tests {
         assert_eq!(parse_year("unknown"), None);
         // Two digits is not a year we can trust.
         assert_eq!(parse_year("97"), None);
+    }
+
+    /// A label sampler's imprint belongs in `TPUB`, not in `albumartist`
+    /// where it reads as an artist. Vorbis spells the same thing
+    /// `ORGANIZATION`, and `LABEL` is a common third spelling.
+    #[test]
+    fn the_label_is_read_from_a_real_file() {
+        let d = scan_dir("label");
+        // A real WAV, so lofty parses it, with tags written onto it.
+        let path = d.join("tagged.wav");
+        write_wav(&path, 4410);
+
+        use lofty::config::WriteOptions;
+        use lofty::tag::{Tag, TagExt, TagType};
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.insert_text(ItemKey::TrackArtist, "ANTIGONE".into());
+        tag.insert_text(ItemKey::AlbumArtist, "Various Artists".into());
+        tag.insert_text(ItemKey::Publisher, "trip recordings".into());
+        tag.save_to_path(&path, WriteOptions::default()).unwrap();
+
+        let track = read_track(&path, 0, 0).expect("reads");
+        assert_eq!(track.label.as_deref(), Some("trip recordings"));
+        assert_eq!(track.artist.as_deref(), Some("ANTIGONE"));
+        assert_eq!(track.albumartist.as_deref(), Some("Various Artists"));
+        // The label must not leak into the identity the tree files under.
+        assert_eq!(track.file_under(), "Various Artists");
     }
 
     #[test]

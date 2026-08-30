@@ -156,7 +156,7 @@ field is there at all — `genre?` has one, `!genre?` has none — and an empty 
 is a literal question mark, and matching is **smart-case**: insensitive unless your pattern contains a capital.
 
 Fields are the same names the format language uses:
-`artist albumartist file_under album title display_title genre path filename any` for text,
+`artist albumartist file_under album title display_title genre label path filename any` for text,
 `track disc year duration bitrate samplerate channels` for numbers.
 
 Four more come from the play history rather than the tags: `play_count`, `days_since_played`, `days_since_added` and
@@ -187,6 +187,11 @@ values each key accepts. `/` and `?` search, `n`/`N` repeat the search.
 flip, named values cycle, exactly as `:toggle` does. `resample_quality` needs the device rebuilt so it says to use
 `:set`, and a binding row points at `:bind`.
 
+`label` is the record label, from `TPUB` / `ORGANIZATION` / `LABEL`. It has its own field because it is otherwise
+homeless: a label sampler is a **compilation**, so its `albumartist` belongs to `Various Artists` (or, for a stray
+single, to the track's own artist) — and a label written into an artist field turns up in your library looking like a
+band. Bandcamp does exactly that, for want of anywhere better to put it.
+
 Track lists are divided by album, and by disc within a multi-disc album. Turn it off with `:set album_headers=false`.
 
 ## Configuration
@@ -208,7 +213,7 @@ o = ["add-queue", "next"]         # a list is a macro
 "M-f" = "seek +30"
 
 [format]
-# {artist} {album} {title} {track} {year} {duration} {genre} … and more.
+# {artist} {album} {title} {track} {year} {duration} {genre} {label} … and more.
 # [ ... ] disappears entirely if a field inside it is missing.
 # {track:02} pads, {title:.40} truncates, {duration:>7} right-aligns.
 now_playing = "{artist}[ — {album}] — {title:.40}"

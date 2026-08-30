@@ -2106,6 +2106,21 @@ Append here as decisions are made. Format: date, decision, rationale.
   passed with the feature disabled — the track pane beside it has a gutter of its own and satisfied the same substrings.
   The test that bites reads the tree pane's cell specifically.
 
+- **2026-08-30** **`label` is a field, because a label is not an artist.** Bandcamp writes the imprint into
+  `albumartist` — correct for a single-artist release, wrong for a sampler, and it does not special-case one — so a
+  label turns up in the library looking like a band. §11.4 files by `albumartist`, so this is not a display bug to patch
+  around; the tag is simply in the wrong place.
+
+  The settled convention is that a label sampler is a **compilation**: `albumartist` is `Various Artists`, `artist` is
+  the real per-track artist, and the label goes in `TPUB` (`ORGANIZATION` in Vorbis, sometimes `LABEL`). Retagging to
+  that convention fixes the tree — but destroys the label unless something reads it, which is why the field comes with
+  the fix rather than after it. One field in the shared vocabulary, so `{label}` renders, `label="*trip*"` filters and
+  `sort = "label"` orders, without any of the three languages being told about it separately.
+
+  A **stray single** off a sampler is the sub-case worth naming: `Various Artists` would give it a node of its own
+  holding one track. Better to drop `albumartist` entirely and let §11.4's fallback use the track artist, which files it
+  beside that artist's other music.
+
 ---
 
 ## 14. Prior art worth reading

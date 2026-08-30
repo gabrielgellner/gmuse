@@ -33,6 +33,9 @@ pub enum Field {
     Disc,
     Year,
     Genre,
+    /// The record label (`TPUB`), which is where a label sampler's imprint
+    /// belongs — not in `albumartist`, where it looks like an artist.
+    Label,
     Duration,
     Bitrate,
     SampleRate,
@@ -60,6 +63,7 @@ impl Field {
             | Field::Title
             | Field::DisplayTitle
             | Field::Genre
+            | Field::Label
             | Field::Path
             | Field::FileName => Kind::Text,
             Field::Track
@@ -84,6 +88,7 @@ impl Field {
             "disc" => Field::Disc,
             "year" => Field::Year,
             "genre" => Field::Genre,
+            "label" => Field::Label,
             "duration" => Field::Duration,
             "bitrate" => Field::Bitrate,
             "samplerate" => Field::SampleRate,
@@ -107,6 +112,7 @@ impl Field {
         "file_under",
         "filename",
         "genre",
+        "label",
         "path",
         "samplerate",
         "title",
@@ -131,6 +137,7 @@ impl Field {
             Field::Disc => t.discnumber?.to_string(),
             Field::Year => t.date?.to_string(),
             Field::Genre => t.genre.clone()?,
+            Field::Label => t.label.clone()?,
             Field::Duration => {
                 let secs = t.duration.as_secs();
                 format!("{}:{:02}", secs / 60, secs % 60)

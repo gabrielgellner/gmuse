@@ -427,6 +427,7 @@ pub(crate) fn text_of(f: Field, t: &Track) -> Option<String> {
         Field::Title => t.title.clone()?,
         Field::DisplayTitle => t.display_title().to_string(),
         Field::Genre => t.genre.clone()?,
+        Field::Label => t.label.clone()?,
         Field::Path => t.path.display().to_string(),
         Field::FileName => t.path.file_name()?.to_string_lossy().into_owned(),
         _ => return None,
@@ -728,6 +729,31 @@ mod tests {
         Expr::parse(expr)
             .expect("should parse")
             .compile(Env::default())(t)
+    }
+
+    /// The label joins one vocabulary, so it filters without the filter
+    /// language being told about it separately — the whole point of sharing
+    /// `format::Field`.
+    #[test]
+    fn the_label_filters_like_any_other_text_field() {
+        let bare = track();
+        assert!(
+            matches("!label?", &bare),
+            "an untagged label must be missing"
+        );
+
+        let mut labelled = track();
+        labelled.label = Some("trip recordings".into());
+        assert!(matches("label?", &labelled));
+        assert!(matches(r#"label="trip*""#, &labelled));
+        // Smart-case: a capital in the pattern makes it exact.
+        assert!(!matches(r#"label="*RECORDINGS""#, &labelled));
+        // Smart-case, like every other text field: lowercase is insensitive.
+        assert!(matches(r#"label="*recordings""#, &labelled));
+
+        // Not an `any` field: `any` covers what you would search for by name,
+        // and a label is a fact about the release rather than its title.
+        assert!(!matches(r#"any="*trip*""#, &labelled));
     }
 
     #[test]

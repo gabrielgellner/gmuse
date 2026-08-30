@@ -48,6 +48,14 @@ pub struct Track {
     pub discnumber: Option<u32>,
     pub date: Option<i32>,
     pub genre: Option<String>,
+    /// The record label, from `TPUB` / `ORGANIZATION` / `LABEL`.
+    ///
+    /// Its own field because it is otherwise homeless: a label sampler is a
+    /// *compilation*, so its `albumartist` belongs to "Various Artists" and
+    /// the label has nowhere else to go. Bandcamp writes the label into
+    /// `albumartist` for want of anywhere better, which is what makes a label
+    /// appear in the library as though it were an artist.
+    pub label: Option<String>,
     pub duration: Duration,
     pub bitrate: Option<u32>,
     pub samplerate: Option<u32>,
