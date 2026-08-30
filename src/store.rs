@@ -73,9 +73,9 @@ impl Track {
             .unwrap_or(UNKNOWN_ARTIST)
     }
 
-    /// The album a track should file under.
+    /// The album a track should file under, or [`NO_ALBUM`] when it has none.
     pub fn album_or_unknown(&self) -> &str {
-        self.album.as_deref().unwrap_or(UNKNOWN_ALBUM)
+        self.album.as_deref().unwrap_or(NO_ALBUM)
     }
 
     /// What to show when there is no title tag: the file name, which is far
@@ -91,7 +91,16 @@ impl Track {
 }
 
 pub const UNKNOWN_ARTIST: &str = "Unknown Artist";
-pub const UNKNOWN_ALBUM: &str = "Unknown Album";
+/// What a track with no album is filed under.
+///
+/// Lowercase on purpose: album titles are capitalised, so this reads as a
+/// category rather than as a record called "Singles" — and there is no such
+/// record, which is the whole point of leaving the tag empty.
+///
+/// This is presentation only. `Track::album` stays `None`, so the format
+/// language's `[{album}]` groups still vanish and the filter's `!album?` still
+/// finds exactly these tracks.
+pub const NO_ALBUM: &str = "singles";
 
 /// The arena.
 ///
@@ -223,6 +232,30 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    /// A track with no album is *filed* under a label, but its tag stays
+    /// `None` — that is what keeps `!album?` meaningful and what makes the
+    /// format language's `[{album}]` group vanish rather than print a label.
+    #[test]
+    fn a_track_with_no_album_files_under_singles_but_keeps_an_empty_tag() {
+        let t = Track {
+            path: std::path::PathBuf::from("/m/Singles/Mala - Changes.mp3"),
+            artist: Some("Mala".into()),
+            ..Default::default()
+        };
+        assert_eq!(t.album_or_unknown(), NO_ALBUM);
+        assert_eq!(t.album, None, "filing must not invent a tag");
+    }
+
+    /// And a real album is untouched by any of it.
+    #[test]
+    fn a_real_album_files_under_its_own_name() {
+        let t = Track {
+            album: Some("London Zoo".into()),
+            ..Default::default()
+        };
+        assert_eq!(t.album_or_unknown(), "London Zoo");
+    }
+
     use super::*;
 
     fn track(path: &str) -> Track {

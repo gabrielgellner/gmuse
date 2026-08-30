@@ -755,6 +755,22 @@ mod tests {
         assert!(matches(r#"!genre="folk""#, &t), "negation still works");
     }
 
+    /// Filing an album-less track under a label is *presentation*: the tag
+    /// stays empty, so `!album?` still finds exactly those tracks. Reading
+    /// `album_or_unknown()` here instead would silently make every single look
+    /// like it belongs to a record called "singles".
+    #[test]
+    fn filing_a_single_does_not_give_it_an_album() {
+        let mut t = track();
+        t.album = None;
+        assert!(matches("!album?", &t));
+        assert!(!matches("album?", &t));
+        assert!(
+            !matches(r#"album="*singles*""#, &t),
+            "the display label leaked into the tag"
+        );
+    }
+
     /// `field?` asks whether the track has the field at all — the one thing
     /// foobar2000 could say and this language could only imply.
     #[test]

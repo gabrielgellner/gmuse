@@ -1804,6 +1804,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   which is worse in a line that is already tight. A spec that sizes nothing (`{track:0}`, `{title:.}`) is rejected: it
   is a typo, not a rule.
 
+- **2026-08-30** **A track with no album files under `singles`, and its tag stays empty.** Lowercase on purpose: album
+  titles are capitalised, so it reads as a category rather than as a record called "Singles" — and there is no such
+  record, which is the point of leaving the tag alone.
+
+  The alternative was to _write_ `album = "Singles"` into the files. It looks identical on screen and costs no code, and
+  it is a lie: those tracks are not from an album of that name, and it would break `!album?` as the way to find them.
+  Presentation belongs in the player; the files stay true. The same reasoning that keeps analysis outside gmuse.
+
+  `Track::album` is still `None`, so the format language's `[{album}]` groups vanish and the filter's `!album?` finds
+  exactly these tracks. **A mutation caught that this claim was untested** — swapping the filter to read
+  `album_or_unknown()` broke nothing until a test was added for it, and that swap is precisely the mistake that would
+  make every single look like it belonged to a record.
+
+  Layout, from issue #20: a shared `Singles/` folder **per catalog** — `Dance/Singles/`, `General/Singles/` — because
+  the singles span both and one top-level folder would be a third catalog mixing dubstep with folk, which is what
+  catalogs exist to prevent.
+
+  Tagged with **`rsgain custom`, never `rsgain easy`**: easy mode computes an album gain per folder, and a folder of
+  unrelated singles would get an average across tracks with nothing to do with each other. With no album gain written,
+  `replaygain=auto` falls back to the track figure on its own — that fallback already existed for track-only scans.
+
+  Importing the five pending files found something worth recording: **only one of them was actually album-less.** The
+  Bug's "Poison Dart" is track 11 of _London Zoo_, ANTIGONE's "DANCE" is track 6 of a compilation, and two are genuine
+  single releases whose album tag equals their title. So a `Singles/` folder is about **provenance — loose tracks not
+  part of a complete album owned — not about the tracks lacking an album.** Their tags were left alone.
+
 ---
 
 ## 14. Prior art worth reading
