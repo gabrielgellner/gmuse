@@ -8,7 +8,23 @@
 //! see the Decision Log for the counts that decided this.
 
 use crate::format::{Field, Kind};
+use crate::history::History;
 use crate::store::Track;
+
+/// What a filter can see besides the track itself.
+///
+/// History lives in its own store keyed by path (§13), not on `Track`, so a
+/// predicate that asks about play counts needs handing the store as well.
+/// `None` means "no history available", and every history field is then
+/// *missing* rather than zero — the difference between "never played" and
+/// "cannot say".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Env<'a> {
+    pub history: Option<&'a History>,
+    /// Seconds since the epoch, for the `days_since_*` fields. Passed in so a
+    /// test can fix the clock.
+    pub now: i64,
+}
 
 /// A glob pattern. `*` is the only metacharacter; `\*` is a literal asterisk.
 ///
@@ -131,10 +147,37 @@ impl Glob {
 /// What a comparison looks at. `any` is a filter-only pseudo-field covering
 /// every text field, so "search everything" is explicit rather than a bare
 /// word with implicit meaning.
+/// A field that comes from the history store rather than the file's tags.
+///
+/// Dates are exposed as **days since**, not as timestamps: `days_since_added<30`
+/// reads, and `added>1735689600` does not. It also needs no date literals in
+/// the grammar, which is a whole syntax avoided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryField {
+    PlayCount,
+    DaysSincePlayed,
+    DaysSinceAdded,
+}
+
+impl HistoryField {
+    pub const NAMES: &'static [&'static str] =
+        &["days_since_added", "days_since_played", "play_count"];
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "play_count" => HistoryField::PlayCount,
+            "days_since_played" => HistoryField::DaysSincePlayed,
+            "days_since_added" => HistoryField::DaysSinceAdded,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selector {
     Field(Field),
     Any,
+    History(HistoryField),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,8 +216,8 @@ impl Filter {
         })
     }
 
-    pub fn compile(&self) -> impl Fn(&Track) -> bool + '_ {
-        self.expr.compile()
+    pub fn compile<'a>(&'a self, env: Env<'a>) -> impl Fn(&Track) -> bool + 'a {
+        self.expr.compile(env)
     }
 }
 
@@ -227,6 +270,7 @@ pub enum FilterError {
 
 fn field_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = Field::NAMES.to_vec();
+    names.extend_from_slice(HistoryField::NAMES);
     names.push("any");
     names.sort_unstable();
     names
@@ -246,22 +290,23 @@ impl Expr {
 
     /// Build the predicate once. **Do not re-interpret the AST per track** —
     /// this runs over the whole library on every keystroke in view 6.
-    pub fn compile(&self) -> impl Fn(&Track) -> bool + '_ {
-        move |track| self.eval(track)
+    pub fn compile<'a>(&'a self, env: Env<'a>) -> impl Fn(&Track) -> bool + 'a {
+        move |track| self.eval(track, &env)
     }
 
-    fn eval(&self, t: &Track) -> bool {
+    fn eval(&self, t: &Track, env: &Env) -> bool {
         match self {
-            Expr::And(a, b) => a.eval(t) && b.eval(t),
-            Expr::Or(a, b) => a.eval(t) || b.eval(t),
-            Expr::Not(e) => !e.eval(t),
+            Expr::And(a, b) => a.eval(t, env) && b.eval(t, env),
+            Expr::Or(a, b) => a.eval(t, env) || b.eval(t, env),
+            Expr::Not(e) => !e.eval(t, env),
             Expr::Present(Selector::Field(f)) => present(*f, t),
             Expr::Present(Selector::Any) => true,
+            Expr::Present(Selector::History(h)) => history_number(*h, t, env).is_some(),
             Expr::Cmp {
                 selector,
                 op,
                 value,
-            } => compare(*selector, *op, value, t),
+            } => compare(*selector, *op, value, t, env),
         }
     }
 }
@@ -279,8 +324,39 @@ const ANY_FIELDS: &[Field] = &[
     Field::FileName,
 ];
 
-fn compare(selector: Selector, op: Op, value: &Value, t: &Track) -> bool {
+/// A history field's value. `None` is "cannot say" — no history, or never
+/// played — and a comparison against it is false, like any missing field.
+fn history_number(f: HistoryField, t: &Track, env: &Env) -> Option<i64> {
+    let history = env.history?;
+    let entry = history.get(&t.path);
+    Some(match f {
+        // An unplayed track has played zero times, which is an answer;
+        // `play_count=0` is how you ask for the ones you have never heard.
+        HistoryField::PlayCount => i64::from(entry.map(|e| e.plays).unwrap_or(0)),
+        HistoryField::DaysSincePlayed => days_since(entry?.last_played?, env.now),
+        HistoryField::DaysSinceAdded => days_since(entry?.added, env.now),
+    })
+}
+
+fn days_since(then: i64, now: i64) -> i64 {
+    (now - then).max(0) / 86_400
+}
+
+fn compare(selector: Selector, op: Op, value: &Value, t: &Track, env: &Env) -> bool {
     match (selector, value) {
+        (Selector::History(h), Value::Number(n)) => match history_number(h, t, env) {
+            Some(v) => match op {
+                Op::Eq => v == *n,
+                Op::Ne => v != *n,
+                Op::Lt => v < *n,
+                Op::Le => v <= *n,
+                Op::Gt => v > *n,
+                Op::Ge => v >= *n,
+            },
+            None => false,
+        },
+        // A history field against a quoted pattern is rejected by the parser.
+        (Selector::History(_), Value::Text(_)) => false,
         (Selector::Any, Value::Text(glob)) => {
             let hit = ANY_FIELDS
                 .iter()
@@ -528,6 +604,8 @@ impl Parser {
 
         let selector = if name == "any" {
             Selector::Any
+        } else if let Some(h) = HistoryField::parse(&name) {
+            Selector::History(h)
         } else {
             Selector::Field(
                 Field::parse(&name).ok_or(FilterError::UnknownField { name: name.clone() })?,
@@ -549,6 +627,7 @@ impl Parser {
         let kind = match selector {
             Selector::Any => Kind::Text,
             Selector::Field(f) => f.kind(),
+            Selector::History(_) => Kind::Number,
         };
 
         // Ordering a string is meaningless, and saying so beats comparing
@@ -613,7 +692,9 @@ mod tests {
     }
 
     fn matches(expr: &str, t: &Track) -> bool {
-        Expr::parse(expr).expect("should parse").compile()(t)
+        Expr::parse(expr)
+            .expect("should parse")
+            .compile(Env::default())(t)
     }
 
     #[test]
@@ -769,6 +850,116 @@ mod tests {
             !matches(r#"album="*singles*""#, &t),
             "the display label leaked into the tag"
         );
+    }
+
+    const DAY: i64 = 86_400;
+
+    fn with_history(plays: u32, last_played: Option<i64>, added: i64) -> History {
+        let mut h = History::default();
+        let p = track().path;
+        h.note_seen(&p, added);
+        for _ in 0..plays {
+            h.note_played(&p, last_played.unwrap_or(added));
+        }
+        // `note_played` stamps `added` only when the entry is new, so the
+        // first-seen date above survives.
+        h
+    }
+
+    fn matches_env(expr: &str, t: &Track, h: &History, now: i64) -> bool {
+        let e = Expr::parse(expr).expect("should parse");
+        let env = Env {
+            history: Some(h),
+            now,
+        };
+        e.compile(env)(t)
+    }
+
+    /// Play counts, and the query that matters most: what have I never heard?
+    #[test]
+    fn play_count_reads_from_the_history() {
+        let t = track();
+        let now = 100 * DAY;
+        let played = with_history(7, Some(now - DAY), 50 * DAY);
+
+        assert!(matches_env("play_count=7", &t, &played, now));
+        assert!(matches_env("play_count>5", &t, &played, now));
+        assert!(!matches_env("play_count>7", &t, &played, now));
+
+        // A track the history has never seen has played zero times — an
+        // answer, not a missing value, so `play_count=0` finds it.
+        let empty = History::default();
+        assert!(matches_env("play_count=0", &t, &empty, now));
+        assert!(!matches_env("play_count>0", &t, &empty, now));
+    }
+
+    /// Dates are exposed as *days since*, so a query reads as English and the
+    /// grammar needs no date literals.
+    #[test]
+    fn days_since_played_and_added() {
+        let t = track();
+        let now = 100 * DAY;
+        let h = with_history(3, Some(now - 10 * DAY), now - 40 * DAY);
+
+        assert!(matches_env("days_since_played=10", &t, &h, now));
+        assert!(matches_env("days_since_played<30", &t, &h, now));
+        assert!(!matches_env("days_since_played>30", &t, &h, now));
+
+        assert!(matches_env("days_since_added=40", &t, &h, now));
+        assert!(matches_env("days_since_added>30", &t, &h, now));
+
+        // The two compose, which is the point.
+        assert!(matches_env(
+            "days_since_added>30&days_since_played<30",
+            &t,
+            &h,
+            now
+        ));
+    }
+
+    /// Never played has no "days since", so `!days_since_played?` finds
+    /// exactly those — and it must not read as zero days, which would make
+    /// them look freshly played.
+    #[test]
+    fn a_track_never_played_has_no_days_since() {
+        let t = track();
+        let now = 100 * DAY;
+        let mut h = History::default();
+        h.note_seen(&t.path, now - 5 * DAY);
+
+        assert!(!matches_env("days_since_played?", &t, &h, now));
+        assert!(matches_env("!days_since_played?", &t, &h, now));
+        assert!(
+            !matches_env("days_since_played=0", &t, &h, now),
+            "never played must not read as played today"
+        );
+        assert!(matches_env("days_since_added=5", &t, &h, now));
+    }
+
+    /// With no history at all, every history field is *missing* rather than
+    /// zero — "cannot say" is not the same as "never". The line prompt keeps
+    /// no history, so this is a real case.
+    #[test]
+    fn without_a_history_the_fields_are_missing() {
+        let t = track();
+        let expr = |s: &str| Expr::parse(s).unwrap().compile(Env::default())(&t);
+        assert!(!expr("play_count=0"), "cannot say is not zero");
+        assert!(!expr("play_count>0"));
+        assert!(!expr("days_since_added?"));
+        assert!(expr("!days_since_added?"));
+    }
+
+    #[test]
+    fn history_fields_are_numbers() {
+        assert_eq!(
+            Expr::parse(r#"play_count="a""#),
+            Err(FilterError::NotText {
+                field: "play_count".into()
+            })
+        );
+        // And they appear in the unknown-field message.
+        let msg = Expr::parse("play_counts=1").unwrap_err().to_string();
+        assert!(msg.contains("play_count"), "{msg}");
     }
 
     /// `field?` asks whether the track has the field at all — the one thing

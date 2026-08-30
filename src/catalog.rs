@@ -47,10 +47,10 @@ impl Catalog {
     /// Whether a track belongs. Both halves must hold, and an absent half is
     /// simply not a constraint — so `roots` alone, `where` alone, and both
     /// together all read the same way.
-    fn contains(&self, track: &crate::store::Track) -> bool {
+    fn contains(&self, track: &crate::store::Track, env: crate::filter::Env<'_>) -> bool {
         let by_path = self.roots.is_empty() || self.roots.iter().any(|r| under(&track.path, r));
         let by_rule = match &self.filter {
-            Some(f) => f.compile()(track),
+            Some(f) => f.compile(env)(track),
             None => true,
         };
         by_path && by_rule
@@ -251,7 +251,7 @@ impl Catalogs {
     ///
     /// With nothing defined, or everything active, this is the whole store —
     /// so a user who never configures a catalog sees no change at all.
-    pub fn members(&self, store: &Store) -> HashSet<TrackId> {
+    pub fn members(&self, store: &Store, env: crate::filter::Env<'_>) -> HashSet<TrackId> {
         let active: Vec<&Catalog> = match &self.active {
             Active::All => self.defined.iter().collect(),
             Active::Only(names) => self
@@ -267,7 +267,7 @@ impl Catalogs {
 
         store
             .iter()
-            .filter(|(_, track)| active.iter().any(|c| c.contains(track)))
+            .filter(|(_, track)| active.iter().any(|c| c.contains(track, env)))
             .map(|(id, _)| id)
             .collect()
     }
@@ -322,7 +322,12 @@ mod tests {
     fn no_catalogs_means_every_track() {
         let store = store_with(&["/m/a.mp3", "/m/b.mp3"]);
         let catalogs = Catalogs::default();
-        assert_eq!(catalogs.members(&store).len(), 2);
+        assert_eq!(
+            catalogs
+                .members(&store, crate::filter::Env::default())
+                .len(),
+            2
+        );
         // And nothing to say about it in the status line.
         assert_eq!(catalogs.label(), None);
     }
@@ -332,7 +337,12 @@ mod tests {
         let (store, catalogs) = fixture();
         // "/m/loose.mp3" is under no catalog root, but `all` must still show
         // it, or scanning a stray folder would make music vanish.
-        assert_eq!(catalogs.members(&store).len(), 5);
+        assert_eq!(
+            catalogs
+                .members(&store, crate::filter::Env::default())
+                .len(),
+            5
+        );
     }
 
     #[test]
@@ -340,7 +350,10 @@ mod tests {
         let (store, mut catalogs) = fixture();
         catalogs.apply(Spec::Only(vec!["general".into()])).unwrap();
         assert_eq!(
-            paths(&store, &catalogs.members(&store)),
+            paths(
+                &store,
+                &catalogs.members(&store, crate::filter::Env::default())
+            ),
             BTreeSet::from([
                 "/m/general/a.mp3".to_string(),
                 "/m/general/b.mp3".to_string()
@@ -355,7 +368,7 @@ mod tests {
         catalogs
             .apply(Spec::Only(vec!["general".into(), "classical".into()]))
             .unwrap();
-        let members = catalogs.members(&store);
+        let members = catalogs.members(&store, crate::filter::Env::default());
         assert_eq!(members.len(), 3);
         // Definition order, not alphabetical: the label reads the way the
         // config was written.
@@ -369,7 +382,7 @@ mod tests {
         catalogs
             .apply(Spec::Adjust(vec![(false, "classical".into())]))
             .unwrap();
-        let members = catalogs.members(&store);
+        let members = catalogs.members(&store, crate::filter::Env::default());
         assert!(!paths(&store, &members).contains("/m/classical/d.mp3"));
         assert_eq!(members.len(), 3, "general (2) + electronic (1)");
     }
@@ -381,25 +394,39 @@ mod tests {
         catalogs
             .apply(Spec::Adjust(vec![(true, "classical".into())]))
             .unwrap();
-        assert_eq!(catalogs.members(&store).len(), 3);
+        assert_eq!(
+            catalogs
+                .members(&store, crate::filter::Env::default())
+                .len(),
+            3
+        );
         catalogs
             .apply(Spec::Adjust(vec![(false, "general".into())]))
             .unwrap();
-        assert_eq!(catalogs.members(&store).len(), 1);
+        assert_eq!(
+            catalogs
+                .members(&store, crate::filter::Env::default())
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn an_unknown_name_is_an_error_and_changes_nothing() {
         let (store, mut catalogs) = fixture();
         catalogs.apply(Spec::Only(vec!["general".into()])).unwrap();
-        let before = catalogs.members(&store).len();
+        let before = catalogs
+            .members(&store, crate::filter::Env::default())
+            .len();
 
         let err = catalogs
             .apply(Spec::Only(vec!["general".into(), "nosuch".into()]))
             .unwrap_err();
         assert!(err.contains("nosuch"), "{err}");
         assert_eq!(
-            catalogs.members(&store).len(),
+            catalogs
+                .members(&store, crate::filter::Env::default())
+                .len(),
             before,
             "a bad name must not half-apply"
         );
@@ -409,7 +436,11 @@ mod tests {
     fn none_active_is_allowed_and_says_so() {
         let (store, mut catalogs) = fixture();
         catalogs.apply(Spec::Only(vec![])).unwrap();
-        assert!(catalogs.members(&store).is_empty());
+        assert!(
+            catalogs
+                .members(&store, crate::filter::Env::default())
+                .is_empty()
+        );
         assert_eq!(catalogs.label().as_deref(), Some("none"));
     }
 
@@ -422,7 +453,10 @@ mod tests {
         catalogs.define("rock", vec![PathBuf::from("/m/rock")], None);
         catalogs.apply(Spec::Only(vec!["rock".into()])).unwrap();
         assert_eq!(
-            paths(&store, &catalogs.members(&store)),
+            paths(
+                &store,
+                &catalogs.members(&store, crate::filter::Env::default())
+            ),
             BTreeSet::from(["/m/rock/a.mp3".to_string()])
         );
     }
@@ -457,6 +491,12 @@ mod tests {
         catalogs
             .apply(Spec::Only(vec!["one".into(), "two".into()]))
             .unwrap();
-        assert_eq!(catalogs.members(&store).len(), 1, "membership is a set");
+        assert_eq!(
+            catalogs
+                .members(&store, crate::filter::Env::default())
+                .len(),
+            1,
+            "membership is a set"
+        );
     }
 }

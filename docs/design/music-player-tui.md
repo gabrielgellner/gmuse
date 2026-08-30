@@ -1854,6 +1854,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   Not yet exposed to the filter language. `play_count` and `last_played` as filter fields need the predicate to see more
   than a `&Track`, which is a signature change worth its own piece of work — and it is what #15 actually wants.
 
+- **2026-08-30** **History reaches the filter language: `play_count`, `days_since_played`, `days_since_added`.** This is
+  what turns #13 from infrastructure into something usable, and it is the prerequisite #15 was actually waiting on.
+
+  **Dates are exposed as "days since", not as timestamps.** `days_since_added<30` reads; `added>1735689600` does not. It
+  also avoids date literals in the grammar entirely — foobar2000 needs `BEFORE`, `AFTER`, `SINCE`, `DURING`, and
+  `DURING LAST n DAYS` to say what two integer comparisons say here.
+
+  **Missing and zero are kept apart, deliberately.** A track never played has _no_ `days_since_played`, so
+  `!days_since_played?` finds exactly those — reading it as zero would make them look freshly played. But `play_count`
+  is `0` for them, because "never" is an answer rather than an absence. With no history at all — the line prompt keeps
+  none — every history field is missing, because "cannot say" is not "never". Three mutations pin these apart.
+
+  The predicate signature changed from `Fn(&Track) -> bool` to taking an `Env { history, now }`, since history lives in
+  its own store keyed by path rather than on `Track`. That reached `Catalogs::members`, which is how a catalog can now
+  be `where = "play_count=0"`. Verified against the reference library with a synthetic history: 279 unplayed of 311, 32
+  played this week, 176 unplayed in the Dance folder.
+
+  **History is loaded before the library is built, not after.** A catalog may be defined by `play_count`, and building
+  the projection without the history would silently give the wrong membership until something happened to trigger a
+  rebuild. Ordering, again, being the thing that makes a diagnostic or a projection quietly wrong.
+
+  Not added to the **format** language. Those fields render from a `&Track` alone, and giving them the same environment
+  is a separate change — the shared vocabulary is for the file's own fields, and `any` was already filter-only.
+
 ---
 
 ## 14. Prior art worth reading

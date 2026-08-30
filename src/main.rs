@@ -255,9 +255,29 @@ fn run_tui(
     log_path: Option<PathBuf>,
     resume: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // History is loaded before the library, not after: a catalog may be defined
+    // by `play_count` or `days_since_added`, and building the projection
+    // without it would silently give the wrong membership until something
+    // happened to trigger a rebuild.
+    let history_path = crate::history::default_path();
+    let mut history = crate::history::History::load(&history_path);
+    let first_run = history.is_empty();
+    let known = history.len();
+    let now = crate::history::now();
+    for (_, track) in app.store.iter() {
+        history.note_seen(&track.path, now);
+    }
+    let fresh = history.len() - known;
+
     let library = Library::from_members(
         &app.store,
-        app.catalogs.members(&app.store),
+        app.catalogs.members(
+            &app.store,
+            crate::filter::Env {
+                history: Some(&history),
+                now,
+            },
+        ),
         smart_artist_sort,
     );
     let start_dir = app
@@ -328,23 +348,16 @@ fn run_tui(
     // from here on. It cannot be recovered for an existing library: the file's
     // mtime is not it — writing ReplayGain tags moved every one of them.
     {
-        let path = crate::history::default_path();
-        state.history = crate::history::History::load(&path);
-        let first_run = state.history.is_empty();
-        let known = state.history.len();
-        let now = crate::history::now();
-        for (_, track) in app.store.iter() {
-            state.history.note_seen(&track.path, now);
-        }
-        let fresh = state.history.len() - known;
-        state.history_path = Some(path);
+        let total = history.len();
+        state.history = history;
+        state.history_path = Some(history_path);
         ui::save_history(&mut state);
         state.audit.line(
             "history",
             &if first_run {
                 format!("{fresh} tracks, all first seen now — added dates start here")
             } else {
-                format!("{} known, {fresh} new since last run", state.history.len())
+                format!("{total} known, {fresh} new since last run")
             },
         );
     }
@@ -438,7 +451,12 @@ fn print_library(app: &App) {
 
     // Report what the active catalogs actually cover, not the whole store —
     // otherwise this contradicts what the views show.
-    let members = app.catalogs.members(&app.store);
+    // The line prompt keeps no history, so history-defined catalogs cannot be
+    // evaluated here — their fields read as missing, which is the honest
+    // answer rather than a guess.
+    let members = app
+        .catalogs
+        .members(&app.store, crate::filter::Env::default());
     let mut counted = 0usize;
 
     for (id, t) in app.store.iter() {

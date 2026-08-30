@@ -1493,11 +1493,20 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // §7's rule: active catalogs union, the transient filter intersects.
     // "Which bodies of music am I in" is a selection; "what am I looking for"
     // is a restriction.
-    let mut members = ui.catalogs.members(ctx.store);
-    if let Some(f) = &ui.filter {
-        let matches = f.compile();
-        members.retain(|id| ctx.store.get(*id).is_some_and(&matches));
-    }
+    let members = {
+        // Scoped so the borrows of `history` and `filter` end before the
+        // library is replaced below.
+        let env = crate::filter::Env {
+            history: Some(&ui.history),
+            now: crate::history::now(),
+        };
+        let mut m = ui.catalogs.members(ctx.store, env);
+        if let Some(f) = &ui.filter {
+            let matches = f.compile(env);
+            m.retain(|id| ctx.store.get(*id).is_some_and(&matches));
+        }
+        m
+    };
     ui.library = Library::from_members(ctx.store, members, ui.smart_artist_sort);
     ui.tree.selected = 0;
     ui.tree.track_selected = 0;
@@ -3035,7 +3044,11 @@ mod tests {
         catalogs.define("va", vec![PathBuf::from("/m/va")], None);
         let mut ui = Ui::new(
             PathBuf::from("/m"),
-            Library::from_members(store, catalogs.members(store), true),
+            Library::from_members(
+                store,
+                catalogs.members(store, crate::filter::Env::default()),
+                true,
+            ),
         );
         ui.catalogs = catalogs;
         ui
