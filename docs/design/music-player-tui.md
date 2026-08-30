@@ -1986,6 +1986,25 @@ Append here as decisions are made. Format: date, decision, rationale.
   have been easier and wrong: a version that silently started from an empty history looks exactly like the ratings being
   gone.
 
+- **2026-08-30** **Moves are detected at scan time, and ambiguity is declined.** Everything durable is keyed by path,
+  which is the right key — an arena index is meaningful only while the cache that produced it survives — but nothing
+  noticed when the key changed. A reorganisation orphaned ratings, reset play counts, and reset `added`, so a file owned
+  for a year reappeared in `days_since_added<30`. Worst of all it was **silent**: the scan reported one addition and one
+  removal, which is exactly what a correct scan of a real addition and a real deletion prints.
+
+  A departure is paired with an arrival on a signature of size, duration, audio properties and tags — **only when that
+  signature is unique on both sides.** Two copies of one track, or two untagged files of the same length, would
+  otherwise be paired arbitrarily, and a wrong pairing attaches somebody's rating to the wrong song, which is worse than
+  the loss being prevented.
+
+  `mtime` is deliberately excluded, though it would make the signature stricter: a plain `mv` preserves it, but a copy
+  without `-p`, an rsync without `-a`, and a restore from backup all reset it — and those are exactly the
+  reorganisations worth surviving. `Track` gained `size` for this, which is what forced a cache format bump; `size`
+  carries most of the signature's weight because for a byte-identical move it is conclusive.
+
+  The scan **says** what it did. A reassociation the listener never sees is as bad as the silent loss it replaces, and
+  worse if it ever guesses wrong.
+
 ---
 
 ## 14. Prior art worth reading

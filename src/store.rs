@@ -54,6 +54,13 @@ pub struct Track {
     pub channels: Option<u8>,
     /// Seconds since the epoch, for incremental rescan.
     pub mtime: i64,
+    /// File size in bytes.
+    ///
+    /// Not used for scanning — mtime decides that — but it is the strongest
+    /// signal available for recognising a *moved* file, whose bytes are
+    /// unchanged and whose path is not (#25).
+    #[serde(default)]
+    pub size: u64,
     pub replaygain: Option<ReplayGain>,
 }
 

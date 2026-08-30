@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::store::Store;
 
 /// Bump on any change to `Track`, `Store`, or this envelope.
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const MAGIC: &[u8; 5] = b"gmuse";
 
 #[derive(Serialize, Deserialize)]

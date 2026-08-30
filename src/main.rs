@@ -47,6 +47,11 @@ struct App {
     roots: Vec<PathBuf>,
     cache_path: Option<PathBuf>,
     catalogs: catalog::Catalogs,
+    /// Files recognised at a new path by the startup scan.
+    ///
+    /// Carried here because the scan runs before the history is loaded, and
+    /// the history is what most needs to know (#25).
+    moves: Vec<scan::Move>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -117,6 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         roots,
         cache_path,
         catalogs,
+        moves: Vec::new(),
     };
 
     if !app.roots.is_empty() {
@@ -128,6 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let report = scan::scan(&mut app.store, &roots);
         println!("library: {report}");
         report_errors(&report);
+        app.moves = report.moves.clone();
         save_cache(&app);
     } else if !app.store.is_empty() {
         println!("library: {} tracks (cached)", app.store.len());
@@ -272,6 +279,20 @@ fn run_tui(
         );
     }
     let mut history = crate::history::History::load(&history_path);
+
+    // Before `note_seen` below, which would otherwise create a fresh entry at
+    // the new path and make the carried one lose to it — leaving the ratings
+    // stranded under a path no file has.
+    let carried = app
+        .moves
+        .iter()
+        .filter(|m| history.rename(&m.from, &m.to))
+        .count();
+    if carried > 0 {
+        println!("history: carried {carried} across a move");
+        let _ = history.save(&history_path);
+    }
+
     let first_run = history.is_empty();
     let known = history.len();
     let now = crate::history::now();

@@ -274,6 +274,20 @@ It cannot default inside the library, because roots may be several and on differ
 Ratings are gmuse's, not the file's — §1 keeps tag editing out of scope — which is exactly why they need a home you
 choose rather than one they are stuck with.
 
+**Reorganising your library does not lose them.** A track is identified by its path, so a rename would ordinarily look
+like one deletion and one unrelated arrival — ratings orphaned, play count back to zero, and the file reappearing in
+`days_since_added<30` as if it were new. Instead the scan pairs departures with arrivals by size, duration and tags,
+carries the history across, and says so:
+
+```
+library: 311 tracks (3 added, 0 updated, 308 unchanged, 3 removed, 0 errors) in 0.11s
+  3 tracks moved, and their history moved with them
+history: carried 3 across a move
+```
+
+An **ambiguous** match is declined rather than guessed — two copies of one track, or two untagged files of the same
+length, keep their own history rather than risk attaching a rating to the wrong song.
+
 ## Smart playlists
 
 A saved rule that fills view 3. `:playlist <name>` loads one, `Tab` completes the names.

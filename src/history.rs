@@ -226,6 +226,29 @@ impl History {
     }
 
     /// Record a play.
+    /// Carry an entry to a track's new path (#25).
+    ///
+    /// Returns whether anything moved. The old key is **removed**, not left as
+    /// a copy: two entries for one track would double-count a play the moment
+    /// the file moved back, and the stale one would never be cleaned up.
+    ///
+    /// A destination that already has an entry wins — it was created by
+    /// `note_seen` for a file that really is there, and overwriting it with a
+    /// departed track's ratings would be a guess in the wrong direction.
+    pub fn rename(&mut self, from: &Path, to: &Path) -> bool {
+        let from = from.to_string_lossy().into_owned();
+        let to = to.to_string_lossy().into_owned();
+        if from == to || self.entries.contains_key(&to) {
+            return false;
+        }
+        let Some(entry) = self.entries.remove(&from) else {
+            return false;
+        };
+        self.entries.insert(to, entry);
+        self.dirty = true;
+        true
+    }
+
     pub fn note_played(&mut self, path: &Path, now: i64) {
         let e = self.entries.entry(key(path)).or_insert(Entry {
             added: now,
@@ -246,6 +269,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn rename_carries_an_entry_to_a_new_path() {
+        let mut h = History::default();
+        h.note_seen(Path::new("/m/old.mp3"), 100);
+        h.note_played(Path::new("/m/old.mp3"), 200);
+        h.note_rating(Path::new("/m/old.mp3"), 4, 200);
+
+        assert!(h.rename(Path::new("/m/old.mp3"), Path::new("/m/new.mp3")));
+        let e = h.get(Path::new("/m/new.mp3")).expect("carried");
+        assert_eq!((e.plays, e.rating, e.added), (1, Some(4), 100));
+        assert!(
+            h.get(Path::new("/m/old.mp3")).is_none(),
+            "the old key must go — two entries would double-count a play"
+        );
+    }
+
+    /// The destination was created by `note_seen` for a file that really is
+    /// there. Overwriting it with a departed track's ratings guesses in the
+    /// wrong direction.
+    #[test]
+    fn rename_will_not_overwrite_an_existing_entry() {
+        let mut h = History::default();
+        h.note_rating(Path::new("/m/old.mp3"), 1, 100);
+        h.note_rating(Path::new("/m/new.mp3"), 5, 100);
+
+        assert!(!h.rename(Path::new("/m/old.mp3"), Path::new("/m/new.mp3")));
+        assert_eq!(h.get(Path::new("/m/new.mp3")).unwrap().rating, Some(5));
+        assert_eq!(h.get(Path::new("/m/old.mp3")).unwrap().rating, Some(1));
+    }
+
+    #[test]
+    fn renaming_something_unknown_changes_nothing() {
+        let mut h = History::default();
+        h.note_rating(Path::new("/m/a.mp3"), 3, 100);
+        assert!(!h.rename(Path::new("/m/nope.mp3"), Path::new("/m/b.mp3")));
+        assert!(!h.rename(Path::new("/m/a.mp3"), Path::new("/m/a.mp3")));
+        assert_eq!(h.len(), 1);
     }
 
     #[test]
