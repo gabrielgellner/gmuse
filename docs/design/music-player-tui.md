@@ -2005,6 +2005,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   The scan **says** what it did. A reassociation the listener never sees is as bad as the silent loss it replaces, and
   worse if it ever guesses wrong.
 
+- **2026-08-30** **Ratings and plays are events, not state.** `history.toml` held the answer and rewrote the whole file
+  to change it — fine on one machine, lossy on two. Play a track on the laptop and rate one on the desktop, and
+  whichever file wins the sync takes everything the other machine did with it; the blast radius of a whole-file write is
+  the library, not the track.
+
+  Now the base is written once and never again, and each machine appends to `events-<machine>.log`. No two writers touch
+  one file, so a sync has nothing to resolve. Reading is `base + fold(all logs, in timestamp order)`. Plays are counted
+  so two machines' plays add up; a rating is the latest by timestamp, which where the conflict is genuine at least gives
+  both machines the _same_ answer, which two state files could not promise.
+
+  The machine id lives in `$XDG_STATE_HOME`, **not** `data_dir` — the latter is the directory being synced, so both
+  machines would read one id and collide precisely where it matters. It is generated rather than taken from the
+  environment: neither `HOSTNAME` nor `HOST` is exported to a child process on macOS or under zsh, so every machine
+  would have answered "local" and shared one log.
+
+  **Log decisions, not interactions.** A play and a rating are things the listener meant; a seek is not. That rule is
+  what keeps growth proportional to listening — measured, a year is ~4 MB folding in 4.6 ms and thirty years 62 ms, so
+  compaction is a tidiness question and not a performance one. `History::save` survives unused as the other half of a
+  compaction that is deliberately not built: truncating a log cannot be made safe without deciding what it means to a
+  machine that has not synced yet.
+
 ---
 
 ## 14. Prior art worth reading

@@ -261,6 +261,29 @@ Three directories, divided by **worth** rather than by kind:
 | `$XDG_STATE_HOME/gmuse` | session, audit log    | yes — it is where you were      |
 | `$XDG_CACHE_HOME/gmuse` | the scanned library   | yes — rescan                    |
 
+### Nothing is ever rewritten
+
+Ratings and plays are recorded as **events**, appended to a log, rather than as state in a file that gets rewritten:
+
+```
+<data_dir>/history.toml          the base, written once and never again
+<data_dir>/events-<machine>.log  this machine's appends
+<data_dir>/events-<other>.log    another machine's, arriving by sync
+```
+
+Reading is the base plus every log, folded in timestamp order. This matters the moment two machines share the directory.
+With a state file, playing a track on one and rating one on the other means whichever file wins the sync takes
+_everything_ the other machine did with it — the blast radius of a whole-file write is the library, not the track. With
+logs, each machine appends only to its own file, so a sync has nothing to resolve: plays add up, and a rating is the
+latest by timestamp, which at least gives both machines the _same_ answer.
+
+Each machine's id lives in `$XDG_STATE_HOME/gmuse/machine-id` — deliberately outside the synced directory, or both
+machines would read one id and collide exactly where it matters.
+
+The log records **decisions, not interactions**: a play and a rating are things you meant, a seek is not. That is what
+keeps its growth proportional to listening. A year is about 4 MB and folds in 5 ms; thirty years folds in 62 ms, so
+there is nothing to compact.
+
 `data_dir` defaults to `$XDG_DATA_HOME/gmuse` and is the one you want in a backup. It is a setting because that is a
 personal answer:
 

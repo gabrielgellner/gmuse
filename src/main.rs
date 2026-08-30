@@ -14,6 +14,7 @@ mod catalog;
 mod cli;
 mod cmd;
 mod config;
+mod events;
 mod filter;
 mod format;
 mod history;
@@ -278,26 +279,48 @@ fn run_tui(
             history_path.display()
         );
     }
-    let mut history = crate::history::History::load(&history_path);
+    // The base plus every log, this machine's and any that arrived by sync.
+    let machine = crate::events::machine_id(&config::default_state_dir());
+    let events_path = crate::events::log_path(&loaded.data_dir, &machine);
+    let (mut history, applied) = crate::events::folded(&history_path, &loaded.data_dir);
+    if applied > 0 {
+        println!("history: {applied} events");
+    }
+    let log = |event: crate::events::Kind| {
+        if let Err(e) = crate::events::append(
+            &events_path,
+            &crate::events::Event {
+                at: crate::history::now(),
+                kind: event,
+            },
+        ) {
+            eprintln!("history: {e}");
+        }
+    };
 
     // Before `note_seen` below, which would otherwise create a fresh entry at
     // the new path and make the carried one lose to it — leaving the ratings
     // stranded under a path no file has.
-    let carried = app
-        .moves
-        .iter()
-        .filter(|m| history.rename(&m.from, &m.to))
-        .count();
+    let mut carried = 0;
+    for m in &app.moves {
+        if history.rename(&m.from, &m.to) {
+            carried += 1;
+            // Recorded rather than re-inferred: another machine folding this
+            // log has no scan to work it out from.
+            log(crate::events::Kind::Moved(m.from.clone(), m.to.clone()));
+        }
+    }
     if carried > 0 {
         println!("history: carried {carried} across a move");
-        let _ = history.save(&history_path);
     }
 
     let first_run = history.is_empty();
     let known = history.len();
     let now = crate::history::now();
     for (_, track) in app.store.iter() {
-        history.note_seen(&track.path, now);
+        if history.note_seen(&track.path, now) {
+            log(crate::events::Kind::Seen(track.path.clone()));
+        }
     }
     let fresh = history.len() - known;
 
@@ -383,8 +406,7 @@ fn run_tui(
     {
         let total = history.len();
         state.history = history;
-        state.history_path = Some(history_path);
-        ui::save_history(&mut state);
+        state.events_path = Some(events_path);
         state.audit.line(
             "history",
             &if first_run {
@@ -437,7 +459,6 @@ fn run_tui(
     ratatui::restore();
     // Written after the terminal is restored, so a failure is visible.
     ui::save_session(&mut state, &ctx);
-    ui::save_history(&mut state);
     // Written after the terminal is restored, so the summary is visible.
     if state.audit.is_enabled() {
         let underruns = app.player.underruns();

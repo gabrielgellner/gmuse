@@ -288,9 +288,17 @@ pub struct Ui {
     pub audit: crate::audit::Audit,
     /// Where to write "where I was". `None` disables resumption entirely.
     pub session_path: Option<PathBuf>,
-    /// Play counts and first-seen dates. Empty and unsaved unless a path is set.
+    /// Play counts, ratings and first-seen dates — the folded state.
+    ///
+    /// Held in memory so the UI answers immediately; what makes it durable is
+    /// the event appended beside each change, not this.
     pub history: crate::history::History,
-    pub history_path: Option<PathBuf>,
+    /// Where to append events. `None` disables recording entirely.
+    ///
+    /// Nothing here ever rewrites `history.toml`: the base is immutable, and
+    /// that is what lets two machines share a directory without one's whole
+    /// file losing to the other's (#26).
+    pub events_path: Option<PathBuf>,
     /// The current track has already been counted, so a long listen does not
     /// count twice. Cleared whenever a different track becomes audible.
     counted_current: bool,
@@ -374,7 +382,7 @@ impl Ui {
             pending_next: None,
             session_path: None,
             history: crate::history::History::default(),
-            history_path: None,
+            events_path: None,
             counted_current: false,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
@@ -530,7 +538,7 @@ fn note_play_progress(ui: &mut Ui, ctx: &Context<'_>) {
 /// once-only guard is only reachable with a real audio device, which is to say
 /// untestable. An earlier version had exactly that hole.
 fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
-    if ui.counted_current || ui.history_path.is_none() {
+    if ui.counted_current || ui.events_path.is_none() {
         return;
     }
     let Some(id) = ui.playback.current else {
@@ -550,7 +558,7 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
         "played",
         &format!("{} (play {plays})", track.path.display()),
     );
-    save_history(ui);
+    record(ui, crate::events::Kind::Played(track.path.clone()));
     // A rule mentioning `play_count` or `last_played` now answers differently.
     refresh_smart(ui, ctx);
 }
@@ -580,8 +588,8 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
         return;
     }
 
-    if ui.history_path.is_none() {
-        ui.notify("ratings need a history file");
+    if ui.events_path.is_none() {
+        ui.notify("ratings need somewhere to record them");
         return;
     }
     // `note_rating` takes zero as "clear", which is the storage-level spelling
@@ -591,7 +599,10 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
         _ => 0,
     };
     ui.history.note_rating(&path, stars, crate::history::now());
-    save_history(ui);
+    record(
+        ui,
+        crate::events::Kind::Rated(path.clone(), (stars > 0).then_some(stars)),
+    );
 
     let said = match spec {
         RateSpec::Set(n) => format!("{n}/5"),
@@ -607,16 +618,21 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
 /// Write the history if anything changed. Failures are logged, never shown:
 /// the atomic write means the previous file survives, and a full disk should
 /// not interrupt listening.
-pub fn save_history(ui: &mut Ui) {
-    let Some(path) = ui.history_path.clone() else {
+/// Append one event, and treat the in-memory state as saved once it lands.
+///
+/// Written immediately rather than at exit: a rating is worth more than a play
+/// count, and losing one to a crash would be worse than the cost of an open.
+pub fn record(ui: &mut Ui, kind: crate::events::Kind) {
+    let Some(path) = ui.events_path.clone() else {
         return;
     };
-    if !ui.history.is_dirty() {
-        return;
-    }
-    match ui.history.save(&path) {
+    let event = crate::events::Event {
+        at: crate::history::now(),
+        kind,
+    };
+    match crate::events::append(&path, &event) {
         Ok(()) => ui.history.mark_saved(),
-        Err(e) => ui.audit.line("history", &format!("could not save: {e}")),
+        Err(e) => ui.audit.line("history", &format!("could not record: {e}")),
     }
 }
 
@@ -2929,7 +2945,7 @@ mod tests {
             crate::filter::Filter::parse("rating>=4").unwrap(),
             None,
         );
-        ui.history_path = Some(PathBuf::from("/dev/null"));
+        ui.events_path = Some(crate::events::log_path(&scratch("smart-playlists"), "test"));
         ui
     }
 
@@ -4638,10 +4654,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        let dir = std::env::temp_dir().join("gmuse-history-ui");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        ui.history_path = Some(dir.join("history.toml"));
+        ui.events_path = Some(crate::events::log_path(&scratch("history-ui"), "test"));
 
         let (id, track) = store.iter().next().unwrap();
         let (path, half) = (track.path.clone(), track.duration / 2);
@@ -4669,29 +4682,37 @@ mod tests {
         assert_eq!(ui.history.get(&path).unwrap().plays, 2);
     }
 
-    /// The history is written when it changes, and the file is real.
+    /// A change is durable because an event was appended, not because a file
+    /// was rewritten — and folding that log back must reproduce the state.
     #[test]
-    fn the_history_is_saved_when_dirty() {
+    fn a_change_is_appended_and_folds_back() {
         let store = fixture();
         let mut ui = ui_of(&store, true);
-        let dir = std::env::temp_dir().join("gmuse-history-save");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("history.toml");
-        ui.history_path = Some(path.clone());
+        let dir = scratch("history-append");
+        ui.events_path = Some(crate::events::log_path(&dir, "test"));
 
         ui.history.note_played(std::path::Path::new("/m/x.mp3"), 5);
         assert!(ui.history.is_dirty());
-        save_history(&mut ui);
-        assert!(!ui.history.is_dirty(), "saving should clear the flag");
-        assert!(path.exists());
+        record(&mut ui, crate::events::Kind::Played("/m/x.mp3".into()));
+        assert!(!ui.history.is_dirty(), "recording should clear the flag");
 
-        let back = crate::history::History::load(&path);
-        assert_eq!(back.get(std::path::Path::new("/m/x.mp3")).unwrap().plays, 1);
+        // The base is untouched — that is what lets two machines share a
+        // directory without one whole file losing to the other.
+        assert!(
+            !dir.join("history.toml").exists(),
+            "recording must not rewrite the base"
+        );
+
+        let (folded, applied) = crate::events::folded(&dir.join("history.toml"), &dir);
+        assert_eq!(applied, 1);
+        assert_eq!(
+            folded.get(std::path::Path::new("/m/x.mp3")).unwrap().plays,
+            1
+        );
     }
 
-    /// With no history path — the default until one is set — nothing is
-    /// recorded and nothing is written.
+    /// With nowhere to record — the default until a path is set — nothing is
+    /// counted and nothing is written.
     #[test]
     fn without_a_history_path_nothing_is_recorded() {
         let store = fixture();
@@ -4703,12 +4724,17 @@ mod tests {
         assert!(ui.history.is_empty());
     }
 
-    fn ui_with_history(store: &Store, name: &str) -> Ui {
-        let mut ui = ui_of(store, true);
-        let dir = std::env::temp_dir().join(format!("gmuse-rating-{name}"));
+    /// A clean directory of its own, so tests never see each other's events.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gmuse-ui-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        ui.history_path = Some(dir.join("history.toml"));
+        dir
+    }
+
+    fn ui_with_history(store: &Store, name: &str) -> Ui {
+        let mut ui = ui_of(store, true);
+        ui.events_path = Some(crate::events::log_path(&scratch(name), "test"));
         ui
     }
 
@@ -4773,18 +4799,54 @@ mod tests {
     fn a_rating_is_saved_immediately() {
         let store = fixture();
         let ctx = ctx_of(&store);
-        let mut ui = ui_with_history(&store, "saved");
-        let path = ui.history_path.clone().unwrap();
+        let mut ui = ui_with_history(&store, "rating-saved");
+        let dir = ui
+            .events_path
+            .clone()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let id = store.iter().next().unwrap().0;
         ui.playback.current = Some(id);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 4");
 
-        let back = crate::history::History::load(&path);
+        let (back, _) = crate::events::folded(&dir.join("history.toml"), &dir);
         assert_eq!(
             back.get(&store.get(id).unwrap().path).unwrap().rating,
             Some(4)
+        );
+    }
+
+    /// Clearing is an event too, and `none` must fold back to unrated rather
+    /// than to nought stars — §13 keeps those different questions.
+    #[test]
+    fn clearing_a_rating_folds_back_to_unrated() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "rating-cleared");
+        let dir = ui
+            .events_path
+            .clone()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let id = store.iter().next().unwrap().0;
+        ui.playback.current = Some(id);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 4");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate none");
+
+        let (back, _) = crate::events::folded(&dir.join("history.toml"), &dir);
+        assert_eq!(
+            back.get(&store.get(id).unwrap().path).unwrap().rating,
+            None,
+            "the later `rate none` did not win"
         );
     }
 

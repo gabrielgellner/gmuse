@@ -134,6 +134,7 @@ pub struct History {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum HistoryError {
     #[error("writing {path}: {source}")]
     Write {
@@ -162,6 +163,16 @@ impl History {
         }
     }
 
+    /// Write the base.
+    ///
+    /// Unused at runtime **on purpose**: since #26 the base is immutable and
+    /// every change is an appended event, which is what lets two machines
+    /// share a directory without one whole file losing to the other. This is
+    /// the other half of compaction — fold the logs, write a new base — which
+    /// the measurements say is not needed yet (30 years of listening folds in
+    /// 62 ms) and which cannot be done safely without deciding what a
+    /// truncated log means to a machine that has not synced yet.
+    #[allow(dead_code)]
     pub fn save(&self, path: &Path) -> Result<(), HistoryError> {
         let mut out = self.clone();
         out.version = VERSION;
@@ -184,6 +195,9 @@ impl History {
         self.entries.get(&key(path))
     }
 
+    /// Whether anything is not yet durable *anywhere* — neither in the base
+    /// nor in a log. Cleared by a successful append, not by a save.
+    #[allow(dead_code)]
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
@@ -204,14 +218,20 @@ impl History {
     ///
     /// This is where `added` comes from, so it must never overwrite: a track
     /// seen every launch would otherwise be permanently "added today".
-    pub fn note_seen(&mut self, path: &Path, now: i64) {
+    /// Returns whether this was the first sighting — that is, whether an
+    /// entry was created. The caller logs an event only when it was, so a
+    /// startup scan of an already-known library appends nothing.
+    pub fn note_seen(&mut self, path: &Path, now: i64) -> bool {
+        let mut created = false;
         self.entries.entry(key(path)).or_insert_with(|| {
+            created = true;
             self.dirty = true;
             Entry {
                 added: now,
                 ..Default::default()
             }
         });
+        created
     }
 
     /// Set or clear a rating. Zero clears, because "no stars" and "unrated"

@@ -401,6 +401,19 @@ pub fn parse_text(text: &str) -> Loaded {
     out
 }
 
+/// `$XDG_STATE_HOME/gmuse`, falling back to `~/.local/state`.
+///
+/// Where you were, not what you decided — the session, the audit log, and the
+/// machine id. Deliberately *not* synced, which is what makes the id per
+/// machine rather than shared.
+pub fn default_state_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("gmuse")
+}
+
 /// `$XDG_DATA_HOME/gmuse`, falling back to `~/.local/share`.
 ///
 /// Data rather than state, and the distinction is worth: state is where you
