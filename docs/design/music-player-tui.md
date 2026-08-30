@@ -1878,6 +1878,43 @@ Append here as decisions are made. Format: date, decision, rationale.
   Not added to the **format** language. Those fields render from a `&Track` alone, and giving them the same environment
   is a separate change — the shared vocabulary is for the file's own fields, and `any` was already filter-only.
 
+- **2026-08-30** **Ratings (issue #14): ours, not the file's.** `:rate 1`–`5`, `:rate none` to clear, a bare `:rate` to
+  report, and `rating` as a filter field. Stored in the history file beside plays and first-seen — the same store, as
+  the issue argued, rather than a second one.
+
+  **§1 holds: gmuse still writes no tags.** trollstov carves out exactly this exception and says why — a rating in the
+  file travels with the music — and audium writes metadata wholesale. Both were read before deciding. The trade taken
+  here is portability lost, and never being the program that rewrote someone's library gained. #14 records that the door
+  is not closed; reopening it would be an amendment to §1 with an entry of its own, not a quiet exception.
+
+  **Reading existing `POPM` tags was dropped after checking, not after arguing.** lofty exposes them and it would have
+  cost little — but **0 of 80 sampled files carry one**, so it would have been speculative work delivering nothing. The
+  star scale is also a genuine mess: lofty ships per-player constructors (`windows_media_player`, `musicbee`, `picard`)
+  because the same byte means different star counts, which is a second reason to keep our own value authoritative if the
+  two ever meet.
+
+  **A rating is 1 to 5, or absent — zero is not a value.** `!rating?` finds what has not been judged; reading unrated as
+  nought stars would make every untouched track look actively disliked, which is a different claim. `:rate none` clears;
+  **`:rate 0` is refused**, because it reads as setting a value and there is no such value.
+
+  That left one incoherence, spotted in review rather than by a test: **`rating=0` was a query that could never match**.
+  The `Option` is not the redundant part — it carries the distinction between _never judged_ and _judged and disliked_,
+  which collapsing to zero would lose. The mistake was letting `0` be _spelled_ as a rating value. So a comparison of
+  `rating` against zero is now a parse error naming the idiom: "`rating?` is rated, `!rating?` is not". Every such
+  comparison was either dead (`=0`, `<0`) or a long way of writing `rating?` (`>0`), and it is the first thing someone
+  reaching for "unrated" will type.
+
+  The same rule then had to hold in the command language, which review caught straight after: `:rate 0` was still
+  spelling a clear as a value. Zero now means nothing anywhere — **one rule stated once, rather than a filter rule and a
+  command rule that happen to agree.**
+
+  Deliberately narrow: `play_count=0` and `days_since_played=0` stay valid, because zero plays and played-today are real
+  answers. Mutations check both directions — accepting zero again, and widening the rejection to every history field.
+
+  `:rate` acts on **what is playing**, falling back to the cursor when nothing is — rating is something done to a song
+  being heard, and the fallback is what makes it work while browsing. Written immediately rather than at exit: a
+  judgement is worth more than a play count and losing one to a crash would be worse.
+
 ---
 
 ## 14. Prior art worth reading

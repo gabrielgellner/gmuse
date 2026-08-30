@@ -522,6 +522,53 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
     save_history(ui);
 }
 
+/// Rate the track being heard, or — with nothing playing — the one under the
+/// cursor. Rating is something you do to a song you are listening to, and
+/// falling back to the selection is what makes it work while browsing too.
+fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
+    use crate::cmd::RateSpec;
+
+    let Some(id) = ui.playback.current.or_else(|| ui.selected_track(ctx)) else {
+        ui.notify("nothing to rate");
+        return;
+    };
+    let Some(track) = ctx.store.get(id) else {
+        return;
+    };
+    let path = track.path.clone();
+    let title = format!("{} — {}", track.file_under(), track.display_title());
+
+    if spec == RateSpec::Report {
+        let current = match ui.history.get(&path).and_then(|e| e.rating) {
+            Some(n) => format!("{n}/5"),
+            None => "unrated".into(),
+        };
+        ui.notify(format!("{title}: {current}"));
+        return;
+    }
+
+    if ui.history_path.is_none() {
+        ui.notify("ratings need a history file");
+        return;
+    }
+    // `note_rating` takes zero as "clear", which is the storage-level spelling
+    // of `RateSpec::Clear`; the command language does not have a zero.
+    let stars = match spec {
+        RateSpec::Set(n) => n,
+        _ => 0,
+    };
+    ui.history.note_rating(&path, stars, crate::history::now());
+    save_history(ui);
+
+    let said = match spec {
+        RateSpec::Set(n) => format!("{n}/5"),
+        _ => "unrated".into(),
+    };
+    ui.audit
+        .line("rated", &format!("{said} {}", path.display()));
+    ui.notify(format!("{title}: {said}"));
+}
+
 /// Write the history if anything changed. Failures are logged, never shown:
 /// the atomic write means the previous file survives, and a full disk should
 /// not interrupt listening.
@@ -1427,6 +1474,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             };
             run_search(ui, ctx, &pattern, dir);
         }
+        Command::Rate(spec) => rate(ui, ctx, spec),
         Command::Filter(filter) => {
             let label = match &filter {
                 Some(f) => format!("filtered: {}", f.source),
@@ -4318,6 +4366,145 @@ mod tests {
         ui.playback.current = Some(id);
         record_play_if_earned(&mut ui, &ctx, Duration::from_secs(9999));
         assert!(ui.history.is_empty());
+    }
+
+    fn ui_with_history(store: &Store, name: &str) -> Ui {
+        let mut ui = ui_of(store, true);
+        let dir = std::env::temp_dir().join(format!("gmuse-rating-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ui.history_path = Some(dir.join("history.toml"));
+        ui
+    }
+
+    /// `:rate` acts on what is playing — you rate a song you are hearing.
+    #[test]
+    fn rating_applies_to_the_playing_track() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "playing");
+
+        let ids: Vec<TrackId> = store.iter().map(|(id, _)| id).collect();
+        let (playing, selected) = (ids[0], ids[1]);
+        ui.playback.current = Some(playing);
+        ui.view = View::Sorted;
+        ui.sorted = ui
+            .library
+            .sorted()
+            .iter()
+            .position(|id| *id == selected)
+            .unwrap();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 5");
+
+        let played_path = &store.get(playing).unwrap().path;
+        assert_eq!(ui.history.get(played_path).unwrap().rating, Some(5));
+        assert!(
+            ui.history
+                .get(&store.get(selected).unwrap().path)
+                .and_then(|e| e.rating)
+                .is_none(),
+            "it rated the selection instead of what was playing"
+        );
+    }
+
+    /// With nothing playing it falls back to the cursor, so browsing and
+    /// rating works too.
+    #[test]
+    fn rating_falls_back_to_the_selection() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "selection");
+        ui.playback.current = None;
+        ui.view = View::Sorted;
+        ui.sorted = 0;
+        let under_cursor = ui.library.sorted()[0];
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 3");
+        assert_eq!(
+            ui.history
+                .get(&store.get(under_cursor).unwrap().path)
+                .unwrap()
+                .rating,
+            Some(3)
+        );
+    }
+
+    /// A rating is written straight away — it is a judgement, and losing it to
+    /// a crash would be worse than losing a play count.
+    #[test]
+    fn a_rating_is_saved_immediately() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "saved");
+        let path = ui.history_path.clone().unwrap();
+        let id = store.iter().next().unwrap().0;
+        ui.playback.current = Some(id);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 4");
+
+        let back = crate::history::History::load(&path);
+        assert_eq!(
+            back.get(&store.get(id).unwrap().path).unwrap().rating,
+            Some(4)
+        );
+    }
+
+    /// `:rate none` clears, and `:rate 0` is refused rather than doing it
+    /// silently — one rule for zero across both languages.
+    #[test]
+    fn rate_none_clears_and_rate_zero_is_refused() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "clear");
+        let id = store.iter().next().unwrap().0;
+        let path = store.get(id).unwrap().path.clone();
+        ui.playback.current = Some(id);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 4");
+        assert_eq!(ui.history.get(&path).unwrap().rating, Some(4));
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 0");
+        assert_eq!(
+            ui.history.get(&path).unwrap().rating,
+            Some(4),
+            "`rate 0` should have been refused, not silently cleared"
+        );
+        assert!(ui.status.contains("rate none"), "{:?}", ui.status);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate none");
+        assert_eq!(ui.history.get(&path).unwrap().rating, None);
+    }
+
+    /// A bare `:rate` reports rather than changing anything.
+    #[test]
+    fn a_bare_rate_reports_the_current_rating() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "report");
+        let id = store.iter().next().unwrap().0;
+        ui.playback.current = Some(id);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate");
+        assert!(ui.status.contains("unrated"), "{:?}", ui.status);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 2");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate");
+        assert!(ui.status.contains("2/5"), "{:?}", ui.status);
+        assert_eq!(
+            ui.history.get(&store.get(id).unwrap().path).unwrap().rating,
+            Some(2),
+            "reporting changed the rating"
+        );
     }
 
     /// The arrows drive the menu too. Not the primary binding, but a menu

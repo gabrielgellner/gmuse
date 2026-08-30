@@ -245,6 +245,22 @@ impl SettingKey {
     ];
 }
 
+/// What `:rate` was asked to do.
+///
+/// Three states rather than an `Option<u8>`, because "report" and "clear" are
+/// different requests and nesting them reads as a puzzle. Zero is not one of
+/// them: a rating is 1 to 5 or absent, in the command language exactly as in
+/// the filter language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateSpec {
+    /// `:rate` — say what it is.
+    Report,
+    /// `:rate none` — unrate it.
+    Clear,
+    /// `:rate 4`.
+    Set(u8),
+}
+
 /// A setting's value, already typed. Which variant is valid depends on the key,
 /// and the parser is what enforces that.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -337,6 +353,7 @@ pub enum Command {
     ViewPrev,
     ViewLast,
     Catalog(crate::catalog::Spec),
+    Rate(RateSpec),
     /// Narrow the library to what matches. `None` clears it.
     ///
     /// Transient and anonymous, as against a catalog, which is the same idea

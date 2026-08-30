@@ -101,6 +101,9 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
 
     match *verb {
         "view" if words.len() == 1 => (1..=7).map(|n| n.to_string()).collect(),
+        "rate" if words.len() == 1 => std::iter::once("none".to_string())
+            .chain((1..=5).map(|n| n.to_string()))
+            .collect(),
 
         // Catalogs accept a list, so they keep completing.
         "catalog" | "cat" => {

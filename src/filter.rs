@@ -157,17 +157,23 @@ pub enum HistoryField {
     PlayCount,
     DaysSincePlayed,
     DaysSinceAdded,
+    Rating,
 }
 
 impl HistoryField {
-    pub const NAMES: &'static [&'static str] =
-        &["days_since_added", "days_since_played", "play_count"];
+    pub const NAMES: &'static [&'static str] = &[
+        "days_since_added",
+        "days_since_played",
+        "play_count",
+        "rating",
+    ];
 
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "play_count" => HistoryField::PlayCount,
             "days_since_played" => HistoryField::DaysSincePlayed,
             "days_since_added" => HistoryField::DaysSinceAdded,
+            "rating" => HistoryField::Rating,
             _ => return None,
         })
     }
@@ -266,6 +272,8 @@ pub enum FilterError {
     Trailing(String),
     #[error("`any?` is not a question — every track has some text")]
     PresentOnAny,
+    #[error("no track has zero stars — `rating?` is rated, `!rating?` is not")]
+    RatingZero,
 }
 
 fn field_names() -> Vec<&'static str> {
@@ -335,6 +343,10 @@ fn history_number(f: HistoryField, t: &Track, env: &Env) -> Option<i64> {
         HistoryField::PlayCount => i64::from(entry.map(|e| e.plays).unwrap_or(0)),
         HistoryField::DaysSincePlayed => days_since(entry?.last_played?, env.now),
         HistoryField::DaysSinceAdded => days_since(entry?.added, env.now),
+        // Unrated is *missing*, not zero — `!rating?` is how you find the
+        // tracks you have not judged, and calling them nought stars would
+        // make them look actively disliked.
+        HistoryField::Rating => i64::from(entry?.rating?),
     })
 }
 
@@ -661,6 +673,15 @@ impl Parser {
             _ => return Err(FilterError::ExpectedOperator(name)),
         };
 
+        // Ratings are 1 to 5 or absent, so nothing can be zero. Every
+        // comparison against it is therefore either dead (`rating=0`,
+        // `rating<0`) or a long way of writing `rating?` (`rating>0`) — and it
+        // is what someone reaching for "unrated" will type first, so say the
+        // idiom rather than returning nothing.
+        if selector == Selector::History(HistoryField::Rating) && value == Value::Number(0) {
+            return Err(FilterError::RatingZero);
+        }
+
         Ok(Expr::Cmp {
             selector,
             op,
@@ -947,6 +968,52 @@ mod tests {
         assert!(!expr("play_count>0"));
         assert!(!expr("days_since_added?"));
         assert!(expr("!days_since_added?"));
+    }
+
+    /// Unrated is missing, not zero — `!rating?` finds what you have not
+    /// judged, and calling those nought stars would make them look disliked.
+    #[test]
+    fn unrated_is_missing_not_zero() {
+        let t = track();
+        let now = 100 * DAY;
+        let mut h = History::default();
+        h.note_seen(&t.path, now);
+
+        assert!(!matches_env("rating?", &t, &h, now));
+        assert!(matches_env("!rating?", &t, &h, now));
+
+        h.note_rating(&t.path, 4, now);
+        assert!(matches_env("rating?", &t, &h, now));
+        assert!(matches_env("rating=4", &t, &h, now));
+        assert!(matches_env("rating>=4", &t, &h, now));
+        assert!(!matches_env("rating>4", &t, &h, now));
+        // The query this whole feature is for.
+        assert!(matches_env("rating>=4&play_count=0", &t, &h, now));
+    }
+
+    /// Ratings are 1 to 5 or absent — so zero is not a value, and asking
+    /// about it says the idiom instead of quietly matching nothing.
+    #[test]
+    fn zero_is_not_a_rating() {
+        for expr in ["rating=0", "rating>0", "rating<0", "rating!=0", "rating>=0"] {
+            assert_eq!(
+                Expr::parse(expr),
+                Err(FilterError::RatingZero),
+                "{expr} should have been rejected"
+            );
+        }
+        // The message points at what to write instead.
+        let msg = Expr::parse("rating=0").unwrap_err().to_string();
+        assert!(msg.contains("!rating?"), "{msg}");
+
+        // Real ratings are untouched, and so are other fields' zeros.
+        assert!(Expr::parse("rating=1").is_ok());
+        assert!(Expr::parse("rating>=4").is_ok());
+        assert!(
+            Expr::parse("play_count=0").is_ok(),
+            "0 plays is a real answer"
+        );
+        assert!(Expr::parse("days_since_played=0").is_ok(), "played today");
     }
 
     #[test]

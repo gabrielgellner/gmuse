@@ -140,6 +140,10 @@ too, because §5 builds its pool from the library.
 :filter filename="*.opus"
 :filter !genre?               # tracks with no genre at all
 :filter genre?&!year?         # tagged with a genre but no year
+:filter play_count=0          # never played
+:filter days_since_played<7   # heard this week
+:filter rating>=4             # the good ones
+:filter !rating?              # not judged yet
 ```
 
 `&` `|` `!` and parentheses; `=` `!=` for text, `=` `!=` `<` `<=` `>` `>=` for numbers. A trailing `?` asks whether the
@@ -151,10 +155,18 @@ Fields are the same names the format language uses:
 `artist albumartist file_under album title display_title genre path filename any` for text,
 `track disc year duration bitrate samplerate channels` for numbers.
 
-Three more come from the play history rather than the tags: `play_count`, `days_since_played` and `days_since_added`.
-Dates are exposed as _days since_ rather than as timestamps, so a query reads as English and the language needs no date
-literals. A track never played has no `days_since_played` at all — `!days_since_played?` finds exactly those — while
-`play_count` is `0` for them, because "never" is an answer.
+Four more come from the play history rather than the tags: `play_count`, `days_since_played`, `days_since_added` and
+`rating`. Dates are exposed as _days since_ rather than as timestamps, so a query reads as English and the language
+needs no date literals. A track never played has no `days_since_played` at all — `!days_since_played?` finds exactly
+those — while `play_count` is `0` for them, because "never" is an answer. Unrated is likewise _missing_ rather than
+nought stars — `!rating?` finds what you have not judged.
+
+A rating is **1 to 5, or absent** — nothing carries zero stars, so both `:rate 0` and `rating=0` are refused, each with
+a message naming what to write instead. That keeps _unrated_ and _rated badly_ as different questions.
+
+`:rate 1`–`:rate 5` rates what is playing, or the track under the cursor when nothing is. `:rate none` clears it and a
+bare `:rate` reports. **Ratings are gmuse's, not the file's**: §1 keeps tag editing out of scope, so they live in
+`$XDG_STATE_HOME/gmuse/history.toml` and do not travel with the files.
 
 Typing while the completion menu is open **narrows** it; `Backspace` widens it again, and a line matching nothing leaves
 the menu up saying `no matches` rather than vanishing. `C-n`/`C-p` or the arrows walk it, `C-y` accepts, `Esc` closes

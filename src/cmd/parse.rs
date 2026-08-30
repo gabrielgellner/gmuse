@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use super::keys;
 use super::{
-    AaaMode, AddTarget, Command, Context, PaneTarget, Quality, SearchDir, SeekSpec, SettingKey,
-    SettingValue, ViewId, VolSpec,
+    AaaMode, AddTarget, Command, Context, PaneTarget, Quality, RateSpec, SearchDir, SeekSpec,
+    SettingKey, SettingValue, ViewId, VolSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -60,6 +60,7 @@ pub const VERBS: &[&str] = &[
     "prev",
     "q",
     "quit",
+    "rate",
     "remove",
     "rescan",
     "rsearch",
@@ -222,6 +223,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         },
         "search-next" => Command::SearchNext,
         "search-prev" => Command::SearchPrev,
+        "rate" => Command::Rate(rate_spec(rest)?),
         "catalog" => Command::Catalog(catalog_spec(rest)?),
         "filter" => Command::Filter(if rest.is_empty() {
             None
@@ -345,6 +347,33 @@ fn clock(s: &str) -> Option<f64> {
     Some(total)
 }
 
+/// `4`, `none`, or nothing at all.
+///
+/// A helper rather than a nested match inside `command`, like every other verb
+/// that takes an argument — the test that keeps `VERBS` in step with the
+/// parser reads that function's arms, and a nested match reads to it as more
+/// verbs.
+fn rate_spec(rest: &str) -> Result<RateSpec, ParseError> {
+    Ok(match rest {
+        "" => RateSpec::Report,
+        "none" => RateSpec::Clear,
+        // Zero is not a rating here either: `:rate 0` reads as setting a
+        // value, and there is no such value. Same rule as `rating=0`.
+        "0" => {
+            return Err(ParseError::Bad(
+                rest.into(),
+                "rating — `rate none` clears it",
+            ));
+        }
+        n => RateSpec::Set(
+            n.parse::<u8>()
+                .ok()
+                .filter(|n| (1..=5).contains(n))
+                .ok_or_else(|| ParseError::Bad(rest.into(), "rating, 1 to 5, or `none`"))?,
+        ),
+    })
+}
+
 /// `50`, `50%`, `+10`, `-5%`. Percentages, because that is what a volume is.
 fn vol_spec(rest: &str) -> Result<VolSpec, ParseError> {
     if rest.is_empty() {
@@ -459,6 +488,9 @@ pub fn format(cmd: &Command) -> String {
         Command::ViewNext => "view-next".into(),
         Command::ViewPrev => "view-prev".into(),
         Command::ViewLast => "view-last".into(),
+        Command::Rate(RateSpec::Report) => "rate".into(),
+        Command::Rate(RateSpec::Clear) => "rate none".into(),
+        Command::Rate(RateSpec::Set(n)) => format!("rate {n}"),
         Command::Filter(None) => "filter".into(),
         Command::Filter(Some(f)) => format!("filter {}", f.source),
         Command::Catalog(spec) => match spec {
@@ -563,6 +595,27 @@ mod tests {
             );
         }
         assert!(command("set replaygain=loud").is_err());
+    }
+
+    /// A rating is 1 to 5 or `none` — the command language has no zero, just
+    /// as the filter language has none.
+    #[test]
+    fn rate_takes_one_to_five_or_none() {
+        assert_eq!(command("rate").unwrap(), Command::Rate(RateSpec::Report));
+        assert_eq!(
+            command("rate none").unwrap(),
+            Command::Rate(RateSpec::Clear)
+        );
+        assert_eq!(command("rate 1").unwrap(), Command::Rate(RateSpec::Set(1)));
+        assert_eq!(command("rate 5").unwrap(), Command::Rate(RateSpec::Set(5)));
+
+        // Zero is refused, and the message says what to write instead.
+        let e = command("rate 0").unwrap_err().to_string();
+        assert!(e.contains("rate none"), "{e}");
+
+        assert!(command("rate 6").is_err());
+        assert!(command("rate -1").is_err());
+        assert!(command("rate lots").is_err());
     }
 
     #[test]
@@ -797,6 +850,7 @@ mod tests {
                 "view" => "view 1".to_string(),
                 "catalog" => format!("{verb} all"),
                 "filter" => "filter year>2000".to_string(),
+                "rate" => "rate 4".to_string(),
                 "in" => "in tree down".to_string(),
                 "search" | "rsearch" => format!("{verb} text"),
                 other => other.to_string(),

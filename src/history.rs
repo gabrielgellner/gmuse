@@ -59,6 +59,16 @@ pub struct Entry {
     pub plays: u32,
     #[serde(default)]
     pub last_played: Option<i64>,
+    /// Stars, 1 to 5. `None` is unrated, which is distinct from a low rating
+    /// and is what `!rating?` finds.
+    ///
+    /// **Ours, not the file's.** §1 keeps tag editing out of scope, so a
+    /// rating lives here rather than in a `POPM` frame. That costs
+    /// portability — trollstov carves out exactly this exception for exactly
+    /// that reason — and buys never being the program that rewrote someone's
+    /// library. See issue #14 if that trade is ever revisited.
+    #[serde(default)]
+    pub rating: Option<u8>,
     /// When gmuse first saw the file.
     ///
     /// Not the file's mtime, which moves for reasons that have nothing to do
@@ -159,6 +169,17 @@ impl History {
         });
     }
 
+    /// Set or clear a rating. Zero clears, because "no stars" and "unrated"
+    /// are the same thing to anyone typing it.
+    pub fn note_rating(&mut self, path: &Path, stars: u8, now: i64) {
+        let e = self.entries.entry(key(path)).or_insert(Entry {
+            added: now,
+            ..Default::default()
+        });
+        e.rating = (stars > 0).then_some(stars.min(5));
+        self.dirty = true;
+    }
+
     /// Record a play.
     pub fn note_played(&mut self, path: &Path, now: i64) {
         let e = self.entries.entry(key(path)).or_insert(Entry {
@@ -233,18 +254,53 @@ mod tests {
         assert_eq!(h.get(p).unwrap().plays, 1);
     }
 
+    /// Zero clears, because "no stars" and "unrated" are the same thing to
+    /// anyone typing it — and unrated has to stay distinct from rated-low.
+    #[test]
+    fn a_rating_of_zero_clears_it() {
+        let mut h = History::default();
+        let p = Path::new("/m/a.mp3");
+        h.note_rating(p, 4, 1);
+        assert_eq!(h.get(p).unwrap().rating, Some(4));
+        h.note_rating(p, 1, 2);
+        assert_eq!(h.get(p).unwrap().rating, Some(1), "one star is not none");
+        h.note_rating(p, 0, 3);
+        assert_eq!(h.get(p).unwrap().rating, None);
+    }
+
+    /// Rating a track that has never been played must not lose its history,
+    /// and rating must not disturb the first-seen date.
+    #[test]
+    fn rating_leaves_the_rest_of_an_entry_alone() {
+        let mut h = History::default();
+        let p = Path::new("/m/a.mp3");
+        h.note_seen(p, 100);
+        h.note_played(p, 200);
+        h.note_rating(p, 5, 300);
+        let e = h.get(p).unwrap();
+        assert_eq!(
+            (e.added, e.plays, e.last_played, e.rating),
+            (100, 1, Some(200), Some(5))
+        );
+    }
+
     #[test]
     fn a_round_trip_keeps_everything() {
         let path = tmpdir("roundtrip").join("history.toml");
         let mut h = History::default();
         h.note_seen(Path::new("/m/a.mp3"), 10);
         h.note_played(Path::new("/m/b with spaces.mp3"), 20);
+        h.note_rating(Path::new("/m/b with spaces.mp3"), 4, 20);
         h.note_played(Path::new("/m/Löffler — “quoted”.mp3"), 30);
         h.save(&path).unwrap();
 
         let back = History::load(&path);
         assert_eq!(back.len(), 3);
         assert_eq!(back.get(Path::new("/m/a.mp3")).unwrap().added, 10);
+        assert_eq!(
+            back.get(Path::new("/m/b with spaces.mp3")).unwrap().rating,
+            Some(4)
+        );
         assert_eq!(
             back.get(Path::new("/m/Löffler — “quoted”.mp3"))
                 .unwrap()
