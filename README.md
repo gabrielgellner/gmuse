@@ -138,11 +138,14 @@ too, because §5 builds its pool from the library.
 :filter year>=1990&year<2000&(genre="folk"|genre="country")
 :filter any="*live*"          # any = every text field
 :filter filename="*.opus"
+:filter !genre?               # tracks with no genre at all
+:filter genre?&!year?         # tagged with a genre but no year
 ```
 
-`&` `|` `!` and parentheses; `=` `!=` for text, `=` `!=` `<` `<=` `>` `>=` for numbers. Strings match by **glob**, where
-`*` is the only metacharacter — `"Ferrell"` is exact, `"*Ferrell*"` contains, `"Ferrell*"` starts. `?` is a literal
-question mark, and matching is **smart-case**: insensitive unless your pattern contains a capital.
+`&` `|` `!` and parentheses; `=` `!=` for text, `=` `!=` `<` `<=` `>` `>=` for numbers. A trailing `?` asks whether the
+field is there at all — `genre?` has one, `!genre?` has none — and an empty tag counts as missing. Strings match by
+**glob**, where `*` is the only metacharacter — `"Ferrell"` is exact, `"*Ferrell*"` contains, `"Ferrell*"` starts. `?`
+is a literal question mark, and matching is **smart-case**: insensitive unless your pattern contains a capital.
 
 Fields are the same names the format language uses:
 `artist albumartist file_under album title display_title genre path filename any` for text,

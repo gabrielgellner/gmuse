@@ -188,6 +188,13 @@ pub enum Expr {
         op: Op,
         value: Value,
     },
+    /// `genre?` — the track has a value for this field at all.
+    ///
+    /// Expressible without it (`genre="*"` for text, `year>=0` for numbers)
+    /// because a missing tag matches nothing, but only if you work that out,
+    /// and text and numbers needed different spellings. foobar2000 spells it
+    /// `MISSING`/`PRESENT`; this is the same idea in this language's register.
+    Present(Selector),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -214,6 +221,8 @@ pub enum FilterError {
     Empty,
     #[error("unexpected {0:?} at the end")]
     Trailing(String),
+    #[error("`any?` is not a question — every track has some text")]
+    PresentOnAny,
 }
 
 fn field_names() -> Vec<&'static str> {
@@ -246,6 +255,8 @@ impl Expr {
             Expr::And(a, b) => a.eval(t) && b.eval(t),
             Expr::Or(a, b) => a.eval(t) || b.eval(t),
             Expr::Not(e) => !e.eval(t),
+            Expr::Present(Selector::Field(f)) => present(*f, t),
+            Expr::Present(Selector::Any) => true,
             Expr::Cmp {
                 selector,
                 op,
@@ -302,6 +313,18 @@ fn compare(selector: Selector, op: Op, value: &Value, t: &Track) -> bool {
         },
         // `any` against a number is rejected by the parser.
         (Selector::Any, Value::Number(_)) => false,
+    }
+}
+
+/// Whether the track has this field at all.
+///
+/// An empty tag counts as missing: a `GENRE=""` frame is a tagging artefact,
+/// not an answer, and treating it as present would make `!genre?` miss exactly
+/// the files worth finding.
+fn present(f: Field, t: &Track) -> bool {
+    match f.kind() {
+        Kind::Text => text_of(f, t).is_some_and(|v| !v.trim().is_empty()),
+        Kind::Number => number_of(f, t).is_some(),
     }
 }
 
@@ -494,7 +517,15 @@ impl Parser {
         }
     }
 
-    fn comparison(&mut self, name: String) -> Result<Expr, FilterError> {
+    fn comparison(&mut self, mut name: String) -> Result<Expr, FilterError> {
+        // A trailing `?` asks whether the field is there at all. Checked on
+        // the *field* word only, so an unquoted value that ends in a question
+        // mark — `title=You?` — is untouched.
+        let presence = name.ends_with('?');
+        if presence {
+            name.pop();
+        }
+
         let selector = if name == "any" {
             Selector::Any
         } else {
@@ -502,6 +533,13 @@ impl Parser {
                 Field::parse(&name).ok_or(FilterError::UnknownField { name: name.clone() })?,
             )
         };
+
+        if presence {
+            return match selector {
+                Selector::Any => Err(FilterError::PresentOnAny),
+                s => Ok(Expr::Present(s)),
+            };
+        }
 
         let op = match self.next() {
             Some(Token::Op(op)) => op,
@@ -717,6 +755,52 @@ mod tests {
         assert!(matches(r#"!genre="folk""#, &t), "negation still works");
     }
 
+    /// `field?` asks whether the track has the field at all — the one thing
+    /// foobar2000 could say and this language could only imply.
+    #[test]
+    fn presence_and_absence() {
+        let full = track();
+        let mut bare = track();
+        bare.genre = None;
+        bare.date = None;
+
+        assert!(matches("genre?", &full));
+        assert!(!matches("genre?", &bare));
+        assert!(matches("!genre?", &bare));
+        assert!(!matches("!genre?", &full));
+
+        // Numbers too, with the same spelling — the asymmetry this fixes was
+        // needing `genre="*"` for text and `year>=0` for numbers.
+        assert!(matches("year?", &full));
+        assert!(!matches("year?", &bare));
+        assert!(matches("!year?", &bare));
+
+        // Composes like any other predicate.
+        assert!(matches("genre?&year>2020", &full));
+        assert!(matches(r#"!genre?|artist="*ferrell*""#, &bare));
+    }
+
+    /// An empty tag is a tagging artefact, not an answer. Counting it as
+    /// present would make `!genre?` miss the files worth finding.
+    #[test]
+    fn an_empty_tag_counts_as_missing() {
+        let mut t = track();
+        t.genre = Some(String::new());
+        assert!(!matches("genre?", &t));
+        t.genre = Some("   ".into());
+        assert!(!matches("genre?", &t), "whitespace is not a genre either");
+    }
+
+    /// A `?` in a value is a question mark, not a presence test. The check is
+    /// on the field word only, which is what keeps `title=You?` working.
+    #[test]
+    fn a_question_mark_in_a_value_is_still_literal() {
+        let mut t = track();
+        t.title = Some("Have You Got It In You?".into());
+        assert!(matches(r#"title="*In You?""#, &t));
+        assert!(matches("title=*You?", &t), "unquoted, too");
+    }
+
     #[test]
     fn errors_say_what_is_wrong() {
         assert_eq!(
@@ -747,6 +831,13 @@ mod tests {
         assert_eq!(Expr::parse(""), Err(FilterError::Empty));
         // A bare word is an error, not an implicit any-field search.
         assert!(Expr::parse("ferrell").is_err());
+        assert_eq!(Expr::parse("any?"), Err(FilterError::PresentOnAny));
+        assert_eq!(
+            Expr::parse("nosuch?"),
+            Err(FilterError::UnknownField {
+                name: "nosuch".into()
+            })
+        );
         // The unknown-field message lists the alternatives.
         let msg = Expr::parse("artistt=x").unwrap_err().to_string();
         assert!(msg.contains("artistt") && msg.contains("artist"), "{msg}");

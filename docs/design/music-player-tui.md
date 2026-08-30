@@ -372,6 +372,9 @@ question mark in a title is real. `\*` is a literal asterisk.
 **Smart-case**: insensitive unless the pattern contains a capital, as in vim and ripgrep. `genre="jazz"` finds "Jazz";
 `artist="Burial"` is precise.
 
+A trailing `?` on a field asks whether the track has it at all: `genre?` has one, `!genre?` has none. An empty or
+whitespace tag counts as missing.
+
 **No regex**, and not by omission — see the Decision Log. It can arrive later as a separate opt-in operator (`=~`) if
 globs prove insufficient, so the hazardous behaviour would be something asked for rather than the default.
 
@@ -1717,6 +1720,39 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   Unquoted values are accepted where unambiguous (`genre=folk`, `year>2020`) — not an implicit rule, because the _field_
   determines the type, so there is nothing to guess.
+
+- **2026-08-30** **`field?` for presence, after measuring this language against foobar2000 and iTunes.** The comparison
+  was worth doing, and mostly reassuring:
+
+  |                        | foobar2000                           | iTunes                    | gmuse                         |
+  | ---------------------- | ------------------------------------ | ------------------------- | ----------------------------- |
+  | booleans and grouping  | `AND OR NOT ()`                      | match all/any, nested     | parity                        |
+  | substring              | `HAS` (word set)                     | _contains_                | `"*x*"`                       |
+  | prefix / suffix        | —                                    | _begins/ends with_        | **ahead of foobar**           |
+  | case                   | always insensitive                   | always insensitive        | **smart-case, ahead of both** |
+  | present / missing      | `PRESENT` / `MISSING`                | —                         | **was the gap**               |
+  | dates, play statistics | `SINCE`, `DURING LAST n DAYS`        | _in the last n days_      | absent                        |
+  | sort / limit           | `SORT BY`                            | _limit to N, selected by_ | absent                        |
+  | field vs field         | `%last_played% AFTER %first_played%` | —                         | absent                        |
+
+  **Three of the four absences are not language problems.** Dates and play statistics are a _data_ gap — the grammar
+  would express them today if #13 and #14 existed. Sort and limit belong to smart playlists, not filters: a filter
+  answers "which tracks", a smart playlist answers "which tracks, in what order, how many", and folding `SORT BY` into
+  `:filter` would blur a line drawn on purpose. Field-to-field comparison is genuinely missing and genuinely rare.
+
+  Presence was the real one — and checking rather than assuming showed it was already _expressible_: `genre="*"` works
+  because a missing tag matches nothing, and `year>=0` is the numeric equivalent. But nobody would derive that, and
+  **text and numbers needed different spellings**, which is the actual defect. `field?` gives one form for both.
+
+  An empty tag counts as missing. A `GENRE=""` frame is a tagging artefact rather than an answer, and treating it as
+  present would make `!genre?` miss exactly the files worth finding.
+
+  The `?` is detected on the **field word only**, so `title=You?` still compares against a literal question mark — the
+  design alternative, lexing `?` as its own token, is rejected by four tests.
+
+  Not taken from foobar: **`HAS` word-set matching**, where `artist HAS sierra ferrell` matches "Ferrell, Sierra"
+  regardless of order. Expressible here as `artist="*sierra*"&artist="*ferrell*"`, which is wordier but composes with
+  everything else rather than being a special operator.
 
 ---
 
