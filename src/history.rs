@@ -1,10 +1,15 @@
 //! Per-track history: how often a track has been played, when, and when it
 //! first appeared (issue #13).
 //!
-//! **Durable, not derived.** It cannot be rebuilt by rescanning, so it lives in
-//! `$XDG_STATE_HOME` beside the session and the audit log rather than in the
-//! cache — the Decision Log records what happened the one time durable data
-//! shared a lifetime with derived data. Written temp-then-rename.
+//! **Durable, not derived.** It cannot be rebuilt by rescanning, so it lives
+//! under `data_dir` rather than in the cache — the Decision Log records what
+//! happened the one time durable data shared a lifetime with derived data.
+//! Written temp-then-rename.
+//!
+//! Under `data_dir` rather than `$XDG_STATE_HOME`, where it started, because
+//! ratings and play counts are the one thing here worth backing up and the
+//! state directory is exactly what a backup tool skips. The session and the
+//! audit log stay behind: losing where you were is not a loss.
 //!
 //! **Keyed by path, not `TrackId`.** An arena index is meaningful only while
 //! the cache that produced it survives; a discarded cache reassigns every one,
@@ -21,13 +26,53 @@ const VERSION: u32 = 1;
 /// Four minutes, or half the track — last.fm's rule, and the usual one.
 const LONG_ENOUGH: Duration = Duration::from_secs(240);
 
-/// `$XDG_STATE_HOME/gmuse/history.toml`.
-pub fn default_path() -> PathBuf {
+/// `<data_dir>/history.toml`.
+pub fn path_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("history.toml")
+}
+
+/// Where the history lived before it moved to `data_dir`.
+///
+/// Kept so [`migrate`] can find it. Not a fallback read: a version that
+/// silently started from an empty history would look exactly like the ratings
+/// being gone, which is the failure this whole move is meant to prevent.
+fn legacy_path() -> PathBuf {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("gmuse").join("history.toml")
+}
+
+/// Move a pre-`data_dir` history into place, if there is one and nothing is
+/// there yet. Returns where it came from, so the caller can say so.
+///
+/// Moved rather than copied, so there is one file and no question later about
+/// which is current. A failed rename falls back to copy-then-remove, because
+/// `data_dir` may well be on another disk — pointing it at a NAS is the whole
+/// reason the setting exists.
+pub fn migrate(to: &Path) -> Option<PathBuf> {
+    migrate_from(&legacy_path(), to)
+}
+
+/// The half of [`migrate`] that does not read the environment.
+///
+/// Split out so it is testable: mutating `XDG_STATE_HOME` to exercise the real
+/// entry point would race every other test in the process.
+fn migrate_from(from: &Path, to: &Path) -> Option<PathBuf> {
+    if to.exists() || !from.exists() || from == to {
+        return None;
+    }
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir).ok()?;
+    }
+    if std::fs::rename(from, to).is_err() {
+        std::fs::copy(from, to).ok()?;
+        // A copy that cannot be cleaned up is still a successful migration;
+        // the stale original is harmless because nothing reads it.
+        let _ = std::fs::remove_file(from);
+    }
+    Some(from.to_path_buf())
 }
 
 /// Seconds since the epoch. Passed in rather than read, so the callers that
@@ -201,6 +246,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn the_path_sits_under_the_data_dir() {
+        assert_eq!(
+            path_in(Path::new("/data/gmuse")),
+            PathBuf::from("/data/gmuse/history.toml")
+        );
+    }
+
+    /// The upgrade case, and the one that matters: real ratings exist in the
+    /// old place and must arrive in the new one.
+    #[test]
+    fn migration_moves_a_legacy_history_and_reports_where_from() {
+        let d = tmpdir("migrate");
+        let legacy = d.join("state").join("history.toml");
+        let mut h = History::default();
+        h.note_seen(Path::new("/m/a.mp3"), 100);
+        h.note_rating(Path::new("/m/a.mp3"), 5, 200);
+        h.save(&legacy).unwrap();
+
+        let target = path_in(&d.join("data"));
+        assert_eq!(migrate_from(&legacy, &target), Some(legacy.clone()));
+        assert!(!legacy.exists(), "the original must not be left behind");
+        assert_eq!(
+            History::load(&target)
+                .get(Path::new("/m/a.mp3"))
+                .unwrap()
+                .rating,
+            Some(5)
+        );
+
+        // A second run finds nothing to do rather than clobbering.
+        assert_eq!(migrate_from(&legacy, &target), None);
+    }
+
+    /// An existing history in the new place wins. Migrating over it would
+    /// discard whatever has been rated since the upgrade.
+    #[test]
+    fn migration_never_overwrites_an_existing_history() {
+        let d = tmpdir("migrate-existing");
+        let legacy = d.join("state").join("history.toml");
+        let mut old = History::default();
+        old.note_rating(Path::new("/m/a.mp3"), 1, 100);
+        old.save(&legacy).unwrap();
+
+        let target = path_in(&d.join("data"));
+        let mut current = History::default();
+        current.note_rating(Path::new("/m/a.mp3"), 5, 300);
+        current.save(&target).unwrap();
+
+        assert_eq!(migrate_from(&legacy, &target), None);
+        assert_eq!(
+            History::load(&target)
+                .get(Path::new("/m/a.mp3"))
+                .unwrap()
+                .rating,
+            Some(5),
+            "the newer history was overwritten by the legacy one"
+        );
+        assert!(
+            legacy.exists(),
+            "nothing was migrated, so nothing was moved"
+        );
+    }
+
+    #[test]
+    fn migration_does_nothing_without_a_legacy_file() {
+        let d = tmpdir("migrate-none");
+        let target = path_in(&d.join("data"));
+        assert_eq!(migrate_from(&d.join("nope.toml"), &target), None);
+        assert!(!target.exists());
     }
 
     /// Half the track or four minutes, whichever comes first — so a skip does

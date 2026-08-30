@@ -251,6 +251,29 @@ Unknown tables, settings and styles are **errors**, reported with where they are
 the file still loads. See [`examples/config.toml`](examples/config.toml) for every option, and view 7 in the app for
 every setting and binding currently in force.
 
+## Where your data lives
+
+Three directories, divided by **worth** rather than by kind:
+
+|                         | holds                 | recoverable?                    |
+| ----------------------- | --------------------- | ------------------------------- |
+| `data_dir`              | ratings, play history | **no** — it is what you decided |
+| `$XDG_STATE_HOME/gmuse` | session, audit log    | yes — it is where you were      |
+| `$XDG_CACHE_HOME/gmuse` | the scanned library   | yes — rescan                    |
+
+`data_dir` defaults to `$XDG_DATA_HOME/gmuse` and is the one you want in a backup. It is a setting because that is a
+personal answer:
+
+```toml
+data_dir = "~/MusicLibrary/.gmuse"   # ratings travel with the music
+```
+
+It cannot default inside the library, because roots may be several and on different disks. A history left in the old
+`$XDG_STATE_HOME` location is **moved** on first run, and gmuse says so.
+
+Ratings are gmuse's, not the file's — §1 keeps tag editing out of scope — which is exactly why they need a home you
+choose rather than one they are stuck with.
+
 ## Smart playlists
 
 A saved rule that fills view 3. `:playlist <name>` loads one, `Tab` completes the names.

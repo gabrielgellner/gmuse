@@ -1972,6 +1972,20 @@ Append here as decisions are made. Format: date, decision, rationale.
   guess in either language now costs one message naming the other spelling. This is the first place the shared
   vocabulary has been deliberately broken, and the reason is that the failure it prevents is **silent**.
 
+- **2026-08-30** **Durable data is split by worth, not by kind, and the precious half is a setting.** `history.toml`
+  moves from `$XDG_STATE_HOME` to `data_dir`, defaulting to `$XDG_DATA_HOME/gmuse`; `session.toml` and the audit log
+  stay behind. The line is whether the thing can be recovered by using the program again — where you were can, what you
+  decided cannot. Ratings were sitting in the directory a backup tool skips, and §1 keeping tag editing out of scope is
+  precisely why they have nowhere else to be.
+
+  A setting rather than a fixed path because pointing it inside the library makes ratings travel with the music, and
+  that is a personal answer. It cannot _default_ there: gmuse has no concept of "the library folder" — roots may be
+  several and on different disks, and a playlist crosses them by design.
+
+  A legacy history is **moved**, not copied, and the move is reported. Falling back to a read of the old location would
+  have been easier and wrong: a version that silently started from an empty history looks exactly like the ratings being
+  gone.
+
 ---
 
 ## 14. Prior art worth reading

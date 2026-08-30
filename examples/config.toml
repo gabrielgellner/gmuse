@@ -45,6 +45,18 @@ resample_quality = "balanced" # fast | balanced | high
 #
 # active_catalogs = ["general"]   # omit, or ["all"], for everything
 
+# Where everything *you* have decided about your music lives: ratings, play
+# history, and playlists. This is the half worth backing up, so it is a setting
+# — point it inside your library and it travels with the music.
+#
+# Default: $XDG_DATA_HOME/gmuse (i.e. ~/.local/share/gmuse). It cannot default
+# inside the library, because roots may be several and on different disks.
+#
+# The session and the audit log stay in $XDG_STATE_HOME whatever this says:
+# losing where you were is not a loss.
+#
+# data_dir = "~/MusicLibrary/.gmuse"
+
 # Smart playlists: a saved rule that fills view 3. `:playlist <name>` loads one.
 #
 # A catalog and a smart playlist can hold the same expression and still be

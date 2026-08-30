@@ -88,6 +88,19 @@ pub struct Config {
     /// that is documented on [`crate::smart`].
     #[serde(default)]
     pub playlists: HashMap<String, PlaylistTable>,
+    /// Where everything *you* have decided about your music lives — ratings,
+    /// play history, and playlists once #22 lands.
+    ///
+    /// A setting rather than a fixed path because this is the half worth
+    /// backing up, and people back up different places. Pointing it inside the
+    /// library makes ratings travel with the music. It cannot *default* there:
+    /// gmuse has no concept of "the library folder" — roots may be several, and
+    /// on different disks, and a playlist crosses them by design.
+    ///
+    /// The session and the audit log stay in `$XDG_STATE_HOME`: losing where
+    /// you were is not a loss.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
     /// Library roots, for when you do not want named catalogs.
     ///
     /// The durable home for roots: the cache is derived data and is thrown
@@ -152,6 +165,8 @@ pub struct Loaded {
     pub now_playing: crate::format::Template,
     pub catalogs: crate::catalog::Catalogs,
     pub playlists: crate::smart::SmartPlaylists,
+    /// Resolved: the config's `data_dir` with `~` expanded, or the default.
+    pub data_dir: PathBuf,
     /// Whether the config named `active_catalogs` at all.
     ///
     /// Kept separate from its *value*, because `["all"]` is a legitimate
@@ -312,6 +327,14 @@ pub fn parse_text(text: &str) -> Loaded {
         out.catalogs.define(&name, roots, filter);
     }
 
+    // Resolved here, at the boundary: nothing downstream sees a `~` or has to
+    // know what the default was.
+    out.data_dir = config
+        .data_dir
+        .as_deref()
+        .map(expand_tilde)
+        .unwrap_or_else(default_data_dir);
+
     out.active_specified = !config.active_catalogs.is_empty();
     if !config.active_catalogs.is_empty() {
         let spec = if config.active_catalogs.iter().any(|n| n == "all") {
@@ -378,6 +401,19 @@ pub fn parse_text(text: &str) -> Loaded {
     out
 }
 
+/// `$XDG_DATA_HOME/gmuse`, falling back to `~/.local/share`.
+///
+/// Data rather than state, and the distinction is worth: state is where you
+/// were, data is what you decided. A rating cannot be recovered by using the
+/// program again.
+pub fn default_data_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("gmuse")
+}
+
 fn expand_tilde(path: &Path) -> PathBuf {
     let Ok(rest) = path.strip_prefix("~") else {
         return path.to_path_buf();
@@ -392,8 +428,12 @@ fn expand_tilde(path: &Path) -> PathBuf {
 pub fn load(path: &Path) -> Loaded {
     match std::fs::read_to_string(path) {
         Ok(text) => parse_text(&text),
+        // No config file at all still needs the defaults resolved — a `Loaded`
+        // with an empty `data_dir` would write the history to the process's
+        // working directory.
         Err(_) => Loaded {
             theme: Theme::default(),
+            data_dir: default_data_dir(),
             ..Default::default()
         },
     }
@@ -583,6 +623,31 @@ mod tests {
         };
         assert_eq!(**cmd, Command::Seek(SeekSpec::Relative(30.0)));
     }
+    #[test]
+    fn data_dir_defaults_and_expands_a_tilde() {
+        // Absent: the default, never an empty path — that would write the
+        // history into whatever directory gmuse happened to start in.
+        let bare = parse_text("");
+        assert_eq!(bare.data_dir, default_data_dir());
+        assert!(bare.data_dir.is_absolute() || bare.data_dir.starts_with("."));
+
+        let home = std::env::var("HOME").expect("HOME");
+        let set = parse_text(r#"data_dir = "~/MusicLibrary/.gmuse""#);
+        assert_eq!(
+            set.data_dir,
+            PathBuf::from(&home).join("MusicLibrary/.gmuse"),
+            "a config `~` must expand, as it does for library and catalog roots"
+        );
+        assert!(set.errors.is_empty(), "{:?}", set.errors);
+    }
+
+    /// A missing config file still has to resolve its defaults.
+    #[test]
+    fn a_missing_config_still_has_a_data_dir() {
+        let loaded = load(Path::new("/nonexistent/gmuse/config.toml"));
+        assert_eq!(loaded.data_dir, default_data_dir());
+    }
+
     #[test]
     fn playlist_tables_become_smart_playlists() {
         let loaded = parse_text(

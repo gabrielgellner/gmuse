@@ -261,7 +261,16 @@ fn run_tui(
     // by `play_count` or `days_since_added`, and building the projection
     // without it would silently give the wrong membership until something
     // happened to trigger a rebuild.
-    let history_path = crate::history::default_path();
+    let history_path = crate::history::path_in(&loaded.data_dir);
+    // Before the first read, so an upgrade finds the ratings rather than an
+    // empty file that looks exactly like having lost them.
+    if let Some(from) = crate::history::migrate(&history_path) {
+        println!(
+            "history: moved {} -> {}",
+            from.display(),
+            history_path.display()
+        );
+    }
     let mut history = crate::history::History::load(&history_path);
     let first_run = history.is_empty();
     let known = history.len();
