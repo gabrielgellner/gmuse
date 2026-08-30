@@ -1830,6 +1830,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   single releases whose album tag equals their title. So a `Singles/` folder is about **provenance — loose tracks not
   part of a complete album owned — not about the tracks lacking an album.** Their tags were left alone.
 
+- **2026-08-30** **Per-track history (`src/history.rs`, issue #13): plays, last played, first seen.** The third store in
+  `$XDG_STATE_HOME`, after the audit log and the session, and built to the same rules — durable rather than derived,
+  keyed by **path** rather than `TrackId`, written temp-then-rename. Nothing new was invented: `session.toml` had
+  already settled the shape, which was the argument for doing resumption first.
+
+  **A play is half the track or four minutes, whichever comes first** — last.fm's rule and the usual one. A track of
+  unknown length has no half to take, so it must earn the full four minutes; without that guard a zero duration counts a
+  play the instant it starts. Counted once per track, polled from the render loop rather than driven by an event,
+  because "half way through" is not something the player emits.
+
+  **`added` can only start from now.** The obvious source for an existing library is the file's mtime, and it is useless
+  here: writing ReplayGain tags across the library reset every mtime in an afternoon, which this project did to itself
+  earlier today. So the first run stamps everything with the current time and says so in the log. The field becomes
+  meaningful from that point forward, and there is no way to recover what it would have been.
+
+  **A mutation exposed an untestable guard, and the fix was to move the decision.** `note_play_progress` read the
+  position from the player and then decided; with no player in the tests it returned early, so removing the once-only
+  guard broke nothing. Splitting it into `record_play_if_earned(ui, ctx, position)` — the decision, with the position
+  passed in — made the guard reachable, and three mutations now fail against it. The remaining hole is honest: clearing
+  the guard at a track boundary happens in the `Loaded` arm, which still needs a real device.
+
+  Not yet exposed to the filter language. `play_count` and `last_played` as filter fields need the predicate to see more
+  than a `&Track`, which is a signature change worth its own piece of work — and it is what #15 actually wants.
+
 ---
 
 ## 14. Prior art worth reading

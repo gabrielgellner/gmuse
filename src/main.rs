@@ -16,6 +16,7 @@ mod cmd;
 mod config;
 mod filter;
 mod format;
+mod history;
 mod library;
 mod next;
 mod playlist;
@@ -323,6 +324,31 @@ fn run_tui(
         }
     }
 
+    // Every track gets a first-seen date, so "recently added" means something
+    // from here on. It cannot be recovered for an existing library: the file's
+    // mtime is not it — writing ReplayGain tags moved every one of them.
+    {
+        let path = crate::history::default_path();
+        state.history = crate::history::History::load(&path);
+        let first_run = state.history.is_empty();
+        let known = state.history.len();
+        let now = crate::history::now();
+        for (_, track) in app.store.iter() {
+            state.history.note_seen(&track.path, now);
+        }
+        let fresh = state.history.len() - known;
+        state.history_path = Some(path);
+        ui::save_history(&mut state);
+        state.audit.line(
+            "history",
+            &if first_run {
+                format!("{fresh} tracks, all first seen now — added dates start here")
+            } else {
+                format!("{} known, {fresh} new since last run", state.history.len())
+            },
+        );
+    }
+
     // Where we were last time, restored paused. After the config, so `fixed`
     // means something; before the settings summary, so the summary reports
     // what is actually in force.
@@ -365,6 +391,7 @@ fn run_tui(
     ratatui::restore();
     // Written after the terminal is restored, so a failure is visible.
     ui::save_session(&mut state, &ctx);
+    ui::save_history(&mut state);
     // Written after the terminal is restored, so the summary is visible.
     if state.audit.is_enabled() {
         let underruns = app.player.underruns();

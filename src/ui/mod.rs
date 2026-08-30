@@ -288,6 +288,12 @@ pub struct Ui {
     pub audit: crate::audit::Audit,
     /// Where to write "where I was". `None` disables resumption entirely.
     pub session_path: Option<PathBuf>,
+    /// Play counts and first-seen dates. Empty and unsaved unless a path is set.
+    pub history: crate::history::History,
+    pub history_path: Option<PathBuf>,
+    /// The current track has already been counted, so a long listen does not
+    /// count twice. Cleared whenever a different track becomes audible.
+    counted_current: bool,
     /// A restored track has been loaded but its seek has not landed yet.
     ///
     /// Loading emits `Loaded`, which is a save point — and at that instant the
@@ -356,6 +362,9 @@ impl Ui {
             relative_numbers: false,
             pending_next: None,
             session_path: None,
+            history: crate::history::History::default(),
+            history_path: None,
+            counted_current: false,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
@@ -467,10 +476,66 @@ where
             handle_key(key, ui, ctx);
         }
         drain_player_events(ui, ctx);
+        note_play_progress(ui, ctx);
         audit_underruns(ui, ctx);
         ui.expire_status();
     }
     Ok(())
+}
+
+/// Count a play once enough of the track has actually been heard.
+///
+/// Polled from the render loop rather than triggered by an event, because the
+/// interesting moment — half the track — is not an event the player has. The
+/// same reason the underrun count is polled.
+fn note_play_progress(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(player) = ctx.player else {
+        return;
+    };
+    record_play_if_earned(ui, ctx, player.position());
+}
+
+/// The decision, separated from where the position comes from — otherwise the
+/// once-only guard is only reachable with a real audio device, which is to say
+/// untestable. An earlier version had exactly that hole.
+fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
+    if ui.counted_current || ui.history_path.is_none() {
+        return;
+    }
+    let Some(id) = ui.playback.current else {
+        return;
+    };
+    let Some(track) = ctx.store.get(id) else {
+        return;
+    };
+    if !crate::history::counts_as_played(position, track.duration) {
+        return;
+    }
+    ui.counted_current = true;
+    let now = crate::history::now();
+    ui.history.note_played(&track.path, now);
+    let plays = ui.history.get(&track.path).map(|e| e.plays).unwrap_or(0);
+    ui.audit.line(
+        "played",
+        &format!("{} (play {plays})", track.path.display()),
+    );
+    save_history(ui);
+}
+
+/// Write the history if anything changed. Failures are logged, never shown:
+/// the atomic write means the previous file survives, and a full disk should
+/// not interrupt listening.
+pub fn save_history(ui: &mut Ui) {
+    let Some(path) = ui.history_path.clone() else {
+        return;
+    };
+    if !ui.history.is_dirty() {
+        return;
+    }
+    match ui.history.save(&path) {
+        Ok(()) => ui.history.mark_saved(),
+        Err(e) => ui.audit.line("history", &format!("could not save: {e}")),
+    }
 }
 
 /// Record any underruns since the last tick.
@@ -575,6 +640,7 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
                     ui.playback.current = Some(id);
                     ui.status.clear();
                 }
+                ui.counted_current = false;
                 // A track boundary is the cheapest honest save point: the
                 // queue and current track have just changed, and writing on
                 // quit alone would lose the whole session to a crash — which
@@ -4166,6 +4232,79 @@ mod tests {
         press(&mut ui, &ctx, "enter");
         assert!(ui.catalogs.is_active("beta"));
         assert!(!ui.catalogs.is_active("alpha"));
+    }
+
+    /// A play is counted once, however long the track is left running, and
+    /// only after enough of it has been heard.
+    #[test]
+    fn a_play_is_counted_once_and_only_when_earned() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let dir = std::env::temp_dir().join("gmuse-history-ui");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ui.history_path = Some(dir.join("history.toml"));
+
+        let (id, track) = store.iter().next().unwrap();
+        let (path, half) = (track.path.clone(), track.duration / 2);
+        ui.playback.current = Some(id);
+
+        // Too early: a skip is not a play.
+        record_play_if_earned(&mut ui, &ctx, Duration::from_secs(1));
+        assert!(ui.history.get(&path).is_none(), "counted a skip");
+
+        record_play_if_earned(&mut ui, &ctx, half);
+        assert_eq!(ui.history.get(&path).unwrap().plays, 1);
+
+        // Still playing, later in the same track: it must not count again.
+        record_play_if_earned(&mut ui, &ctx, track.duration);
+        assert_eq!(
+            ui.history.get(&path).unwrap().plays,
+            1,
+            "the same track was counted twice"
+        );
+
+        // A different track becoming audible clears the guard, so the next one
+        // can earn its own play.
+        ui.counted_current = false;
+        record_play_if_earned(&mut ui, &ctx, track.duration);
+        assert_eq!(ui.history.get(&path).unwrap().plays, 2);
+    }
+
+    /// The history is written when it changes, and the file is real.
+    #[test]
+    fn the_history_is_saved_when_dirty() {
+        let store = fixture();
+        let mut ui = ui_of(&store, true);
+        let dir = std::env::temp_dir().join("gmuse-history-save");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.toml");
+        ui.history_path = Some(path.clone());
+
+        ui.history.note_played(std::path::Path::new("/m/x.mp3"), 5);
+        assert!(ui.history.is_dirty());
+        save_history(&mut ui);
+        assert!(!ui.history.is_dirty(), "saving should clear the flag");
+        assert!(path.exists());
+
+        let back = crate::history::History::load(&path);
+        assert_eq!(back.get(std::path::Path::new("/m/x.mp3")).unwrap().plays, 1);
+    }
+
+    /// With no history path — the default until one is set — nothing is
+    /// recorded and nothing is written.
+    #[test]
+    fn without_a_history_path_nothing_is_recorded() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let (id, _) = store.iter().next().unwrap();
+        ui.playback.current = Some(id);
+        record_play_if_earned(&mut ui, &ctx, Duration::from_secs(9999));
+        assert!(ui.history.is_empty());
     }
 
     /// The arrows drive the menu too. Not the primary binding, but a menu
