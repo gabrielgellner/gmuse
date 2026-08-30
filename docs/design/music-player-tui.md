@@ -409,9 +409,11 @@ is "you hear what you can see". Playlists and the queue are **not** filtered: th
 
 ### Format strings
 
-`{artist} — {title}`, with `{field:pad}` width specifiers and `[…]` groups that vanish when a field inside them is
-missing. Parse to a `Vec<Atom>` at config-load time and render against a `&Track`. Never re-parse per frame — the
-now-playing line renders at whatever the UI tick rate is.
+`{artist} — {title}`, with `{field:spec}` sizing and `[…]` groups that vanish when a field inside them is missing. A
+spec is `[>|0]? min? ( '.' max )?` — `{track:02}`, `{artist:20}`, `{duration:>7}`, `{title:.40}`, `{title:8.8}`. A
+minimum pads and a maximum truncates; the value is padded first and cut second, so **the maximum always wins**. Parse to
+a `Vec<Atom>` at config-load time and render against a `&Track`. Never re-parse per frame — the now-playing line renders
+at whatever the UI tick rate is.
 
 Named placeholders rather than the `%a` this section originally specified — see the Decision Log entry of 2026-08-30. A
 literal delimiter is backslash-escaped (`\[`, `\{`), not doubled.
@@ -1779,6 +1781,23 @@ Append here as decisions are made. Format: date, decision, rationale.
   **The rest is deliberately declined.** Variables, arithmetic and nested conditionals add up to a programming language
   living in a config file, and foobar's power-user configurations are notoriously unreadable for exactly that reason. §1
   names scope creep as this project's failure mode; a format string that needs debugging is what that looks like here.
+
+- **2026-08-30** **Truncation in the format language (`{title:.40}`), the one gap the foobar2000 comparison found.** The
+  status line is a single line, so without it a long template is clipped by the terminal at whatever column it runs out
+  — the author has no say in _what_ gets lost. `$padcut` is foobar's answer and this is the same idea in this language's
+  spelling.
+
+  A spec is now `[>|0]? min? ( '.' max )?`. The value is **padded to the minimum, then cut to the maximum**, so a
+  contradiction like `{artist:20.4}` resolves to four characters rather than being an error: the maximum always wins,
+  which is one sentence and stays predictable.
+
+  Cutting is by **characters, not bytes** — half of a multi-byte character is not a string, and this library is full of
+  them (`Christian Löffler`). Pinned by a test, because `&s[..max]` is the obvious wrong implementation and panics
+  rather than misbehaving quietly, which is at least loud but still a crash in a render loop.
+
+  **No ellipsis.** It would be friendlier, and it would make the rendered width depend on whether the cut happened,
+  which is worse in a line that is already tight. A spec that sizes nothing (`{track:0}`, `{title:.}`) is rejected: it
+  is a typo, not a rule.
 
 ---
 

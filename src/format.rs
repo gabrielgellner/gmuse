@@ -147,50 +147,87 @@ impl Field {
     }
 }
 
-/// How a field is padded. `{track:02}`, `{artist:20}`, `{duration:>8}`.
+/// How a field is sized. `{track:02}`, `{artist:20}`, `{duration:>8}`,
+/// `{title:.30}`, `{title:10.30}`.
+///
+/// A minimum pads, a maximum truncates, and **the maximum always wins**: the
+/// value is padded to `min` and then cut to `max`, which is foobar2000's
+/// `$padcut` and the only rule that stays predictable when both are given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Pad {
+pub struct Pad {
+    align: Align,
+    min: Option<usize>,
+    /// Truncation is a plain cut, with no ellipsis. An ellipsis would be
+    /// friendlier and would make the width arithmetic depend on whether the
+    /// cut happened, which is worse in a status line that is already tight.
+    max: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Align {
+    /// Padded on the right, so the text is left-aligned.
     #[default]
-    None,
-    /// Minimum width, padded on the right.
-    Left(usize),
-    /// Minimum width, padded on the left.
-    Right(usize),
-    /// Minimum width, padded on the left with `0`.
-    Zero(usize),
+    Left,
+    /// Padded on the left with spaces.
+    Right,
+    /// Padded on the left with zeros — `{track:02}`, the reason this exists.
+    Zero,
 }
 
 impl Pad {
     fn parse(spec: &str) -> Option<Self> {
         if spec.is_empty() {
-            return Some(Pad::None);
+            return Some(Pad::default());
         }
-        if let Some(rest) = spec.strip_prefix('>') {
-            return Some(Pad::Right(rest.parse().ok()?));
+        let (align, rest) = match spec.strip_prefix('>') {
+            Some(r) => (Align::Right, r),
+            None => match spec.strip_prefix('0') {
+                Some(r) => (Align::Zero, r),
+                None => (Align::Left, spec),
+            },
+        };
+        let (min_text, max_text) = match rest.split_once('.') {
+            Some((a, b)) => (a, Some(b)),
+            None => (rest, None),
+        };
+        let min = if min_text.is_empty() {
+            None
+        } else {
+            Some(min_text.parse().ok()?)
+        };
+        let max = match max_text {
+            Some(t) => Some(t.parse().ok()?),
+            None => None,
+        };
+        // A spec that sizes nothing is a typo, not a rule — `{track:0}` and
+        // `{title:.}` should say so rather than silently doing nothing.
+        if min.is_none() && max.is_none() {
+            return None;
         }
-        if let Some(rest) = spec.strip_prefix('0') {
-            // A bare "0" is a zero width, which is a typo rather than a rule.
-            return Some(Pad::Zero(rest.parse().ok()?));
-        }
-        Some(Pad::Left(spec.parse().ok()?))
+        Some(Pad { align, min, max })
     }
 
     fn apply(self, s: &str) -> String {
-        let width = match self {
-            Pad::None => return s.to_string(),
-            Pad::Left(w) | Pad::Right(w) | Pad::Zero(w) => w,
-        };
-        let len = s.chars().count();
-        if len >= width {
-            return s.to_string();
+        let mut out = s.to_string();
+        if let Some(min) = self.min {
+            let len = out.chars().count();
+            if len < min {
+                let fill = min - len;
+                out = match self.align {
+                    Align::Left => format!("{out}{}", " ".repeat(fill)),
+                    Align::Right => format!("{}{out}", " ".repeat(fill)),
+                    Align::Zero => format!("{}{out}", "0".repeat(fill)),
+                };
+            }
         }
-        let fill = width - len;
-        match self {
-            Pad::Left(_) => format!("{s}{}", " ".repeat(fill)),
-            Pad::Right(_) => format!("{}{s}", " ".repeat(fill)),
-            Pad::Zero(_) => format!("{}{s}", "0".repeat(fill)),
-            Pad::None => unreachable!("returned above"),
+        if let Some(max) = self.max {
+            // By characters, not bytes: cutting a multi-byte character in half
+            // would produce something that is not a string.
+            if out.chars().count() > max {
+                out = out.chars().take(max).collect();
+            }
         }
+        out
     }
 }
 
@@ -387,8 +424,53 @@ mod tests {
         assert_eq!(render("{track:02}", &full()), "01");
         assert_eq!(render(r"\[{duration:>7}\]", &full()), "[   3:41]");
         assert_eq!(render("{genre:8}|", &full()), "folk    |");
-        // Already wide enough: padding is a minimum, never a truncation.
+        // Already wide enough: a minimum is never a truncation.
         assert_eq!(render("{artist:3}", &full()), "Sierra Ferrell");
+    }
+
+    /// The status line is one line, so a long template is otherwise clipped by
+    /// the terminal with no say in where. foobar2000 spells this `$padcut`.
+    #[test]
+    fn truncation() {
+        assert_eq!(render("{artist:.6}", &full()), "Sierra");
+        assert_eq!(render("{artist:.99}", &full()), "Sierra Ferrell");
+        // Padded to the minimum, then cut to the maximum: `$padcut`.
+        assert_eq!(render("{genre:.2}", &full()), "fo");
+        assert_eq!(render("{genre:8.8}|", &full()), "folk    |");
+        assert_eq!(render("{artist:8.8}|", &full()), "Sierra F|");
+        // The maximum wins when the two disagree.
+        assert_eq!(render("{artist:20.4}", &full()), "Sier");
+        // Alignment still applies to the minimum.
+        assert_eq!(render("{genre:>8.8}|", &full()), "    folk|");
+    }
+
+    /// Cutting by characters, not bytes — half a multi-byte character is not
+    /// a string, and this library is full of them.
+    #[test]
+    fn truncation_is_character_safe() {
+        let mut t = full();
+        t.artist = Some("Christian Löffler".into());
+        assert_eq!(render("{artist:.11}", &t), "Christian L");
+        assert_eq!(render("{artist:.12}", &t), "Christian Lö");
+        t.artist = Some("日本語のタイトル".into());
+        assert_eq!(render("{artist:.3}", &t), "日本語");
+    }
+
+    /// A spec that sizes nothing is a typo, not a rule.
+    #[test]
+    fn an_empty_size_spec_is_rejected() {
+        assert_eq!(
+            Template::parse("{track:0}"),
+            Err(FormatError::BadPad("0".into()))
+        );
+        assert_eq!(
+            Template::parse("{title:.}"),
+            Err(FormatError::BadPad(".".into()))
+        );
+        assert_eq!(
+            Template::parse("{title:>}"),
+            Err(FormatError::BadPad(">".into()))
+        );
     }
 
     /// A group vanishes entirely — including its literal text — when a field

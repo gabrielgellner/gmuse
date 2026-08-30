@@ -181,7 +181,8 @@ o = ["add-queue", "next"]         # a list is a macro
 [format]
 # {artist} {album} {title} {track} {year} {duration} {genre} … and more.
 # [ ... ] disappears entirely if a field inside it is missing.
-now_playing = "{artist}[ — {album}] — {title}"
+# {track:02} pads, {title:.40} truncates, {duration:>7} right-aligns.
+now_playing = "{artist}[ — {album}] — {title:.40}"
 
 [theme.palette]
 accent = "magenta"
