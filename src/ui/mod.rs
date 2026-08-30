@@ -311,6 +311,9 @@ pub struct Ui {
     /// the active catalogs — or `smart_artist_sort` — rebuilds it.
     pub library: Library,
     pub catalogs: crate::catalog::Catalogs,
+    /// A transient narrowing on top of the active catalogs. Anonymous and
+    /// not saved — a named, persistent one is a catalog (§7).
+    pub filter: Option<crate::filter::Filter>,
     /// Keep playing past the end of the current album/artist pool. Stored here
     /// because it is a setting the user toggles, not a property of a track.
     pub continue_playing: bool,
@@ -359,6 +362,7 @@ impl Ui {
             now_playing: crate::format::Template::default(),
             library,
             catalogs: crate::catalog::Catalogs::default(),
+            filter: None,
             continue_playing: true,
             album_headers: true,
             smart_artist_sort: true,
@@ -1342,6 +1346,19 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             };
             run_search(ui, ctx, &pattern, dir);
         }
+        Command::Filter(filter) => {
+            let label = match &filter {
+                Some(f) => format!("filtered: {}", f.source),
+                None => "filter cleared".into(),
+            };
+            ui.filter = filter;
+            rebuild_library(ui, ctx);
+            if ui.library.is_empty() {
+                ui.notify("nothing matches");
+            } else {
+                ui.notify(format!("{label} ({} tracks)", ui.library.len()));
+            }
+        }
         Command::Catalog(spec) => match ui.catalogs.apply(spec) {
             Ok(()) => {
                 rebuild_library(ui, ctx);
@@ -1362,7 +1379,14 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
 /// `smart_artist_sort`. The cursors have to be clamped: the row they pointed at
 /// may not exist any more.
 fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
-    let members = ui.catalogs.members(ctx.store);
+    // §7's rule: active catalogs union, the transient filter intersects.
+    // "Which bodies of music am I in" is a selection; "what am I looking for"
+    // is a restriction.
+    let mut members = ui.catalogs.members(ctx.store);
+    if let Some(f) = &ui.filter {
+        let matches = f.compile();
+        members.retain(|id| ctx.store.get(*id).is_some_and(&matches));
+    }
     ui.library = Library::from_members(ctx.store, members, ui.smart_artist_sort);
     ui.tree.selected = 0;
     ui.tree.track_selected = 0;
@@ -3844,6 +3868,91 @@ mod tests {
             crate::format::Template::default(),
             "a rejected template should leave the default in place"
         );
+    }
+
+    /// `:filter` narrows the library, and clearing it restores everything.
+    #[test]
+    fn a_filter_narrows_the_library_and_clears() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let all = ui.library.len();
+        assert!(all > 2);
+
+        let first = store.iter().next().unwrap().1.artist.clone().unwrap();
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, &format!("filter artist=\"{first}\""));
+        let narrowed = ui.library.len();
+        assert!(narrowed > 0 && narrowed < all, "{narrowed} of {all}");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "filter");
+        assert_eq!(ui.library.len(), all, "clearing should restore everything");
+    }
+
+    /// §7's combining rule: active catalogs union, the filter intersects. The
+    /// failure to avoid is a filter that quietly widens the library past the
+    /// catalogs, or catalogs that stop narrowing once a filter is set.
+    #[test]
+    fn a_filter_intersects_the_active_catalogs() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // A filter that matches everything must not add tracks the catalogs
+        // excluded, and must not remove any they included.
+        let before = ui.library.len();
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "filter duration>=0");
+        assert_eq!(
+            ui.library.len(),
+            before,
+            "an all-matching filter changed the set"
+        );
+
+        // And one that matches nothing empties it.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "filter year>9999");
+        assert_eq!(ui.library.len(), 0);
+    }
+
+    /// Playlists and the queue hold `TrackId`s straight into the `Store` and
+    /// must survive a filter — crossing boundaries is the point of them.
+    #[test]
+    fn a_filter_leaves_the_playlist_and_queue_alone() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let ids: Vec<TrackId> = store.iter().map(|(id, _)| id).take(3).collect();
+        for id in &ids {
+            ui.queue.push_back(*id);
+            ui.playlist.push(*id);
+        }
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "filter year>9999");
+        assert_eq!(
+            ui.library.len(),
+            0,
+            "the filter should have emptied the library"
+        );
+        assert_eq!(ui.queue.len(), 3, "the queue was filtered");
+        assert_eq!(ui.playlist.len(), 3, "the playlist was filtered");
+    }
+
+    /// A bad expression is a reported problem, not a panic or a silent no-op.
+    #[test]
+    fn a_bad_filter_expression_says_so() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let before = ui.library.len();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "filter nosuchfield=1");
+        assert!(ui.status.contains("nosuchfield"), "{:?}", ui.status);
+        assert_eq!(ui.library.len(), before, "a bad filter changed the library");
     }
 
     /// The arrows drive the menu too. Not the primary binding, but a menu

@@ -337,6 +337,11 @@ pub enum Command {
     ViewPrev,
     ViewLast,
     Catalog(crate::catalog::Spec),
+    /// Narrow the library to what matches. `None` clears it.
+    ///
+    /// Transient and anonymous, as against a catalog, which is the same idea
+    /// named and persistent — see §7.
+    Filter(Option<crate::filter::Filter>),
     Search {
         pattern: String,
         dir: SearchDir,

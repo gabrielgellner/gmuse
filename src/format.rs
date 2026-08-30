@@ -41,7 +41,37 @@ pub enum Field {
     FileName,
 }
 
+/// Whether a field compares as text or as a number. Only the filter language
+/// (§7) cares, but it lives here because the field vocabulary is shared: one
+/// place to add `play_count`, and both languages get it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Text,
+    Number,
+}
+
 impl Field {
+    pub fn kind(self) -> Kind {
+        match self {
+            Field::Artist
+            | Field::AlbumArtist
+            | Field::FileUnder
+            | Field::Album
+            | Field::Title
+            | Field::DisplayTitle
+            | Field::Genre
+            | Field::Path
+            | Field::FileName => Kind::Text,
+            Field::Track
+            | Field::Disc
+            | Field::Year
+            | Field::Duration
+            | Field::Bitrate
+            | Field::SampleRate
+            | Field::Channels => Kind::Number,
+        }
+    }
+
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "artist" => Field::Artist,

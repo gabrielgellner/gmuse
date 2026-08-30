@@ -14,6 +14,7 @@ mod catalog;
 mod cli;
 mod cmd;
 mod config;
+mod filter;
 mod format;
 mod library;
 mod next;

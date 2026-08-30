@@ -128,6 +128,26 @@ the album figure in order and the track figure when shuffling. Analysis is delib
 library with [rsgain](https://github.com/complexlogic/rsgain) (`rsgain easy ~/Music`) and gmuse reads what it wrote.
 Untagged files play untouched, so the setting is inert until something is tagged.
 
+`:filter` narrows the library to what matches an expression, and `:filter` with no argument clears it. Active catalogs
+union; the filter intersects — so it narrows what you are already looking at, and it narrows what shuffle picks from
+too, because §5 builds its pool from the library.
+
+```
+:filter genre="jazz"|genre="blues"
+:filter artist="*ferrell*"&year>2020
+:filter year>=1990&year<2000&(genre="folk"|genre="country")
+:filter any="*live*"          # any = every text field
+:filter filename="*.opus"
+```
+
+`&` `|` `!` and parentheses; `=` `!=` for text, `=` `!=` `<` `<=` `>` `>=` for numbers. Strings match by **glob**, where
+`*` is the only metacharacter — `"Ferrell"` is exact, `"*Ferrell*"` contains, `"Ferrell*"` starts. `?` is a literal
+question mark, and matching is **smart-case**: insensitive unless your pattern contains a capital.
+
+Fields are the same names the format language uses:
+`artist albumartist file_under album title display_title genre path filename any` for text,
+`track disc year duration bitrate samplerate channels` for numbers.
+
 Typing while the completion menu is open **narrows** it; `Backspace` widens it again, and a line matching nothing leaves
 the menu up saying `no matches` rather than vanishing. `C-n`/`C-p` or the arrows walk it, `C-y` accepts, `Esc` closes
 the menu and a second `Esc` the line.

@@ -25,6 +25,8 @@ pub enum ParseError {
     Bad(String, &'static str),
     #[error("{0}")]
     Key(#[from] keys::KeyParseError),
+    #[error("{0}")]
+    Filter(#[from] crate::filter::FilterError),
 }
 
 /// Every verb `command` accepts, aliases included.
@@ -45,6 +47,7 @@ pub const VERBS: &[&str] = &[
     "down",
     "expand",
     "expand-all",
+    "filter",
     "in",
     "next",
     "page-down",
@@ -220,6 +223,11 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "search-next" => Command::SearchNext,
         "search-prev" => Command::SearchPrev,
         "catalog" => Command::Catalog(catalog_spec(rest)?),
+        "filter" => Command::Filter(if rest.is_empty() {
+            None
+        } else {
+            Some(crate::filter::Filter::parse(rest)?)
+        }),
         "quit" | "q" => Command::Quit,
 
         other => return Err(ParseError::UnknownCommand(other.to_string())),
@@ -451,6 +459,8 @@ pub fn format(cmd: &Command) -> String {
         Command::ViewNext => "view-next".into(),
         Command::ViewPrev => "view-prev".into(),
         Command::ViewLast => "view-last".into(),
+        Command::Filter(None) => "filter".into(),
+        Command::Filter(Some(f)) => format!("filter {}", f.source),
         Command::Catalog(spec) => match spec {
             crate::catalog::Spec::All => "catalog all".into(),
             crate::catalog::Spec::Only(names) => format!("catalog {}", names.join(" ")),
@@ -786,6 +796,7 @@ mod tests {
                 "unbind" => "unbind common x".to_string(),
                 "view" => "view 1".to_string(),
                 "catalog" => format!("{verb} all"),
+                "filter" => "filter year>2000".to_string(),
                 "in" => "in tree down".to_string(),
                 "search" | "rsearch" => format!("{verb} text"),
                 other => other.to_string(),

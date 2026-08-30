@@ -1686,6 +1686,38 @@ Append here as decisions are made. Format: date, decision, rationale.
   living with it. Also deferred: **runtime-defined named filters** (cmus's `fset`), which need somewhere to persist —
   the same durable store #13 and #14 want, and not worth inventing twice.
 
+- **2026-08-30** **The filter language implemented (`src/filter.rs`), and `:filter` wired in.** Built to the spec
+  settled earlier the same day; the notable part is what the reference library confirmed once it could be run against.
+
+  `album="Burial (S/T)"` finds its 13 tracks and `title="*In You?"` finds the one — the two cases that decided globs
+  over regex, now demonstrably working rather than argued about. `path="*/Dance/*"` gives 47, `filename="*.opus"` five,
+  `any="*burial*"` thirteen.
+
+  **And a finding that mattered: the library had no genre tags at all.** `genre="*folk*"` returned nothing across all
+  148 files. So `[catalogs.jazz] where = 'genre="jazz"'` — the headline example of why catalogs should become
+  filter-defined — could not have worked, and folder-based catalogs were not a limitation being worked around but the
+  only thing the tag data supported.
+
+  **Fixed the same day, outside the program.** Genres were written with `mutagen`, per album, as compound values —
+  `Electronic; Dubstep`, `Americana; Bluegrass` — which suits glob matching exactly: `genre="*electronic*"` finds all 59
+  electronic tracks and `genre="*dubstep*"` narrows to Burial's 13. Verified afterwards that all 148 files kept their
+  ReplayGain tags; `mutagen` edits in place, where an ffmpeg remux would have risked them.
+
+  That is the third time the pattern has held: **the heavy or file-modifying work happens outside gmuse and gmuse reads
+  the result** — rsgain for loudness, mutagen for genres, and bliss for similarity if #19 ever happens. §1's "tag
+  editing (reading only)" is not a gap to route around; it is what makes each of those a separate, replaceable tool.
+
+  Two implementation decisions worth recording. **`Filter` carries its source text** alongside the parsed AST, because
+  §6 requires a command to round-trip through text and rendering the AST would turn `genre=folk` into `genre="folk"` — a
+  different line for the same meaning. Parsing still happens at the boundary; nothing downstream sees the string.
+
+  **A missing tag matches nothing, including `!=`.** Three-valued logic is more correct and much harder to predict; `!`
+  on the whole comparison is how to ask for "or missing". Pinned by a test, because the alternative is defensible enough
+  that someone will eventually "fix" it.
+
+  Unquoted values are accepted where unambiguous (`genre=folk`, `year>2020`) — not an implicit rule, because the _field_
+  determines the type, so there is nothing to guess.
+
 ---
 
 ## 14. Prior art worth reading
