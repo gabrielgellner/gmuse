@@ -16,7 +16,8 @@ use super::{Context, SettingKey, parse};
 #[derive(Debug, Default, Clone)]
 pub struct World {
     pub catalogs: Vec<String>,
-    /// Smart playlist names, for `:playlist`.
+    /// Every name `:playlist open` accepts — rules and saved files alike,
+    /// because they are one vocabulary (#15, #22).
     pub playlists: Vec<String>,
     /// `(context, key text)` for every binding, so `unbind` offers only keys
     /// that are actually bound.
@@ -107,8 +108,17 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
             .chain((1..=5).map(|n| n.to_string()))
             .collect(),
 
-        // One name only, unlike `catalog`: view 3 shows one list at a time.
-        "playlist" if words.len() == 1 => world.playlists.clone(),
+        // Subcommands first, then names — so `:playlist <Tab>` shows what can
+        // be done and `:playlist open <Tab>` what there is to do it to.
+        "playlist" if words.len() == 1 => ["list", "open", "save"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        // `save` completes existing names too: overwriting one is a normal
+        // thing to want, and typing it out again is not.
+        "playlist" if words.len() == 2 && matches!(words[1], "open" | "save") => {
+            world.playlists.clone()
+        }
 
         // Catalogs accept a list, so they keep completing.
         "catalog" | "cat" => {

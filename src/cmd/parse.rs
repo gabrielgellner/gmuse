@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use super::keys;
 use super::{
-    AaaMode, AddTarget, Command, Context, PaneTarget, Quality, RateSpec, SearchDir, SeekSpec,
-    SettingKey, SettingValue, ViewId, VolSpec,
+    AaaMode, AddTarget, Command, Context, PaneTarget, PlaylistSpec, Quality, RateSpec, SearchDir,
+    SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -227,15 +227,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "search-prev" => Command::SearchPrev,
         "rate" => Command::Rate(rate_spec(rest)?),
         "catalog" => Command::Catalog(catalog_spec(rest)?),
-        "playlist" => {
-            if rest.is_empty() {
-                return Err(ParseError::Missing {
-                    cmd: "playlist",
-                    what: "the name of a smart playlist",
-                });
-            }
-            Command::Playlist(rest.to_string())
-        }
+        "playlist" => Command::Playlist(playlist_spec(rest)?),
         "freeze" => Command::Freeze,
         "filter" => Command::Filter(if rest.is_empty() {
             None
@@ -357,6 +349,43 @@ fn clock(s: &str) -> Option<f64> {
         total = total * 60.0 + v;
     }
     Some(total)
+}
+/// `open <name>`, `save <name>`, or `list`.
+///
+/// A bare name is **rejected** rather than treated as `open`. It was the
+/// spelling for a day, and keeping it would mean a playlist called `save`
+/// could never be opened — the ambiguity is small and permanent, and the error
+/// names the replacement.
+fn playlist_spec(rest: &str) -> Result<PlaylistSpec, ParseError> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(PlaylistSpec::List);
+    }
+    let (word, name) = match rest.split_once(char::is_whitespace) {
+        Some((w, n)) => (w, n.trim()),
+        None => (rest, ""),
+    };
+    let needs_name = |verb: &'static str| -> Result<String, ParseError> {
+        if name.is_empty() {
+            Err(ParseError::Missing {
+                cmd: verb,
+                what: "a playlist name",
+            })
+        } else {
+            Ok(name.to_string())
+        }
+    };
+    Ok(match word {
+        "list" => PlaylistSpec::List,
+        "open" => PlaylistSpec::Open(needs_name("playlist open")?),
+        "save" => PlaylistSpec::Save(needs_name("playlist save")?),
+        other => {
+            return Err(ParseError::Bad(
+                other.into(),
+                "playlist action — try `open <name>`, `save <name>`, or `list`",
+            ));
+        }
+    })
 }
 
 /// `4`, `none`, or nothing at all.
@@ -503,7 +532,11 @@ pub fn format(cmd: &Command) -> String {
         Command::Rate(RateSpec::Report) => "rate".into(),
         Command::Rate(RateSpec::Clear) => "rate none".into(),
         Command::Rate(RateSpec::Set(n)) => format!("rate {n}"),
-        Command::Playlist(name) => format!("playlist {name}"),
+        Command::Playlist(spec) => match spec {
+            PlaylistSpec::List => "playlist list".into(),
+            PlaylistSpec::Open(n) => format!("playlist open {n}"),
+            PlaylistSpec::Save(n) => format!("playlist save {n}"),
+        },
         Command::Freeze => "freeze".into(),
         Command::Filter(None) => "filter".into(),
         Command::Filter(Some(f)) => format!("filter {}", f.source),
@@ -616,19 +649,7 @@ mod tests {
     #[test]
     fn rate_takes_one_to_five_or_none() {
         assert_eq!(command("rate").unwrap(), Command::Rate(RateSpec::Report));
-        assert_eq!(
-            command("playlist fresh").unwrap(),
-            Command::Playlist("fresh".into())
-        );
         assert_eq!(command("freeze").unwrap(), Command::Freeze);
-        // A name is the whole point; without one there is nothing to load.
-        assert!(matches!(
-            command("playlist").unwrap_err(),
-            ParseError::Missing {
-                cmd: "playlist",
-                ..
-            }
-        ));
         assert_eq!(
             command("rate none").unwrap(),
             Command::Rate(RateSpec::Clear)
@@ -876,7 +897,7 @@ mod tests {
                 "unbind" => "unbind common x".to_string(),
                 "view" => "view 1".to_string(),
                 "catalog" => format!("{verb} all"),
-                "playlist" => "playlist fresh".to_string(),
+                "playlist" => "playlist open fresh".to_string(),
                 "filter" => "filter year>2000".to_string(),
                 "rate" => "rate 4".to_string(),
                 "in" => "in tree down".to_string(),
@@ -885,6 +906,46 @@ mod tests {
             };
             command(&line).unwrap_or_else(|e| panic!("{verb:?} does not parse: {e}"));
         }
+    }
+
+    #[test]
+    fn playlist_takes_subcommands() {
+        assert_eq!(
+            command("playlist open fresh").unwrap(),
+            Command::Playlist(PlaylistSpec::Open("fresh".into()))
+        );
+        assert_eq!(
+            command("playlist save late night").unwrap(),
+            Command::Playlist(PlaylistSpec::Save("late night".into())),
+            "a name keeps its spaces"
+        );
+        assert_eq!(
+            command("playlist list").unwrap(),
+            Command::Playlist(PlaylistSpec::List)
+        );
+        // A bare `:playlist` is the listing — the useful thing to do with no
+        // argument, rather than an error.
+        assert_eq!(
+            command("playlist").unwrap(),
+            Command::Playlist(PlaylistSpec::List)
+        );
+    }
+
+    /// A bare name was the spelling for a day (#15). Keeping it would mean a
+    /// playlist called `save` could never be opened, so it is rejected — and
+    /// the error names the replacement.
+    #[test]
+    fn a_bare_playlist_name_is_rejected_by_name() {
+        let e = command("playlist fresh").unwrap_err();
+        assert!(e.to_string().contains("open <name>"), "{e}");
+        assert!(
+            matches!(command("playlist open"), Err(ParseError::Missing { .. })),
+            "open needs a name"
+        );
+        assert!(matches!(
+            command("playlist save"),
+            Err(ParseError::Missing { .. })
+        ));
     }
 
     #[test]

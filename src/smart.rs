@@ -85,10 +85,6 @@ impl SmartPlaylists {
     pub fn names(&self) -> Vec<&str> {
         self.defined.iter().map(|p| p.name.as_str()).collect()
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.defined.is_empty()
-    }
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ mod filter;
 mod format;
 mod history;
 mod library;
+mod m3u;
 mod next;
 mod playlist;
 mod repl;
@@ -347,6 +348,7 @@ fn run_tui(
     let mut state = ui::Ui::new(start_dir, library);
     state.catalogs = app.catalogs.clone();
     state.playlists = loaded.playlists.clone();
+    state.saved = Some(playlist::Playlists::new(&loaded.data_dir));
 
     // Opened before the terminal is taken over, so a failure is visible.
     if let Some(path) = log_path {

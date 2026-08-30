@@ -168,8 +168,9 @@ a message naming what to write instead. That keeps _unrated_ and _rated badly_ a
 bare `:rate` reports. **Ratings are gmuse's, not the file's**: §1 keeps tag editing out of scope, so they live in
 `$XDG_STATE_HOME/gmuse/history.toml` and do not travel with the files.
 
-`:playlist <name>` fills view 3 from a saved rule and `:freeze` turns it into an ordinary, editable one — see
-[Smart playlists](#smart-playlists).
+`:playlist open <name>` fills view 3, from a saved rule or a saved file — they are one vocabulary.
+`:playlist save <name>` writes view 3 out, `:playlist list` says what there is, and `:freeze` detaches a rule without
+writing anything. See [Playlists](#playlists).
 
 Typing while the completion menu is open **narrows** it; `Backspace` widens it again, and a line matching nothing leaves
 the menu up saying `no matches` rather than vanishing. `C-n`/`C-p` or the arrows walk it, `C-y` accepts, `Esc` closes
@@ -310,6 +311,34 @@ history: carried 3 across a move
 
 An **ambiguous** match is declined rather than guessed — two copies of one track, or two untagged files of the same
 length, keep their own history rather than risk attaching a rating to the wrong song.
+
+## Playlists
+
+View 3 holds one playlist at a time. `y` adds the selection, `D` removes, and **it survives a quit** — the queue always
+did, and a list you assembled deliberately deserved it more.
+
+Named playlists are files, kept in `<data_dir>/playlists`:
+
+```
+:playlist save roadtrip     write view 3 out as roadtrip.m3u8
+:playlist open roadtrip     read it back
+:playlist list              what there is
+```
+
+`open` takes a **rule or a file** without caring which, because both are play sources — see
+[Smart playlists](#smart-playlists). Saving a rule-defined list writes what it currently holds and detaches it, so it
+becomes an ordinary editable playlist.
+
+The format is **M3U8**, not one of ours. A playlist is an ordered list of paths, which is exactly what M3U is, and M3U
+is what everything reads — VLC, foobar2000, Plex, beets, cmus. We write `#EXTM3U` with `#EXTINF` lines and read `.m3u`,
+`.m3u8` and cmus's `.pl`. The set of playlists **is** whatever the directory holds, so one dropped in from another
+program simply appears.
+
+Paths are written relative to the playlist file, so a library and its playlists move together. A playlist naming music
+the library does not have loads short and says how many were missing, rather than quietly dropping them.
+
+`#EXTINF` is write-only: emitted for other programs, ignored on read, because our own tags are better and a metadata
+cache in a text file goes stale.
 
 ## Smart playlists
 

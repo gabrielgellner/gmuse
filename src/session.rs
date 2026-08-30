@@ -61,6 +61,17 @@ pub struct Session {
     /// tracks*.
     #[serde(default)]
     pub queue: Vec<PathBuf>,
+    /// View 3, as paths.
+    ///
+    /// The queue is consumed as it plays and is explicitly a one-shot, yet it
+    /// used to be the only one of the two that came back — so a playlist you
+    /// spent ten minutes assembling was lost on quit while the throwaway list
+    /// survived. That was backwards (#22).
+    ///
+    /// Only the *unnamed* working playlist needs this: a saved one is a file,
+    /// and reopening it by name is better than shadowing it with a stale copy.
+    #[serde(default)]
+    pub playlist: Vec<PathBuf>,
     #[serde(default)]
     pub current: Option<PathBuf>,
     #[serde(default)]
@@ -120,6 +131,7 @@ mod tests {
         Session {
             version: VERSION,
             queue: vec![PathBuf::from("/m/a.mp3"), PathBuf::from("/m/b.flac")],
+            playlist: vec![PathBuf::from("/m/c.mp3")],
             current: Some(PathBuf::from("/m/c.opus")),
             position_secs: 42.5,
             modes: Modes {

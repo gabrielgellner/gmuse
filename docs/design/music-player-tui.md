@@ -2044,6 +2044,33 @@ Append here as decisions are made. Format: date, decision, rationale.
   every test green. The tests that matter write a real WAV to a temp tree and scan overlapping roots, which is the only
   version that fails when the wiring goes.
 
+- **2026-08-30** **Playlists are `.m3u8` files in a directory, and the directory is the index.** Not a format of our
+  own: a playlist _is_ an ordered list of paths, which is exactly what M3U is, and M3U is what every other program
+  reads. XSPF is technically better and never got adopted. Inventing one would have bought nothing and cost the ability
+  to open the file anywhere else — including Plex (#18). We write `.m3u8` (the `8` declares UTF-8, the format's one
+  genuine ambiguity) and read `.m3u`, `.m3u8` and cmus's `.pl`, which is a strict subset.
+
+  No index file: the set of playlists is whatever the directory holds, so one dropped in from another program appears
+  without being imported. An index would be a second source of truth to keep in step.
+
+  Paths are written **relative to the playlist file**, so a library and its playlists move together — which is the point
+  of keeping them under `data_dir`. `#EXTINF` is write-only: emitted because other programs use it, ignored on read
+  because our own tags are better and a metadata cache in a text file goes stale.
+
+- **2026-08-30** **`:playlist` takes subcommands, and a bare name is refused.** `open`, `save`, `list` — one verb, so
+  everything playlist-shaped is discoverable from one place and `:playlist <Tab>` shows the lot. `open` takes a rule
+  (#15) or a saved file (#22) without caring which, because §7 settled that both are play _sources_; sharing one
+  vocabulary is the whole reason they do not collide.
+
+  The bare `:playlist <name>` that shipped that morning is rejected rather than kept as a shorthand. Keeping it would
+  mean a playlist called `save` could never be opened — a small, permanent ambiguity — and the error names the
+  replacement.
+
+- **2026-08-30** **The session remembers view 3.** It remembered the _queue_, which is consumed as it plays and is
+  explicitly a one-shot, and not the playlist, so a list assembled deliberately was lost while the throwaway one
+  survived. A rule-owned list is deliberately **not** captured: it is recomputed from its rule on open, and freezing a
+  stale copy into the session would make it lie.
+
 ---
 
 ## 14. Prior art worth reading

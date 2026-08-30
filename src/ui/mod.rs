@@ -329,6 +329,11 @@ pub struct Ui {
     pub catalogs: crate::catalog::Catalogs,
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// Saved playlists on disk, under `data_dir/playlists` (#22).
+    ///
+    /// `None` when there is nowhere to keep them, which is the same guard the
+    /// event log uses — the feature is simply absent rather than half-working.
+    pub saved: Option<crate::playlist::Playlists>,
     /// Which smart playlist view 3 is currently showing, if any.
     ///
     /// The name rather than the list: the tracks live in `playlist` like any
@@ -368,6 +373,7 @@ impl Ui {
             status: String::new(),
             playlist: Playlist::new(),
             playlists: crate::smart::SmartPlaylists::default(),
+            saved: None,
             smart: None,
             queue: Queue::new(),
             playback: Playback::default(),
@@ -426,12 +432,7 @@ impl Ui {
                 .iter()
                 .map(|c| c.name.clone())
                 .collect(),
-            playlists: self
-                .playlists
-                .names()
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
+            playlists: known_playlists(self),
             bound: bind::sorted(&self.bindings)
                 .into_iter()
                 .map(|(ctx, key, _)| (ctx, key))
@@ -833,6 +834,17 @@ pub fn capture_session(ui: &Ui, ctx: &Context<'_>) -> crate::session::Session {
     crate::session::Session {
         version: 0, // stamped by `save`
         queue: ui.queue.entries().filter_map(|id| path_of(*id)).collect(),
+        // A rule-owned list is not captured: it is recomputed from the rule on
+        // open, and freezing a stale copy into the session would make it lie.
+        playlist: match ui.smart {
+            Some(_) => Vec::new(),
+            None => ui
+                .playlist
+                .entries()
+                .iter()
+                .filter_map(|id| path_of(*id))
+                .collect(),
+        },
         current: ui.playback.current.and_then(path_of),
         position_secs: ctx
             .player
@@ -910,6 +922,16 @@ pub fn restore_session(
             None => missing += 1,
         }
     }
+
+    ui.playlist.clear();
+    for path in &saved.playlist {
+        if let Some(id) = ctx.store.id_for_path(path) {
+            ui.playlist.push(id);
+        } else {
+            missing += 1;
+        }
+    }
+    ui.playlist_sel = 0;
 
     if let Some(path) = saved.current.as_ref()
         && let Some(id) = ctx.store.id_for_path(path)
@@ -1395,7 +1417,11 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             _ => ui.notify("nothing to remove here"),
         },
         Command::Rescan => ui.notify("rescan lands with :rescan in the app"),
-        Command::Playlist(name) => load_smart(ui, ctx, &name),
+        Command::Playlist(spec) => match spec {
+            crate::cmd::PlaylistSpec::Open(name) => open_playlist(ui, ctx, &name),
+            crate::cmd::PlaylistSpec::Save(name) => save_playlist(ui, ctx, &name),
+            crate::cmd::PlaylistSpec::List => list_playlists(ui),
+        },
         Command::Freeze => match ui.smart.take() {
             Some(name) => ui.notify(format!(
                 "froze {name} — {} tracks, now editable",
@@ -1605,17 +1631,136 @@ fn rule_owned(what: &str) -> String {
     format!("this playlist is a rule — `:freeze` it to {what} it by hand")
 }
 
+/// Open a playlist by name, whichever kind it is.
+///
+/// A rule and a saved list are both play *sources* (#15), so they share one
+/// verb rather than colliding in two. A rule wins a name clash, because it is
+/// the one that cannot be renamed from inside the app.
+fn open_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+    if ui.playlists.get(name).is_some() {
+        load_smart(ui, ctx, name);
+        return;
+    }
+    if let Some(found) = ui.saved.as_ref().and_then(|s| s.find(name)) {
+        load_saved(ui, ctx, &found);
+        return;
+    }
+    let known = known_playlists(ui);
+    ui.notify(if known.is_empty() {
+        "no playlists — `:playlist save <name>` writes the current one".into()
+    } else {
+        format!("no playlist {name:?} — try one of: {}", known.join(", "))
+    });
+}
+
+/// Every name `:playlist open` would accept.
+fn known_playlists(ui: &Ui) -> Vec<String> {
+    let mut names: Vec<String> = ui
+        .playlists
+        .names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if let Some(saved) = &ui.saved {
+        for s in saved.list() {
+            if !names.contains(&s.name) {
+                names.push(s.name);
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+fn list_playlists(ui: &mut Ui) {
+    let known = known_playlists(ui);
+    if !known.is_empty() {
+        ui.notify(known.join(", "));
+        return;
+    }
+    // Naming the directory turns "there are none" into something actionable —
+    // and it is where you would drop one in from another program.
+    ui.notify(
+        match ui.saved.as_ref().map(|s| s.dir().display().to_string()) {
+            Some(dir) => format!("no playlists yet — they live in {dir}"),
+            None => "no playlists — set `data_dir` in the config".into(),
+        },
+    );
+}
+
+/// Fill view 3 from a saved `.m3u8`.
+fn load_saved(ui: &mut Ui, ctx: &Context<'_>, found: &crate::playlist::Saved) {
+    let paths = match crate::m3u::read(&found.path) {
+        Ok(p) => p,
+        Err(e) => {
+            ui.notify(e.to_string());
+            return;
+        }
+    };
+    // A playlist names paths; the store may not know all of them — the file
+    // could predate a scan, or name music that has gone. Said out loud rather
+    // than silently short, because a playlist quietly missing three tracks is
+    // how you stop trusting it.
+    let mut missing = 0;
+    ui.playlist.clear();
+    for path in &paths {
+        match ctx.store.id_for_path(path) {
+            Some(id) => ui.playlist.push(id),
+            None => missing += 1,
+        }
+    }
+    ui.playlist_sel = 0;
+    // A saved playlist is an ordinary one: editable, and owned by nobody.
+    ui.smart = None;
+    switch_view(ui, View::Playlist);
+    ui.notify(match missing {
+        0 => format!("{}: {} tracks", found.name, ui.playlist.len()),
+        n => format!(
+            "{}: {} tracks, {n} not in the library",
+            found.name,
+            ui.playlist.len()
+        ),
+    });
+}
+
+/// Write view 3 out under a name.
+fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+    let Some(saved) = ui.saved.clone() else {
+        ui.notify("nowhere to save playlists — set `data_dir` in the config");
+        return;
+    };
+    if ui.playlist.is_empty() {
+        ui.notify("the playlist is empty — nothing to save");
+        return;
+    }
+    let tracks: Vec<&crate::store::Track> = ui
+        .playlist
+        .entries()
+        .iter()
+        .filter_map(|id| ctx.store.get(*id))
+        .collect();
+    let at = saved.path_for(name);
+    match crate::m3u::write(&at, &tracks) {
+        Ok(()) => {
+            // Saving a rule-defined list writes what it *currently* holds and
+            // detaches it, which is what `:freeze` does — so say so rather
+            // than leaving the title claiming a rule still owns it.
+            let was = ui.smart.take();
+            ui.notify(match was {
+                Some(rule) => format!(
+                    "saved {} tracks as {name} (detached from {rule})",
+                    tracks.len()
+                ),
+                None => format!("saved {} tracks as {name}", tracks.len()),
+            });
+        }
+        Err(e) => ui.notify(e.to_string()),
+    }
+}
+
 /// Fill view 3 from a named smart playlist.
 fn load_smart(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let Some(spec) = ui.playlists.get(name) else {
-        ui.notify(if ui.playlists.is_empty() {
-            "no smart playlists are defined — see `[playlists.…]` in the config".into()
-        } else {
-            format!(
-                "no smart playlist {name:?} — try one of: {}",
-                ui.playlists.names().join(", ")
-            )
-        });
         return;
     };
     let ids = spec.members(ctx.store, ui.sort_env());
@@ -2977,7 +3122,7 @@ mod tests {
         let mut ui = with_playlists(&store);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "playlist electronic");
+        type_line(&mut ui, &ctx, "playlist open electronic");
 
         assert_eq!(ui.view, View::Playlist);
         assert_eq!(ui.smart.as_deref(), Some("electronic"));
@@ -3001,7 +3146,7 @@ mod tests {
         let before = ui.library.sorted().to_vec();
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "playlist electronic");
+        type_line(&mut ui, &ctx, "playlist open electronic");
 
         assert_eq!(ui.playlist.len(), 2, "the rule selected two");
         assert_eq!(
@@ -3018,7 +3163,7 @@ mod tests {
         let mut ui = with_playlists(&store);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "playlist nope");
+        type_line(&mut ui, &ctx, "playlist open nope");
         assert!(ui.status.contains("electronic"), "{}", ui.status);
         assert!(ui.status.contains("good"), "{}", ui.status);
         assert!(ui.smart.is_none());
@@ -3031,7 +3176,7 @@ mod tests {
         let mut ui = with_playlists(&store);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "playlist good");
+        type_line(&mut ui, &ctx, "playlist open good");
         assert!(ui.playlist.is_empty());
         assert!(ui.status.contains("rating>=4"), "{}", ui.status);
     }
@@ -3045,7 +3190,7 @@ mod tests {
         let mut ui = with_playlists(&store);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "playlist electronic");
+        type_line(&mut ui, &ctx, "playlist open electronic");
         let before = ui.playlist.len();
 
         execute(&mut ui, &ctx, Command::Remove);
@@ -3072,7 +3217,7 @@ mod tests {
         let mut ui = with_playlists(&store);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "playlist electronic");
+        type_line(&mut ui, &ctx, "playlist open electronic");
         let before = ui.playlist.len();
 
         execute(&mut ui, &ctx, Command::Freeze);
@@ -3102,7 +3247,7 @@ mod tests {
         let mut ui = with_playlists(&store);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "playlist good");
+        type_line(&mut ui, &ctx, "playlist open good");
         assert!(ui.playlist.is_empty(), "nothing is rated yet");
 
         // Rate the track under the cursor in view 2.
@@ -3121,7 +3266,7 @@ mod tests {
         let mut ui = with_playlists(&store);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "playlist electronic");
+        type_line(&mut ui, &ctx, "playlist open electronic");
         let out = render(&ui, &ctx, 74, 10);
         assert!(out.contains("playlist: electronic"), "{out}");
 
@@ -3130,18 +3275,185 @@ mod tests {
         assert!(!out.contains("playlist: electronic"), "{out}");
     }
 
+    /// The defect #22 opened with: the queue came back and the playlist did
+    /// not, so a list you spent ten minutes on was lost while the throwaway
+    /// one survived.
+    #[test]
+    fn a_hand_built_playlist_survives_a_quit() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+        let ids: Vec<_> = store.iter().map(|(id, _)| id).collect();
+        ui.playlist.push(ids[2]);
+        ui.playlist.push(ids[0]);
+
+        let snapshot = capture_session(&ui, &ctx);
+        assert_eq!(snapshot.playlist.len(), 2);
+
+        let mut fresh = with_playlists(&store);
+        restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
+        assert_eq!(
+            fresh.playlist.entries(),
+            [ids[2], ids[0]],
+            "order matters — a playlist is a deliberate one"
+        );
+    }
+
+    /// A rule-owned list is recomputed on open, so freezing a stale copy into
+    /// the session would make it lie.
+    #[test]
+    fn a_rule_owned_playlist_is_not_captured_in_the_session() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open electronic");
+        assert_eq!(ui.playlist.len(), 2);
+
+        assert!(capture_session(&ui, &ctx).playlist.is_empty());
+    }
+
+    fn ui_with_saved(store: &Store, name: &str) -> (Ui, PathBuf) {
+        let dir = scratch(name);
+        let mut ui = with_playlists(store);
+        ui.saved = Some(crate::playlist::Playlists::new(&dir));
+        (ui, dir)
+    }
+
+    #[test]
+    fn a_saved_playlist_round_trips_through_a_file() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "save-open");
+        let ids: Vec<_> = store.iter().map(|(id, _)| id).collect();
+        ui.playlist.push(ids[2]);
+        ui.playlist.push(ids[0]);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist save roadtrip");
+        assert!(
+            dir.join("playlists/roadtrip.m3u8").exists(),
+            "{}",
+            ui.status
+        );
+
+        ui.playlist.clear();
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open roadtrip");
+        assert_eq!(ui.playlist.entries(), [ids[2], ids[0]]);
+        assert!(ui.smart.is_none(), "a saved playlist is an ordinary one");
+        assert_eq!(ui.view, View::Playlist);
+    }
+
+    /// Saving is also how a rule becomes editable, so it must detach — leaving
+    /// the title claiming a rule still owns the list would be a lie.
+    #[test]
+    fn saving_a_rule_owned_playlist_detaches_it() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "save-detach");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open electronic");
+        let before = ui.playlist.len();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist save keepers");
+        assert!(ui.smart.is_none(), "{}", ui.status);
+        assert_eq!(ui.playlist.len(), before);
+
+        ui.view = View::Playlist;
+        execute(&mut ui, &ctx, Command::Remove);
+        assert_eq!(ui.playlist.len(), before - 1, "still not editable");
+    }
+
+    /// A playlist naming music the library does not have is short, and says so
+    /// — quietly dropping tracks is how you stop trusting it.
+    #[test]
+    fn tracks_a_playlist_names_but_the_library_lacks_are_reported() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "missing");
+        let known = store.iter().next().unwrap().1.path.display().to_string();
+        std::fs::create_dir_all(dir.join("playlists")).unwrap();
+        std::fs::write(
+            dir.join("playlists/partial.m3u8"),
+            format!(
+                "#EXTM3U
+{known}
+/m/gone.mp3
+"
+            ),
+        )
+        .unwrap();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open partial");
+        assert_eq!(ui.playlist.len(), 1);
+        assert!(ui.status.contains("1 not in the library"), "{}", ui.status);
+    }
+
+    /// One vocabulary: `open` takes a rule or a file without caring which.
+    #[test]
+    fn listing_shows_rules_and_saved_files_together() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "listing");
+        std::fs::create_dir_all(dir.join("playlists")).unwrap();
+        std::fs::write(
+            dir.join("playlists/roadtrip.m3u8"),
+            "#EXTM3U
+",
+        )
+        .unwrap();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist list");
+        for expected in ["electronic", "good", "roadtrip"] {
+            assert!(
+                ui.status.contains(expected),
+                "{expected} missing: {}",
+                ui.status
+            );
+        }
+    }
+
+    #[test]
+    fn saving_an_empty_playlist_says_so_rather_than_writing_a_stub() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "empty-save");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist save nothing");
+        assert!(ui.status.contains("empty"), "{}", ui.status);
+        assert!(!dir.join("playlists/nothing.m3u8").exists());
+    }
+
     #[test]
     fn tab_completes_smart_playlist_names() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let mut ui = with_playlists(&store);
 
+        // The name completes after the action.
         press(&mut ui, &ctx, ":");
-        for c in "playlist e".chars() {
+        for c in "playlist open e".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
-        assert_eq!(typed(&ui), "playlist electronic ");
+        assert_eq!(typed(&ui), "playlist open electronic ");
+
+        // And the actions complete before it: what can be done, before what to
+        // do it to.
+        press(&mut ui, &ctx, "escape");
+        press(&mut ui, &ctx, ":");
+        for c in "playlist sa".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        assert_eq!(typed(&ui), "playlist save ");
     }
 
     /// §9's M6 criterion: every default binding must actually fire. A binding
@@ -4249,6 +4561,7 @@ mod tests {
         crate::session::Session {
             version: 1,
             queue: Vec::new(),
+            playlist: Vec::new(),
             current: None,
             position_secs: 0.0,
             modes: crate::session::Modes {

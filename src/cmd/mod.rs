@@ -290,6 +290,26 @@ pub fn quality_name(q: Quality) -> &'static str {
     }
 }
 
+/// What `:playlist` was asked to do.
+///
+/// Subcommands rather than a bare name, so everything playlist-shaped is
+/// discoverable from one verb and `:playlist <Tab>` shows the lot. `open`
+/// takes a smart playlist or a saved one without caring which — the whole
+/// point of #15 was that a rule and a list are both play *sources*, so they
+/// share a vocabulary rather than colliding in two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaylistSpec {
+    /// Fill view 3 from a rule (#15) or a saved `.m3u8` (#22).
+    ///
+    /// A *source*, not a narrowing — the library stays exactly as it was. The
+    /// narrowing spelling of the same idea is `:catalog`.
+    Open(String),
+    /// Write view 3 out under a name.
+    Save(String),
+    /// What there is to open. Also what a bare `:playlist` does.
+    List,
+}
+
 /// Everything the application can be asked to do.
 ///
 /// One enum for keys, the `:` line and the rc file, per §6.
@@ -353,11 +373,7 @@ pub enum Command {
     ViewPrev,
     ViewLast,
     Catalog(crate::catalog::Spec),
-    /// Fill view 3 from a named smart playlist (§7, issue #15).
-    ///
-    /// A *source*, not a narrowing — the library stays exactly as it was. The
-    /// narrowing spelling of the same idea is `:catalog`.
-    Playlist(String),
+    Playlist(PlaylistSpec),
     /// Turn the loaded smart playlist into an ordinary, editable one.
     ///
     /// A rule-defined list cannot have a track removed from it without growing
