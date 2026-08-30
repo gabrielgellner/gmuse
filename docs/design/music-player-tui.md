@@ -229,9 +229,18 @@ _subset_ of it. A catalog is therefore a membership rule, and:
   must **not** be filtered by the active set — a playlist is an explicit choice, and crossing themes is the point.
 - **One scan, one cache.** Catalogs partition what is _shown_, never what is indexed.
 
-The open question is how membership is defined: scan roots (works today) or a filter expression (needs §7). Since a
-catalog is close to being a named, persistent filter, **catalogs and the filter language should be designed together in
-M8** rather than becoming two mechanisms for one idea.
+**Membership is a filter expression** (§7), settled 2026-08-30. `roots = […]` stays as sugar for the common case and
+desugars to a path match, so a catalog can equally be `where = "genre=\"jazz\"|genre=\"blues\""`. There is one
+mechanism, not two: a catalog _is_ a named, persistent filter, which is what cmus's `fset` already is.
+
+Active catalogs **union**; a transient filter **intersects**:
+
+```text
+members = (union of the active catalogs) ∩ (the transient filter, if any)
+```
+
+Two combining rules, each following from what the thing is for — "which bodies of music am I in" is a selection, "what
+am I looking for" is a restriction. This is also what `:catalog folk pop` already does, and it must keep doing it.
 
 Removal from the library is a tombstone or a rebuild, never an index shift — shifting invalidates every `TrackId` held
 elsewhere.
@@ -333,8 +342,46 @@ Both are small. Hand-rolled recursive descent or `winnow` — do not pull in a p
 
 ### Filter expressions
 
-`~"artist=foo&bitrate>192"`, with `&` (and), `|` (or), `!` (not), parentheses, `=`/`<`/`>` comparisons, and bare words
-matching any text field.
+Settled 2026-08-30 — see the Decision Log for the reasoning and the evidence.
+
+```text
+genre="jazz"|genre="blues"
+artist="*ferrell*"&year>2020
+genre="*electronic*"&!genre="*christmas*"&bitrate>256
+year>=1990&year<2000&(genre="folk"|genre="country")
+filename="*.opus"
+any="*live*"
+```
+
+**Terse, deliberately.** This is a pointed language typed at a `:` prompt, not prose. `&` `|` `!` and parentheses; `=`
+`!=` for strings; `=` `!=` `<` `<=` `>` `>=` for numbers.
+
+**Strings match by glob, and `*` is the only metacharacter.** One operator covers every positional case, and the
+wildcard is visible where it applies rather than spread across four keywords:
+
+| pattern              | matches      |
+| -------------------- | ------------ |
+| `artist="Ferrell"`   | exactly that |
+| `artist="Ferrell*"`  | starts with  |
+| `artist="*Ferrell"`  | ends with    |
+| `artist="*Ferrell*"` | contains     |
+
+`?` is **not** a metacharacter — glob's "exactly one character" is never what anyone wants from a music search, while a
+question mark in a title is real. `\*` is a literal asterisk.
+
+**Smart-case**: insensitive unless the pattern contains a capital, as in vim and ripgrep. `genre="jazz"` finds "Jazz";
+`artist="Burial"` is precise.
+
+**No regex**, and not by omission — see the Decision Log. It can arrive later as a separate opt-in operator (`=~`) if
+globs prove insufficient, so the hazardous behaviour would be something asked for rather than the default.
+
+**No bare words.** `ferrell` alone is an error; `any="*ferrell*"` is how you search every text field. `any` is a real
+field that composes with everything else, so the convenience costs no implicitness.
+
+Fields are **the same names the format language uses** (§7 below, `format::Field`), with a type attached — one
+vocabulary for both mini-languages, and one place to add `play_count` when it exists. Strings: `artist`, `albumartist`,
+`album`, `title`, `genre`, `filename`, `path`, `any`. Numbers: `track`, `disc`, `year`, `duration`, `bitrate`,
+`samplerate`, `channels`.
 
 ```rust
 pub enum FilterExpr {
@@ -342,7 +389,6 @@ pub enum FilterExpr {
     Or(Box<FilterExpr>, Box<FilterExpr>),
     Not(Box<FilterExpr>),
     Cmp { field: Field, op: CmpOp, value: Value },
-    Text(String),
 }
 
 impl FilterExpr {
@@ -350,8 +396,13 @@ impl FilterExpr {
 }
 ```
 
-**Compile once to a closure**, do not re-interpret the AST per track. Filters run over the whole library on every
-keystroke in view 6.
+**Compile once to a closure**, do not re-interpret the AST per track. Measured: a whole-library pass is 0.92ms at 20k
+tracks in the worst case, so there is no index to be won — see the Decision Log entry on SQLite.
+
+**A filter confines playback, not merely display.** §4 makes `Library` a projection and §5 builds pools from it, so
+anything that narrows the library narrows what shuffle picks from. That falls out rather than being built, and the rule
+is "you hear what you can see". Playlists and the queue are **not** filtered: they hold `TrackId`s straight into the
+`Store`, and crossing boundaries is the point of them.
 
 ### Format strings
 
@@ -1569,6 +1620,71 @@ Append here as decisions are made. Format: date, decision, rationale.
   tests were **inert** — one replaced an identical-looking `ConfigError` block earlier in the file, because
   `replace(..., 1)` takes the first match. That is the third time this session a passing mutation meant a bad mutation
   rather than a weak test. **Check the mutation landed where it was aimed before drawing any conclusion from it.**
+
+- **2026-08-30** **The filter language, designed (§7) — and catalogs turn out to be filters already.** The log warned
+  twice that "a catalog defined by a filter expression is a named, persistent filter; building the filter language first
+  without that in mind risks two mechanisms for one idea". Reading cmus's manual made the collision exact rather than
+  theoretical:
+
+  | cmus                           | gmuse today                    |
+  | ------------------------------ | ------------------------------ |
+  | `fset dance=…`                 | `[catalogs.dance] roots = […]` |
+  | `factivate dance`              | `:catalog dance`               |
+  | view 6 lists them, space/enter | view 6 is a stub saying "M8"   |
+
+  **We had already built cmus's named filters and called them catalogs.** That is a good outcome: the concept was right
+  and only the membership rule was narrow. So a catalog becomes a named filter expression, `roots` stays as sugar, and
+  view 6 finally has a job.
+
+  The distinction that survives is not catalog-versus-filter but **lifetime** (named and persistent versus transient and
+  anonymous) and **role** (narrows the world versus adds a play source — which is the line to smart playlists, #15). One
+  language, three usages.
+
+  **The combining rule differs by role, and that is deliberate.** Active catalogs union; a transient filter intersects.
+  Under a single rule `:catalog folk pop` would either break (AND: no track is both) or filters would stop narrowing
+  (OR). "Which bodies of music" is a selection, "what am I looking for" is a restriction.
+
+  **Syntax: terse, cmus-shaped**, chosen after seeing the alternatives written out. MPD spells its operators
+  (`contains`, `starts_with`) and is the most explicit of the three tools surveyed — but it has **no `OR` at all**,
+  which is disqualifying when `genre="jazz"|genre="blues"` is exactly the catalog one wants. beets is the tersest and
+  most implicit (bare words search everything, space means AND). cmus sits between and reads well for something typed at
+  a prompt.
+
+- **2026-08-30** **Globs, not regex — decided on the library's own data, not on taste.** Regex was the obvious candidate
+  for string matching and is the wrong one here, because music metadata is made of regex metacharacters. Counted across
+  170 distinct tag values in the reference library:
+
+  | character       | values containing it |
+  | --------------- | -------------------- |
+  | `.`             | **19**               |
+  | `(` and `)`     | **23**               |
+  | `?`             | 1                    |
+  | `*`             | **0**                |
+  | `[` `+` `^` `$` | 0                    |
+
+  The failures are silent, which is what makes them disqualifying rather than merely inconvenient:
+
+  - `Burial (S/T)` as a regex matches `Burial S/T` and **not** the actual album — a silent miss.
+  - `Have You Got It In You?` — the `?` makes the preceding letter optional, so the literal title does not match.
+  - `Anderson .Paak` — `.` matches any character, so it also matches `Anderson XPaak` — a silent over-match.
+
+  Nothing errors; you simply get the wrong tracks. With globs, `*` collides with **nothing** in this library, and `?` is
+  deliberately _not_ treated as a metacharacter: glob's "exactly one character" is never wanted from a music search,
+  while a question mark in a title is real. That leaves the language collision-free on real data.
+
+  Regex is deferred rather than rejected. If globs prove insufficient it arrives as a distinct `=~`, opt-in, at the cost
+  of the `regex` crate and of `|` meaning two things on one line.
+
+  **Smart-case**, as in vim and ripgrep: insensitive unless the pattern contains a capital. Tags are inconsistently
+  capitalised, so `genre="jazz"` must find "Jazz"; `artist="Burial"` stays precise.
+
+  **No bare words.** `any="*ferrell*"` searches every text field, and `any` is a real field that composes with the rest
+  — the convenience without the one implicit thing in an otherwise explicit language.
+
+  Left open on purpose: **whether a transient `:filter` survives a restart**. Session resumption now remembers modes and
+  a filter is arguably one, but "transient" and "restored on launch" are in tension and the answer is clearer after
+  living with it. Also deferred: **runtime-defined named filters** (cmus's `fset`), which need somewhere to persist —
+  the same durable store #13 and #14 want, and not worth inventing twice.
 
 ---
 
