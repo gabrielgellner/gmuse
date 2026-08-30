@@ -140,7 +140,7 @@ pub enum SearchDir {
 }
 
 /// Settings reachable from `:set` and `:toggle`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SettingKey {
     AaaMode,
     Shuffle,

@@ -48,6 +48,16 @@ impl AaaMode {
             AaaMode::Album => "album",
         }
     }
+
+    /// The inverse of [`AaaMode::label`], for reading a saved session.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "all" => AaaMode::All,
+            "artist" => AaaMode::Artist,
+            "album" => AaaMode::Album,
+            _ => return None,
+        })
+    }
 }
 
 /// Where the chosen track came from, so the caller knows what to do next.

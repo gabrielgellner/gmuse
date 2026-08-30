@@ -99,6 +99,7 @@ gmuse [OPTIONS] [FILE]
   -r, --rate <RATE>          force the device sample rate                   [env: GMUSE_RATE]
   -q, --resample <QUALITY>   fast | balanced | high                         [env: GMUSE_RESAMPLE]
   -v, --volume <VOLUME>      initial fader position, 1.0 is unity
+      --no-resume            do not restore or save the session
   -L, --library <DIR>        library root to scan, repeatable  [env: GMUSE_LIBRARY]
       --rescan               re-read every file, ignoring mtimes
       --no-cache             do not read or write the library cache
@@ -117,6 +118,10 @@ playing track is emphasised in every list it appears in.
 Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
 `<`/`>` seek 60s, `-`/`+` adjust volume by 3 dB. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m`
 cycles all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue, `D` removes.
+
+The queue, current track, position and playback modes come back on the next launch, **paused** — including the shuffle
+seed, so a shuffled sequence resumes rather than restarting. `--no-resume` starts fresh. Settings named in `config.toml`
+win over what was remembered; anything the config does not mention keeps whatever you last set.
 
 Loudness is matched from ReplayGain 2.0 tags when files have them — `set replaygain=auto` follows the play order, taking
 the album figure in order and the track figure when shuffling. Analysis is deliberately somebody else's job: tag a

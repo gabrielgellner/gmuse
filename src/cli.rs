@@ -33,6 +33,10 @@ pub struct Cli {
     #[arg(short = 'q', long, env = "GMUSE_RESAMPLE", default_value = "balanced")]
     pub resample: Quality,
 
+    /// Start fresh: do not restore the last session, and do not save this one.
+    #[arg(long)]
+    pub no_resume: bool,
+
     /// Initial volume as a fader position: 1.0 is unity, 0.0 silence.
     #[arg(short = 'v', long, default_value_t = 1.0)]
     pub volume: f32,

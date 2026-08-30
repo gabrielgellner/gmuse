@@ -19,6 +19,7 @@ mod next;
 mod playlist;
 mod repl;
 mod scan;
+mod session;
 mod store;
 mod ui;
 
@@ -140,7 +141,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.player
                 .load(crate::audio::TrackSource::plain(path.clone()));
         }
-        return run_tui(&app, args.smart_artist_sort, loaded, args.log_path());
+        return run_tui(
+            &app,
+            args.smart_artist_sort,
+            loaded,
+            args.log_path(),
+            !args.no_resume,
+        );
     }
 
     // The config sets up UI state, which the line prompt does not have. Say so
@@ -242,6 +249,7 @@ fn run_tui(
     smart_artist_sort: bool,
     loaded: config::Loaded,
     log_path: Option<PathBuf>,
+    resume: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let library = Library::from_members(
         &app.store,
@@ -283,6 +291,21 @@ fn run_tui(
     }
 
     state.theme = loaded.theme;
+
+    // Which settings the config actually spoke about. The resumption rule is
+    // "config wins where it speaks, the session fills the rest": writing a
+    // setting in config.toml should take effect immediately rather than being
+    // shadowed by whatever a stale session file remembers. Collected before
+    // the commands are consumed below.
+    let fixed: std::collections::HashSet<cmd::SettingKey> = loaded
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            cmd::Command::Set { key, .. } => Some(*key),
+            _ => None,
+        })
+        .collect();
+
     // The config's bindings and settings are commands, so they run through the
     // same execute() a keypress does — there is no second configuration path
     // to keep in step.
@@ -294,6 +317,29 @@ fn run_tui(
         for e in &loaded.errors {
             eprintln!("config: {e}");
         }
+    }
+
+    // Where we were last time, restored paused. After the config, so `fixed`
+    // means something; before the settings summary, so the summary reports
+    // what is actually in force.
+    if resume {
+        let path = session::default_path();
+        if let Some(saved) = session::load(&path) {
+            ui::restore_session(&mut state, &ctx, &saved, &fixed);
+            state.audit.line(
+                "session",
+                &format!(
+                    "restored {} queued, {}",
+                    saved.queue.len(),
+                    saved
+                        .current
+                        .as_ref()
+                        .map(|p| format!("at {:.1}s in {}", saved.position_secs, p.display()))
+                        .unwrap_or_else(|| "nothing playing".into())
+                ),
+            );
+        }
+        state.session_path = Some(path);
     }
 
     // *After* the config has run, or this records the defaults rather than
@@ -313,6 +359,8 @@ fn run_tui(
     let mut terminal = ratatui::init();
     let result = ui::run(&mut terminal, &mut state, &ctx);
     ratatui::restore();
+    // Written after the terminal is restored, so a failure is visible.
+    ui::save_session(&mut state, &ctx);
     // Written after the terminal is restored, so the summary is visible.
     if state.audit.is_enabled() {
         let underruns = app.player.underruns();

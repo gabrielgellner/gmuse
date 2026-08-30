@@ -1480,6 +1480,36 @@ Append here as decisions are made. Format: date, decision, rationale.
   The line prompt prints gain and decibels in its own `status` output, so there is somewhere to look, but the flag
   should either work or say it does not apply.
 
+- **2026-08-29** **Session resumption (issue #16), and the first use of `$XDG_STATE_HOME` for durable state.** Queue,
+  current track, position and modes come back on the next launch, **paused** — starting playback unbidden would be
+  obnoxious. It is §1's "the interface has to be usable when it is not in front of you" cashed in: a player that forgets
+  where you were every launch is the opposite of that.
+
+  **The shuffle seed is the interesting part.** §5 makes shuffle a seeded permutation, so the order being heard is a
+  function of `rng_state` and the pool. Restoring the _mode_ without the _seed_ resumes a different sequence while
+  looking entirely correct — one `u64` is the difference between resuming a shuffle and restarting one. It also has to
+  be restored **after** shuffle, because setting shuffle reseeds; the test mutates that ordering to prove it.
+
+  **Precedence: the config wins where it speaks, the session fills the rest.** Writing a setting in `config.toml` should
+  take effect immediately rather than being shadowed by a stale session file — the confusing failure is editing a config
+  and seeing nothing happen. The keys the config named are collected from its own `Set` commands before they run, which
+  reuses the existing `active_specified` idea: _what the config said_ is distinct from _the value it produced_, and only
+  the former should outrank memory.
+
+  **The store is `$XDG_STATE_HOME/gmuse/session.toml`, written temp-then-rename.** Not the cache: this cannot be rebuilt
+  by rescanning, and the Decision Log records what happened last time durable data shared a lifetime with derived data.
+  Not keyed by `TrackId` either — an arena index is meaningful only while the cache that produced it survives, so a
+  queue keyed by id would silently restore _other tracks_. Paths, with anything missing skipped and counted rather than
+  treated as an error.
+
+  **A bug found by writing it down rather than by a test.** Restoring loads the track, and loading emits `Loaded`, which
+  is a save point — but at that instant the position is still 0, because the decoder has not yet processed the seek that
+  follows. The first save would therefore overwrite the very position being resumed, and it would present as "resumption
+  does not work". A one-shot guard skips that first `Loaded`; the test now fails without it.
+
+  Saving happens at every track boundary as well as on quit. On quit alone, a crash loses the whole session — which is
+  precisely the session worth having, the same reasoning that made the audit log flush per line.
+
 ---
 
 ## 14. Prior art worth reading

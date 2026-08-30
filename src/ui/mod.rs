@@ -274,6 +274,15 @@ pub struct Ui {
     pub relative_numbers: bool,
     /// Session log. Disabled unless `--log` was given.
     pub audit: crate::audit::Audit,
+    /// Where to write "where I was". `None` disables resumption entirely.
+    pub session_path: Option<PathBuf>,
+    /// A restored track has been loaded but its seek has not landed yet.
+    ///
+    /// Loading emits `Loaded`, which is a save point — and at that instant the
+    /// position is still 0, because the decoder has not processed the seek
+    /// that follows. Saving there would overwrite the very position being
+    /// resumed, losing it to any crash before the next save.
+    resuming: bool,
     /// Underruns already logged, so only new ones are recorded.
     seen_underruns: u32,
     /// The track handed to the player for a gapless splice, held until the
@@ -326,6 +335,8 @@ impl Ui {
             previous_view: View::Tree,
             relative_numbers: false,
             pending_next: None,
+            session_path: None,
+            resuming: false,
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
             settings_sel: 0,
@@ -541,6 +552,19 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
                     ui.playback.current = Some(id);
                     ui.status.clear();
                 }
+                // A track boundary is the cheapest honest save point: the
+                // queue and current track have just changed, and writing on
+                // quit alone would lose the whole session to a crash — which
+                // is exactly the session worth having.
+                //
+                // The first `Loaded` after a restore is the exception: it is
+                // this program's own doing and arrives before the seek has
+                // landed. Skip it once, then resume saving normally.
+                if ui.resuming {
+                    ui.resuming = false;
+                } else {
+                    save_session(ui, ctx);
+                }
             }
         }
     }
@@ -596,6 +620,137 @@ fn announce_next(ui: &mut Ui, ctx: &Context<'_>) -> Option<crate::audio::TrackSo
     let source = source_for(ui, ctx.store.get(id)?);
     ui.pending_next = Some(id);
     Some(source)
+}
+
+/// Write the session, if one is being kept. Failures are logged, never shown:
+/// a full disk should not interrupt playback, and the atomic write means the
+/// previous session survives anyway.
+pub fn save_session(ui: &mut Ui, ctx: &Context<'_>) {
+    if ui.resuming {
+        return;
+    }
+    let Some(path) = ui.session_path.clone() else {
+        return;
+    };
+    let snapshot = capture_session(ui, ctx);
+    if let Err(e) = crate::session::save(&path, &snapshot) {
+        ui.audit.line("session", &format!("could not save: {e}"));
+    }
+}
+
+/// Capture where we are, for [`crate::session`].
+///
+/// Paths rather than `TrackId`s — see the note on `Session::queue`.
+pub fn capture_session(ui: &Ui, ctx: &Context<'_>) -> crate::session::Session {
+    let path_of = |id: TrackId| ctx.store.get(id).map(|t| t.path.clone());
+    crate::session::Session {
+        version: 0, // stamped by `save`
+        queue: ui.queue.entries().filter_map(|id| path_of(*id)).collect(),
+        current: ui.playback.current.and_then(path_of),
+        position_secs: ctx
+            .player
+            .map(|p| p.position().as_secs_f64())
+            .unwrap_or(0.0),
+        modes: crate::session::Modes {
+            shuffle: ui.playback.shuffle,
+            repeat: ui.playback.repeat,
+            repeat_current: ui.playback.repeat_current,
+            continue_playing: ui.continue_playing,
+            aaa_mode: ui.playback.aaa_mode.label().into(),
+            replaygain: ui.replaygain.label().into(),
+            active: match ui.playback.active {
+                next::ActiveSource::Playlist => "playlist".into(),
+                next::ActiveSource::Library => "library".into(),
+            },
+            rng_state: ui.playback.rng_state,
+        },
+    }
+}
+
+/// Restore a saved session, leaving playback **paused**.
+///
+/// `fixed` names the settings the config spoke about; those are left alone.
+/// The rule is "if you wrote it in `config.toml` you meant it, and anything it
+/// does not mention remembers what you last did" — so editing the config takes
+/// effect immediately rather than being shadowed by a stale session file.
+///
+/// Nothing here is an error worth interrupting a launch for: a track that has
+/// moved or gone is skipped, and an unparseable mode falls back to the default.
+pub fn restore_session(
+    ui: &mut Ui,
+    ctx: &Context<'_>,
+    saved: &crate::session::Session,
+    fixed: &std::collections::HashSet<SettingKey>,
+) {
+    use crate::cmd::ReplayGainMode;
+    use next::{AaaMode, ActiveSource};
+
+    let m = &saved.modes;
+    if !fixed.contains(&SettingKey::Shuffle) {
+        ui.playback.shuffle = m.shuffle;
+    }
+    if !fixed.contains(&SettingKey::Repeat) {
+        ui.playback.repeat = m.repeat;
+    }
+    if !fixed.contains(&SettingKey::RepeatCurrent) {
+        ui.playback.repeat_current = m.repeat_current;
+    }
+    if !fixed.contains(&SettingKey::Continue) {
+        ui.continue_playing = m.continue_playing;
+    }
+    if !fixed.contains(&SettingKey::AaaMode)
+        && let Some(mode) = AaaMode::parse(&m.aaa_mode)
+    {
+        ui.playback.aaa_mode = mode;
+    }
+    if !fixed.contains(&SettingKey::ReplayGain)
+        && let Some(mode) = ReplayGainMode::parse(&m.replaygain)
+    {
+        ui.replaygain = mode;
+    }
+    ui.playback.active = match m.active.as_str() {
+        "playlist" => ActiveSource::Playlist,
+        _ => ActiveSource::Library,
+    };
+    // Restored *after* shuffle, because setting shuffle reseeds.
+    ui.playback.rng_state = m.rng_state;
+
+    ui.queue.clear();
+    let mut missing = 0;
+    for path in &saved.queue {
+        match ctx.store.id_for_path(path) {
+            Some(id) => ui.queue.push_back(id),
+            None => missing += 1,
+        }
+    }
+
+    if let Some(path) = saved.current.as_ref()
+        && let Some(id) = ctx.store.id_for_path(path)
+        && let Some(track) = ctx.store.get(id)
+    {
+        ui.playback.current = Some(id);
+        // Held until the resumed track's `Loaded` has been seen, so that the
+        // save it triggers does not record a position of 0.
+        ui.resuming = true;
+        if let Some(player) = ctx.player {
+            // Load, seek, then pause: resuming playback unbidden on launch
+            // would be obnoxious. The commands queue in order, so the decoder
+            // opens the file, moves to where you were, and stops there.
+            player.load(source_for(ui, track));
+            if saved.position_secs > 0.0 {
+                player.seek(crate::audio::SeekTo::Absolute(
+                    std::time::Duration::from_secs_f64(saved.position_secs),
+                ));
+            }
+            player.pause();
+        }
+    } else if saved.current.is_some() {
+        missing += 1;
+    }
+
+    if missing > 0 {
+        ui.notify(format!("{missing} remembered track(s) are gone"));
+    }
 }
 
 /// A gain as decibels, for the log. Silence has no decibel value.
@@ -3430,6 +3585,154 @@ mod tests {
         assert_eq!(db_label(1.0), "+0.0 dB");
         assert_eq!(db_label(0.5), "-6.0 dB");
         assert_eq!(db_label(2.0), "+6.0 dB");
+    }
+
+    fn saved_with(shuffle: bool, aaa: &str, rng: u64) -> crate::session::Session {
+        crate::session::Session {
+            version: 1,
+            queue: Vec::new(),
+            current: None,
+            position_secs: 0.0,
+            modes: crate::session::Modes {
+                shuffle,
+                repeat: true,
+                repeat_current: false,
+                continue_playing: true,
+                aaa_mode: aaa.into(),
+                replaygain: "album".into(),
+                active: "library".into(),
+                rng_state: rng,
+            },
+        }
+    }
+
+    /// The precedence rule: if you wrote it in `config.toml` you meant it, and
+    /// anything the config does not mention remembers what you last did.
+    ///
+    /// The failure this prevents is the confusing one — editing the config and
+    /// seeing no effect, because a stale session file silently outranks it.
+    #[test]
+    fn the_config_wins_where_it_speaks_and_the_session_fills_the_rest() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // The config spoke about shuffle, and set it on.
+        ui.playback.shuffle = true;
+        let fixed = std::collections::HashSet::from([SettingKey::Shuffle]);
+
+        // The session remembers shuffle off and aaa_mode album.
+        restore_session(&mut ui, &ctx, &saved_with(false, "album", 7), &fixed);
+
+        assert!(ui.playback.shuffle, "the config named shuffle and lost");
+        assert_eq!(
+            ui.playback.aaa_mode,
+            crate::next::AaaMode::Album,
+            "the config was silent on aaa_mode, so the session should win"
+        );
+        assert!(ui.playback.repeat, "likewise repeat");
+    }
+
+    /// Shuffle is a seeded permutation, so the seed *is* the order. Restoring
+    /// the mode without it resumes a different sequence while looking correct.
+    #[test]
+    fn the_shuffle_order_is_restored_not_merely_the_mode() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        restore_session(
+            &mut ui,
+            &ctx,
+            &saved_with(true, "all", 0xdead_beef),
+            &Default::default(),
+        );
+        assert!(ui.playback.shuffle);
+        assert_eq!(
+            ui.playback.rng_state, 0xdead_beef,
+            "the seed was lost, so the shuffle order silently changed"
+        );
+    }
+
+    /// A round trip through capture must not change anything, or resuming
+    /// twice would drift.
+    #[test]
+    fn capture_then_restore_is_a_fixed_point() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let ids: Vec<TrackId> = store.iter().map(|(id, _)| id).take(3).collect();
+        for id in &ids {
+            ui.queue.push_back(*id);
+        }
+        ui.playback.current = Some(ids[0]);
+        ui.playback.shuffle = true;
+        ui.playback.rng_state = 99;
+        ui.replaygain = crate::cmd::ReplayGainMode::Track;
+
+        let first = capture_session(&ui, &ctx);
+        let mut fresh = ui_of(&store, true);
+        restore_session(&mut fresh, &ctx, &first, &Default::default());
+        let second = capture_session(&fresh, &ctx);
+
+        assert_eq!(first.queue, second.queue);
+        assert_eq!(first.current, second.current);
+        assert_eq!(first.modes, second.modes);
+    }
+
+    /// Restoring loads the track, which emits `Loaded` — a save point — while
+    /// the position is still 0, because the seek that follows has not been
+    /// processed yet. Saving there would overwrite the very position being
+    /// resumed, and it would look like resumption simply did not work.
+    #[test]
+    fn resuming_does_not_immediately_save_over_the_position_it_restored() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let dir = std::env::temp_dir().join("gmuse-session-resume-guard");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.toml");
+        ui.session_path = Some(path.clone());
+
+        let id = store.iter().next().unwrap().0;
+        let mut saved = saved_with(false, "all", 0);
+        saved.current = Some(store.get(id).unwrap().path.clone());
+        saved.position_secs = 42.5;
+
+        restore_session(&mut ui, &ctx, &saved, &Default::default());
+        assert!(ui.resuming, "the guard was not raised");
+
+        save_session(&mut ui, &ctx);
+        assert!(
+            !path.exists(),
+            "the restored position was overwritten before its seek landed"
+        );
+
+        // Once the resumed track's own `Loaded` has gone by, saving resumes.
+        ui.resuming = false;
+        save_session(&mut ui, &ctx);
+        assert!(path.exists(), "saving never restarted");
+    }
+
+    /// A track that has moved or gone is skipped, not an error — a library
+    /// reorganised between sessions must not stop the player starting.
+    #[test]
+    fn tracks_that_have_gone_are_skipped() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let mut saved = saved_with(false, "all", 0);
+        saved.queue = vec![PathBuf::from("/gone/a.mp3"), PathBuf::from("/gone/b.mp3")];
+        saved.current = Some(PathBuf::from("/gone/c.mp3"));
+        restore_session(&mut ui, &ctx, &saved, &Default::default());
+
+        assert!(ui.queue.is_empty(), "phantom entries were restored");
+        assert_eq!(ui.playback.current, None);
+        assert!(ui.status.contains("gone"), "no notice: {:?}", ui.status);
     }
 
     /// The arrows drive the menu too. Not the primary binding, but a menu
