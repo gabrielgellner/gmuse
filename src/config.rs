@@ -69,6 +69,9 @@ pub struct Config {
     pub keys: HashMap<String, HashMap<String, Binding>>,
     #[serde(default)]
     pub theme: ThemeTable,
+    /// `[format] now_playing = "{artist} — {title}"`.
+    #[serde(default)]
+    pub format: FormatTable,
     /// Commands run once at startup, after everything else is applied.
     #[serde(default)]
     pub startup_commands: Vec<String>,
@@ -94,6 +97,15 @@ pub struct CatalogTable {
     pub roots: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormatTable {
+    /// The now-playing description in the status line. The state icon, times
+    /// and mode flags around it stay structured, so they keep their own theme
+    /// roles rather than being flattened into one string.
+    pub now_playing: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigError {
     pub where_: String,
@@ -111,6 +123,8 @@ impl std::fmt::Display for ConfigError {
 pub struct Loaded {
     pub commands: Vec<Command>,
     pub theme: Theme,
+    /// Parsed once, here, so the status line never parses while rendering.
+    pub now_playing: crate::format::Template,
     pub catalogs: crate::catalog::Catalogs,
     /// Whether the config named `active_catalogs` at all.
     ///
@@ -208,6 +222,18 @@ pub fn parse_text(text: &str) -> Loaded {
             where_: "theme".into(),
             message: e.to_string(),
         });
+    }
+
+    // Parsed here, at the boundary, so a bad template is a reported config
+    // problem rather than something the status line discovers per frame.
+    if let Some(source) = &config.format.now_playing {
+        match crate::format::Template::parse(source) {
+            Ok(t) => out.now_playing = t,
+            Err(e) => out.errors.push(ConfigError {
+                where_: "format.now_playing".into(),
+                message: e.to_string(),
+            }),
+        }
     }
 
     if !config.library.is_empty() {

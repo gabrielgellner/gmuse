@@ -304,6 +304,9 @@ pub struct Ui {
     pending_next: Option<TrackId>,
     pub settings_sel: usize,
     pub theme: theme::Theme,
+    /// How the now-playing description is written. Parsed at config load; the
+    /// status line only renders it.
+    pub now_playing: crate::format::Template,
     /// The library projection. Owned rather than borrowed, because changing
     /// the active catalogs — or `smart_artist_sort` — rebuilds it.
     pub library: Library,
@@ -353,6 +356,7 @@ impl Ui {
             seen_underruns: 0,
             settings_sel: 0,
             theme: theme::Theme::default(),
+            now_playing: crate::format::Template::default(),
             library,
             catalogs: crate::catalog::Catalogs::default(),
             continue_playing: true,
@@ -3790,6 +3794,56 @@ mod tests {
         assert!(ui.queue.is_empty(), "phantom entries were restored");
         assert_eq!(ui.playback.current, None);
         assert!(ui.status.contains("gone"), "no notice: {:?}", ui.status);
+    }
+
+    /// The template reaches the status line from the config, and a bad one is
+    /// a reported problem rather than something the renderer discovers.
+    #[test]
+    fn the_now_playing_template_comes_from_the_config() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let loaded = crate::config::parse_text(
+            r#"
+            [format]
+            now_playing = "{title} :: {file_under}"
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        ui.now_playing = loaded.now_playing;
+
+        let id = store.iter().next().unwrap().0;
+        ui.playback.current = Some(id);
+        let track = store.get(id).unwrap();
+
+        let out = render(&ui, &ctx, 120, 20);
+        assert!(
+            out.contains(&format!(
+                "{} :: {}",
+                track.display_title(),
+                track.file_under()
+            )),
+            "the configured template was not used:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_bad_template_is_a_config_error_and_leaves_the_default() {
+        let loaded = crate::config::parse_text(
+            r#"
+            [format]
+            now_playing = "{nosuchfield}"
+            "#,
+        );
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert_eq!(loaded.errors[0].where_, "format.now_playing");
+        assert!(loaded.errors[0].message.contains("nosuchfield"));
+        assert_eq!(
+            loaded.now_playing,
+            crate::format::Template::default(),
+            "a rejected template should leave the default in place"
+        );
     }
 
     /// The arrows drive the menu too. Not the primary binding, but a menu

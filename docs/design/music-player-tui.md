@@ -355,9 +355,12 @@ keystroke in view 6.
 
 ### Format strings
 
-`%a - %l - %02n. %t` etc., with width/padding specifiers and conditional groups for missing fields. Parse to a
-`Vec<FormatAtom>` at config-load time and render against a `&Track`. Never re-parse per frame — the now-playing line
-renders at whatever the UI tick rate is.
+`{artist} — {title}`, with `{field:pad}` width specifiers and `[…]` groups that vanish when a field inside them is
+missing. Parse to a `Vec<Atom>` at config-load time and render against a `&Track`. Never re-parse per frame — the
+now-playing line renders at whatever the UI tick rate is.
+
+Named placeholders rather than the `%a` this section originally specified — see the Decision Log entry of 2026-08-30. A
+literal delimiter is backslash-escaped (`\[`, `\{`), not doubled.
 
 ---
 
@@ -1534,6 +1537,38 @@ Append here as decisions are made. Format: date, decision, rationale.
   code's** — `Tab` had already extended `set aaa_mode=` to `set aaa_mode=a`, so the keystrokes it sent produced
   `aaa_mode=aal`. Reading the actual buffer rather than assuming it turned a false alarm into a passing test that covers
   the real path, and a mutation confirms the split is load-bearing.
+
+- **2026-08-30** **Format strings, half of M8 (§7). Named placeholders, not `%a`.** §7 specified cmus-style
+  `%a - %l - %02n. %t`; it now specifies `{artist} — {title}`. Command _names_ were kept close to cmus because a cmus
+  user types them and `:bind` strings quote them, but nobody carries a format string between players, so the
+  compatibility argument that saved `win-up` does not apply here. Against it: the alphabet runs out.
+  `%a %l %t %n %y %d %g` are already taken and the fields worth adding next — `play_count`, `rating`, `replaygain` —
+  have no sensible letter left. spotify-player and spotatui both use named placeholders.
+
+  **`[…]` groups are the feature that earns the language.** A group is emitted only if every field inside it has a
+  value, so `{artist}[ — {album}]` drops the separator along with the album rather than leaving `Sierra Ferrell — `
+  behind. Without it the caller needs a conditional per field, which is what a format string exists to avoid — and it is
+  the concrete thing `docs/inspiration/spotatui.md` records going wrong elsewhere, where placeholders arrive with their
+  separators baked in and the template author cannot control layout.
+
+  **Escaping is backslash, not doubling, and that was forced by a failing test.** Doubling is what Rust's own format
+  strings use and it cannot work here: `]]` is ambiguous between a literal `]` and two nested groups closing together,
+  so `[{album}[ ({year})]]` would not parse. Rust avoids this only by having nothing that nests. The test for nesting is
+  what surfaced it — worth noting because the obvious reading of a failing test is that the test is wrong, and this time
+  it was the design.
+
+  Scope: **the now-playing description only**. The state icon, elapsed/total and mode flags keep their own theme roles
+  and stay structured, because one template for the whole line would flatten per-segment styling unless placeholders
+  could carry `Role`s — a much larger design for no benefit yet. Track-list rows are the obvious next surface and are
+  really spotatui's "columns as config" idea, which is a different feature.
+
+  Templates are parsed in `config.rs`, so a bad one is a reported problem naming `format.now_playing` rather than
+  something the renderer discovers per frame, and the default survives a rejected template.
+
+  A note on the mutation testing, since it went wrong twice in the same way: two of the mutations written to check these
+  tests were **inert** — one replaced an identical-looking `ConfigError` block earlier in the file, because
+  `replace(..., 1)` takes the first match. That is the third time this session a passing mutation meant a bad mutation
+  rather than a weak test. **Check the mutation landed where it was aimed before drawing any conclusion from it.**
 
 ---
 

@@ -14,6 +14,7 @@ mod catalog;
 mod cli;
 mod cmd;
 mod config;
+mod format;
 mod library;
 mod next;
 mod playlist;
@@ -291,6 +292,7 @@ fn run_tui(
     }
 
     state.theme = loaded.theme;
+    state.now_playing = loaded.now_playing.clone();
 
     // Which settings the config actually spoke about. The resumption rule is
     // "config wins where it speaks, the session fills the rest": writing a

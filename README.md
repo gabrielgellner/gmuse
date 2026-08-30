@@ -155,6 +155,11 @@ replaygain = "auto"         # off | track | album | auto
 o = ["add-queue", "next"]         # a list is a macro
 "M-f" = "seek +30"
 
+[format]
+# {artist} {album} {title} {track} {year} {duration} {genre} … and more.
+# [ ... ] disappears entirely if a field inside it is missing.
+now_playing = "{artist}[ — {album}] — {title}"
+
 [theme.palette]
 accent = "magenta"
 
