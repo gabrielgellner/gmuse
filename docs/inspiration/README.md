@@ -6,6 +6,11 @@ Projects worth learning from, read for three things only:
 2. **Keybindings** — anything richer than cmus's flat single keys
 3. **TUI architecture** — how the interface is structured internally
 
+One entry, [foobar2000](foobar2000.md), is here for a fourth reason and none of the first three: it is not a TUI, and
+its interface and engine are irrelevant. It is read for its **query and title-formatting languages**, which are the most
+developed of their kind, and as a place to look when a power-user question comes up that this project has not reached
+yet.
+
 The player and audio path are settled: see [the design brief](../design/music-player-tui.md) §1–§5. Nothing here is read
 for storage, streaming, or audio backends. cmus remains the _behavioural_ specification; this folder is for the parts of
 a modern TUI it predates.

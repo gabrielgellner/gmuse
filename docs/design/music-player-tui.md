@@ -1754,6 +1754,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   regardless of order. Expressible here as `artist="*sierra*"&artist="*ferrell*"`, which is wordier but composes with
   everything else rather than being a special operator.
 
+- **2026-08-30** **foobar2000 added to `docs/inspiration/`, for a reason none of the others are there for.** It is not a
+  TUI and its interface and engine are irrelevant; it is read for its **two mini-languages**, which are the most
+  developed of their kind, and as somewhere to look when a power-user question arrives that this project has not
+  reached. The folder's README now says so, because the existing three-point remit does not cover it.
+
+  **Its title-formatting conditional sections are `[…]`, exactly ours**, with the same rule — the section disappears if
+  a field inside is undefined. `%artist% - [%album% / ]%title%` is our `{artist} - [{album} / ]{title}`. That was
+  arrived at here independently, from the failure mode recorded in `spotatui.md`, and finding the same answer in the
+  language with the most use behind it is a good signal.
+
+  Beyond that it is a full expression language and ours is a template: `$if`, `$ifgreater`, `$upper`, `$cut`, `$padcut`,
+  arithmetic, and `$puts`/`$get` variables.
+
+  **The observation worth keeping: three things we hardcoded are functions there.** `file_under` is
+  `$if2(%albumartist%,%artist%)`, `display_title` is `$if2(%title%,%filename%)`, and `smart_artist_sort` is
+  `$swapprefix`. Because the format language cannot express a fallback, each convenience had to become a field or a
+  setting — which is why the field list keeps growing, and why each new one needs code. Not obviously the wrong trade:
+  `{file_under}` is friendlier than `$if2(…)` and cannot be got wrong. But it explains the shape of the thing.
+
+  **Truncation is the one real gap.** The status line is one line and a long template is simply clipped by the terminal;
+  `{title:.30}` would be the natural spelling for foobar's `$padcut`. Worth doing.
+
+  **The rest is deliberately declined.** Variables, arithmetic and nested conditionals add up to a programming language
+  living in a config file, and foobar's power-user configurations are notoriously unreadable for exactly that reason. §1
+  names scope creep as this project's failure mode; a format string that needs debugging is what that looks like here.
+
 ---
 
 ## 14. Prior art worth reading
