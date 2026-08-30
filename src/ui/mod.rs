@@ -319,6 +319,15 @@ pub struct Ui {
     /// the active catalogs — or `smart_artist_sort` — rebuilds it.
     pub library: Library,
     pub catalogs: crate::catalog::Catalogs,
+    /// Smart playlists, from the config (§7, issue #15).
+    pub playlists: crate::smart::SmartPlaylists,
+    /// Which smart playlist view 3 is currently showing, if any.
+    ///
+    /// The name rather than the list: the tracks live in `playlist` like any
+    /// other, and this is what marks them as **owned by a rule** — which is
+    /// what makes editing refuse and `:freeze` mean something. Cleared by
+    /// `:freeze` and by anything that fills view 3 by hand.
+    pub smart: Option<String>,
     /// A transient narrowing on top of the active catalogs. Anonymous and
     /// not saved — a named, persistent one is a catalog (§7).
     pub filter: Option<crate::filter::Filter>,
@@ -350,6 +359,8 @@ impl Ui {
             browser: BrowserState::at(start_dir),
             status: String::new(),
             playlist: Playlist::new(),
+            playlists: crate::smart::SmartPlaylists::default(),
+            smart: None,
             queue: Queue::new(),
             playback: Playback::default(),
             volume_hint: None,
@@ -385,6 +396,20 @@ impl Ui {
     }
 
     /// What completion can offer, from the running application.
+    /// History, the clock, and the shuffle seed, for the sort language.
+    pub fn sort_env(&self) -> crate::sort::SortEnv<'_> {
+        crate::sort::SortEnv {
+            env: crate::filter::Env {
+                history: Some(&self.history),
+                now: crate::history::now(),
+            },
+            smart_artist_sort: self.smart_artist_sort,
+            // Shared with shuffle, so `sort = "random"` gives a new order on
+            // the same occasions a shuffled pool does.
+            seed: self.playback.rng_state,
+        }
+    }
+
     pub fn completion_world(&self) -> crate::cmd::complete::World {
         crate::cmd::complete::World {
             catalogs: self
@@ -392,6 +417,12 @@ impl Ui {
                 .defined()
                 .iter()
                 .map(|c| c.name.clone())
+                .collect(),
+            playlists: self
+                .playlists
+                .names()
+                .into_iter()
+                .map(str::to_string)
                 .collect(),
             bound: bind::sorted(&self.bindings)
                 .into_iter()
@@ -520,6 +551,8 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
         &format!("{} (play {plays})", track.path.display()),
     );
     save_history(ui);
+    // A rule mentioning `play_count` or `last_played` now answers differently.
+    refresh_smart(ui, ctx);
 }
 
 /// Rate the track being heard, or — with nothing playing — the one under the
@@ -567,6 +600,8 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
     ui.audit
         .line("rated", &format!("{said} {}", path.display()));
     ui.notify(format!("{title}: {said}"));
+    // A rule mentioning `rating` now answers differently.
+    refresh_smart(ui, ctx);
 }
 
 /// Write the history if anything changed. Failures are logged, never shown:
@@ -1332,6 +1367,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             }
         },
         Command::Remove => match ui.view {
+            View::Playlist if ui.smart.is_some() => ui.notify(rule_owned("remove from")),
             View::Playlist => {
                 ui.playlist.remove(ui.playlist_sel);
                 ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
@@ -1343,6 +1379,14 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             _ => ui.notify("nothing to remove here"),
         },
         Command::Rescan => ui.notify("rescan lands with :rescan in the app"),
+        Command::Playlist(name) => load_smart(ui, ctx, &name),
+        Command::Freeze => match ui.smart.take() {
+            Some(name) => ui.notify(format!(
+                "froze {name} — {} tracks, now editable",
+                ui.playlist.len()
+            )),
+            None => ui.notify("the playlist is already an ordinary one"),
+        },
 
         // ---- transport
         Command::Play => {
@@ -1537,6 +1581,69 @@ fn apply_catalog_spec(ui: &mut Ui, ctx: &Context<'_>, spec: crate::catalog::Spec
     }
 }
 
+/// Why an edit to view 3 was refused.
+///
+/// Names the escape hatch rather than only saying no: the wish is legitimate,
+/// it just cannot be granted while a rule owns the list.
+fn rule_owned(what: &str) -> String {
+    format!("this playlist is a rule — `:freeze` it to {what} it by hand")
+}
+
+/// Fill view 3 from a named smart playlist.
+fn load_smart(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+    let Some(spec) = ui.playlists.get(name) else {
+        ui.notify(if ui.playlists.is_empty() {
+            "no smart playlists are defined — see `[playlists.…]` in the config".into()
+        } else {
+            format!(
+                "no smart playlist {name:?} — try one of: {}",
+                ui.playlists.names().join(", ")
+            )
+        });
+        return;
+    };
+    let ids = spec.members(ctx.store, ui.sort_env());
+    let count = ids.len();
+    // An empty result is the confusing case, so it says what the rule was
+    // rather than leaving you to go and read the config.
+    let said = if count == 0 {
+        format!("{name}: nothing matches {}", spec.rule_label())
+    } else {
+        format!("{name}: {count} tracks")
+    };
+    ui.playlist.clear();
+    for id in ids {
+        ui.playlist.push(id);
+    }
+    ui.playlist_sel = 0;
+    ui.smart = Some(name.to_string());
+    switch_view(ui, View::Playlist);
+    ui.notify(said);
+}
+
+/// Recompute the loaded smart playlist, if there is one.
+///
+/// Called after anything that can change what the rule answers — a play, a
+/// rating, a rescan. §15 settled that a smart playlist is a *live query*, and
+/// this is what keeps that true without re-evaluating it on every redraw.
+///
+/// The cursor is kept where it was rather than reset: a list that jumped to
+/// the top whenever a play count ticked over would be unusable.
+fn refresh_smart(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(name) = ui.smart.clone() else {
+        return;
+    };
+    let Some(spec) = ui.playlists.get(&name) else {
+        return;
+    };
+    let ids = spec.members(ctx.store, ui.sort_env());
+    ui.playlist.clear();
+    for id in ids {
+        ui.playlist.push(id);
+    }
+    ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
+}
+
 fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // §7's rule: active catalogs union, the transient filter intersects.
     // "Which bodies of music am I in" is a selection; "what am I looking for"
@@ -1561,6 +1668,11 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     ui.sorted = 0;
     // Playlists and the queue are deliberately untouched: they hold TrackIds
     // straight into the Store and are meant to cross catalogs.
+    //
+    // A smart playlist is re-evaluated rather than left alone, but for a
+    // different reason: it did not cross a catalog boundary, the *store* may
+    // have changed under it.
+    refresh_smart(ui, ctx);
 }
 
 /// Change view, remembering where we came from so `g<Tab>` can go back.
@@ -1622,6 +1734,10 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
     let count = ids.len();
     match target {
         AddTarget::Playlist => {
+            if ui.smart.is_some() {
+                ui.notify(rule_owned("add to"));
+                return;
+            }
             for id in ids {
                 ui.playlist.push(id);
             }
@@ -1856,6 +1972,13 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         None => frame.render_widget(statusline::status(ui, ctx), status),
     }
 
+    // A rule-owned list says whose rule it is, so "why can I not delete this
+    // row" has an answer on screen rather than only in the refusal message.
+    let playlist_title = match &ui.smart {
+        Some(name) => format!("playlist: {name}"),
+        None => "playlist".to_string(),
+    };
+
     match ui.view {
         View::Tree => draw_tree(frame, body, ui, ctx),
         View::Sorted => draw_tracks(
@@ -1879,7 +2002,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
             TrackList {
                 ids: ui.playlist.entries(),
                 selected: ui.playlist_sel,
-                title: "playlist",
+                title: &playlist_title,
                 focused: true,
                 divide: false,
             },
@@ -2791,6 +2914,218 @@ mod tests {
             handle_key(KeyEvent::from(KeyCode::Char(c)), ui, ctx);
         }
         handle_key(KeyEvent::from(KeyCode::Enter), ui, ctx);
+    }
+
+    /// A `Ui` with two smart playlists defined and a history to test against.
+    fn with_playlists(store: &Store) -> Ui {
+        let mut ui = ui_of(store, true);
+        ui.playlists.define(
+            "electronic",
+            crate::filter::Filter::parse("genre=\"electronic\"").unwrap(),
+            Some(crate::sort::Sort::parse("title").unwrap()),
+        );
+        ui.playlists.define(
+            "good",
+            crate::filter::Filter::parse("rating>=4").unwrap(),
+            None,
+        );
+        ui.history_path = Some(PathBuf::from("/dev/null"));
+        ui
+    }
+
+    /// A store where genre is set, so a rule has something to select on.
+    fn genre_fixture() -> Store {
+        let mut s = Store::new();
+        for (path, title, genre) in [
+            ("/m/a.mp3", "Zebra", "electronic"),
+            ("/m/b.mp3", "Antelope", "electronic"),
+            ("/m/c.mp3", "Marmot", "folk"),
+        ] {
+            s.upsert(Track {
+                path: PathBuf::from(path),
+                artist: Some("Someone".into()),
+                album: Some("An Album".into()),
+                title: Some(title.into()),
+                genre: Some(genre.into()),
+                duration: Duration::from_secs(200),
+                ..Default::default()
+            });
+        }
+        s
+    }
+
+    #[test]
+    fn loading_a_smart_playlist_fills_view_three_in_its_order() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist electronic");
+
+        assert_eq!(ui.view, View::Playlist);
+        assert_eq!(ui.smart.as_deref(), Some("electronic"));
+        let titles: Vec<&str> = ui
+            .playlist
+            .entries()
+            .iter()
+            .map(|id| store.get(*id).unwrap().title.as_deref().unwrap())
+            .collect();
+        assert_eq!(titles, ["Antelope", "Zebra"], "sorted by title");
+    }
+
+    /// The design decision this whole feature turns on: a smart playlist is a
+    /// **source**, not a narrowing. Loading one must leave the library exactly
+    /// as it was — otherwise it is a catalog wearing another name.
+    #[test]
+    fn loading_a_smart_playlist_does_not_narrow_the_library() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+        let before = ui.library.sorted().to_vec();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist electronic");
+
+        assert_eq!(ui.playlist.len(), 2, "the rule selected two");
+        assert_eq!(
+            ui.library.sorted(),
+            before,
+            "the library must be untouched — narrowing is what :catalog does"
+        );
+    }
+
+    #[test]
+    fn an_unknown_smart_playlist_lists_the_ones_there_are() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist nope");
+        assert!(ui.status.contains("electronic"), "{}", ui.status);
+        assert!(ui.status.contains("good"), "{}", ui.status);
+        assert!(ui.smart.is_none());
+    }
+
+    #[test]
+    fn a_rule_matching_nothing_says_what_the_rule_was() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist good");
+        assert!(ui.playlist.is_empty());
+        assert!(ui.status.contains("rating>=4"), "{}", ui.status);
+    }
+
+    /// Editing is refused while a rule owns the list, and the refusal names
+    /// the way out rather than only saying no.
+    #[test]
+    fn a_rule_owned_playlist_refuses_edits_and_names_freeze() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist electronic");
+        let before = ui.playlist.len();
+
+        execute(&mut ui, &ctx, Command::Remove);
+        assert_eq!(ui.playlist.len(), before, "a rule-owned entry was removed");
+        assert!(ui.status.contains(":freeze"), "{}", ui.status);
+
+        ui.view = View::Sorted;
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Add {
+                target: crate::cmd::AddTarget::Playlist,
+                path: None,
+            },
+        );
+        assert_eq!(ui.playlist.len(), before, "a track was added to a rule");
+        assert!(ui.status.contains(":freeze"), "{}", ui.status);
+    }
+
+    #[test]
+    fn freezing_keeps_the_tracks_and_makes_them_editable() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist electronic");
+        let before = ui.playlist.len();
+
+        execute(&mut ui, &ctx, Command::Freeze);
+        assert!(ui.smart.is_none());
+        assert_eq!(ui.playlist.len(), before, "freezing must keep the tracks");
+
+        ui.view = View::Playlist;
+        execute(&mut ui, &ctx, Command::Remove);
+        assert_eq!(ui.playlist.len(), before - 1, "still not editable");
+    }
+
+    #[test]
+    fn freezing_an_ordinary_playlist_says_so() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+        execute(&mut ui, &ctx, Command::Freeze);
+        assert!(ui.status.contains("already an ordinary"), "{}", ui.status);
+    }
+
+    /// A live query, not a snapshot: rating a track has to change what a
+    /// rating-based rule answers, without anyone reloading it by hand.
+    #[test]
+    fn rating_a_track_re_evaluates_the_loaded_rule() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist good");
+        assert!(ui.playlist.is_empty(), "nothing is rated yet");
+
+        // Rate the track under the cursor in view 2.
+        ui.view = View::Sorted;
+        ui.sorted = 0;
+        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(5)));
+
+        assert_eq!(ui.playlist.len(), 1, "the rule did not notice the rating");
+        assert_eq!(ui.smart.as_deref(), Some("good"));
+    }
+
+    #[test]
+    fn view_three_names_the_rule_it_is_showing() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist electronic");
+        let out = render(&ui, &ctx, 74, 10);
+        assert!(out.contains("playlist: electronic"), "{out}");
+
+        execute(&mut ui, &ctx, Command::Freeze);
+        let out = render(&ui, &ctx, 74, 10);
+        assert!(!out.contains("playlist: electronic"), "{out}");
+    }
+
+    #[test]
+    fn tab_completes_smart_playlist_names() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        for c in "playlist e".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        tab(&mut ui, &ctx);
+        assert_eq!(typed(&ui), "playlist electronic ");
     }
 
     /// §9's M6 criterion: every default binding must actually fire. A binding
@@ -5017,11 +5352,14 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        for c in "bind common Z pla".chars() {
+        // `pau`, not `pla`: `play` and `playlist` share a prefix, so `pla`
+        // completes to the common stem and this would stop testing that a
+        // *unique* match appends its space.
+        for c in "bind common Z pau".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
-        assert_eq!(typed(&ui), "bind common Z play ");
+        assert_eq!(typed(&ui), "bind common Z pause ");
     }
 
     #[test]

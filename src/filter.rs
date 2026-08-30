@@ -274,6 +274,8 @@ pub enum FilterError {
     PresentOnAny,
     #[error("no track has zero stars — `rating?` is rated, `!rating?` is not")]
     RatingZero,
+    #[error("{name} is how a sort spells it — in a filter, use `{instead}`")]
+    WrongLanguage { name: String, instead: &'static str },
 }
 
 fn field_names() -> Vec<&'static str> {
@@ -416,7 +418,7 @@ fn present(f: Field, t: &Track) -> bool {
     }
 }
 
-fn text_of(f: Field, t: &Track) -> Option<String> {
+pub(crate) fn text_of(f: Field, t: &Track) -> Option<String> {
     Some(match f {
         Field::Artist => t.artist.clone()?,
         Field::AlbumArtist => t.albumartist.clone()?,
@@ -431,7 +433,7 @@ fn text_of(f: Field, t: &Track) -> Option<String> {
     })
 }
 
-fn number_of(f: Field, t: &Track) -> Option<i64> {
+pub(crate) fn number_of(f: Field, t: &Track) -> Option<i64> {
     Some(match f {
         Field::Track => i64::from(t.tracknumber?),
         Field::Disc => i64::from(t.discnumber?),
@@ -619,9 +621,19 @@ impl Parser {
         } else if let Some(h) = HistoryField::parse(&name) {
             Selector::History(h)
         } else {
-            Selector::Field(
-                Field::parse(&name).ok_or(FilterError::UnknownField { name: name.clone() })?,
-            )
+            Selector::Field(Field::parse(&name).ok_or_else(|| match name.as_str() {
+                // The sort language's spelling of the two date fields. Naming
+                // the replacement keeps a wrong guess to one message.
+                "added" => FilterError::WrongLanguage {
+                    name: name.clone(),
+                    instead: "days_since_added",
+                },
+                "last_played" => FilterError::WrongLanguage {
+                    name: name.clone(),
+                    instead: "days_since_played",
+                },
+                _ => FilterError::UnknownField { name: name.clone() },
+            })?)
         };
 
         if presence {

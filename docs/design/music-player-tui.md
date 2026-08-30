@@ -411,6 +411,40 @@ anything that narrows the library narrows what shuffle picks from. That falls ou
 is "you hear what you can see". Playlists and the queue are **not** filtered: they hold `TrackId`s straight into the
 `Store`, and crossing boundaries is the point of them.
 
+### Sort keys and smart playlists
+
+Settled 2026-08-30 — see the Decision Log.
+
+A **smart playlist** is a named filter expression with an order, and it is a **play source**, not a narrowing:
+
+```toml
+[playlists.fresh]
+where = "days_since_added<30"
+sort = "-added"
+```
+
+`:playlist <name>` fills view 3 from the rule; `:freeze` turns the loaded one into an ordinary, editable playlist.
+
+The distinction that makes this coherent is _not_ persistence — catalogs are saved too. It is exclusivity. A catalog
+hides everything outside itself; a smart playlist sits alongside the library and is one more place to play from. A saved
+expression that narrows already exists and is spelled `[catalogs.x] where = "…"`, so making smart playlists narrow would
+be two mechanisms for one idea. Membership is evaluated over the `Store`, not the active `Library`, because §4 already
+says a playlist must not be filtered by the active set.
+
+It is a **live query**, re-evaluated when anything it depends on moves — a play, a rating, a rescan. That is what makes
+it not editable: an exception list bolted onto a rule is how these become unexplainable, so `:freeze` drops the rule
+instead.
+
+**Sort** is a comma-separated list of field names, applied left to right, `-` for descending, from the same vocabulary
+as the filter and format languages plus `random`. Not foobar2000's arbitrary format pattern, which sorts numbers
+lexically unless padded by hand, and not iTunes' fixed menu, which does not compose. Missing values sort **last in both
+directions**; ties break by path, so the order is total and stable.
+
+Dates are the one place the two languages diverge: a filter says `days_since_added`, a sort says `added`. `days_since`
+inverts in an order — ascending would mean newest first — so `-days_since_added` written for "newest" gives the oldest
+**silently**, with a plausible-looking list and no error. Each language takes the spelling that reads in it and rejects
+the other by name.
+
 ### Format strings
 
 `{artist} — {title}`, with `{field:spec}` sizing and `[…]` groups that vanish when a field inside them is missing. A
@@ -1914,6 +1948,29 @@ Append here as decisions are made. Format: date, decision, rationale.
   `:rate` acts on **what is playing**, falling back to the cursor when nothing is — rating is something done to a song
   being heard, and the fallback is what makes it work while browsing. Written immediately rather than at exit: a
   judgement is worth more than a play count and losing one to a crash would be worse.
+
+- **2026-08-30** **A smart playlist is a source, not a narrowing** — and saving is not what decides that. Catalogs are
+  saved too, and they narrow. The test is exclusivity: while a catalog is active the rest of the library is unreachable
+  and shuffle cannot leave it; a playlist sits alongside the library as one more place to play from. The decisive
+  argument is that a saved expression which narrows **already exists** — `[catalogs.x] where = "…"` — so making smart
+  playlists narrow would be the "two mechanisms for one idea" this log has now warned about three times. Membership is
+  therefore evaluated over the `Store`, inheriting §4's rule that a playlist is not filtered by the active set.
+
+  Evaluated **on use**, as foobar2000 does, rather than materialised: a filter pass is 0.92 ms at 20k tracks, so there
+  is nothing to buy by caching and drift to lose. Which in turn is why it is **not editable** — a per-track exception
+  list bolted onto a rule is how these become unexplainable. `:freeze` drops the rule and keeps the tracks.
+
+- **2026-08-30** **Sort is a named vocabulary, shared with the filter and format languages** — a comma-separated list
+  applied left to right, `-` for descending, plus `random`. foobar2000 sorts by an arbitrary title-format pattern, which
+  is more general and sorts track 10 before track 2 unless you remember `$num()`; iTunes offers a fixed menu that does
+  not compose. Type-aware keys give both. Missing values sort **last in both directions**, which costs strict
+  reversibility and buys never opening a list with a screen of blanks; ties break by path so the order is total.
+
+- **2026-08-30** **The two languages spell dates differently, on purpose.** A filter says `days_since_added`, a sort
+  says `added`. `days_since` reads in a question and inverts in an order — ascending means newest first — so
+  `-days_since_added` written for "newest" returns the oldest, with no error and a list that looks plausible. A wrong
+  guess in either language now costs one message naming the other spelling. This is the first place the shared
+  vocabulary has been deliberately broken, and the reason is that the failure it prevents is **silent**.
 
 ---
 

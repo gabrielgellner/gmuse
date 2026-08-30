@@ -81,6 +81,13 @@ pub struct Config {
     /// Which catalogs start active. Omit, or `["all"]`, for everything.
     #[serde(default)]
     pub active_catalogs: Vec<String>,
+    /// `[playlists.fresh] where = "days_since_added<30"` — smart playlists.
+    ///
+    /// Beside the catalogs because both are named expressions living in the
+    /// config; what separates them is what they *do* with the expression, and
+    /// that is documented on [`crate::smart`].
+    #[serde(default)]
+    pub playlists: HashMap<String, PlaylistTable>,
     /// Library roots, for when you do not want named catalogs.
     ///
     /// The durable home for roots: the cache is derived data and is thrown
@@ -100,6 +107,19 @@ pub struct CatalogTable {
     /// rename.
     #[serde(default, rename = "where")]
     pub filter: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaylistTable {
+    /// A §7 filter expression. Required: a smart playlist with no rule would
+    /// be the whole library under another name.
+    #[serde(default, rename = "where")]
+    pub filter: Option<String>,
+    /// A sort order. Omitted means the library's own — see
+    /// [`crate::sort::Sort::library_order`].
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -131,6 +151,7 @@ pub struct Loaded {
     /// Parsed once, here, so the status line never parses while rendering.
     pub now_playing: crate::format::Template,
     pub catalogs: crate::catalog::Catalogs,
+    pub playlists: crate::smart::SmartPlaylists,
     /// Whether the config named `active_catalogs` at all.
     ///
     /// Kept separate from its *value*, because `["all"]` is a legitimate
@@ -304,6 +325,44 @@ pub fn parse_text(text: &str) -> Loaded {
                 message: e,
             });
         }
+    }
+
+    // Smart playlists. Sorted for the same reason catalogs are: a HashMap's
+    // order is arbitrary and completion reads better in a stable one.
+    let mut playlists: Vec<(&String, &PlaylistTable)> = config.playlists.iter().collect();
+    playlists.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, table) in playlists {
+        let Some(src) = table.filter.as_deref() else {
+            out.errors.push(ConfigError {
+                where_: format!("playlists.{name}"),
+                message: "has no where — a smart playlist is its rule".into(),
+            });
+            continue;
+        };
+        // Both languages parse here, at the boundary, so a bad expression
+        // names the playlist it came from rather than failing in a redraw.
+        let filter = match crate::filter::Filter::parse(src) {
+            Ok(f) => f,
+            Err(e) => {
+                out.errors.push(ConfigError {
+                    where_: format!("playlists.{name}.where"),
+                    message: e.to_string(),
+                });
+                continue;
+            }
+        };
+        let sort = match table.sort.as_deref().map(crate::sort::Sort::parse) {
+            Some(Ok(s)) => Some(s),
+            None => None,
+            Some(Err(e)) => {
+                out.errors.push(ConfigError {
+                    where_: format!("playlists.{name}.sort"),
+                    message: e.to_string(),
+                });
+                continue;
+            }
+        };
+        out.playlists.define(name, filter, sort);
     }
 
     for text in &config.startup_commands {
@@ -524,6 +583,56 @@ mod tests {
         };
         assert_eq!(**cmd, Command::Seek(SeekSpec::Relative(30.0)));
     }
+    #[test]
+    fn playlist_tables_become_smart_playlists() {
+        let loaded = parse_text(
+            r#"
+            [playlists.fresh]
+            where = "days_since_added<30"
+            sort = "-added"
+
+            [playlists.neglected]
+            where = "play_count=0"
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.playlists.names(), ["fresh", "neglected"]);
+
+        let fresh = loaded.playlists.get("fresh").expect("defined");
+        assert_eq!(fresh.filter.source, "days_since_added<30");
+        assert_eq!(fresh.sort.source, "-added");
+        // An omitted sort falls back rather than erroring.
+        assert_eq!(
+            loaded.playlists.get("neglected").unwrap().sort,
+            crate::sort::Sort::library_order()
+        );
+    }
+
+    /// Both languages parse at the boundary, so a bad expression names the
+    /// playlist and the key it came from rather than failing during a redraw.
+    #[test]
+    fn a_bad_playlist_names_where_it_came_from() {
+        let no_rule = parse_text("[playlists.a]\nsort = \"artist\"\n");
+        assert_eq!(no_rule.errors[0].where_, "playlists.a");
+        assert!(no_rule.errors[0].message.contains("no where"));
+
+        let bad_filter = parse_text("[playlists.a]\nwhere = \"nonsense=\"\n");
+        assert_eq!(bad_filter.errors[0].where_, "playlists.a.where");
+
+        let bad_sort = parse_text("[playlists.a]\nwhere = \"year>0\"\nsort = \"nope\"\n");
+        assert_eq!(bad_sort.errors[0].where_, "playlists.a.sort");
+        assert!(bad_sort.errors[0].message.contains("unknown sort key"));
+
+        // A rule using the sort language's date spelling is caught here too,
+        // with the message that names the right one.
+        let crossed = parse_text("[playlists.a]\nwhere = \"added>3\"\n");
+        assert!(
+            crossed.errors[0].message.contains("days_since_added"),
+            "{:?}",
+            crossed.errors
+        );
+    }
+
     /// `["all"]` is an explicit choice, not an absence of one.
     ///
     /// The two were told apart by inspecting the resulting `Active`, which

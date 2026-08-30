@@ -168,6 +168,9 @@ a message naming what to write instead. That keeps _unrated_ and _rated badly_ a
 bare `:rate` reports. **Ratings are gmuse's, not the file's**: §1 keeps tag editing out of scope, so they live in
 `$XDG_STATE_HOME/gmuse/history.toml` and do not travel with the files.
 
+`:playlist <name>` fills view 3 from a saved rule and `:freeze` turns it into an ordinary, editable one — see
+[Smart playlists](#smart-playlists).
+
 Typing while the completion menu is open **narrows** it; `Backspace` widens it again, and a line matching nothing leaves
 the menu up saying `no matches` rather than vanishing. `C-n`/`C-p` or the arrows walk it, `C-y` accepts, `Esc` closes
 the menu and a second `Esc` the line.
@@ -247,6 +250,49 @@ is the point of a playlist. Everything is scanned once whatever is active, so sw
 Unknown tables, settings and styles are **errors**, reported with where they are — `keys.common.^n` — and the rest of
 the file still loads. See [`examples/config.toml`](examples/config.toml) for every option, and view 7 in the app for
 every setting and binding currently in force.
+
+## Smart playlists
+
+A saved rule that fills view 3. `:playlist <name>` loads one, `Tab` completes the names.
+
+```toml
+[playlists.fresh]
+where = "days_since_added<30"
+sort = "-added"                 # newest first
+
+[playlists.neglected]
+where = "play_count=0"
+sort = "random"
+
+[playlists.best]
+where = 'rating>=4&genre="*jazz*"'
+sort = "-rating, artist, album, track"
+```
+
+A catalog and a smart playlist can hold the same expression and still be different things, and the difference is not
+that one is saved — both are. A catalog **narrows**: it hides everything outside itself, and shuffle cannot reach out. A
+smart playlist is a **source**: it fills view 3 and leaves the library exactly as it was. _Show me only my jazz_ is a
+catalog; _play my highly rated_ is a smart playlist.
+
+Like any playlist, it crosses catalogs freely — that is the point of one — and shuffle, repeat and the queue treat it as
+they treat any other list.
+
+It is a **live query, not a snapshot**: the rule is re-read whenever something it depends on moves, so rating a track or
+playing one changes what a `rating` or `play_count` rule answers without reloading it. That also means it cannot be
+edited by hand — removing one track from a rule would need an exception list bolted onto the rule, which is how these
+become unexplainable. `:freeze` turns the loaded one into an ordinary playlist, which _is_ editable, and view 3's title
+says `playlist: <name>` while a rule owns it.
+
+`sort` is a comma-separated list of field names, applied left to right, with `-` for descending. The keys are the names
+the filter and format languages already use, plus `random`. Numbers compare as numbers, so track 2 precedes track 10.
+Artist keys honour `smart_artist_sort`, so a sorted playlist agrees with the library tree about where "The Beatles"
+goes. A missing value sorts **last in both directions** — a list whose first screen is blanks looks broken rather than
+sorted.
+
+Dates are the one place the two languages differ. A filter says `days_since_added`; a sort says `added`. `days_since`
+reads well in a question and inverts in an order — ascending would mean newest first — so `-days_since_added` written
+for "newest" would silently give the oldest and a plausible-looking list. Each language takes one spelling and rejects
+the other by name.
 
 ## Licence
 

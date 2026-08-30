@@ -45,6 +45,36 @@ resample_quality = "balanced" # fast | balanced | high
 #
 # active_catalogs = ["general"]   # omit, or ["all"], for everything
 
+# Smart playlists: a saved rule that fills view 3. `:playlist <name>` loads one.
+#
+# A catalog and a smart playlist can hold the same expression and still be
+# different things. A catalog *narrows* — it hides everything outside itself,
+# and shuffle cannot reach out. A smart playlist is a *source*: it fills view 3
+# and leaves the library exactly as it was. "Show me only my jazz" is a
+# catalog; "play my highly rated" is a smart playlist.
+#
+# Rule-defined lists are not editable — `:freeze` turns the loaded one into an
+# ordinary playlist, which is.
+#
+# `sort` is a comma-separated list of field names, applied left to right, with
+# `-` for descending. Keys are the names the filter and format languages use,
+# plus `random`. Dates are the one place the two languages differ: a filter
+# says `days_since_added`, a sort says `added`, because `-added` cannot be
+# misread as oldest-first the way `-days_since_added` can. Each rejects the
+# other by name.
+#
+# [playlists.fresh]
+# where = "days_since_added<30"
+# sort = "-added"                 # newest first
+#
+# [playlists.neglected]
+# where = "play_count=0"
+# sort = "random"
+#
+# [playlists.best]
+# where = 'rating>=4&genre="*jazz*"'
+# sort = "-rating, artist, album, track"
+
 # Contexts: common, library, sorted, playlist, queue, browser, filters, settings
 # A binding in a view's own context wins over the same key in `common`.
 #

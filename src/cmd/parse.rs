@@ -48,6 +48,7 @@ pub const VERBS: &[&str] = &[
     "expand",
     "expand-all",
     "filter",
+    "freeze",
     "in",
     "next",
     "page-down",
@@ -57,6 +58,7 @@ pub const VERBS: &[&str] = &[
     "pane-right",
     "pause",
     "play",
+    "playlist",
     "prev",
     "q",
     "quit",
@@ -225,6 +227,16 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "search-prev" => Command::SearchPrev,
         "rate" => Command::Rate(rate_spec(rest)?),
         "catalog" => Command::Catalog(catalog_spec(rest)?),
+        "playlist" => {
+            if rest.is_empty() {
+                return Err(ParseError::Missing {
+                    cmd: "playlist",
+                    what: "the name of a smart playlist",
+                });
+            }
+            Command::Playlist(rest.to_string())
+        }
+        "freeze" => Command::Freeze,
         "filter" => Command::Filter(if rest.is_empty() {
             None
         } else {
@@ -491,6 +503,8 @@ pub fn format(cmd: &Command) -> String {
         Command::Rate(RateSpec::Report) => "rate".into(),
         Command::Rate(RateSpec::Clear) => "rate none".into(),
         Command::Rate(RateSpec::Set(n)) => format!("rate {n}"),
+        Command::Playlist(name) => format!("playlist {name}"),
+        Command::Freeze => "freeze".into(),
         Command::Filter(None) => "filter".into(),
         Command::Filter(Some(f)) => format!("filter {}", f.source),
         Command::Catalog(spec) => match spec {
@@ -602,6 +616,19 @@ mod tests {
     #[test]
     fn rate_takes_one_to_five_or_none() {
         assert_eq!(command("rate").unwrap(), Command::Rate(RateSpec::Report));
+        assert_eq!(
+            command("playlist fresh").unwrap(),
+            Command::Playlist("fresh".into())
+        );
+        assert_eq!(command("freeze").unwrap(), Command::Freeze);
+        // A name is the whole point; without one there is nothing to load.
+        assert!(matches!(
+            command("playlist").unwrap_err(),
+            ParseError::Missing {
+                cmd: "playlist",
+                ..
+            }
+        ));
         assert_eq!(
             command("rate none").unwrap(),
             Command::Rate(RateSpec::Clear)
@@ -849,6 +876,7 @@ mod tests {
                 "unbind" => "unbind common x".to_string(),
                 "view" => "view 1".to_string(),
                 "catalog" => format!("{verb} all"),
+                "playlist" => "playlist fresh".to_string(),
                 "filter" => "filter year>2000".to_string(),
                 "rate" => "rate 4".to_string(),
                 "in" => "in tree down".to_string(),

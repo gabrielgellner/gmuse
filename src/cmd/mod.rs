@@ -353,6 +353,18 @@ pub enum Command {
     ViewPrev,
     ViewLast,
     Catalog(crate::catalog::Spec),
+    /// Fill view 3 from a named smart playlist (§7, issue #15).
+    ///
+    /// A *source*, not a narrowing — the library stays exactly as it was. The
+    /// narrowing spelling of the same idea is `:catalog`.
+    Playlist(String),
+    /// Turn the loaded smart playlist into an ordinary, editable one.
+    ///
+    /// A rule-defined list cannot have a track removed from it without growing
+    /// an exception list bolted onto the rule, which is how these become
+    /// unexplainable. Dropping the rule and keeping the tracks is the honest
+    /// version of the same wish.
+    Freeze,
     Rate(RateSpec),
     /// Narrow the library to what matches. `None` clears it.
     ///

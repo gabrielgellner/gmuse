@@ -16,6 +16,8 @@ use super::{Context, SettingKey, parse};
 #[derive(Debug, Default, Clone)]
 pub struct World {
     pub catalogs: Vec<String>,
+    /// Smart playlist names, for `:playlist`.
+    pub playlists: Vec<String>,
     /// `(context, key text)` for every binding, so `unbind` offers only keys
     /// that are actually bound.
     pub bound: Vec<(Context, String)>,
@@ -104,6 +106,9 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
         "rate" if words.len() == 1 => std::iter::once("none".to_string())
             .chain((1..=5).map(|n| n.to_string()))
             .collect(),
+
+        // One name only, unlike `catalog`: view 3 shows one list at a time.
+        "playlist" if words.len() == 1 => world.playlists.clone(),
 
         // Catalogs accept a list, so they keep completing.
         "catalog" | "cat" => {
@@ -223,6 +228,7 @@ mod tests {
     fn world() -> World {
         World {
             catalogs: vec!["general".into(), "dance".into()],
+            playlists: vec!["fresh".into(), "neglected".into()],
             bound: vec![
                 (Context::Common, "j".into()),
                 (Context::Common, "g g".into()),

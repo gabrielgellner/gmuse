@@ -23,6 +23,8 @@ mod playlist;
 mod repl;
 mod scan;
 mod session;
+mod smart;
+mod sort;
 mod store;
 mod ui;
 
@@ -293,6 +295,7 @@ fn run_tui(
     };
     let mut state = ui::Ui::new(start_dir, library);
     state.catalogs = app.catalogs.clone();
+    state.playlists = loaded.playlists.clone();
 
     // Opened before the terminal is taken over, so a failure is visible.
     if let Some(path) = log_path {
