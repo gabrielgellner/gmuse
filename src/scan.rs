@@ -82,6 +82,10 @@ impl std::fmt::Display for ScanReport {
 /// library built from another.
 pub fn scan(store: &mut Store, roots: &[PathBuf]) -> ScanReport {
     let start = Instant::now();
+    // A root under another root would have every one of its files walked
+    // twice — read twice on a cold scan, and counted twice in the report,
+    // which is how a 311-track library came to announce 622 (#21).
+    let roots = &prune_nested(roots);
     let mut report = ScanReport::default();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     // Paths that were not in the store before this pass. Half of what move
@@ -246,6 +250,25 @@ fn detect_moves(store: &Store, gone: &[PathBuf], arrived: &[PathBuf]) -> Vec<Mov
     moves
 }
 
+/// Drop any root that lies under another, and any exact duplicate.
+///
+/// `Path::starts_with` compares whole components, so `/a/bc` is not under
+/// `/a/b` — which is why this is not string prefix matching.
+fn prune_nested(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        // Already covered by something kept — including by itself, which is
+        // how duplicates fall out.
+        if kept.iter().any(|k| root.starts_with(k)) {
+            continue;
+        }
+        // This one covers things already kept; they are the redundant ones now.
+        kept.retain(|k| !k.starts_with(root));
+        kept.push(root.clone());
+    }
+    kept
+}
+
 fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -354,6 +377,130 @@ fn parse_db(s: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal 16-bit PCM WAV, so a scan test needs no music library.
+    fn write_wav(path: &Path, frames: u32) {
+        let (channels, rate, bps) = (1u16, 44_100u32, 2u16);
+        let block = channels * bps;
+        let data = frames * block as u32;
+        let mut w: Vec<u8> = Vec::with_capacity(44 + data as usize);
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&(36 + data).to_le_bytes());
+        w.extend_from_slice(b"WAVEfmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&channels.to_le_bytes());
+        w.extend_from_slice(&rate.to_le_bytes());
+        w.extend_from_slice(&(rate * block as u32).to_le_bytes());
+        w.extend_from_slice(&block.to_le_bytes());
+        w.extend_from_slice(&(bps * 8).to_le_bytes());
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&data.to_le_bytes());
+        for i in 0..frames {
+            w.extend_from_slice(&((i % 1000) as i16).to_le_bytes());
+        }
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, w).unwrap();
+    }
+
+    fn scan_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("gmuse-scan-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The wiring, not just the helper: `scan` itself must prune, or every
+    /// file under an overlapping root is read twice and counted twice. This is
+    /// what actually produced `622 tracks` for a 311-track library (#21).
+    #[test]
+    fn scanning_overlapping_roots_visits_each_file_once() {
+        let d = scan_dir("overlapping");
+        write_wav(&d.join("Dance/a.wav"), 4410);
+        write_wav(&d.join("General/b.wav"), 4410);
+
+        // The stale parent beside its two real children, as the cache had it.
+        let roots = vec![d.join("Dance"), d.join("General"), d.clone()];
+        let mut store = Store::new();
+        let report = scan(&mut store, &roots);
+
+        assert_eq!(report.errors, vec![], "the fixture files did not read");
+        assert_eq!(store.len(), 2);
+        assert_eq!(
+            report.total(),
+            2,
+            "each file was counted more than once: {report}"
+        );
+        assert_eq!(report.added, 2);
+    }
+
+    /// And the incremental path counts once too — the case that reported 622,
+    /// where everything was `unchanged`.
+    #[test]
+    fn rescanning_overlapping_roots_counts_each_file_once() {
+        let d = scan_dir("overlapping-rescan");
+        write_wav(&d.join("Dance/a.wav"), 4410);
+        write_wav(&d.join("General/b.wav"), 4410);
+        let roots = vec![d.join("Dance"), d.join("General"), d.clone()];
+
+        let mut store = Store::new();
+        scan(&mut store, &roots);
+        let again = scan(&mut store, &roots);
+
+        assert_eq!(again.unchanged, 2, "{again}");
+        assert_eq!(again.total(), 2, "{again}");
+        assert_eq!(again.removed, 0);
+    }
+
+    /// A root under another root walked every one of its files twice — read
+    /// twice on a cold scan, and counted twice in the report. That is how a
+    /// 311-track library came to announce 622 (#21).
+    #[test]
+    fn a_root_under_another_root_is_dropped() {
+        let roots = [
+            PathBuf::from("/m/Dance"),
+            PathBuf::from("/m/General"),
+            PathBuf::from("/m"),
+        ];
+        // The parent arrives last and swallows the two already kept.
+        assert_eq!(prune_nested(&roots), vec![PathBuf::from("/m")]);
+
+        // And the other way round: the parent first, children ignored.
+        let roots = [
+            PathBuf::from("/m"),
+            PathBuf::from("/m/Dance"),
+            PathBuf::from("/m/General"),
+        ];
+        assert_eq!(prune_nested(&roots), vec![PathBuf::from("/m")]);
+    }
+
+    #[test]
+    fn unrelated_roots_all_survive() {
+        let roots = [
+            PathBuf::from("/m/Dance"),
+            PathBuf::from("/m/General"),
+            PathBuf::from("/other"),
+        ];
+        assert_eq!(prune_nested(&roots), roots.to_vec());
+    }
+
+    #[test]
+    fn an_exact_duplicate_is_dropped() {
+        let roots = [PathBuf::from("/m"), PathBuf::from("/m")];
+        assert_eq!(prune_nested(&roots), vec![PathBuf::from("/m")]);
+    }
+
+    /// Component-wise, not string prefix: `/m/Bach` is not inside `/m/B`.
+    #[test]
+    fn a_shared_name_prefix_is_not_containment() {
+        let roots = [PathBuf::from("/m/B"), PathBuf::from("/m/Bach")];
+        assert_eq!(prune_nested(&roots), roots.to_vec());
+    }
+
+    #[test]
+    fn nothing_in_nothing_out() {
+        assert!(prune_nested(&[]).is_empty());
+    }
 
     fn track(path: &str, size: u64, title: &str) -> Track {
         Track {

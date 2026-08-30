@@ -101,6 +101,18 @@ impl Cli {
             .map(|p| p.unwrap_or_else(crate::audit::default_path))
     }
 
+    /// `--library` roots, with `~` expanded.
+    ///
+    /// A shell expands `~` before gmuse sees it, but an env var does not —
+    /// `GMUSE_LIBRARY=~/Music` and a quoted `-L '~/Music'` both arrive
+    /// literally, and a literal `~/Music` silently walks nothing.
+    pub fn library_roots(&self) -> Vec<PathBuf> {
+        self.library
+            .iter()
+            .map(|p| crate::config::expand_tilde(p))
+            .collect()
+    }
+
     pub fn player_config(&self) -> PlayerConfig {
         PlayerConfig {
             device: self.device.clone(),
@@ -123,6 +135,21 @@ mod tests {
 
     /// `--log` shipped broken because nothing here was tested: clap rejected
     /// the bare flag at runtime, which no compile or unit test could see.
+    /// A shell expands `~`, but an env var does not — `GMUSE_LIBRARY=~/Music`
+    /// arrives literally, and a literal `~/Music` silently walks nothing.
+    #[test]
+    fn library_roots_expand_a_tilde() {
+        let cli = Cli::parse_from(["gmuse", "-L", "~/Music", "-L", "/abs/path"]);
+        let home = std::env::var("HOME").expect("HOME");
+        assert_eq!(
+            cli.library_roots(),
+            vec![
+                PathBuf::from(&home).join("Music"),
+                PathBuf::from("/abs/path")
+            ]
+        );
+    }
+
     #[test]
     fn log_takes_an_optional_path() {
         assert_eq!(parse(&[]).log_path(), None, "absent means no logging");

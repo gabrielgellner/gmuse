@@ -2026,6 +2026,24 @@ Append here as decisions are made. Format: date, decision, rationale.
   compaction that is deliberately not built: truncating a log cannot be made safe without deciding what it means to a
   machine that has not synced yet.
 
+- **2026-08-30** **Roots come from the config; the cache is a fallback, not an accumulator.** `main` seeded its root
+  list from the cache and only ever appended, so a one-off `--library` stayed for ever. A stale root that happened to be
+  the _parent_ of two real catalog roots then made `scan` walk every file twice and count it twice — which is how a
+  311-track library announced `622 tracks` on every launch.
+
+  Two fixes, because there were two faults. Cached roots are used **only when the config and `--library` supply none**,
+  which keeps "scan once with `--library`, run bare after" working while stopping anything from lingering. And `scan`
+  drops any root lying under another before walking, using `Path::starts_with` — component-wise, so `/m/Bach` is not
+  inside `/m/B`, which string prefixes would have got wrong.
+
+  `--library` now expands a leading `~`, as config roots always did. A shell expands it before gmuse sees it, but
+  `GMUSE_LIBRARY=~/Music` does not, and a literal `~/Music` walks nothing at all — silently. One `expand_tilde`, shared,
+  rather than two that disagree.
+
+  The first attempt at testing this proved the pruning helper and not that `scan` called it: deleting the call left
+  every test green. The tests that matter write a real WAV to a temp tree and scan overlapping roots, which is the only
+  version that fails when the wiring goes.
+
 ---
 
 ## 14. Prior art worth reading

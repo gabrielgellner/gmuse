@@ -364,6 +364,11 @@ Put your roots in the config so they survive a cache format change:
 library = ["~/Music"]
 ```
 
+Roots come from the config and from `--library`; the cache's remembered roots are a **fallback**, used only when neither
+says anything, so scanning once with `--library` and running bare afterwards still works. A one-off `--library`
+therefore stays a one-off rather than joining the set for ever. A root that lies under another is dropped before
+scanning, so overlapping roots do not walk — or count — the same file twice.
+
 The library is scanned on startup and cached at `$XDG_CACHE_HOME/gmuse/library.postcard`, so later runs need no
 `--library`. Rescans are incremental by mtime: 20,000 tracks scan cold in 0.86s and rescan in 0.08s.
 

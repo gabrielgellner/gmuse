@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (!args.no_cache).then(|| args.cache.clone().unwrap_or_else(cache::default_path));
 
     // Load the cached library, then reconcile it with the roots we were given.
-    let (store, mut roots, cached_active) = match cache_path.as_deref().map(cache::load) {
+    let (store, cached_roots, cached_active) = match cache_path.as_deref().map(cache::load) {
         Some(Ok(cache::Outcome::Loaded {
             store,
             roots,
@@ -95,11 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogs = loaded.catalogs.clone();
     let config_chose_catalogs = loaded.active_specified;
     if !args.library.is_empty() {
-        catalogs.define(
-            catalog::DEFAULT,
-            args.library.iter().map(|p| p.to_path_buf()).collect(),
-            None,
-        );
+        catalogs.define(catalog::DEFAULT, args.library_roots(), None);
     }
     // A remembered choice wins over the config default, unless the config
     // names one explicitly — otherwise picking a catalog would not stick.
@@ -111,11 +107,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Scanning covers every catalog root regardless of what is active, so
     // switching catalogs later needs no rescan.
-    for root in catalogs.all_roots() {
-        if !roots.contains(&root) {
-            roots.push(root);
-        }
-    }
+    //
+    // The cache's roots are a **fallback**, not an addition: they exist so
+    // that `gmuse -L ~/Music` once, then bare afterwards, keeps working. Adding
+    // them to what the config and `--library` already say is what let a
+    // one-off `-L` linger for ever, and a stale root that happened to be the
+    // parent of two real ones made every file scan twice (#21).
+    let roots = scan_roots(catalogs.all_roots(), cached_roots);
 
     let mut app = App {
         player,
@@ -640,8 +638,58 @@ fn drain_events(player: &PlayerHandle) {
 
 /// `mm:ss.mmm` — millisecond resolution, because second resolution cannot show
 /// whether a seek landed where it was asked to.
+/// What to scan: what the config and `--library` say, or — only if they say
+/// nothing — what the cache remembered.
+///
+/// The cache's roots are a **fallback, not an addition**. They exist so that
+/// `gmuse -L ~/Music` once and bare afterwards keeps working. Adding them to
+/// what is already known is what let a one-off `-L` linger for ever, and a
+/// stale root that happened to be the parent of two real ones made every file
+/// scan twice (#21).
+fn scan_roots(from_catalogs: Vec<PathBuf>, cached: Vec<PathBuf>) -> Vec<PathBuf> {
+    if from_catalogs.is_empty() {
+        cached
+    } else {
+        from_catalogs
+    }
+}
+
 fn fmt_time(d: Duration) -> String {
     let total = d.as_secs_f64();
     let mins = (total / 60.0).floor();
     format!("{:02}:{:06.3}", mins as u64, total - mins * 60.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The documented workflow: scan once with `--library`, then run bare.
+    #[test]
+    fn the_cache_supplies_roots_when_nothing_else_does() {
+        let cached = vec![PathBuf::from("/m/Music")];
+        assert_eq!(scan_roots(Vec::new(), cached.clone()), cached);
+    }
+
+    /// And the bug: a one-off `-L` used to join the remembered set for ever,
+    /// so a stale parent root kept every file being walked twice (#21).
+    #[test]
+    fn configured_roots_replace_what_the_cache_remembered() {
+        let cached = vec![
+            PathBuf::from("/m"),
+            PathBuf::from("~/MusicLibrary"),
+            PathBuf::from("/tmp/one-off"),
+        ];
+        let configured = vec![PathBuf::from("/m/Dance"), PathBuf::from("/m/General")];
+        assert_eq!(
+            scan_roots(configured.clone(), cached),
+            configured,
+            "a stale root outlived the run that introduced it"
+        );
+    }
+
+    #[test]
+    fn nothing_anywhere_scans_nothing() {
+        assert!(scan_roots(Vec::new(), Vec::new()).is_empty());
+    }
 }

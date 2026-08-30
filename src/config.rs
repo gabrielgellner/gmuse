@@ -427,7 +427,12 @@ pub fn default_data_dir() -> PathBuf {
     base.join("gmuse")
 }
 
-fn expand_tilde(path: &Path) -> PathBuf {
+/// Expand a leading `~`.
+///
+/// Shared with `cli.rs` rather than duplicated: a config root and a `--library`
+/// root are the same kind of thing, and having only one of them expand is
+/// exactly the surprise #21 recorded.
+pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
     let Ok(rest) = path.strip_prefix("~") else {
         return path.to_path_buf();
     };
