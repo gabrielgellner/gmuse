@@ -89,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         catalogs.define(
             catalog::DEFAULT,
             args.library.iter().map(|p| p.to_path_buf()).collect(),
+            None,
         );
     }
     // A remembered choice wins over the config default, unless the config

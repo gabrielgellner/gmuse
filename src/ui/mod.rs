@@ -303,6 +303,8 @@ pub struct Ui {
     /// so this is where the answer lives in between.
     pending_next: Option<TrackId>,
     pub settings_sel: usize,
+    /// Cursor in view 6, the catalog list.
+    pub catalog_sel: usize,
     pub theme: theme::Theme,
     /// How the now-playing description is written. Parsed at config load; the
     /// status line only renders it.
@@ -358,6 +360,7 @@ impl Ui {
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
             settings_sel: 0,
+            catalog_sel: 0,
             theme: theme::Theme::default(),
             now_playing: crate::format::Template::default(),
             library,
@@ -1174,6 +1177,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Expand => {
             if ui.view == View::Tree && ui.tree.pane == Pane::Tree {
                 ui.tree.toggle(&ui.library, ctx.store);
+            } else if ui.view == View::Filters {
+                // Space turns one catalog on or off. The union of what is on
+                // is the library, so this reads as "include this too".
+                toggle_catalog_under_cursor(ui, ctx);
             }
         }
         Command::ExpandAll => {
@@ -1190,6 +1197,14 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Activate => match ui.view {
             View::Browser => ui.browser.enter(),
             View::Settings => {}
+            // Enter makes this the only catalog — the common case, and one
+            // keypress rather than clearing the others by hand.
+            View::Filters => {
+                let Some(name) = catalog_under_cursor(ui) else {
+                    return;
+                };
+                apply_catalog_spec(ui, ctx, crate::catalog::Spec::Only(vec![name]));
+            }
             _ => {
                 ui.playback.active = match ui.view {
                     View::Playlist => ActiveSource::Playlist,
@@ -1378,6 +1393,36 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
 /// Called whenever membership or ordering changes — a catalog switch, or
 /// `smart_artist_sort`. The cursors have to be clamped: the row they pointed at
 /// may not exist any more.
+fn catalog_under_cursor(ui: &Ui) -> Option<String> {
+    ui.catalogs
+        .defined()
+        .get(ui.catalog_sel)
+        .map(|c| c.name.clone())
+}
+
+fn toggle_catalog_under_cursor(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(name) = catalog_under_cursor(ui) else {
+        return;
+    };
+    // `Spec::Adjust` already expands "all" to every name before applying the
+    // delta, so turning one off while everything is active does the right
+    // thing without a special case here — an earlier version had one, and a
+    // mutation showed it was doing nothing.
+    let add = !ui.catalogs.is_active(&name);
+    apply_catalog_spec(ui, ctx, crate::catalog::Spec::Adjust(vec![(add, name)]));
+}
+
+fn apply_catalog_spec(ui: &mut Ui, ctx: &Context<'_>, spec: crate::catalog::Spec) {
+    match ui.catalogs.apply(spec) {
+        Ok(()) => {
+            rebuild_library(ui, ctx);
+            let label = ui.catalogs.label().unwrap_or_else(|| "all".into());
+            ui.notify(format!("catalogs: {label} ({} tracks)", ui.library.len()));
+        }
+        Err(e) => ui.notify(e),
+    }
+}
+
 fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // §7's rule: active catalogs union, the transient filter intersects.
     // "Which bodies of music am I in" is a selection; "what am I looking for"
@@ -1549,7 +1594,7 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
         View::Playlist => ui.playlist.len(),
         View::Queue => ui.queue.len(),
         View::Browser => ui.browser.entries.len(),
-        View::Filters => 0,
+        View::Filters => ui.catalogs.defined().len(),
         View::Settings => {
             bind::sorted(&ui.bindings).len() + SettingKey::ALL.len() + ui.catalogs.defined().len()
         }
@@ -1566,7 +1611,7 @@ fn current_cursor(ui: &Ui) -> usize {
         View::Playlist => ui.playlist_sel,
         View::Queue => ui.queue_sel,
         View::Browser => ui.browser.selected,
-        View::Filters => 0,
+        View::Filters => ui.catalog_sel,
         View::Settings => ui.settings_sel,
     }
 }
@@ -1586,9 +1631,69 @@ fn set_cursor(ui: &mut Ui, next: usize) {
         View::Playlist => ui.playlist_sel = next,
         View::Queue => ui.queue_sel = next,
         View::Browser => ui.browser.selected = next,
-        View::Filters => {}
+        View::Filters => ui.catalog_sel = next,
         View::Settings => ui.settings_sel = next,
     }
+}
+
+/// View 6: the catalogs, which §7 settled are named, persistent filters.
+///
+/// cmus lists filters here and uses space to *select* then enter to activate.
+/// This toggles directly — space turns one on or off, enter makes it the only
+/// one — because the result is visible immediately either way and the two-step
+/// exists in cmus to batch a change you cannot see until you commit it.
+fn draw_catalogs(frame: &mut Frame, area: Rect, ui: &Ui) {
+    let theme = &ui.theme;
+    let defined = ui.catalogs.defined();
+
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(f) = &ui.filter {
+        lines.push(Line::from(vec![
+            Span::styled("  filter  ", theme.get(theme::Role::StatusDim)),
+            Span::styled(f.source.clone(), theme.get(theme::Role::StatusNotice)),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    if defined.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no catalogs defined — see [catalogs] in the config",
+            theme.get(theme::Role::StatusDim),
+        )));
+    }
+
+    for (i, catalog) in defined.iter().enumerate() {
+        let on = ui.catalogs.is_active(&catalog.name);
+        let selected = i == ui.catalog_sel;
+        let body = if selected {
+            theme.get(theme::Role::SelectionFocused)
+        } else if on {
+            theme.get(theme::Role::StatusText)
+        } else {
+            theme.get(theme::Role::StatusDim)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                if on { "  [x] " } else { "  [ ] " },
+                theme.get(if on {
+                    theme::Role::StatusPlaying
+                } else {
+                    theme::Role::StatusDim
+                }),
+            ),
+            Span::styled(format!("{:<14}", catalog.name), body),
+            Span::styled(catalog.rule_label(), theme.get(theme::Role::StatusDim)),
+        ]));
+    }
+
+    let title = match ui.catalogs.label() {
+        Some(l) => format!("catalogs — {l}"),
+        None => "catalogs — all".to_string(),
+    };
+    frame.render_widget(
+        Paragraph::new(lines).block(pane_block(theme, &title, true)),
+        area,
+    );
 }
 
 pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
@@ -1673,17 +1778,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
             )
         }
         View::Browser => draw_browser(frame, body, ui),
-        View::Filters => frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  filters arrive with the filter language in M8",
-                    ui.theme.get(theme::Role::StatusDim),
-                )),
-            ])
-            .block(pane_block(&ui.theme, "filters", true)),
-            body,
-        ),
+        View::Filters => draw_catalogs(frame, body, ui),
         View::Settings => draw_settings(frame, body, ui),
     }
 }
@@ -2870,8 +2965,8 @@ mod tests {
     /// A fixture split into two catalogs by directory.
     fn catalog_ui(store: &Store) -> Ui {
         let mut catalogs = Catalogs::default();
-        catalogs.define("paak", vec![PathBuf::from("/m/paak")]);
-        catalogs.define("va", vec![PathBuf::from("/m/va")]);
+        catalogs.define("paak", vec![PathBuf::from("/m/paak")], None);
+        catalogs.define("va", vec![PathBuf::from("/m/va")], None);
         let mut ui = Ui::new(
             PathBuf::from("/m"),
             Library::from_members(store, catalogs.members(store), true),
@@ -3953,6 +4048,124 @@ mod tests {
         type_line(&mut ui, &ctx, "filter nosuchfield=1");
         assert!(ui.status.contains("nosuchfield"), "{:?}", ui.status);
         assert_eq!(ui.library.len(), before, "a bad filter changed the library");
+    }
+
+    /// A catalog can be defined by an expression rather than by roots, and
+    /// membership is roots AND where when both are given.
+    #[test]
+    fn a_catalog_can_be_defined_by_a_filter() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let all = ui.library.len();
+
+        let loaded = crate::config::parse_text(
+            r#"
+            [catalogs.recent]
+            where = "duration>100"
+            [catalogs.nothing]
+            where = "year>9999"
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+
+        ui.catalogs = loaded.catalogs;
+        ui.catalogs
+            .apply(crate::catalog::Spec::Only(vec!["nothing".into()]))
+            .unwrap();
+        rebuild_library(&mut ui, &ctx);
+        assert_eq!(ui.library.len(), 0, "a where-only catalog should apply");
+
+        ui.catalogs
+            .apply(crate::catalog::Spec::Only(vec!["recent".into()]))
+            .unwrap();
+        rebuild_library(&mut ui, &ctx);
+        assert!(!ui.library.is_empty() && ui.library.len() <= all);
+    }
+
+    /// Active catalogs union — the rule §7 settled, and the reason
+    /// `:catalog folk pop` gives you both rather than nothing.
+    #[test]
+    fn active_catalogs_union() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let loaded = crate::config::parse_text(
+            r#"
+            [catalogs.none]
+            where = "year>9999"
+            [catalogs.all_of_them]
+            where = "duration>=0"
+            "#,
+        );
+        ui.catalogs = loaded.catalogs;
+        ui.catalogs
+            .apply(crate::catalog::Spec::Only(vec![
+                "none".into(),
+                "all_of_them".into(),
+            ]))
+            .unwrap();
+        rebuild_library(&mut ui, &ctx);
+        assert!(
+            !ui.library.is_empty(),
+            "a union with an empty catalog should not empty the library"
+        );
+    }
+
+    /// A bad expression names the catalog it came from, and the catalog is
+    /// dropped rather than silently matching everything.
+    #[test]
+    fn a_bad_catalog_expression_names_the_catalog() {
+        let loaded = crate::config::parse_text(
+            r#"
+            [catalogs.broken]
+            where = "nosuchfield=1"
+            "#,
+        );
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert_eq!(loaded.errors[0].where_, "catalogs.broken.where");
+        assert!(loaded.catalogs.defined().is_empty());
+    }
+
+    #[test]
+    fn a_catalog_with_neither_roots_nor_where_is_rejected() {
+        let loaded = crate::config::parse_text(
+            "[catalogs.empty]
+",
+        );
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert!(loaded.errors[0].message.contains("neither"));
+    }
+
+    /// View 6 lists the catalogs, shows which are on, and toggles them.
+    #[test]
+    fn view_six_lists_and_toggles_catalogs() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.catalogs.define("alpha", vec![PathBuf::from("/m")], None);
+        ui.catalogs
+            .define("beta", vec![PathBuf::from("/other")], None);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 6");
+        assert_eq!(ui.view, View::Filters);
+        let out = render(&ui, &ctx, 100, 20);
+        assert!(out.contains("alpha") && out.contains("beta"), "{out}");
+        assert!(out.contains("[x]"), "nothing shown as active:\n{out}");
+
+        // Space turns the one under the cursor off. Everything was active, so
+        // this has to name the others rather than collapsing to nothing.
+        press(&mut ui, &ctx, "space");
+        assert!(!ui.catalogs.is_active("alpha"), "space did not toggle");
+        assert!(ui.catalogs.is_active("beta"), "it turned off the wrong one");
+
+        // Enter makes the one under the cursor the only one.
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "enter");
+        assert!(ui.catalogs.is_active("beta"));
+        assert!(!ui.catalogs.is_active("alpha"));
     }
 
     /// The arrows drive the menu too. Not the primary binding, but a menu

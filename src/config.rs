@@ -95,6 +95,11 @@ pub struct Config {
 pub struct CatalogTable {
     #[serde(default)]
     pub roots: Vec<PathBuf>,
+    /// `where = "genre=\"jazz\""` — a §7 filter expression. Combines with
+    /// `roots` when both are given. `where` is a Rust keyword, hence the
+    /// rename.
+    #[serde(default, rename = "where")]
+    pub filter: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -240,33 +245,50 @@ pub fn parse_text(text: &str) -> Loaded {
         out.catalogs.define(
             crate::catalog::DEFAULT,
             config.library.iter().map(|r| expand_tilde(r)).collect(),
+            None,
         );
     }
 
     // Catalogs. `~` is expanded here because a config file is where people
     // write it, and nothing downstream would know what to do with it.
-    let mut defined: Vec<(String, Vec<PathBuf>)> = config
+    let mut defined: Vec<(String, Vec<PathBuf>, Option<String>)> = config
         .catalogs
         .iter()
         .map(|(name, table)| {
             (
                 name.clone(),
                 table.roots.iter().map(|r| expand_tilde(r)).collect(),
+                table.filter.clone(),
             )
         })
         .collect();
     // HashMap order is arbitrary; the label and the settings view read better
     // in a stable one.
     defined.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, roots) in defined {
-        if roots.is_empty() {
+    for (name, roots, filter_source) in defined {
+        if roots.is_empty() && filter_source.is_none() {
             out.errors.push(ConfigError {
                 where_: format!("catalogs.{name}"),
-                message: "has no roots".into(),
+                message: "has neither roots nor where".into(),
             });
             continue;
         }
-        out.catalogs.define(&name, roots);
+        // Parsed here, at the boundary: a bad expression names the catalog it
+        // came from rather than failing somewhere in a redraw.
+        let filter = match filter_source {
+            Some(src) => match crate::filter::Filter::parse(&src) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    out.errors.push(ConfigError {
+                        where_: format!("catalogs.{name}.where"),
+                        message: e.to_string(),
+                    });
+                    continue;
+                }
+            },
+            None => None,
+        };
+        out.catalogs.define(&name, roots, filter);
     }
 
     out.active_specified = !config.active_catalogs.is_empty();

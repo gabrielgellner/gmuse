@@ -205,11 +205,24 @@ roots = ["~/Music/Electronic", "~/Music/Ambient"]
 [catalogs.classical]
 roots = ["~/Music/Classical"]
 
+# A catalog is a named, persistent filter, so it can be an expression instead —
+# or as well, in which case both must match.
+[catalogs.jazzish]
+where = 'genre="*jazz*"|genre="*blues*"'
+
+[catalogs.recent-dance]
+roots = ["~/Music/Electronic"]
+where = "year>2015"
+
 active_catalogs = ["general"]   # or ["all"]
 ```
 
+A `where`-only catalog narrows what has already been indexed; it adds nothing to _scan_, so the files still have to be
+reachable from `library` or from some catalog's roots.
+
 `:catalog electronica` activates one, `:catalog folk pop` a subset, `:catalog +jazz` / `-jazz` adjusts, `:catalog all`
-restores everything. The active set shows in the status line and survives a restart.
+restores everything. **View 6** lists them: `space` turns one on or off, `enter` makes it the only one. The active set
+shows in the status line and survives a restart.
 
 Catalogs confine **browsing and shuffle**. Playlists and the queue hold tracks directly and cross catalogs freely — that
 is the point of a playlist. Everything is scanned once whatever is active, so switching is instant.

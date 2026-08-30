@@ -229,9 +229,13 @@ _subset_ of it. A catalog is therefore a membership rule, and:
   must **not** be filtered by the active set — a playlist is an explicit choice, and crossing themes is the point.
 - **One scan, one cache.** Catalogs partition what is _shown_, never what is indexed.
 
-**Membership is a filter expression** (§7), settled 2026-08-30. `roots = […]` stays as sugar for the common case and
-desugars to a path match, so a catalog can equally be `where = "genre=\"jazz\"|genre=\"blues\""`. There is one
-mechanism, not two: a catalog _is_ a named, persistent filter, which is what cmus's `fset` already is.
+**Membership is `roots` and `where`** (§7), settled 2026-08-30, either of which may be absent and which combine with
+**and** when both are given. A catalog _is_ a named, persistent filter, which is what cmus's `fset` already is.
+
+`roots` is **not** desugared into a path expression, which is what this section said before the implementation.
+Desugaring would replace `Path::starts_with` — component-wise — with string globbing, and smart-case would quietly make
+a lowercase root case-insensitive. Two optional keys describing one rule is not the "two mechanisms for one idea" that
+warning was about.
 
 Active catalogs **union**; a transient filter **intersects**:
 
@@ -489,7 +493,8 @@ binding, plus rebinding round-trips through the rc file.
 silence. Verify on a continuous-mix album — this is the acid test. Verified on Anderson .Paak's _Malibu_; see the
 Decision Log.
 
-**M8 — filters and format strings.**
+**M8 — filters and format strings.** ✅ _done 2026-08-30._ Format strings, the filter language, `:filter`, catalogs
+defined by expressions, and view 6.
 
 _Note: the resampler was pulled forward out of milestone order (done 2026-08-27), because Opus playback is impossible
 without it on a 44.1k-only output device._

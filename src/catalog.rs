@@ -21,11 +21,58 @@ use crate::store::{Store, TrackId};
 pub const DEFAULT: &str = "default";
 
 /// One named body of music.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Membership is `roots` **and** `where`, either of which may be absent. §7
+/// settled that a catalog is a named, persistent filter — and it is, but the
+/// two keys are kept as two fields rather than desugaring `roots` into a path
+/// expression. Desugaring would replace `Path::starts_with`, which compares
+/// components, with string globbing, and smart-case would quietly make a
+/// lowercase root case-insensitive. Two optional keys describing one rule is
+/// not the "two mechanisms for one idea" that warning was about.
+#[derive(Debug, Clone)]
 pub struct Catalog {
     pub name: String,
-    /// A track belongs to this catalog when its path is under one of these.
+    /// A track belongs when its path is under one of these. Empty means the
+    /// rule does not look at paths at all.
     pub roots: Vec<PathBuf>,
+    /// An expression the track must also match (§7).
+    ///
+    /// A `where`-only catalog adds nothing to *scan* — it narrows what has
+    /// already been indexed, so the files still have to be reachable from
+    /// `library` or from some catalog's roots.
+    pub filter: Option<crate::filter::Filter>,
+}
+
+impl Catalog {
+    /// Whether a track belongs. Both halves must hold, and an absent half is
+    /// simply not a constraint — so `roots` alone, `where` alone, and both
+    /// together all read the same way.
+    fn contains(&self, track: &crate::store::Track) -> bool {
+        let by_path = self.roots.is_empty() || self.roots.iter().any(|r| under(&track.path, r));
+        let by_rule = match &self.filter {
+            Some(f) => f.compile()(track),
+            None => true,
+        };
+        by_path && by_rule
+    }
+
+    /// What the config said, for view 6.
+    pub fn rule_label(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.roots.is_empty() {
+            parts.push(
+                self.roots
+                    .iter()
+                    .map(|r| r.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        if let Some(f) = &self.filter {
+            parts.push(f.source.clone());
+        }
+        parts.join("  &  ")
+    }
 }
 
 /// Which catalogs are in force.
@@ -46,7 +93,7 @@ pub enum Spec {
     Adjust(Vec<(bool, String)>),
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct Catalogs {
     defined: Vec<Catalog>,
     active: Active,
@@ -77,22 +124,40 @@ impl Catalogs {
         &self.defined
     }
 
+    /// Whether a named catalog is currently in force. `Active::All` means all
+    /// of them, which is not the same as none being active.
+    pub fn is_active(&self, name: &str) -> bool {
+        match &self.active {
+            Active::All => true,
+            Active::Only(names) => names.contains(name),
+        }
+    }
+
     pub fn names(&self) -> Vec<&str> {
         self.defined.iter().map(|c| c.name.as_str()).collect()
     }
 
     /// Add a catalog, merging roots if the name already exists.
-    pub fn define(&mut self, name: &str, roots: Vec<PathBuf>) {
+    pub fn define(
+        &mut self,
+        name: &str,
+        roots: Vec<PathBuf>,
+        filter: Option<crate::filter::Filter>,
+    ) {
         if let Some(existing) = self.defined.iter_mut().find(|c| c.name == name) {
             for root in roots {
                 if !existing.roots.contains(&root) {
                     existing.roots.push(root);
                 }
             }
+            if filter.is_some() {
+                existing.filter = filter;
+            }
         } else {
             self.defined.push(Catalog {
                 name: name.to_string(),
                 roots,
+                filter,
             });
         }
     }
@@ -202,11 +267,7 @@ impl Catalogs {
 
         store
             .iter()
-            .filter(|(_, track)| {
-                active
-                    .iter()
-                    .any(|c| c.roots.iter().any(|r| under(&track.path, r)))
-            })
+            .filter(|(_, track)| active.iter().any(|c| c.contains(track)))
             .map(|(id, _)| id)
             .collect()
     }
@@ -245,9 +306,9 @@ mod tests {
             "/m/loose.mp3",
         ]);
         let mut catalogs = Catalogs::default();
-        catalogs.define("general", vec![PathBuf::from("/m/general")]);
-        catalogs.define("electronic", vec![PathBuf::from("/m/electronic")]);
-        catalogs.define("classical", vec![PathBuf::from("/m/classical")]);
+        catalogs.define("general", vec![PathBuf::from("/m/general")], None);
+        catalogs.define("electronic", vec![PathBuf::from("/m/electronic")], None);
+        catalogs.define("classical", vec![PathBuf::from("/m/classical")], None);
         (store, catalogs)
     }
 
@@ -358,7 +419,7 @@ mod tests {
     fn root_matching_is_by_component_not_prefix() {
         let store = store_with(&["/m/rock/a.mp3", "/m/rockabilly/b.mp3"]);
         let mut catalogs = Catalogs::default();
-        catalogs.define("rock", vec![PathBuf::from("/m/rock")]);
+        catalogs.define("rock", vec![PathBuf::from("/m/rock")], None);
         catalogs.apply(Spec::Only(vec!["rock".into()])).unwrap();
         assert_eq!(
             paths(&store, &catalogs.members(&store)),
@@ -369,8 +430,12 @@ mod tests {
     #[test]
     fn defining_the_same_name_twice_merges_roots() {
         let mut catalogs = Catalogs::default();
-        catalogs.define("mixed", vec![PathBuf::from("/a")]);
-        catalogs.define("mixed", vec![PathBuf::from("/b"), PathBuf::from("/a")]);
+        catalogs.define("mixed", vec![PathBuf::from("/a")], None);
+        catalogs.define(
+            "mixed",
+            vec![PathBuf::from("/b"), PathBuf::from("/a")],
+            None,
+        );
         assert_eq!(catalogs.defined().len(), 1);
         assert_eq!(catalogs.defined()[0].roots.len(), 2, "no duplicate roots");
     }
@@ -387,8 +452,8 @@ mod tests {
     fn a_track_in_two_catalogs_appears_once() {
         let store = store_with(&["/m/both/a.mp3"]);
         let mut catalogs = Catalogs::default();
-        catalogs.define("one", vec![PathBuf::from("/m/both")]);
-        catalogs.define("two", vec![PathBuf::from("/m")]);
+        catalogs.define("one", vec![PathBuf::from("/m/both")], None);
+        catalogs.define("two", vec![PathBuf::from("/m")], None);
         catalogs
             .apply(Spec::Only(vec!["one".into(), "two".into()]))
             .unwrap();
