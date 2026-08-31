@@ -2660,6 +2660,33 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   It also has to bypass `execute`, or one keystroke would record two undo steps and two entries in the repeat state.
 
+- **2026-08-31** **The help popups scroll (issue #42), and the key exception is exactly as wide as the affordance.**
+  `<leader>?` lists every key in the view — 41 rows against a cap of seven — and the rest was unreachable: the notice
+  said to go and read the Index guide instead. `^d`/`^u` now move half of what the popup is showing, clamped, which is
+  which-key's own scroll (`win.lua:104`) and matches what those keys do everywhere else here.
+
+  It needed an exception to a rule chosen on purpose — any key dismisses the popup and is swallowed doing it — so the
+  exception is drawn to be self-evident rather than remembered: **the popup takes `^d` only when `^d` would do something
+  in it.** `popup_is_scrollable` asks whether anything is hidden, which is the same condition that draws the
+  `^d ^u scroll` footer, so there is never a press that looks like it should scroll and does not, nor a key silently
+  eaten by a panel that had nothing to show. `draw` clears `help_view` when no popup is drawn, or a popup still waiting
+  out its delay would inherit the last one's scrollability.
+
+  The footer follows which-key's rule (`view.lua:448`): shown **only** when the content is taller than the window. Not
+  taken from it are `<esc> close` and `<bs> back` — here _any_ key closes, so naming one would be a lie, and there is no
+  going back to name.
+
+- **2026-08-31** **`+N more` cannot happen in the shipped keymap, so naming prefix groups is not built.** The other half
+  of #42 was that a prefix reads as `+3 more` where which-key names it — which the local nvim config spends most of its
+  lines doing.
+
+  Measured before building: **every default binding is at most two keys**, so no continuation is itself a prefix and
+  `Next::More` is never constructed. `z` offers 16 continuations and 0 groups; `g` 5 and 0; `<leader>` 12 and 0.
+
+  It is reachable — a user binding `z g g` would see it — but naming groups needs a `group` verb, config plumbing, a
+  name table and completion, for a case the defaults never reach and for which there would be no default names to write.
+  Left in the issue with the measurement recorded, so the decision is on file rather than rediscovered.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

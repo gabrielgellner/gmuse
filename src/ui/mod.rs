@@ -343,6 +343,16 @@ pub struct Ui {
     /// time only grows, so once the popup is up, going deeper cannot take it
     /// away again.
     pending_since: Option<Instant>,
+    /// How far the popup in the bottom slot is scrolled, in laid-out rows.
+    ///
+    /// One field for both tenants — `<leader>?` and the prefix panel — because
+    /// they are one slot and only ever one of them is up. Reset wherever the
+    /// content changes, so a fresh popup always opens at its top.
+    help_scroll: usize,
+    /// The popup's visible rows and its full height as of the last frame, so
+    /// `^d` can move by half a screen of *this* popup and stop at its end.
+    /// A `Cell` for the same reason `body_height` is one: only `draw` knows.
+    help_view: std::cell::Cell<(usize, usize)>,
     /// How long a prefix must be held before its popup is drawn. Zero shows it
     /// on the next frame, which is what this did before it was configurable.
     pub which_key_delay: Duration,
@@ -519,6 +529,8 @@ impl Ui {
             last_search: None,
             pending: Vec::new(),
             pending_since: None,
+            help_scroll: 0,
+            help_view: std::cell::Cell::new((0, 0)),
             which_key_delay: Duration::from_millis(DEFAULT_WHICH_KEY_DELAY_MS),
             count: None,
             previous_view: View::Tree,
@@ -1276,6 +1288,39 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
     }
 }
 
+/// Whether a popup is up **and has something hidden to scroll to**.
+///
+/// The narrower question on purpose: it makes the key exception exactly as
+/// wide as the affordance. A popup that fits shows no `^d ^u scroll` footer
+/// and does not take the key either, so `^d` still means half a page there —
+/// and there is never a press that looks like it should scroll and does not.
+///
+/// Not the completion menu: that has its own keys and its own scrolling
+/// question (#43), where `^d` would have to argue with the `:` line.
+fn popup_is_scrollable(ui: &Ui) -> bool {
+    let (visible, total) = ui.help_view.get();
+    ui.prompt.is_none() && total > visible
+}
+
+/// `^d`/`^u` inside a popup — half of what it is showing, clamped at both
+/// ends, exactly as which-key's own scroll does (`win.lua:104`).
+///
+/// Returns whether the key was one of them, so the caller knows to stop.
+fn scroll_popup(ui: &mut Ui, key: KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    let (visible, total) = ui.help_view.get();
+    let half = (visible / 2).max(1);
+    let furthest = total.saturating_sub(visible);
+    match key.code {
+        KeyCode::Char('d') => ui.help_scroll = (ui.help_scroll + half).min(furthest),
+        KeyCode::Char('u') => ui.help_scroll = ui.help_scroll.saturating_sub(half),
+        _ => return false,
+    }
+    true
+}
+
 /// Route a key.
 ///
 /// A prompt swallows everything while it is open. Otherwise the key is
@@ -1283,11 +1328,25 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
 /// the resulting [`Command`] is handed to [`execute`] — which is the only
 /// place UI state is mutated, per §6.
 fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
+    // `^d`/`^u` belong to the popup while one is up, and act *on* it rather
+    // than through it — which is why they are the exception to the
+    // any-key-dismisses rule below rather than a hole in it. which-key does
+    // the same, and gets away without the exception only because its popup is
+    // not sharing a keymap with anything.
+    //
+    // Nothing is shadowed by this: a chord cannot continue with `^d` (no
+    // binding starts with a prefix and then a control key), so the alternative
+    // was not "half a page" but "the chord is abandoned".
+    if popup_is_scrollable(ui) && scroll_popup(ui, key) {
+        return;
+    }
+
     // Any key closes the help, and is swallowed doing it. Acting on the same
     // press would mean reading the popup and pressing something is different
     // from reading it and pressing nothing.
     if ui.help.is_some() {
         ui.help = None;
+        ui.help_scroll = 0;
         return;
     }
     if ui.prompt.is_some() {
@@ -1365,6 +1424,9 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     if ui.pending.is_empty() {
         ui.pending_since = Some(Instant::now());
     }
+    // Going deeper shows a different list, so it opens at its top. The delay
+    // above deliberately does *not* restart; only the content did.
+    ui.help_scroll = 0;
     ui.pending.push(key);
     match bind::resolve(&ui.bindings, ui.view.context(), &ui.pending) {
         bind::Resolved::Exact(cmd) => {
@@ -2168,6 +2230,7 @@ fn show_help(ui: &mut Ui) {
         }
     }
     ui.help = Some(rows);
+    ui.help_scroll = 0;
 }
 
 /// The open playlist's history, if it has one.
@@ -3201,6 +3264,12 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     .areas(frame.area());
     ui.body_height.set(view_height(body));
 
+    // Cleared when nothing is drawn, so the key exception above is asking
+    // about the popup that is actually on screen rather than the last one.
+    if ui.prompt.is_some() || (ui.help.is_none() && which.is_none()) {
+        ui.help_view.set((0, 0));
+    }
+
     if menu_height > 0 {
         match (&ui.prompt, &ui.help, &which) {
             (Some(prompt), _, _) => draw_completions(frame, menu, ui, prompt),
@@ -3358,15 +3427,24 @@ fn draw_help(frame: &mut Frame, area: Rect, ui: &Ui, rows: &[String], title: &st
     let laid_out = completion_rows(rows, area.width);
     let column = completion_column(rows);
     let available = (area.height.saturating_sub(2)) as usize;
-    let shown = if laid_out.len() > available {
+    let overflows = laid_out.len() > available;
+    // One row goes to the footer when there is one, so the count it carries is
+    // exact rather than off by the row it is written on.
+    let shown = if overflows {
         available.saturating_sub(1)
     } else {
         available
     };
+    // Clamped here rather than where the key is handled: only this function
+    // knows how many rows the layout produced at this width, and the width can
+    // change under a popup that is already open.
+    let first = ui.help_scroll.min(laid_out.len().saturating_sub(shown));
+    ui.help_view.set((shown, laid_out.len()));
 
     let text = ui.theme.get(theme::Role::StatusText);
     let mut lines: Vec<Line> = laid_out
         .iter()
+        .skip(first)
         .take(shown)
         .map(|row| {
             let mut spans = Vec::with_capacity(row.len() * 2);
@@ -3381,12 +3459,19 @@ fn draw_help(frame: &mut Frame, area: Rect, ui: &Ui, rows: &[String], title: &st
             Line::from(spans)
         })
         .collect();
-    if laid_out.len() > shown {
+    // The affordance appears only when it is true, which is which-key's rule
+    // (`view.lua:448`, guarded on the content being taller than the window). A
+    // popup that fits advertises nothing, and the hint does not become
+    // furniture you stop reading.
+    if overflows {
+        let below = laid_out.len() - shown - first;
+        let position = if below > 0 {
+            format!("… {below} more")
+        } else {
+            "… end".to_string()
+        };
         lines.push(Line::from(Span::styled(
-            format!(
-                "… {} more — the Index guide lists every one",
-                laid_out.len() - shown
-            ),
+            format!("{position}   ^d ^u scroll"),
             ui.theme.get(theme::Role::StatusDim),
         )));
     }
@@ -9002,6 +9087,138 @@ mod tests {
             full,
             "a due popup should not spin the loop on a zero timeout"
         );
+    }
+
+    /// The complaint in #42: the rows past the cap were unreachable. `<leader>?`
+    /// lists every key that works in the view, which is far more than the
+    /// popup's ten-row cap holds.
+    #[test]
+    fn the_help_popup_scrolls_to_what_it_could_not_show() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "<leader> ?");
+        let first = render(&ui, &ctx, 80, 24);
+        assert!(
+            first.contains("^d ^u scroll"),
+            "no scroll affordance on an overflowing popup:\n{first}"
+        );
+        assert_eq!(ui.help_scroll, 0, "it should open at the top");
+
+        press(&mut ui, &ctx, "^d");
+        assert!(
+            ui.help.is_some(),
+            "^d dismissed the popup instead of scrolling"
+        );
+        assert!(ui.help_scroll > 0, "^d did not scroll");
+        let second = render(&ui, &ctx, 80, 24);
+        assert_ne!(
+            first, second,
+            "the popup drew the same rows after scrolling"
+        );
+
+        press(&mut ui, &ctx, "^u");
+        assert_eq!(ui.help_scroll, 0, "^u did not come back");
+    }
+
+    /// The exception is exactly as wide as the affordance: a popup that fits
+    /// shows no hint and does not take the key either.
+    ///
+    /// What `^d` does *instead* here is what it has always done mid-chord —
+    /// no binding continues a prefix with a control key, so `resolve` finds
+    /// nothing and the chord is abandoned. That is unchanged, and the point of
+    /// the test is that the popup does not quietly swallow the press on top of
+    /// it.
+    #[test]
+    fn a_popup_that_fits_does_not_take_the_key() {
+        let store = big_fixture(200);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        let _ = render(&ui, &ctx, 100, 24);
+
+        // `d` has one continuation, so its popup cannot overflow.
+        press(&mut ui, &ctx, "d");
+        waited(&mut ui);
+        let _ = render(&ui, &ctx, 100, 24);
+        assert_eq!(ui.help_view.get().0, ui.help_view.get().1, "it overflowed");
+
+        press(&mut ui, &ctx, "^d");
+        assert_eq!(ui.help_scroll, 0, "a popup that fits scrolled");
+        assert!(
+            ui.pending.is_empty(),
+            "the chord should have been abandoned"
+        );
+    }
+
+    /// which-key's rule: the hint appears only when it is true (`view.lua:448`).
+    /// A popup that fits advertises nothing, or the hint becomes furniture.
+    #[test]
+    fn a_popup_that_fits_offers_no_scroll_hint() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        // `d` has one continuation, so it cannot overflow at any width.
+        press(&mut ui, &ctx, "d");
+        waited(&mut ui);
+        let out = render(&ui, &ctx, 100, 24);
+        assert!(out.contains("d  remove"), "the panel is not up:\n{out}");
+        assert!(
+            !out.contains("scroll"),
+            "a popup that fits should not mention scrolling:\n{out}"
+        );
+    }
+
+    /// Scrolling stops at the end rather than running off it, and the footer
+    /// says which end you are at.
+    #[test]
+    fn the_popup_stops_at_its_end() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "<leader> ?");
+        let _ = render(&ui, &ctx, 80, 24);
+        for _ in 0..40 {
+            press(&mut ui, &ctx, "^d");
+            let _ = render(&ui, &ctx, 80, 24);
+        }
+        let (visible, total) = ui.help_view.get();
+        assert_eq!(
+            ui.help_scroll,
+            total - visible,
+            "it scrolled past the last row"
+        );
+        assert!(
+            render(&ui, &ctx, 80, 24).contains("… end"),
+            "the footer should say there is nothing below"
+        );
+    }
+
+    /// Going deeper into a chord shows a different list, so it opens at its
+    /// top — otherwise the offset from the previous list lands somewhere
+    /// arbitrary in this one.
+    #[test]
+    fn a_deeper_chord_opens_the_popup_at_its_top() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "<leader> ?");
+        let _ = render(&ui, &ctx, 80, 24);
+        press(&mut ui, &ctx, "^d");
+        assert!(ui.help_scroll > 0);
+
+        // Any key dismisses the help; then a prefix opens the other popup.
+        press(&mut ui, &ctx, "escape");
+        press(&mut ui, &ctx, "z");
+        assert_eq!(ui.help_scroll, 0, "the offset survived into a new popup");
     }
 
     /// Completing the chord takes it away again — it is a prompt, not a mode.

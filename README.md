@@ -148,6 +148,9 @@ until structure runs out, then acts on the thing itself.
 **Start a chord and it tells you what can follow.** Press `z`, or the leader, or `g`, and the bottom panel lists every
 key that extends it and what each one does. It is read off the binding table, so a `:bind` appears in it at once.
 
+When it holds more than fits, `^d` and `^u` scroll it — and it says so, but only then: a panel that fits advertises
+nothing.
+
 It waits 300ms first, so a chord you already know is never interrupted by a panel you did not need.
 `:set which_key_delay=0` shows it immediately, and any number of milliseconds sets the wait. This is not vim's
 `timeoutlen` and does not change what a key _means_ — no key here is both a command and a prefix, so nothing is ever
