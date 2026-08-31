@@ -2634,6 +2634,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   a key nothing writes about and asserts it is _still_ reported — because a guard that is only exercised when it works
   is not a guard.
 
+- **2026-08-31** **`^d`/`^u` (issue #44), and `^f`/`^b` measuring the pane they are in (#45).** `^d`/`^u` were never
+  bound — the report was that they did not work in the guides, and they did not work anywhere. `^f`/`^b` were bound but
+  moved a hardcoded ten rows, which is a third of a page on a tall terminal and an overshoot in a split.
+
+  Both now measure. `page_height` is the pane less **two rows of overlap**, which is vim's (`:h CTRL-F`) and is not
+  incidental — the overlap is what makes the jump readable. `half_page_height` takes no overlap, because half a page
+  already leaves half the screen in common.
+
+  **One number serves every pane, and the reason is worth writing down: every split in this UI is side by side.** So a
+  pane is exactly as tall as the body area, and `Ui::body_height` — set once in `draw` — is right for all of them,
+  including the three that render as a `Paragraph` and have no `Scroll` at all: the playlist list, the scope view, and
+  the guide body. Reaching for `Scroll::height` instead would have left the guide body out, which is precisely where the
+  report came from.
+
+- **2026-08-31** **The `zz` that `^d` owes is deferred to the next frame, and applying it at once was wrong.**
+  `Scroll::place` reads `row`, which is the cursor's **screen row as of the last frame**. `zz` is correct with that
+  because it does not move the cursor. `^d` does, so recentring in the same breath would centre where the cursor _was_ —
+  and in a track list the error grows with position, because rows and track indices diverge by however many album
+  dividers sit above the cursor.
+
+  So `centre_next` is a flag, honoured inside `state_within` after the row for this frame is known. The test asserts the
+  cursor ends up within one row of the middle after six `^d`s rather than asserting on an offset: the offset is an
+  implementation detail and the centring is the property.
+
+  It also has to bypass `execute`, or one keystroke would record two undo steps and two entries in the repeat state.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

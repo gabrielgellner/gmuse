@@ -396,6 +396,16 @@ pub struct Ui {
     /// cursor tens of rows past anything visible, so `k` did nothing until it
     /// had walked back through them.
     pub guide_view: std::cell::Cell<(usize, usize)>,
+    /// The height of the body area as of the last frame, borders excluded.
+    ///
+    /// **Every split in this UI is side by side**, so a pane is exactly as
+    /// tall as the body — which makes this one number right for all of them,
+    /// including the three panes that draw as a `Paragraph` and have no
+    /// `Scroll` to record a height on: the playlist list, the scope view, and
+    /// the guide body.
+    ///
+    /// A `Cell` for the same reason `guide_view` is one: only `draw` knows it.
+    body_height: std::cell::Cell<usize>,
     /// How far each list is scrolled. One per list rather than one shared:
     /// switching views must not scroll the view you came from.
     pub tree_scroll: Scroll,
@@ -528,6 +538,7 @@ impl Ui {
             guide_sel: 0,
             guide_scroll: 0,
             guide_view: std::cell::Cell::new((0, 0)),
+            body_height: std::cell::Cell::new(0),
             guide_pane: Pane::Tree,
             theme: theme::Theme::default(),
             now_playing: crate::format::Template::default(),
@@ -1550,7 +1561,6 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
     let len = current_len(ui, ctx);
     let cursor = current_cursor(ui);
     let n = count.unwrap_or(1).max(1);
-    let page = 10usize;
 
     // One place, so a new editing command cannot forget to be undoable.
     remember(ui, &cmd);
@@ -1565,8 +1575,33 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             Some(row) => set_cursor(ui, row.saturating_sub(1).min(len.saturating_sub(1))),
             None => set_cursor(ui, len.saturating_sub(1)),
         },
-        Command::PageDown => set_cursor(ui, (cursor + page * n).min(len.saturating_sub(1))),
-        Command::PageUp => set_cursor(ui, cursor.saturating_sub(page * n)),
+        Command::PageDown => {
+            let page = page_height(ui);
+            set_cursor(ui, (cursor + page * n).min(len.saturating_sub(1)));
+        }
+        Command::PageUp => {
+            let page = page_height(ui);
+            set_cursor(ui, cursor.saturating_sub(page * n));
+        }
+        // `^d`/`^u`, then `zz`. The recentring is what keeps the cursor pinned
+        // mid-screen so the text slides past it, instead of the cursor walking
+        // to an edge and staying there — which makes each press show a
+        // different amount of new context than the one before.
+        //
+        // In the guide body there is nothing to recentre: the "cursor" *is*
+        // the scroll offset there, so moving it half a screen already is the
+        // scroll. `focused_scroll` returns `None` for that pane and the
+        // recentre is skipped, which is right rather than a gap.
+        Command::HalfPageDown => {
+            let half = half_page_height(ui);
+            set_cursor(ui, (cursor + half * n).min(len.saturating_sub(1)));
+            recentre(ui);
+        }
+        Command::HalfPageUp => {
+            let half = half_page_height(ui);
+            set_cursor(ui, cursor.saturating_sub(half * n));
+            recentre(ui);
+        }
         Command::PaneNext => {
             if ui.view == View::Guides {
                 ui.guide_pane = match ui.guide_pane {
@@ -2756,6 +2791,35 @@ fn flat_step(ui: &Ui, ctx: &Context<'_>, motion: Motion, count: usize) -> Option
 /// `None` where the focused pane is not a scrolling list — view 3's set of
 /// playlists and view 7's open guide both draw themselves, and neither is long
 /// enough to want this.
+/// `zz` on whatever pane has the cursor, when it has a `Scroll` to do it with.
+///
+/// Separate from `Command::Place` so a motion can recentre without going back
+/// through `execute`, which would record a second undo step and a second entry
+/// in the repeat state for one keystroke.
+fn recentre(ui: &Ui) {
+    if let Some(scroll) = focused_scroll(ui) {
+        scroll.centre_next.set(true);
+    }
+}
+
+/// How far a page motion moves, from the pane's real height (#45).
+///
+/// This used to be a hardcoded 10, so `^f` moved a third of a page on a tall
+/// terminal and overshot what was on screen in a short one — the one thing a
+/// page motion is for is landing somewhere you can relate to where you were.
+///
+/// vim keeps **two lines** of the old screen as an anchor (`:h CTRL-F`), and
+/// that overlap is not incidental: it is what makes the jump readable.
+fn page_height(ui: &Ui) -> usize {
+    ui.body_height.get().saturating_sub(2).max(1)
+}
+
+/// Half a screen — `^d` and `^u`. No overlap to subtract: half a page already
+/// leaves half the screen in common.
+fn half_page_height(ui: &Ui) -> usize {
+    (ui.body_height.get() / 2).max(1)
+}
+
 fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
     Some(match ui.view {
         View::Tree => &ui.tree_scroll,
@@ -3135,6 +3199,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         Constraint::Length(1),
     ])
     .areas(frame.area());
+    ui.body_height.set(view_height(body));
 
     if menu_height > 0 {
         match (&ui.prompt, &ui.help, &which) {
@@ -3563,6 +3628,15 @@ pub struct Scroll {
     /// dividers make it differ from the track index every other caller uses.
     row: std::cell::Cell<usize>,
     height: std::cell::Cell<usize>,
+    /// A `zz` owed to the next frame, from a motion that moved the cursor and
+    /// wants to recentre after it — `^d` and `^u`.
+    ///
+    /// Deferred rather than applied at once, because `row` above is the
+    /// cursor's **screen row** as of the last frame, and a track list's rows
+    /// and its track indices differ by however many album dividers are above
+    /// the cursor. Recentring immediately would centre where the cursor *was*,
+    /// and be wrong by a growing amount the further down the list you went.
+    centre_next: std::cell::Cell<bool>,
 }
 
 impl Scroll {
@@ -3579,10 +3653,14 @@ impl Scroll {
     /// The state for this frame, with the remembered offset clamped so the
     /// pane can show filler *below* the list but never only filler.
     fn state_within(&self, selected: Option<usize>, len: usize, height: usize) -> ListState {
-        let top = self.top.get().min(len.saturating_sub(1));
-        self.top.set(top);
         self.row.set(selected.unwrap_or(0));
         self.height.set(height);
+        // Now that the row is this frame's, honour any deferred `zz`.
+        if self.centre_next.replace(false) {
+            self.place(crate::cmd::Place::Centre);
+        }
+        let top = self.top.get().min(len.saturating_sub(1));
+        self.top.set(top);
         ListState::default()
             .with_selected(selected)
             .with_offset(top)
@@ -3791,6 +3869,25 @@ mod tests {
 
     /// A library with the three things §9 says the tree must get right: a
     /// compilation, a multi-disc album, and a track with no tags at all.
+    /// A library long enough that a page motion has somewhere to go, on one
+    /// album so the flat list has no dividers to complicate the arithmetic.
+    fn big_fixture(n: u32) -> Store {
+        let mut store = Store::new();
+        for i in 1..=n {
+            store.upsert(Track {
+                path: PathBuf::from(format!("/m/long/{i:04}.mp3")),
+                artist: Some("One Artist".into()),
+                albumartist: Some("One Artist".into()),
+                album: Some("One Album".into()),
+                title: Some(format!("Track {i:04}")),
+                tracknumber: Some(i),
+                duration: Duration::from_secs(200),
+                ..Default::default()
+            });
+        }
+        store
+    }
+
     fn fixture() -> Store {
         let mut store = Store::new();
 
@@ -4705,6 +4802,100 @@ mod tests {
         type_line(&mut ui, &ctx, "playlist save nothing");
         assert!(ui.status.contains("empty"), "{}", ui.status);
         assert!(!dir.join("playlists/nothing.m3u8").exists());
+    }
+
+    /// #45: this used to be a hardcoded 10, whatever the pane's height.
+    ///
+    /// Two different heights, because a test against a pane that happens to be
+    /// ten rows tall cannot tell the old behaviour from the new one — the
+    /// coincident-answers failure this project has now paid for three times.
+    #[test]
+    fn a_page_is_the_pane_it_is_in() {
+        let store = big_fixture(200);
+        let ctx = ctx_of(&store);
+
+        // A terminal loses the tab strip and the status line, then the pane
+        // loses two border rows, then vim's page keeps two rows of overlap.
+        let page_of = |rows: u16| rows as usize - 2 - 2 - 2;
+
+        for rows in [24u16, 44] {
+            let expect = page_of(rows);
+            let mut ui = ui_of(&store, true);
+            ui.view = View::Sorted;
+            // A frame, so the body height is recorded.
+            let _ = render(&ui, &ctx, 100, rows);
+            press(&mut ui, &ctx, "^f");
+            assert_eq!(
+                ui.sorted, expect,
+                "a page in a {rows}-row terminal should be {expect}"
+            );
+        }
+    }
+
+    /// Half of it, and vim's two-row page overlap does not apply — half a page
+    /// already leaves half the screen in common.
+    #[test]
+    fn a_half_page_is_half_the_pane() {
+        let store = big_fixture(200);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        let _ = render(&ui, &ctx, 100, 24);
+
+        press(&mut ui, &ctx, "^d");
+        assert_eq!(ui.sorted, 10, "half of a 20-row pane");
+        press(&mut ui, &ctx, "^u");
+        assert_eq!(ui.sorted, 0, "and back");
+    }
+
+    /// The recentre is owed to the *next* frame, not applied at once.
+    ///
+    /// `Scroll::row` is the cursor's **screen row** as of the last frame, and
+    /// a track list's rows and its track indices differ by however many album
+    /// dividers sit above the cursor. Centring immediately would centre where
+    /// the cursor was, wrongly and by a growing amount — so this asserts the
+    /// cursor ends up near the middle of the pane after the frame, which is
+    /// the property, rather than asserting on an offset.
+    #[test]
+    fn a_half_page_leaves_the_cursor_centred() {
+        let store = big_fixture(200);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        let _ = render(&ui, &ctx, 100, 24);
+
+        for _ in 0..6 {
+            press(&mut ui, &ctx, "^d");
+            let _ = render(&ui, &ctx, 100, 24);
+        }
+
+        let scroll = focused_scroll(&ui).expect("view 2 has one");
+        let screen_row = scroll.row.get() - scroll.top();
+        let height = scroll.height.get();
+        assert!(
+            screen_row.abs_diff(height / 2) <= 1,
+            "cursor sat {screen_row} rows into a {height}-row pane"
+        );
+    }
+
+    /// The pane the report came from. It has no `Scroll` at all — its cursor
+    /// *is* the scroll offset — so a half-page motion has to work through
+    /// `body_height` rather than through `focused_scroll`, and there is
+    /// nothing to recentre.
+    #[test]
+    fn half_page_scrolls_the_guide_body() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Guides;
+        ui.guide_pane = Pane::Tracks;
+        let _ = render(&ui, &ctx, 100, 24);
+
+        assert_eq!(ui.guide_scroll, 0);
+        press(&mut ui, &ctx, "^d");
+        assert_eq!(ui.guide_scroll, 10, "the guide body did not scroll");
+        press(&mut ui, &ctx, "^u");
+        assert_eq!(ui.guide_scroll, 0);
     }
 
     /// The tree numbers every row, because an artist and an album are both

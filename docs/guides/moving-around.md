@@ -7,8 +7,20 @@ you were on before.
     5 browser    6 scope      7 guides
 
 Within any of them the motions are vim's. `j` and `k` move, and take a count — `3j` goes down three. `gg` and `G` go to
-the top and bottom, and `12G` goes to row 12. `^f` and `^b` page. The arrow keys — `up`, `down`, `left`, `right` — and
-`home`, `end`, `pageup` and `pagedown` do what you would expect, for the times your hands are not on the home row.
+the top and bottom, and `12G` goes to row 12. The arrow keys — `up`, `down`, `left`, `right` — and `home`, `end`,
+`pageup` and `pagedown` do what you would expect, for the times your hands are not on the home row.
+
+    ^d      half a screen down, recentred
+    ^u      half a screen up, recentred
+    ^f      a screen down
+    ^b      a screen up
+
+`^d` and `^u` are the pair to learn. Half a screen is the distance at which you can still see where you came from, and
+they recentre afterwards, so the cursor stays pinned mid-screen and the text slides past it rather than the cursor
+drifting to an edge and staying there. `^f` and `^b` keep two rows of the old screen as an anchor, exactly as vim does.
+
+All four measure the pane you are actually in, so they move further on a tall terminal and less in a split view. They
+work in the guides too, where the whole right-hand pane scrolls.
 
 `/` searches forwards and `?` backwards; `n` and `N` repeat.
 

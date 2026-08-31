@@ -43,6 +43,12 @@ pub const DEFAULTS: &[&str] = &[
     "bind common end bottom",
     "bind common ^f page-down",
     "bind common ^b page-up",
+    // `^d`/`^u` rather than `^f`/`^b` is what actually gets used: half a page
+    // is the distance at which you can still see where you came from. They
+    // recentre, so the cursor stays mid-screen and the text slides past it
+    // instead of the cursor drifting to an edge.
+    "bind common ^d half-page-down",
+    "bind common ^u half-page-up",
     "bind common pagedown page-down",
     "bind common pageup page-up",
     "bind common tab pane-next",

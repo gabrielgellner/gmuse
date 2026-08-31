@@ -540,6 +540,11 @@ pub enum Command {
     Down,
     PageUp,
     PageDown,
+    /// `^d` and `^u` — half a screen, recentred. vim's, and the pair actually
+    /// used: half a page is the distance at which you can still see where you
+    /// came from.
+    HalfPageUp,
+    HalfPageDown,
     Top,
     Bottom,
     Activate,
