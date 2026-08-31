@@ -125,6 +125,10 @@ structure runs out, then acts on the thing itself.
 
 **`space` is the leader**, and `<leader>?` shows the keys that work in the current view.
 
+**View 8 is the guides** — short pieces on how to do things, as against which key does what. `<leader>?` answers the
+second; the guides answer the first, which is the one you cannot find by pressing keys. Titles on the left, the guide on
+the right, `tab` between them, and the ordinary motions scroll it.
+
 Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `settings`.
 
 `<leader>` in a binding stands for whatever `leader` says, `space` by default:
@@ -153,9 +157,10 @@ cycles all/artist/album. `a` adds the selection to the open playlist, `e` to the
 before the cursor. `u` undoes, `^r` redoes. vim's registers, so `dd` then `p` swaps two tracks, and `yy` — open another
 playlist — `p` copies one across.
 
-The queue, current track, position and playback modes come back on the next launch, **paused** — including the shuffle
-seed, so a shuffled sequence resumes rather than restarting. `--no-resume` starts fresh. Settings named in `config.toml`
-win over what was remembered; anything the config does not mention keeps whatever you last set.
+The view you were on, the queue, the open playlist, the current track, its position and the playback modes all come back
+on the next launch, **paused** — including the shuffle seed, so a shuffled sequence resumes rather than restarting.
+`--no-resume` starts fresh. Settings named in `config.toml` win over what was remembered; anything the config does not
+mention keeps whatever you last set.
 
 Loudness is matched from ReplayGain 2.0 tags when files have them — `set replaygain=auto` follows the play order, taking
 the album figure in order and the track figure when shuffling. Analysis is deliberately somebody else's job: tag a

@@ -69,6 +69,14 @@ pub struct Session {
     /// what you would want after editing it in another program.
     #[serde(default)]
     pub open_playlist: Option<String>,
+    /// Which view was in front, by number.
+    ///
+    /// By number rather than by name because that is what `:view 3` and `3gt`
+    /// mean, and what the tab strip shows. Without it you did not land where
+    /// you left: reopening a playlist switches to view 3, so every launch
+    /// arrived there whatever you had actually been looking at.
+    #[serde(default)]
+    pub view: Option<u8>,
     #[serde(default)]
     pub current: Option<PathBuf>,
     #[serde(default)]
@@ -129,6 +137,7 @@ mod tests {
             version: VERSION,
             queue: vec![PathBuf::from("/m/a.mp3"), PathBuf::from("/m/b.flac")],
             open_playlist: Some("mix".into()),
+            view: Some(2),
             current: Some(PathBuf::from("/m/c.opus")),
             position_secs: 42.5,
             modes: Modes {

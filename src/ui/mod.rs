@@ -42,6 +42,8 @@ pub enum View {
     Browser = 5,
     Filters = 6,
     Settings = 7,
+    /// Prose: how to do the things, as against which key does what.
+    Guides = 8,
 }
 
 impl View {
@@ -54,6 +56,7 @@ impl View {
             View::Browser => "browser",
             View::Filters => "scope",
             View::Settings => "settings",
+            View::Guides => "guides",
         }
     }
 
@@ -66,6 +69,7 @@ impl View {
             ViewId::Browser => View::Browser,
             ViewId::Filters => View::Filters,
             ViewId::Settings => View::Settings,
+            ViewId::Guides => View::Guides,
         }
     }
 
@@ -91,6 +95,7 @@ impl View {
         View::Browser,
         View::Filters,
         View::Settings,
+        View::Guides,
     ];
 
     pub fn context(self) -> crate::cmd::Context {
@@ -103,6 +108,7 @@ impl View {
             View::Browser => C::Browser,
             View::Filters => C::Filters,
             View::Settings => C::Settings,
+            View::Guides => C::Guides,
         }
     }
 }
@@ -371,6 +377,19 @@ pub struct Ui {
     pub settings_sel: usize,
     /// Cursor in view 6, the catalog list.
     pub catalog_sel: usize,
+    /// Which guide is open, and how far down it we are.
+    pub guide_sel: usize,
+    pub guide_scroll: usize,
+    /// The last drawn guide's line count and visible height.
+    ///
+    /// A `Cell` because only `draw` can know them — they depend on the pane's
+    /// width, which nothing outside a frame has. Guessing instead was worse
+    /// than it looked: an over-estimate let `G` reach the end but left the
+    /// cursor tens of rows past anything visible, so `k` did nothing until it
+    /// had walked back through them.
+    pub guide_view: std::cell::Cell<(usize, usize)>,
+    /// Which half of view 8 has focus: the list of guides, or the guide.
+    pub guide_pane: Pane,
     /// Cursor in view 3's left pane, the list of playlists.
     pub playlists_sel: usize,
     /// Which half of view 3 has focus: the set, or the open one.
@@ -483,6 +502,10 @@ impl Ui {
             playlist_pane: Pane::Tree,
             playlist_rows: Vec::new(),
             catalog_sel: 0,
+            guide_sel: 0,
+            guide_scroll: 0,
+            guide_view: std::cell::Cell::new((0, 0)),
+            guide_pane: Pane::Tree,
             theme: theme::Theme::default(),
             now_playing: crate::format::Template::default(),
             track_line: crate::format::Template::parse("{track:2}  {display_title}  {duration}")
@@ -603,7 +626,7 @@ impl Ui {
             View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
-            View::Browser | View::Filters | View::Settings => None,
+            View::Browser | View::Filters | View::Settings | View::Guides => None,
         }
     }
 }
@@ -951,6 +974,7 @@ pub fn capture_session(ui: &Ui, ctx: &Context<'_>) -> crate::session::Session {
         version: 0, // stamped by `save`
         queue: ui.queue.entries().filter_map(|id| path_of(*id)).collect(),
         open_playlist: ui.open.as_ref().map(|o| o.name().to_string()),
+        view: Some(ui.view as u8),
         current: ui.playback.current.and_then(path_of),
         position_secs: ctx
             .player
@@ -1034,6 +1058,18 @@ pub fn restore_session(
     refresh_playlist_rows(ui);
     if let Some(name) = &saved.open_playlist {
         open_playlist(ui, ctx, &name.clone());
+    }
+
+    // **After** the playlist, because opening one switches to view 3 — which
+    // is exactly why every launch used to land there.
+    if let Some(view) = saved
+        .view
+        .and_then(crate::cmd::ViewId::from_number)
+        .map(View::from_id)
+    {
+        switch_view(ui, view);
+        // Landing somewhere with no history of having been anywhere else.
+        ui.previous_view = view;
     }
 
     if let Some(path) = saved.current.as_ref()
@@ -1446,6 +1482,12 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::PageDown => set_cursor(ui, (cursor + page * n).min(len.saturating_sub(1))),
         Command::PageUp => set_cursor(ui, cursor.saturating_sub(page * n)),
         Command::PaneNext => {
+            if ui.view == View::Guides {
+                ui.guide_pane = match ui.guide_pane {
+                    Pane::Tree => Pane::Tracks,
+                    Pane::Tracks => Pane::Tree,
+                };
+            }
             if ui.view == View::Playlist {
                 ui.playlist_pane = match ui.playlist_pane {
                     Pane::Tree => Pane::Tracks,
@@ -1458,16 +1500,16 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 ui.tree.close(&ui.library, ctx.store);
             }
         }
-        Command::PaneLeft => {
-            if ui.view == View::Playlist {
-                ui.playlist_pane = Pane::Tree;
-            }
-        }
-        Command::PaneRight => {
-            if ui.view == View::Playlist {
-                ui.playlist_pane = Pane::Tracks;
-            }
-        }
+        Command::PaneLeft => match ui.view {
+            View::Playlist => ui.playlist_pane = Pane::Tree,
+            View::Guides => ui.guide_pane = Pane::Tree,
+            _ => {}
+        },
+        Command::PaneRight => match ui.view {
+            View::Playlist => ui.playlist_pane = Pane::Tracks,
+            View::Guides => ui.guide_pane = Pane::Tracks,
+            _ => {}
+        },
         // Run a command as though the named pane had focus, then put focus
         // back. Reusing the ordinary command rather than duplicating every
         // motion per pane is the whole point of the wrapper.
@@ -1509,6 +1551,9 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         }
         Command::Activate => match ui.view {
             View::Browser => ui.browser.enter(),
+            // The list picks; Enter moves into what you picked, which is the
+            // same thing it does everywhere else.
+            View::Guides => ui.guide_pane = Pane::Tracks,
             View::Settings => toggle_under_cursor(ui, ctx),
             // The left pane picks, so Enter there opens rather than plays —
             // and moves focus to the contents, which is what you wanted next.
@@ -2546,7 +2591,7 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
             .iter()
             .map(|p| p.display().to_string().to_lowercase())
             .collect(),
-        View::Filters | View::Settings => Vec::new(),
+        View::Filters | View::Settings | View::Guides => Vec::new(),
     }
 }
 
@@ -2561,6 +2606,17 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
         View::Queue => ui.queue.len(),
         View::Browser => ui.browser.entries.len(),
         View::Filters => ui.catalogs.defined().len(),
+        View::Guides => match ui.guide_pane {
+            Pane::Tree => crate::guides::GUIDES.len(),
+            // Scrolling *is* moving a cursor down the text, so the pane's
+            // length is its line count and `G` reaches the end for free.
+            // The furthest the text can scroll, from what was last drawn —
+            // so `G` lands on the last screenful and `k` moves from there.
+            Pane::Tracks => {
+                let (lines, height) = ui.guide_view.get();
+                lines.saturating_sub(height) + 1
+            }
+        },
         View::Settings => {
             bind::sorted(&ui.bindings).len() + SettingKey::ALL.len() + ui.catalogs.defined().len()
         }
@@ -2578,6 +2634,10 @@ fn current_cursor(ui: &Ui) -> usize {
         View::Queue => ui.queue_sel,
         View::Browser => ui.browser.selected,
         View::Filters => ui.catalog_sel,
+        View::Guides => match ui.guide_pane {
+            Pane::Tree => ui.guide_sel,
+            Pane::Tracks => ui.guide_scroll,
+        },
         View::Settings => ui.settings_sel,
     }
 }
@@ -2593,6 +2653,15 @@ fn set_cursor(ui: &mut Ui, next: usize) {
         View::Queue => ui.queue_sel = next,
         View::Browser => ui.browser.selected = next,
         View::Filters => ui.catalog_sel = next,
+        View::Guides => match ui.guide_pane {
+            Pane::Tree => {
+                ui.guide_sel = next;
+                // A new guide starts at its top, not wherever the last one
+                // happened to be scrolled to.
+                ui.guide_scroll = 0;
+            }
+            Pane::Tracks => ui.guide_scroll = next,
+        },
         View::Settings => ui.settings_sel = next,
     }
 }
@@ -2630,6 +2699,66 @@ fn toggle_under_cursor(ui: &mut Ui, ctx: &Context<'_>) {
         return;
     }
     ui.notify("a binding is not a toggle — use `:bind` to change one");
+}
+
+/// View 8: the guides. Titles on the left, the guide on the right.
+///
+/// Two panes rather than one scrolling document, for the same reason view 1
+/// and view 3 have them: the list is how you *choose*, and it must stay
+/// visible while you read.
+fn draw_guides(frame: &mut Frame, area: Rect, ui: &Ui) {
+    let theme = &ui.theme;
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)]).areas(area);
+
+    let titles: Vec<ListItem> = crate::guides::GUIDES
+        .iter()
+        .map(|g| ListItem::new(Line::from(Span::raw(format!("  {}", g.title)))))
+        .collect();
+    let mut state = ListState::default().with_selected(Some(ui.guide_sel));
+    frame.render_stateful_widget(
+        List::new(titles)
+            .block(pane_block(theme, "guides", ui.guide_pane == Pane::Tree))
+            .highlight_style(highlight(theme, ui.guide_pane == Pane::Tree)),
+        left,
+        &mut state,
+    );
+
+    let Some(guide) = crate::guides::GUIDES.get(ui.guide_sel) else {
+        return;
+    };
+    let height = right.height.saturating_sub(2) as usize;
+    let text = crate::guides::wrapped(guide, right.width.saturating_sub(3) as usize);
+    // Recorded so the cursor's range matches what is actually on screen. Only
+    // here are the pane's width and height known.
+    ui.guide_view.set((text.len(), height));
+    // Scrolled by the cursor, so `j`, `3j`, `gg` and `G` reach the text with
+    // no scroll keys of its own.
+    let first = ui
+        .guide_scroll
+        .min(text.len().saturating_sub(height.max(1)));
+    let lines: Vec<Line> = text
+        .iter()
+        .skip(first)
+        .take(height)
+        .map(|(kind, raw)| {
+            let style = match kind {
+                crate::guides::Kind::Heading => theme.get(theme::Role::SettingKey),
+                crate::guides::Kind::Example => theme.get(theme::Role::StatusNotice),
+                crate::guides::Kind::Prose => theme.get(theme::Role::StatusText),
+            };
+            Line::from(Span::styled(format!(" {raw}"), style))
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(lines).block(pane_block(
+            theme,
+            guide.title,
+            ui.guide_pane == Pane::Tracks,
+        )),
+        right,
+    );
 }
 
 /// View 3's left pane: what there is to open.
@@ -2840,6 +2969,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         }
         View::Browser => draw_browser(frame, body, ui),
         View::Filters => draw_catalogs(frame, body, ui),
+        View::Guides => draw_guides(frame, body, ui),
         View::Settings => draw_settings(frame, body, ui),
     }
 }
@@ -4034,6 +4164,48 @@ mod tests {
         assert_eq!(fresh.playlist.len(), 1, "its tracks did not come back");
     }
 
+    /// You land where you left. Reopening a playlist switches to view 3, so
+    /// without this every launch arrived there whatever you had been on.
+    #[test]
+    fn the_view_comes_back_and_a_reopened_playlist_does_not_override_it() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "session-view");
+        new_playlist(&mut ui, &ctx, "mix");
+        assert_eq!(ui.view, View::Playlist, "`new` should open it");
+
+        // Wander off to a different view and quit from there.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 8");
+        let snapshot = capture_session(&ui, &ctx);
+        assert_eq!(snapshot.view, Some(8));
+        assert_eq!(snapshot.open_playlist.as_deref(), Some("mix"));
+
+        let mut fresh = with_playlists(&store);
+        fresh.saved = ui.saved.clone();
+        restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
+
+        assert_eq!(fresh.view, View::Guides, "it landed on the playlist view");
+        // And the playlist still came back — the view restore is on top of it,
+        // not instead of it.
+        assert_eq!(fresh.open.as_ref().map(Open::name), Some("mix"));
+    }
+
+    /// A session from before this existed has no view; it must not land on
+    /// view 1 by surprise, it must simply not move.
+    #[test]
+    fn a_session_without_a_view_leaves_it_alone() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "session-no-view");
+        let mut snapshot = capture_session(&ui, &ctx);
+        snapshot.view = None;
+
+        ui.view = View::Queue;
+        restore_session(&mut ui, &ctx, &snapshot, &Default::default());
+        assert_eq!(ui.view, View::Queue);
+    }
+
     /// A rule is remembered by name too, and **recomputed** on open — which is
     /// the point of storing a name rather than a list.
     #[test]
@@ -4973,6 +5145,106 @@ mod tests {
         assert_eq!(ui.tree.rows(&ui.library, &store).len(), closed);
     }
 
+    /// `<leader>?` says what a key does; the guides say how to do the thing.
+    /// Different questions, and the second is the one you cannot get to by
+    /// pressing keys.
+    #[test]
+    fn view_eight_shows_a_guide_beside_the_list() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 8");
+        assert_eq!(ui.view, View::Guides);
+
+        let out = render(&ui, &ctx, 96, 18);
+        assert!(out.contains("8:guides"), "{out}");
+        // Both panes: the titles, and the first guide's text.
+        assert!(out.contains("Moving around"), "{out}");
+        assert!(out.contains("The library tree"), "{out}");
+        assert!(out.contains("leader"), "the guide body is missing:\n{out}");
+    }
+
+    #[test]
+    fn choosing_a_guide_shows_it_and_starts_at_the_top() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Guides;
+
+        press(&mut ui, &ctx, "j");
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        assert_eq!(ui.guide_pane, Pane::Tracks, "Enter did not move into it");
+        let out = render(&ui, &ctx, 96, 18);
+        assert!(out.contains("The library tree"), "{out}");
+
+        // Scroll, then pick a different guide: it starts at its own top
+        // rather than wherever the last one had been left.
+        press(&mut ui, &ctx, "3 j");
+        assert_eq!(ui.guide_scroll, 3);
+        let _ = render(&ui, &ctx, 96, 18);
+        execute(&mut ui, &ctx, Command::PaneLeft);
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.guide_scroll, 0, "the new guide kept the old scroll");
+    }
+
+    /// The cursor's range is a deliberate over-estimate, so `G` must land on
+    /// the last screenful rather than scrolling past the text into nothing.
+    #[test]
+    fn g_reaches_the_end_of_a_guide() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Guides;
+        ui.guide_pane = Pane::Tracks;
+        // The cursor's range comes from what was last drawn, so draw first —
+        // as the event loop does before it ever sees a keypress.
+        let _ = render(&ui, &ctx, 56, 10);
+
+        press(&mut ui, &ctx, "G");
+        // A narrow, short pane: prose wraps to far more lines than the source
+        // has, and only a few fit. That is where an under-estimated range
+        // leaves the end out of reach — a tall pane hides the bug, because
+        // the clamp rescues it.
+        let out = render(&ui, &ctx, 56, 10);
+        // The guide's last word, which is where it wraps to whatever the pane
+        // is — comparing a whole wrapped line would only test my arithmetic
+        // about the width.
+        let last_word = crate::guides::lines(&crate::guides::GUIDES[0])
+            .iter()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .and_then(|l| l.split_whitespace().next_back())
+            .expect("the guide is empty");
+        assert!(out.contains(last_word), "the end is unreachable:\n{out}");
+    }
+
+    /// `G` then `k` has to move. It did not: the range was a guess wide of
+    /// what was on screen, so the cursor sat tens of rows past the end and
+    /// `k` walked back through phantom rows before anything happened.
+    #[test]
+    fn k_moves_back_up_immediately_after_g() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Guides;
+        ui.guide_pane = Pane::Tracks;
+        let _ = render(&ui, &ctx, 56, 10);
+
+        press(&mut ui, &ctx, "G");
+        let bottom = ui.guide_scroll;
+        assert!(bottom > 0, "`G` did not move");
+
+        press(&mut ui, &ctx, "k");
+        assert_eq!(ui.guide_scroll, bottom - 1, "`k` did nothing after `G`");
+
+        // And what is drawn actually changes, not just the number.
+        let after = render(&ui, &ctx, 56, 10);
+        press(&mut ui, &ctx, "G");
+        assert_ne!(after, render(&ui, &ctx, 56, 10), "the pane did not scroll");
+    }
+
     #[test]
     fn tab_swaps_the_two_panes_of_view_three() {
         let store = genre_fixture();
@@ -5132,6 +5404,7 @@ mod tests {
                     crate::cmd::Context::Browser => ViewId::Browser,
                     crate::cmd::Context::Filters => ViewId::Filters,
                     crate::cmd::Context::Settings => ViewId::Settings,
+                    crate::cmd::Context::Guides => ViewId::Guides,
                     crate::cmd::Context::Common => unreachable!(),
                 }),
             };
@@ -6227,6 +6500,7 @@ mod tests {
             version: 1,
             queue: Vec::new(),
             open_playlist: None,
+            view: None,
             current: None,
             position_secs: 0.0,
             modes: crate::session::Modes {

@@ -18,6 +18,7 @@ mod datadir;
 mod events;
 mod filter;
 mod format;
+mod guides;
 mod history;
 mod library;
 mod m3u;

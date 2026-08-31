@@ -2265,6 +2265,34 @@ Append here as decisions are made. Format: date, decision, rationale.
   at hours earlier from vim alone. Converging on a keymap by two routes is decent evidence the reshuffle was following
   something real.
 
+- **2026-08-30** **View 8 is guides — prose, not a key list.** `<leader>?` answers "what does this key do"; the guides
+  answer "how do I do the thing", and the second cannot be found by pressing keys. `dd` then `p` swapping two tracks is
+  not deducible from a table of bindings, and neither is the register being global.
+
+  Two panes, view 1 and view 3's shape, because the list is how you choose and has to stay visible while you read. It
+  passes #23's test by being navigated and scrolled with the ordinary motions rather than merely displayed.
+
+  The text is `include_str!`d from `docs/guides/*.md`: real files, reviewable and diffable when the behaviour they
+  describe changes, but compiled in so the binary needs no data directory and cannot ship without them.
+
+  **Prose is rewrapped by paragraph; examples are untouched.** prettier reflows the source to 120 columns, which no pane
+  is, so wrapping happens at render — but an example is a key table or a diagram whose alignment carries meaning.
+  Wrapping each _source line_ on its own is also wrong: it leaves a short line wherever the file happened to break.
+
+  **The scroll range is a deliberate over-estimate.** The cursor's extent must be known without a frame to measure it,
+  and wrapping only adds lines, so it is computed at a width narrower than any pane and clamped where it is drawn.
+  Under-estimating instead makes the end of a guide unreachable. A test at a _narrow, short_ pane pins it — a tall one
+  hides the bug, because the clamp rescues it.
+
+  **A test asserts the keys the guides teach are really bound.** Prose about a keymap goes stale silently; this is the
+  cheapest thing that makes it fail loudly.
+
+---
+
+## 14. Prior art worth reading
+
+Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
+
 - **Trix** — <https://github.com/RIZAmohammadkhan/TerminalMusicPlayer> — ratatui + Symphonia, gapless via next-track
   pre-decode, dedicated decode worker with a ~750ms buffer, container-level seeking. Closest to this design; read first.
 - **termusic** — <https://github.com/tramhao/termusic> — the most mature Rust local-library player. Note: client/server
