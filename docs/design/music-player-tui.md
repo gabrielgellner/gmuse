@@ -2304,6 +2304,35 @@ Append here as decisions are made. Format: date, decision, rationale.
   stale one has to clamp rather than blank the pane. ratatui does clamp; there is a test that says so rather than
   trusting it.
 
+- **2026-08-30** **Text folds before it is compared, in two forms.** `src/text.rs`. Metadata carries marks a keyboard
+  may not have, and this library's own filenames carry fullwidth stand-ins for the characters Windows forbids — so a
+  track tagged `Air & Lack Thereof / Sparing the Horses` is `… ⧸ …` on disk. Neither is typeable by hand, and both were
+  making things unfindable.
+
+  **Two forms, because a mark can be typed around two ways.** `Löffler` is `loffler` to someone dropping the umlaut and
+  `loeffler` to someone spelling it out, and German does the second. A search tries the flattened text and then, only
+  when the text actually spells differently without its marks, the spelled-out form. Most characters have one sensible
+  answer and the two agree, so the second pass is skipped outright — `expanded()` returns `None` for all-ASCII text and
+  for `é`, `ñ`, `ç` alike.
+
+  **Hand-rolled rather than `unicode-normalization`.** NFD would decompose the accents generically but still miss
+  `ø æ ß ł đ œ`, which do not decompose at all, and every one of the punctuation substitutions — the half this library
+  actually needs. Measured before choosing, per the project's own rule: the entire tag cache contains
+  `ö ü í ´ ’ ＂ ⧸ ？` and nothing else, so Latin-1 plus Latin Extended-A is already far past what is there. No new
+  dependency.
+
+  **Smart-case governs capitals only.** Typing a capital asks for case to matter; there is no way to type a capital to
+  ask for a diaeresis that is not on the keyboard, so marks always fold. The two are different axes and the rule says
+  so.
+
+- **2026-08-30** **Sort keys flatten their marks, which fixes an ordering bug nobody had noticed.** `ö` is U+00F6 and
+  `z` is U+007A, so a raw comparison filed Christian Löffler after every artist beginning `lz` — off the end of the L
+  section entirely. `sort_key` now folds through `text::needle`.
+
+  The consequence worth recording: two artists whose names differ only by a mark now share a tree node, exactly as
+  `MUSE`/`Muse`/`muse` already did under case folding. That is the desirable reading — it is what inconsistent tagging
+  across an album looks like, and merging beats showing the same artist twice — but it is a merge, and it is silent.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

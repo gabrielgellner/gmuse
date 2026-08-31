@@ -30,6 +30,7 @@ mod session;
 mod smart;
 mod sort;
 mod store;
+mod text;
 mod ui;
 mod undo;
 
@@ -618,9 +619,9 @@ fn print_library(app: &App) {
 }
 
 fn print_matches(app: &App, query: &str) {
-    let needle = query.to_lowercase();
+    let needle = text::needle(query);
     let hit = |s: Option<&str>| {
-        s.map(|s| s.to_lowercase().contains(&needle))
+        s.map(|s| text::Haystack::of(s).contains(&needle))
             .unwrap_or(false)
     };
 

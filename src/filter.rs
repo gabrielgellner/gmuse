@@ -86,8 +86,12 @@ impl Glob {
             segments.push(current);
         }
 
-        if !case_sensitive {
-            for s in &mut segments {
+        // The pattern is flattened whatever the case rule: smart-case is
+        // about capitals, and there is no way to "type a capital" to ask for
+        // a diaeresis you do not have on the keyboard.
+        for s in &mut segments {
+            *s = crate::text::flatten(s).into_owned();
+            if !case_sensitive {
                 *s = s.to_lowercase();
             }
         }
@@ -99,7 +103,17 @@ impl Glob {
         }
     }
 
+    /// Tries the flattened text, then — only if the text actually spells
+    /// differently without its marks — the spelled-out form, so that both
+    /// `loffler` and `loeffler` find `Löffler`.
     pub fn matches(&self, text: &str) -> bool {
+        if self.matches_folded(&crate::text::flatten(text)) {
+            return true;
+        }
+        crate::text::expanded(text).is_some_and(|s| self.matches_folded(&s))
+    }
+
+    fn matches_folded(&self, text: &str) -> bool {
         // Lowering allocates. Measured elsewhere at well under a millisecond
         // for a whole-library pass, and this is not on the audio path.
         let owned;
@@ -1153,5 +1167,45 @@ mod tests {
         // The unknown-field message lists the alternatives.
         let msg = Expr::parse("artistt=x").unwrap_err().to_string();
         assert!(msg.contains("artistt") && msg.contains("artist"), "{msg}");
+    }
+
+    /// The end-to-end shape of what the folding is for: a filter typed on a
+    /// keyboard without an umlaut still selects the tracks that have one.
+    #[test]
+    fn a_filter_finds_an_umlaut_typed_either_way() {
+        let g = |pattern: &str| Glob::new(pattern);
+        for typed in ["*loffler*", "*loeffler*", "*löffler*", "*Löffler*"] {
+            assert!(
+                g(typed).matches("Christian Löffler"),
+                "{typed:?} should have matched"
+            );
+        }
+    }
+
+    #[test]
+    fn a_filter_matches_across_the_fullwidth_stand_ins() {
+        // The tag says `/`; this library's filename says `⧸`.
+        assert!(
+            Glob::new("*thereof / sparing*").matches("Air & Lack Thereof ⧸ Sparing the Horses")
+        );
+    }
+
+    /// Smart-case governs **capitals only**. Typing one asks for case to
+    /// matter; there is no way to type a capital to ask for a diaeresis you do
+    /// not have on the keyboard, so marks always fold.
+    #[test]
+    fn smart_case_governs_capitals_and_not_the_marks() {
+        assert!(
+            Glob::new("*Loffler*").matches("Christian Löffler"),
+            "the capital makes case matter, and the umlaut still folds"
+        );
+        assert!(
+            !Glob::new("*Loffler*").matches("christian löffler"),
+            "but the capital does have to match"
+        );
+        assert!(
+            Glob::new("*loffler*").matches("Christian LÖFFLER"),
+            "no capital typed, so neither case nor the mark matters"
+        );
     }
 }

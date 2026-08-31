@@ -145,6 +145,12 @@ A leader must be a key that is **not bound on its own** — a chord cannot exten
 moved off `space` to `o`. That is also the point: `?` keeps meaning reverse search, as in vim, and help lives behind the
 prefix rather than taking a key it should not have.
 
+**Marks fold, both ways.** `/loffler` and `/loeffler` both find Christian Löffler, and so does `/löffler` — a mark can
+be typed around two ways and searching tries both. The same holds for `:filter` and for sorting, so he files under Lo
+rather than after every artist beginning Lz. Typographic punctuation folds too: `don't` finds `don’t`, and because this
+library stores Windows-illegal characters as fullwidth stand-ins, `Thereof / Sparing` finds the file whose name says
+`⧸`. Smart-case is unaffected — a capital asks for case to matter, never for the mark back.
+
 `:set relative_numbers=true` adds a vim-style distance gutter — absolute on the cursor line, distance elsewhere. Track
 lists count **tracks**, so an album divider never shifts the number `3j` needs; the artist/album pane counts every row,
 because an artist and an album are both jumpable. The playing track is emphasised in every list it appears in.

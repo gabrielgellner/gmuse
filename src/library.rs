@@ -9,11 +9,15 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::store::{Store, Track, TrackId};
 
-/// A normalised sort key: case-folded, and with a leading article moved out of
-/// the way when `smart_artist_sort` is on.
+/// A normalised sort key: case-folded, marks flattened, and with a leading
+/// article moved out of the way when `smart_artist_sort` is on.
 ///
 /// Kept separate from the display string, which stays on the `Track` — "The
 /// Beatles" must sort under B and still render with its "The".
+///
+/// The marks are flattened for **ordering**, not only for looks: `ö` is U+00F6,
+/// so a raw comparison files Löffler after every artist beginning `lz`, which
+/// is to say off the end of the L section entirely.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SortKey(String);
 
@@ -31,7 +35,7 @@ const ARTICLES: &[&str] = &["the ", "a ", "an "];
 /// `smart` strips a leading article, matching cmus's `smart_artist_sort`. It is
 /// applied to artists only — "The Wall" is an album whose T matters.
 pub fn sort_key(s: &str, smart: bool) -> SortKey {
-    let folded = s.trim().to_lowercase();
+    let folded = crate::text::needle(s.trim());
     if smart {
         for article in ARTICLES {
             if let Some(rest) = folded.strip_prefix(article) {
@@ -351,5 +355,32 @@ mod tests {
         let first = store.get(lib.sorted()[0]).unwrap();
         assert_eq!(first.artist.as_deref(), Some("The Aardvarks"));
         assert_eq!(lib.sorted().len(), 2);
+    }
+
+    /// `ö` is U+00F6 and `z` is U+007A, so an unflattened key files Löffler
+    /// past every artist beginning `lz` — off the end of the L section.
+    #[test]
+    fn an_umlaut_sorts_among_its_own_letters_not_after_z() {
+        let mut keys = [
+            sort_key("Lz Top", false),
+            sort_key("Christian Löffler", false),
+            sort_key("Lonnie Holley", false),
+            sort_key("La Luz", false),
+        ];
+        keys.sort();
+        let order: Vec<&str> = keys.iter().map(SortKey::as_str).collect();
+        assert_eq!(
+            order,
+            ["christian loffler", "la luz", "lonnie holley", "lz top"],
+            "Löffler must file under Lo, not after Lz"
+        );
+    }
+
+    #[test]
+    fn a_leading_article_is_still_stripped_after_flattening() {
+        assert_eq!(
+            sort_key("The Österreichers", true).as_str(),
+            "osterreichers"
+        );
     }
 }

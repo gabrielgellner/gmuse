@@ -2548,7 +2548,7 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
 
 /// Move the cursor to the next row matching `pattern`, wrapping once.
 fn run_search(ui: &mut Ui, ctx: &Context<'_>, pattern: &str, dir: SearchDir) {
-    let needle = pattern.to_lowercase();
+    let needle = crate::text::needle(pattern);
     let haystack = search_rows(ui, ctx);
     if haystack.is_empty() {
         return;
@@ -2570,21 +2570,22 @@ fn run_search(ui: &mut Ui, ctx: &Context<'_>, pattern: &str, dir: SearchDir) {
     ui.notify(format!("no match for {pattern:?}"));
 }
 
-/// Lower-cased text for each row of the current view, for searching.
-fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
+/// Folded text for each row of the current view, for searching. Folded here
+/// rather than per comparison, so a search over the library does the work once
+/// per row instead of once per row per keystroke.
+fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
     let describe = |id: &crate::store::TrackId| {
         ctx.store
             .get(*id)
             .map(|t| {
-                format!(
+                crate::text::Haystack::of(&format!(
                     "{} {} {}",
                     t.file_under(),
                     t.album_or_unknown(),
                     t.display_title()
-                )
-                .to_lowercase()
+                ))
             })
-            .unwrap_or_default()
+            .unwrap_or_else(|| crate::text::Haystack::of(""))
     };
     match ui.view {
         // Artists, albums and tracks are all rows now, so `/` searches the
@@ -2595,7 +2596,7 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
             .iter()
             .map(|row| match row {
                 tree::Row::Track { id, .. } => describe(id),
-                other => other.label().to_lowercase(),
+                other => crate::text::Haystack::of(&other.label()),
             })
             .collect(),
         View::Sorted => ui.library.sorted().iter().map(describe).collect(),
@@ -2605,7 +2606,7 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
             .browser
             .entries
             .iter()
-            .map(|p| p.display().to_string().to_lowercase())
+            .map(|p| crate::text::Haystack::of(&p.display().to_string()))
             .collect(),
         View::Filters | View::Settings | View::Guides => Vec::new(),
     }
@@ -8057,5 +8058,89 @@ mod tests {
             out.contains("Track 000"),
             "a stale offset should clamp, not blank the pane:\n{out}"
         );
+    }
+    /// Its own store rather than the shared fixture: adding a row there moves
+    /// every count and rendering assertion in the file, and this needs exactly
+    /// two tracks to say what it means.
+    fn marked_fixture() -> Store {
+        let mut store = Store::new();
+        store.upsert(Track {
+            path: PathBuf::from("/m/loffler/01.mp3"),
+            artist: Some("Christian Löffler".into()),
+            album: Some("A Life ⧸ Young Alaska".into()),
+            title: Some("Nothing Is Real".into()),
+            tracknumber: Some(1),
+            duration: Duration::from_secs(267),
+            ..Default::default()
+        });
+        store.upsert(Track {
+            path: PathBuf::from("/m/aaa/01.mp3"),
+            artist: Some("Aaa Ordinary".into()),
+            album: Some("Plain".into()),
+            title: Some("First".into()),
+            tracknumber: Some(1),
+            duration: Duration::from_secs(100),
+            ..Default::default()
+        });
+        store
+    }
+
+    /// The whole point, end to end: `/` finds him without the umlaut, and
+    /// spelled out the way German spells it when the key is missing.
+    #[test]
+    fn search_finds_an_umlaut_however_it_is_typed() {
+        let store = marked_fixture();
+        let ctx = ctx_of(&store);
+
+        for typed in ["loffler", "loeffler", "löffler", "Loffler"] {
+            let mut ui = ui_of(&store, true);
+            ui.view = View::Sorted;
+            ui.sorted = 0;
+            press(&mut ui, &ctx, "/");
+            type_line(&mut ui, &ctx, typed);
+
+            let landed = ui.library.sorted()[ui.sorted];
+            let artist = store.get(landed).map(|t| t.file_under().to_string());
+            assert_eq!(
+                artist.as_deref(),
+                Some("Christian Löffler"),
+                "/{typed} landed somewhere else"
+            );
+        }
+    }
+
+    /// The tag holds `/`; the filename holds `⧸`, because Windows forbids the
+    /// first. Searching has to put them back together.
+    #[test]
+    fn search_crosses_the_fullwidth_stand_ins() {
+        let store = marked_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 0;
+
+        press(&mut ui, &ctx, "/");
+        type_line(&mut ui, &ctx, "a life / young");
+
+        let landed = ui.library.sorted()[ui.sorted];
+        assert_eq!(
+            store.get(landed).and_then(|t| t.album.clone()).as_deref(),
+            Some("A Life ⧸ Young Alaska")
+        );
+    }
+
+    /// Folding must not quietly become fuzzy matching — a real miss still
+    /// misses, and says so.
+    #[test]
+    fn a_search_that_should_miss_still_misses() {
+        let store = marked_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 0;
+
+        press(&mut ui, &ctx, "/");
+        type_line(&mut ui, &ctx, "lieffler");
+        assert_eq!(ui.sorted, 0, "nothing should have matched");
     }
 }
