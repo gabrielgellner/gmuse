@@ -182,6 +182,83 @@ pub fn resolve<'a>(bindings: &'a Bindings, ctx: Context, keys: &[Key]) -> Resolv
     }
 }
 
+/// How the panel is ordered: by the key case-insensitively, then unshifted
+/// before shifted, then the key itself to break the tie.
+type Order = (String, bool, String);
+
+/// What one key could be followed by, and what it would then mean.
+#[derive(Debug, PartialEq)]
+pub enum Next<'a> {
+    /// Pressing it runs this.
+    Runs(&'a Command),
+    /// It is itself a prefix, with this many bindings under it.
+    More(usize),
+}
+
+/// The keys that can follow a partially typed sequence — which-key's panel.
+///
+/// Derived from the binding table rather than written down, so a `:bind` takes
+/// effect in the panel the moment it takes effect in the keymap. Same reason
+/// the pending-key indicator is derived.
+///
+/// Context shadowing is applied exactly as [`lookup`] applies it: a view's own
+/// binding hides the common one, and the panel must not offer both.
+pub fn continuations<'a>(
+    bindings: &'a Bindings,
+    ctx: Context,
+    prefix: &[Key],
+) -> Vec<(String, Next<'a>)> {
+    let mut best: HashMap<&Seq, (Context, &Command)> = HashMap::new();
+    for ((c, seq), cmd) in bindings {
+        if (*c != ctx && *c != Context::Common) || seq.len() <= prefix.len() {
+            continue;
+        }
+        if !seq.starts_with(prefix) {
+            continue;
+        }
+        match best.get(seq) {
+            Some((held, _)) if *held != Context::Common => {}
+            _ => {
+                best.insert(seq, (*c, cmd));
+            }
+        }
+    }
+
+    // Case-insensitively, unshifted first on a tie, so `c` is followed by `C`.
+    // They are a pair to anyone reading the panel; two separate alphabets —
+    // every capital, then every minuscule — is how ASCII orders them and not
+    // how a keymap is read.
+    let mut groups: std::collections::BTreeMap<Order, Vec<(&Seq, &'a Command)>> =
+        std::collections::BTreeMap::new();
+    for (seq, (_, cmd)) in best {
+        let key = keys::format_seq(&seq[prefix.len()..prefix.len() + 1]);
+        let shifted = key.chars().next().is_some_and(char::is_uppercase);
+        groups
+            .entry((key.to_lowercase(), shifted, key.clone()))
+            .or_default()
+            .push((seq, cmd));
+    }
+
+    groups
+        .into_iter()
+        .map(|((_, _, key), under)| (key, under))
+        .map(|(key, under)| {
+            // A key bound on its own wins outright — `resolve` fires it
+            // without waiting — so anything extending it is unreachable and
+            // showing it as a prefix would be a lie.
+            let direct = under
+                .iter()
+                .find(|(seq, _)| seq.len() == prefix.len() + 1)
+                .map(|(_, cmd)| *cmd);
+            let next = match direct {
+                Some(cmd) => Next::Runs(cmd),
+                None => Next::More(under.len()),
+            };
+            (key, next)
+        })
+        .collect()
+}
+
 /// Every binding, sorted for display in view 7.
 ///
 /// Sorted by context then key *name*, because `KeyCode` has no meaningful
@@ -300,5 +377,114 @@ mod tests {
         let a: Vec<String> = sorted(&bindings).iter().map(|r| r.1.clone()).collect();
         let b: Vec<String> = sorted(&bindings).iter().map(|r| r.1.clone()).collect();
         assert_eq!(a, b, "view 7 would reshuffle between frames");
+    }
+
+    fn seq(text: &str) -> Seq {
+        keys::parse_seq(text).unwrap_or_else(|e| panic!("{text:?}: {e}"))
+    }
+
+    fn offered(rows: &[(String, Next<'_>)], key: &str) -> bool {
+        rows.iter().any(|(k, _)| k == key)
+    }
+
+    /// The panel is a list of what pressing one more key would do, so it must
+    /// not list keys that belong to some other prefix entirely.
+    #[test]
+    fn only_what_extends_the_prefix_is_offered() {
+        let b = defaults();
+        let rows = continuations(&b, Context::Common, &seq("z"));
+
+        assert!(offered(&rows, "o"), "`zo` extends `z`");
+        assert!(
+            !offered(&rows, "t"),
+            "`gt` does not extend `z`, and offering it would be offering a key \
+             that does nothing: {rows:?}"
+        );
+        assert!(!offered(&rows, "g"), "nor does `gg`: {rows:?}");
+    }
+
+    /// A binding that belongs to another view is not reachable from this one,
+    /// so the panel must not advertise it.
+    #[test]
+    fn another_views_bindings_are_not_offered() {
+        let mut b = defaults();
+        b.insert((Context::Queue, seq("z 9")), Command::Quit);
+
+        let here = continuations(&b, Context::Library, &seq("z"));
+        assert!(!offered(&here, "9"), "the queue's binding leaked: {here:?}");
+
+        let there = continuations(&b, Context::Queue, &seq("z"));
+        assert!(offered(&there, "9"), "and it should be there: {there:?}");
+    }
+
+    /// A key that only ever appears deeper is a prefix, not a command — the
+    /// panel says `+n more` rather than naming something one press away.
+    #[test]
+    fn a_key_that_only_goes_deeper_is_shown_as_a_prefix() {
+        let mut b = defaults();
+        b.insert((Context::Common, seq("z q w")), Command::Quit);
+        b.insert((Context::Common, seq("z q e")), Command::Top);
+
+        let rows = continuations(&b, Context::Common, &seq("z"));
+        let q = rows
+            .iter()
+            .find(|(k, _)| k == "q")
+            .expect("`q` is reachable");
+        assert_eq!(
+            q.1,
+            Next::More(2),
+            "`z q` runs nothing on its own — two bindings live under it"
+        );
+    }
+
+    /// Context shadowing, as `lookup` applies it. Several keys at once because
+    /// the wrong implementation — keeping whichever the hash map yielded first
+    /// — is right about half the time on any single key.
+    #[test]
+    fn a_views_own_binding_hides_the_common_one() {
+        let mut b = defaults();
+        for (key, cmd) in [
+            ("z o", Command::Quit),
+            ("z c", Command::Quit),
+            ("z a", Command::Quit),
+            ("z r", Command::Quit),
+            ("z m", Command::Quit),
+        ] {
+            b.insert((Context::Queue, seq(key)), cmd);
+        }
+
+        let rows = continuations(&b, Context::Queue, &seq("z"));
+        for key in ["o", "c", "a", "r", "m"] {
+            let found = rows.iter().find(|(k, _)| k == key).expect("still offered");
+            assert_eq!(
+                found.1,
+                Next::Runs(&Command::Quit),
+                "{key:?} should be the queue's, not the common one"
+            );
+            assert_eq!(
+                rows.iter().filter(|(k, _)| k == key).count(),
+                1,
+                "{key:?} must be offered once, not once per context"
+            );
+        }
+    }
+
+    /// `c` then `C`, not every capital and then every minuscule.
+    #[test]
+    fn a_key_is_followed_by_its_shifted_twin() {
+        let b = defaults();
+        let rows = continuations(&b, Context::Common, &seq("z"));
+        let at = |k: &str| {
+            rows.iter()
+                .position(|(key, _)| key == k)
+                .unwrap_or_else(|| panic!("{k:?} is not offered: {rows:?}"))
+        };
+        assert_eq!(
+            at("c") + 1,
+            at("C"),
+            "`zc` and `zC` should be adjacent: {rows:?}"
+        );
+        assert_eq!(at("r") + 1, at("R"));
+        assert!(at("c") < at("m"), "and the alphabet still runs a to z");
     }
 }

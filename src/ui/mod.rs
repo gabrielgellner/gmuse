@@ -2913,9 +2913,15 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     // The help popup shares the completion menu's slot: same shape, same
     // reason — a list of things you might type next, without covering the view
     // it is helping you use.
-    let menu_height = match (&ui.prompt, &ui.help) {
-        (Some(p), _) => menu_height(p, frame.area().width),
-        (None, Some(rows)) => rows_height(rows, frame.area().width),
+    // A third occupant of the same slot: the keys that could follow what you
+    // have typed so far. Derived from `pending` rather than stored, for the
+    // same reason the pending-key indicator is — there is no second copy of
+    // the truth to keep in step.
+    let which = which_key_rows(ui);
+    let menu_height = match (&ui.prompt, &ui.help, &which) {
+        (Some(p), _, _) => menu_height(p, frame.area().width),
+        (None, Some(rows), _) => rows_height(rows, frame.area().width),
+        (None, None, Some(rows)) => rows_height(rows, frame.area().width),
         _ => 0,
     };
 
@@ -2928,9 +2934,24 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     .areas(frame.area());
 
     if menu_height > 0 {
-        match (&ui.prompt, &ui.help) {
-            (Some(prompt), _) => draw_completions(frame, menu, ui, prompt),
-            (None, Some(rows)) => draw_help(frame, menu, ui, rows),
+        match (&ui.prompt, &ui.help, &which) {
+            (Some(prompt), _, _) => draw_completions(frame, menu, ui, prompt),
+            (None, Some(rows), _) => draw_help(
+                frame,
+                menu,
+                ui,
+                rows,
+                &format!("{} — keys that work here", ui.view.title()),
+            ),
+            // Named for the prefix rather than the view: what you are looking
+            // at is the continuation of something you started typing.
+            (None, None, Some(rows)) => draw_help(
+                frame,
+                menu,
+                ui,
+                rows,
+                &format!("after {}", crate::cmd::keys::format_seq(&ui.pending)),
+            ),
             _ => {}
         }
     }
@@ -3096,6 +3117,29 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
 /// Rows the completion menu needs, borders included. Zero when there is
 /// nothing to show.
 /// How tall a popup of `rows` needs to be, borders included and capped.
+/// The keys that could follow what has been typed so far, or `None` when
+/// nothing is pending.
+///
+/// which-key, without a timeout: a chord here is always deliberate — no key is
+/// both a command and a prefix, because `resolve` fires the shorter one — so
+/// there is nothing to wait to find out. A fast `gg` flashes the panel for one
+/// frame, which is what which-key looks like with `timeoutlen` at zero.
+fn which_key_rows(ui: &Ui) -> Option<Vec<String>> {
+    if ui.pending.is_empty() {
+        return None;
+    }
+    let rows: Vec<String> = bind::continuations(&ui.bindings, ui.view.context(), &ui.pending)
+        .into_iter()
+        .map(|(key, next)| match next {
+            bind::Next::Runs(cmd) => format!("{key}  {}", crate::cmd::parse::format(cmd)),
+            // which-key's `+prefix`, and the `+` is why it is not mistaken for
+            // a command name.
+            bind::Next::More(n) => format!("{key}  +{n} more"),
+        })
+        .collect();
+    (!rows.is_empty()).then_some(rows)
+}
+
 fn rows_height(rows: &[String], width: u16) -> u16 {
     if rows.is_empty() {
         return 3;
@@ -3110,7 +3154,7 @@ fn rows_height(rows: &[String], width: u16) -> u16 {
 /// Laid out in the same columns as the completion menu, from the same helper —
 /// two popups in one slot that disagreed about their shape would read as two
 /// different things.
-fn draw_help(frame: &mut Frame, area: Rect, ui: &Ui, rows: &[String]) {
+fn draw_help(frame: &mut Frame, area: Rect, ui: &Ui, rows: &[String], title: &str) {
     let laid_out = completion_rows(rows, area.width);
     let column = completion_column(rows);
     let available = (area.height.saturating_sub(2)) as usize;
@@ -3144,7 +3188,7 @@ fn draw_help(frame: &mut Frame, area: Rect, ui: &Ui, rows: &[String]) {
         )));
     }
 
-    let title = format!("{} — keys that work here", ui.view.title());
+    let title = title.to_string();
     frame.render_widget(
         Paragraph::new(lines).block(pane_block(&ui.theme, &title, false)),
         area,
@@ -8487,5 +8531,119 @@ mod tests {
         let state = scroll.state_within(Some(0), 20);
         assert_eq!(state.offset(), 19, "the last row is as far as it may go");
         assert_eq!(scroll.top(), 19, "and the clamp is written back");
+    }
+
+    /// Pressing a prefix should say what can follow it, without being asked.
+    #[test]
+    fn a_prefix_key_offers_what_comes_next() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z");
+        let out = render(&ui, &ctx, 100, 20);
+        for expect in ["o  fold open", "r  fold more", "M  fold none"] {
+            assert!(out.contains(expect), "expected {expect:?} in:\n{out}");
+        }
+    }
+
+    /// And the leader, which is the other prefix worth having one for.
+    #[test]
+    fn the_leader_offers_what_comes_next() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "<leader>");
+        let out = render(&ui, &ctx, 100, 20);
+        assert!(out.contains("c  pause"), "{out}");
+        assert!(out.contains("?  help"), "{out}");
+    }
+
+    /// It is derived, not stored, so a `:bind` shows up in it at once.
+    #[test]
+    fn a_new_binding_appears_in_the_panel_immediately() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "bind common \"z 9\" quit");
+        press(&mut ui, &ctx, "z");
+        let out = render(&ui, &ctx, 100, 20);
+        assert!(out.contains("9  quit"), "{out}");
+    }
+
+    /// Completing the chord takes it away again — it is a prompt, not a mode.
+    #[test]
+    fn the_panel_goes_when_the_chord_completes() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z");
+        assert!(render(&ui, &ctx, 100, 20).contains("fold open"));
+        press(&mut ui, &ctx, "a");
+        assert!(
+            !render(&ui, &ctx, 100, 20).contains("fold open"),
+            "the panel outlived the chord"
+        );
+    }
+
+    /// A view's own binding hides the common one, exactly as `lookup` has it —
+    /// offering both would be offering a key that does something else.
+    #[test]
+    fn the_panel_applies_context_shadowing() {
+        use crate::cmd::bind::{Next, continuations};
+        use crate::cmd::keys;
+
+        let mut bindings = bind::defaults();
+        let seq = keys::parse_seq("z o").expect("parses");
+        bindings.insert((crate::cmd::Context::Queue, seq), Command::Quit);
+
+        let under_z = keys::parse_seq("z").expect("parses");
+        let rows = continuations(&bindings, crate::cmd::Context::Queue, &under_z);
+        let o = rows
+            .iter()
+            .find(|(k, _)| k == "o")
+            .expect("`o` should still be offered");
+        assert_eq!(o.1, Next::Runs(&Command::Quit), "the queue's own wins");
+        assert_eq!(
+            rows.iter().filter(|(k, _)| k == "o").count(),
+            1,
+            "and it must be offered once, not twice"
+        );
+    }
+
+    /// A key bound on its own fires immediately, so anything extending it is
+    /// unreachable — the panel must not advertise it as a prefix.
+    #[test]
+    fn a_key_bound_on_its_own_is_shown_as_what_it_runs() {
+        use crate::cmd::bind::{Next, continuations};
+        use crate::cmd::keys;
+
+        let mut bindings = bind::defaults();
+        bindings.insert(
+            (
+                crate::cmd::Context::Common,
+                keys::parse_seq("z o x").unwrap(),
+            ),
+            Command::Quit,
+        );
+
+        let rows = continuations(
+            &bindings,
+            crate::cmd::Context::Common,
+            &keys::parse_seq("z").unwrap(),
+        );
+        let o = rows.iter().find(|(k, _)| k == "o").expect("`o` is bound");
+        assert!(
+            matches!(o.1, Next::Runs(_)),
+            "`zo` fires on its own, so `zox` can never be reached: {:?}",
+            o.1
+        );
     }
 }

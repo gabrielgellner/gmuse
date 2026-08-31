@@ -2396,6 +2396,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   The padding is a property of the screen rather than of the list, which is the whole reason vim draws `~` at all. New
   `Role::Filler`, set behind the gutter — the gutter is information and the filler is the absence of it.
 
+- **2026-08-30** **which-key, derived from the binding table.** Pressing a prefix — `z`, `<leader>`, `g`, `d` — lists
+  what can follow it in the bottom slot the completion menu and the `<leader>?` popup already share. Three occupants,
+  one shape: they are all "a list of things you might type next, without covering the view it is helping you use".
+
+  **Derived from `pending`, never stored**, for the same reason the pending-key indicator is: there is no second copy of
+  the truth to keep in step, and a `:bind` shows up in the panel the moment it takes effect in the keymap.
+
+  **No timeout.** which-key's `timeoutlen` exists because vim has keys that are both a command and the start of a longer
+  one, so it must wait to find out which you meant. Here `resolve` fires the shorter binding outright — the README has
+  always said a chord cannot extend a key bound on its own — so there is nothing to wait for. A fast `gg` flashes the
+  panel for one frame, which is what which-key looks like with the timeout at zero.
+
+  Two things the panel must get right, and both are about what it does _not_ say. Context shadowing is applied exactly
+  as `lookup` applies it, or a view would be offered a key that does something else. And a key bound on its own is shown
+  as what it runs rather than as a prefix, because anything extending it is unreachable — `+n more` is reserved for keys
+  that really do only go deeper.
+
+  Ordered case-insensitively with the unshifted key first, so `c` is followed by `C`. Two separate alphabets — every
+  capital, then every minuscule — is how ASCII sorts and not how a keymap is read.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

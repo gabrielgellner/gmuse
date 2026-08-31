@@ -134,6 +134,10 @@ the cursor possible near the end.
 plays. `<leader>x` plays what is under the cursor from anywhere, so the two are not redundant: `Enter` acts on structure
 until structure runs out, then acts on the thing itself.
 
+**Start a chord and it tells you what can follow.** Press `z`, or the leader, or `g`, and the bottom panel lists every
+key that extends it and what each one does — which-key, without a timeout, because a key bound on its own fires outright
+here and there is nothing to wait to find out. It is read off the binding table, so a `:bind` appears in it at once.
+
 **`space` is the leader**, and `<leader>?` shows the keys that work in the current view.
 
 **View 8 is the guides** — short pieces on how to do things, as against which key does what. `<leader>?` answers the
