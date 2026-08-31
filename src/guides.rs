@@ -251,4 +251,130 @@ mod tests {
             );
         }
     }
+
+    /// The named keys, whose capitalisation is only ever typography: prose
+    /// writes `Enter` and `g<Tab>` where the binding table says `enter` and
+    /// `g tab`.
+    const NAMES: &[&str] = &[
+        "leader", "enter", "tab", "space", "home", "end", "pageup", "pagedown", "up", "down",
+        "left", "right", "esc",
+    ];
+
+    /// A key as the guides would write it: no angle brackets, no spaces, and
+    /// named keys lower-cased.
+    ///
+    /// **Letters keep their case**, because here it is meaning rather than
+    /// typography — `r` and `R` are different bindings, as are `zc` and `zC`.
+    /// Folding everything let a sentence about `c` stand in for the bound `C`,
+    /// which is how `C` passed this test before it deserved to.
+    fn normalised(s: &str) -> String {
+        let mut out = s.to_string();
+        for name in NAMES {
+            let mut at = 0;
+            while let Some(i) = out[at..].to_lowercase().find(name) {
+                let (from, to) = (at + i, at + i + name.len());
+                out.replace_range(from..to, name);
+                at = to;
+            }
+        }
+        out.chars()
+            .filter(|c| !matches!(c, '<' | '>' | ' ' | '`'))
+            .collect()
+    }
+
+    /// Every key the guides mention, taken from backticked spans and from the
+    /// indented example blocks — the two places a key is ever written.
+    ///
+    /// Extracted rather than grepped for, so that a single-letter binding like
+    /// `o` has to appear *as a key* and cannot be satisfied by the letter o
+    /// turning up inside a word.
+    fn keys_the_guides_write() -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for guide in GUIDES {
+            for span in guide.body.split('`').skip(1).step_by(2) {
+                out.insert(normalised(span));
+            }
+            // Only the **key column** of an example row: everything up to the
+            // first run of two spaces. Taking every token would let the words
+            // of a description stand in for a key, and single-letter bindings
+            // like `r` and `m` would pass on prose alone — which is exactly
+            // what happened when this was first written.
+            for line in guide.body.lines().filter(|l| l.starts_with("    ")) {
+                let column = line.trim_start().split("  ").next().unwrap_or_default();
+                if !column.is_empty() {
+                    out.insert(normalised(column));
+                }
+            }
+        }
+        out
+    }
+
+    /// Bindings deliberately left untaught, and why.
+    ///
+    /// An alias for a key that *is* taught needs no prose of its own —
+    /// documenting both would only suggest they differ.
+    const UNTAUGHT: &[(&str, &str)] = &[("<leader> =", "an alias for `<leader> +`")];
+
+    /// The other direction, and the one that actually rots: a key can be added
+    /// or moved without anybody remembering the guides exist.
+    ///
+    /// It caught a real hole the first time it ran — the whole transport row
+    /// had moved behind `<leader>` without a word written about it anywhere,
+    /// and `moving-around` still said there were seven views.
+    fn untaught(bindings: &crate::cmd::bind::Bindings) -> Vec<String> {
+        let written = keys_the_guides_write();
+        crate::cmd::bind::sorted(bindings)
+            .into_iter()
+            .map(|(_, key, _)| key)
+            .filter(|key| !written.contains(&normalised(key)))
+            .filter(|key| !UNTAUGHT.iter().any(|(k, _)| k == key))
+            .collect()
+    }
+
+    #[test]
+    fn every_binding_is_taught_by_some_guide() {
+        let found = untaught(&crate::cmd::bind::defaults());
+        assert!(
+            found.is_empty(),
+            "bound but taught nowhere: {found:?}\n\
+             Add it to a guide, or to `UNTAUGHT` with the reason."
+        );
+    }
+
+    /// The test above can only fail when something is undocumented, so with
+    /// everything documented it would pass even if the audit looked at
+    /// nothing. This is the half that keeps it honest.
+    #[test]
+    fn the_audit_notices_an_undocumented_key() {
+        let mut bindings = crate::cmd::bind::defaults();
+        bindings.insert(
+            (
+                crate::cmd::Context::Common,
+                crate::cmd::keys::parse_seq("z 9").expect("parses"),
+            ),
+            crate::cmd::Command::Quit,
+        );
+        assert_eq!(
+            untaught(&bindings),
+            vec!["z 9".to_string()],
+            "a binding no guide mentions should have been reported"
+        );
+    }
+
+    /// And the exemptions have to stay real: a key that stops being bound
+    /// should not sit in the list forever pretending to be documented.
+    #[test]
+    fn every_exemption_is_still_a_binding() {
+        let bindings = crate::cmd::bind::defaults();
+        let bound: Vec<String> = crate::cmd::bind::sorted(&bindings)
+            .into_iter()
+            .map(|(_, key, _)| key)
+            .collect();
+        for (key, why) in UNTAUGHT {
+            assert!(
+                bound.iter().any(|b| b == key),
+                "{key:?} is exempt as {why}, but is not bound at all"
+            );
+        }
+    }
 }

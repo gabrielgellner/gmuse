@@ -5468,7 +5468,13 @@ mod tests {
         // Both panes: the titles, and the first guide's text.
         assert!(out.contains("Moving around"), "{out}");
         assert!(out.contains("The library tree"), "{out}");
-        assert!(out.contains("leader"), "the guide body is missing:\n{out}");
+        // The opening line, because that is what the pane shows by definition.
+        // A word from further down is hostage to how long the sections above
+        // it happen to be.
+        assert!(
+            out.contains("nvim tabs"),
+            "the guide body is missing:\n{out}"
+        );
     }
 
     #[test]

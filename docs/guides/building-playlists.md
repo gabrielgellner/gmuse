@@ -33,6 +33,8 @@ global.**
     P       put before
     3dd     cut three
     2p      put twice
+    D       cut from here to the end
+    Y       copy from here to the end
 
 Because `p` puts _after_, `dd` then `p` swaps a track with the one below it. That is the whole reordering story — there
 is no separate "move up" key.

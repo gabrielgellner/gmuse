@@ -1,15 +1,27 @@
 # Moving around
 
-Seven views, switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight to view 3; `g<Tab>` returns to the one
+Eight views, switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight to view 3; `g<Tab>` returns to the one
 you were on before.
 
     1 library    2 sorted     3 playlist   4 queue
-    5 browser    6 scope      7 settings
+    5 browser    6 scope      7 settings    8 guides
 
 Within any of them the motions are vim's. `j` and `k` move, and take a count — `3j` goes down three. `gg` and `G` go to
-the top and bottom, and `12G` goes to row 12. `^f` and `^b` page.
+the top and bottom, and `12G` goes to row 12. `^f` and `^b` page. The arrow keys — `up`, `down`, `left`, `right` — and
+`home`, `end`, `pageup` and `pagedown` do what you would expect, for the times your hands are not on the home row.
 
 `/` searches forwards and `?` backwards; `n` and `N` repeat.
+
+`gp` goes to whatever is playing, opening any folds that were hiding it.
+
+## Where you are on screen
+
+    zt      put this row at the top of the pane
+    zz      at the middle
+    zb      at the bottom
+
+These move the _view_, not the cursor — the row you are on stays the row you are on. Lists draw `~` past their last row
+exactly as vim does, which is what lets `zt` work on the final track instead of being ignored.
 
 ## The leader
 
@@ -21,10 +33,56 @@ the top and bottom, and `12G` goes to row 12. `^f` and `^b` page.
 `<leader>?` is worth pressing in each view — it lists that view's own bindings as well as the common ones, which is a
 different question from view 7's list of every binding everywhere.
 
+**Start any chord and it tells you the rest.** Press `z`, or `g`, or the leader on its own, and a panel lists every key
+that could come next and what each one does. There is no delay to wait through: a key bound on its own fires immediately
+here, so there is never anything to wait and see about.
+
 Bind your own in the config, where `<leader>` stands for whatever `leader` says:
 
     [keys.common]
     "<leader> p" = "playlist list"
+
+## Transport lives behind the leader
+
+    <leader>x    play what the cursor is on
+    <leader>c    pause
+    <leader>v    stop
+    <leader>b    next
+    <leader>z    previous
+    <leader>+    louder, 3 dB a step
+    <leader>-    quieter
+    <leader>>    seek a minute on
+    <leader><    seek a minute back
+    right        seek ten seconds on
+    left         ten seconds back
+
+The prefix is deliberate. Navigating is what your hands are doing in these views, and reaching for the transport is
+stepping outside that — so it costs a key, and the bare letters go to the folds and motions that browsing wants.
+
+The letters are Winamp's row, unchanged. That matters: there is one alphabet to learn rather than two, and the plan is
+that a future transport mode makes these same letters bare, so `c` and `<leader>c` will be one pause reached from two
+postures.
+
+## What plays next
+
+Five toggles, and they show in the status line so you can see what is on without pressing anything.
+
+    s            shuffle
+    r            repeat the list when it ends
+    R            repeat the current track
+    C            continue — carry on into the next album rather than stopping
+    m            cycle all / artist / album
+
+`m` is what cmus calls `aaa_mode`, and it decides how far "the list" reaches: everything, everything by this artist, or
+just this album. It is the setting that makes `r` mean three different things.
+
+The queue always wins. Anything in view 4 plays before whatever these would have chosen, which is what makes it a queue
+rather than a second playlist.
+
+## Leaving
+
+`q` quits. There is no confirmation and nothing is lost: the view you were on, the queue, the open playlist, the current
+track and its position all come back next time.
 
 ## Numbers down the side
 

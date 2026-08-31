@@ -2,6 +2,14 @@
 
 Three ways to narrow the library, and they differ in how they combine.
 
+## Marks fold, so type what you can
+
+`/loffler` finds Christian Löffler, and so does `/loeffler` — a mark can be typed around two ways and searching tries
+both. Typographic punctuation folds too, so `don't` finds `don’t`. This holds for `:filter` and for sorting, which is
+why he files under Lo rather than after every artist beginning Lz.
+
+Typing a capital still asks for case to matter. It never asks for the mark back — those are different questions.
+
 ## Filters — a question
 
     :filter genre="jazz"|genre="blues"

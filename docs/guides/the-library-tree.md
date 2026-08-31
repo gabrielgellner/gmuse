@@ -65,10 +65,19 @@ in this view your hands are looking for something, not driving the transport —
 
 ## What the cursor covers
 
-`a`, `e` and `<leader>x` act on everything _under_ the row, not just the row:
+    a    add to the open playlist
+    e    add to the queue
+
+Both act on everything _under_ the row, not just the row:
 
     on a track     that track
     on an album    its tracks, in order
     on an artist   everything by them
 
-So gathering an album is one keypress on the album row — you do not have to open it first.
+So gathering an album is one keypress on the album row — you do not have to open it first. `<leader>x` reaches the same
+way, which is why playing an album is one key on its row too.
+
+    A    add to the library
+
+`A` is cmus's, and here it only tells you what to type instead: the library is the thing you are already looking at, so
+there is nothing to add a track _to_. Growing it means scanning somewhere new — `:add <path>`.

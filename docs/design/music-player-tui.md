@@ -2454,6 +2454,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   flat lists it moves the cursor. Where the track is not in the view at all, it says so rather than moving somewhere
   arbitrary.
 
+- **2026-08-31** **The guides are checked against the keymap in both directions.** There was already a test that keys
+  the guides _teach_ are really bound. The other direction is the one that actually rots, because a key can be added or
+  moved without anyone remembering the guides exist — and it had: the entire transport row had gone behind `<leader>`
+  with nothing written about it anywhere, `moving-around` still said there were seven views, and the five playback-mode
+  toggles had never been documented at all.
+
+  Two things the audit had to get right before it was worth anything:
+
+  **Only the key column of an example row counts.** Taking every token let the words of a description stand in for a
+  key, so single-letter bindings passed on prose alone.
+
+  **Letters keep their case; only named keys are folded.** Here case is meaning rather than typography — `r` and `R` are
+  different bindings, as are `zc` and `zC` — and folding everything let a sentence mentioning `c` satisfy the bound `C`.
+  `enter`/`Enter` and `g tab`/`g<Tab>` are folded by name, which is the only place capitalisation really is spelling.
+
+  An `UNTAUGHT` list carries the deliberate exemptions with a reason each, and a second test checks those are still
+  bound — an exemption for a key that no longer exists is a comment pretending to be a decision. A third feeds the audit
+  a binding no guide mentions and requires it to be reported, because a test that can only fail on absence would pass
+  just as well if it looked at nothing.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
