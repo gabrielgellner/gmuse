@@ -51,6 +51,15 @@ pub struct Cli {
     )]
     pub library: Vec<PathBuf>,
 
+    /// Move ratings, playlists and event logs from the previous `data_dir`.
+    ///
+    /// Not automatic: gmuse cannot tell a moved `data_dir` from a first run,
+    /// or from another machine's data not having synced yet, and copying from
+    /// somewhere else on a guess is how you attach one library's ratings to
+    /// another (#27).
+    #[arg(long)]
+    pub migrate_data: bool,
+
     /// Re-read every file, ignoring the mtime fast path.
     #[arg(long)]
     pub rescan: bool,

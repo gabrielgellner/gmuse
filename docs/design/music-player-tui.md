@@ -2154,6 +2154,39 @@ Append here as decisions are made. Format: date, decision, rationale.
   can I do here_ — which is a different question from view 7's flat list of every binding in every context, and both are
   worth being able to ask.
 
+- **2026-08-30** **A moved `data_dir` is reported, never followed.** Editing the setting changes where gmuse looks, not
+  where the data is, so the next launch folded from nothing and reported an empty history while the ratings sat in the
+  previous directory — #24's failure one step later, and its reasoning applies verbatim.
+
+  It cannot be fixed by moving automatically, because three situations are indistinguishable from inside: the directory
+  changed and the data is elsewhere; the directory is right and this is a first run; the directory is right and nothing
+  has synced from the other machine yet. The third is real now that the directory is meant to be shared, and it is where
+  helpfully copying from somewhere else would attach one library's ratings to another. So gmuse detects, declines, and
+  names the remedy — the shape every other ambiguity here takes.
+
+  The last directory used is remembered in `$XDG_STATE_HOME`, **not** in `data_dir`: it is a fact about this machine,
+  and putting it in the synced directory would have two machines overwrite each other's answer.
+
+  **The subtle part, found by running it rather than by reasoning.** The obvious test — "the new directory already has
+  data, so it was moved by hand; say nothing" — is wrong, because gmuse writes an events log to the new location on the
+  very launch that warns. The second launch would then see data in both places, conclude the move had happened, and go
+  quiet for ever with the ratings still stranded: the same silent loss, reached by a different route. Only the _old_
+  directory being empty settles it, so two directories both holding ratings is reported rather than excused — that is
+  what a half-finished move looks like, and being told is the point.
+
+  `--migrate-data` moves the base, every log and the playlists; `history.toml` alone would strand the recent plays.
+  Nothing is ever overwritten, and the warning repeats until nothing is stranded.
+
+  A **log** whose name is already taken is the likely clash rather than a rare one — it is the same machine's, and gmuse
+  writes one at the new location on the launch that warns. Only the events the destination _lacks_ travel, into a file
+  of its own; logs fold together by timestamp, which is what several in a directory are for.
+
+  Taking the **difference** is what makes that safe, and it is why an earlier all-or-nothing rule was wrong: it declined
+  any overlap at all, stranding the new half of a partly-overlapping log — the realistic case. A copy contributes
+  nothing and is named; a partial overlap contributes its new events; a disjoint log contributes all of itself. No play
+  is counted twice and none is dropped, and both counts are reported so neither is silent. Only logs: a second
+  `history.toml` is a base, not a stream of facts, and two of them cannot be folded.
+
 ---
 
 ## 14. Prior art worth reading

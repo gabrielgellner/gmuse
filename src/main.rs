@@ -14,6 +14,7 @@ mod catalog;
 mod cli;
 mod cmd;
 mod config;
+mod datadir;
 mod events;
 mod filter;
 mod format;
@@ -160,6 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             loaded,
             args.log_path(),
             !args.no_resume,
+            args.migrate_data,
         );
     }
 
@@ -263,6 +265,7 @@ fn run_tui(
     loaded: config::Loaded,
     log_path: Option<PathBuf>,
     resume: bool,
+    migrate_data: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // History is loaded before the library, not after: a catalog may be defined
     // by `play_count` or `days_since_added`, and building the projection
@@ -278,6 +281,63 @@ fn run_tui(
             history_path.display()
         );
     }
+    // Did `data_dir` move out from under the data? Checked before the first
+    // read, so an empty history is explained rather than merely reported.
+    let state_dir = config::default_state_dir();
+    match datadir::check(
+        datadir::remembered(&state_dir).as_deref(),
+        &loaded.data_dir,
+        datadir::has_data,
+    ) {
+        datadir::Check::Fine => datadir::remember(&state_dir, &loaded.data_dir),
+        datadir::Check::Stranded { from } => {
+            if migrate_data {
+                match datadir::move_data(&from, &loaded.data_dir) {
+                    Ok(moved) => {
+                        println!(
+                            "data_dir: moved {} item(s) from {}",
+                            moved.took.len(),
+                            from.display()
+                        );
+                        for m in &moved.merged {
+                            println!(
+                                "  recovered {} event(s) into {}{}",
+                                m.took,
+                                m.at.display(),
+                                match m.already {
+                                    0 => String::new(),
+                                    n => format!(" ({n} already had a home)"),
+                                }
+                            );
+                        }
+                        for left in &moved.left {
+                            println!(
+                                "  left {}: something of that name is already there",
+                                left.display()
+                            );
+                        }
+                        // Remembered only when nothing was left: otherwise the
+                        // next launch should say so again.
+                        if moved.left.is_empty() {
+                            datadir::remember(&state_dir, &loaded.data_dir);
+                        }
+                    }
+                    Err(e) => eprintln!("data_dir: {e}"),
+                }
+            } else {
+                // Deliberately not remembering the new directory: a launch that
+                // ignored this would otherwise never be warned again.
+                eprintln!(
+                    "data_dir: changed to {}, but {} still holds your ratings.\n\
+                     Move them with `gmuse --migrate-data`, or by hand — both \
+                     history.toml and events-*.log.",
+                    loaded.data_dir.display(),
+                    from.display()
+                );
+            }
+        }
+    }
+
     // The base plus every log, this machine's and any that arrived by sync.
     let machine = crate::events::machine_id(&config::default_state_dir());
     let events_path = crate::events::log_path(&loaded.data_dir, &machine);

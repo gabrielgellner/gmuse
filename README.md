@@ -323,6 +323,31 @@ data_dir = "~/MusicLibrary/.gmuse"   # ratings travel with the music
 It cannot default inside the library, because roots may be several and on different disks. A history left in the old
 `$XDG_STATE_HOME` location is **moved** on first run, and gmuse says so.
 
+**Changing `data_dir` later does not move anything**, and gmuse will not guess — it cannot tell a moved directory from a
+first run, or from another machine's data not having synced yet, and copying on a guess is how one library's ratings end
+up attached to another. Instead it says what happened and what to do:
+
+```
+data_dir: changed to ~/MusicLibrary/.gmuse, but ~/.local/share/gmuse still holds your ratings.
+Move them with `gmuse --migrate-data`, or by hand — both history.toml and events-*.log.
+```
+
+`--migrate-data` moves the base, **every** log and the playlists — `history.toml` alone would leave recent plays and
+ratings behind.
+
+A log whose name is already taken is the _likely_ clash, not a rare one: it is the same machine's, and gmuse writes one
+at the new location on the launch that warns. Only the events the destination **lacks** travel, into a file of its own —
+logs fold together by timestamp, which is what having several in a directory is for:
+
+```
+data_dir: moved 1 item(s) from ~/.local/share/gmuse
+  recovered 6 event(s) into .../events-cc49b23-recovered.log (1 already had a home)
+```
+
+Taking the difference covers every case: a log **copied** forward rather than moved contributes nothing and is named;
+one overlapping partly contributes its new half; a disjoint one contributes all of itself. Nothing is ever overwritten
+and no play is counted twice, and the warning repeats until nothing is stranded.
+
 Ratings are gmuse's, not the file's — §1 keeps tag editing out of scope — which is exactly why they need a home you
 choose rather than one they are stuck with.
 
