@@ -391,6 +391,12 @@ pub struct Ui {
     /// How the now-playing description is written. Parsed at config load; the
     /// status line only renders it.
     pub now_playing: crate::format::Template,
+    /// How a track row is written in the library tree.
+    ///
+    /// Its own template because a track sits beside an artist row there and
+    /// has to read differently — the same reason a file explorer icons files
+    /// apart from folders.
+    pub track_line: crate::format::Template,
     /// The library projection. Owned rather than borrowed, because changing
     /// the active catalogs — or `smart_artist_sort` — rebuilds it.
     pub library: Library,
@@ -479,6 +485,8 @@ impl Ui {
             catalog_sel: 0,
             theme: theme::Theme::default(),
             now_playing: crate::format::Template::default(),
+            track_line: crate::format::Template::parse("{track:2}  {display_title}  {duration}")
+                .expect("a literal template"),
             library,
             catalogs: crate::catalog::Catalogs::default(),
             filter: None,
@@ -580,15 +588,18 @@ impl Ui {
     /// The track the cursor is on in the current view, if any.
     pub fn selected_track(&self, ctx: &Context<'_>) -> Option<TrackId> {
         match self.view {
-            View::Tree => {
-                let tracks = self.tree.tracks_for(&self.library, ctx.store);
-                match self.tree.pane {
-                    // With the tree pane focused, Enter plays the first track
-                    // of whatever is selected rather than doing nothing.
-                    Pane::Tree => tracks.first().copied(),
-                    Pane::Tracks => tracks.get(self.tree.track_selected).copied(),
-                }
-            }
+            // The row itself when it is a track, and otherwise the first
+            // track underneath — so `x` on a closed album plays it from the
+            // top rather than doing nothing.
+            View::Tree => self
+                .tree
+                .selected_track(&self.library, ctx.store)
+                .or_else(|| {
+                    self.tree
+                        .tracks_for(&self.library, ctx.store)
+                        .first()
+                        .copied()
+                }),
             View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
@@ -1434,34 +1445,29 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         },
         Command::PageDown => set_cursor(ui, (cursor + page * n).min(len.saturating_sub(1))),
         Command::PageUp => set_cursor(ui, cursor.saturating_sub(page * n)),
-        Command::PaneNext => match ui.view {
-            View::Tree => {
-                ui.tree.pane = match ui.tree.pane {
-                    Pane::Tree => Pane::Tracks,
-                    Pane::Tracks => Pane::Tree,
-                };
-            }
-            View::Playlist => {
+        Command::PaneNext => {
+            if ui.view == View::Playlist {
                 ui.playlist_pane = match ui.playlist_pane {
                     Pane::Tree => Pane::Tracks,
                     Pane::Tracks => Pane::Tree,
                 };
             }
-            _ => {}
-        },
-        // Directional rather than a toggle: with two panes they behave the
-        // same, but the binding says what it means and keeps working when a
-        // third arrives.
-        Command::PaneLeft => match ui.view {
-            View::Tree => ui.tree.pane = Pane::Tree,
-            View::Playlist => ui.playlist_pane = Pane::Tree,
-            _ => {}
-        },
-        Command::PaneRight => match ui.view {
-            View::Tree => ui.tree.pane = Pane::Tracks,
-            View::Playlist => ui.playlist_pane = Pane::Tracks,
-            _ => {}
-        },
+        }
+        Command::FoldClose => {
+            if ui.view == View::Tree {
+                ui.tree.close(&ui.library, ctx.store);
+            }
+        }
+        Command::PaneLeft => {
+            if ui.view == View::Playlist {
+                ui.playlist_pane = Pane::Tree;
+            }
+        }
+        Command::PaneRight => {
+            if ui.view == View::Playlist {
+                ui.playlist_pane = Pane::Tracks;
+            }
+        }
         // Run a command as though the named pane had focus, then put focus
         // back. Reusing the ordinary command rather than duplicating every
         // motion per pane is the whole point of the wrapper.
@@ -1470,22 +1476,17 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 crate::cmd::PaneTarget::Tree => Pane::Tree,
                 crate::cmd::PaneTarget::Tracks => Pane::Tracks,
             };
-            // Both two-pane views, since the wrapper is about panes rather
-            // than about the library.
-            let focused = match ui.view {
-                View::Tree => std::mem::replace(&mut ui.tree.pane, want),
-                View::Playlist => std::mem::replace(&mut ui.playlist_pane, want),
-                _ => return,
-            };
-            execute_counted(ui, ctx, *cmd, count);
-            match ui.view {
-                View::Tree => ui.tree.pane = focused,
-                View::Playlist => ui.playlist_pane = focused,
-                _ => {}
+            // View 3 is the only two-pane view now that the library tree
+            // holds all three levels in one.
+            if ui.view != View::Playlist {
+                return;
             }
+            let focused = std::mem::replace(&mut ui.playlist_pane, want);
+            execute_counted(ui, ctx, *cmd, count);
+            ui.playlist_pane = focused;
         }
         Command::Expand => {
-            if ui.view == View::Tree && ui.tree.pane == Pane::Tree {
+            if ui.view == View::Tree {
                 ui.tree.toggle(&ui.library, ctx.store);
             } else if ui.view == View::Filters {
                 // Space turns one catalog on or off. The union of what is on
@@ -1526,18 +1527,29 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 };
                 apply_catalog_spec(ui, ctx, crate::catalog::Spec::Only(vec![name]));
             }
-            _ => {
-                ui.playback.active = match ui.view {
-                    View::Playlist => ActiveSource::Playlist,
-                    _ => ActiveSource::Library,
-                };
-                if let Some(id) = ui.selected_track(ctx) {
-                    if ui.view == View::Queue {
-                        ui.queue.pop_front();
+            // Enter *confirms*: it opens or closes a node, and on a track —
+            // where there is nothing left to descend into — it plays. That is
+            // snacks' rule, and with all three levels in one pane there is no
+            // second pane to descend into instead.
+            View::Tree => {
+                let leaf = ui
+                    .tree
+                    .rows(&ui.library, ctx.store)
+                    .get(ui.tree.selected)
+                    .map(|r| r.is_leaf())
+                    .unwrap_or(false);
+                if leaf {
+                    if let Some(id) = ui.selected_track(ctx) {
+                        ui.playback.active = ActiveSource::Library;
+                        play(ui, ctx, id);
                     }
-                    play(ui, ctx, id);
+                } else {
+                    ui.tree.toggle(&ui.library, ctx.store);
                 }
             }
+            // Elsewhere there is nothing to confirm. Inert in a context is
+            // already ordinary here — `h` outside the tree does nothing too.
+            _ => {}
         },
         // `dd` takes a count, as in vim: `3dd` removes three. It cuts —
         // the rows go to the register, so `dd` … `p` moves them, here or in
@@ -1570,15 +1582,30 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         },
 
         // ---- transport
-        Command::Play => {
-            if ui.playback.current.is_some() {
+        // `x` plays **what is under the cursor**. It used to mean "resume if
+        // something is playing, else play the selection" — two behaviours on
+        // one key, the first of which is what `c` already does.
+        Command::Play => match ui.selected_track(ctx) {
+            Some(id) => {
+                ui.playback.active = match ui.view {
+                    View::Playlist => ActiveSource::Playlist,
+                    _ => ActiveSource::Library,
+                };
+                // The queue is consumed as it plays, so playing from it takes
+                // the entry rather than leaving a copy behind.
+                if ui.view == View::Queue {
+                    ui.queue.pop_front();
+                }
+                play(ui, ctx, id);
+            }
+            // Nothing selectable here — scope, settings, the browser. Resuming
+            // is the only sensible reading of "play".
+            None => {
                 if let Some(p) = ctx.player {
                     p.play();
                 }
-            } else if let Some(id) = ui.selected_track(ctx) {
-                play(ui, ctx, id);
             }
-        }
+        },
         Command::Pause => {
             if let Some(p) = ctx.player {
                 p.toggle();
@@ -2348,7 +2375,6 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     };
     ui.library = Library::from_members(ctx.store, members, ui.smart_artist_sort);
     ui.tree.selected = 0;
-    ui.tree.track_selected = 0;
     ui.sorted = 0;
     // Playlists and the queue are deliberately untouched: they hold TrackIds
     // straight into the Store and are meant to cross catalogs.
@@ -2413,7 +2439,7 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
     let ids: Vec<crate::store::TrackId> = match ui.view {
         // From the tree, add everything the cursor covers — an album or an
         // artist — which is the whole point of adding from a tree.
-        View::Tree if ui.tree.pane == Pane::Tree => ui.tree.tracks_for(&ui.library, ctx.store),
+        View::Tree => ui.tree.tracks_for(&ui.library, ctx.store),
         _ => ui.selected_track(ctx).into_iter().collect(),
     };
     if ids.is_empty() {
@@ -2500,20 +2526,17 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
             .unwrap_or_default()
     };
     match ui.view {
-        View::Tree => match ui.tree.pane {
-            Pane::Tree => ui
-                .tree
-                .rows(&ui.library, ctx.store)
-                .iter()
-                .map(|r| r.label().to_lowercase())
-                .collect(),
-            Pane::Tracks => ui
-                .tree
-                .tracks_for(&ui.library, ctx.store)
-                .iter()
-                .map(describe)
-                .collect(),
-        },
+        // Artists, albums and tracks are all rows now, so `/` searches the
+        // lot — which is what a single buffer should do.
+        View::Tree => ui
+            .tree
+            .rows(&ui.library, ctx.store)
+            .iter()
+            .map(|row| match row {
+                tree::Row::Track { id, .. } => describe(id),
+                other => other.label().to_lowercase(),
+            })
+            .collect(),
         View::Sorted => ui.library.sorted().iter().map(describe).collect(),
         View::Playlist => ui.playlist.entries().iter().map(describe).collect(),
         View::Queue => ui.queue.entries().map(describe).collect(),
@@ -2529,10 +2552,7 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
 
 fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
     match ui.view {
-        View::Tree => match ui.tree.pane {
-            Pane::Tree => ui.tree.rows(&ui.library, ctx.store).len(),
-            Pane::Tracks => ui.tree.tracks_for(&ui.library, ctx.store).len(),
-        },
+        View::Tree => ui.tree.rows(&ui.library, ctx.store).len(),
         View::Sorted => ui.library.sorted().len(),
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlist_rows.len(),
@@ -2549,10 +2569,7 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
 
 fn current_cursor(ui: &Ui) -> usize {
     match ui.view {
-        View::Tree => match ui.tree.pane {
-            Pane::Tree => ui.tree.selected,
-            Pane::Tracks => ui.tree.track_selected,
-        },
+        View::Tree => ui.tree.selected,
         View::Sorted => ui.sorted,
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlists_sel,
@@ -2567,15 +2584,7 @@ fn current_cursor(ui: &Ui) -> usize {
 
 fn set_cursor(ui: &mut Ui, next: usize) {
     match ui.view {
-        View::Tree => match ui.tree.pane {
-            Pane::Tree => {
-                ui.tree.selected = next;
-                // Moving in the tree resets the track pane: keeping the old
-                // index would point into a different album's list.
-                ui.tree.track_selected = 0;
-            }
-            Pane::Tracks => ui.tree.track_selected = next,
-        },
+        View::Tree => ui.tree.selected = next,
         View::Sorted => ui.sorted = next,
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlists_sel = next,
@@ -3124,58 +3133,50 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         return;
     }
 
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
-
     let rows = ui.tree.rows(&ui.library, ctx.store);
-    // The tree numbers every row, not every *track*: an artist and an album
-    // are both jumpable, so there is nothing here to skip the way a track list
-    // skips its album dividers.
+    // Artists, albums and tracks in one list. A track row is rendered through
+    // the format template rather than labelled, because it has to look
+    // different from the artist row above it — which is what makes a single
+    // pane readable at all.
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            let label = Span::raw(row.label());
-            ListItem::new(Line::from(if ui.relative_numbers {
-                // Its own role, dimmed, so the numbers sit behind the names
-                // rather than competing with them — the same treatment the
-                // track pane gives its gutter.
-                vec![
-                    Span::styled(
-                        list::gutter(i, ui.tree.selected),
-                        ui.theme.get(theme::Role::Gutter),
-                    ),
-                    label,
-                ]
-            } else {
-                vec![label]
-            }))
+            let mut spans: Vec<Span> = Vec::new();
+            if ui.relative_numbers {
+                spans.push(Span::styled(
+                    list::gutter(i, ui.tree.selected),
+                    ui.theme.get(theme::Role::Gutter),
+                ));
+            }
+            match row {
+                tree::Row::Track { id, .. } => {
+                    let style = if ui.playback.current == Some(*id) {
+                        ui.theme.get(theme::Role::Playing)
+                    } else {
+                        Style::default()
+                    };
+                    spans.push(Span::raw(row.label()));
+                    let text = ctx
+                        .store
+                        .get(*id)
+                        .map(|t| ui.track_line.render(t))
+                        .unwrap_or_default();
+                    spans.push(Span::styled(text, style));
+                }
+                _ => spans.push(Span::raw(row.label())),
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
-    let focused = ui.tree.pane == Pane::Tree;
     let mut state = ListState::default().with_selected(Some(ui.tree.selected));
     frame.render_stateful_widget(
         List::new(items)
-            .block(pane_block(&ui.theme, "artist / album", focused))
-            .highlight_style(highlight(&ui.theme, focused)),
-        left,
+            .block(pane_block(&ui.theme, "library", true))
+            .highlight_style(highlight(&ui.theme, true)),
+        area,
         &mut state,
-    );
-
-    let tracks = ui.tree.tracks_for(&ui.library, ctx.store);
-    draw_track_list(
-        frame,
-        right,
-        ui,
-        ctx,
-        TrackList {
-            ids: &tracks,
-            selected: ui.tree.track_selected,
-            title: "tracks",
-            focused: !focused,
-            divide: true,
-        },
     );
 }
 
@@ -3440,9 +3441,7 @@ mod tests {
             .iter()
             .position(|r| r.label().contains("Various Artists"))
             .unwrap();
-        let lib = std::mem::take(&mut ui.library);
-        ui.tree.toggle(&lib, &store);
-        ui.library = lib;
+        expand_to_tracks(&mut ui, &store);
 
         let out = render(&ui, &ctx, 74, 12);
         assert!(out.contains("▾ Various Artists"), "{out}");
@@ -3465,8 +3464,9 @@ mod tests {
             .iter()
             .position(|r| r.label().contains("Wall Builders"))
             .unwrap();
+        expand_to_tracks(&mut ui, &store);
 
-        let out = render(&ui, &ctx, 74, 12);
+        let out = render(&ui, &ctx, 90, 16);
         let first = out.find("First Disc Opener").expect(&out);
         let second = out.find("Second Disc Opener").expect(&out);
         assert!(first < second, "disc 2 sorted before disc 1:\n{out}");
@@ -3485,8 +3485,9 @@ mod tests {
             .iter()
             .position(|r| r.label().contains("Unknown Artist"))
             .unwrap();
+        expand_to_tracks(&mut ui, &store);
 
-        let out = render(&ui, &ctx, 74, 12);
+        let out = render(&ui, &ctx, 90, 14);
         assert!(out.contains("unlabelled.mp3"), "{out}");
         assert!(out.contains("1:05"), "duration missing:\n{out}");
     }
@@ -3528,39 +3529,6 @@ mod tests {
         assert_eq!(ui.tree.selected, 0, "ran off the top");
     }
 
-    #[test]
-    fn tab_moves_focus_between_panes() {
-        let store = fixture();
-        let ctx = Context {
-            store: &store,
-            player: None,
-        };
-        let mut ui = ui_of(&store, true);
-        assert_eq!(ui.tree.pane, Pane::Tree);
-        handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
-        assert_eq!(ui.tree.pane, Pane::Tracks);
-        handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
-        assert_eq!(ui.tree.pane, Pane::Tree);
-    }
-
-    /// Moving in the tree must reset the track cursor: the old index would
-    /// point into a different album's list.
-    #[test]
-    fn moving_the_tree_cursor_resets_the_track_pane() {
-        let store = fixture();
-        let ctx = Context {
-            store: &store,
-            player: None,
-        };
-        let mut ui = ui_of(&store, true);
-        handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
-        handle_key(KeyEvent::from(KeyCode::Char('j')), &mut ui, &ctx);
-        assert_eq!(ui.tree.track_selected, 1);
-
-        handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
-        handle_key(KeyEvent::from(KeyCode::Char('j')), &mut ui, &ctx);
-        assert_eq!(ui.tree.track_selected, 0, "stale track cursor after moving");
-    }
     // ---- playback wiring (M5) -------------------------------------------
     //
     // `ctx.player` is None here: these cover the decisions the UI makes, which
@@ -3573,36 +3541,65 @@ mod tests {
         }
     }
 
+    /// Open the artist under the cursor and its first album, so the tracks
+    /// are on screen. Tracks live inline now, two folds down.
+    fn expand_to_tracks(ui: &mut Ui, store: &Store) {
+        let lib = std::mem::take(&mut ui.library);
+        ui.tree.toggle(&lib, store);
+        ui.tree.selected += 1;
+        ui.tree.toggle(&lib, store);
+        ui.library = lib;
+    }
+
     /// A `Ui` over the whole fixture library.
     fn ui_of(store: &Store, smart: bool) -> Ui {
         Ui::new(PathBuf::from("/m"), Library::rebuild(store, smart))
     }
 
     #[test]
-    fn enter_in_the_track_pane_plays_the_selected_track() {
+    fn x_plays_the_track_row_under_the_cursor() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
+        expand_to_tracks(&mut ui, &store);
 
-        handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx); // focus tracks
-        handle_key(KeyEvent::from(KeyCode::Char('j')), &mut ui, &ctx);
-        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        // Down onto the second track of the open album.
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "j");
+        let expected = ui.tree.tracks_for(&ui.library, &store)[0];
+        press(&mut ui, &ctx, "x");
 
         let played = ui.playback.current.expect("nothing started playing");
-        let expected = ui.tree.tracks_for(&ui.library, &store)[1];
         assert_eq!(played, expected);
     }
 
     #[test]
-    fn enter_on_an_artist_row_starts_that_artists_first_track() {
+    fn enter_confirms_opening_a_node_and_playing_a_track() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        let closed = ui.tree.rows(&ui.library, &store).len();
 
-        let played = ui.playback.current.expect("nothing started playing");
-        let first = ui.tree.tracks_for(&ui.library, &store)[0];
-        assert_eq!(played, first, "Enter on a tree row should not be a no-op");
+        // On an artist, Enter opens it — there is nothing to play there.
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        assert!(ui.tree.rows(&ui.library, &store).len() > closed);
+        assert!(ui.playback.current.is_none(), "Enter played an artist");
+
+        // Down to the album, open it, down to the first track.
+        press(&mut ui, &ctx, "j");
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        assert!(ui.playback.current.is_none(), "Enter played an album");
+        press(&mut ui, &ctx, "j");
+
+        // At a track there is nothing left to open, so Enter plays it —
+        // snacks' rule, and the reason `Enter` and `x` are not redundant.
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        let rows = ui.tree.rows(&ui.library, &store);
+        assert!(
+            ui.playback.current.is_some(),
+            "Enter did not play the track; rows: {:?}",
+            rows.iter().map(|r| r.label()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -3610,7 +3607,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        press(&mut ui, &ctx, "x");
         let first = ui.playback.current.unwrap();
 
         handle_key(KeyEvent::from(KeyCode::Char('b')), &mut ui, &ctx);
@@ -3695,7 +3692,7 @@ mod tests {
 
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
-        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        press(&mut ui, &ctx, "x");
         assert_eq!(ui.playback.active, ActiveSource::Playlist);
         assert_eq!(ui.playback.current, Some(sorted[3]));
 
@@ -3754,7 +3751,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        press(&mut ui, &ctx, "x");
         let playing = ui.playback.current.expect("nothing started");
         assert!(render(&ui, &ctx, 90, 8).contains("Anderson .Paak"));
 
@@ -4529,8 +4526,7 @@ mod tests {
         // The view's own bindings and common's, which is what is reachable.
         assert!(rows.iter().any(|r| r.contains("quit")), "{rows:?}");
         assert!(rows.iter().any(|r| r.starts_with("j ")), "{rows:?}");
-        // View 1's own, which only work here.
-        assert!(rows.iter().any(|r| r.starts_with("^j ")), "{rows:?}");
+
         // It is drawn, not merely stored.
         let out = render(&ui, &ctx, 90, 20);
         assert!(out.contains("keys that work here"), "{out}");
@@ -4552,8 +4548,8 @@ mod tests {
 
         assert!(rows.iter().any(|r| r.contains("quit")), "common is missing");
         assert!(
-            !rows.iter().any(|r| r.starts_with("^j ")),
-            "view 1's own bindings leaked in: {rows:?}"
+            rows.iter().any(|r| r.starts_with("l ")),
+            "the common bindings are missing: {rows:?}"
         );
     }
 
@@ -4898,6 +4894,83 @@ mod tests {
 
         press(&mut ui, &ctx, "u");
         assert!(ui.status.contains("undo history"), "{}", ui.status);
+    }
+
+    /// Enter is for structure; the transport row is for sound. Two ways to
+    /// start music would be two mechanisms for one idea (§9).
+    #[test]
+    fn enter_never_plays() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "enter-structure");
+        new_playlist(&mut ui, &ctx, "mix");
+        ui.view = View::Sorted;
+        press(&mut ui, &ctx, "a");
+
+        for (view, pane) in [
+            (View::Sorted, Pane::Tree),
+            (View::Playlist, Pane::Tracks),
+            (View::Queue, Pane::Tree),
+        ] {
+            ui.view = view;
+            ui.playlist_pane = pane;
+            handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+            assert!(
+                ui.playback.current.is_none(),
+                "Enter started playing in {view:?}"
+            );
+        }
+    }
+
+    /// `x` used to mean "resume if playing, else play the selection" — two
+    /// behaviours, the first of which is what `c` already does.
+    #[test]
+    fn x_plays_the_selection_even_while_something_is_playing() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "tab");
+
+        press(&mut ui, &ctx, "x");
+        let first = ui.playback.current.expect("nothing started");
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "x");
+
+        assert_ne!(
+            ui.playback.current,
+            Some(first),
+            "`x` resumed instead of playing what the cursor was on"
+        );
+    }
+
+    /// The queue is consumed as it plays, so playing from it takes the entry.
+    #[test]
+    fn x_in_the_queue_consumes_the_entry() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        press(&mut ui, &ctx, "e");
+        let queued = ui.queue.len();
+        assert!(queued > 0);
+
+        ui.view = View::Queue;
+        press(&mut ui, &ctx, "x");
+        assert_eq!(ui.queue.len(), queued - 1, "the entry was not consumed");
+    }
+
+    /// snacks' `Z`. `M-c` was alt-prefixed and undiscoverable.
+    #[test]
+    fn capital_z_collapses_everything() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let closed = ui.tree.rows(&ui.library, &store).len();
+
+        press(&mut ui, &ctx, "M-e");
+        assert!(ui.tree.rows(&ui.library, &store).len() > closed);
+        press(&mut ui, &ctx, "Z");
+        assert_eq!(ui.tree.rows(&ui.library, &store).len(), closed);
     }
 
     #[test]
@@ -5431,7 +5504,7 @@ mod tests {
         assert_eq!(ui.playlist.len(), 1, "the playlist was filtered");
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
-        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        press(&mut ui, &ctx, "x");
         assert_eq!(
             ui.playback.current,
             Some(va),
@@ -5862,89 +5935,93 @@ mod tests {
     }
     // ---- pane navigation (#5) --------------------------------------------
 
+    /// `l` is `activate`: it opens a node and, at a track, plays it — the
+    /// same key snacks binds to `confirm`. `h` closes, walking up when the row
+    /// is already shut, which is how you get out without a notion of "level".
     #[test]
-    fn h_and_l_move_between_panes() {
+    fn l_and_h_fold_at_every_level() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        assert_eq!(ui.tree.pane, Pane::Tree);
+        let closed = ui.tree.rows(&ui.library, &store).len();
 
         press(&mut ui, &ctx, "l");
-        assert_eq!(ui.tree.pane, Pane::Tracks);
-        press(&mut ui, &ctx, "h");
-        assert_eq!(ui.tree.pane, Pane::Tree);
+        let with_albums = ui.tree.rows(&ui.library, &store).len();
+        assert!(with_albums > closed, "`l` did not open the artist");
 
-        // Directional, not a toggle: pressing the same one twice stays put.
-        press(&mut ui, &ctx, "h");
-        assert_eq!(ui.tree.pane, Pane::Tree);
-        press(&mut ui, &ctx, "l");
-        press(&mut ui, &ctx, "l");
-        assert_eq!(ui.tree.pane, Pane::Tracks);
-    }
-
-    /// The point of the whole feature: step album to album from the track
-    /// pane, without a Tab over and a Tab back each time.
-    #[test]
-    fn ctrl_j_drives_the_tree_without_leaving_the_track_pane() {
-        let store = fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-
-        press(&mut ui, &ctx, "l"); // focus the tracks
-        assert_eq!(ui.tree.pane, Pane::Tracks);
-        let first = ui.tree.tracks_for(&ui.library, &store);
-
-        press(&mut ui, &ctx, "^j");
-        assert_eq!(ui.tree.selected, 1, "the tree did not move");
-        assert_eq!(ui.tree.pane, Pane::Tracks, "focus was stolen");
-
-        // And the track pane now shows a different set.
-        let second = ui.tree.tracks_for(&ui.library, &store);
-        assert_ne!(first, second, "the track list did not follow");
-
-        press(&mut ui, &ctx, "^k");
-        assert_eq!(ui.tree.selected, 0);
-        assert_eq!(ui.tree.pane, Pane::Tracks);
-    }
-
-    #[test]
-    fn driving_the_tree_resets_the_track_cursor() {
-        let store = fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-        press(&mut ui, &ctx, "l");
+        // Down onto an album and open that too: tracks appear inline, which
+        // is the whole point of one pane.
         press(&mut ui, &ctx, "j");
-        assert_eq!(ui.tree.track_selected, 1);
+        press(&mut ui, &ctx, "l");
+        assert!(
+            ui.tree.rows(&ui.library, &store).len() > with_albums,
+            "`l` did not open the album"
+        );
 
-        // Otherwise the cursor would point into the previous album's list.
-        press(&mut ui, &ctx, "^j");
-        assert_eq!(ui.tree.track_selected, 0);
+        // `h` closes the album we are on.
+        press(&mut ui, &ctx, "h");
+        assert_eq!(ui.tree.rows(&ui.library, &store).len(), with_albums);
+
+        // Already closed, so `h` closes the parent and moves to it.
+        press(&mut ui, &ctx, "h");
+        assert_eq!(ui.tree.rows(&ui.library, &store).len(), closed);
+        assert_eq!(ui.tree.selected, 0, "the cursor did not follow up");
     }
 
+    /// At a track there is nothing left to open, so `l` plays it — snacks
+    /// binds `l` to `confirm`, and confirming a leaf is doing the thing.
+    #[test]
+    fn l_on_a_track_plays_it() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        expand_to_tracks(&mut ui, &store);
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "j");
+
+        assert!(ui.playback.current.is_none());
+        press(&mut ui, &ctx, "l");
+        assert!(ui.playback.current.is_some(), "`l` did not play the track");
+    }
+
+    /// A count survives the `in <pane>` wrapper, so `2 in tracks down` moves
+    /// two rows in the pane you are not standing in.
     #[test]
     fn a_count_passes_through_the_pane_wrapper() {
-        let store = fixture();
+        let store = genre_fixture();
         let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-        press(&mut ui, &ctx, "l");
-
-        press(&mut ui, &ctx, "2");
-        press(&mut ui, &ctx, "^j");
-        assert_eq!(ui.tree.selected, 2, "the count was dropped by `in`");
-    }
-
-    #[test]
-    fn the_in_wrapper_is_expressible_on_the_command_line() {
-        let store = fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
+        let (mut ui, _) = ui_with_saved(&store, "in-count");
+        new_playlist(&mut ui, &ctx, "mix");
+        for (id, _) in store.iter() {
+            ui.playlist.push(id);
+        }
+        ui.playlist_pane = Pane::Tree;
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "in tree bottom");
-        let rows = ui.tree.rows(&ui.library, &store).len();
-        assert_eq!(ui.tree.selected, rows - 1);
-        // Focus is unchanged: `in` aims a command, it does not move you.
-        assert_eq!(ui.tree.pane, Pane::Tree);
+        type_line(&mut ui, &ctx, "in tracks down");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "in tracks down");
+        assert_eq!(ui.playlist_sel, 2, "the count was dropped by `in`");
+        assert_eq!(ui.playlist_pane, Pane::Tree);
+    }
+
+    /// `in <pane>` aims a command at view 3's other pane without moving focus.
+    /// The library tree has one pane now, so it is not a target.
+    #[test]
+    fn the_in_wrapper_is_expressible_on_the_command_line() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "in-wrapper");
+        new_playlist(&mut ui, &ctx, "mix");
+        for (id, _) in store.iter() {
+            ui.playlist.push(id);
+        }
+        ui.playlist_pane = Pane::Tree;
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "in tracks bottom");
+        assert_eq!(ui.playlist_sel, ui.playlist.len() - 1, "it did not reach");
+        assert_eq!(ui.playlist_pane, Pane::Tree, "focus moved");
     }
 
     #[test]
@@ -7521,22 +7598,26 @@ mod tests {
         assert_eq!(bg2, bg, "the selection surface should be unchanged");
     }
 
-    /// An unfocused pane should still read as unfocused, even sitting on the
-    /// playing track.
+    /// A pane that is not focused still shows where its cursor is, dimmed —
+    /// otherwise coming back to it is a guess. View 3 is the two-pane one now.
     #[test]
     fn an_unfocused_pane_keeps_its_dim_selection() {
         use ratatui::style::Color;
-        let store = fixture();
+        let store = genre_fixture();
         let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
+        let (mut ui, _) = ui_with_saved(&store, "dim-pane");
+        new_playlist(&mut ui, &ctx, "mix");
+        for (id, _) in store.iter() {
+            ui.playlist.push(id);
+        }
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tree;
 
-        // Tree focused, so the track pane is not.
-        let tracks = ui.tree.tracks_for(&ui.library, &store);
-        ui.playback.current = tracks.first().copied();
-        ui.tree.track_selected = 0;
-        ui.tree.pane = Pane::Tree;
-
-        let title = store.get(tracks[0]).unwrap().display_title().to_string();
+        let title = store
+            .get(ui.playlist.entries()[0])
+            .unwrap()
+            .display_title()
+            .to_string();
         let (fg, _) = cursor_row_colours(&ui, &ctx, &title);
         assert_ne!(fg, Color::Green, "an unfocused pane looked focused");
     }

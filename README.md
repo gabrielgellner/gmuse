@@ -109,9 +109,21 @@ gmuse [OPTIONS] [FILE]
 ```
 
 The TUI opens on the library tree. Views are nvim-style tabs: `gt`/`gT` step, `3gt` jumps to view 3, and `g<Tab>`
-returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `o` expands an
-artist, `tab` swaps pane, `q` quits. **`space` is the leader**, and `<leader>?` shows the keys that work in the current
-view.
+returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `l` opens the
+node under the cursor and `h` closes it, `Z` closes everything, `tab` swaps pane in view 3, `q` quits.
+
+**View 1 is one pane holding all three levels** — artists, their albums, and the tracks of whichever albums you have
+open. Several artists and several of their albums can be open at once, and the whole thing reads as one buffer: `j`,
+`3j`, `gg`, `G`, `/` and the relative gutter all work over it uniformly.
+
+`h` on something **already closed** closes its parent and moves there, so repeated `h` walks up and out without needing
+a notion of "level".
+
+**`Enter` confirms.** On an artist or an album it opens or closes; on a track — where there is nothing left to open — it
+plays. `x` plays what is under the cursor from anywhere, so the two are not redundant: `Enter` acts on structure until
+structure runs out, then acts on the thing itself.
+
+**`space` is the leader**, and `<leader>?` shows the keys that work in the current view.
 
 Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `settings`.
 
@@ -232,9 +244,12 @@ o = ["add-queue", "next"]         # a list is a macro
 
 [format]
 # {artist} {album} {title} {track} {year} {duration} {genre} {label} … and more.
+# `track` is how a row reads in the library tree, where it sits beside an
+# artist row and so has to look different.
 # [ ... ] disappears entirely if a field inside it is missing.
 # {track:02} pads, {title:.40} truncates, {duration:>7} right-aligns.
 now_playing = "{artist}[ — {album}] — {title:.40}"
+track = "{track:2}  {display_title}  {duration}"
 
 [theme.palette]
 accent = "magenta"

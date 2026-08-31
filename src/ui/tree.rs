@@ -1,16 +1,29 @@
-//! View 1: the artist/album tree.
+//! View 1: the artist / album / track tree.
 //!
 //! DESIGN §8 calls this out as the one custom widget the project needs. It is
-//! not a generic tree — it is exactly two levels, and flattening it to rows
+//! not a generic tree — it is exactly three levels, and flattening it to rows
 //! each frame is both simpler and faster than maintaining a parallel structure
 //! that has to be kept in step with the library.
+//!
+//! **One pane, all three levels.** Tracks used to live in a second pane
+//! showing whatever the tree had selected, which meant exactly one album's
+//! tracks at a time. Inline, several artists and several of their albums can
+//! be open at once and the whole thing reads as one buffer: `j`, `3j`, `gg`,
+//! `G` and the relative gutter all work over it uniformly, which is the point.
 
 use std::collections::HashSet;
 
 use crate::library::{Library, SortKey};
 use crate::store::{Store, TrackId};
 
-/// One visible line in the left pane.
+/// What can be opened and closed. Tracks are leaves, so they are not here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Node {
+    Artist(SortKey),
+    Album(SortKey, SortKey),
+}
+
+/// One visible line.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
     Artist {
@@ -24,18 +37,34 @@ pub enum Row {
         key: SortKey,
         display: String,
         tracks: usize,
+        expanded: bool,
+    },
+    Track {
+        artist: SortKey,
+        album: SortKey,
+        id: TrackId,
     },
 }
 
 impl Row {
-    /// How the row renders, including the expansion marker and indent.
+    /// The marker and indent. A track's *text* comes from the format template,
+    /// so it is rendered rather than labelled — a row beside an artist row
+    /// needs to look different, and the template is how that is said.
     pub fn label(&self) -> String {
         match self {
             Row::Artist {
                 display, expanded, ..
             } => format!("{} {display}", if *expanded { "▾" } else { "▸" }),
-            Row::Album { display, .. } => format!("    {display}"),
+            Row::Album {
+                display, expanded, ..
+            } => format!("  {} {display}", if *expanded { "▾" } else { "▸" }),
+            Row::Track { .. } => "      ".to_string(),
         }
+    }
+
+    /// Whether this row can be opened or closed at all.
+    pub fn is_leaf(&self) -> bool {
+        matches!(self, Row::Track { .. })
     }
 }
 
@@ -49,10 +78,8 @@ pub enum Pane {
 
 #[derive(Debug, Default)]
 pub struct TreeState {
-    expanded: HashSet<SortKey>,
+    expanded: HashSet<Node>,
     pub selected: usize,
-    pub track_selected: usize,
-    pub pane: Pane,
 }
 
 impl TreeState {
@@ -70,7 +97,7 @@ impl TreeState {
                 .and_then(|id| store.get(*id))
                 .map(|t| t.file_under().to_string())
                 .unwrap_or_else(|| artist_key.as_str().to_string());
-            let expanded = self.expanded.contains(artist_key);
+            let expanded = self.expanded.contains(&Node::Artist(artist_key.clone()));
             rows.push(Row::Artist {
                 key: artist_key.clone(),
                 display,
@@ -86,19 +113,42 @@ impl TreeState {
                     .and_then(|id| store.get(*id))
                     .map(|t| t.album_or_unknown().to_string())
                     .unwrap_or_else(|| album_key.as_str().to_string());
+                let open = self
+                    .expanded
+                    .contains(&Node::Album(artist_key.clone(), album_key.clone()));
                 rows.push(Row::Album {
                     artist: artist_key.clone(),
                     key: album_key.clone(),
                     display,
                     tracks: tracks.len(),
+                    expanded: open,
                 });
+                if !open {
+                    continue;
+                }
+                for id in tracks {
+                    rows.push(Row::Track {
+                        artist: artist_key.clone(),
+                        album: album_key.clone(),
+                        id: *id,
+                    });
+                }
             }
         }
         rows
     }
 
-    /// Tracks shown in the right pane for the current selection: one album, or
-    /// everything by the artist when an artist row is selected.
+    /// The node a row belongs to, for opening and closing.
+    fn node_of(row: &Row) -> Option<Node> {
+        match row {
+            Row::Artist { key, .. } => Some(Node::Artist(key.clone())),
+            Row::Album { artist, key, .. } => Some(Node::Album(artist.clone(), key.clone())),
+            Row::Track { .. } => None,
+        }
+    }
+
+    /// Every track under the selected row: one track, one album, or everything
+    /// by an artist. What `a` and `e` add, and what `x` plays the first of.
     pub fn tracks_for(&self, lib: &Library, store: &Store) -> Vec<TrackId> {
         let rows = self.rows(lib, store);
         let Some(row) = rows.get(self.selected) else {
@@ -116,51 +166,78 @@ impl TreeState {
                 .and_then(|(_, albums)| albums.get(key))
                 .cloned()
                 .unwrap_or_default(),
+            Row::Track { id, .. } => vec![*id],
         }
     }
 
-    /// Toggle the artist on the selected row.
+    /// The track on the selected row, if it is one.
+    pub fn selected_track(&self, lib: &Library, store: &Store) -> Option<TrackId> {
+        match self.rows(lib, store).get(self.selected) {
+            Some(Row::Track { id, .. }) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Open or close the node under the cursor. A track has nothing to toggle.
     ///
-    /// Selecting an *album* row and pressing space collapses its artist, which
-    /// is what cmus does and saves a trip back up to the artist line.
+    /// Deliberately **not** `close()` then `open()`: `close` walks up when the
+    /// node is already shut, which is right for `h` and wrong here — toggling
+    /// a closed album would close its artist instead of opening the album.
     pub fn toggle(&mut self, lib: &Library, store: &Store) {
         let rows = self.rows(lib, store);
-        let Some(row) = rows.get(self.selected) else {
+        let Some(node) = rows.get(self.selected).and_then(Self::node_of) else {
             return;
         };
-        let (key, from_album_row) = match row {
-            Row::Artist { key, .. } => (key.clone(), false),
-            Row::Album { artist, .. } => (artist.clone(), true),
-        };
-        if self.expanded.contains(&key) {
-            self.expanded.remove(&key);
-            if from_album_row {
-                // Move the cursor to the artist we just closed, or the row
-                // vanishes from under the selection.
-                if let Some(pos) = rows
-                    .iter()
-                    .position(|r| matches!(r, Row::Artist { key: k, .. } if *k == key))
-                {
-                    self.selected = pos;
-                }
-            }
-        } else {
-            self.expanded.insert(key);
+        if !self.expanded.remove(&node) {
+            self.expanded.insert(node);
         }
-        self.track_selected = 0;
+    }
+
+    /// Close the node under the cursor.
+    ///
+    /// If it is **already closed** — or is a track, which is never open — the
+    /// *parent* closes instead and the cursor moves to it. That is snacks'
+    /// rule, and it is what lets repeated `h` walk up and out without anything
+    /// needing a concept of "level".
+    pub fn close(&mut self, lib: &Library, store: &Store) -> bool {
+        let rows = self.rows(lib, store);
+        let Some(row) = rows.get(self.selected) else {
+            return false;
+        };
+        let node = Self::node_of(row).filter(|n| self.expanded.contains(n));
+        let target = match node {
+            Some(n) => n,
+            // Closed, or a leaf: go up.
+            None => match row {
+                Row::Artist { .. } => return false,
+                Row::Album { artist, .. } => Node::Artist(artist.clone()),
+                Row::Track { artist, album, .. } => Node::Album(artist.clone(), album.clone()),
+            },
+        };
+        self.expanded.remove(&target);
+        // The row would otherwise vanish from under the cursor.
+        if let Some(pos) = self
+            .rows(lib, store)
+            .iter()
+            .position(|r| Self::node_of(r).as_ref() == Some(&target))
+        {
+            self.selected = pos;
+        }
+        true
     }
 
     /// Open every artist. Useful on a small library, painful on a large one,
     /// which is why it is not the default.
+    /// Artists only, not their albums: opening every album of every artist
+    /// puts the whole library on screen as tracks, which is what view 2 is.
     pub fn expand_all(&mut self, lib: &Library) {
         for (key, _) in lib.artists() {
-            self.expanded.insert(key.clone());
+            self.expanded.insert(Node::Artist(key.clone()));
         }
     }
 
     pub fn collapse_all(&mut self) {
         self.expanded.clear();
-        self.track_selected = 0;
     }
 }
 
@@ -214,7 +291,35 @@ mod tests {
         let rows = state.rows(&lib, &store);
         assert_eq!(
             rows.iter().map(Row::label).collect::<Vec<_>>(),
-            ["▾ Burial", "    Burial", "    Untrue", "▸ Mr. Oizo"]
+            ["▾ Burial", "  ▸ Burial", "  ▸ Untrue", "▸ Mr. Oizo"]
+        );
+    }
+
+    /// The point of one pane: tracks sit inline under an open album, and
+    /// several albums across several artists can be open at once.
+    #[test]
+    fn opening_an_album_puts_its_tracks_inline() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.toggle(&lib, &store); // the artist
+        state.selected = 1;
+        state.toggle(&lib, &store); // its first album
+
+        let rows = state.rows(&lib, &store);
+        assert!(
+            matches!(rows.get(2), Some(Row::Track { .. })),
+            "no track inline: {:?}",
+            rows.iter().map(Row::label).collect::<Vec<_>>()
+        );
+
+        // A second artist can be open at the same time.
+        state.selected = rows.len() - 1;
+        state.toggle(&lib, &store);
+        let both = state.rows(&lib, &store);
+        assert!(both.len() > rows.len(), "the second artist did not open");
+        assert!(
+            both.iter().any(|r| matches!(r, Row::Track { .. })),
+            "the first artist's tracks closed when the second opened"
         );
     }
 
@@ -244,12 +349,31 @@ mod tests {
         state.toggle(&lib, &store);
         state.selected = 2; // an album row
 
-        state.toggle(&lib, &store);
+        // `close` walks up when the row is already shut, which is how `h`
+        // collapses outward without needing a concept of "level".
+        state.close(&lib, &store);
 
         // The album rows are gone, so the selection must not be left dangling
         // over what is now a different artist.
         assert_eq!(state.selected, 0);
         assert_eq!(state.rows(&lib, &store).len(), 2);
+    }
+
+    /// Toggling an album must open it, not close its artist — `toggle` and
+    /// `close` differ precisely here.
+    #[test]
+    fn toggling_a_closed_album_opens_it_rather_than_closing_the_artist() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.toggle(&lib, &store);
+        let with_albums = state.rows(&lib, &store).len();
+        state.selected = 1;
+
+        state.toggle(&lib, &store);
+        assert!(
+            state.rows(&lib, &store).len() > with_albums,
+            "the artist collapsed instead of the album opening"
+        );
     }
 
     #[test]

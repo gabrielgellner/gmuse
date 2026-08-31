@@ -144,6 +144,11 @@ pub struct PlaylistTable {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FormatTable {
+    /// How a track row reads in the library tree.
+    ///
+    /// Its own template because a track sits beside an artist row there and
+    /// has to look different — the same job a file explorer gives icons.
+    pub track: Option<String>,
     /// The now-playing description in the status line. The state icon, times
     /// and mode flags around it stay structured, so they keep their own theme
     /// roles rather than being flattened into one string.
@@ -169,6 +174,8 @@ pub struct Loaded {
     pub theme: Theme,
     /// Parsed once, here, so the status line never parses while rendering.
     pub now_playing: crate::format::Template,
+    /// How a track row reads in the library tree.
+    pub track_line: Option<crate::format::Template>,
     pub catalogs: crate::catalog::Catalogs,
     pub playlists: crate::smart::SmartPlaylists,
     /// Resolved: the config's `data_dir` with `~` expanded, or the default.
@@ -283,6 +290,15 @@ pub fn parse_text(text: &str) -> Loaded {
             Ok(t) => out.now_playing = t,
             Err(e) => out.errors.push(ConfigError {
                 where_: "format.now_playing".into(),
+                message: e.to_string(),
+            }),
+        }
+    }
+    if let Some(source) = &config.format.track {
+        match crate::format::Template::parse(source) {
+            Ok(t) => out.track_line = Some(t),
+            Err(e) => out.errors.push(ConfigError {
+                where_: "format.track".into(),
                 message: e.to_string(),
             }),
         }
@@ -674,6 +690,21 @@ mod tests {
         };
         assert_eq!(**cmd, Command::Seek(SeekSpec::Relative(30.0)));
     }
+    /// A track row sits beside an artist row in the tree, so it gets its own
+    /// template — and a bad one names the key it came from.
+    #[test]
+    fn the_track_template_is_configurable() {
+        let loaded = parse_text("[format]\ntrack = \"{artist} — {title}\"\n");
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert!(loaded.track_line.is_some());
+
+        // Omitted: the built-in stays, rather than rendering nothing.
+        assert!(parse_text("").track_line.is_none());
+
+        let bad = parse_text("[format]\ntrack = \"{nonsense}\"\n");
+        assert_eq!(bad.errors[0].where_, "format.track");
+    }
+
     #[test]
     fn data_dir_defaults_and_expands_a_tilde() {
         // Absent: the default, never an empty path — that would write the

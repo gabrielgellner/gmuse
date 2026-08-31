@@ -48,6 +48,7 @@ pub const VERBS: &[&str] = &[
     "expand",
     "expand-all",
     "filter",
+    "fold-close",
     "help",
     "freeze",
     "in",
@@ -123,6 +124,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "put" => Command::Put { before: false },
         "put-before" => Command::Put { before: true },
         "pane-next" => Command::PaneNext,
+        "fold-close" => Command::FoldClose,
         "pane-left" => Command::PaneLeft,
         "pane-right" => Command::PaneRight,
         "in" => {
@@ -499,6 +501,7 @@ pub fn format(cmd: &Command) -> String {
         Command::Put { before: false } => "put".into(),
         Command::Put { before: true } => "put-before".into(),
         Command::PaneNext => "pane-next".into(),
+        Command::FoldClose => "fold-close".into(),
         Command::PaneLeft => "pane-left".into(),
         Command::PaneRight => "pane-right".into(),
         Command::In { pane, cmd } => format!("in {} {}", pane.name(), format(cmd)),

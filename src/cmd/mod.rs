@@ -353,6 +353,14 @@ pub enum Command {
     /// which makes the analogy hold rather than merely rhyme.
     RemoveToEnd,
     PaneNext,
+    /// Close the fold under the cursor — `h`.
+    ///
+    /// There is no matching `FoldOpen`: opening *is* [`Command::Activate`],
+    /// which `l` and `Enter` are both bound to, and on a track that means
+    /// play. snacks spells it the same way — `l` is `confirm`, `h` is
+    /// `explorer_close` — and the asymmetry is real rather than an oversight:
+    /// closing is one act, while opening bottoms out in doing the thing.
+    FoldClose,
     PaneLeft,
     PaneRight,
     /// Run a command against a named pane instead of the focused one.

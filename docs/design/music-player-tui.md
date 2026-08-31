@@ -2227,11 +2227,43 @@ Append here as decisions are made. Format: date, decision, rationale.
   `u` was `rescan`, which in the TUI only printed a message saying to use `:rescan` — so freeing it cost nothing. It
   moved to `<leader>u`.
 
----
+- **2026-08-30** **View 1 is one pane holding all three levels.** Tracks lived in a second pane showing whatever the
+  tree had selected, which meant exactly one album's tracks at a time. Inline, several artists and several of _their_
+  albums can be open at once, and the whole view reads as one buffer — `j`, `3j`, `gg`, `G`, `/` and the relative gutter
+  all work over it uniformly, which is the point. Jumping between distant albums stops needing a pane.
 
-## 14. Prior art worth reading
+  It **removed** machinery rather than adding it: `Pane` and `track_selected` leave `TreeState`, `tab` and the
+  `in <pane>` wrapper belong to view 3 alone, and the `^j`/`^k` bindings — which existed only to drive the tree from the
+  tracks pane — are gone.
 
-Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
+  A track row renders through its own format template. It sits beside an artist row and has to look different, which is
+  the job a file explorer gives icons; a template says it without depending on a patched font.
+
+  `toggle` deliberately is **not** `close()` then `open()`. `close` walks up when the node is already shut — right for
+  `h`, wrong for a toggle, where it would close an album's artist instead of opening the album. Caught by pressing Enter
+  on an album and watching the wrong thing collapse.
+
+- **2026-08-30** **`Enter` confirms; `x` plays.** Enter opens or closes a node, and on a **track** — where there is
+  nothing left to open — it plays. That is snacks' rule, and with all three levels in one pane there is no second pane
+  to descend into instead, which is what made "Enter never plays" the right answer for two panes and the wrong one for
+  this.
+
+  `x` still plays what is under the cursor from anywhere, so the two are not redundant: Enter acts on structure until
+  structure runs out. It also fixed `x`, which meant "resume if something is playing, else play the selection" — two
+  behaviours, the first of which is what `c` does. In the queue, `x` consumes the entry.
+
+- **2026-08-30** **`h` and `l` are the explorer motions, because vim's fold keys cannot be.** vim opens a fold with
+  `zo`, and `z` here is Winamp's `prev` — the one place gmuse's two borrowed traditions actually collide. Checking
+  snacks.nvim's explorer settled it: it does not use `z` at all. `l` opens, `h` closes, `Z` closes everything.
+
+  **Folds only.** An earlier version fell through to moving between panes when there was nothing to open, which made `l`
+  unpredictable mid-fold — open, or jump? — because the answer depended on state you could not see. `h` on something
+  already closed closes its _parent_ and moves there, which is how repeated `h` walks up and out without anything
+  needing a concept of "level".
+
+  Worth recording: snacks independently uses `a` for add, `y` for yank and `p` for paste, which this project had arrived
+  at hours earlier from vim alone. Converging on a keymap by two routes is decent evidence the reshuffle was following
+  something real.
 
 - **Trix** — <https://github.com/RIZAmohammadkhan/TerminalMusicPlayer> — ratatui + Symphonia, gapless via next-track
   pre-decode, dedicated decode worker with a ~750ms buffer, container-level seeking. Closest to this design; read first.

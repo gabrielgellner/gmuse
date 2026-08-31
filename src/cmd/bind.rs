@@ -46,12 +46,13 @@ pub const DEFAULTS: &[&str] = &[
     "bind common pagedown page-down",
     "bind common pageup page-up",
     "bind common tab pane-next",
-    "bind common h pane-left",
-    "bind common l pane-right",
-    // Drive the tree from wherever you are, so stepping album to album does
-    // not need a Tab over and a Tab back each time.
-    "bind library ^j in tree down",
-    "bind library ^k in tree up",
+    // Folds only, at every level. `h` on something already closed closes its
+    // parent, so repeated `h` walks up and out — snacks' rule.
+    // `l` is a second binding for `activate`, not a command of its own —
+    // snacks binds it to `confirm` too. `h` keeps its own, because closing is
+    // one act while opening bottoms out in playing the track.
+    "bind common l activate",
+    "bind common h fold-close",
     // `o` for open, not `space`: space is the leader, and a chord cannot
     // extend a key that is bound on its own.
     "bind common o expand",
@@ -66,8 +67,10 @@ pub const DEFAULTS: &[&str] = &[
     "bind common u undo",
     "bind common ^r redo",
     "bind common \"<leader> u\" rescan",
+    // `Z` is snacks' close-all. `M-c` was undiscoverable; expand-all keeps
+    // its alt binding for now, having no explorer convention to borrow.
+    "bind common Z collapse-all",
     "bind common M-e expand-all",
-    "bind common M-c collapse-all",
     // transport
     "bind common x play",
     "bind common c pause",
