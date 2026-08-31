@@ -449,6 +449,8 @@ pub struct Ui {
     /// How the now-playing description is written. Parsed at config load; the
     /// status line only renders it.
     pub now_playing: crate::format::Template,
+    /// The transport panel's headline (#34).
+    pub transport_line: crate::format::Template,
     /// How a track row is written in the library tree.
     ///
     /// Its own template because a track sits beside an artist row there and
@@ -558,6 +560,7 @@ impl Ui {
             guide_pane: Pane::Tree,
             theme: theme::Theme::default(),
             now_playing: crate::format::Template::default(),
+            transport_line: crate::format::Template::transport_default(),
             track_line: crate::format::Template::parse("{track:2}  {display_title}  {duration}")
                 .expect("a literal template"),
             library,
@@ -3290,10 +3293,23 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     // same reason the pending-key indicator is — there is no second copy of
     // the truth to keep in step.
     let which = which_key_rows(ui, Instant::now());
+    // A fourth tenant of the one slot, and the lowest-priority one: `:` and
+    // `<leader>?` are things you just asked for, and the panel is a standing
+    // display. It comes back when they close.
+    // …and it yields on a short terminal. The other three tenants are things
+    // you just asked for and are gone in a keystroke; this one *stands*, so a
+    // panel that left the library pane with nothing but borders would be the
+    // "swallows the view it is helping you use" failure the slot's cap already
+    // guards against — but for as long as the mode lasts. The status line
+    // still says `-- TRANSPORT --`, so nothing is lost that has to be seen.
+    const BODY_FLOOR: u16 = 4;
+    let chrome = 2 + TRANSPORT_PANEL + BODY_FLOOR;
+    let transport_panel = ui.mode == crate::cmd::Mode::Transport && frame.area().height >= chrome;
     let menu_height = match (&ui.prompt, &ui.help, &which) {
         (Some(p), _, _) => menu_height(p, frame.area().width),
         (None, Some(rows), _) => rows_height(rows, frame.area().width),
         (None, None, Some(rows)) => rows_height(rows, frame.area().width),
+        _ if transport_panel => TRANSPORT_PANEL,
         _ => 0,
     };
 
@@ -3340,6 +3356,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 rows,
                 &format!("after {}", crate::cmd::keys::format_seq(&ui.pending)),
             ),
+            _ if transport_panel => draw_transport(frame, menu, ui, ctx),
             _ => {}
         }
     }
@@ -3532,6 +3549,114 @@ fn draw_help(frame: &mut Frame, area: Rect, ui: &Ui, rows: &[String], title: &st
         Paragraph::new(lines).block(pane_block(&ui.theme, &title, false)),
         area,
     );
+}
+
+/// How tall the transport panel is. Fixed, because it always says the same
+/// four things and a panel that resized as a track's tags changed would be
+/// worse than one that is simply this tall.
+const TRANSPORT_PANEL: u16 = 6;
+
+/// The panel that rises with the mode (#34).
+///
+/// **Scoped to the mode, which is what keeps it the right side of §1.** A
+/// permanent now-playing panel is the "something to watch" that has been
+/// refused twice; this is not there at all while you are browsing, and appears
+/// only once you have said — by entering the mode — that playback is what you
+/// are attending to. A panel you cannot dismiss is clutter; a panel that *is*
+/// the thing you switched to is the screen doing what you asked.
+fn draw_transport(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
+    let theme = &ui.theme;
+    let text = theme.get(theme::Role::StatusText);
+    let dim = theme.get(theme::Role::StatusDim);
+    let mut lines: Vec<Line> = Vec::new();
+
+    let state = ctx
+        .player
+        .map(|p| p.state())
+        .unwrap_or(crate::audio::State::Stopped);
+    let position = ctx.player.map(|p| p.position()).unwrap_or(Duration::ZERO);
+    let track = ui.playback.current.and_then(|id| ctx.store.get(id));
+
+    match track {
+        Some(track) => {
+            lines.push(Line::from(vec![
+                // The same three glyphs the status line uses. `▶` is
+                // single-width everywhere; `⏸` and `⏹` are in a range many
+                // terminals draw double-width or not at all, so `■` stands in
+                // for stop and the row cannot be shifted by a mis-measured
+                // glyph.
+                Span::styled(
+                    match state {
+                        crate::audio::State::Playing => "▶  ",
+                        crate::audio::State::Paused => "⏸  ",
+                        crate::audio::State::Stopped => "■  ",
+                    },
+                    theme.get(theme::Role::StatusPlaying),
+                ),
+                Span::styled(ui.transport_line.render(track), text),
+            ]));
+            lines.push(Line::from(Span::styled(
+                progress_bar(position, track.duration, area.width.saturating_sub(2)),
+                theme.get(theme::Role::StatusPlaying),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{} / {}",
+                        list::fmt_duration(position),
+                        list::fmt_duration(track.duration)
+                    ),
+                    dim,
+                ),
+                Span::styled(
+                    match ctx.player {
+                        Some(p) => format!("   vol {:.0}%", p.volume() * 100.0),
+                        None => String::new(),
+                    },
+                    dim,
+                ),
+            ]));
+        }
+        None => {
+            lines.push(Line::from(Span::styled("nothing playing", dim)));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "x plays what the cursor is on",
+                dim,
+            )));
+        }
+    }
+
+    // What is next is worth a line precisely because shuffle makes it
+    // unguessable, and `next()` is pure so asking costs nothing.
+    let next = crate::next::next_with_source(next_input(ui))
+        .and_then(|(id, _)| ctx.store.get(id))
+        .map(|t| format!("next  {}", ui.now_playing.render(t)))
+        .unwrap_or_else(|| "next  —".to_string());
+    lines.push(Line::from(Span::styled(next, dim)));
+
+    frame.render_widget(
+        Paragraph::new(lines).block(pane_block(theme, "transport", true)),
+        area,
+    );
+}
+
+/// A position bar drawn from block characters rather than with a gauge widget,
+/// so it takes a theme role like everything else and cannot introduce a colour
+/// of its own.
+fn progress_bar(position: Duration, total: Duration, width: u16) -> String {
+    let width = width.max(1) as usize;
+    let fraction = if total.is_zero() {
+        0.0
+    } else {
+        (position.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0)
+    };
+    let filled = (fraction * width as f64).round() as usize;
+    let mut out = String::with_capacity(width * 3);
+    for i in 0..width {
+        out.push(if i < filled { '━' } else { '─' });
+    }
+    out
 }
 
 fn menu_height(prompt: &Prompt, width: u16) -> u16 {
@@ -9299,6 +9424,104 @@ mod tests {
 
         press(&mut ui, &ctx, "escape");
         assert_eq!(ui.mode, crate::cmd::Mode::Normal);
+    }
+
+    /// The panel rises with the mode and is not there without it — which is
+    /// the whole of why it is not the "something to watch" §1 refuses.
+    #[test]
+    fn the_transport_panel_rises_with_the_mode() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        ui.playback.current = ui.library.sorted().first().copied();
+
+        let browsing = render(&ui, &ctx, 84, 20);
+        assert!(
+            !browsing.contains("┌ transport"),
+            "the panel is up while browsing:\n{browsing}"
+        );
+
+        press(&mut ui, &ctx, "i");
+        let out = render(&ui, &ctx, 84, 20);
+        assert!(out.contains("┌ transport"), "no panel in the mode:\n{out}");
+        assert!(
+            out.contains("next  "),
+            "the panel should say what is next:\n{out}"
+        );
+
+        press(&mut ui, &ctx, "escape");
+        assert!(!render(&ui, &ctx, 84, 20).contains("┌ transport"));
+    }
+
+    /// It is the lowest-priority tenant of the slot: `:` and `<leader>?` are
+    /// things you just asked for, and it comes back when they close.
+    #[test]
+    fn a_prompt_displaces_the_transport_panel() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.playback.current = ui.library.sorted().first().copied();
+        press(&mut ui, &ctx, "i");
+        assert!(render(&ui, &ctx, 84, 20).contains("┌ transport"));
+
+        press(&mut ui, &ctx, ":");
+        let out = render(&ui, &ctx, 84, 20);
+        assert!(
+            !out.contains("┌ transport"),
+            "the panel outranked the prompt:\n{out}"
+        );
+
+        press(&mut ui, &ctx, "escape");
+        assert!(
+            render(&ui, &ctx, 84, 20).contains("┌ transport"),
+            "the panel did not come back"
+        );
+    }
+
+    /// A standing panel must not leave the view with nothing but borders. The
+    /// other three tenants are gone in a keystroke; this one lasts as long as
+    /// the mode does.
+    #[test]
+    fn the_panel_yields_on_a_short_terminal() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        press(&mut ui, &ctx, "i");
+
+        let out = render(&ui, &ctx, 84, 10);
+        assert!(
+            !out.contains("┌ transport"),
+            "the panel swallowed the view:\n{out}"
+        );
+        assert!(
+            out.contains("Anderson .Paak"),
+            "no library rows left:\n{out}"
+        );
+        // The indicator is the part that may never be lost.
+        assert!(out.contains("-- TRANSPORT --"), "{out}");
+    }
+
+    /// The bar is a fraction of the pane, not of anything it invented.
+    #[test]
+    fn the_position_bar_fills_by_how_far_in_you_are() {
+        let full = progress_bar(Duration::from_secs(50), Duration::from_secs(100), 10);
+        assert_eq!(full.chars().filter(|c| *c == '━').count(), 5, "{full}");
+        let start = progress_bar(Duration::ZERO, Duration::from_secs(100), 10);
+        assert_eq!(start.chars().filter(|c| *c == '━').count(), 0, "{start}");
+        let end = progress_bar(Duration::from_secs(100), Duration::from_secs(100), 10);
+        assert_eq!(end.chars().filter(|c| *c == '━').count(), 10, "{end}");
+        // A track with no duration must not divide by zero or overfill.
+        let unknown = progress_bar(Duration::from_secs(9), Duration::ZERO, 10);
+        assert_eq!(
+            unknown.chars().filter(|c| *c == '━').count(),
+            0,
+            "{unknown}"
+        );
+        // Nor may a position past the end run off it.
+        let over = progress_bar(Duration::from_secs(500), Duration::from_secs(100), 10);
+        assert_eq!(over.chars().count(), 10, "{over}");
     }
 
     /// The indicator outranks a notice, because the four seconds after a

@@ -153,6 +153,11 @@ pub struct FormatTable {
     /// and mode flags around it stay structured, so they keep their own theme
     /// roles rather than being flattened into one string.
     pub now_playing: Option<String>,
+    /// The transport panel's headline (#34). Its own key rather than reusing
+    /// `now_playing`, because the panel has a whole line where the status
+    /// line has whatever is left after the times and the mode flags — the
+    /// point of the panel is that there is room for more.
+    pub transport: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +179,8 @@ pub struct Loaded {
     pub theme: Theme,
     /// Parsed once, here, so the status line never parses while rendering.
     pub now_playing: crate::format::Template,
+    /// The transport panel's headline, same discipline.
+    pub transport: crate::format::Template,
     /// How a track row reads in the library tree.
     pub track_line: Option<crate::format::Template>,
     pub catalogs: crate::catalog::Catalogs,
@@ -202,6 +209,7 @@ pub struct Loaded {
 pub fn parse_text(text: &str) -> Loaded {
     let mut out = Loaded {
         theme: Theme::default(),
+        transport: crate::format::Template::transport_default(),
         ..Default::default()
     };
 
@@ -290,6 +298,15 @@ pub fn parse_text(text: &str) -> Loaded {
             Ok(t) => out.now_playing = t,
             Err(e) => out.errors.push(ConfigError {
                 where_: "format.now_playing".into(),
+                message: e.to_string(),
+            }),
+        }
+    }
+    if let Some(source) = &config.format.transport {
+        match crate::format::Template::parse(source) {
+            Ok(t) => out.transport = t,
+            Err(e) => out.errors.push(ConfigError {
+                where_: "format.transport".into(),
                 message: e.to_string(),
             }),
         }

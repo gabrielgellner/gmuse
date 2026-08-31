@@ -135,7 +135,15 @@ muted = "darkgray"
 # Roles: tab_active tab_inactive border_focused border_unfocused
 #        selection_focused selection_unfocused status_text status_dim
 #        status_playing status_notice status_modes status_underrun
-#        prompt_sigil setting_key binding_context binding_key
+#        prompt_sigil setting_key binding_context binding_key mode
+# How lines read. `[...]` groups vanish when a field inside them is missing.
+[format]
+# The status line's description of what is playing.
+now_playing = "{file_under} — {display_title}"
+# The transport panel's headline (`i` enters the mode). Its own key because the
+# panel has a whole line where the status line has whatever is left over.
+transport = "{file_under} — {display_title}[  ·  {album}][  ·  {year}]"
+
 [theme.styles]
 tab_active = { fg = "black", bg = "accent", mods = ["bold"] }
 tab_inactive = { fg = "muted" }

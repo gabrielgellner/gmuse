@@ -2724,6 +2724,37 @@ Append here as decisions are made. Format: date, decision, rationale.
   that says "finished". That is the same shape as `search`/`search-next` and `add`/`add-playlist`, both of which predate
   it, so it is consistent rather than a new wart.
 
+- **2026-08-31** **The transport panel (issue #34), and the §1 argument it has to win.** `-- TRANSPORT --` on the status
+  line was easy to miss, so the mode now raises a panel in the bottom slot: what is playing through its own format
+  template, a position bar, the times and volume, and **what is next** — which earns its line precisely because shuffle
+  makes it unguessable, and which `next()` can answer purely.
+
+  §1 refuses "something to watch" and has refused a permanent now-playing panel twice. **What makes this different is
+  that it is scoped to the mode.** While you are browsing — which is the whole of what the program is for — it is not
+  there and costs nothing. It appears only once you have said, by entering the mode, that playback is what you are
+  attending to. A panel you cannot dismiss is clutter; a panel that _is_ the thing you switched to is the screen doing
+  what you asked. Judged by the vision document's §7 standard, the boundary moved to a principled place rather than by
+  an increment.
+
+- **2026-08-31** **The panel is the slot's lowest-priority tenant, and the only one that yields to a short terminal.**
+  `:` and `<leader>?` displace it, because those are things you just asked for and it is a standing display; it comes
+  back when they close.
+
+  The height guard is the part that is not obvious. The other three tenants are gone in a keystroke, so the slot's
+  ten-row cap is enough for them. This one lasts as long as the mode does, so on a terminal too short to spare six rows
+  it would leave the library pane as nothing but borders — the "swallows the view it is helping you use" failure, held
+  open indefinitely. Below `2 + 6 + 4` rows the panel simply does not rise, and nothing is lost that must be seen
+  because the status line still carries the indicator.
+
+- **2026-08-31** **`[format] transport` is its own key, not a reuse of `now_playing`.** The panel has a whole line where
+  the status line has whatever is left after the state glyph, the times and the mode flags — having room is the reason
+  the panel exists, so sharing a template would have thrown that away. The default is richer accordingly, with album and
+  year in `[…]` groups so a track carrying nothing but a filename still reads as one line.
+
+  The glyphs are the status line's three, unchanged: `▶` is single-width everywhere, while `⏸` and `⏹` sit in a range
+  many terminals draw double-width or not at all — so `■` stands in for stop, and a mis-measured glyph cannot shift the
+  row. #34 flagged this and the answer was already in the status line.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

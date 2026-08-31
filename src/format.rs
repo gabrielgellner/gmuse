@@ -281,6 +281,18 @@ impl Default for Template {
 }
 
 impl Template {
+    /// The transport panel's headline (#34).
+    ///
+    /// Richer than the status line's, because the panel has a whole line
+    /// where the status line has whatever is left over — which is the reason
+    /// the panel exists. Every optional part is bracketed, so a track with
+    /// nothing but a filename still reads as one line rather than as dangling
+    /// punctuation.
+    pub fn transport_default() -> Self {
+        Self::parse("{file_under} — {display_title}[  ·  {album}][  ·  {year}]")
+            .expect("the transport template must parse")
+    }
+
     pub fn parse(source: &str) -> Result<Self, FormatError> {
         let mut chars = source.chars().peekable();
         let atoms = parse_atoms(&mut chars, false)?;
