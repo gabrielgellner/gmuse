@@ -2289,6 +2289,21 @@ Append here as decisions are made. Format: date, decision, rationale.
 
 ---
 
+- **2026-08-30** **Every list remembers where it is scrolled to.** A fresh `ListState` starts at offset zero, and
+  ratatui then scrolls the least it can to bring the selection into view — which lands the selection on the _last_
+  visible row whenever it is past the first page. Going down that is invisible, because the view only starts moving once
+  the cursor reaches the bottom and that part was always right. Coming back it is plainly wrong: after `G`, `k` dragged
+  the whole view up a line at a time with the cursor stuck to the bottom line, instead of walking the cursor up the page
+  it was already on.
+
+  `Scroll(Cell<usize>)`, one per list, read into the `ListState` before the frame and written back after. A `Cell` for
+  the same reason `guide_view` is one — only `draw` knows the pane's height. One per list rather than one shared,
+  because switching views must not scroll the view you came from.
+
+  The offset now outlives the rows it referred to — a fold closing, a filter narrowing, `dd` on the last entry — so a
+  stale one has to clamp rather than blank the pane. ratatui does clamp; there is a test that says so rather than
+  trusting it.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

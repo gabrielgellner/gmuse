@@ -388,6 +388,15 @@ pub struct Ui {
     /// cursor tens of rows past anything visible, so `k` did nothing until it
     /// had walked back through them.
     pub guide_view: std::cell::Cell<(usize, usize)>,
+    /// How far each list is scrolled. One per list rather than one shared:
+    /// switching views must not scroll the view you came from.
+    pub tree_scroll: Scroll,
+    pub sorted_scroll: Scroll,
+    pub playlist_scroll: Scroll,
+    pub queue_scroll: Scroll,
+    pub browser_scroll: Scroll,
+    pub settings_scroll: Scroll,
+    pub guides_scroll: Scroll,
     /// Which half of view 8 has focus: the list of guides, or the guide.
     pub guide_pane: Pane,
     /// Cursor in view 3's left pane, the list of playlists.
@@ -466,6 +475,13 @@ impl Ui {
         Self {
             view: View::Tree,
             tree: TreeState::default(),
+            tree_scroll: Scroll::default(),
+            sorted_scroll: Scroll::default(),
+            playlist_scroll: Scroll::default(),
+            queue_scroll: Scroll::default(),
+            browser_scroll: Scroll::default(),
+            settings_scroll: Scroll::default(),
+            guides_scroll: Scroll::default(),
             sorted: 0,
             playlist_sel: 0,
             queue_sel: 0,
@@ -2715,7 +2731,7 @@ fn draw_guides(frame: &mut Frame, area: Rect, ui: &Ui) {
         .iter()
         .map(|g| ListItem::new(Line::from(Span::raw(format!("  {}", g.title)))))
         .collect();
-    let mut state = ListState::default().with_selected(Some(ui.guide_sel));
+    let mut state = ui.guides_scroll.state(Some(ui.guide_sel));
     frame.render_stateful_widget(
         List::new(titles)
             .block(pane_block(theme, "guides", ui.guide_pane == Pane::Tree))
@@ -2723,6 +2739,7 @@ fn draw_guides(frame: &mut Frame, area: Rect, ui: &Ui) {
         left,
         &mut state,
     );
+    ui.guides_scroll.remember(&state);
 
     let Some(guide) = crate::guides::GUIDES.get(ui.guide_sel) else {
         return;
@@ -2923,6 +2940,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
             ui,
             ctx,
             TrackList {
+                scroll: &ui.sorted_scroll,
                 ids: ui.library.sorted(),
                 selected: ui.sorted,
                 title: "sorted",
@@ -2943,6 +2961,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 ui,
                 ctx,
                 TrackList {
+                    scroll: &ui.playlist_scroll,
                     ids: ui.playlist.entries(),
                     selected: ui.playlist_sel,
                     title: &playlist_title,
@@ -2959,6 +2978,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 ui,
                 ctx,
                 TrackList {
+                    scroll: &ui.queue_scroll,
                     ids: &entries,
                     selected: ui.queue_sel,
                     title: "queue",
@@ -3038,7 +3058,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
         ])));
     }
 
-    let mut state = ListState::default().with_selected(Some(ui.settings_sel));
+    let mut state = ui.settings_scroll.state(Some(ui.settings_sel));
     frame.render_stateful_widget(
         List::new(items)
             .block(pane_block(&ui.theme, "settings and bindings", true))
@@ -3046,6 +3066,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
         area,
         &mut state,
     );
+    ui.settings_scroll.remember(&state);
 }
 
 /// Rows the completion menu needs, borders included. Zero when there is
@@ -3300,7 +3321,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         })
         .collect();
 
-    let mut state = ListState::default().with_selected(Some(ui.tree.selected));
+    let mut state = ui.tree_scroll.state(Some(ui.tree.selected));
     frame.render_stateful_widget(
         List::new(items)
             .block(pane_block(&ui.theme, "library", true))
@@ -3308,10 +3329,42 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         area,
         &mut state,
     );
+    ui.tree_scroll.remember(&state);
 }
 
 /// What to draw a track list as.
+/// Where a list is scrolled to, remembered between frames.
+///
+/// A fresh `ListState` starts at offset zero, and ratatui then scrolls the
+/// least it can to bring the selection into view — which lands the selection
+/// on the **last** visible row whenever it is past the first page. That reads
+/// fine going down and wrong coming back: after `G`, `k` drags the whole view
+/// up a line at a time with the cursor stuck to the bottom, instead of walking
+/// the cursor up the page it is already on.
+///
+/// A `Cell` for the same reason `guide_view` is one — only `draw` knows the
+/// pane's height, and nothing outside a frame does.
+#[derive(Debug, Default)]
+pub struct Scroll(std::cell::Cell<usize>);
+
+impl Scroll {
+    fn state(&self, selected: Option<usize>) -> ListState {
+        ListState::default()
+            .with_selected(selected)
+            .with_offset(self.0.get())
+    }
+
+    /// Called after rendering, with the state ratatui just adjusted.
+    fn remember(&self, state: &ListState) {
+        self.0.set(state.offset());
+    }
+}
+
 struct TrackList<'a> {
+    /// Where this list was scrolled to last frame. Threaded through rather
+    /// than looked up, because one function draws view 2, view 3's right pane
+    /// and the queue, and they scroll independently.
+    scroll: &'a Scroll,
     ids: &'a [crate::store::TrackId],
     /// A **track** index, not a screen row.
     selected: usize,
@@ -3356,8 +3409,9 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
             playing: ui.playback.current,
         },
     );
-    let mut state =
-        ListState::default().with_selected(list::row_of_track(&rows, spec.selected).or(Some(0)));
+    let mut state = spec
+        .scroll
+        .state(list::row_of_track(&rows, spec.selected).or(Some(0)));
     // A selection landing on the playing track keeps the playing colour, or
     // the cursor hides the one thing you are watching for. Only while focused:
     // an unfocused pane should still read as unfocused.
@@ -3376,6 +3430,7 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
         area,
         &mut state,
     );
+    spec.scroll.remember(&state);
 }
 
 fn draw_browser(frame: &mut Frame, area: Rect, ui: &Ui) {
@@ -3397,7 +3452,7 @@ fn draw_browser(frame: &mut Frame, area: Rect, ui: &Ui) {
             ListItem::new(Line::from(label))
         })
         .collect();
-    let mut state = ListState::default().with_selected(Some(ui.browser.selected));
+    let mut state = ui.browser_scroll.state(Some(ui.browser.selected));
     frame.render_stateful_widget(
         List::new(items)
             .block(pane_block(
@@ -3409,6 +3464,7 @@ fn draw_browser(frame: &mut Frame, area: Rect, ui: &Ui) {
         area,
         &mut state,
     );
+    ui.browser_scroll.remember(&state);
 }
 
 fn empty_hint(theme: &theme::Theme, title: &str) -> Vec<Line<'static>> {
@@ -7894,5 +7950,112 @@ mod tests {
             .to_string();
         let (fg, _) = cursor_row_colours(&ui, &ctx, &title);
         assert_ne!(fg, Color::Green, "an unfocused pane looked focused");
+    }
+
+    /// A list longer than the pane, so the cursor has somewhere to be other
+    /// than the edge.
+    fn tall_fixture(n: usize) -> Store {
+        let mut store = Store::new();
+        for i in 0..n {
+            store.upsert(Track {
+                path: PathBuf::from(format!("/m/tall/{i:03}.mp3")),
+                artist: Some("Tall".into()),
+                album: Some("Album".into()),
+                title: Some(format!("Track {i:03}")),
+                tracknumber: Some(i as u32 + 1),
+                duration: Duration::from_secs(100),
+                ..Default::default()
+            });
+        }
+        store
+    }
+
+    /// `G` then `k` used to drag the whole view up with the cursor pinned to
+    /// the bottom line, because a fresh `ListState` starts at offset zero and
+    /// ratatui then scrolls the least it can to reach the selection.
+    #[test]
+    fn k_after_g_walks_up_the_page_rather_than_dragging_the_view() {
+        let store = tall_fixture(40);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.album_headers = false;
+
+        press(&mut ui, &ctx, "G");
+        let at_bottom = render(&ui, &ctx, 90, 12);
+        assert!(at_bottom.contains("Track 039"), "G should reach the end");
+
+        press(&mut ui, &ctx, "k");
+        let after = render(&ui, &ctx, 90, 12);
+        assert!(
+            after.contains("Track 039"),
+            "the last row scrolled off, so the cursor never left the bottom line:\n{after}"
+        );
+        assert!(after.contains("Track 038"), "and the cursor is on 038");
+    }
+
+    /// The other direction still works, which is what made the bug hard to
+    /// see: from the top the view only starts moving once the cursor reaches
+    /// the bottom, and that part was always right.
+    #[test]
+    fn j_from_the_top_fills_the_page_before_scrolling() {
+        let store = tall_fixture(40);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.album_headers = false;
+
+        press(&mut ui, &ctx, "g g");
+        press(&mut ui, &ctx, "j");
+        let after = render(&ui, &ctx, 90, 12);
+        assert!(
+            after.contains("Track 000"),
+            "one j should not have scrolled anything:\n{after}"
+        );
+    }
+
+    /// Each list keeps its own place, or stepping to another view and back
+    /// would land you somewhere you never scrolled to.
+    #[test]
+    fn each_view_remembers_its_own_scroll() {
+        let store = tall_fixture(40);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.album_headers = false;
+
+        press(&mut ui, &ctx, "G");
+        let _ = render(&ui, &ctx, 90, 12);
+
+        ui.view = View::Queue;
+        let queue = render(&ui, &ctx, 90, 12);
+        assert!(!queue.contains("Track 039"), "the queue is empty:\n{queue}");
+
+        ui.view = View::Sorted;
+        let back = render(&ui, &ctx, 90, 12);
+        assert!(
+            back.contains("Track 039"),
+            "view 2 should still be where it was left:\n{back}"
+        );
+    }
+
+    /// Remembering the offset means it can outlive the rows it referred to —
+    /// a fold closing, a filter narrowing, `dd` on the last entry. ratatui
+    /// clamps, and this says so rather than trusting it.
+    #[test]
+    fn a_scroll_left_past_the_end_of_a_shrunken_list_still_draws() {
+        let store = tall_fixture(40);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.album_headers = false;
+        ui.sorted = 0;
+        ui.sorted_scroll.0.set(9_999);
+
+        let out = render(&ui, &ctx, 90, 12);
+        assert!(
+            out.contains("Track 000"),
+            "a stale offset should clamp, not blank the pane:\n{out}"
+        );
     }
 }
