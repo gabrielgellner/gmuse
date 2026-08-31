@@ -10,7 +10,7 @@
 //! a fuzzy one is a guess. Fuzzy matching belongs on `/` search, over titles.
 
 use super::keys;
-use super::{Context, SettingKey, parse};
+use super::{Context, Fold, SettingKey, parse};
 
 /// What is available to complete against, from the running application.
 #[derive(Debug, Default, Clone)]
@@ -145,6 +145,7 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
             .map(|k| format!("{}=", k.name()))
             .collect(),
 
+        "fold" if words.len() == 1 => Fold::ALL.iter().map(|f| f.name().to_string()).collect(),
         "in" if words.len() == 1 => vec!["tree".into(), "tracks".into()],
         // Anything after the pane is a whole command again.
         "in" if words.len() >= 2 => parse::VERBS.iter().map(|s| s.to_string()).collect(),

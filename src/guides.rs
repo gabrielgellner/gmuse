@@ -227,7 +227,23 @@ mod tests {
             .map(|(_, key, _)| key)
             .collect();
         for key in [
-            "y y", "d d", "p", "P", "u", "^r", "l", "h", "Z", "a", "e", "x",
+            "y y",
+            "d d",
+            "p",
+            "P",
+            "u",
+            "^r",
+            "l",
+            "h",
+            "o",
+            "a",
+            "e",
+            "z r",
+            "z m",
+            "z R",
+            "z M",
+            "z C",
+            "<leader> x",
         ] {
             assert!(
                 bound.iter().any(|b| b == key),

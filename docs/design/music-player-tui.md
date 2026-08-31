@@ -2252,6 +2252,40 @@ Append here as decisions are made. Format: date, decision, rationale.
   structure runs out. It also fixed `x`, which meant "resume if something is playing, else play the selection" — two
   behaviours, the first of which is what `c` does. In the queue, `x` consumes the entry.
 
+- **2026-08-30** **Transport moved behind `<leader>`, and `z` became vim's fold prefix.** The collision recorded in the
+  entry below — `z` is Winamp's `prev`, and vim opens a fold with `zo` — was resolved by moving the _other_ side.
+  `<leader>x` `<leader>c` `<leader>v` `<leader>b` `<leader>z`, plus volume and the 60-second seeks; the arrows keep bare
+  seek because nothing else wants them.
+
+  The reasoning is about posture, not about which key is scarcer. In these views your hands are navigating; reaching for
+  the transport is stepping outside what you are doing, and the prefix says so. That frees the bare letters for what
+  browsing actually wants — the whole `z` fold family, and `-` for #31's parent motion — and it costs one keystroke on
+  an action you take between songs rather than within one.
+
+  **The letters do not change**, only the prefix. That is what makes it one alphabet rather than two, and it is what
+  lets #33 add a transport mode later in which the same letters are bare: `c` and `<leader>c` will be the same pause
+  reached from the two postures, not two things to remember. Doing this half first is therefore not work done twice —
+  `<leader>`-prefixed transport _is_ normal mode's end state.
+
+  Consequences: `Z` (close-all) and `M-e` (expand-all) are gone, replaced by `zM` and `zR` — and `zr`/`zm`, which
+  neither had. `expand`, `fold-close`, `expand-all` and `collapse-all` collapsed into one `fold <what>` command with
+  nine forms, since they were nine forms of one idea and the config language should say so.
+
+- **2026-08-30** **The tree keeps a fold _level_, not a set of open nodes.** `Expansion<K>` in `src/ui/fold.rs` holds a
+  `level` plus explicit overrides either side of it, because vim's folds are two ideas at once. A bare `HashSet` of open
+  paths cannot express `zr` — "open one more level" — without walking the whole tree to insert every node at that depth,
+  which then loses the distinction between "open because the level says so" and "open because you opened it", and makes
+  the next `zm` do the wrong thing.
+
+  This is the operation the tree can offer that a file explorer cannot: its levels are **homogeneous**. In a filesystem,
+  depth 3 means nothing in particular, so "collapse to level 2" is not a thought anyone has. Here every node at depth 0
+  is an artist and every node at depth 1 is an album, so `zm` is "collapse to artists" and `foldlevel` is exactly the
+  right word. Keyed on the ident path rather than a row index, so expansion survives a re-sort, a filter and a rescan.
+
+  A level change discards the hand-made overrides, as vim's does: the point of a level command is to say what the whole
+  tree looks like, and leaving exceptions behind would make `zM` not actually close everything. When a level change
+  closes the row out from under the cursor, the cursor rides up to the deepest ancestor still visible.
+
 - **2026-08-30** **`h` and `l` are the explorer motions, because vim's fold keys cannot be.** vim opens a fold with
   `zo`, and `z` here is Winamp's `prev` — the one place gmuse's two borrowed traditions actually collide. Checking
   snacks.nvim's explorer settled it: it does not use `z` at all. `l` opens, `h` closes, `Z` closes everything.
@@ -2332,6 +2366,35 @@ Append here as decisions are made. Format: date, decision, rationale.
   The consequence worth recording: two artists whose names differ only by a mark now share a tree node, exactly as
   `MUSE`/`Muse`/`muse` already did under case folding. That is the desirable reading — it is what inconsistent tagging
   across an album looks like, and merging beats showing the same artist twice — but it is a merge, and it is silent.
+
+- **2026-08-30** **`zr`/`zm` hold the cursor's screen row — which nvim does not do.** Measured rather than assumed,
+  because the question was asked directly. In nvim, with the cursor on buffer line 60 and the window scrolled:
+
+  |             | topline | cursor line | screen row |
+  | ----------- | ------- | ----------- | ---------- |
+  | before `zr` | 41      | 60          | 10         |
+  | after `zr`  | 43      | 60          | **18**     |
+  | after `zm`  | 42      | 60          | **9**      |
+
+  nvim anchors `topline` to a **buffer line** and lets the cursor slide down the screen as the folds above it open. The
+  cursor keeps its line, never its place.
+
+  gmuse anchors the other end: the cursor's screen row is held and the tree opens behind it. That is a deliberate
+  departure, and it is the right one here — in a file you are reading downward from the top of the window, so the top is
+  what should stay put; in this tree the cursor _is_ the subject, and `zr` is asking "show me more around what I am
+  looking at". Only the level forms are anchored: `zo` and friends change nothing above the cursor, and `zc` walking up
+  to a parent should move the cursor up the screen, as it does in vim and as `h` always has here.
+
+- **2026-08-30** **`~` filler past the end of every list, as vim draws it.** Without it a list stops scrolling once its
+  last row reaches the bottom line, so the cursor's screen position depends on how many rows happen to be _below_ it —
+  and holding the cursor still across a `zm` becomes impossible near the end however carefully the fold code tries.
+
+  Checked against nvim rather than assumed: `^E` at the end of a buffer scrolls until `topline == lastline`, the last
+  line alone at the top with `~` below. `Scroll::state_within` clamps to exactly that, which also stops a stale offset
+  asking `pad_to_view` for ten thousand filler rows.
+
+  The padding is a property of the screen rather than of the list, which is the whole reason vim draws `~` at all. New
+  `Role::Filler`, set behind the gutter — the gutter is information and the filler is the absence of it.
 
 ## 14. Prior art worth reading
 

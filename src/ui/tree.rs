@@ -11,17 +11,9 @@
 //! be open at once and the whole thing reads as one buffer: `j`, `3j`, `gg`,
 //! `G` and the relative gutter all work over it uniformly, which is the point.
 
-use std::collections::HashSet;
-
 use crate::library::{Library, SortKey};
 use crate::store::{Store, TrackId};
-
-/// What can be opened and closed. Tracks are leaves, so they are not here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Node {
-    Artist(SortKey),
-    Album(SortKey, SortKey),
-}
+use crate::ui::fold::Expansion;
 
 /// One visible line.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,9 +68,16 @@ pub enum Pane {
     Tracks,
 }
 
+/// How deep the tree goes: artists at depth 0, albums at depth 1. `zR` sets
+/// the level here, and there is nothing below an album but tracks, which are
+/// leaves and have no fold of their own.
+const DEPTH: u16 = 2;
+
 #[derive(Debug, Default)]
 pub struct TreeState {
-    expanded: HashSet<Node>,
+    /// Keyed on the ident path — `[artist]` for an artist, `[artist, album]`
+    /// for an album — so expansion survives a re-sort or a rescan.
+    folds: Expansion<SortKey>,
     pub selected: usize,
 }
 
@@ -97,7 +96,7 @@ impl TreeState {
                 .and_then(|id| store.get(*id))
                 .map(|t| t.file_under().to_string())
                 .unwrap_or_else(|| artist_key.as_str().to_string());
-            let expanded = self.expanded.contains(&Node::Artist(artist_key.clone()));
+            let expanded = self.folds.is_open(std::slice::from_ref(artist_key));
             rows.push(Row::Artist {
                 key: artist_key.clone(),
                 display,
@@ -113,9 +112,7 @@ impl TreeState {
                     .and_then(|id| store.get(*id))
                     .map(|t| t.album_or_unknown().to_string())
                     .unwrap_or_else(|| album_key.as_str().to_string());
-                let open = self
-                    .expanded
-                    .contains(&Node::Album(artist_key.clone(), album_key.clone()));
+                let open = self.folds.is_open(&[artist_key.clone(), album_key.clone()]);
                 rows.push(Row::Album {
                     artist: artist_key.clone(),
                     key: album_key.clone(),
@@ -138,12 +135,23 @@ impl TreeState {
         rows
     }
 
-    /// The node a row belongs to, for opening and closing.
-    fn node_of(row: &Row) -> Option<Node> {
+    /// The path of a row that can be opened. A track has none — it is a leaf.
+    fn path_of(row: &Row) -> Option<Vec<SortKey>> {
         match row {
-            Row::Artist { key, .. } => Some(Node::Artist(key.clone())),
-            Row::Album { artist, key, .. } => Some(Node::Album(artist.clone(), key.clone())),
+            Row::Artist { key, .. } => Some(vec![key.clone()]),
+            Row::Album { artist, key, .. } => Some(vec![artist.clone(), key.clone()]),
             Row::Track { .. } => None,
+        }
+    }
+
+    /// Where a row *sits*, leaves included: a track's is its album's, because
+    /// that is the row the cursor should fall back to when the track's fold
+    /// closes under it.
+    fn seat_of(row: &Row) -> Vec<SortKey> {
+        match row {
+            Row::Artist { key, .. } => vec![key.clone()],
+            Row::Album { artist, key, .. } => vec![artist.clone(), key.clone()],
+            Row::Track { artist, album, .. } => vec![artist.clone(), album.clone()],
         }
     }
 
@@ -178,19 +186,112 @@ impl TreeState {
         }
     }
 
-    /// Open or close the node under the cursor. A track has nothing to toggle.
+    /// Open or close the node under the cursor — `za`, and `o`.
     ///
     /// Deliberately **not** `close()` then `open()`: `close` walks up when the
     /// node is already shut, which is right for `h` and wrong here — toggling
     /// a closed album would close its artist instead of opening the album.
     pub fn toggle(&mut self, lib: &Library, store: &Store) {
-        let rows = self.rows(lib, store);
-        let Some(node) = rows.get(self.selected).and_then(Self::node_of) else {
+        let Some(path) = self.path_under(lib, store) else {
             return;
         };
-        if !self.expanded.remove(&node) {
-            self.expanded.insert(node);
+        self.folds.toggle(&path);
+    }
+
+    /// `zo` — open the node under the cursor, and only it.
+    pub fn open(&mut self, lib: &Library, store: &Store) {
+        if let Some(path) = self.path_under(lib, store) {
+            self.folds.open(&path);
         }
+    }
+
+    /// `zO` — open the node under the cursor and everything beneath it.
+    pub fn open_deep(&mut self, lib: &Library, store: &Store) {
+        let Some(path) = self.path_under(lib, store) else {
+            return;
+        };
+        let mut paths = vec![path.clone()];
+        paths.extend(self.descendants(lib, &path));
+        self.folds.open_all(paths);
+    }
+
+    /// `zC` — close the node under the cursor and everything beneath it, so
+    /// that reopening it does not spill the subtree you had expanded inside.
+    pub fn close_deep(&mut self, lib: &Library, store: &Store) {
+        let Some(path) = self.path_under(lib, store) else {
+            return;
+        };
+        let mut paths = vec![path.clone()];
+        paths.extend(self.descendants(lib, &path));
+        self.keeping_cursor(lib, store, |t| t.folds.close_all(paths));
+    }
+
+    /// `zR` — every fold open. Depth 2 is the whole tree: artists at 0,
+    /// albums at 1.
+    pub fn open_everything(&mut self, lib: &Library, store: &Store) {
+        self.keeping_cursor(lib, store, |t| t.folds.set_level(DEPTH));
+    }
+
+    /// `zM` — every fold closed.
+    pub fn close_everything(&mut self, lib: &Library, store: &Store) {
+        self.keeping_cursor(lib, store, |t| t.folds.set_level(0));
+    }
+
+    /// `zr` — one level more. From nothing that is artists, then albums.
+    pub fn more(&mut self, lib: &Library, store: &Store) {
+        self.keeping_cursor(lib, store, |t| t.folds.more());
+    }
+
+    /// `zm` — one level fewer.
+    pub fn less(&mut self, lib: &Library, store: &Store) {
+        self.keeping_cursor(lib, store, |t| t.folds.less());
+    }
+
+    /// The openable path under the cursor, if the cursor is on one.
+    fn path_under(&self, lib: &Library, store: &Store) -> Option<Vec<SortKey>> {
+        self.rows(lib, store)
+            .get(self.selected)
+            .and_then(Self::path_of)
+    }
+
+    /// Every openable path strictly under `path`. Only albums can be under
+    /// anything, so this is one level deep by construction.
+    fn descendants(&self, lib: &Library, path: &[SortKey]) -> Vec<Vec<SortKey>> {
+        let [artist] = path else { return Vec::new() };
+        lib.artists()
+            .find(|(k, _)| *k == artist)
+            .map(|(_, albums)| {
+                albums
+                    .keys()
+                    .map(|album| vec![artist.clone(), album.clone()])
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Run a fold change and land the cursor somewhere that still exists.
+    ///
+    /// A level change can close the row out from under you. vim puts the
+    /// cursor on the start of the fold that swallowed it, which here means the
+    /// deepest visible ancestor of where you were.
+    fn keeping_cursor(&mut self, lib: &Library, store: &Store, change: impl FnOnce(&mut Self)) {
+        let seat = self.rows(lib, store).get(self.selected).map(Self::seat_of);
+        change(self);
+        let rows = self.rows(lib, store);
+        let Some(seat) = seat else {
+            self.selected = self.selected.min(rows.len().saturating_sub(1));
+            return;
+        };
+        let mut best = 0;
+        let mut deepest = 0;
+        for (i, row) in rows.iter().enumerate() {
+            let at = Self::seat_of(row);
+            if at.len() <= seat.len() && seat.starts_with(&at) && at.len() >= deepest {
+                deepest = at.len();
+                best = i;
+            }
+        }
+        self.selected = best.min(rows.len().saturating_sub(1));
     }
 
     /// Close the node under the cursor.
@@ -198,46 +299,33 @@ impl TreeState {
     /// If it is **already closed** — or is a track, which is never open — the
     /// *parent* closes instead and the cursor moves to it. That is snacks'
     /// rule, and it is what lets repeated `h` walk up and out without anything
-    /// needing a concept of "level".
+    /// needing a concept of "level". `zc` is bound to it too, which is what
+    /// vim's `zc` does on a line inside a fold.
     pub fn close(&mut self, lib: &Library, store: &Store) -> bool {
         let rows = self.rows(lib, store);
         let Some(row) = rows.get(self.selected) else {
             return false;
         };
-        let node = Self::node_of(row).filter(|n| self.expanded.contains(n));
-        let target = match node {
-            Some(n) => n,
+        let path = Self::path_of(row).filter(|p| self.folds.is_open(p));
+        let target = match path {
+            Some(p) => p,
             // Closed, or a leaf: go up.
             None => match row {
                 Row::Artist { .. } => return false,
-                Row::Album { artist, .. } => Node::Artist(artist.clone()),
-                Row::Track { artist, album, .. } => Node::Album(artist.clone(), album.clone()),
+                Row::Album { artist, .. } => vec![artist.clone()],
+                Row::Track { artist, album, .. } => vec![artist.clone(), album.clone()],
             },
         };
-        self.expanded.remove(&target);
+        self.folds.close(&target);
         // The row would otherwise vanish from under the cursor.
         if let Some(pos) = self
             .rows(lib, store)
             .iter()
-            .position(|r| Self::node_of(r).as_ref() == Some(&target))
+            .position(|r| Self::path_of(r).as_deref() == Some(target.as_slice()))
         {
             self.selected = pos;
         }
         true
-    }
-
-    /// Open every artist. Useful on a small library, painful on a large one,
-    /// which is why it is not the default.
-    /// Artists only, not their albums: opening every album of every artist
-    /// puts the whole library on screen as tracks, which is what view 2 is.
-    pub fn expand_all(&mut self, lib: &Library) {
-        for (key, _) in lib.artists() {
-            self.expanded.insert(Node::Artist(key.clone()));
-        }
-    }
-
-    pub fn collapse_all(&mut self) {
-        self.expanded.clear();
     }
 }
 
@@ -377,12 +465,156 @@ mod tests {
     }
 
     #[test]
-    fn expand_all_then_collapse_all() {
+    fn zr_walks_down_a_level_at_a_time_and_zm_walks_back() {
         let (store, lib) = fixture();
         let mut state = TreeState::default();
-        state.expand_all(&lib);
-        assert_eq!(state.rows(&lib, &store).len(), 5); // 2 artists + 3 albums
-        state.collapse_all();
+        assert_eq!(state.rows(&lib, &store).len(), 2, "2 artists");
+
+        state.more(&lib, &store);
+        assert_eq!(state.rows(&lib, &store).len(), 5, "+ 3 albums");
+
+        state.more(&lib, &store);
+        assert_eq!(state.rows(&lib, &store).len(), 9, "+ 4 tracks");
+
+        state.less(&lib, &store);
+        assert_eq!(state.rows(&lib, &store).len(), 5);
+        state.less(&lib, &store);
         assert_eq!(state.rows(&lib, &store).len(), 2);
+    }
+
+    #[test]
+    fn zm_at_the_top_stays_there_rather_than_wrapping() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.less(&lib, &store);
+        state.less(&lib, &store);
+        state.more(&lib, &store);
+        assert_eq!(
+            state.rows(&lib, &store).len(),
+            5,
+            "one zr after bottoming out should open the albums, not undo a debt"
+        );
+    }
+
+    #[test]
+    fn zr_opens_everything_and_zm_closes_it() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.open_everything(&lib, &store);
+        assert_eq!(state.rows(&lib, &store).len(), 9);
+        state.close_everything(&lib, &store);
+        assert_eq!(state.rows(&lib, &store).len(), 2);
+    }
+
+    #[test]
+    fn a_level_change_discards_what_was_opened_by_hand() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.toggle(&lib, &store); // open Burial by hand
+        state.close_everything(&lib, &store);
+        assert_eq!(
+            state.rows(&lib, &store).len(),
+            2,
+            "zM has to close what was opened by hand too, or it is not `all`"
+        );
+    }
+
+    /// Deliberately on the *second* artist: landing on row 0 is what a cursor
+    /// that does not ride up would also do, so testing the first artist proves
+    /// nothing.
+    #[test]
+    fn collapsing_past_the_cursor_lands_it_on_the_row_that_swallowed_it() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.open_everything(&lib, &store);
+        let rows = state.rows(&lib, &store);
+        let oizo_track = rows
+            .iter()
+            .position(|r| matches!(r, Row::Track { artist, .. } if artist.as_str() == "mr. oizo"))
+            .expect("Mr. Oizo's track should be on screen with every fold open");
+        state.selected = oizo_track;
+
+        state.close_everything(&lib, &store);
+        let rows = state.rows(&lib, &store);
+        assert_eq!(
+            rows.len(),
+            2,
+            "everything but the artists should have closed"
+        );
+        assert!(
+            matches!(&rows[state.selected], Row::Artist { display, .. } if display == "Mr. Oizo"),
+            "the cursor should ride up to its own artist, not to the top: {:?}",
+            rows.get(state.selected)
+        );
+    }
+
+    #[test]
+    fn za_closes_what_it_opened() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        let shut = state.rows(&lib, &store).len();
+
+        state.toggle(&lib, &store);
+        assert!(state.rows(&lib, &store).len() > shut);
+        state.toggle(&lib, &store);
+        assert_eq!(
+            state.rows(&lib, &store).len(),
+            shut,
+            "za has to go both ways — that is the whole of what it is"
+        );
+    }
+
+    #[test]
+    fn zo_opens_only_the_node_under_the_cursor() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.open(&lib, &store);
+        assert_eq!(
+            state.rows(&lib, &store).len(),
+            4,
+            "Burial's 2 albums, Mr. Oizo still shut"
+        );
+    }
+
+    #[test]
+    fn zo_opens_the_node_and_zo_again_does_not_close_it() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.open(&lib, &store);
+        let opened = state.rows(&lib, &store).len();
+        state.open(&lib, &store);
+        assert_eq!(
+            state.rows(&lib, &store).len(),
+            opened,
+            "zo is not a toggle — that is za"
+        );
+    }
+
+    #[test]
+    fn zo_deep_opens_the_albums_too() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.open_deep(&lib, &store);
+        assert_eq!(
+            state.rows(&lib, &store).len(),
+            7,
+            "Burial, its 2 albums and their 3 tracks, plus Mr. Oizo"
+        );
+    }
+
+    #[test]
+    fn zc_deep_does_not_spill_the_subtree_when_reopened() {
+        let (store, lib) = fixture();
+        let mut state = TreeState::default();
+        state.open_deep(&lib, &store);
+        state.close_deep(&lib, &store);
+        assert_eq!(state.rows(&lib, &store).len(), 2);
+
+        state.open(&lib, &store);
+        assert_eq!(
+            state.rows(&lib, &store).len(),
+            4,
+            "reopening Burial should show its albums closed, not the tracks it had open"
+        );
     }
 }

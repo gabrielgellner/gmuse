@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use super::keys;
 use super::{
-    AaaMode, AddTarget, Command, Context, PaneTarget, PlaylistSpec, Quality, RateSpec, SearchDir,
-    SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
+    AaaMode, AddTarget, Command, Context, Fold, PaneTarget, PlaylistSpec, Quality, RateSpec,
+    SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -43,12 +43,9 @@ pub const VERBS: &[&str] = &[
     "bind",
     "bottom",
     "catalog",
-    "collapse-all",
     "down",
-    "expand",
-    "expand-all",
     "filter",
-    "fold-close",
+    "fold",
     "help",
     "freeze",
     "in",
@@ -116,7 +113,16 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "top" => Command::Top,
         "bottom" => Command::Bottom,
         "activate" => Command::Activate,
-        "expand" => Command::Expand,
+        "fold" => {
+            let word = rest.trim();
+            if word.is_empty() {
+                return Err(ParseError::Missing {
+                    cmd: "fold",
+                    what: "one of open, close, toggle, open-deep, close-deep, all, none, more, less",
+                });
+            }
+            Command::Fold(Fold::parse(word).ok_or_else(|| ParseError::Bad(word.into(), "fold"))?)
+        }
         "remove" => Command::Remove,
         "remove-to-end" => Command::RemoveToEnd,
         "yank" => Command::Yank,
@@ -124,7 +130,6 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "put" => Command::Put { before: false },
         "put-before" => Command::Put { before: true },
         "pane-next" => Command::PaneNext,
-        "fold-close" => Command::FoldClose,
         "pane-left" => Command::PaneLeft,
         "pane-right" => Command::PaneRight,
         "in" => {
@@ -142,8 +147,6 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
                 cmd: Box::new(command(cmd_text)?),
             }
         }
-        "expand-all" => Command::ExpandAll,
-        "collapse-all" => Command::CollapseAll,
 
         // Playback. The short aliases are what a person types.
         "play" => Command::Play,
@@ -493,7 +496,7 @@ pub fn format(cmd: &Command) -> String {
         Command::Top => "top".into(),
         Command::Bottom => "bottom".into(),
         Command::Activate => "activate".into(),
-        Command::Expand => "expand".into(),
+        Command::Fold(f) => format!("fold {}", f.name()),
         Command::Remove => "remove".into(),
         Command::RemoveToEnd => "remove-to-end".into(),
         Command::Yank => "yank".into(),
@@ -501,12 +504,9 @@ pub fn format(cmd: &Command) -> String {
         Command::Put { before: false } => "put".into(),
         Command::Put { before: true } => "put-before".into(),
         Command::PaneNext => "pane-next".into(),
-        Command::FoldClose => "fold-close".into(),
         Command::PaneLeft => "pane-left".into(),
         Command::PaneRight => "pane-right".into(),
         Command::In { pane, cmd } => format!("in {} {}", pane.name(), format(cmd)),
-        Command::ExpandAll => "expand-all".into(),
-        Command::CollapseAll => "collapse-all".into(),
         Command::Play => "play".into(),
         Command::Pause => "pause".into(),
         Command::Stop => "stop".into(),
@@ -779,7 +779,10 @@ mod tests {
     /// §9's M6 criterion: a rebinding must survive a trip through the rc file.
     #[test]
     fn every_command_round_trips_through_text() {
-        let samples = vec![
+        // Built from `Fold::ALL` rather than listed, so a new fold form is
+        // covered the moment it exists.
+        let mut samples: Vec<Command> = Fold::ALL.iter().copied().map(Command::Fold).collect();
+        samples.extend(vec![
             Command::Up,
             Command::Down,
             Command::PageUp,
@@ -787,7 +790,6 @@ mod tests {
             Command::Top,
             Command::Bottom,
             Command::Activate,
-            Command::Expand,
             Command::Remove,
             Command::PaneNext,
             Command::PaneLeft,
@@ -796,8 +798,6 @@ mod tests {
                 pane: PaneTarget::Tree,
                 cmd: Box::new(Command::Down),
             },
-            Command::ExpandAll,
-            Command::CollapseAll,
             Command::Play,
             Command::Pause,
             Command::Stop,
@@ -861,7 +861,7 @@ mod tests {
             Command::SearchNext,
             Command::SearchPrev,
             Command::Quit,
-        ];
+        ]);
 
         for cmd in samples {
             let text = format(&cmd);
@@ -929,6 +929,7 @@ mod tests {
                 "playlist" => "playlist open fresh".to_string(),
                 "filter" => "filter year>2000".to_string(),
                 "rate" => "rate 4".to_string(),
+                "fold" => "fold toggle".to_string(),
                 "in" => "in tree down".to_string(),
                 "search" | "rsearch" => format!("{verb} text"),
                 other => other.to_string(),

@@ -52,10 +52,24 @@ pub const DEFAULTS: &[&str] = &[
     // snacks binds it to `confirm` too. `h` keeps its own, because closing is
     // one act while opening bottoms out in playing the track.
     "bind common l activate",
-    "bind common h fold-close",
+    "bind common h fold close",
+    // vim's fold vocabulary, whole. The levels here are homogeneous — every
+    // node at depth 0 is an artist — so `zr`/`zm` mean "expand to albums" and
+    // "collapse to artists", which is an operation a file explorer cannot
+    // offer and does not implement.
+    "bind common \"z o\" fold open",
+    "bind common \"z c\" fold close",
+    "bind common \"z a\" fold toggle",
+    "bind common \"z O\" fold open-deep",
+    "bind common \"z C\" fold close-deep",
+    "bind common \"z R\" fold all",
+    "bind common \"z M\" fold none",
+    "bind common \"z r\" fold more",
+    "bind common \"z m\" fold less",
     // `o` for open, not `space`: space is the leader, and a chord cannot
-    // extend a key that is bound on its own.
-    "bind common o expand",
+    // extend a key that is bound on its own. It is `za` under another name,
+    // and outside the tree it is what ticks a checkbox.
+    "bind common o fold toggle",
     "bind common enter activate",
     // vim's `dd`, and `D` for delete-to-end. `D` alone was cmus's, and sat
     // oddly in a keymap whose navigation is otherwise nvim's — in vim `D`
@@ -67,23 +81,32 @@ pub const DEFAULTS: &[&str] = &[
     "bind common u undo",
     "bind common ^r redo",
     "bind common \"<leader> u\" rescan",
-    // `Z` is snacks' close-all. `M-c` was undiscoverable; expand-all keeps
-    // its alt binding for now, having no explorer convention to borrow.
-    "bind common Z collapse-all",
-    "bind common M-e expand-all",
+    // `Z` was snacks' close-all, and `M-e` its opposite. Both are gone: `zM`
+    // and `zR` say the same thing in the vocabulary the rest of the keymap
+    // already speaks, and `zm`/`zr` add the graduated version neither had.
     // transport
-    "bind common x play",
-    "bind common c pause",
-    "bind common v stop",
-    "bind common b next",
-    "bind common z prev",
+    // Transport is `<leader>`-prefixed in normal mode. The letters are
+    // Winamp's row, unchanged — what changes is that reaching them says you
+    // are stepping outside browsing, which is what you are doing in view 1.
+    // #33 adds the mode where they are bare again; the letters stay the same,
+    // so there is one alphabet rather than two.
+    //
+    // It frees `z` for vim's fold vocabulary and `-` for the parent motion,
+    // which is the immediate reason to do it now.
+    "bind common \"<leader> x\" play",
+    "bind common \"<leader> c\" pause",
+    "bind common \"<leader> v\" stop",
+    "bind common \"<leader> b\" next",
+    "bind common \"<leader> z\" prev",
+    "bind common \"<leader> >\" seek +60",
+    "bind common \"<leader> <\" seek -60",
+    "bind common \"<leader> +\" vol +5%",
+    "bind common \"<leader> =\" vol +5%",
+    "bind common \"<leader> -\" vol -5%",
+    // The arrows stay bare: nothing else wants them, and seeking with them is
+    // what every player does.
     "bind common right seek +10",
     "bind common left seek -10",
-    "bind common > seek +60",
-    "bind common < seek -60",
-    "bind common + vol +5%",
-    "bind common = vol +5%",
-    "bind common - vol -5%",
     // modes
     "bind common s toggle shuffle",
     "bind common r toggle repeat",

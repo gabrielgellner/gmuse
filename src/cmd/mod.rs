@@ -324,6 +324,80 @@ pub enum PlaylistSpec {
 /// Everything the application can be asked to do.
 ///
 /// One enum for keys, the `:` line and the rc file, per §6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fold {
+    /// `zo`, and `l` on a closed node.
+    Open,
+    /// `zc`, and `h`. On something already closed it closes the parent, so
+    /// repeated presses walk up and out.
+    Close,
+    /// `za`, and `o`.
+    Toggle,
+    /// `zO` — this node and everything under it.
+    OpenDeep,
+    /// `zC` — this node and everything under it, so reopening does not spill
+    /// the subtree you had expanded inside.
+    CloseDeep,
+    /// `zR` — every fold in the tree.
+    All,
+    /// `zM` — none of them.
+    None,
+    /// `zr` — one level deeper. Artists, then albums.
+    More,
+    /// `zm` — one level shallower.
+    Less,
+}
+
+impl Fold {
+    pub fn parse(word: &str) -> Option<Self> {
+        Some(match word {
+            "open" => Self::Open,
+            "close" => Self::Close,
+            "toggle" => Self::Toggle,
+            "open-deep" => Self::OpenDeep,
+            "close-deep" => Self::CloseDeep,
+            "all" => Self::All,
+            "none" => Self::None,
+            "more" => Self::More,
+            "less" => Self::Less,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Close => "close",
+            Self::Toggle => "toggle",
+            Self::OpenDeep => "open-deep",
+            Self::CloseDeep => "close-deep",
+            Self::All => "all",
+            Self::None => "none",
+            Self::More => "more",
+            Self::Less => "less",
+        }
+    }
+
+    /// Whether this form moves the whole tree's level, as against acting on
+    /// one node. These are the ones that insert and remove rows *above* the
+    /// cursor, so they are the ones whose screen position has to be held.
+    pub fn levels(self) -> bool {
+        matches!(self, Self::All | Self::None | Self::More | Self::Less)
+    }
+
+    pub const ALL: &'static [Fold] = &[
+        Self::Open,
+        Self::Close,
+        Self::Toggle,
+        Self::OpenDeep,
+        Self::CloseDeep,
+        Self::All,
+        Self::None,
+        Self::More,
+        Self::Less,
+    ];
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     // navigation
@@ -334,7 +408,10 @@ pub enum Command {
     Top,
     Bottom,
     Activate,
-    Expand,
+    /// Open or close what is under the cursor, or move the whole tree's fold
+    /// level. vim's `z` family, spelled out as one command with an argument
+    /// rather than nine commands, because they are nine forms of one idea.
+    Fold(Fold),
     /// Remove the item under the cursor. Takes a count: `3dd`.
     Remove,
     /// Copy rows into the register without removing them. Takes a count.
@@ -366,7 +443,6 @@ pub enum Command {
     /// play. snacks spells it the same way — `l` is `confirm`, `h` is
     /// `explorer_close` — and the asymmetry is real rather than an oversight:
     /// closing is one act, while opening bottoms out in doing the thing.
-    FoldClose,
     PaneLeft,
     PaneRight,
     /// Run a command against a named pane instead of the focused one.
@@ -377,8 +453,6 @@ pub enum Command {
         pane: PaneTarget,
         cmd: Box<Command>,
     },
-    ExpandAll,
-    CollapseAll,
     // playback
     Play,
     Pause,

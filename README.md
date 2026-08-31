@@ -110,7 +110,7 @@ gmuse [OPTIONS] [FILE]
 
 The TUI opens on the library tree. Views are nvim-style tabs: `gt`/`gT` step, `3gt` jumps to view 3, and `g<Tab>`
 returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `l` opens the
-node under the cursor and `h` closes it, `Z` closes everything, `tab` swaps pane in view 3, `q` quits.
+node under the cursor and `h` closes it, `zM` closes everything, `tab` swaps pane in view 3, `q` quits.
 
 **View 1 is one pane holding all three levels** — artists, their albums, and the tracks of whichever albums you have
 open. Several artists and several of their albums can be open at once, and the whole thing reads as one buffer: `j`,
@@ -119,9 +119,20 @@ open. Several artists and several of their albums can be open at once, and the w
 `h` on something **already closed** closes its parent and moves there, so repeated `h` walks up and out without needing
 a notion of "level".
 
+The `z` family is vim's, whole: `zo`/`zc`/`za` on one fold, `zO`/`zC` with the subtree, `zR`/`zM` for all of them, and
+`zr`/`zm` a level at a time. That last pair is the one worth learning — one `zr` puts every artist's albums on screen,
+another puts every track there, and `zm` walks back out. It works because the levels are **homogeneous**: every row at
+the first level is an artist and every row at the second is an album, so "collapse to artists" is a real operation. A
+file explorer cannot offer it, because "three directories deep" is not a category.
+
+A level change **holds the cursor still on screen** and opens the tree behind it. nvim does not do this — it keeps the
+cursor on its buffer line and lets it slide down the window as the folds above it open — but here the cursor is the
+subject rather than the top of the window. Lists also draw vim's `~` past their last row, which is what makes holding
+the cursor possible near the end.
+
 **`Enter` confirms.** On an artist or an album it opens or closes; on a track — where there is nothing left to open — it
-plays. `x` plays what is under the cursor from anywhere, so the two are not redundant: `Enter` acts on structure until
-structure runs out, then acts on the thing itself.
+plays. `<leader>x` plays what is under the cursor from anywhere, so the two are not redundant: `Enter` acts on structure
+until structure runs out, then acts on the thing itself.
 
 **`space` is the leader**, and `<leader>?` shows the keys that work in the current view.
 
@@ -141,7 +152,7 @@ leader = "space"
 "<leader> p" = "playlist list"
 ```
 
-A leader must be a key that is **not bound on its own** — a chord cannot extend one that is — which is why `expand`
+A leader must be a key that is **not bound on its own** — a chord cannot extend one that is — which is why fold-toggle
 moved off `space` to `o`. That is also the point: `?` keeps meaning reverse search, as in vim, and help lives behind the
 prefix rather than taking a key it should not have.
 
@@ -155,9 +166,16 @@ library stores Windows-illegal characters as fullwidth stand-ins, `Thereof / Spa
 lists count **tracks**, so an album divider never shifts the number `3j` needs; the artist/album pane counts every row,
 because an artist and an album are both jumpable. The playing track is emphasised in every list it appears in.
 
-Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
-`<`/`>` seek 60s, `-`/`+` adjust volume by 3 dB. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m`
-cycles all/artist/album. `a` adds the selection to the open playlist, `e` to the queue, `A` to the library.
+**Transport lives behind the leader.** `Enter` or `<leader>x` plays the selection, `<leader>c` pauses, `<leader>v`
+stops, `<leader>b`/`<leader>z` are next/previous, `←`/`→` seek 10s, `<leader><`/`<leader>>` seek 60s, and
+`<leader>-`/`<leader>+` adjust volume by 3 dB.
+
+The prefix is deliberate. Navigating is what your hands are doing in these views, and reaching for the transport is
+stepping outside that — so it costs a key, and the bare letters go to the folds and motions that browsing actually
+wants. The letters themselves are unchanged, so there is one alphabet to learn rather than two.
+
+Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m` cycles all/artist/album. `a` adds the selection to the
+open playlist, `e` to the queue, `A` to the library.
 
 `dd` cuts a row and takes a count (`3dd`), `D` cuts to the end; `yy`/`Y` copy the same way, and `p`/`P` put after or
 before the cursor. `u` undoes, `^r` redoes. vim's registers, so `dd` then `p` swaps two tracks, and `yy` — open another

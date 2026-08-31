@@ -3,6 +3,7 @@
 //! M4 scope: views 1–5, navigation, `Tab`, `Space`. Read-only; nothing here
 //! starts playback, which is M5's job.
 
+pub mod fold;
 pub mod list;
 pub mod statusline;
 pub mod theme;
@@ -23,7 +24,7 @@ use crate::audio::PlayerHandle;
 use crate::cmd::bind::{self, Bindings};
 use crate::cmd::keys::Key;
 use crate::cmd::{
-    AddTarget, Command, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec, parse,
+    AddTarget, Command, Fold, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec, parse,
 };
 use crate::library::Library;
 use crate::next::{self, ActiveSource, Playback, Source};
@@ -1511,9 +1512,53 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 };
             }
         }
-        Command::FoldClose => {
-            if ui.view == View::Tree {
-                ui.tree.close(&ui.library, ctx.store);
+        // vim's `z` family. Only view 1 has folds; elsewhere `fold toggle`
+        // is what `o` means on a checkbox, which is the one form that has a
+        // sensible reading outside a tree.
+        Command::Fold(what) => {
+            if ui.view != View::Tree {
+                if what == Fold::Toggle {
+                    match ui.view {
+                        // One catalog on or off. The union of what is on is
+                        // the library, so this reads as "include this too".
+                        View::Filters => toggle_catalog_under_cursor(ui, ctx),
+                        View::Settings => toggle_under_cursor(ui, ctx),
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            // Hold the cursor still **on screen** across a level change.
+            //
+            // `keeping_cursor` keeps the cursor on the right *node*, which is
+            // the correct thing logically and the wrong thing to watch: a
+            // level change inserts or removes rows above the cursor, so the
+            // node keeps its identity and jumps up or down the screen. What
+            // the eye is tracking is the row it is looking at, and the tree
+            // should open and close behind it.
+            let screen_row = ui.tree.selected.saturating_sub(ui.tree_scroll.top());
+
+            let lib = &ui.library;
+            match what {
+                Fold::Open => ui.tree.open(lib, ctx.store),
+                Fold::Close => {
+                    ui.tree.close(lib, ctx.store);
+                }
+                Fold::Toggle => ui.tree.toggle(lib, ctx.store),
+                Fold::OpenDeep => ui.tree.open_deep(lib, ctx.store),
+                Fold::CloseDeep => ui.tree.close_deep(lib, ctx.store),
+                Fold::All => ui.tree.open_everything(lib, ctx.store),
+                Fold::None => ui.tree.close_everything(lib, ctx.store),
+                Fold::More => ui.tree.more(lib, ctx.store),
+                Fold::Less => ui.tree.less(lib, ctx.store),
+            }
+
+            // Only the level forms: `zo` and friends act on the node under the
+            // cursor, so everything they change is *below* it and the row does
+            // not move on its own.
+            if what.levels() {
+                ui.tree_scroll
+                    .scroll_to(ui.tree.selected.saturating_sub(screen_row));
             }
         }
         Command::PaneLeft => match ui.view {
@@ -1542,28 +1587,6 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             let focused = std::mem::replace(&mut ui.playlist_pane, want);
             execute_counted(ui, ctx, *cmd, count);
             ui.playlist_pane = focused;
-        }
-        Command::Expand => {
-            if ui.view == View::Tree {
-                ui.tree.toggle(&ui.library, ctx.store);
-            } else if ui.view == View::Filters {
-                // Space turns one catalog on or off. The union of what is on
-                // is the library, so this reads as "include this too".
-                toggle_catalog_under_cursor(ui, ctx);
-            } else if ui.view == View::Settings {
-                toggle_under_cursor(ui, ctx);
-            }
-        }
-        Command::ExpandAll => {
-            if ui.view == View::Tree {
-                ui.tree.expand_all(&ui.library);
-            }
-        }
-        Command::CollapseAll => {
-            if ui.view == View::Tree {
-                ui.tree.collapse_all();
-                ui.tree.selected = 0;
-            }
         }
         Command::Activate => match ui.view {
             View::Browser => ui.browser.enter(),
@@ -3322,7 +3345,11 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         })
         .collect();
 
-    let mut state = ui.tree_scroll.state(Some(ui.tree.selected));
+    let mut items = items;
+    let mut state = ui
+        .tree_scroll
+        .state_within(Some(ui.tree.selected), rows.len());
+    pad_to_view(&mut items, &ui.theme, area, state.offset());
     frame.render_stateful_widget(
         List::new(items)
             .block(pane_block(&ui.theme, "library", true))
@@ -3358,6 +3385,43 @@ impl Scroll {
     /// Called after rendering, with the state ratatui just adjusted.
     fn remember(&self, state: &ListState) {
         self.0.set(state.offset());
+    }
+
+    /// The first visible row, as of the last frame.
+    fn top(&self) -> usize {
+        self.0.get()
+    }
+
+    /// The state for this frame, with the remembered offset clamped so the
+    /// pane can show filler *below* the list but never only filler.
+    fn state_within(&self, selected: Option<usize>, len: usize) -> ListState {
+        let top = self.0.get().min(len.saturating_sub(1));
+        self.0.set(top);
+        ListState::default()
+            .with_selected(selected)
+            .with_offset(top)
+    }
+
+    /// Scroll so `row` is the first visible one. ratatui clamps at render, so
+    /// this can ask for more than the list has.
+    fn scroll_to(&self, row: usize) {
+        self.0.set(row);
+    }
+}
+
+/// vim's `~`: the rows past the end of the list.
+///
+/// Without them a list can only scroll until its last row sits on the bottom
+/// line, so the cursor's screen position depends on how many rows happen to be
+/// *below* it — collapse a fold near the end and the cursor drops to the last
+/// line however carefully the fold code held it. Padding out to the viewport
+/// makes the padding a property of the screen rather than of the list, which
+/// is the whole reason vim draws `~` at all.
+fn pad_to_view(items: &mut Vec<ListItem<'static>>, theme: &theme::Theme, area: Rect, top: usize) {
+    let height = area.height.saturating_sub(2) as usize;
+    let filler = theme.get(theme::Role::Filler);
+    while items.len() < top + height {
+        items.push(ListItem::new(Line::from(Span::styled("~", filler))));
     }
 }
 
@@ -3410,9 +3474,12 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
             playing: ui.playback.current,
         },
     );
-    let mut state = spec
-        .scroll
-        .state(list::row_of_track(&rows, spec.selected).or(Some(0)));
+    let mut items = items;
+    let mut state = spec.scroll.state_within(
+        list::row_of_track(&rows, spec.selected).or(Some(0)),
+        rows.len(),
+    );
+    pad_to_view(&mut items, &ui.theme, area, state.offset());
     // A selection landing on the playing track keeps the playing colour, or
     // the cursor hides the one thing you are watching for. Only while focused:
     // an unfocused pane should still read as unfocused.
@@ -3754,7 +3821,7 @@ mod tests {
         press(&mut ui, &ctx, "j");
         press(&mut ui, &ctx, "j");
         let expected = ui.tree.tracks_for(&ui.library, &store)[0];
-        press(&mut ui, &ctx, "x");
+        press(&mut ui, &ctx, "<leader> x");
 
         let played = ui.playback.current.expect("nothing started playing");
         assert_eq!(played, expected);
@@ -3790,19 +3857,23 @@ mod tests {
     }
 
     #[test]
-    fn b_and_z_walk_forwards_and_backwards() {
+    fn leader_b_and_leader_z_walk_forwards_and_backwards() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        press(&mut ui, &ctx, "x");
+        press(&mut ui, &ctx, "<leader> x");
         let first = ui.playback.current.unwrap();
 
-        handle_key(KeyEvent::from(KeyCode::Char('b')), &mut ui, &ctx);
+        press(&mut ui, &ctx, "<leader> b");
         let second = ui.playback.current.unwrap();
         assert_ne!(first, second);
 
-        handle_key(KeyEvent::from(KeyCode::Char('z')), &mut ui, &ctx);
-        assert_eq!(ui.playback.current, Some(first), "z should come back");
+        press(&mut ui, &ctx, "<leader> z");
+        assert_eq!(
+            ui.playback.current,
+            Some(first),
+            "<leader>z should come back"
+        );
     }
 
     #[test]
@@ -3879,7 +3950,7 @@ mod tests {
 
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
-        press(&mut ui, &ctx, "x");
+        press(&mut ui, &ctx, "<leader> x");
         assert_eq!(ui.playback.active, ActiveSource::Playlist);
         assert_eq!(ui.playback.current, Some(sorted[3]));
 
@@ -3938,11 +4009,11 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        press(&mut ui, &ctx, "x");
+        press(&mut ui, &ctx, "<leader> x");
         let playing = ui.playback.current.expect("nothing started");
         assert!(render(&ui, &ctx, 90, 8).contains("Anderson .Paak"));
 
-        handle_key(KeyEvent::from(KeyCode::Char('v')), &mut ui, &ctx);
+        press(&mut ui, &ctx, "<leader> v");
         assert_eq!(
             ui.playback.current,
             Some(playing),
@@ -3953,8 +4024,8 @@ mod tests {
         let out = render(&ui, &ctx, 90, 8);
         assert!(out.contains("Anderson .Paak"), "{out}");
 
-        // And `b` still steps from where we stopped, rather than restarting.
-        handle_key(KeyEvent::from(KeyCode::Char('b')), &mut ui, &ctx);
+        // And next still steps from where we stopped, rather than restarting.
+        press(&mut ui, &ctx, "<leader> b");
         assert_ne!(ui.playback.current, Some(playing));
     }
     // ---- the command layer (M6) ------------------------------------------
@@ -3966,6 +4037,10 @@ mod tests {
     fn press(ui: &mut Ui, ctx: &Context<'_>, keys_text: &str) {
         let seq = keys::parse_seq(keys_text)
             .unwrap_or_else(|e| panic!("bad test key {keys_text:?}: {e}"));
+        // `<leader>` is a sentinel until it is resolved, exactly as it is when
+        // a binding is inserted — a test that pressed the placeholder would be
+        // pressing a key no keyboard has.
+        let seq = keys::resolve_leader(&seq, ui.leader);
         for k in seq {
             let mut mods = KeyModifiers::NONE;
             if k.ctrl {
@@ -5160,10 +5235,10 @@ mod tests {
         let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, "tab");
 
-        press(&mut ui, &ctx, "x");
+        press(&mut ui, &ctx, "<leader> x");
         let first = ui.playback.current.expect("nothing started");
         press(&mut ui, &ctx, "j");
-        press(&mut ui, &ctx, "x");
+        press(&mut ui, &ctx, "<leader> x");
 
         assert_ne!(
             ui.playback.current,
@@ -5184,22 +5259,44 @@ mod tests {
         assert!(queued > 0);
 
         ui.view = View::Queue;
-        press(&mut ui, &ctx, "x");
+        press(&mut ui, &ctx, "<leader> x");
         assert_eq!(ui.queue.len(), queued - 1, "the entry was not consumed");
     }
 
-    /// snacks' `Z`. `M-c` was alt-prefixed and undiscoverable.
+    /// vim's `zR` and `zM`, which replaced snacks' `Z` and an alt-prefixed
+    /// expand-all that nobody would have found.
     #[test]
-    fn capital_z_collapses_everything() {
+    fn z_r_opens_every_fold_and_z_m_closes_them() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         let closed = ui.tree.rows(&ui.library, &store).len();
 
-        press(&mut ui, &ctx, "M-e");
+        press(&mut ui, &ctx, "z R");
         assert!(ui.tree.rows(&ui.library, &store).len() > closed);
-        press(&mut ui, &ctx, "Z");
+        press(&mut ui, &ctx, "z M");
         assert_eq!(ui.tree.rows(&ui.library, &store).len(), closed);
+    }
+
+    /// The graduated version, which is the reason the level exists at all.
+    #[test]
+    fn z_r_lowercase_opens_one_level_at_a_time() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let artists = ui.tree.rows(&ui.library, &store).len();
+
+        press(&mut ui, &ctx, "z r");
+        let albums = ui.tree.rows(&ui.library, &store).len();
+        press(&mut ui, &ctx, "z r");
+        let tracks = ui.tree.rows(&ui.library, &store).len();
+        assert!(
+            artists < albums && albums < tracks,
+            "zr should add a level each time, got {artists} then {albums} then {tracks}"
+        );
+
+        press(&mut ui, &ctx, "z m");
+        assert_eq!(ui.tree.rows(&ui.library, &store).len(), albums);
     }
 
     /// `<leader>?` says what a key does; the guides say how to do the thing.
@@ -5834,7 +5931,7 @@ mod tests {
         assert_eq!(ui.playlist.len(), 1, "the playlist was filtered");
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
-        press(&mut ui, &ctx, "x");
+        press(&mut ui, &ctx, "<leader> x");
         assert_eq!(
             ui.playback.current,
             Some(va),
@@ -6225,16 +6322,16 @@ mod tests {
         let mut ui = ui_of(&store, true);
         ui.view = View::Sorted;
 
-        // `z` is prev by default.
+        // `u` is undo by default.
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "bind common \"z z\" bottom");
-        press(&mut ui, &ctx, "z z");
-        assert_eq!(ui.sorted, 0, "the chord fired despite `z` being bound");
+        type_line(&mut ui, &ctx, "bind common \"u u\" bottom");
+        press(&mut ui, &ctx, "u u");
+        assert_eq!(ui.sorted, 0, "the chord fired despite `u` being bound");
 
         // Freeing the key makes the chord reachable.
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "unbind common z");
-        press(&mut ui, &ctx, "z z");
+        type_line(&mut ui, &ctx, "unbind common u");
+        press(&mut ui, &ctx, "u u");
         assert_eq!(ui.sorted, ui.library.sorted().len() - 1);
     }
 
@@ -8142,5 +8239,253 @@ mod tests {
         press(&mut ui, &ctx, "/");
         type_line(&mut ui, &ctx, "lieffler");
         assert_eq!(ui.sorted, 0, "nothing should have matched");
+    }
+
+    /// A library deep enough that a `zr` inserts many rows above the cursor.
+    fn many_artists(n: usize) -> Store {
+        let mut store = Store::new();
+        for i in 0..n {
+            for t in 1..=2u32 {
+                store.upsert(Track {
+                    path: PathBuf::from(format!("/m/{i:03}/{t}.mp3")),
+                    artist: Some(format!("Artist {i:03}")),
+                    album: Some(format!("Album {i:03}")),
+                    title: Some(format!("Track {t}")),
+                    tracknumber: Some(t),
+                    duration: Duration::from_secs(100),
+                    ..Default::default()
+                });
+            }
+        }
+        store
+    }
+
+    /// `zr` should open the tree *behind* the cursor: the row you are looking
+    /// at stays where it is, and the new rows appear around it. Keeping the
+    /// node without keeping the row makes the cursor jump down the screen by
+    /// however many albums were inserted above it.
+    ///
+    /// Far enough down that the view is **already scrolled** — with the
+    /// viewport at row zero the screen row and the list index are the same
+    /// number, and a test cannot tell which one the code used.
+    #[test]
+    fn zr_holds_the_cursor_still_on_screen() {
+        let store = many_artists(20);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "1 5 G");
+        let before = render(&ui, &ctx, 90, 14);
+        assert!(
+            ui.tree_scroll.top() > 0,
+            "the view should be scrolled:\n{before}"
+        );
+        let was = tree_cursor_row(&ui);
+
+        press(&mut ui, &ctx, "z r");
+        let after = render(&ui, &ctx, 90, 14);
+        assert_eq!(
+            tree_cursor_row(&ui),
+            was,
+            "the cursor moved down the screen as the tree opened:\nbefore:\n{before}\nafter:\n{after}"
+        );
+        assert!(
+            after.contains("Artist 014"),
+            "and it is still on the row it was on:\n{after}"
+        );
+    }
+
+    /// Where the tree's cursor sits on screen, after the frame that decided
+    /// it — ratatui clamps the offset at render, so reading it before would be
+    /// reading a request rather than a result.
+    fn tree_cursor_row(ui: &Ui) -> usize {
+        ui.tree.selected.saturating_sub(ui.tree_scroll.top())
+    }
+
+    /// And the same coming back. Deep enough into the list that there *are*
+    /// enough rows above the cursor to hold it where it was — near the top
+    /// there are not, which is the next test.
+    #[test]
+    fn zm_holds_the_cursor_still_on_screen() {
+        let store = many_artists(20);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z r");
+        press(&mut ui, &ctx, "3 0 G");
+        let before = render(&ui, &ctx, 90, 14);
+        let was = tree_cursor_row(&ui);
+
+        press(&mut ui, &ctx, "z m");
+        let after = render(&ui, &ctx, 90, 14);
+        assert_eq!(
+            tree_cursor_row(&ui),
+            was,
+            "the cursor moved as the tree closed:\nbefore:\n{before}\nafter:\n{after}"
+        );
+    }
+
+    /// Near the top of the tree the request is impossible: collapsing leaves
+    /// fewer rows above the cursor than the screen row it wants, and there is
+    /// no negative offset. It rides as high as it can rather than scrolling
+    /// past the start.
+    #[test]
+    fn zm_near_the_top_settles_for_the_top() {
+        let store = many_artists(20);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z r");
+        press(&mut ui, &ctx, "1 0 G");
+        let _ = render(&ui, &ctx, 90, 14);
+
+        press(&mut ui, &ctx, "z m");
+        let after = render(&ui, &ctx, 90, 14);
+        assert_eq!(ui.tree_scroll.top(), 0, "should be showing the start");
+        assert!(
+            after.contains("Artist 000"),
+            "and the first row with it:\n{after}"
+        );
+    }
+
+    /// `zo` acts on the node under the cursor, so everything it changes is
+    /// below — the row must not be dragged to compensate for nothing.
+    #[test]
+    fn zo_leaves_the_cursor_where_it_is() {
+        let store = many_artists(20);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "1 5 G");
+        let before = render(&ui, &ctx, 90, 14);
+        let was = tree_cursor_row(&ui);
+
+        press(&mut ui, &ctx, "z o");
+        let after = render(&ui, &ctx, 90, 14);
+        assert_eq!(
+            tree_cursor_row(&ui),
+            was,
+            "nothing above the cursor changed, so nothing should have moved:\nbefore:\n{before}\nafter:\n{after}"
+        );
+    }
+
+    /// The reason `levels()` exists rather than anchoring everything. `zc` on
+    /// something already closed walks up to the parent, and the cursor should
+    /// *move up the screen* to it — as it does in vim, and as `h` has always
+    /// done here. Anchoring would drag the whole view down to keep the parent
+    /// where the child had been.
+    #[test]
+    fn zc_walking_up_moves_the_cursor_rather_than_the_view() {
+        let store = many_artists(20);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z r");
+        press(&mut ui, &ctx, "3 0 G");
+        let before = render(&ui, &ctx, 90, 14);
+        let was = tree_cursor_row(&ui);
+        let top = ui.tree_scroll.top();
+
+        // On a closed album, so `zc` closes the artist above it and moves there.
+        press(&mut ui, &ctx, "z c");
+        let after = render(&ui, &ctx, 90, 14);
+        assert_eq!(
+            ui.tree_scroll.top(),
+            top,
+            "the view should not have scrolled:\nbefore:\n{before}\nafter:\n{after}"
+        );
+        assert!(
+            tree_cursor_row(&ui) < was,
+            "the cursor should have walked up the screen, not stayed put"
+        );
+    }
+
+    /// The point of the `~` filler. Collapsing near the *end* of the tree
+    /// leaves fewer rows below the cursor than the pane can show, and without
+    /// somewhere to put the shortfall the list stops scrolling and the cursor
+    /// drops to the last line — however carefully the fold code held it.
+    #[test]
+    fn zm_near_the_end_holds_the_cursor_and_shows_filler() {
+        let store = many_artists(20);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        // `G` then back up the page, so the cursor sits *high* on a view that
+        // is scrolled a long way down. Collapsing from there wants a viewport
+        // that runs past the end of the tree.
+        press(&mut ui, &ctx, "z r");
+        press(&mut ui, &ctx, "G");
+        // A frame between the two, because the offset is a property of the
+        // last render — which is exactly what makes `k` walk up the page
+        // rather than drag the view.
+        let _ = render(&ui, &ctx, 90, 14);
+        press(&mut ui, &ctx, "5 k");
+        let before = render(&ui, &ctx, 90, 14);
+        let was = tree_cursor_row(&ui);
+
+        press(&mut ui, &ctx, "z m");
+        let after = render(&ui, &ctx, 90, 14);
+        assert_eq!(
+            tree_cursor_row(&ui),
+            was,
+            "the cursor slid down the screen as the tree ran out:\nbefore:\n{before}\nafter:\n{after}"
+        );
+        assert!(
+            after.contains('~'),
+            "and the shortfall should be drawn as filler:\n{after}"
+        );
+    }
+
+    /// Filler is what is *past* the list, never instead of it: scrolling can
+    /// leave the last row at the top but no further.
+    #[test]
+    fn a_pane_never_shows_only_filler() {
+        let store = many_artists(20);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        ui.tree.selected = 19;
+        ui.tree_scroll.scroll_to(9_999);
+
+        let out = render(&ui, &ctx, 90, 14);
+        assert!(
+            out.contains("Artist 019"),
+            "the last row should still be on screen:\n{out}"
+        );
+        assert!(
+            !out.contains("Artist 018"),
+            "and it should be at the top, with filler under it:\n{out}"
+        );
+    }
+
+    /// A list shorter than its pane is the ordinary case, and it should look
+    /// like vim rather than like a list with a lot of blank rows after it.
+    #[test]
+    fn a_short_list_fills_the_rest_of_the_pane() {
+        let store = many_artists(2);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        let out = render(&ui, &ctx, 90, 14);
+        assert!(out.contains('~'), "expected filler rows:\n{out}");
+    }
+
+    /// The clamp in `state_within` is not about what you see — ratatui scrolls
+    /// back to the selection regardless — it is about not asking `pad_to_view`
+    /// for ten thousand filler rows.
+    #[test]
+    fn a_stale_offset_is_clamped_before_it_pads_a_pane() {
+        let scroll = Scroll::default();
+        scroll.scroll_to(9_999);
+        let state = scroll.state_within(Some(0), 20);
+        assert_eq!(state.offset(), 19, "the last row is as far as it may go");
+        assert_eq!(scroll.top(), 19, "and the clamp is written back");
     }
 }

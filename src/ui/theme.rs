@@ -38,6 +38,8 @@ pub enum Role {
     Playing,
     SelectionPlaying,
     CompletionSelected,
+    /// vim's `~` on the lines past the end of a buffer.
+    Filler,
 }
 
 impl Role {
@@ -64,6 +66,7 @@ impl Role {
             Role::Playing => "playing",
             Role::SelectionPlaying => "selection_playing",
             Role::CompletionSelected => "completion_selected",
+            Role::Filler => "filler",
         }
     }
 
@@ -90,6 +93,7 @@ impl Role {
         Role::BindingKey,
         Role::AlbumHeader,
         Role::Gutter,
+        Role::Filler,
         Role::Playing,
         Role::SelectionPlaying,
         Role::CompletionSelected,
@@ -198,6 +202,7 @@ impl Default for Theme {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
                 Role::Gutter => Style::default().fg(Color::DarkGray),
+                Role::Filler => Style::default().fg(Color::DarkGray),
                 // The same green as the status line's play indicator, so
                 // "playing" means one thing wherever it appears.
                 Role::Playing => Style::default()

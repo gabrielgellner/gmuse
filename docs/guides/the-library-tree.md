@@ -18,23 +18,48 @@ opposite ends of the library on screen together and move between them with `j` a
     l        open the row under the cursor
     h        close it
     Enter    same as l
-    Z        close everything
+    o        open it if it is closed, close it if it is open
 
 `h` on something **already closed** closes its parent and moves there. So pressing `h` repeatedly walks you up and out —
 from a track, to its album, to its artist — without needing a key for "collapse this level".
 
-## Enter versus x
+## Folds, by the level
+
+These are vim's fold keys, and they do here what they do there.
+
+    z o      open this row
+    z c      close it
+    z a      toggle it
+    z O      open this row and everything under it
+    z C      close this row and everything under it
+    z R      open every fold
+    z M      close every fold
+    z r      open one more level
+    z m      close one level
+
+`zr` and `zm` are the two worth learning. From everything closed, one `zr` puts every artist's albums on screen; another
+puts every track there. `zm` walks back out the same way.
+
+That works because the levels here all mean the same thing — every row at the first level is an artist, every row at the
+second is an album. A file explorer cannot offer this, because "three directories deep" is not a category. Here it is.
+
+`zC` matters more than it looks: closing an artist with `h` leaves the albums you had open still open underneath, so
+reopening spills them back. `zC` closes the subtree with it.
+
+## Enter versus play
 
 `Enter` and `l` **confirm**. On an artist or album that means open or close; on a track there is nothing left to open,
 so it plays.
 
-`x` plays whatever is under the cursor from anywhere, including from inside a closed album, where it starts at the top.
+`<leader>x` plays whatever is under the cursor from anywhere, including from inside a closed album, where it starts at
+the top.
 
-So `Enter` acts on structure until structure runs out. `x` always means sound.
+So `Enter` acts on structure until structure runs out, and `<leader>x` always means sound. The leader is there because
+in this view your hands are looking for something, not driving the transport — reaching past it is the point.
 
 ## What the cursor covers
 
-`a`, `e` and `x` act on everything _under_ the row, not just the row:
+`a`, `e` and `<leader>x` act on everything _under_ the row, not just the row:
 
     on a track     that track
     on an album    its tracks, in order
