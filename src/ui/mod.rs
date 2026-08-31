@@ -1468,24 +1468,11 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 }
             }
         },
-        Command::Remove => match ui.view {
-            View::Playlist if ui.playlist_pane == Pane::Tree => {
-                ui.notify("`D` removes a track — delete a playlist from the file system")
-            }
-            View::Playlist if ui.open.as_ref().is_some_and(Open::is_rule) => {
-                ui.notify(rule_owned("remove from"))
-            }
-            View::Playlist => {
-                ui.playlist.remove(ui.playlist_sel);
-                ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
-                persist_open(ui, ctx);
-            }
-            View::Queue => {
-                ui.queue.remove(ui.queue_sel);
-                ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
-            }
-            _ => ui.notify("nothing to remove here"),
-        },
+        // `dd` takes a count, as in vim: `3dd` removes three.
+        Command::Remove => remove_rows(ui, ctx, n),
+        // `D` is delete-to-end. There is no "inside a line" here, so the list
+        // is what has an end.
+        Command::RemoveToEnd => remove_rows(ui, ctx, len.saturating_sub(cursor)),
         Command::Rescan => ui.notify("rescan lands with :rescan in the app"),
         Command::Playlist(spec) => match spec {
             crate::cmd::PlaylistSpec::Open(name) => open_playlist(ui, ctx, &name),
@@ -1841,6 +1828,41 @@ fn load_saved(ui: &mut Ui, ctx: &Context<'_>, found: &crate::playlist::Saved) {
             ui.playlist.len()
         ),
     });
+}
+
+/// Remove `n` rows from the cursor down, in whichever list is focused.
+///
+/// Removing repeatedly at the same index is what "the next one moves up under
+/// the cursor" means, so this needs no index arithmetic. `Playlist::remove`
+/// bounds-checks and returns `None`, so an overrunning count is already safe;
+/// the `break` only saves spinning through a large one.
+fn remove_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
+    match ui.view {
+        View::Playlist if ui.playlist_pane == Pane::Tree => {
+            ui.notify("that removes a track — `:playlist delete` is not a thing yet")
+        }
+        View::Playlist if ui.open.as_ref().is_some_and(Open::is_rule) => {
+            ui.notify(rule_owned("remove from"))
+        }
+        View::Playlist => {
+            for _ in 0..n {
+                if ui.playlist.remove(ui.playlist_sel).is_none() {
+                    break;
+                }
+            }
+            ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
+            persist_open(ui, ctx);
+        }
+        View::Queue => {
+            for _ in 0..n {
+                if ui.queue.remove(ui.queue_sel).is_none() {
+                    break;
+                }
+            }
+            ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
+        }
+        _ => ui.notify("nothing to remove here"),
+    }
 }
 
 /// Start an empty playlist and open it.
@@ -4049,6 +4071,69 @@ mod tests {
 
     /// The two panes are view 1's shape, so `tab` and `pane-left`/`right`
     /// work here without any new keys.
+    /// vim's `dd`, including its count. `D` was cmus's and meant this, which
+    /// sat oddly in a keymap whose navigation is otherwise nvim's.
+    #[test]
+    fn dd_removes_one_and_takes_a_count() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "dd");
+        new_playlist(&mut ui, &ctx, "mix");
+        for (id, _) in store.iter() {
+            ui.playlist.push(id);
+        }
+        let all = ui.playlist.len();
+        assert!(all >= 3, "the fixture needs three tracks");
+
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "d d");
+        assert_eq!(ui.playlist.len(), all - 1);
+
+        press(&mut ui, &ctx, "2 d d");
+        assert_eq!(ui.playlist.len(), all - 3, "the count was ignored");
+    }
+
+    /// `D` is delete-to-end. There is no "inside a line" here, so the list is
+    /// what has an end — which makes the analogy hold rather than rhyme.
+    #[test]
+    fn capital_d_removes_to_the_end_of_the_list() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "capital-d");
+        new_playlist(&mut ui, &ctx, "mix");
+        for (id, _) in store.iter() {
+            ui.playlist.push(id);
+        }
+        assert!(ui.playlist.len() >= 3, "the fixture needs three tracks");
+
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        ui.playlist_sel = 1;
+        press(&mut ui, &ctx, "D");
+
+        assert_eq!(ui.playlist.len(), 1, "everything from the cursor should go");
+        // Written through, like any other edit.
+        let at = dir.join("playlists/mix.m3u8");
+        assert_eq!(crate::m3u::read(&at).unwrap().len(), 1);
+    }
+
+    /// A count that runs off the end takes what is there and stops, rather
+    /// than wrapping or panicking.
+    #[test]
+    fn removing_past_the_end_stops_there() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "dd-overrun");
+        new_playlist(&mut ui, &ctx, "mix");
+        ui.playlist.push(store.iter().next().unwrap().0);
+
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "9 d d");
+        assert!(ui.playlist.is_empty());
+    }
+
     #[test]
     fn tab_swaps_the_two_panes_of_view_three() {
         let store = genre_fixture();
@@ -4409,13 +4494,13 @@ mod tests {
 
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
-        press(&mut ui, &ctx, "D");
+        press(&mut ui, &ctx, "d d");
         assert_eq!(ui.playlist.len(), before - 1);
 
         // In the tree there is nothing to remove, and it must say so rather
         // than deleting something else.
         ui.view = View::Tree;
-        press(&mut ui, &ctx, "D");
+        press(&mut ui, &ctx, "d d");
         assert!(ui.status.contains("nothing to remove"), "{}", ui.status);
     }
 
@@ -6234,9 +6319,15 @@ mod tests {
         // vocabulary changes, which says nothing about the menu.
         let title = format!("{} completions", crate::cmd::parse::VERBS.len());
         assert!(out.contains(&title), "{out}");
-        // Laid out in columns, so several verbs share a line.
-        assert!(out.contains("activate"), "{out}");
-        assert!(out.contains("quit"), "{out}");
+        // Laid out in columns, so several verbs share a line. Derived, like
+        // the count: naming a verb made this fail when another was added and
+        // pushed that one into the hidden remainder.
+        let first = crate::cmd::parse::VERBS[0];
+        assert!(out.contains(first), "{first} missing:\n{out}");
+        assert!(
+            out.lines().any(|l| l.matches("  ").count() > 1),
+            "not in columns:\n{out}"
+        );
         // Capped, with the remainder counted rather than silently dropped.
         assert!(out.contains("more"), "no overflow notice:\n{out}");
     }

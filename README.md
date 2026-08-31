@@ -120,7 +120,8 @@ because an artist and an album are both jumpable. The playing track is emphasise
 
 Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
 `<`/`>` seek 60s, `-`/`+` adjust volume by 3 dB. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m`
-cycles all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue, `D` removes.
+cycles all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue. `dd` removes a row and takes a
+count (`3dd`); `D` removes from the cursor to the end, as in vim.
 
 The queue, current track, position and playback modes come back on the next launch, **paused** — including the shuffle
 seed, so a shuffled sequence resumes rather than restarting. `--no-resume` starts fresh. Settings named in `config.toml`

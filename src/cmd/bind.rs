@@ -54,7 +54,11 @@ pub const DEFAULTS: &[&str] = &[
     "bind library ^k in tree up",
     "bind common space expand",
     "bind common enter activate",
-    "bind common D remove",
+    // vim's `dd`, and `D` for delete-to-end. `D` alone was cmus's, and sat
+    // oddly in a keymap whose navigation is otherwise nvim's — in vim `D`
+    // deletes to the end of a line, never the line itself.
+    "bind common \"d d\" remove",
+    "bind common D remove-to-end",
     "bind common u rescan",
     "bind common M-e expand-all",
     "bind common M-c collapse-all",

@@ -329,7 +329,14 @@ pub enum Command {
     Bottom,
     Activate,
     Expand,
+    /// Remove the item under the cursor. Takes a count: `3dd`.
     Remove,
+    /// Remove from the cursor to the end of the list.
+    ///
+    /// `D` in vim is delete-to-end-of-line. There is no "inside a line" here,
+    /// so the row is the line and the *list* is what there is an end of —
+    /// which makes the analogy hold rather than merely rhyme.
+    RemoveToEnd,
     PaneNext,
     PaneLeft,
     PaneRight,
