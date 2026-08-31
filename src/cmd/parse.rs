@@ -888,7 +888,7 @@ mod tests {
                 ctx: Context::Queue,
                 key: vec![keys::Key::new(KeyCode::Char(' '))],
             },
-            Command::View(ViewId::Settings),
+            Command::View(ViewId::Guides),
             Command::Search {
                 pattern: "burial".into(),
                 dir: SearchDir::Forward,

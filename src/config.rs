@@ -325,7 +325,7 @@ pub fn parse_text(text: &str) -> Loaded {
             )
         })
         .collect();
-    // HashMap order is arbitrary; the label and the settings view read better
+    // HashMap order is arbitrary; the label reads better
     // in a stable one.
     defined.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, roots, filter_source) in defined {

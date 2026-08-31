@@ -29,6 +29,7 @@ album_headers = true        # divide track lists by album
 relative_numbers = false    # vim-style distance gutter
 aaa_mode = "all"            # all | artist | album
 resample_quality = "balanced" # fast | balanced | high
+which_key_delay = 300       # ms before a prefix shows what can follow it; 0 is instant
 
 # Catalogs are separate bodies of music. Browsing and shuffle stay inside the
 # active ones; playlists and the queue cross them freely. Everything is scanned
@@ -87,7 +88,7 @@ resample_quality = "balanced" # fast | balanced | high
 # where = 'rating>=4&genre="*jazz*"'
 # sort = "-rating, artist, album, track"
 
-# Contexts: common, library, sorted, playlist, queue, browser, filters, settings
+# Contexts: common, library, sorted, playlist, queue, browser, filters, guides
 # A binding in a view's own context wins over the same key in `common`.
 #
 # Key names: a character, or space/enter/tab/backspace/delete/insert/home/end/

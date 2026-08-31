@@ -2602,6 +2602,38 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   `:toggle which_key_delay` is refused by name, like `resample_quality` before it, rather than cycling through guesses.
 
+- **2026-08-31** **The settings view is deleted, and the keymap listing becomes a generated guide (issue #47).**
+  Settings are a file and a `:` command; a pane that renders them is a UI for something vim has never needed one for.
+  The rule, stated so it can be applied again: when a thing could be a view or a command, prefer the command unless
+  there is a reason beyond "it was cheap to add". §6 justified view 7 as costing nothing once bindings and settings were
+  enumerable — true, and _cheap to build_ is not _worth having on screen_.
+
+  Two of its three jobs needed no replacement. Catalogs were **already duplicated** by view 6, which is the scope view
+  and lists them as its whole purpose. Editing a setting is `:set` and `:toggle`, and the playback modes it displayed
+  are in the status line already.
+
+  The third did. View 7 was the only complete listing of the keymap, and both the which-key overflow notice and
+  `<leader>?` leaned on it — `<leader>?` answers "what can follow this prefix", never "what is bound". So the listing
+  survives as **a guide that is generated rather than written**: `Body::Keymap` renders `bind::sorted` into the same
+  shape the written guides use, so it goes through the same wrapping and styling, and a `:bind` typed a moment ago is in
+  it. vim keeps the same artifact at `:help index`, which is where the title comes from.
+
+  Views renumber 8 → 7, ending at seven as cmus does.
+
+- **2026-08-31** **A generated guide would have made the guide audit pass vacuously, and that is the interesting part.**
+  `keys_the_guides_write` scans guide bodies for indented key columns, and `every_binding_is_taught_by_some_guide`
+  reports any binding no guide mentions. An index generated _from the binding table_ contains every key by construction
+  — so counting it would have made that test pass for every binding that has ever existed, and the prose guides would
+  have silently stopped being checked.
+
+  Nothing would have failed. The test would have stayed green while checking nothing, which is the same failure the
+  degenerate-fixture entries above record, arriving by a new route: not a fixture too small to tell answers apart, but
+  an oracle that has been handed the answer key.
+
+  `keys_the_guides_write` therefore reads `Body::Text` only, and `the_generated_index_does_not_count_as_teaching` binds
+  a key nothing writes about and asserts it is _still_ reported — because a guard that is only exercised when it works
+  is not a guard.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

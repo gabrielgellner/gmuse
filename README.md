@@ -156,11 +156,11 @@ deeper redraws it at once.
 
 **`space` is the leader**, and `<leader>?` shows the keys that work in the current view.
 
-**View 8 is the guides** — short pieces on how to do things, as against which key does what. `<leader>?` answers the
+**View 7 is the guides** — short pieces on how to do things, as against which key does what. `<leader>?` answers the
 second; the guides answer the first, which is the one you cannot find by pressing keys. Titles on the left, the guide on
 the right, `tab` between them, and the ordinary motions scroll it.
 
-Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `settings`.
+Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `guides`.
 
 `<leader>` in a binding stands for whatever `leader` says, `space` by default:
 
@@ -262,9 +262,10 @@ the menu and a second `Esc` the line.
 `:` opens the command line — `Tab` completes verbs and their arguments, including catalog names, setting keys and the
 values each key accepts. `/` and `?` search, `n`/`N` repeat the search.
 
-**View 7** lists every setting, catalog and binding, and `space` or `Enter` changes the one under the cursor — booleans
-flip, named values cycle, exactly as `:toggle` does. `resample_quality` needs the device rebuilt so it says to use
-`:set`, and a binding row points at `:bind`.
+**The `Index` guide** lists every binding, generated from the binding table rather than checked in, so a `:bind` typed a
+moment ago is already in it. It is a listing and not an editor: settings live in `config.toml` and change with `:set`
+and `:toggle` — booleans flip, named values cycle, and `resample_quality` says to use `:set` because it needs the device
+rebuilt.
 
 `label` is the record label, from `TPUB` / `ORGANIZATION` / `LABEL`. It has its own field because it is otherwise
 homeless: a label sampler is a **compilation**, so its `albumartist` belongs to `Various Artists` (or, for a stray
@@ -344,7 +345,7 @@ Catalogs confine **browsing and shuffle**. Playlists and the queue hold tracks d
 is the point of a playlist. Everything is scanned once whatever is active, so switching is instant.
 
 Unknown tables, settings and styles are **errors**, reported with where they are — `keys.common.^n` — and the rest of
-the file still loads. See [`examples/config.toml`](examples/config.toml) for every option, and view 7 in the app for
+the file still loads. See [`examples/config.toml`](examples/config.toml) for every option, and the `Index` guide for
 every setting and binding currently in force.
 
 ## Where your data lives

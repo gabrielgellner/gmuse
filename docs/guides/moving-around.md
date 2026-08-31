@@ -1,10 +1,10 @@
 # Moving around
 
-Eight views, switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight to view 3; `g<Tab>` returns to the one
+Seven views, switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight to view 3; `g<Tab>` returns to the one
 you were on before.
 
     1 library    2 sorted     3 playlist   4 queue
-    5 browser    6 scope      7 settings    8 guides
+    5 browser    6 scope      7 guides
 
 Within any of them the motions are vim's. `j` and `k` move, and take a count — `3j` goes down three. `gg` and `G` go to
 the top and bottom, and `12G` goes to row 12. `^f` and `^b` page. The arrow keys — `up`, `down`, `left`, `right` — and
@@ -66,7 +66,7 @@ exactly as vim does, which is what lets `zt` work on the final track instead of 
     <leader>u    rescan the library
 
 `<leader>?` is worth pressing in each view — it lists that view's own bindings as well as the common ones, which is a
-different question from view 7's list of every binding everywhere.
+different question from the `Index` guide's list of every binding everywhere.
 
 **Start any chord and it tells you the rest.** Press `z`, or `g`, or the leader on its own, and a panel lists every key
 that could come next and what each one does. There is no delay to wait through: a key bound on its own fires immediately

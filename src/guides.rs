@@ -1,4 +1,4 @@
-//! The guides — view 8.
+//! The guides — view 7.
 //!
 //! Prose, not a key list. `<leader>?` answers "what does this key do"; these
 //! answer "how do I do the thing", which is a different question and the one
@@ -10,10 +10,24 @@
 //! behaviour they describe changes — but the binary needs no data directory
 //! and cannot ship without them.
 
-/// One guide: its title, and its text.
+/// Where a guide's text comes from.
+pub enum Body {
+    /// A file in `docs/guides/`, compiled in.
+    Text(&'static str),
+    /// Rendered from the binding table at read time.
+    ///
+    /// The listing that view 7 used to be (#47). Generated rather than written
+    /// because it is the one guide that is a *table of what is true now*
+    /// rather than an explanation: a `:bind` at runtime shows up in it, and
+    /// there is no second copy of the keymap to fall out of step. vim keeps
+    /// the same thing under `:help index`.
+    Keymap,
+}
+
+/// One guide: its title, and where its text comes from.
 pub struct Guide {
     pub title: &'static str,
-    pub body: &'static str,
+    pub body: Body,
 }
 
 /// In the order someone meets them, not alphabetical. Moving around comes
@@ -21,36 +35,79 @@ pub struct Guide {
 pub const GUIDES: &[Guide] = &[
     Guide {
         title: "Moving around",
-        body: include_str!("../docs/guides/moving-around.md"),
+        body: Body::Text(include_str!("../docs/guides/moving-around.md")),
     },
     Guide {
         title: "The library tree",
-        body: include_str!("../docs/guides/the-library-tree.md"),
+        body: Body::Text(include_str!("../docs/guides/the-library-tree.md")),
     },
     Guide {
         title: "Building playlists",
-        body: include_str!("../docs/guides/building-playlists.md"),
+        body: Body::Text(include_str!("../docs/guides/building-playlists.md")),
     },
     Guide {
         title: "Finding things",
-        body: include_str!("../docs/guides/finding-things.md"),
+        body: Body::Text(include_str!("../docs/guides/finding-things.md")),
     },
     Guide {
         title: "Rules that make lists",
-        body: include_str!("../docs/guides/saved-rules.md"),
+        body: Body::Text(include_str!("../docs/guides/saved-rules.md")),
     },
     Guide {
         title: "Writing the lines",
-        body: include_str!("../docs/guides/format-strings.md"),
+        body: Body::Text(include_str!("../docs/guides/format-strings.md")),
+    },
+    // Last, because it is the one you come to already knowing what you want —
+    // the others are read in order the first time and this one is consulted.
+    Guide {
+        title: "Index",
+        body: Body::Keymap,
     },
 ];
 
+/// A guide's text: the file for a written one, the live keymap for the index.
+///
+/// `Cow` rather than `String`, so the written guides stay the `&'static str`
+/// they have always been and nothing is copied to read one.
+pub fn body(
+    guide: &Guide,
+    bindings: &crate::cmd::bind::Bindings,
+) -> std::borrow::Cow<'static, str> {
+    match guide.body {
+        Body::Text(text) => std::borrow::Cow::Borrowed(text),
+        Body::Keymap => std::borrow::Cow::Owned(keymap(bindings)),
+    }
+}
+
+/// Every binding, as a guide body — in the shape the written guides use, so it
+/// renders through exactly the same code: a heading per context, and an
+/// indented `key  command` table under each.
+///
+/// `bind::sorted` is the same ordering view 7 showed, and the format is
+/// `parse::format`, which round-trips — so what is listed is a line you could
+/// type back.
+fn keymap(bindings: &crate::cmd::bind::Bindings) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from(
+        "# Index\n\nEvery key that is bound, read off the binding table — so a `:bind` appears here at once.\n\n         Keys under `common` work in every view. A view's own binding hides the common one.\n",
+    );
+    let mut context = None;
+    for (ctx, key, cmd) in crate::cmd::bind::sorted(bindings) {
+        if context != Some(ctx) {
+            let _ = write!(out, "\n## {}\n\n", ctx.name());
+            context = Some(ctx);
+        }
+        // Two spaces between the columns, because that is what `kind` reads as
+        // an example row and what the guide audit splits on.
+        let _ = writeln!(out, "    {key}  {}", crate::cmd::parse::format(cmd));
+    }
+    out
+}
+
 /// The body as display lines, with the leading `# Title` dropped — the pane
 /// is already titled, and repeating it wastes the first row.
-pub fn lines(guide: &Guide) -> Vec<&'static str> {
-    guide
-        .body
-        .lines()
+pub fn lines(body: &str) -> Vec<&str> {
+    body.lines()
         .skip_while(|l| l.starts_with("# ") || l.trim().is_empty())
         .collect()
 }
@@ -64,7 +121,7 @@ pub fn lines(guide: &Guide) -> Vec<&'static str> {
 ///
 /// The heading marker is dropped: `##` is markdown's way of saying "heading",
 /// and on screen the style says it instead.
-pub fn wrapped(guide: &Guide, width: usize) -> Vec<(Kind, String)> {
+pub fn wrapped(body: &str, width: usize) -> Vec<(Kind, String)> {
     let width = width.max(20);
     let mut out = Vec::new();
     // Consecutive prose lines are one paragraph, joined before wrapping.
@@ -91,7 +148,7 @@ pub fn wrapped(guide: &Guide, width: usize) -> Vec<(Kind, String)> {
         paragraph.clear();
     };
 
-    for line in lines(guide) {
+    for line in lines(body) {
         match kind(line) {
             Kind::Prose if !line.trim().is_empty() => {
                 if !paragraph.is_empty() {
@@ -146,17 +203,25 @@ mod tests {
     #[test]
     fn every_guide_has_a_title_and_a_body() {
         assert!(!GUIDES.is_empty());
+        let bindings = crate::cmd::bind::defaults();
         for g in GUIDES {
             assert!(!g.title.is_empty());
-            assert!(lines(g).len() > 5, "{} is too short to be a guide", g.title);
+            let text = body(g, &bindings);
+            assert!(
+                lines(&text).len() > 5,
+                "{} is too short to be a guide",
+                g.title
+            );
         }
     }
 
     /// The pane is titled already; repeating the heading wastes the first row.
     #[test]
     fn the_leading_heading_is_dropped() {
+        let bindings = crate::cmd::bind::defaults();
         for g in GUIDES {
-            let first = lines(g)[0];
+            let text = body(g, &bindings);
+            let first = lines(&text)[0];
             assert!(!first.starts_with("# "), "{}: {first:?}", g.title);
             assert!(!first.trim().is_empty(), "{} starts blank", g.title);
         }
@@ -166,11 +231,10 @@ mod tests {
     /// otherwise a short line appears wherever prettier happened to wrap.
     #[test]
     fn prose_is_rewrapped_as_paragraphs() {
-        let g = Guide {
-            title: "t",
-            body: "# t\n\nthe quick brown fox jumped over\nthe lazy dog and kept going\n\n    an example\n",
-        };
-        let out = wrapped(&g, 30);
+        let out = wrapped(
+            "# t\n\nthe quick brown fox jumped over\nthe lazy dog and kept going\n\n    an example\n",
+            30,
+        );
         let prose: Vec<&str> = out
             .iter()
             .filter(|(k, l)| *k == Kind::Prose && !l.is_empty())
@@ -200,8 +264,9 @@ mod tests {
     /// The pane is styled; `##` on screen is markdown leaking through.
     #[test]
     fn heading_markers_are_dropped() {
+        let bindings = crate::cmd::bind::defaults();
         for g in GUIDES {
-            for (kind, line) in wrapped(g, 70) {
+            for (kind, line) in wrapped(&body(g, &bindings), 70) {
                 if kind == Kind::Heading {
                     assert!(!line.starts_with('#'), "{}: {line:?}", g.title);
                 }
@@ -288,10 +353,19 @@ mod tests {
     /// Extracted rather than grepped for, so that a single-letter binding like
     /// `o` has to appear *as a key* and cannot be satisfied by the letter o
     /// turning up inside a word.
+    /// **Written** guides only. The index is generated from the binding table,
+    /// so it contains every key by construction — counting it would make the
+    /// audit below pass for every binding that has ever existed, and the prose
+    /// guides would silently stop being checked at all. A green test that
+    /// checks nothing is worse than no test, and this is exactly the shape
+    /// that produces one.
     fn keys_the_guides_write() -> std::collections::HashSet<String> {
         let mut out = std::collections::HashSet::new();
         for guide in GUIDES {
-            for span in guide.body.split('`').skip(1).step_by(2) {
+            let Body::Text(body) = guide.body else {
+                continue;
+            };
+            for span in body.split('`').skip(1).step_by(2) {
                 out.insert(normalised(span));
             }
             // Only the **key column** of an example row: everything up to the
@@ -299,7 +373,7 @@ mod tests {
             // of a description stand in for a key, and single-letter bindings
             // like `r` and `m` would pass on prose alone — which is exactly
             // what happened when this was first written.
-            for line in guide.body.lines().filter(|l| l.starts_with("    ")) {
+            for line in body.lines().filter(|l| l.starts_with("    ")) {
                 let column = line.trim_start().split("  ").next().unwrap_or_default();
                 if !column.is_empty() {
                     out.insert(normalised(column));
@@ -329,6 +403,34 @@ mod tests {
             .filter(|key| !written.contains(&normalised(key)))
             .filter(|key| !UNTAUGHT.iter().any(|(k, _)| k == key))
             .collect()
+    }
+
+    /// The guard that keeps the audit meaningful. The index lists every
+    /// binding, so if `keys_the_guides_write` read it the audit would pass
+    /// unconditionally — including for a key no prose mentions anywhere.
+    ///
+    /// Checked by asking for a key that is bound and deliberately *not*
+    /// written about: it must still be reported. If this ever fails, the audit
+    /// above has become decorative.
+    #[test]
+    fn the_generated_index_does_not_count_as_teaching() {
+        let mut bindings = crate::cmd::bind::defaults();
+        let seq = crate::cmd::keys::parse_seq("g z q").expect("test keys");
+        bindings.insert(
+            (crate::cmd::Context::Common, seq),
+            crate::cmd::Command::Quit,
+        );
+
+        let listed = keymap(&bindings);
+        assert!(
+            listed.contains("g z q"),
+            "the index should list every binding"
+        );
+        assert_eq!(
+            untaught(&bindings),
+            vec!["g z q".to_string()],
+            "a key only the generated index mentions must still count as untaught"
+        );
     }
 
     #[test]

@@ -43,9 +43,9 @@ pub enum View {
     Queue = 4,
     Browser = 5,
     Filters = 6,
-    Settings = 7,
-    /// Prose: how to do the things, as against which key does what.
-    Guides = 8,
+    /// Prose: how to do the things, as against which key does what — plus the
+    /// generated index of every binding, which is what view 7 used to be (#47).
+    Guides = 7,
 }
 
 impl View {
@@ -57,7 +57,6 @@ impl View {
             View::Queue => "queue",
             View::Browser => "browser",
             View::Filters => "scope",
-            View::Settings => "settings",
             View::Guides => "guides",
         }
     }
@@ -70,7 +69,6 @@ impl View {
             ViewId::Queue => View::Queue,
             ViewId::Browser => View::Browser,
             ViewId::Filters => View::Filters,
-            ViewId::Settings => View::Settings,
             ViewId::Guides => View::Guides,
         }
     }
@@ -96,7 +94,6 @@ impl View {
         View::Queue,
         View::Browser,
         View::Filters,
-        View::Settings,
         View::Guides,
     ];
 
@@ -109,7 +106,6 @@ impl View {
             View::Queue => C::Queue,
             View::Browser => C::Browser,
             View::Filters => C::Filters,
-            View::Settings => C::Settings,
             View::Guides => C::Guides,
         }
     }
@@ -387,7 +383,6 @@ pub struct Ui {
     /// still hearing the track before it — but the pool has already moved on,
     /// so this is where the answer lives in between.
     pending_next: Option<TrackId>,
-    pub settings_sel: usize,
     /// Cursor in view 6, the catalog list.
     pub catalog_sel: usize,
     /// Which guide is open, and how far down it we are.
@@ -408,9 +403,8 @@ pub struct Ui {
     pub playlist_scroll: Scroll,
     pub queue_scroll: Scroll,
     pub browser_scroll: Scroll,
-    pub settings_scroll: Scroll,
     pub guides_scroll: Scroll,
-    /// Which half of view 8 has focus: the list of guides, or the guide.
+    /// Which half of view 7 has focus: the list of guides, or the guide.
     pub guide_pane: Pane,
     /// Cursor in view 3's left pane, the list of playlists.
     pub playlists_sel: usize,
@@ -421,7 +415,7 @@ pub struct Ui {
     /// left, see it on the right — and `tab`, `pane-left` and `in <pane>` all
     /// work here for free.
     pub playlist_pane: Pane,
-    /// What view 8 shows, rebuilt when it is entered or when a playlist is
+    /// What view 7 shows, rebuilt when it is entered or when a playlist is
     /// written.
     ///
     /// Cached rather than derived per frame: counting a saved playlist's
@@ -493,7 +487,6 @@ impl Ui {
             playlist_scroll: Scroll::default(),
             queue_scroll: Scroll::default(),
             browser_scroll: Scroll::default(),
-            settings_scroll: Scroll::default(),
             guides_scroll: Scroll::default(),
             sorted: 0,
             playlist_sel: 0,
@@ -528,7 +521,6 @@ impl Ui {
             resuming: false,
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
-            settings_sel: 0,
             playlists_sel: 0,
             playlist_pane: Pane::Tree,
             playlist_rows: Vec::new(),
@@ -686,7 +678,7 @@ impl Ui {
             View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
-            View::Browser | View::Filters | View::Settings | View::Guides => None,
+            View::Browser | View::Filters | View::Guides => None,
         }
     }
 }
@@ -1595,12 +1587,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Fold(what) => {
             if ui.view != View::Tree {
                 if what == Fold::Toggle {
-                    match ui.view {
-                        // One catalog on or off. The union of what is on is
-                        // the library, so this reads as "include this too".
-                        View::Filters => toggle_catalog_under_cursor(ui, ctx),
-                        View::Settings => toggle_under_cursor(ui, ctx),
-                        _ => {}
+                    // One catalog on or off. The union of what is on is the
+                    // library, so this reads as "include this too".
+                    if ui.view == View::Filters {
+                        toggle_catalog_under_cursor(ui, ctx);
                     }
                 }
                 return;
@@ -1692,7 +1682,6 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             // The list picks; Enter moves into what you picked, which is the
             // same thing it does everywhere else.
             View::Guides => ui.guide_pane = Pane::Tracks,
-            View::Settings => toggle_under_cursor(ui, ctx),
             // The left pane picks, so Enter there opens rather than plays —
             // and moves focus to the contents, which is what you wanted next.
             View::Playlist if ui.playlist_pane == Pane::Tree => {
@@ -2009,7 +1998,7 @@ fn open_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     });
 }
 
-/// Rebuild view 8's rows.
+/// Rebuild view 7's rows.
 ///
 /// Rules first, then saved files, each alphabetical — rules cannot be created
 /// or renamed from inside the app, so they are the fixed part of the list and
@@ -2765,7 +2754,7 @@ fn flat_step(ui: &Ui, ctx: &Context<'_>, motion: Motion, count: usize) -> Option
 /// The list `zz`, `zt` and `zb` act on: the one you are looking at.
 ///
 /// `None` where the focused pane is not a scrolling list — view 3's set of
-/// playlists and view 8's open guide both draw themselves, and neither is long
+/// playlists and view 7's open guide both draw themselves, and neither is long
 /// enough to want this.
 fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
     Some(match ui.view {
@@ -2774,7 +2763,6 @@ fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
         View::Playlist if ui.playlist_pane == Pane::Tracks => &ui.playlist_scroll,
         View::Queue => &ui.queue_scroll,
         View::Browser => &ui.browser_scroll,
-        View::Settings => &ui.settings_scroll,
         View::Guides if ui.guide_pane == Pane::Tree => &ui.guides_scroll,
         View::Playlist | View::Guides | View::Filters => return None,
     })
@@ -2882,7 +2870,7 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
             .iter()
             .map(|p| crate::text::Haystack::of(&p.display().to_string()))
             .collect(),
-        View::Filters | View::Settings | View::Guides => Vec::new(),
+        View::Filters | View::Guides => Vec::new(),
     }
 }
 
@@ -2908,9 +2896,6 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
                 lines.saturating_sub(height) + 1
             }
         },
-        View::Settings => {
-            bind::sorted(&ui.bindings).len() + SettingKey::ALL.len() + ui.catalogs.defined().len()
-        }
     }
 }
 
@@ -2929,7 +2914,6 @@ fn current_cursor(ui: &Ui) -> usize {
             Pane::Tree => ui.guide_sel,
             Pane::Tracks => ui.guide_scroll,
         },
-        View::Settings => ui.settings_sel,
     }
 }
 
@@ -2953,46 +2937,10 @@ fn set_cursor(ui: &mut Ui, next: usize) {
             }
             Pane::Tracks => ui.guide_scroll = next,
         },
-        View::Settings => ui.settings_sel = next,
     }
 }
 
-/// View 6: the catalogs, which §7 settled are named, persistent filters.
-///
-/// cmus lists filters here and uses space to *select* then enter to activate.
-/// This toggles directly — space turns one on or off, enter makes it the only
-/// one — because the result is visible immediately either way and the two-step
-/// exists in cmus to batch a change you cannot see until you commit it.
-/// Change the row under the cursor in view 7.
-///
-/// A view that shows what can change and refuses to change it is a display,
-/// not a destination — and §4's whole argument for a view is that it is a
-/// place to *do* something. Booleans flip and named values cycle, which is
-/// what `:toggle` already means, so this adds a way in rather than a second
-/// mechanism.
-///
-/// Bindings are the one inert kind of row: there is nothing to cycle, and
-/// editing a key from here would be a `:bind` prompt rather than a toggle.
-fn toggle_under_cursor(ui: &mut Ui, ctx: &Context<'_>) {
-    let i = ui.settings_sel;
-    if let Some(key) = SettingKey::ALL.get(i).copied() {
-        execute(ui, ctx, Command::Toggle(key));
-        return;
-    }
-    // Catalogs are shown here too, and turning one on is the same act view 6
-    // spells with space — the same mechanism reached from a second place, not
-    // a second mechanism.
-    let catalogs = ui.catalogs.defined();
-    if let Some(catalog) = catalogs.get(i - SettingKey::ALL.len()) {
-        let name = catalog.name.clone();
-        let on = ui.catalogs.is_active(&name);
-        apply_catalog_spec(ui, ctx, crate::catalog::Spec::Adjust(vec![(!on, name)]));
-        return;
-    }
-    ui.notify("a binding is not a toggle — use `:bind` to change one");
-}
-
-/// View 8: the guides. Titles on the left, the guide on the right.
+/// View 7: the guides. Titles on the left, the guide on the right.
 ///
 /// Two panes rather than one scrolling document, for the same reason view 1
 /// and view 3 have them: the list is how you *choose*, and it must stay
@@ -3023,7 +2971,8 @@ fn draw_guides(frame: &mut Frame, area: Rect, ui: &Ui) {
         return;
     };
     let height = right.height.saturating_sub(2) as usize;
-    let text = crate::guides::wrapped(guide, right.width.saturating_sub(3) as usize);
+    let body = crate::guides::body(guide, &ui.bindings);
+    let text = crate::guides::wrapped(&body, right.width.saturating_sub(3) as usize);
     // Recorded so the cursor's range matches what is actually on screen. Only
     // here are the pane's width and height known.
     ui.guide_view.set((text.len(), height));
@@ -3289,87 +3238,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         View::Browser => draw_browser(frame, body, ui),
         View::Filters => draw_catalogs(frame, body, ui),
         View::Guides => draw_guides(frame, body, ui),
-        View::Settings => draw_settings(frame, body, ui),
     }
-}
-
-/// View 7. §6 promised this would cost nothing extra once bindings and
-/// settings were data, and it does: it is a rendering of both maps.
-fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
-    let mut items: Vec<ListItem> = Vec::new();
-
-    for key in SettingKey::ALL.iter().copied() {
-        let value = match key {
-            SettingKey::AaaMode => ui.playback.aaa_mode.label().to_string(),
-            SettingKey::ReplayGain => ui.replaygain.label().to_string(),
-            SettingKey::Shuffle => ui.playback.shuffle.to_string(),
-            SettingKey::Repeat => ui.playback.repeat.to_string(),
-            SettingKey::RepeatCurrent => ui.playback.repeat_current.to_string(),
-            SettingKey::Continue => ui.continue_playing.to_string(),
-            SettingKey::SmartArtistSort => ui.smart_artist_sort.to_string(),
-            SettingKey::ResampleQuality => "balanced".into(),
-            SettingKey::AlbumHeaders => ui.album_headers.to_string(),
-            SettingKey::RelativeNumbers => ui.relative_numbers.to_string(),
-            SettingKey::WhichKeyDelay => ui.which_key_delay.as_millis().to_string(),
-        };
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(
-                format!("{:<20}", key.name()),
-                ui.theme.get(theme::Role::SettingKey),
-            ),
-            Span::raw(value),
-        ])));
-    }
-
-    if !ui.catalogs.defined().is_empty() {
-        let active: Vec<&str> = ui.catalogs.active_names();
-        for catalog in ui.catalogs.defined() {
-            let on = active.contains(&catalog.name.as_str());
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{:<20}", format!("catalog {}", catalog.name)),
-                    ui.theme.get(theme::Role::SettingKey),
-                ),
-                Span::raw(format!(
-                    "{}  {}",
-                    if on { "active" } else { "  off " },
-                    catalog
-                        .roots
-                        .iter()
-                        .map(|r| r.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-            ])));
-        }
-    }
-
-    for (bctx, key, cmd) in bind::sorted(&ui.bindings) {
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(
-                format!("{:<10}", bctx.name()),
-                ui.theme.get(theme::Role::BindingContext),
-            ),
-            Span::styled(
-                format!("{:<10}", key.to_string()),
-                ui.theme.get(theme::Role::BindingKey),
-            ),
-            Span::raw(parse::format(cmd)),
-        ])));
-    }
-
-    let mut state =
-        ui.settings_scroll
-            .state_within(Some(ui.settings_sel), items.len(), view_height(area));
-    pad_to_view(&mut items, &ui.theme, area, state.offset());
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(pane_block(&ui.theme, "settings and bindings", true))
-            .highlight_style(highlight(&ui.theme, true)),
-        area,
-        &mut state,
-    );
-    ui.settings_scroll.remember(&state);
 }
 
 /// Rows the completion menu needs, borders included. Zero when there is
@@ -3449,7 +3318,10 @@ fn draw_help(frame: &mut Frame, area: Rect, ui: &Ui, rows: &[String], title: &st
         .collect();
     if laid_out.len() > shown {
         lines.push(Line::from(Span::styled(
-            format!("… {} more — view 7 lists every one", laid_out.len() - shown),
+            format!(
+                "… {} more — the Index guide lists every one",
+                laid_out.len() - shown
+            ),
             ui.theme.get(theme::Role::StatusDim),
         )));
     }
@@ -4662,9 +4534,9 @@ mod tests {
 
         // Wander off to a different view and quit from there.
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 8");
+        type_line(&mut ui, &ctx, "view 7");
         let snapshot = capture_session(&ui, &ctx);
-        assert_eq!(snapshot.view, Some(8));
+        assert_eq!(snapshot.view, Some(7));
         assert_eq!(snapshot.open_playlist.as_deref(), Some("mix"));
 
         let mut fresh = with_playlists(&store);
@@ -4833,78 +4705,6 @@ mod tests {
         type_line(&mut ui, &ctx, "playlist save nothing");
         assert!(ui.status.contains("empty"), "{}", ui.status);
         assert!(!dir.join("playlists/nothing.m3u8").exists());
-    }
-
-    /// A view that shows what can change and refuses to change it is a
-    /// display, not a destination.
-    #[test]
-    fn space_toggles_the_setting_under_the_cursor_in_view_seven() {
-        let store = fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-        press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 7");
-
-        let i = SettingKey::ALL
-            .iter()
-            .position(|k| *k == SettingKey::Shuffle)
-            .unwrap();
-        ui.settings_sel = i;
-        assert!(!ui.playback.shuffle);
-
-        press(&mut ui, &ctx, "o");
-        assert!(ui.playback.shuffle, "space did not toggle it");
-        execute(&mut ui, &ctx, Command::Activate);
-        assert!(!ui.playback.shuffle, "enter did not toggle it back");
-    }
-
-    /// Named values cycle rather than flip, which is what `:toggle` already
-    /// means — a way in, not a second mechanism.
-    #[test]
-    fn a_named_setting_cycles_in_view_seven() {
-        let store = fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-        ui.view = View::Settings;
-        ui.settings_sel = SettingKey::ALL
-            .iter()
-            .position(|k| *k == SettingKey::AaaMode)
-            .unwrap();
-
-        assert_eq!(ui.playback.aaa_mode.label(), "all");
-        press(&mut ui, &ctx, "o");
-        assert_eq!(ui.playback.aaa_mode.label(), "artist");
-    }
-
-    /// `resample_quality` needs the device rebuilt, so it is not a toggle —
-    /// and view 7 has to say so rather than appearing to do nothing.
-    #[test]
-    fn a_setting_that_is_not_a_toggle_says_so() {
-        let store = fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-        ui.view = View::Settings;
-        ui.settings_sel = SettingKey::ALL
-            .iter()
-            .position(|k| *k == SettingKey::ResampleQuality)
-            .unwrap();
-
-        press(&mut ui, &ctx, "o");
-        assert!(ui.status.contains(":set"), "{}", ui.status);
-    }
-
-    /// A binding row is the one inert kind: there is nothing to cycle, and the
-    /// message points at what does change one.
-    #[test]
-    fn a_binding_row_in_view_seven_points_at_bind() {
-        let store = fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-        ui.view = View::Settings;
-        ui.settings_sel = SettingKey::ALL.len() + ui.catalogs.defined().len();
-
-        press(&mut ui, &ctx, "o");
-        assert!(ui.status.contains(":bind"), "{}", ui.status);
     }
 
     /// The tree numbers every row, because an artist and an album are both
@@ -5191,7 +4991,7 @@ mod tests {
     }
 
     /// "What can I do *here*" — so another view's bindings must not appear.
-    /// View 7's flat list of every binding answers the other question.
+    /// The Index guide's flat list of every binding answers the other question.
     #[test]
     fn help_leaves_out_another_views_bindings() {
         let store = fixture();
@@ -5663,11 +5463,11 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 8");
+        type_line(&mut ui, &ctx, "view 7");
         assert_eq!(ui.view, View::Guides);
 
         let out = render(&ui, &ctx, 96, 18);
-        assert!(out.contains("8:guides"), "{out}");
+        assert!(out.contains("7:guides"), "{out}");
         // Both panes: the titles, and the first guide's text.
         assert!(out.contains("Moving around"), "{out}");
         assert!(out.contains("The library tree"), "{out}");
@@ -5725,7 +5525,8 @@ mod tests {
         // The guide's last word, which is where it wraps to whatever the pane
         // is — comparing a whole wrapped line would only test my arithmetic
         // about the width.
-        let last_word = crate::guides::lines(&crate::guides::GUIDES[0])
+        let first = crate::guides::body(&crate::guides::GUIDES[0], &bind::defaults());
+        let last_word = crate::guides::lines(&first)
             .iter()
             .rev()
             .find(|l| !l.trim().is_empty())
@@ -5917,7 +5718,6 @@ mod tests {
                     crate::cmd::Context::Queue => ViewId::Queue,
                     crate::cmd::Context::Browser => ViewId::Browser,
                     crate::cmd::Context::Filters => ViewId::Filters,
-                    crate::cmd::Context::Settings => ViewId::Settings,
                     crate::cmd::Context::Guides => ViewId::Guides,
                     crate::cmd::Context::Common => unreachable!(),
                 }),
@@ -6152,30 +5952,40 @@ mod tests {
         assert!(!ui.playback.shuffle);
     }
 
+    /// The keymap listing survived view 7's deletion (#47) — as a guide, and
+    /// generated, so a `:bind` shows up in it without anything being kept in
+    /// step by hand.
     #[test]
-    fn view_seven_lists_settings_and_bindings() {
+    fn the_index_guide_lists_the_live_keymap() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Settings;
+        ui.view = View::Guides;
+        ui.guide_sel = crate::guides::GUIDES
+            .iter()
+            .position(|g| g.title == "Index")
+            .expect("an index guide");
+        ui.guide_pane = Pane::Tracks;
+
         let out = render(&ui, &ctx, 100, 24);
-        assert!(out.contains("aaa_mode"), "{out}");
-        assert!(out.contains("shuffle"), "{out}");
+        assert!(out.contains("common"), "no context heading:\n{out}");
         assert!(
-            out.contains("7:settings"),
-            "the tab strip should list it:\n{out}"
+            out.contains("7:guides"),
+            "the tab strip should end at 7:\n{out}"
         );
 
-        // Bindings render in the same list, as §6 promised — below the
-        // settings, so scroll to them.
-        ui.settings_sel = crate::cmd::SettingKey::ALL.len() + 20;
-        let out = render(&ui, &ctx, 100, 24);
-        assert!(out.contains("common"), "{out}");
-        // A command name from the defaults, whatever it happens to be —
-        // asserting on a naming *prefix* made this test depend on the
-        // vocabulary's shape rather than on bindings being drawn.
-        let some_verb = crate::cmd::parse::format(&crate::cmd::Command::Down);
-        assert!(out.contains(&some_verb), "no bindings visible:\n{out}");
+        // A binding made now must appear, which a checked-in file could not
+        // do. Asserted on the guide's body rather than on the frame: the
+        // listing is far longer than a pane, and where a given key lands in it
+        // is not this test's business.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "bind common \"g z q\" quit");
+        let index = &crate::guides::GUIDES[ui.guide_sel];
+        let body = crate::guides::body(index, &ui.bindings);
+        assert!(
+            body.contains("g z q"),
+            "a new binding is missing from the index"
+        );
     }
 
     #[test]
@@ -6371,15 +6181,19 @@ mod tests {
         assert!(ui.sorted < ui.library.sorted().len());
     }
 
+    /// View 7 used to list catalogs too, which was always a duplicate of view
+    /// 6 — the scope view lists them as its whole purpose. Deleting view 7
+    /// (#47) lost nothing here, and this checks the survivor rather than
+    /// assuming it.
     #[test]
-    fn catalogs_show_in_view_seven() {
+    fn catalogs_show_in_the_scope_view() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = catalog_ui(&store);
-        ui.view = View::Settings;
+        ui.view = View::Filters;
         let out = render(&ui, &ctx, 110, 24);
-        assert!(out.contains("catalog paak"), "{out}");
-        assert!(out.contains("catalog va"), "{out}");
+        assert!(out.contains("paak"), "{out}");
+        assert!(out.contains("va"), "{out}");
     }
     // ---- album headers (#7) ----------------------------------------------
 
@@ -9316,7 +9130,7 @@ mod tests {
         );
     }
 
-    /// The same in view 8. The open guide scrolls by its own mechanism, not a
+    /// The same in view 7. The open guide scrolls by its own mechanism, not a
     /// `Scroll`, so placing while focused there does nothing — but it must not
     /// move the list of guides instead.
     #[test]

@@ -28,8 +28,7 @@ pub enum Context {
     Queue,
     Browser,
     Filters,
-    Settings,
-    /// View 8, the guides.
+    /// View 7, the guides.
     Guides,
 }
 
@@ -44,7 +43,6 @@ impl Context {
             Context::Browser => "browser",
             Context::Filters => "filters",
             Context::Guides => "guides",
-            Context::Settings => "settings",
         }
     }
 
@@ -58,7 +56,6 @@ impl Context {
             "browser" => Context::Browser,
             "filters" => Context::Filters,
             "guides" => Context::Guides,
-            "settings" => Context::Settings,
             _ => return None,
         })
     }
@@ -73,8 +70,7 @@ pub enum ViewId {
     Queue = 4,
     Browser = 5,
     Filters = 6,
-    Settings = 7,
-    Guides = 8,
+    Guides = 7,
 }
 
 impl ViewId {
@@ -86,8 +82,7 @@ impl ViewId {
             4 => ViewId::Queue,
             5 => ViewId::Browser,
             6 => ViewId::Filters,
-            8 => ViewId::Guides,
-            7 => ViewId::Settings,
+            7 => ViewId::Guides,
             _ => return None,
         })
     }
@@ -659,7 +654,7 @@ pub enum Command {
     /// Show the keys that work here, in the bottom pane.
     ///
     /// The context's own bindings and `common`'s, which is what "what can I do
-    /// here" actually means — view 7's flat list of every binding in every
+    /// here" actually means — the index guide's flat list of every binding in every
     /// context answers a different question.
     Help,
     Quit,

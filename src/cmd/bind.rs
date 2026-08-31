@@ -293,11 +293,11 @@ pub fn continuations<'a>(
         .collect()
 }
 
-/// Every binding, sorted for display in view 7.
+/// Every binding, sorted for the Index guide.
 ///
 /// Sorted by context then key *name*, because `KeyCode` has no meaningful
-/// ordering of its own and a settings view that reshuffles itself between
-/// frames would be unusable.
+/// ordering of its own and a listing that reshuffled itself between frames
+/// would be unusable.
 pub fn sorted(bindings: &Bindings) -> Vec<(Context, String, &Command)> {
     let mut rows: Vec<(Context, String, &Command)> = bindings
         .iter()
