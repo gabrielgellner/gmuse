@@ -2546,6 +2546,23 @@ Append here as decisions are made. Format: date, decision, rationale.
   the tree is exactly three levels. `flat_step`'s `artist_starts`/`album_starts` remain the real tie and are noted with
   the issue.
 
+- **2026-08-31** **A vision document (`docs/design/vision-and-future.md`), and what it is not allowed to do.** The
+  ambition has outgrown what §1 describes — librarianship with BPM, key and embeddings; tag editing; a two-deck
+  instrument shaped like a tracker; one library across machines that cannot talk to each other. Written down so the next
+  design decision can be judged against the whole rather than against the feature in front of it.
+
+  It is explicitly **not** an authorisation. This brief stays the only place scope moves, and the vision document says
+  so in its first paragraph. What it does instead is name the three boundaries now under pressure — tag editing (§1 says
+  reading only), the three-thread architecture (INVARIANT, and two decks is a revision of it rather than an extension),
+  and waveforms as a navigational aid against the no-visualizers rule — so that each is argued and recorded here when it
+  moves, on the standard set by the 2026-08-29 amendment: a boundary may move to a principled place, and may not erode
+  by increments.
+
+  Its one load-bearing claim is that this has converged on **one expression vocabulary behind every surface** — filter,
+  sort, format, catalog, smart playlist, `ViewSpec`, sync policy — so the design rule for a new capability is to try it
+  as a field, a predicate, an event or a view spec before it becomes a subsystem. Ratings, history and catalogs are the
+  evidence: each was small because it entered that way.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
