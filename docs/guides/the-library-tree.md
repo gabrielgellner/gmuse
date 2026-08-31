@@ -36,12 +36,18 @@ These are vim's fold keys, and they do here what they do there.
     z M      close every fold
     z r      open one more level
     z m      close one level
+    z x      close everything except what holds this row
+    z t z z z b    put this row at the top / middle / bottom of the pane
+    g p      go to the playing track
 
 `zr` and `zm` are the two worth learning. From everything closed, one `zr` puts every artist's albums on screen; another
 puts every track there. `zm` walks back out the same way.
 
 That works because the levels here all mean the same thing — every row at the first level is an artist, every row at the
 second is an album. A file explorer cannot offer this, because "three directories deep" is not a category. Here it is.
+
+`zx` is the one to reach for when the tree has got away from you: it closes everything, then reopens just the folds you
+were inside, so you keep your place and lose the mess. On an artist row it is simply `zM`.
 
 `zC` matters more than it looks: closing an artist with `h` leaves the albums you had open still open underneath, so
 reopening spills them back. `zC` closes the subtree with it.

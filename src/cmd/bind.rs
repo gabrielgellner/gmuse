@@ -66,6 +66,18 @@ pub const DEFAULTS: &[&str] = &[
     "bind common \"z M\" fold none",
     "bind common \"z r\" fold more",
     "bind common \"z m\" fold less",
+    // `zx` is vim's: close every fold, then put back the ones that were
+    // holding the cursor. `zv` on its own is not bound because it could never
+    // do anything here — the cursor always sits on a row the tree produced.
+    "bind common \"z x\" fold only",
+    // Where the cursor's row sits in the pane. vim keeps these on `z` because
+    // they are about what you can see rather than where you are.
+    "bind common \"z t\" place top",
+    "bind common \"z z\" place centre",
+    "bind common \"z b\" place bottom",
+    // "where is the thing I am listening to?" — a question neither the cursor
+    // nor a search asks. `g` is already the go-somewhere prefix.
+    "bind common \"g p\" playing",
     // `o` for open, not `space`: space is the leader, and a chord cannot
     // extend a key that is bound on its own. It is `za` under another name,
     // and outside the tree it is what ticks a checkbox.
@@ -396,10 +408,11 @@ mod tests {
 
         assert!(offered(&rows, "o"), "`zo` extends `z`");
         assert!(
-            !offered(&rows, "t"),
-            "`gt` does not extend `z`, and offering it would be offering a key \
+            !offered(&rows, "d"),
+            "`dd` does not extend `z`, and offering it would be offering a key \
              that does nothing: {rows:?}"
         );
+        assert!(!offered(&rows, "y"), "nor does `yy`: {rows:?}");
         assert!(!offered(&rows, "g"), "nor does `gg`: {rows:?}");
     }
 

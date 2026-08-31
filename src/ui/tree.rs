@@ -247,6 +247,86 @@ impl TreeState {
         self.keeping_cursor(lib, store, |t| t.folds.less());
     }
 
+    /// Every fold that must be open for `row` to be on screen.
+    ///
+    /// An artist needs none — level 0 shows them. An album needs its artist. A
+    /// track needs both, which is why this is a list and not a parent link.
+    fn ancestors_of(row: &Row) -> Vec<Vec<SortKey>> {
+        match row {
+            Row::Artist { .. } => Vec::new(),
+            Row::Album { artist, .. } => vec![vec![artist.clone()]],
+            Row::Track { artist, album, .. } => {
+                vec![vec![artist.clone()], vec![artist.clone(), album.clone()]]
+            }
+        }
+    }
+
+    /// `zx` — close every fold, then reopen just the ones that were holding
+    /// the cursor's row, and put the cursor back on it.
+    ///
+    /// vim defines `zx` as "reapply foldlevel, then `zv`". `zv` on its own is
+    /// not bound here because it could never do anything: the cursor always
+    /// sits on a row that `rows()` produced, so it is visible by construction.
+    /// It is only meaningful *after* something has closed underneath it, which
+    /// is exactly this.
+    pub fn only(&mut self, lib: &Library, store: &Store) {
+        let rows = self.rows(lib, store);
+        let Some(row) = rows.get(self.selected) else {
+            return;
+        };
+        let opens = Self::ancestors_of(row);
+        let want = Self::mark_of(row);
+
+        self.folds.set_level(0);
+        self.folds.open_all(opens);
+
+        if let Some(at) = self
+            .rows(lib, store)
+            .iter()
+            .position(|r| Self::mark_of(r) == want)
+        {
+            self.selected = at;
+        }
+    }
+
+    /// Put the cursor on `id`, opening whatever was hiding it.
+    ///
+    /// Nothing else is disturbed — the point is to find the playing track
+    /// without losing the shape you had built up looking for it.
+    pub fn reveal(&mut self, lib: &Library, store: &Store, id: TrackId) -> bool {
+        let Some((artist, album)) = lib.artists().find_map(|(artist, albums)| {
+            albums
+                .iter()
+                .find(|(_, ids)| ids.contains(&id))
+                .map(|(album, _)| (artist.clone(), album.clone()))
+        }) else {
+            return false;
+        };
+        self.folds
+            .open_all(vec![vec![artist.clone()], vec![artist, album]]);
+        match self
+            .rows(lib, store)
+            .iter()
+            .position(|r| matches!(r, Row::Track { id: got, .. } if *got == id))
+        {
+            Some(at) => {
+                self.selected = at;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What identifies a row across a fold change: a track by its id, a
+    /// container by its path. Not the `Row` itself — that carries whether it is
+    /// expanded, which is precisely what a fold change alters.
+    fn mark_of(row: &Row) -> (Vec<SortKey>, Option<TrackId>) {
+        match row {
+            Row::Track { id, .. } => (Self::seat_of(row), Some(*id)),
+            _ => (Self::seat_of(row), None),
+        }
+    }
+
     /// The openable path under the cursor, if the cursor is on one.
     fn path_under(&self, lib: &Library, store: &Store) -> Option<Vec<SortKey>> {
         self.rows(lib, store)

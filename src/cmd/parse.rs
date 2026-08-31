@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use super::keys;
 use super::{
-    AaaMode, AddTarget, Command, Context, Fold, PaneTarget, PlaylistSpec, Quality, RateSpec,
+    AaaMode, AddTarget, Command, Context, Fold, PaneTarget, Place, PlaylistSpec, Quality, RateSpec,
     SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
 };
 
@@ -46,10 +46,12 @@ pub const VERBS: &[&str] = &[
     "down",
     "filter",
     "fold",
+    "place",
     "help",
     "freeze",
     "in",
     "next",
+    "playing",
     "page-down",
     "page-up",
     "pane-left",
@@ -123,6 +125,17 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             }
             Command::Fold(Fold::parse(word).ok_or_else(|| ParseError::Bad(word.into(), "fold"))?)
         }
+        "place" => {
+            let word = rest.trim();
+            if word.is_empty() {
+                return Err(ParseError::Missing {
+                    cmd: "place",
+                    what: "one of top, centre, bottom",
+                });
+            }
+            Command::Place(Place::parse(word).ok_or_else(|| ParseError::Bad(word.into(), "place"))?)
+        }
+        "playing" => Command::Playing,
         "remove" => Command::Remove,
         "remove-to-end" => Command::RemoveToEnd,
         "yank" => Command::Yank,
@@ -497,6 +510,8 @@ pub fn format(cmd: &Command) -> String {
         Command::Bottom => "bottom".into(),
         Command::Activate => "activate".into(),
         Command::Fold(f) => format!("fold {}", f.name()),
+        Command::Place(p) => format!("place {}", p.name()),
+        Command::Playing => "playing".into(),
         Command::Remove => "remove".into(),
         Command::RemoveToEnd => "remove-to-end".into(),
         Command::Yank => "yank".into(),
@@ -782,6 +797,8 @@ mod tests {
         // Built from `Fold::ALL` rather than listed, so a new fold form is
         // covered the moment it exists.
         let mut samples: Vec<Command> = Fold::ALL.iter().copied().map(Command::Fold).collect();
+        samples.extend(Place::ALL.iter().copied().map(Command::Place));
+        samples.push(Command::Playing);
         samples.extend(vec![
             Command::Up,
             Command::Down,
@@ -930,6 +947,7 @@ mod tests {
                 "filter" => "filter year>2000".to_string(),
                 "rate" => "rate 4".to_string(),
                 "fold" => "fold toggle".to_string(),
+                "place" => "place centre".to_string(),
                 "in" => "in tree down".to_string(),
                 "search" | "rsearch" => format!("{verb} text"),
                 other => other.to_string(),

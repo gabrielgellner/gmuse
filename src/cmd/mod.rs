@@ -324,6 +324,40 @@ pub enum PlaylistSpec {
 /// Everything the application can be asked to do.
 ///
 /// One enum for keys, the `:` line and the rc file, per §6.
+/// Where to put the cursor's row in its pane — vim's `zt`, `zz` and `zb`.
+///
+/// Not a fold operation, but it shares the `z` prefix because vim puts it
+/// there: both are about what you can see rather than about where you are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    Top,
+    Centre,
+    Bottom,
+}
+
+impl Place {
+    pub fn parse(word: &str) -> Option<Self> {
+        Some(match word {
+            "top" => Self::Top,
+            "centre" | "center" => Self::Centre,
+            "bottom" => Self::Bottom,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            // British spelling to match the rest of the prose; `center` parses
+            // too, because half the world will type it.
+            Self::Centre => "centre",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    pub const ALL: &'static [Place] = &[Self::Top, Self::Centre, Self::Bottom];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fold {
     /// `zo`, and `l` on a closed node.
@@ -346,6 +380,9 @@ pub enum Fold {
     More,
     /// `zm` — one level shallower.
     Less,
+    /// `zx` — close every fold, then reopen just the ones that were holding
+    /// the cursor's row. "Close all but where I am."
+    Only,
 }
 
 impl Fold {
@@ -360,6 +397,7 @@ impl Fold {
             "none" => Self::None,
             "more" => Self::More,
             "less" => Self::Less,
+            "only" => Self::Only,
             _ => return None,
         })
     }
@@ -375,6 +413,7 @@ impl Fold {
             Self::None => "none",
             Self::More => "more",
             Self::Less => "less",
+            Self::Only => "only",
         }
     }
 
@@ -383,6 +422,12 @@ impl Fold {
     /// cursor, so they are the ones whose screen position has to be held.
     pub fn levels(self) -> bool {
         matches!(self, Self::All | Self::None | Self::More | Self::Less)
+    }
+
+    /// Whether this form puts the cursor's row back on screen after closing
+    /// what was around it.
+    pub fn reveals(self) -> bool {
+        matches!(self, Self::Only)
     }
 
     pub const ALL: &'static [Fold] = &[
@@ -395,6 +440,7 @@ impl Fold {
         Self::None,
         Self::More,
         Self::Less,
+        Self::Only,
     ];
 }
 
@@ -412,6 +458,12 @@ pub enum Command {
     /// level. vim's `z` family, spelled out as one command with an argument
     /// rather than nine commands, because they are nine forms of one idea.
     Fold(Fold),
+    /// Scroll so the cursor's row sits at the top, middle or bottom.
+    Place(Place),
+    /// Put the cursor on the playing track, opening whatever folds were hiding
+    /// it. Answers "where is the thing I am listening to?", which is a question
+    /// neither selection nor search asks.
+    Playing,
     /// Remove the item under the cursor. Takes a count: `3dd`.
     Remove,
     /// Copy rows into the register without removing them. Takes a count.

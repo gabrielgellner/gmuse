@@ -1551,16 +1551,27 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 Fold::None => ui.tree.close_everything(lib, ctx.store),
                 Fold::More => ui.tree.more(lib, ctx.store),
                 Fold::Less => ui.tree.less(lib, ctx.store),
+                Fold::Only => ui.tree.only(lib, ctx.store),
             }
 
             // Only the level forms: `zo` and friends act on the node under the
             // cursor, so everything they change is *below* it and the row does
             // not move on its own.
-            if what.levels() {
+            // `zx` holds the row too: it closes everything around the cursor,
+            // so the one thing that must not move is the cursor.
+            if what.levels() || what.reveals() {
                 ui.tree_scroll
                     .scroll_to(ui.tree.selected.saturating_sub(screen_row));
             }
         }
+        // vim's `zt`, `zz`, `zb`. Measured from the last frame, so a pane
+        // that has never been drawn does nothing rather than guessing.
+        Command::Place(place) => {
+            if let Some(scroll) = focused_scroll(ui) {
+                scroll.place(place);
+            }
+        }
+        Command::Playing => go_to_playing(ui, ctx),
         Command::PaneLeft => match ui.view {
             View::Playlist => ui.playlist_pane = Pane::Tree,
             View::Guides => ui.guide_pane = Pane::Tree,
@@ -2569,6 +2580,64 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
     }
 }
 
+/// The list `zz`, `zt` and `zb` act on: the one you are looking at.
+///
+/// `None` where the focused pane is not a scrolling list — view 3's set of
+/// playlists and view 8's open guide both draw themselves, and neither is long
+/// enough to want this.
+fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
+    Some(match ui.view {
+        View::Tree => &ui.tree_scroll,
+        View::Sorted => &ui.sorted_scroll,
+        View::Playlist if ui.playlist_pane == Pane::Tracks => &ui.playlist_scroll,
+        View::Queue => &ui.queue_scroll,
+        View::Browser => &ui.browser_scroll,
+        View::Settings => &ui.settings_scroll,
+        View::Guides if ui.guide_pane == Pane::Tree => &ui.guides_scroll,
+        View::Playlist | View::Guides | View::Filters => return None,
+    })
+}
+
+/// Put the cursor on the playing track, wherever the current view keeps it.
+///
+/// In view 1 that means opening the folds hiding it, and nothing else — the
+/// point is to find it without losing the shape you built up looking for it.
+fn go_to_playing(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(id) = ui.playback.current else {
+        ui.notify("nothing is playing");
+        return;
+    };
+    let found = match ui.view {
+        View::Tree => ui.tree.reveal(&ui.library, ctx.store, id),
+        View::Sorted => match ui.library.sorted().iter().position(|t| *t == id) {
+            Some(at) => {
+                ui.sorted = at;
+                true
+            }
+            None => false,
+        },
+        View::Playlist => match ui.playlist.entries().iter().position(|t| *t == id) {
+            Some(at) => {
+                ui.playlist_sel = at;
+                ui.playlist_pane = Pane::Tracks;
+                true
+            }
+            None => false,
+        },
+        View::Queue => match ui.queue.entries().position(|t| *t == id) {
+            Some(at) => {
+                ui.queue_sel = at;
+                true
+            }
+            None => false,
+        },
+        _ => false,
+    };
+    if !found {
+        ui.notify("the playing track is not in this view");
+    }
+}
+
 /// Move the cursor to the next row matching `pattern`, wrapping once.
 fn run_search(ui: &mut Ui, ctx: &Context<'_>, pattern: &str, dir: SearchDir) {
     let needle = crate::text::needle(pattern);
@@ -2751,11 +2820,14 @@ fn draw_guides(frame: &mut Frame, area: Rect, ui: &Ui) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)]).areas(area);
 
-    let titles: Vec<ListItem> = crate::guides::GUIDES
+    let mut titles: Vec<ListItem> = crate::guides::GUIDES
         .iter()
         .map(|g| ListItem::new(Line::from(Span::raw(format!("  {}", g.title)))))
         .collect();
-    let mut state = ui.guides_scroll.state(Some(ui.guide_sel));
+    let mut state =
+        ui.guides_scroll
+            .state_within(Some(ui.guide_sel), titles.len(), view_height(left));
+    pad_to_view(&mut titles, theme, left, state.offset());
     frame.render_stateful_widget(
         List::new(titles)
             .block(pane_block(theme, "guides", ui.guide_pane == Pane::Tree))
@@ -3103,7 +3175,10 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
         ])));
     }
 
-    let mut state = ui.settings_scroll.state(Some(ui.settings_sel));
+    let mut state =
+        ui.settings_scroll
+            .state_within(Some(ui.settings_sel), items.len(), view_height(area));
+    pad_to_view(&mut items, &ui.theme, area, state.offset());
     frame.render_stateful_widget(
         List::new(items)
             .block(pane_block(&ui.theme, "settings and bindings", true))
@@ -3390,9 +3465,9 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         .collect();
 
     let mut items = items;
-    let mut state = ui
-        .tree_scroll
-        .state_within(Some(ui.tree.selected), rows.len());
+    let mut state =
+        ui.tree_scroll
+            .state_within(Some(ui.tree.selected), rows.len(), view_height(area));
     pad_to_view(&mut items, &ui.theme, area, state.offset());
     frame.render_stateful_widget(
         List::new(items)
@@ -3417,40 +3492,67 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
 /// A `Cell` for the same reason `guide_view` is one — only `draw` knows the
 /// pane's height, and nothing outside a frame does.
 #[derive(Debug, Default)]
-pub struct Scroll(std::cell::Cell<usize>);
+pub struct Scroll {
+    top: std::cell::Cell<usize>,
+    /// The cursor's **row**, and the pane's visible height, as of the last
+    /// frame. `zz`/`zt`/`zb` need both as numbers, and only `draw` has them:
+    /// the height because it depends on the pane, and the row because album
+    /// dividers make it differ from the track index every other caller uses.
+    row: std::cell::Cell<usize>,
+    height: std::cell::Cell<usize>,
+}
 
 impl Scroll {
-    fn state(&self, selected: Option<usize>) -> ListState {
-        ListState::default()
-            .with_selected(selected)
-            .with_offset(self.0.get())
-    }
-
     /// Called after rendering, with the state ratatui just adjusted.
     fn remember(&self, state: &ListState) {
-        self.0.set(state.offset());
+        self.top.set(state.offset());
     }
 
     /// The first visible row, as of the last frame.
     fn top(&self) -> usize {
-        self.0.get()
+        self.top.get()
     }
 
     /// The state for this frame, with the remembered offset clamped so the
     /// pane can show filler *below* the list but never only filler.
-    fn state_within(&self, selected: Option<usize>, len: usize) -> ListState {
-        let top = self.0.get().min(len.saturating_sub(1));
-        self.0.set(top);
+    fn state_within(&self, selected: Option<usize>, len: usize, height: usize) -> ListState {
+        let top = self.top.get().min(len.saturating_sub(1));
+        self.top.set(top);
+        self.row.set(selected.unwrap_or(0));
+        self.height.set(height);
         ListState::default()
             .with_selected(selected)
             .with_offset(top)
     }
 
+    /// Put the cursor's row at the top, the middle or the bottom of the pane —
+    /// vim's `zt`, `zz` and `zb`.
+    ///
+    /// Measured from the last frame. Before the first one both numbers are
+    /// zero, and every branch below then asks for row zero — which is where it
+    /// already is, so an undrawn pane needs no guard of its own.
+    ///
+    /// `~` filler is what lets `zt` work on the last row rather than being
+    /// quietly ignored.
+    fn place(&self, place: crate::cmd::Place) {
+        let (row, height) = (self.row.get(), self.height.get());
+        self.top.set(match place {
+            crate::cmd::Place::Top => row,
+            crate::cmd::Place::Centre => row.saturating_sub(height / 2),
+            crate::cmd::Place::Bottom => row.saturating_sub(height.saturating_sub(1)),
+        });
+    }
+
     /// Scroll so `row` is the first visible one. ratatui clamps at render, so
     /// this can ask for more than the list has.
     fn scroll_to(&self, row: usize) {
-        self.0.set(row);
+        self.top.set(row);
     }
+}
+
+/// A pane's visible height: its rows, less the border above and below.
+fn view_height(area: Rect) -> usize {
+    area.height.saturating_sub(2) as usize
 }
 
 /// vim's `~`: the rows past the end of the list.
@@ -3462,7 +3564,7 @@ impl Scroll {
 /// makes the padding a property of the screen rather than of the list, which
 /// is the whole reason vim draws `~` at all.
 fn pad_to_view(items: &mut Vec<ListItem<'static>>, theme: &theme::Theme, area: Rect, top: usize) {
-    let height = area.height.saturating_sub(2) as usize;
+    let height = view_height(area);
     let filler = theme.get(theme::Role::Filler);
     while items.len() < top + height {
         items.push(ListItem::new(Line::from(Span::styled("~", filler))));
@@ -3522,6 +3624,7 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
     let mut state = spec.scroll.state_within(
         list::row_of_track(&rows, spec.selected).or(Some(0)),
         rows.len(),
+        view_height(area),
     );
     pad_to_view(&mut items, &ui.theme, area, state.offset());
     // A selection landing on the playing track keeps the playing colour, or
@@ -3564,7 +3667,11 @@ fn draw_browser(frame: &mut Frame, area: Rect, ui: &Ui) {
             ListItem::new(Line::from(label))
         })
         .collect();
-    let mut state = ui.browser_scroll.state(Some(ui.browser.selected));
+    let mut items = items;
+    let mut state =
+        ui.browser_scroll
+            .state_within(Some(ui.browser.selected), items.len(), view_height(area));
+    pad_to_view(&mut items, &ui.theme, area, state.offset());
     frame.render_stateful_widget(
         List::new(items)
             .block(pane_block(
@@ -8192,7 +8299,7 @@ mod tests {
         ui.view = View::Sorted;
         ui.album_headers = false;
         ui.sorted = 0;
-        ui.sorted_scroll.0.set(9_999);
+        ui.sorted_scroll.scroll_to(9_999);
 
         let out = render(&ui, &ctx, 90, 12);
         assert!(
@@ -8528,7 +8635,7 @@ mod tests {
     fn a_stale_offset_is_clamped_before_it_pads_a_pane() {
         let scroll = Scroll::default();
         scroll.scroll_to(9_999);
-        let state = scroll.state_within(Some(0), 20);
+        let state = scroll.state_within(Some(0), 20, 10);
         assert_eq!(state.offset(), 19, "the last row is as far as it may go");
         assert_eq!(scroll.top(), 19, "and the clamp is written back");
     }
@@ -8644,6 +8751,275 @@ mod tests {
             matches!(o.1, Next::Runs(_)),
             "`zo` fires on its own, so `zox` can never be reached: {:?}",
             o.1
+        );
+    }
+
+    /// The question that started this: close everything **except** where I am.
+    #[test]
+    fn zx_closes_every_fold_but_the_one_the_cursor_is_in() {
+        let store = many_artists(8);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z R");
+        let wide = ui.tree.rows(&ui.library, &store).len();
+        // Onto a track, three levels down.
+        press(&mut ui, &ctx, "j j j");
+        let on = ui.tree.rows(&ui.library, &store)[ui.tree.selected].clone();
+        assert!(
+            matches!(on, tree::Row::Track { .. }),
+            "expected a track: {on:?}"
+        );
+
+        press(&mut ui, &ctx, "z x");
+        let rows = ui.tree.rows(&ui.library, &store);
+        assert!(rows.len() < wide, "nothing closed");
+        assert_eq!(
+            rows[ui.tree.selected], on,
+            "the cursor should still be on the track it was on"
+        );
+        // 8 artists, one of them open with its one album open and that album's
+        // 2 tracks — and nothing else.
+        assert_eq!(
+            rows.len(),
+            8 + 1 + 2,
+            "something else stayed open: {rows:?}"
+        );
+    }
+
+    /// On an artist there is nothing to keep open, and `zx` is `zM`.
+    #[test]
+    fn zx_on_an_artist_is_a_plain_close_everything() {
+        let store = many_artists(8);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z R");
+        press(&mut ui, &ctx, "z x");
+        assert_eq!(ui.tree.rows(&ui.library, &store).len(), 8);
+    }
+
+    /// It holds the row on screen, for the same reason `zm` does — closing
+    /// everything around the cursor is the moment the cursor must not move.
+    #[test]
+    fn zx_holds_the_cursor_still_on_screen() {
+        let store = many_artists(20);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z R");
+        press(&mut ui, &ctx, "G");
+        let _ = render(&ui, &ctx, 90, 14);
+        press(&mut ui, &ctx, "5 k");
+        let before = render(&ui, &ctx, 90, 14);
+        let was = tree_cursor_row(&ui);
+
+        press(&mut ui, &ctx, "z x");
+        let after = render(&ui, &ctx, 90, 14);
+        assert_eq!(
+            tree_cursor_row(&ui),
+            was,
+            "before:\n{before}\nafter:\n{after}"
+        );
+    }
+
+    /// `zt` puts the cursor's row at the top of the pane, `zb` at the bottom,
+    /// `zz` in the middle — measured by where the row actually lands.
+    #[test]
+    fn zt_zz_zb_place_the_cursor_row_in_the_pane() {
+        let store = many_artists(30);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "1 5 G");
+        let _ = render(&ui, &ctx, 90, 14);
+
+        press(&mut ui, &ctx, "z t");
+        let top = render(&ui, &ctx, 90, 14);
+        assert_eq!(tree_cursor_row(&ui), 0, "zt should go to the top:\n{top}");
+
+        // A 14-row terminal is one tab line, one status line and a 12-row
+        // body, whose borders leave ten rows of list.
+        press(&mut ui, &ctx, "z b");
+        let bottom = render(&ui, &ctx, 90, 14);
+        assert_eq!(
+            tree_cursor_row(&ui),
+            9,
+            "zb should go to the last visible row:\n{bottom}"
+        );
+
+        press(&mut ui, &ctx, "z z");
+        let _ = render(&ui, &ctx, 90, 14);
+        assert_eq!(tree_cursor_row(&ui), 5, "zz should go to the middle");
+    }
+
+    /// `zt` near the end of a list has nothing below it to show. vim scrolls
+    /// anyway and fills with `~`; without the filler this would be ignored.
+    #[test]
+    fn zt_on_the_last_row_scrolls_rather_than_being_ignored() {
+        let store = many_artists(30);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "G");
+        let _ = render(&ui, &ctx, 90, 14);
+        press(&mut ui, &ctx, "z t");
+        let out = render(&ui, &ctx, 90, 14);
+
+        assert_eq!(tree_cursor_row(&ui), 0, "the last row should be at the top");
+        assert!(out.contains('~'), "and the rest filler:\n{out}");
+    }
+
+    /// It works in the flat lists too, which is where a track index and a
+    /// screen row stop being the same number.
+    #[test]
+    fn placing_works_in_the_sorted_list() {
+        let store = many_artists(30);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "2 0 G");
+        let _ = render(&ui, &ctx, 90, 14);
+        press(&mut ui, &ctx, "z t");
+        let out = render(&ui, &ctx, 90, 14);
+        assert!(
+            out.lines().nth(2).is_some_and(|l| l.contains("Track")),
+            "the cursor's row should be the first one drawn:\n{out}"
+        );
+    }
+
+    /// `gp` finds the playing track and opens whatever was hiding it, without
+    /// disturbing the rest of the tree.
+    #[test]
+    fn g_p_reveals_the_playing_track() {
+        let store = many_artists(8);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        // Play something three levels down, then close everything over it.
+        press(&mut ui, &ctx, "z R");
+        press(&mut ui, &ctx, "j j j");
+        press(&mut ui, &ctx, "<leader> x");
+        let playing = ui.playback.current.expect("nothing started");
+        press(&mut ui, &ctx, "z M");
+        assert_eq!(ui.tree.rows(&ui.library, &store).len(), 8, "all closed");
+
+        press(&mut ui, &ctx, "g p");
+        let rows = ui.tree.rows(&ui.library, &store);
+        assert!(
+            matches!(&rows[ui.tree.selected], tree::Row::Track { id, .. } if *id == playing),
+            "the cursor should be on the playing track: {:?}",
+            rows.get(ui.tree.selected)
+        );
+        assert_eq!(
+            rows.len(),
+            8 + 1 + 2,
+            "it should open the way to the track and nothing else: {rows:?}"
+        );
+    }
+
+    /// And says so rather than moving somewhere arbitrary.
+    #[test]
+    fn g_p_with_nothing_playing_says_so() {
+        let store = many_artists(4);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "g p");
+        assert_eq!(ui.tree.selected, 0);
+        assert!(render(&ui, &ctx, 90, 12).contains("nothing is playing"));
+    }
+
+    /// The arithmetic, directly. ratatui scrolls to keep the selection visible,
+    /// so it quietly corrects an off-by-one in `zb` — which makes the mistake
+    /// invisible in a rendered pane and visible only here.
+    #[test]
+    fn place_puts_the_row_at_the_edge_it_names() {
+        let scroll = Scroll::default();
+        // Ten visible rows, cursor on row 20.
+        let _ = scroll.state_within(Some(20), 100, 10);
+
+        scroll.place(crate::cmd::Place::Top);
+        assert_eq!(scroll.top(), 20, "zt: the cursor's row is the first drawn");
+
+        scroll.place(crate::cmd::Place::Bottom);
+        assert_eq!(
+            scroll.top(),
+            11,
+            "zb: rows 11..=20 fill the pane, so 20 is the last drawn"
+        );
+
+        scroll.place(crate::cmd::Place::Centre);
+        assert_eq!(scroll.top(), 15, "zz: five rows above the cursor");
+    }
+
+    /// A pane nothing has drawn yet has no height to divide by.
+    #[test]
+    fn placing_before_the_first_frame_does_nothing() {
+        let scroll = Scroll::default();
+        for place in crate::cmd::Place::ALL {
+            scroll.place(*place);
+            assert_eq!(scroll.top(), 0);
+        }
+    }
+
+    /// View 3's left pane is a short list that draws itself, so `zz` there has
+    /// nothing to act on — and must not reach across and scroll the tracks.
+    #[test]
+    fn placing_in_the_playlist_pane_leaves_the_tracks_alone() {
+        let store = many_artists(30);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Playlist;
+        for id in ui.library.sorted() {
+            ui.playlist.push(*id);
+        }
+
+        // Scroll the right-hand pane, then move focus to the left one.
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "G");
+        let _ = render(&ui, &ctx, 90, 14);
+        let parked = ui.playlist_scroll.top();
+        assert!(parked > 0, "the tracks should be scrolled to start with");
+
+        ui.playlist_pane = Pane::Tree;
+        press(&mut ui, &ctx, "z t");
+        assert_eq!(
+            ui.playlist_scroll.top(),
+            parked,
+            "the tracks moved while the cursor was in the other pane"
+        );
+    }
+
+    /// The same in view 8. The open guide scrolls by its own mechanism, not a
+    /// `Scroll`, so placing while focused there does nothing — but it must not
+    /// move the list of guides instead.
+    #[test]
+    fn placing_in_an_open_guide_leaves_the_list_alone() {
+        let store = many_artists(4);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Guides;
+        ui.guide_pane = Pane::Tree;
+
+        press(&mut ui, &ctx, "G");
+        let _ = render(&ui, &ctx, 60, 8);
+        let parked = ui.guides_scroll.top();
+
+        ui.guide_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "z t");
+        assert_eq!(
+            ui.guides_scroll.top(),
+            parked,
+            "the list of guides moved while the cursor was in the guide"
         );
     }
 }

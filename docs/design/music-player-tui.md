@@ -2416,6 +2416,44 @@ Append here as decisions are made. Format: date, decision, rationale.
   Ordered case-insensitively with the unshifted key first, so `c` is followed by `C`. Two separate alphabets — every
   capital, then every minuscule — is how ASCII sorts and not how a keymap is read.
 
+- **2026-08-31** **`zv` is not bound, because here it could never do anything.** vim's `zv` opens just enough folds to
+  make the cursor's line visible. In this tree the cursor always sits on a row that `rows()` produced, so it is visible
+  by construction and `zv` is a guaranteed no-op — binding it would be shipping a key that does nothing.
+
+  What is useful is the compound: **`zx`** — vim's "reapply `foldlevel`, then `zv`" — because closing everything is
+  exactly the moment the cursor's row stops being visible. It records the folds holding the cursor's row, sets the level
+  to zero, reopens those, and puts the cursor back. On an artist that degenerates to `zM`, correctly.
+
+  Which folds "hold" a row depends on its kind, and that is why `Expansion::reveal` was deleted rather than used: an
+  ancestors-only walk cannot say that a _track_ needs its own album open. `TreeState::ancestors_of` answers per row —
+  none for an artist, its artist for an album, both for a track.
+
+  The question that prompted it — "can I close all open folds except the one my cursor is in?" — has a vim answer, and
+  taking vim's spelling was cheaper and more memorable than inventing one.
+
+- **2026-08-31** **`zz`/`zt`/`zb` read the cursor's row and the pane's height off the last frame.** Neither number is
+  available outside `draw`: the height depends on the pane, and the row differs from the track index wherever album
+  dividers occupy a screen row. Both live on `Scroll` beside the offset, recorded at render — the same device as
+  `guide_view`, for the same reason.
+
+  Worth recording because it was nearly missed: ratatui scrolls to keep the selection visible, so it **silently
+  corrects** an off-by-one in `zb`. The mistake is invisible in a rendered pane and observable only in the offset that
+  was asked for, which is where the test now looks. A rendering test would have passed either way.
+
+  `zt` on the last row works because of the `~` filler; without it the list stops scrolling and the request is ignored.
+
+  Placing acts on the focused list, and `focused_scroll` returns `None` for the two panes that are not scrolling lists —
+  view 3's set of playlists and view 8's open guide. Reaching across to scroll the _other_ pane is the failure this
+  prevents, and both cases have a test.
+
+- **2026-08-31** **"Where is the thing I am listening to?" is `gp`, not `zv`.** A real question, and one neither the
+  cursor nor a search asks. It goes under `g` — already the go-somewhere prefix — rather than on `z`, because it is not
+  a fold operation and pretending otherwise would have broken the `zx = zM + zv` relationship above.
+
+  In view 1 it opens the way to the playing track and nothing else, leaving the rest of the tree as you built it. In the
+  flat lists it moves the cursor. Where the track is not in the view at all, it says so rather than moving somewhere
+  arbitrary.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

@@ -99,12 +99,6 @@ impl<K: std::hash::Hash + Eq + Clone> Expansion<K> {
         }
     }
 
-    /// Bound by #32, which adds the scroll-and-reveal half of the `z` family.
-    #[allow(dead_code)]
-    pub fn level(&self) -> u16 {
-        self.level
-    }
-
     /// `zr`, `zm`, `zR`, `zM`.
     ///
     /// Discards the hand-made overrides, as vim's `foldlevel` does: the point
@@ -125,17 +119,6 @@ impl<K: std::hash::Hash + Eq + Clone> Expansion<K> {
     /// `zm` — one fewer.
     pub fn less(&mut self) {
         self.set_level(self.level.saturating_sub(1));
-    }
-
-    /// `zv` — open exactly the ancestors of `path`, and nothing else.
-    ///
-    /// Not `zR`-then-scroll: revealing the playing track should leave the rest
-    /// of the tree as you had it.
-    #[allow(dead_code)]
-    pub fn reveal(&mut self, path: &[K]) {
-        for depth in 1..path.len() {
-            self.open(&path[..depth]);
-        }
     }
 
     /// Open every path given — `zO`, whose descendants the caller finds,
@@ -241,23 +224,16 @@ mod tests {
     fn the_level_saturates_rather_than_wrapping() {
         let mut e: Expansion<String> = Expansion::default();
         e.less();
-        assert_eq!(e.level(), 0, "`zm` at the top wrapped");
-        for _ in 0..5 {
-            e.more();
-        }
-        assert_eq!(e.level(), 5);
-    }
+        assert!(
+            !e.is_open(&p(&["burial"])),
+            "`zm` at the top wrapped, and everything is open"
+        );
 
-    /// `zv` opens the way to one row and leaves the rest alone — the whole
-    /// difference between revealing and `zR`-then-scrolling.
-    #[test]
-    fn reveal_opens_only_the_ancestors() {
-        let mut e: Expansion<String> = Expansion::default();
-        e.reveal(&p(&["burial", "untrue", "archangel"]));
-
-        assert!(e.is_open(&p(&["burial"])));
-        assert!(e.is_open(&p(&["burial", "untrue"])));
-        assert!(!e.is_open(&p(&["caribou"])), "it opened something else");
-        assert_eq!(e.level(), 0, "it changed the level");
+        // Through `is_open` rather than a getter: what the level *is* only
+        // matters through what it opens, and asserting on the number instead
+        // was the only thing keeping the getter alive.
+        e.more();
+        assert!(e.is_open(&p(&["burial"])), "one `zr` should open the top");
+        assert!(!e.is_open(&p(&["burial", "untrue"])), "and only the top");
     }
 }

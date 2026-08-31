@@ -119,7 +119,12 @@ open. Several artists and several of their albums can be open at once, and the w
 `h` on something **already closed** closes its parent and moves there, so repeated `h` walks up and out without needing
 a notion of "level".
 
-The `z` family is vim's, whole: `zo`/`zc`/`za` on one fold, `zO`/`zC` with the subtree, `zR`/`zM` for all of them, and
+The `z` family is vim's, whole: `zo`/`zc`/`za` on one fold, `zO`/`zC` with the subtree, `zR`/`zM` for all of them,
+`zr`/`zm` a level at a time, and `zx` to close everything **except** the folds holding the row you are on — the answer
+to "collapse all this, but keep my place". `zt`, `zz` and `zb` put the cursor's row at the top, middle or bottom of the
+pane, and `gp` jumps to the playing track, opening whatever was hiding it and disturbing nothing else.
+
+`zv` is deliberately not bound: the cursor here always sits on a row the tree drew, so it could never do anything.
 `zr`/`zm` a level at a time. That last pair is the one worth learning — one `zr` puts every artist's albums on screen,
 another puts every track there, and `zm` walks back out. It works because the levels are **homogeneous**: every row at
 the first level is an artist and every row at the second is an album, so "collapse to artists" is a real operation. A
