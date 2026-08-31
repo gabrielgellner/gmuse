@@ -339,6 +339,17 @@ pub struct Ui {
     /// Keys typed so far that have not resolved to a binding, and the count
     /// prefix in front of them.
     pub pending: Vec<Key>,
+    /// When the chord in `pending` began — **not** when its last key arrived.
+    ///
+    /// which-key charges its delay once per chord rather than once per key
+    /// (`view.lua:99`: an already-open popup redraws with no delay at all), and
+    /// keeping the *first* key's instant is what implements that: the elapsed
+    /// time only grows, so once the popup is up, going deeper cannot take it
+    /// away again.
+    pending_since: Option<Instant>,
+    /// How long a prefix must be held before its popup is drawn. Zero shows it
+    /// on the next frame, which is what this did before it was configurable.
+    pub which_key_delay: Duration,
     pub count: Option<usize>,
     /// The view before the current one, for `g<Tab>`.
     pub previous_view: View,
@@ -504,6 +515,8 @@ impl Ui {
             register: Vec::new(),
             last_search: None,
             pending: Vec::new(),
+            pending_since: None,
+            which_key_delay: Duration::from_millis(DEFAULT_WHICH_KEY_DELAY_MS),
             count: None,
             previous_view: View::Tree,
             relative_numbers: false,
@@ -591,6 +604,10 @@ impl Ui {
                 .into_iter()
                 .map(|(ctx, key, _)| (ctx, key))
                 .collect(),
+            numbers: vec![(
+                SettingKey::WhichKeyDelay,
+                self.which_key_delay.as_millis().to_string(),
+            )],
         }
     }
 
@@ -614,6 +631,31 @@ impl Ui {
     pub fn notify(&mut self, message: impl Into<String>) {
         self.status = message.into();
         self.status_until = Some(Instant::now() + Duration::from_secs(4));
+    }
+
+    /// How long the loop may wait for a keystroke.
+    ///
+    /// The ordinary tick, unless a prefix is part-way through its delay — in
+    /// which case only what is left of it, so the popup appears when it is due
+    /// rather than when the tick next comes round.
+    fn tick(&self, now: Instant) -> Duration {
+        const TICK: Duration = Duration::from_millis(200);
+        if self.pending.is_empty() {
+            return TICK;
+        }
+        // Once it is due there is nothing left to wait for, so fall back to the
+        // ordinary tick. Returning the remaining zero would spin the loop for
+        // as long as the popup stayed up.
+        let Some(started) = self.pending_since else {
+            return TICK;
+        };
+        match self
+            .which_key_delay
+            .checked_sub(now.saturating_duration_since(started))
+        {
+            Some(left) if !left.is_zero() => left.min(TICK),
+            _ => TICK,
+        }
     }
 
     fn expire_status(&mut self) {
@@ -657,6 +699,25 @@ pub struct Context<'a> {
     pub player: Option<&'a PlayerHandle>,
 }
 
+/// which-key's own default is 200ms; this is the value the config that
+/// prompted the setting uses, and a prefix held on purpose outlasts it easily.
+const DEFAULT_WHICH_KEY_DELAY_MS: u64 = 300;
+
+/// Whether a prefix has been held long enough for its popup to be drawn.
+///
+/// A pure function of the three things that decide it, so the rule is testable
+/// without a clock — the same separation `record_play_if_earned` makes, and for
+/// the same reason.
+///
+/// A zero delay is due immediately, so turning the wait off restores exactly
+/// the behaviour this replaced rather than approximating it.
+fn which_key_due(since: Option<Instant>, now: Instant, delay: Duration) -> bool {
+    match since {
+        Some(started) => now.saturating_duration_since(started) >= delay,
+        None => false,
+    }
+}
+
 /// Run the event loop until the user quits.
 pub fn run<B>(terminal: &mut Terminal<B>, ui: &mut Ui, ctx: &Context<'_>) -> io::Result<()>
 where
@@ -666,7 +727,13 @@ where
         terminal.draw(|frame| draw(frame, ui, ctx))?;
         // Poll rather than block: the position display has to tick even when
         // nobody is pressing anything.
-        if event::poll(Duration::from_millis(200))?
+        //
+        // While a prefix is waiting to be revealed, poll only for what is left
+        // of its delay. Otherwise the popup appears whenever the 200ms tick
+        // next comes round, which is a different moment depending on where in
+        // the cycle the key landed — a 300ms delay showing at anywhere up to
+        // 500ms, and visibly inconsistent between presses.
+        if event::poll(ui.tick(Instant::now()))?
             && let Event::Key(key) = event::read()?
             && key.is_press()
         {
@@ -1288,6 +1355,13 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
         return;
     }
 
+    // Set when a chord *begins*, and deliberately never cleared: it is only
+    // ever read while `pending` is non-empty, and every chord that starts
+    // overwrites it here. Clearing it at each of the two sites that empty
+    // `pending` would be a second copy of the same truth to keep in step.
+    if ui.pending.is_empty() {
+        ui.pending_since = Some(Instant::now());
+    }
     ui.pending.push(key);
     match bind::resolve(&ui.bindings, ui.view.context(), &ui.pending) {
         bind::Resolved::Exact(cmd) => {
@@ -1420,10 +1494,12 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             // space.
             let last = buffer.rsplit(char::is_whitespace).next().unwrap_or("");
             let done = if last.contains('=') {
-                crate::cmd::complete::complete_setting_value(last).map(|c| {
-                    let head = &buffer[..buffer.len() - last.len()];
-                    (format!("{head}{}", c.line), c.options)
-                })
+                crate::cmd::complete::complete_setting_value(last, &ui.completion_world()).map(
+                    |c| {
+                        let head = &buffer[..buffer.len() - last.len()];
+                        (format!("{head}{}", c.line), c.options)
+                    },
+                )
             } else {
                 crate::cmd::complete::complete(&buffer, &world).map(|c| (c.line, c.options))
             };
@@ -1776,6 +1852,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 SettingKey::SmartArtistSort => SettingValue::Bool(!ui.smart_artist_sort),
                 SettingKey::ResampleQuality => {
                     ui.notify("resample_quality needs :set, it is not a toggle");
+                    return;
+                }
+                SettingKey::WhichKeyDelay => {
+                    ui.notify("which_key_delay needs :set, it is a number");
                     return;
                 }
             };
@@ -2527,6 +2607,9 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
         (SettingKey::Continue, SettingValue::Bool(v)) => ui.continue_playing = v,
         (SettingKey::AlbumHeaders, SettingValue::Bool(v)) => ui.album_headers = v,
         (SettingKey::RelativeNumbers, SettingValue::Bool(v)) => ui.relative_numbers = v,
+        (SettingKey::WhichKeyDelay, SettingValue::Millis(ms)) => {
+            ui.which_key_delay = Duration::from_millis(ms as u64);
+        }
         (SettingKey::SmartArtistSort, SettingValue::Bool(v)) => {
             ui.smart_artist_sort = v;
             // The projection is ours now, so this takes effect immediately.
@@ -3088,7 +3171,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     // have typed so far. Derived from `pending` rather than stored, for the
     // same reason the pending-key indicator is — there is no second copy of
     // the truth to keep in step.
-    let which = which_key_rows(ui);
+    let which = which_key_rows(ui, Instant::now());
     let menu_height = match (&ui.prompt, &ui.help, &which) {
         (Some(p), _, _) => menu_height(p, frame.area().width),
         (None, Some(rows), _) => rows_height(rows, frame.area().width),
@@ -3227,6 +3310,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
             SettingKey::ResampleQuality => "balanced".into(),
             SettingKey::AlbumHeaders => ui.album_headers.to_string(),
             SettingKey::RelativeNumbers => ui.relative_numbers.to_string(),
+            SettingKey::WhichKeyDelay => ui.which_key_delay.as_millis().to_string(),
         };
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
@@ -3298,8 +3382,16 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
 /// both a command and a prefix, because `resolve` fires the shorter one — so
 /// there is nothing to wait to find out. A fast `gg` flashes the panel for one
 /// frame, which is what which-key looks like with `timeoutlen` at zero.
-fn which_key_rows(ui: &Ui) -> Option<Vec<String>> {
+fn which_key_rows(ui: &Ui, now: Instant) -> Option<Vec<String>> {
     if ui.pending.is_empty() {
+        return None;
+    }
+    // The wait is only for the popup nobody asked for. `<leader>?` sets
+    // `ui.help` and takes a different path, because a panel you requested by
+    // name should not make you wait for it — which is the same split which-key
+    // makes between its prefix popup and its marks/registers plugins
+    // (`config.lua:13`, `ctx.plugin and 0 or 200`).
+    if !which_key_due(ui.pending_since, now, ui.which_key_delay) {
         return None;
     }
     let rows: Vec<String> = bind::continuations(&ui.bindings, ui.view.context(), &ui.pending)
@@ -4284,6 +4376,18 @@ mod tests {
     use ratatui::crossterm::event::KeyModifiers;
 
     /// Feed a key sequence, e.g. `"j"`, `"g g"`, `"^f"`.
+    /// Backdate the pending chord past its delay, so a test about what the
+    /// popup *says* is not also a test of when it appears.
+    ///
+    /// Deliberately not "set the delay to zero in `ui_of`": that would make
+    /// every render test run in a configuration no user has, and the delay
+    /// would then be exercised by nothing that draws.
+    fn waited(ui: &mut Ui) {
+        ui.pending_since = ui
+            .pending_since
+            .map(|t| t - ui.which_key_delay - Duration::from_millis(1));
+    }
+
     fn press(ui: &mut Ui, ctx: &Context<'_>, keys_text: &str) {
         let seq = keys::parse_seq(keys_text)
             .unwrap_or_else(|e| panic!("bad test key {keys_text:?}: {e}"));
@@ -8754,6 +8858,7 @@ mod tests {
         ui.view = View::Tree;
 
         press(&mut ui, &ctx, "z");
+        waited(&mut ui);
         let out = render(&ui, &ctx, 100, 20);
         for expect in ["o  fold open", "r  fold more", "M  fold none"] {
             assert!(out.contains(expect), "expected {expect:?} in:\n{out}");
@@ -8768,6 +8873,7 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, "<leader>");
+        waited(&mut ui);
         let out = render(&ui, &ctx, 100, 20);
         assert!(out.contains("c  pause"), "{out}");
         assert!(out.contains("?  help"), "{out}");
@@ -8784,8 +8890,113 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "bind common \"z 9\" quit");
         press(&mut ui, &ctx, "z");
+        waited(&mut ui);
         let out = render(&ui, &ctx, 100, 20);
         assert!(out.contains("9  quit"), "{out}");
+    }
+
+    /// The delay itself, as a rule rather than as a rendering.
+    #[test]
+    fn the_popup_waits_and_then_is_due() {
+        let start = Instant::now();
+        let delay = Duration::from_millis(300);
+
+        assert!(
+            !which_key_due(Some(start), start, delay),
+            "due the instant the prefix was pressed"
+        );
+        assert!(
+            !which_key_due(Some(start), start + Duration::from_millis(299), delay),
+            "due a millisecond early"
+        );
+        assert!(which_key_due(Some(start), start + delay, delay));
+        assert!(
+            !which_key_due(None, start + delay, delay),
+            "due with no chord pending"
+        );
+        assert!(
+            which_key_due(Some(start), start, Duration::ZERO),
+            "a zero delay should restore the old behaviour exactly"
+        );
+    }
+
+    /// The whole point: a chord typed at speed never draws the panel.
+    #[test]
+    fn a_chord_finished_before_the_delay_never_shows_the_panel() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z");
+        assert!(
+            !render(&ui, &ctx, 100, 20).contains("fold open"),
+            "the panel appeared before its delay had passed"
+        );
+        press(&mut ui, &ctx, "a");
+        assert!(ui.pending.is_empty(), "the chord did not complete");
+    }
+
+    /// which-key charges the delay once per chord, not once per key: going
+    /// deeper redraws immediately. Held here by keeping the *first* key's
+    /// instant, so this is really a test that the second key does not reset it.
+    #[test]
+    fn going_deeper_does_not_pay_the_delay_again() {
+        let mut bindings = bind::defaults();
+        let seq = crate::cmd::keys::parse_seq("g q x").expect("test keys");
+        bindings.insert((crate::cmd::Context::Common, seq), Command::Quit);
+
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.bindings = bindings;
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "g");
+        waited(&mut ui);
+        let before = ui.pending_since.expect("a chord is pending");
+        press(&mut ui, &ctx, "q");
+
+        assert_eq!(
+            ui.pending_since,
+            Some(before),
+            "the second key restarted the clock"
+        );
+        assert!(
+            render(&ui, &ctx, 100, 20).contains("x  quit"),
+            "going deeper made the popup wait again"
+        );
+    }
+
+    /// The loop must not spin once the popup is up, and must not oversleep
+    /// while it is waiting.
+    #[test]
+    fn the_tick_shortens_for_a_pending_prefix_and_no_further() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let full = Duration::from_millis(200);
+
+        let now = Instant::now();
+        assert_eq!(ui.tick(now), full, "nothing pending, so the ordinary tick");
+
+        press(&mut ui, &ctx, "z");
+        let started = ui.pending_since.expect("a chord is pending");
+        assert_eq!(
+            ui.tick(started + Duration::from_millis(150)),
+            Duration::from_millis(150),
+            "it should wake exactly when the delay expires"
+        );
+        assert_eq!(
+            ui.tick(started + Duration::from_millis(1)),
+            full,
+            "a delay longer than the tick should not stretch it"
+        );
+        assert_eq!(
+            ui.tick(started + Duration::from_secs(9)),
+            full,
+            "a due popup should not spin the loop on a zero timeout"
+        );
     }
 
     /// Completing the chord takes it away again — it is a prompt, not a mode.
@@ -8797,6 +9008,7 @@ mod tests {
         ui.view = View::Tree;
 
         press(&mut ui, &ctx, "z");
+        waited(&mut ui);
         assert!(render(&ui, &ctx, 100, 20).contains("fold open"));
         press(&mut ui, &ctx, "a");
         assert!(

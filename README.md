@@ -146,8 +146,13 @@ plays. `<leader>x` plays what is under the cursor from anywhere, so the two are 
 until structure runs out, then acts on the thing itself.
 
 **Start a chord and it tells you what can follow.** Press `z`, or the leader, or `g`, and the bottom panel lists every
-key that extends it and what each one does — which-key, without a timeout, because a key bound on its own fires outright
-here and there is nothing to wait to find out. It is read off the binding table, so a `:bind` appears in it at once.
+key that extends it and what each one does. It is read off the binding table, so a `:bind` appears in it at once.
+
+It waits 300ms first, so a chord you already know is never interrupted by a panel you did not need.
+`:set which_key_delay=0` shows it immediately, and any number of milliseconds sets the wait. This is not vim's
+`timeoutlen` and does not change what a key _means_ — no key here is both a command and a prefix, so nothing is ever
+waiting to find out. The delay is only about when to draw, and it is charged once per chord: once the panel is up, going
+deeper redraws it at once.
 
 **`space` is the leader**, and `<leader>?` shows the keys that work in the current view.
 

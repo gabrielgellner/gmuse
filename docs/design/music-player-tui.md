@@ -2563,6 +2563,45 @@ Append here as decisions are made. Format: date, decision, rationale.
   as a field, a predicate, an event or a view spec before it becomes a subsystem. Ratings, history and catalogs are the
   evidence: each was small because it entered that way.
 
+- **2026-08-31** **The which-key popup waits 300ms, and the reasoning it replaces was half right (issue #46).** The
+  panel drew on the frame after the prefix, so `zz` flashed the whole fold vocabulary and took it away again. The
+  comment on `which_key_rows` defended that, and the defence conflated two different waits:
+
+  > which-key, without a timeout: a chord here is always deliberate — no key is both a command and a prefix … so there
+  > is nothing to wait to find out.
+
+  True, and it is an argument about **disambiguation** — vim's `timeoutlen`, which decides what the keys _mean_. This
+  keymap genuinely does not need it. which-key's `delay` is a separate option that decides only **when to draw**, so
+  that a chord you already know never gets a popup at all. The old comment even predicted the symptom ("a fast `gg`
+  flashes the panel for one frame") and judged it acceptable; use said otherwise.
+
+  Three details taken from `which-key/view.lua:99`, and they are what make it feel right rather than merely late. **The
+  delay is charged once per chord, not once per key** — an already-open popup redraws with no delay — which is held here
+  by keeping the _first_ key's instant in `pending_since` and never resetting it. **Nothing waits that was asked for by
+  name**: `<leader>?` sets `ui.help` and takes a different path, mirroring which-key's `ctx.plugin and 0`. And **the
+  poll shortens to what is left of the delay** — at a flat 200ms tick the popup would appear anywhere up to 500ms
+  depending on where in the cycle the key landed, which is worse than being late, because it is inconsistent between
+  presses. `tick()` returns the ordinary 200ms again once the popup is due, or the loop would spin on a zero timeout for
+  as long as it stayed up.
+
+- **2026-08-31** **`SettingValue::Millis(u16)` — the first numeric setting, chosen over a named enum.**
+  `off | short | long` would have fitted the existing completion model exactly, and it is a number wearing a disguise;
+  the next timing setting would have reopened the question.
+
+  **The completion question was settled by measuring vim, not by reasoning about it.** `:` completion is prefix-based
+  over a closed vocabulary (2026-08-28) and a number has none, so the first attempt offered `0`, `200`, `300`, `500` as
+  _suggestions_ — which would have meant every other perfectly valid number reading as "no matches". Running
+  `getcompletion("set scrolloff=", "cmdline")` in nvim gives `['7']`: **the current value, alone**, where
+  `set foldmethod=` gives the whole enum. So vim does complete numerics, and what it offers is the one thing it knows
+  rather than a list of plausible ones.
+
+  Taken as-is. `set which_key_delay=` completes to what it is set to now, which answers "what is this at?" — the
+  question you actually have before editing it — and offers nothing when what you have typed is not a prefix of it,
+  because there is nothing to offer. The current value reaches `setting_values` through `World`, alongside the catalogs
+  and bindings already there.
+
+  `:toggle which_key_delay` is refused by name, like `resample_quality` before it, rather than cycling through guesses.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

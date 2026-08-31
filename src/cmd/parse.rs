@@ -500,6 +500,14 @@ fn setting_value(key: SettingKey, text: &str) -> Result<SettingValue, ParseError
             "high" => Quality::High,
             _ => return Err(ParseError::Bad(text.into(), "resample quality")),
         }),
+        // The one setting parsed as a number. Milliseconds, because that is
+        // what it is — and a bad one names itself rather than falling through
+        // to the boolean arm, where "300" would have been rejected as not a
+        // boolean and said so.
+        SettingKey::WhichKeyDelay => SettingValue::Millis(
+            text.parse::<u16>()
+                .map_err(|_| ParseError::Bad(text.into(), "milliseconds"))?,
+        ),
         _ => SettingValue::Bool(match text {
             "true" | "yes" | "on" | "1" => true,
             "false" | "no" | "off" | "0" => false,

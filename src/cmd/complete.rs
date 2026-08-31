@@ -22,6 +22,9 @@ pub struct World {
     /// `(context, key text)` for every binding, so `unbind` offers only keys
     /// that are actually bound.
     pub bound: Vec<(Context, String)>,
+    /// What each numeric setting is set to right now, so `set which_key_delay=`
+    /// can offer it — see [`setting_values`].
+    pub numbers: Vec<(SettingKey, String)>,
 }
 
 /// The result of a completion request.
@@ -79,7 +82,7 @@ pub fn matches(line: &str, world: &World) -> Vec<String> {
     // things, so the split is inside the word rather than at a space.
     if let Some((key_text, typed)) = word.rsplit_once('=') {
         return match SettingKey::parse(key_text) {
-            Some(key) => setting_values(key)
+            Some(key) => setting_values(key, world)
                 .into_iter()
                 .filter(|v| v.starts_with(typed))
                 .collect(),
@@ -134,7 +137,7 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
         "toggle" if words.len() == 1 => SettingKey::ALL
             .iter()
             // resample_quality is not a boolean, so it is not a toggle.
-            .filter(|k| **k != SettingKey::ResampleQuality)
+            .filter(|k| !matches!(k, SettingKey::ResampleQuality | SettingKey::WhichKeyDelay))
             .map(|k| k.name().to_string())
             .collect(),
 
@@ -179,11 +182,27 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
 }
 
 /// `set shuffle=` completes the values valid for that key.
-fn setting_values(key: SettingKey) -> Vec<String> {
+///
+/// A numeric setting completes to **what it is set to now**, which is what vim
+/// does and is the only useful answer when there is no closed set to offer.
+/// Measured rather than assumed: in nvim, `getcompletion("set scrolloff=",
+/// "cmdline")` returns the current value and nothing else, while
+/// `set foldmethod=` returns the whole enum.
+///
+/// A list of plausible numbers would have been guessing, and every value it did
+/// not contain — all but four of them — would have read as "no matches" while
+/// being perfectly valid.
+fn setting_values(key: SettingKey, world: &World) -> Vec<String> {
     match key {
         SettingKey::AaaMode => vec!["all".into(), "artist".into(), "album".into()],
         SettingKey::ResampleQuality => vec!["fast".into(), "balanced".into(), "high".into()],
         SettingKey::ReplayGain => vec!["off".into(), "track".into(), "album".into(), "auto".into()],
+        SettingKey::WhichKeyDelay => world
+            .numbers
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| vec![v.clone()])
+            .unwrap_or_default(),
         _ => vec!["true".into(), "false".into()],
     }
 }
@@ -217,10 +236,10 @@ fn common_prefix(items: &[String]) -> String {
 }
 
 /// `set key=value` is one word, so the value half needs its own handling.
-pub fn complete_setting_value(word: &str) -> Option<Completion> {
+pub fn complete_setting_value(word: &str, world: &World) -> Option<Completion> {
     let (key_text, typed) = word.split_once('=')?;
     let key = SettingKey::parse(key_text)?;
-    let matches: Vec<String> = setting_values(key)
+    let matches: Vec<String> = setting_values(key, world)
         .into_iter()
         .filter(|v| v.starts_with(typed))
         .collect();
@@ -247,7 +266,24 @@ mod tests {
                 (Context::Common, "g g".into()),
                 (Context::Playlist, "x".into()),
             ],
+            numbers: vec![(SettingKey::WhichKeyDelay, "300".into())],
         }
+    }
+
+    /// vim's answer for a numeric option, verified against nvim rather than
+    /// remembered: `getcompletion("set scrolloff=", "cmdline")` returns the
+    /// current value alone, where `set foldmethod=` returns the whole enum.
+    #[test]
+    fn a_numeric_setting_completes_to_what_it_is_now() {
+        let c = complete_setting_value("which_key_delay=", &world()).expect("a candidate");
+        assert_eq!(c.line, "which_key_delay=300");
+        assert_eq!(c.options, vec!["300".to_string()]);
+
+        assert!(
+            complete_setting_value("which_key_delay=4", &world()).is_none(),
+            "a number the current value does not prefix should offer nothing, \
+             rather than a guess it would then have to reject"
+        );
     }
 
     fn line_of(input: &str) -> String {
@@ -321,16 +357,16 @@ mod tests {
     /// The interesting one: which values are valid depends on the key.
     #[test]
     fn set_values_depend_on_the_key() {
-        let c = complete_setting_value("aaa_mode=a").unwrap();
+        let c = complete_setting_value("aaa_mode=a", &world()).unwrap();
         assert_eq!(c.options, ["all", "artist", "album"]);
 
-        let c = complete_setting_value("resample_quality=").unwrap();
+        let c = complete_setting_value("resample_quality=", &world()).unwrap();
         assert_eq!(c.options, ["fast", "balanced", "high"]);
 
-        let c = complete_setting_value("shuffle=t").unwrap();
+        let c = complete_setting_value("shuffle=t", &world()).unwrap();
         assert_eq!(c.line, "shuffle=true");
 
-        assert!(complete_setting_value("nosuch=x").is_none());
+        assert!(complete_setting_value("nosuch=x", &world()).is_none());
     }
 
     #[test]

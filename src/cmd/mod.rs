@@ -158,6 +158,7 @@ pub enum SettingKey {
     AlbumHeaders,
     RelativeNumbers,
     ReplayGain,
+    WhichKeyDelay,
 }
 
 /// Which loudness tag to follow, per ReplayGain 2.0.
@@ -218,6 +219,7 @@ impl SettingKey {
             SettingKey::AlbumHeaders => "album_headers",
             SettingKey::RelativeNumbers => "relative_numbers",
             SettingKey::ReplayGain => "replaygain",
+            SettingKey::WhichKeyDelay => "which_key_delay",
         }
     }
 
@@ -233,6 +235,7 @@ impl SettingKey {
             "album_headers" => SettingKey::AlbumHeaders,
             "relative_numbers" => SettingKey::RelativeNumbers,
             "replaygain" => SettingKey::ReplayGain,
+            "which_key_delay" => SettingKey::WhichKeyDelay,
             _ => return None,
         })
     }
@@ -248,6 +251,7 @@ impl SettingKey {
         SettingKey::AlbumHeaders,
         SettingKey::RelativeNumbers,
         SettingKey::ReplayGain,
+        SettingKey::WhichKeyDelay,
     ];
 }
 
@@ -275,6 +279,12 @@ pub enum SettingValue {
     Aaa(AaaMode),
     Quality(Quality),
     ReplayGain(ReplayGainMode),
+    /// A duration in milliseconds. The first setting that is a *number* rather
+    /// than a name, and deliberately so: `off | short | long` would be a number
+    /// wearing a disguise, and the next timing setting would reopen the
+    /// question. The cost is that this is the one value `:` completion cannot
+    /// enumerate — see `complete::setting_values`.
+    Millis(u16),
 }
 
 impl std::fmt::Display for SettingValue {
@@ -284,6 +294,7 @@ impl std::fmt::Display for SettingValue {
             SettingValue::Aaa(a) => write!(f, "{}", a.label()),
             SettingValue::Quality(q) => write!(f, "{}", quality_name(*q)),
             SettingValue::ReplayGain(m) => write!(f, "{}", m.label()),
+            SettingValue::Millis(ms) => write!(f, "{ms}"),
         }
     }
 }
