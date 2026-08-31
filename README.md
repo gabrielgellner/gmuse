@@ -109,9 +109,8 @@ gmuse [OPTIONS] [FILE]
 ```
 
 The TUI opens on the library tree. Views are nvim-style tabs: `gt`/`gT` step, `3gt` jumps to view 3, and `g<Tab>`
-returns to the last one. **View 8** lists every playlist — rules and saved files together, rules marked as such — and
-`Enter` opens the one under the cursor into view 3. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom,
-`12G` to a row. `space` expands an artist, `tab` swaps pane, `q` quits.
+returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `space` expands
+an artist, `tab` swaps pane, `q` quits.
 
 Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `settings`, `playlists`.
 
@@ -327,23 +326,29 @@ length, keep their own history rather than risk attaching a rating to the wrong 
 
 ## Playlists
 
-View 3 holds one playlist at a time. `y` adds the selection, `D` removes, and **it survives a quit** — the queue always
-did, and a list you assembled deliberately deserved it more.
+View 3 has **two panes**, like view 1: the playlists on the left, the open one's tracks on the right, `tab` to swap. The
+left pane lists rules first, then saved files, with a track count beside each; `Enter` opens one and moves you into it.
+It rereads the directory on entry, so a playlist dropped in from another program appears.
 
-**View 8** lists what there is: rules first, then saved files, with a track count beside each. `Enter` opens one into
-view 3. It rereads the directory whenever you enter it, so a playlist dropped in from another program appears.
-
-Named playlists are files, kept in `<data_dir>/playlists`:
+Playlists are files, kept in `<data_dir>/playlists`:
 
 ```
-:playlist save roadtrip     write view 3 out as roadtrip.m3u8
-:playlist open roadtrip     read it back
+:playlist new roadtrip      start an empty one
+:playlist open roadtrip     open it
+:playlist save mix          copy the open one under a new name
 :playlist list              what there is
 ```
 
+`y` adds the selection to **the playlist you have open**, and `D` removes — both **written to the file immediately**,
+the same rule ratings and plays follow: losing what you meant is worse than the cost of a write. Adding with nothing
+open says so and points at `:playlist new`, rather than inventing a file you did not ask for.
+
 `open` takes a **rule or a file** without caring which, because both are play sources — see
-[Smart playlists](#smart-playlists). Saving a rule-defined list writes what it currently holds and detaches it, so it
-becomes an ordinary editable playlist.
+[Smart playlists](#smart-playlists). A rule cannot be edited; `:playlist save <name>` copies its current contents into
+an ordinary playlist, and `:freeze` detaches it without writing anything.
+
+The session remembers which playlist was open **by name** — the tracks live in the file, so a copy could only go stale,
+and reopening gets whatever the file says today.
 
 The format is **M3U8**, not one of ours. A playlist is an ordered list of paths, which is exactly what M3U is, and M3U
 is what everything reads — VLC, foobar2000, Plex, beets, cmus. We write `#EXTM3U` with `#EXTINF` lines and read `.m3u`,

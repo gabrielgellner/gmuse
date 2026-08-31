@@ -2071,25 +2071,35 @@ Append here as decisions are made. Format: date, decision, rationale.
   survived. A rule-owned list is deliberately **not** captured: it is recomputed from its rule on open, and freezing a
   stale copy into the session would make it lie.
 
-- **2026-08-30** **View 8 is the playlist browser**, and it is a view rather than a pane of view 3 because the two show
-  different things: view 3 is the _open_ playlist, view 8 is the _set_. One is a list of tracks, the other a list of
-  lists. Rules and saved files appear together — they are one vocabulary (#15, #22) — with rules first, since they
-  cannot be created or renamed from inside the app and keeping them fixed stops the interesting half jumping around as
-  playlists are saved. A rule is _marked_, not hidden: opening one gives a list that cannot be edited, which is worth
-  knowing before pressing enter.
+- **2026-08-30** **View 3 is two panes, not two views.** A first attempt made the playlist _browser_ view 8, beside view
+  3's open playlist. That gave the tab strip `3:playlist` and `8:playlists` — two tabs for one subject, and a
+  distinction nobody wants to hold. The set and the open one belong in one view, split the way view 1 already splits
+  artists from tracks: pick on the left, see it on the right. `tab`, `pane-left`/`pane-right` and the `in <pane>`
+  wrapper all work here without a new key, because the wrapper is about _panes_ rather than about the library.
 
-  Rows are cached and rebuilt on entry and on save, not derived per frame: counting a saved playlist's tracks means
-  reading the file, and doing that at the UI tick rate would be I/O for nothing. Rebuilding on entry is also what makes
-  a playlist dropped in by another program appear.
+  That took the count back to seven views, and made #23's other question moot — the numbering only grouped badly because
+  of the tab that should not have existed.
 
-  This is the first view added since the set was inherited from cmus, and it is a partial answer to #23 — the question
-  of whether the _rest_ of that set earns its place is still open.
+  Two consequences worth stating, both simplifications of what shipped hours earlier:
 
-  It also caught a latent bug: the tab strip numbered views by their position in `View::ALL` while `3gt` and `:view 3`
-  use the enum's discriminant. Equivalent only while `ALL` happens to be in id order, and silently wrong the moment a
-  view is inserted anywhere but the end. The strip now numbers from the id, and a test pins `ALL` as complete and
-  ordered — a view missing from it is unreachable by `gt` and invisible in the strip while still being a legal
-  `:view <n>` target.
+  **There is no unnamed working playlist.** Adding means adding to _the one you picked_, so `:playlist new <name>`
+  starts one and `y` refuses when nothing is open, naming that remedy rather than inventing a file. An invisible scratch
+  list was the alternative and it is worse: it cannot be got back to once something else is opened.
+
+  **The session stores the open playlist's name, not its contents.** Every playlist is a file or a rule, so the tracks
+  have a home of their own and a copy in the session could only go stale. Reopening by name gets what the file says
+  today, which is what you want after editing it in another program.
+
+  Edits are **written through** on every `y` and `D`, the rule ratings and plays already follow. `:playlist save` is
+  therefore not "write this out" but _save-as_ — copy the open one, which is also how a rule's current contents become
+  editable.
+
+  `Open { Rule(String), Saved(String) }` replaced a `smart: Option<String>` that would have needed a second, mutually
+  exclusive `Option` beside it. Two `Option`s that cannot both be `Some` are a state that can lie; one enum cannot.
+
+- **2026-08-30** **View 6 is `scope`, not `filters`.** It lists catalogs and shows the active `:filter` as context, so
+  it was named after the smaller half — and the name collided with a command that does something else entirely. `scope`
+  covers both halves: everything narrowing the library right now.
 
 - **2026-08-30** **View 7 is editable, and the relative gutter reaches the tree.** A view that shows what can change and
   refuses to change it is a _display_, and §4's argument for a view is that it is a place to do something — the test #23

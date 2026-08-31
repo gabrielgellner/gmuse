@@ -42,12 +42,6 @@ pub enum View {
     Browser = 5,
     Filters = 6,
     Settings = 7,
-    /// The playlist browser: what there is to open (#22).
-    ///
-    /// A separate view rather than a pane of view 3, because view 3 shows the
-    /// *open* playlist and this shows the *set* — one is a list of tracks, the
-    /// other a list of lists.
-    Playlists = 8,
 }
 
 impl View {
@@ -58,8 +52,7 @@ impl View {
             View::Playlist => "playlist",
             View::Queue => "queue",
             View::Browser => "browser",
-            View::Filters => "filters",
-            View::Playlists => "playlists",
+            View::Filters => "scope",
             View::Settings => "settings",
         }
     }
@@ -72,7 +65,6 @@ impl View {
             ViewId::Queue => View::Queue,
             ViewId::Browser => View::Browser,
             ViewId::Filters => View::Filters,
-            ViewId::Playlists => View::Playlists,
             ViewId::Settings => View::Settings,
         }
     }
@@ -99,7 +91,6 @@ impl View {
         View::Browser,
         View::Filters,
         View::Settings,
-        View::Playlists,
     ];
 
     pub fn context(self) -> crate::cmd::Context {
@@ -111,7 +102,6 @@ impl View {
             View::Queue => C::Queue,
             View::Browser => C::Browser,
             View::Filters => C::Filters,
-            View::Playlists => C::Playlists,
             View::Settings => C::Settings,
         }
     }
@@ -264,7 +254,29 @@ impl BrowserState {
     }
 }
 
-/// One row of view 8.
+/// Which playlist view 3 has open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Open {
+    /// A rule (#15). Editing is refused — an exception list bolted onto a rule
+    /// is how these become unexplainable — and `:freeze` is the way out.
+    Rule(String),
+    /// A saved `.m3u8` (#22). Edits are written straight through.
+    Saved(String),
+}
+
+impl Open {
+    pub fn name(&self) -> &str {
+        match self {
+            Open::Rule(n) | Open::Saved(n) => n,
+        }
+    }
+
+    pub fn is_rule(&self) -> bool {
+        matches!(self, Open::Rule(_))
+    }
+}
+
+/// One row of view 3's left pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaylistRow {
     pub name: String,
@@ -341,8 +353,15 @@ pub struct Ui {
     pub settings_sel: usize,
     /// Cursor in view 6, the catalog list.
     pub catalog_sel: usize,
-    /// Cursor in view 8, the playlist browser.
+    /// Cursor in view 3's left pane, the list of playlists.
     pub playlists_sel: usize,
+    /// Which half of view 3 has focus: the set, or the open one.
+    ///
+    /// `Pane::Tree` is the list of playlists and `Pane::Tracks` its contents,
+    /// named for view 1's panes because they are the same idea — pick on the
+    /// left, see it on the right — and `tab`, `pane-left` and `in <pane>` all
+    /// work here for free.
+    pub playlist_pane: Pane,
     /// What view 8 shows, rebuilt when it is entered or when a playlist is
     /// written.
     ///
@@ -365,13 +384,12 @@ pub struct Ui {
     /// `None` when there is nowhere to keep them, which is the same guard the
     /// event log uses — the feature is simply absent rather than half-working.
     pub saved: Option<crate::playlist::Playlists>,
-    /// Which smart playlist view 3 is currently showing, if any.
+    /// What view 3 is showing, if anything.
     ///
-    /// The name rather than the list: the tracks live in `playlist` like any
-    /// other, and this is what marks them as **owned by a rule** — which is
-    /// what makes editing refuse and `:freeze` mean something. Cleared by
-    /// `:freeze` and by anything that fills view 3 by hand.
-    pub smart: Option<String>,
+    /// The *name*, not the tracks — those live in `playlist` like any other
+    /// list. One enum rather than two mutually exclusive `Option`s, because
+    /// a rule and a file cannot both be open and a pair of them could say so.
+    pub open: Option<Open>,
     /// A transient narrowing on top of the active catalogs. Anonymous and
     /// not saved — a named, persistent one is a catalog (§7).
     pub filter: Option<crate::filter::Filter>,
@@ -405,7 +423,7 @@ impl Ui {
             playlist: Playlist::new(),
             playlists: crate::smart::SmartPlaylists::default(),
             saved: None,
-            smart: None,
+            open: None,
             queue: Queue::new(),
             playback: Playback::default(),
             volume_hint: None,
@@ -426,6 +444,7 @@ impl Ui {
             seen_underruns: 0,
             settings_sel: 0,
             playlists_sel: 0,
+            playlist_pane: Pane::Tree,
             playlist_rows: Vec::new(),
             catalog_sel: 0,
             theme: theme::Theme::default(),
@@ -520,7 +539,7 @@ impl Ui {
             View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
-            View::Browser | View::Filters | View::Settings | View::Playlists => None,
+            View::Browser | View::Filters | View::Settings => None,
         }
     }
 }
@@ -867,17 +886,7 @@ pub fn capture_session(ui: &Ui, ctx: &Context<'_>) -> crate::session::Session {
     crate::session::Session {
         version: 0, // stamped by `save`
         queue: ui.queue.entries().filter_map(|id| path_of(*id)).collect(),
-        // A rule-owned list is not captured: it is recomputed from the rule on
-        // open, and freezing a stale copy into the session would make it lie.
-        playlist: match ui.smart {
-            Some(_) => Vec::new(),
-            None => ui
-                .playlist
-                .entries()
-                .iter()
-                .filter_map(|id| path_of(*id))
-                .collect(),
-        },
+        open_playlist: ui.open.as_ref().map(|o| o.name().to_string()),
         current: ui.playback.current.and_then(path_of),
         position_secs: ctx
             .player
@@ -956,15 +965,12 @@ pub fn restore_session(
         }
     }
 
-    ui.playlist.clear();
-    for path in &saved.playlist {
-        if let Some(id) = ctx.store.id_for_path(path) {
-            ui.playlist.push(id);
-        } else {
-            missing += 1;
-        }
+    // The playlist comes back by *name*: its contents live in a file, and a
+    // copy in the session could only be a stale one.
+    refresh_playlist_rows(ui);
+    if let Some(name) = &saved.open_playlist {
+        open_playlist(ui, ctx, &name.clone());
     }
-    ui.playlist_sel = 0;
 
     if let Some(path) = saved.current.as_ref()
         && let Some(id) = ctx.store.id_for_path(path)
@@ -1357,41 +1363,55 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         },
         Command::PageDown => set_cursor(ui, (cursor + page * n).min(len.saturating_sub(1))),
         Command::PageUp => set_cursor(ui, cursor.saturating_sub(page * n)),
-        Command::PaneNext => {
-            if ui.view == View::Tree {
+        Command::PaneNext => match ui.view {
+            View::Tree => {
                 ui.tree.pane = match ui.tree.pane {
                     Pane::Tree => Pane::Tracks,
                     Pane::Tracks => Pane::Tree,
                 };
             }
-        }
+            View::Playlist => {
+                ui.playlist_pane = match ui.playlist_pane {
+                    Pane::Tree => Pane::Tracks,
+                    Pane::Tracks => Pane::Tree,
+                };
+            }
+            _ => {}
+        },
         // Directional rather than a toggle: with two panes they behave the
         // same, but the binding says what it means and keeps working when a
         // third arrives.
-        Command::PaneLeft => {
-            if ui.view == View::Tree {
-                ui.tree.pane = Pane::Tree;
-            }
-        }
-        Command::PaneRight => {
-            if ui.view == View::Tree {
-                ui.tree.pane = Pane::Tracks;
-            }
-        }
+        Command::PaneLeft => match ui.view {
+            View::Tree => ui.tree.pane = Pane::Tree,
+            View::Playlist => ui.playlist_pane = Pane::Tree,
+            _ => {}
+        },
+        Command::PaneRight => match ui.view {
+            View::Tree => ui.tree.pane = Pane::Tracks,
+            View::Playlist => ui.playlist_pane = Pane::Tracks,
+            _ => {}
+        },
         // Run a command as though the named pane had focus, then put focus
         // back. Reusing the ordinary command rather than duplicating every
         // motion per pane is the whole point of the wrapper.
         Command::In { pane, cmd } => {
-            if ui.view != View::Tree {
-                return;
-            }
-            let focused = ui.tree.pane;
-            ui.tree.pane = match pane {
+            let want = match pane {
                 crate::cmd::PaneTarget::Tree => Pane::Tree,
                 crate::cmd::PaneTarget::Tracks => Pane::Tracks,
             };
+            // Both two-pane views, since the wrapper is about panes rather
+            // than about the library.
+            let focused = match ui.view {
+                View::Tree => std::mem::replace(&mut ui.tree.pane, want),
+                View::Playlist => std::mem::replace(&mut ui.playlist_pane, want),
+                _ => return,
+            };
             execute_counted(ui, ctx, *cmd, count);
-            ui.tree.pane = focused;
+            match ui.view {
+                View::Tree => ui.tree.pane = focused,
+                View::Playlist => ui.playlist_pane = focused,
+                _ => {}
+            }
         }
         Command::Expand => {
             if ui.view == View::Tree && ui.tree.pane == Pane::Tree {
@@ -1418,13 +1438,14 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Activate => match ui.view {
             View::Browser => ui.browser.enter(),
             View::Settings => toggle_under_cursor(ui, ctx),
-            // Enter opens the one under the cursor into view 3 and goes there,
-            // because the point of a browser is to leave it.
-            View::Playlists => {
+            // The left pane picks, so Enter there opens rather than plays —
+            // and moves focus to the contents, which is what you wanted next.
+            View::Playlist if ui.playlist_pane == Pane::Tree => {
                 let Some(row) = ui.playlist_rows.get(ui.playlists_sel).cloned() else {
                     return;
                 };
                 open_playlist(ui, ctx, &row.name);
+                ui.playlist_pane = Pane::Tracks;
             }
             // Enter makes this the only catalog — the common case, and one
             // keypress rather than clearing the others by hand.
@@ -1448,10 +1469,16 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             }
         },
         Command::Remove => match ui.view {
-            View::Playlist if ui.smart.is_some() => ui.notify(rule_owned("remove from")),
+            View::Playlist if ui.playlist_pane == Pane::Tree => {
+                ui.notify("`D` removes a track — delete a playlist from the file system")
+            }
+            View::Playlist if ui.open.as_ref().is_some_and(Open::is_rule) => {
+                ui.notify(rule_owned("remove from"))
+            }
             View::Playlist => {
                 ui.playlist.remove(ui.playlist_sel);
                 ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
+                persist_open(ui, ctx);
             }
             View::Queue => {
                 ui.queue.remove(ui.queue_sel);
@@ -1463,14 +1490,18 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Playlist(spec) => match spec {
             crate::cmd::PlaylistSpec::Open(name) => open_playlist(ui, ctx, &name),
             crate::cmd::PlaylistSpec::Save(name) => save_playlist(ui, ctx, &name),
+            crate::cmd::PlaylistSpec::New(name) => new_playlist(ui, ctx, &name),
             crate::cmd::PlaylistSpec::List => list_playlists(ui),
         },
-        Command::Freeze => match ui.smart.take() {
-            Some(name) => ui.notify(format!(
-                "froze {name} — {} tracks, now editable",
+        Command::Freeze => match ui.open.take() {
+            Some(Open::Rule(name)) => ui.notify(format!(
+                "froze {name} — {} tracks; `:playlist save <name>` keeps it",
                 ui.playlist.len()
             )),
-            None => ui.notify("the playlist is already an ordinary one"),
+            other => {
+                ui.open = other;
+                ui.notify("only a rule can be frozen");
+            }
         },
 
         // ---- transport
@@ -1798,9 +1829,10 @@ fn load_saved(ui: &mut Ui, ctx: &Context<'_>, found: &crate::playlist::Saved) {
         }
     }
     ui.playlist_sel = 0;
-    // A saved playlist is an ordinary one: editable, and owned by nobody.
-    ui.smart = None;
+    ui.open = Some(Open::Saved(found.name.clone()));
     switch_view(ui, View::Playlist);
+    select_open_row(ui);
+    ui.playlist_pane = Pane::Tracks;
     ui.notify(match missing {
         0 => format!("{}: {} tracks", found.name, ui.playlist.len()),
         n => format!(
@@ -1811,7 +1843,68 @@ fn load_saved(ui: &mut Ui, ctx: &Context<'_>, found: &crate::playlist::Saved) {
     });
 }
 
-/// Write view 3 out under a name.
+/// Start an empty playlist and open it.
+///
+/// The alternative to an invisible scratch list: adding to a playlist means
+/// adding to *the one you picked*, so there has to be a way to pick a new one.
+fn new_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+    let Some(saved) = ui.saved.clone() else {
+        ui.notify("nowhere to keep playlists — set `data_dir` in the config");
+        return;
+    };
+    if saved.find(name).is_some() || ui.playlists.get(name).is_some() {
+        ui.notify(format!("{name} already exists — `:playlist open {name}`"));
+        return;
+    }
+    // Written empty rather than held in memory, so it survives a crash and so
+    // it appears to anything else reading the directory.
+    if let Err(e) = crate::m3u::write(&saved.path_for(name), &[]) {
+        ui.notify(e.to_string());
+        return;
+    }
+    ui.playlist.clear();
+    ui.playlist_sel = 0;
+    ui.open = Some(Open::Saved(name.to_string()));
+    refresh_playlist_rows(ui);
+    select_open_row(ui);
+    switch_view(ui, View::Playlist);
+    ui.playlist_pane = Pane::Tracks;
+    let _ = ctx;
+    ui.notify(format!("{name}: empty — add with `y`"));
+}
+
+/// Put the left pane's cursor on whatever is open.
+fn select_open_row(ui: &mut Ui) {
+    if let Some(open) = &ui.open
+        && let Some(i) = ui.playlist_rows.iter().position(|r| r.name == open.name())
+    {
+        ui.playlists_sel = i;
+    }
+}
+
+/// Write the open playlist back to its file.
+///
+/// Called after every edit rather than at exit: the same rule ratings and
+/// plays follow, and for the same reason — losing what you meant is worse
+/// than the cost of a write.
+fn persist_open(ui: &mut Ui, ctx: &Context<'_>) {
+    let (Some(Open::Saved(name)), Some(saved)) = (ui.open.clone(), ui.saved.clone()) else {
+        return;
+    };
+    let tracks: Vec<&crate::store::Track> = ui
+        .playlist
+        .entries()
+        .iter()
+        .filter_map(|id| ctx.store.get(*id))
+        .collect();
+    if let Err(e) = crate::m3u::write(&saved.path_for(&name), &tracks) {
+        ui.notify(e.to_string());
+        return;
+    }
+    refresh_playlist_rows(ui);
+}
+
+/// Copy the open playlist under a new name.
 fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let Some(saved) = ui.saved.clone() else {
         ui.notify("nowhere to save playlists — set `data_dir` in the config");
@@ -1833,14 +1926,13 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
             // Saving a rule-defined list writes what it *currently* holds and
             // detaches it, which is what `:freeze` does — so say so rather
             // than leaving the title claiming a rule still owns it.
-            let was = ui.smart.take();
+            let was = ui.open.replace(Open::Saved(name.to_string()));
             refresh_playlist_rows(ui);
             ui.notify(match was {
-                Some(rule) => format!(
-                    "saved {} tracks as {name} (detached from {rule})",
-                    tracks.len()
-                ),
-                None => format!("saved {} tracks as {name}", tracks.len()),
+                Some(Open::Rule(rule)) => {
+                    format!("saved {} tracks as {name}, a copy of {rule}", tracks.len())
+                }
+                _ => format!("saved {} tracks as {name}", tracks.len()),
             });
         }
         Err(e) => ui.notify(e.to_string()),
@@ -1866,8 +1958,10 @@ fn load_smart(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         ui.playlist.push(id);
     }
     ui.playlist_sel = 0;
-    ui.smart = Some(name.to_string());
+    ui.open = Some(Open::Rule(name.to_string()));
     switch_view(ui, View::Playlist);
+    select_open_row(ui);
+    ui.playlist_pane = Pane::Tracks;
     ui.notify(said);
 }
 
@@ -1880,7 +1974,7 @@ fn load_smart(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
 /// The cursor is kept where it was rather than reset: a list that jumped to
 /// the top whenever a play count ticked over would be unusable.
 fn refresh_smart(ui: &mut Ui, ctx: &Context<'_>) {
-    let Some(name) = ui.smart.clone() else {
+    let Some(Open::Rule(name)) = ui.open.clone() else {
         return;
     };
     let Some(spec) = ui.playlists.get(&name) else {
@@ -1927,9 +2021,9 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
 
 /// Change view, remembering where we came from so `g<Tab>` can go back.
 fn switch_view(ui: &mut Ui, view: View) {
-    // Entering the browser is the moment its contents matter — and the moment
-    // another program may have dropped a playlist into the directory.
-    if view == View::Playlists {
+    // Entering view 3 is the moment the list matters — and the moment another
+    // program may have dropped a playlist into the directory.
+    if view == View::Playlist {
         refresh_playlist_rows(ui);
     }
     if view != ui.view {
@@ -1989,14 +2083,29 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
     let count = ids.len();
     match target {
         AddTarget::Playlist => {
-            if ui.smart.is_some() {
-                ui.notify(rule_owned("add to"));
-                return;
+            match &ui.open {
+                Some(o) if o.is_rule() => {
+                    ui.notify(rule_owned("add to"));
+                    return;
+                }
+                // Adding means adding to the one you picked, so there has to
+                // be one. Naming the remedy beats inventing a file.
+                None => {
+                    ui.notify("no playlist open — `:playlist new <name>` starts one");
+                    return;
+                }
+                Some(_) => {}
             }
             for id in ids {
                 ui.playlist.push(id);
             }
-            ui.notify(format!("added {count} to the playlist"));
+            let name = ui
+                .open
+                .as_ref()
+                .map(|o| o.name().to_string())
+                .unwrap_or_default();
+            persist_open(ui, ctx);
+            ui.notify(format!("added {count} to {name}"));
         }
         AddTarget::Queue => {
             for id in ids {
@@ -2075,9 +2184,6 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
             .map(|p| p.display().to_string().to_lowercase())
             .collect(),
         View::Filters | View::Settings => Vec::new(),
-        // Searchable by name, so `/road` finds a playlist the way it finds a
-        // track.
-        View::Playlists => ui.playlist_rows.iter().map(|r| r.name.clone()).collect(),
     }
 }
 
@@ -2088,11 +2194,13 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
             Pane::Tracks => ui.tree.tracks_for(&ui.library, ctx.store).len(),
         },
         View::Sorted => ui.library.sorted().len(),
-        View::Playlist => ui.playlist.len(),
+        View::Playlist => match ui.playlist_pane {
+            Pane::Tree => ui.playlist_rows.len(),
+            Pane::Tracks => ui.playlist.len(),
+        },
         View::Queue => ui.queue.len(),
         View::Browser => ui.browser.entries.len(),
         View::Filters => ui.catalogs.defined().len(),
-        View::Playlists => ui.playlist_rows.len(),
         View::Settings => {
             bind::sorted(&ui.bindings).len() + SettingKey::ALL.len() + ui.catalogs.defined().len()
         }
@@ -2106,11 +2214,13 @@ fn current_cursor(ui: &Ui) -> usize {
             Pane::Tracks => ui.tree.track_selected,
         },
         View::Sorted => ui.sorted,
-        View::Playlist => ui.playlist_sel,
+        View::Playlist => match ui.playlist_pane {
+            Pane::Tree => ui.playlists_sel,
+            Pane::Tracks => ui.playlist_sel,
+        },
         View::Queue => ui.queue_sel,
         View::Browser => ui.browser.selected,
         View::Filters => ui.catalog_sel,
-        View::Playlists => ui.playlists_sel,
         View::Settings => ui.settings_sel,
     }
 }
@@ -2127,11 +2237,13 @@ fn set_cursor(ui: &mut Ui, next: usize) {
             Pane::Tracks => ui.tree.track_selected = next,
         },
         View::Sorted => ui.sorted = next,
-        View::Playlist => ui.playlist_sel = next,
+        View::Playlist => match ui.playlist_pane {
+            Pane::Tree => ui.playlists_sel = next,
+            Pane::Tracks => ui.playlist_sel = next,
+        },
         View::Queue => ui.queue_sel = next,
         View::Browser => ui.browser.selected = next,
         View::Filters => ui.catalog_sel = next,
-        View::Playlists => ui.playlists_sel = next,
         View::Settings => ui.settings_sel = next,
     }
 }
@@ -2171,7 +2283,7 @@ fn toggle_under_cursor(ui: &mut Ui, ctx: &Context<'_>) {
     ui.notify("a binding is not a toggle — use `:bind` to change one");
 }
 
-/// View 8: what there is to open.
+/// View 3's left pane: what there is to open.
 fn draw_playlists(frame: &mut Frame, area: Rect, ui: &Ui) {
     let theme = &ui.theme;
     let mut lines: Vec<Line> = Vec::new();
@@ -2190,7 +2302,7 @@ fn draw_playlists(frame: &mut Frame, area: Rect, ui: &Ui) {
     }
 
     for (i, row) in ui.playlist_rows.iter().enumerate() {
-        let open = ui.smart.as_deref() == Some(row.name.as_str());
+        let open = ui.open.as_ref().is_some_and(|o| o.name() == row.name);
         let body = if i == ui.playlists_sel {
             theme.get(theme::Role::SelectionFocused)
         } else {
@@ -2213,7 +2325,11 @@ fn draw_playlists(frame: &mut Frame, area: Rect, ui: &Ui) {
     }
 
     frame.render_widget(
-        Paragraph::new(lines).block(pane_block(theme, "playlists", true)),
+        Paragraph::new(lines).block(pane_block(
+            theme,
+            "playlists",
+            ui.playlist_pane == Pane::Tree,
+        )),
         area,
     );
 }
@@ -2311,9 +2427,9 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
 
     // A rule-owned list says whose rule it is, so "why can I not delete this
     // row" has an answer on screen rather than only in the refusal message.
-    let playlist_title = match &ui.smart {
-        Some(name) => format!("playlist: {name}"),
-        None => "playlist".to_string(),
+    let playlist_title = match &ui.open {
+        Some(o) => o.name().to_string(),
+        None => "nothing open".to_string(),
     };
 
     match ui.view {
@@ -2331,19 +2447,27 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 divide: true,
             },
         ),
-        View::Playlist => draw_tracks(
-            frame,
-            body,
-            ui,
-            ctx,
-            TrackList {
-                ids: ui.playlist.entries(),
-                selected: ui.playlist_sel,
-                title: &playlist_title,
-                focused: true,
-                divide: false,
-            },
-        ),
+        View::Playlist => {
+            // Pick on the left, see it on the right — view 1's shape, because
+            // it is the same idea and `tab` already means this.
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
+                    .areas(body);
+            draw_playlists(frame, left, ui);
+            draw_tracks(
+                frame,
+                right,
+                ui,
+                ctx,
+                TrackList {
+                    ids: ui.playlist.entries(),
+                    selected: ui.playlist_sel,
+                    title: &playlist_title,
+                    focused: ui.playlist_pane == Pane::Tracks,
+                    divide: false,
+                },
+            );
+        }
         View::Queue => {
             let entries: Vec<_> = ui.queue.entries().copied().collect();
             draw_tracks(
@@ -2362,7 +2486,6 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         }
         View::Browser => draw_browser(frame, body, ui),
         View::Filters => draw_catalogs(frame, body, ui),
-        View::Playlists => draw_playlists(frame, body, ui),
         View::Settings => draw_settings(frame, body, ui),
     }
 }
@@ -2976,9 +3099,11 @@ mod tests {
         };
         let mut ui = ui_of(&store, true);
         ui.view = View::Playlist;
-        let out = render(&ui, &ctx, 74, 10);
-        assert!(out.contains("the playlist is empty"), "{out}");
+        let out = render(&ui, &ctx, 90, 10);
         assert!(out.contains("3:playlist"), "{out}");
+        // Both halves say what is going on rather than rendering blank.
+        assert!(out.contains("nothing open"), "{out}");
+        assert!(out.contains("no playlists"), "{out}");
     }
 
     #[test]
@@ -3168,6 +3293,7 @@ mod tests {
         ui.playlist.push(sorted[1]);
 
         ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
         assert_eq!(ui.playback.active, ActiveSource::Playlist);
         assert_eq!(ui.playback.current, Some(sorted[3]));
@@ -3322,7 +3448,7 @@ mod tests {
         type_line(&mut ui, &ctx, "playlist open electronic");
 
         assert_eq!(ui.view, View::Playlist);
-        assert_eq!(ui.smart.as_deref(), Some("electronic"));
+        assert_eq!(ui.open.as_ref().map(Open::name), Some("electronic"));
         let titles: Vec<&str> = ui
             .playlist
             .entries()
@@ -3363,7 +3489,7 @@ mod tests {
         type_line(&mut ui, &ctx, "playlist open nope");
         assert!(ui.status.contains("electronic"), "{}", ui.status);
         assert!(ui.status.contains("good"), "{}", ui.status);
-        assert!(ui.smart.is_none());
+        assert!(ui.open.is_none());
     }
 
     #[test]
@@ -3418,10 +3544,11 @@ mod tests {
         let before = ui.playlist.len();
 
         execute(&mut ui, &ctx, Command::Freeze);
-        assert!(ui.smart.is_none());
+        assert!(ui.open.is_none());
         assert_eq!(ui.playlist.len(), before, "freezing must keep the tracks");
 
         ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
         execute(&mut ui, &ctx, Command::Remove);
         assert_eq!(ui.playlist.len(), before - 1, "still not editable");
     }
@@ -3432,7 +3559,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = with_playlists(&store);
         execute(&mut ui, &ctx, Command::Freeze);
-        assert!(ui.status.contains("already an ordinary"), "{}", ui.status);
+        assert!(ui.status.contains("only a rule"), "{}", ui.status);
     }
 
     /// A live query, not a snapshot: rating a track has to change what a
@@ -3453,7 +3580,7 @@ mod tests {
         execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(5)));
 
         assert_eq!(ui.playlist.len(), 1, "the rule did not notice the rating");
-        assert_eq!(ui.smart.as_deref(), Some("good"));
+        assert_eq!(ui.open.as_ref().map(Open::name), Some("good"));
     }
 
     #[test]
@@ -3464,51 +3591,69 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist open electronic");
-        let out = render(&ui, &ctx, 74, 10);
-        assert!(out.contains("playlist: electronic"), "{out}");
+        // The right pane is titled by what is open, and the left marks it.
+        let out = render(&ui, &ctx, 90, 10);
+        assert!(out.contains("electronic"), "{out}");
 
         execute(&mut ui, &ctx, Command::Freeze);
-        let out = render(&ui, &ctx, 74, 10);
-        assert!(!out.contains("playlist: electronic"), "{out}");
+        let out = render(&ui, &ctx, 90, 10);
+        assert!(out.contains("nothing open"), "{out}");
     }
 
-    /// The defect #22 opened with: the queue came back and the playlist did
-    /// not, so a list you spent ten minutes on was lost while the throwaway
-    /// one survived.
+    /// The defect #22 opened with — a playlist lost on quit while the
+    /// throwaway queue survived. Now it comes back by **name**: the tracks
+    /// live in a file, so a copy in the session could only go stale.
     #[test]
-    fn a_hand_built_playlist_survives_a_quit() {
+    fn the_open_playlist_comes_back_by_name() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
-        let mut ui = with_playlists(&store);
-        let ids: Vec<_> = store.iter().map(|(id, _)| id).collect();
-        ui.playlist.push(ids[2]);
-        ui.playlist.push(ids[0]);
+        let (mut ui, _) = ui_with_saved(&store, "session-open");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist new roadtrip");
+        ui.view = View::Sorted;
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Add {
+                target: crate::cmd::AddTarget::Playlist,
+                path: None,
+            },
+        );
+        assert_eq!(ui.playlist.len(), 1, "{}", ui.status);
 
         let snapshot = capture_session(&ui, &ctx);
-        assert_eq!(snapshot.playlist.len(), 2);
+        assert_eq!(snapshot.open_playlist.as_deref(), Some("roadtrip"));
 
         let mut fresh = with_playlists(&store);
+        fresh.saved = ui.saved.clone();
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
         assert_eq!(
-            fresh.playlist.entries(),
-            [ids[2], ids[0]],
-            "order matters — a playlist is a deliberate one"
+            fresh.open.as_ref().map(Open::name),
+            Some("roadtrip"),
+            "the playlist did not reopen"
         );
+        assert_eq!(fresh.playlist.len(), 1, "its tracks did not come back");
     }
 
-    /// A rule-owned list is recomputed on open, so freezing a stale copy into
-    /// the session would make it lie.
+    /// A rule is remembered by name too, and **recomputed** on open — which is
+    /// the point of storing a name rather than a list.
     #[test]
-    fn a_rule_owned_playlist_is_not_captured_in_the_session() {
+    fn a_rule_is_remembered_by_name_and_recomputed() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
-        let mut ui = with_playlists(&store);
+        let (mut ui, _) = ui_with_saved(&store, "session-rule");
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist open electronic");
-        assert_eq!(ui.playlist.len(), 2);
+        let snapshot = capture_session(&ui, &ctx);
+        assert_eq!(snapshot.open_playlist.as_deref(), Some("electronic"));
 
-        assert!(capture_session(&ui, &ctx).playlist.is_empty());
+        let mut fresh = with_playlists(&store);
+        fresh.saved = ui.saved.clone();
+        restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
+        assert!(fresh.open.as_ref().is_some_and(Open::is_rule));
+        assert_eq!(fresh.playlist.len(), 2, "the rule was not re-evaluated");
     }
 
     fn ui_with_saved(store: &Store, name: &str) -> (Ui, PathBuf) {
@@ -3539,7 +3684,10 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist open roadtrip");
         assert_eq!(ui.playlist.entries(), [ids[2], ids[0]]);
-        assert!(ui.smart.is_none(), "a saved playlist is an ordinary one");
+        assert!(
+            !ui.open.as_ref().unwrap().is_rule(),
+            "a saved playlist is editable"
+        );
         assert_eq!(ui.view, View::Playlist);
     }
 
@@ -3557,10 +3705,13 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist save keepers");
-        assert!(ui.smart.is_none(), "{}", ui.status);
+        // The copy is now what is open, and it is editable.
+        assert_eq!(ui.open.as_ref().map(Open::name), Some("keepers"));
+        assert!(!ui.open.as_ref().unwrap().is_rule());
         assert_eq!(ui.playlist.len(), before);
 
         ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
         execute(&mut ui, &ctx, Command::Remove);
         assert_eq!(ui.playlist.len(), before - 1, "still not editable");
     }
@@ -3765,7 +3916,7 @@ mod tests {
     }
 
     #[test]
-    fn view_eight_lists_rules_and_saved_files() {
+    fn the_left_pane_lists_rules_and_saved_files() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, dir) = ui_with_saved(&store, "view8");
@@ -3777,17 +3928,16 @@ mod tests {
         .unwrap();
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 8");
-        assert_eq!(ui.view, View::Playlists);
+        type_line(&mut ui, &ctx, "view 3");
+        assert_eq!(ui.view, View::Playlist);
 
-        let out = render(&ui, &ctx, 90, 12);
-        assert!(out.contains("8:playlists"), "{out}");
+        let out = render(&ui, &ctx, 110, 12);
+        assert!(out.contains("3:playlist"), "{out}");
         // Rules are marked rather than hidden: opening one gives a list you
         // cannot edit, which is worth knowing before pressing enter.
         assert!(out.contains("electronic"), "{out}");
         assert!(out.contains("rule"), "{out}");
         assert!(out.contains("roadtrip"), "{out}");
-        assert!(out.contains("2 tracks"), "{out}");
     }
 
     /// `ALL` drives `gt`/`gT` and the tab strip, so a view missing from it is
@@ -3827,32 +3977,32 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_view_eight_opens_that_playlist() {
+    fn enter_in_the_left_pane_opens_that_playlist() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "view8-enter");
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 8");
+        type_line(&mut ui, &ctx, "view 3");
         // Rules sort first, so the cursor starts on `electronic`.
         execute(&mut ui, &ctx, Command::Activate);
 
         assert_eq!(ui.view, View::Playlist, "the browser is a place to leave");
-        assert_eq!(ui.smart.as_deref(), Some("electronic"));
+        assert_eq!(ui.open.as_ref().map(Open::name), Some("electronic"));
         assert_eq!(ui.playlist.len(), 2);
     }
 
     /// Saving is the one thing that changes the set from inside the app, so
     /// the browser has to notice without being left and re-entered.
     #[test]
-    fn saving_a_playlist_shows_up_in_view_eight() {
+    fn saving_a_playlist_shows_up_in_the_left_pane() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "view8-refresh");
         ui.playlist.push(store.iter().next().unwrap().0);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 8");
+        type_line(&mut ui, &ctx, "view 3");
         assert!(!ui.playlist_rows.iter().any(|r| r.name == "keepers"));
 
         press(&mut ui, &ctx, ":");
@@ -3864,7 +4014,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_view_eight_says_where_playlists_would_go() {
+    fn an_empty_left_pane_says_where_playlists_would_go() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
@@ -3872,7 +4022,7 @@ mod tests {
         ui.saved = Some(crate::playlist::Playlists::new(&dir));
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 8");
+        type_line(&mut ui, &ctx, "view 3");
         let out = render(&ui, &ctx, 100, 8);
         assert!(out.contains("no playlists yet"), "{out}");
         assert!(out.contains("playlists"), "{out}");
@@ -3888,13 +4038,120 @@ mod tests {
         std::fs::create_dir_all(dir.join("playlists/broken.m3u8")).unwrap();
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 8");
+        type_line(&mut ui, &ctx, "view 3");
         let row = ui
             .playlist_rows
             .iter()
             .find(|r| r.name == "broken")
             .expect("not listed");
         assert_eq!(row.detail, "unreadable");
+    }
+
+    /// The two panes are view 1's shape, so `tab` and `pane-left`/`right`
+    /// work here without any new keys.
+    #[test]
+    fn tab_swaps_the_two_panes_of_view_three() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "panes");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 3");
+        assert_eq!(ui.playlist_pane, Pane::Tree, "the list has focus first");
+
+        handle_key(KeyEvent::from(KeyCode::Tab), &mut ui, &ctx);
+        assert_eq!(ui.playlist_pane, Pane::Tracks);
+        execute(&mut ui, &ctx, Command::PaneLeft);
+        assert_eq!(ui.playlist_pane, Pane::Tree);
+    }
+
+    /// `j` moves within whichever pane has focus, so the two cursors are
+    /// independent — the same as view 1.
+    #[test]
+    fn each_pane_of_view_three_has_its_own_cursor() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "panes-cursor");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open electronic");
+        assert_eq!(ui.playlist_pane, Pane::Tracks, "opening puts you in it");
+
+        press(&mut ui, &ctx, "j");
+        assert_eq!((ui.playlist_sel, ui.playlists_sel), (1, 0));
+
+        execute(&mut ui, &ctx, Command::PaneLeft);
+        press(&mut ui, &ctx, "j");
+        assert_eq!((ui.playlist_sel, ui.playlists_sel), (1, 1));
+    }
+
+    /// Adding means adding to the one you picked, so there has to *be* one —
+    /// and the refusal names the way to start one rather than inventing a file.
+    #[test]
+    fn adding_with_nothing_open_names_the_remedy() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "add-nothing-open");
+        ui.view = View::Sorted;
+
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Add {
+                target: crate::cmd::AddTarget::Playlist,
+                path: None,
+            },
+        );
+        assert!(ui.playlist.is_empty());
+        assert!(ui.status.contains(":playlist new"), "{}", ui.status);
+    }
+
+    /// An edit is written through, the same rule ratings and plays follow:
+    /// losing what you meant is worse than the cost of a write.
+    #[test]
+    fn an_edit_is_written_to_the_file_immediately() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "write-through");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist new roadtrip");
+        let at = dir.join("playlists/roadtrip.m3u8");
+        assert!(
+            at.exists(),
+            "a new playlist is a file at once: {}",
+            ui.status
+        );
+        assert!(crate::m3u::read(&at).unwrap().is_empty());
+
+        ui.view = View::Sorted;
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Add {
+                target: crate::cmd::AddTarget::Playlist,
+                path: None,
+            },
+        );
+        assert_eq!(crate::m3u::read(&at).unwrap().len(), 1, "{}", ui.status);
+
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        execute(&mut ui, &ctx, Command::Remove);
+        assert!(
+            crate::m3u::read(&at).unwrap().is_empty(),
+            "the removal was not written"
+        );
+    }
+
+    #[test]
+    fn a_new_playlist_will_not_shadow_an_existing_name() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "new-clash");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist new electronic");
+        assert!(ui.status.contains("already exists"), "{}", ui.status);
     }
 
     #[test]
@@ -3950,7 +4207,6 @@ mod tests {
                     crate::cmd::Context::Queue => ViewId::Queue,
                     crate::cmd::Context::Browser => ViewId::Browser,
                     crate::cmd::Context::Filters => ViewId::Filters,
-                    crate::cmd::Context::Playlists => ViewId::Playlists,
                     crate::cmd::Context::Settings => ViewId::Settings,
                     crate::cmd::Context::Common => unreachable!(),
                 }),
@@ -4126,7 +4382,11 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        // Artist row selected: `y` adds everything under it.
+        // Artist row selected: `y` adds everything under it — to the open
+        // playlist, since adding means adding to the one you picked.
+        ui.saved = Some(crate::playlist::Playlists::new(&scratch("add-tree")));
+        new_playlist(&mut ui, &ctx, "mix");
+        ui.view = View::Tree;
         let expected = ui.tree.tracks_for(&ui.library, &store).len();
         press(&mut ui, &ctx, "y");
         assert_eq!(ui.playlist.len(), expected);
@@ -4141,10 +4401,14 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
+        ui.saved = Some(crate::playlist::Playlists::new(&scratch("remove-only")));
+        new_playlist(&mut ui, &ctx, "mix");
+        ui.view = View::Tree;
         press(&mut ui, &ctx, "y");
         let before = ui.playlist.len();
 
         ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "D");
         assert_eq!(ui.playlist.len(), before - 1);
 
@@ -4312,6 +4576,7 @@ mod tests {
 
         assert_eq!(ui.playlist.len(), 1, "the playlist was filtered");
         ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
         assert_eq!(
             ui.playback.current,
@@ -5030,7 +5295,7 @@ mod tests {
         crate::session::Session {
             version: 1,
             queue: Vec::new(),
-            playlist: Vec::new(),
+            open_playlist: None,
             current: None,
             position_secs: 0.0,
             modes: crate::session::Modes {
@@ -5506,9 +5771,15 @@ mod tests {
         assert!(ui.history.is_empty());
     }
 
-    /// A clean directory of its own, so tests never see each other's events.
+    /// A clean directory of its own, so tests never see each other's files.
+    ///
+    /// Uniquely suffixed: tests run in parallel, and two sharing a name raced
+    /// between one's `remove_dir_all` and the other's `create_dir_all`.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("gmuse-ui-{name}"));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("gmuse-ui-{name}-{n}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

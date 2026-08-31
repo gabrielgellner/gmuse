@@ -61,17 +61,14 @@ pub struct Session {
     /// tracks*.
     #[serde(default)]
     pub queue: Vec<PathBuf>,
-    /// View 3, as paths.
+    /// Which playlist view 3 had open, by **name**.
     ///
-    /// The queue is consumed as it plays and is explicitly a one-shot, yet it
-    /// used to be the only one of the two that came back — so a playlist you
-    /// spent ten minutes assembling was lost on quit while the throwaway list
-    /// survived. That was backwards (#22).
-    ///
-    /// Only the *unnamed* working playlist needs this: a saved one is a file,
-    /// and reopening it by name is better than shadowing it with a stale copy.
+    /// The name, not the tracks: every playlist is a file or a rule now, so
+    /// the contents have a home of their own and a copy here could only go
+    /// stale. Reopening by name gets whatever the file says today, which is
+    /// what you would want after editing it in another program.
     #[serde(default)]
-    pub playlist: Vec<PathBuf>,
+    pub open_playlist: Option<String>,
     #[serde(default)]
     pub current: Option<PathBuf>,
     #[serde(default)]
@@ -131,7 +128,7 @@ mod tests {
         Session {
             version: VERSION,
             queue: vec![PathBuf::from("/m/a.mp3"), PathBuf::from("/m/b.flac")],
-            playlist: vec![PathBuf::from("/m/c.mp3")],
+            open_playlist: Some("mix".into()),
             current: Some(PathBuf::from("/m/c.opus")),
             position_secs: 42.5,
             modes: Modes {

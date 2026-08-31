@@ -378,11 +378,12 @@ fn playlist_spec(rest: &str) -> Result<PlaylistSpec, ParseError> {
     Ok(match word {
         "list" => PlaylistSpec::List,
         "open" => PlaylistSpec::Open(needs_name("playlist open")?),
+        "new" => PlaylistSpec::New(needs_name("playlist new")?),
         "save" => PlaylistSpec::Save(needs_name("playlist save")?),
         other => {
             return Err(ParseError::Bad(
                 other.into(),
-                "playlist action — try `open <name>`, `save <name>`, or `list`",
+                "playlist action — try `open`, `new`, `save`, or `list`",
             ));
         }
     })
@@ -536,6 +537,7 @@ pub fn format(cmd: &Command) -> String {
             PlaylistSpec::List => "playlist list".into(),
             PlaylistSpec::Open(n) => format!("playlist open {n}"),
             PlaylistSpec::Save(n) => format!("playlist save {n}"),
+            PlaylistSpec::New(n) => format!("playlist new {n}"),
         },
         Command::Freeze => "freeze".into(),
         Command::Filter(None) => "filter".into(),
@@ -937,7 +939,7 @@ mod tests {
     #[test]
     fn a_bare_playlist_name_is_rejected_by_name() {
         let e = command("playlist fresh").unwrap_err();
-        assert!(e.to_string().contains("open <name>"), "{e}");
+        assert!(e.to_string().contains("open"), "{e}");
         assert!(
             matches!(command("playlist open"), Err(ParseError::Missing { .. })),
             "open needs a name"

@@ -29,8 +29,6 @@ pub enum Context {
     Browser,
     Filters,
     Settings,
-    /// View 8, the playlist browser (#22).
-    Playlists,
 }
 
 impl Context {
@@ -43,7 +41,6 @@ impl Context {
             Context::Queue => "queue",
             Context::Browser => "browser",
             Context::Filters => "filters",
-            Context::Playlists => "playlists",
             Context::Settings => "settings",
         }
     }
@@ -57,7 +54,6 @@ impl Context {
             "queue" => Context::Queue,
             "browser" => Context::Browser,
             "filters" => Context::Filters,
-            "playlists" => Context::Playlists,
             "settings" => Context::Settings,
             _ => return None,
         })
@@ -74,7 +70,6 @@ pub enum ViewId {
     Browser = 5,
     Filters = 6,
     Settings = 7,
-    Playlists = 8,
 }
 
 impl ViewId {
@@ -86,7 +81,6 @@ impl ViewId {
             4 => ViewId::Queue,
             5 => ViewId::Browser,
             6 => ViewId::Filters,
-            8 => ViewId::Playlists,
             7 => ViewId::Settings,
             _ => return None,
         })
@@ -310,8 +304,13 @@ pub enum PlaylistSpec {
     /// A *source*, not a narrowing — the library stays exactly as it was. The
     /// narrowing spelling of the same idea is `:catalog`.
     Open(String),
-    /// Write view 3 out under a name.
+    /// Copy the open one under a new name. Not "write it out" — edits are
+    /// already written through — but save-as, for forking a list or keeping a
+    /// rule's current contents.
     Save(String),
+    /// Start an empty playlist, so adding to one does not mean modifying an
+    /// existing one.
+    New(String),
     /// What there is to open. Also what a bare `:playlist` does.
     List,
 }
