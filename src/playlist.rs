@@ -35,6 +35,13 @@ impl Playlist {
     pub fn push(&mut self, id: TrackId) {
         self.entries.push(id);
     }
+    /// Insert at `index`, clamped to the end.
+    ///
+    /// Clamped rather than panicking: `p` on the last row puts after it, which
+    /// is one past the end, and that is the ordinary case rather than an error.
+    pub fn insert(&mut self, index: usize, id: TrackId) {
+        self.entries.insert(index.min(self.entries.len()), id);
+    }
     /// Remove the entry at `index`, if there is one.
     ///
     /// Mirrors `VecDeque::remove`, which `Queue` gets for free. `Vec::remove`
@@ -74,6 +81,10 @@ impl Queue {
     }
     pub fn push_back(&mut self, id: TrackId) {
         self.entries.push_back(id);
+    }
+    /// Insert at `index`, clamped to the end — see [`Playlist::insert`].
+    pub fn insert(&mut self, index: usize, id: TrackId) {
+        self.entries.insert(index.min(self.entries.len()), id);
     }
     /// The next queued track, without consuming it.
     ///

@@ -30,6 +30,7 @@ mod smart;
 mod sort;
 mod store;
 mod ui;
+mod undo;
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;

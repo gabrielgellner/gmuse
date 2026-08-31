@@ -61,7 +61,11 @@ pub const DEFAULTS: &[&str] = &[
     // deletes to the end of a line, never the line itself.
     "bind common \"d d\" remove",
     "bind common D remove-to-end",
-    "bind common u rescan",
+    // `u` is undo, as in vim. Rescan moved behind the leader: it is rare, and
+    // `:rescan` is how it is really reached.
+    "bind common u undo",
+    "bind common ^r redo",
+    "bind common \"<leader> u\" rescan",
     "bind common M-e expand-all",
     "bind common M-c collapse-all",
     // transport
@@ -84,9 +88,19 @@ pub const DEFAULTS: &[&str] = &[
     "bind common C toggle continue",
     "bind common m toggle aaa_mode",
     // library
-    "bind common a add",
-    "bind common y add-playlist",
+    // `a` is the common one, so it gets the obvious key. `y` went to yank,
+    // which is what it means in vim, and adding to the *library* is rare —
+    // it is how view 5 reaches music the library does not have yet.
+    "bind common a add-playlist",
+    "bind common A add",
     "bind common e add-queue",
+    // vim's registers. `yy`/`Y` mirror `dd`/`D`, and the register lives on the
+    // Ui rather than on a playlist, exactly as vim's are global — that is what
+    // makes yank here, open another playlist, put there work.
+    "bind common \"y y\" yank",
+    "bind common Y yank-to-end",
+    "bind common p put",
+    "bind common P put-before",
     // search and quit
     "bind common n search-next",
     "bind common N search-prev",

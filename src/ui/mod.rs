@@ -313,6 +313,19 @@ pub struct Ui {
     pub prompt: Option<Prompt>,
     /// The keys-that-work-here popup, when it is up. Dismissed by any key.
     pub help: Option<Vec<String>>,
+    /// Per-list edit history, for `u` and `^r`.
+    pub undo: crate::undo::Undo,
+    /// vim's unnamed register, holding whole tracks.
+    ///
+    /// On the `Ui` rather than on a playlist, because vim's registers are
+    /// **global**: that is what makes `yy` here, open another playlist, `p`
+    /// there work at all, and it is the whole reason this is worth having over
+    /// a nudge key.
+    ///
+    /// One register, unnamed. vim has named and numbered ones too; whether
+    /// they earn their surface when the "text" is tracks is a question best
+    /// answered by missing them.
+    pub register: Vec<TrackId>,
     /// The last search, for `n` and `N`.
     pub last_search: Option<(String, SearchDir)>,
     /// Keys typed so far that have not resolved to a binding, and the count
@@ -444,6 +457,8 @@ impl Ui {
             leader: crate::config::default_leader(),
             help: None,
             prompt: None,
+            undo: crate::undo::Undo::default(),
+            register: Vec::new(),
             last_search: None,
             pending: Vec::new(),
             count: None,
@@ -1404,6 +1419,9 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
     let n = count.unwrap_or(1).max(1);
     let page = 10usize;
 
+    // One place, so a new editing command cannot forget to be undoable.
+    remember(ui, &cmd);
+
     match cmd {
         // ---- navigation
         Command::Down => set_cursor(ui, (cursor + n).min(len.saturating_sub(1))),
@@ -1521,8 +1539,15 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 }
             }
         },
-        // `dd` takes a count, as in vim: `3dd` removes three.
+        // `dd` takes a count, as in vim: `3dd` removes three. It cuts —
+        // the rows go to the register, so `dd` … `p` moves them, here or in
+        // another playlist.
         Command::Remove => remove_rows(ui, ctx, n),
+        Command::Yank => yank_rows(ui, ctx, n),
+        Command::Undo => step_history(ui, ctx, true),
+        Command::Redo => step_history(ui, ctx, false),
+        Command::YankToEnd => yank_rows(ui, ctx, len.saturating_sub(cursor)),
+        Command::Put { before } => put_rows(ui, ctx, before, n),
         // `D` is delete-to-end. There is no "inside a line" here, so the list
         // is what has an end.
         Command::RemoveToEnd => remove_rows(ui, ctx, len.saturating_sub(cursor)),
@@ -1907,6 +1932,213 @@ fn show_help(ui: &mut Ui) {
     ui.help = Some(rows);
 }
 
+/// The open playlist's history, if it has one.
+///
+/// Only a *saved* playlist: a rule cannot be edited, so it has nothing to
+/// undo, and the library is a projection of the store rather than a list.
+fn playlist_key(ui: &Ui) -> Option<crate::undo::Key> {
+    match &ui.open {
+        Some(Open::Saved(name)) => Some(crate::undo::Key::Playlist(name.clone())),
+        _ => None,
+    }
+}
+
+/// Which list `u` and `^r` act on: the one you are looking at.
+fn undo_key(ui: &Ui) -> Option<crate::undo::Key> {
+    match ui.view {
+        View::Playlist => playlist_key(ui),
+        View::Queue => Some(crate::undo::Key::Queue),
+        _ => None,
+    }
+}
+
+/// Which list a command *changes* — which is not always the one on screen.
+///
+/// `a` in the library adds to the open playlist, so recording by view would
+/// have filed that edit under nothing and left it un-undoable. What a command
+/// edits is a property of the command.
+fn edited_key(ui: &Ui, cmd: &Command) -> Option<crate::undo::Key> {
+    match cmd {
+        Command::Add {
+            target: AddTarget::Playlist,
+            ..
+        } => playlist_key(ui),
+        Command::Add {
+            target: AddTarget::Queue,
+            ..
+        } => Some(crate::undo::Key::Queue),
+        Command::Remove | Command::RemoveToEnd | Command::Put { .. } => undo_key(ui),
+        _ => None,
+    }
+}
+
+fn snapshot_of(ui: &Ui, key: &crate::undo::Key) -> crate::undo::Snapshot {
+    match key {
+        crate::undo::Key::Queue => crate::undo::Snapshot {
+            entries: ui.queue.entries().copied().collect(),
+            selected: ui.queue_sel,
+        },
+        crate::undo::Key::Playlist(_) => crate::undo::Snapshot {
+            entries: ui.playlist.entries().to_vec(),
+            selected: ui.playlist_sel,
+        },
+    }
+}
+
+/// Remember the list as it is, before changing it.
+///
+/// Called from `execute` for every editing command rather than inside each
+/// one, so a new edit cannot forget to be undoable — which is the failure that
+/// makes an undo stack worse than none, because it is trusted until the once
+/// it is not.
+fn remember(ui: &mut Ui, cmd: &Command) {
+    if let Some(key) = edited_key(ui, cmd) {
+        let now = snapshot_of(ui, &key);
+        ui.undo.record(key, now);
+    }
+}
+
+/// `u` and `^r`.
+fn step_history(ui: &mut Ui, ctx: &Context<'_>, back: bool) {
+    let Some(key) = undo_key(ui) else {
+        ui.notify("nothing here keeps an undo history");
+        return;
+    };
+    let now = snapshot_of(ui, &key);
+    let step = if back {
+        ui.undo.undo(&key, now)
+    } else {
+        ui.undo.redo(&key, now)
+    };
+    let Some(step) = step else {
+        ui.notify(if back {
+            "already at the oldest change"
+        } else {
+            "already at the newest change"
+        });
+        return;
+    };
+
+    match key {
+        crate::undo::Key::Queue => {
+            ui.queue.clear();
+            for id in &step.entries {
+                ui.queue.push_back(*id);
+            }
+            ui.queue_sel = step.selected.min(ui.queue.len().saturating_sub(1));
+        }
+        crate::undo::Key::Playlist(_) => {
+            ui.playlist.clear();
+            for id in &step.entries {
+                ui.playlist.push(*id);
+            }
+            ui.playlist_sel = step.selected.min(ui.playlist.len().saturating_sub(1));
+            // An undo is an edit like any other: the file follows.
+            persist_open(ui, ctx);
+        }
+    }
+    ui.notify(if back { "undo" } else { "redo" });
+}
+
+/// The rows `n` from the cursor covers, in whichever list is focused.
+fn rows_at_cursor(ui: &Ui, n: usize) -> Vec<TrackId> {
+    let (entries, at) = match ui.view {
+        View::Playlist if ui.playlist_pane == Pane::Tracks => {
+            (ui.playlist.entries().to_vec(), ui.playlist_sel)
+        }
+        View::Playlist => return Vec::new(),
+        View::Queue => (ui.queue.entries().copied().collect(), ui.queue_sel),
+        View::Sorted => (ui.library.sorted().to_vec(), ui.sorted),
+        _ => return Vec::new(),
+    };
+    entries.into_iter().skip(at).take(n).collect()
+}
+
+/// `yy` — copy without removing.
+///
+/// Works in the library too, not only in a playlist: yanking from view 2 and
+/// putting into a playlist is the same act as `a`, spelled the way vim spells
+/// it, and refusing it would be arbitrary.
+fn yank_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
+    let rows = rows_at_cursor(ui, n);
+    if rows.is_empty() {
+        ui.notify("nothing to yank here");
+        return;
+    }
+    let count = rows.len();
+    ui.register = rows;
+    let _ = ctx;
+    ui.notify(match count {
+        1 => "yanked 1 track".to_string(),
+        n => format!("yanked {n} tracks"),
+    });
+}
+
+/// `p` / `P` — put the register after or before the cursor.
+///
+/// Only into a list that holds tracks of its own. The library is a projection
+/// of the store, so there is nothing to put *into* — §4 makes that a rebuild,
+/// not an edit.
+fn put_rows(ui: &mut Ui, ctx: &Context<'_>, before: bool, times: usize) {
+    if ui.register.is_empty() {
+        ui.notify("the register is empty — `yy` or `dd` fills it");
+        return;
+    }
+    let rows: Vec<TrackId> = ui
+        .register
+        .iter()
+        .cycle()
+        .take(ui.register.len() * times.max(1))
+        .copied()
+        .collect();
+    let count = rows.len();
+
+    match ui.view {
+        View::Playlist if ui.playlist_pane == Pane::Tree => {
+            ui.notify("put into the tracks — `tab` moves there")
+        }
+        View::Playlist if ui.open.as_ref().is_some_and(Open::is_rule) => {
+            ui.notify(rule_owned("put into"))
+        }
+        View::Playlist if ui.open.is_none() => {
+            ui.notify("no playlist open — `:playlist new <name>` starts one")
+        }
+        View::Playlist => {
+            // After the cursor, or before it — vim's `p` and `P`. That is what
+            // makes `dd` then `p` swap a track with the next one.
+            let at = if ui.playlist.is_empty() {
+                0
+            } else if before {
+                ui.playlist_sel
+            } else {
+                ui.playlist_sel + 1
+            };
+            for (i, id) in rows.into_iter().enumerate() {
+                ui.playlist.insert(at + i, id);
+            }
+            // The cursor follows what was put, as vim's does.
+            ui.playlist_sel = at;
+            persist_open(ui, ctx);
+            ui.notify(format!("put {count}"));
+        }
+        View::Queue => {
+            let at = if ui.queue.is_empty() {
+                0
+            } else if before {
+                ui.queue_sel
+            } else {
+                ui.queue_sel + 1
+            };
+            for (i, id) in rows.into_iter().enumerate() {
+                ui.queue.insert(at + i, id);
+            }
+            ui.queue_sel = at;
+            ui.notify(format!("put {count}"));
+        }
+        _ => ui.notify("nothing to put into here"),
+    }
+}
+
 /// Remove `n` rows from the cursor down, in whichever list is focused.
 ///
 /// Removing repeatedly at the same index is what "the next one moves up under
@@ -1922,6 +2154,9 @@ fn remove_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
             ui.notify(rule_owned("remove from"))
         }
         View::Playlist => {
+            // `dd` cuts: the rows land in the register, so `dd` … `p` moves
+            // them — here, or into another playlist.
+            ui.register = rows_at_cursor(ui, n);
             for _ in 0..n {
                 if ui.playlist.remove(ui.playlist_sel).is_none() {
                     break;
@@ -1931,6 +2166,7 @@ fn remove_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
             persist_open(ui, ctx);
         }
         View::Queue => {
+            ui.register = rows_at_cursor(ui, n);
             for _ in 0..n {
                 if ui.queue.remove(ui.queue_sel).is_none() {
                     break;
@@ -2025,6 +2261,11 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
             // Saving a rule-defined list writes what it *currently* holds and
             // detaches it, which is what `:freeze` does — so say so rather
             // than leaving the title claiming a rule still owns it.
+            // Saving over an existing playlist replaces its contents, so its
+            // undo history no longer describes anything — `u` would restore a
+            // list this name never held.
+            ui.undo
+                .forget(&crate::undo::Key::Playlist(name.to_string()));
             let was = ui.open.replace(Open::Saved(name.to_string()));
             refresh_playlist_rows(ui);
             ui.notify(match was {
@@ -4382,6 +4623,283 @@ mod tests {
         assert!(ui.quit, "the comma leader did not fire");
     }
 
+    /// The whole point of a register over a nudge key: vim's registers are
+    /// global, so yanking here and putting there needs nothing special.
+    #[test]
+    fn yank_crosses_playlists() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "yank-cross");
+        new_playlist(&mut ui, &ctx, "one");
+        ui.view = View::Sorted;
+        press(&mut ui, &ctx, "a");
+        assert_eq!(ui.playlist.len(), 1);
+
+        // Copy it out of the first playlist.
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "y y");
+        assert_eq!(ui.register.len(), 1);
+
+        // Open another and put it there. The track stays in the first: `yy`
+        // copies, `dd` moves.
+        new_playlist(&mut ui, &ctx, "two");
+        assert!(ui.playlist.is_empty());
+        press(&mut ui, &ctx, "p");
+        assert_eq!(ui.playlist.len(), 1, "{}", ui.status);
+
+        open_playlist(&mut ui, &ctx, "one");
+        assert_eq!(ui.playlist.len(), 1, "`yy` removed it from the source");
+    }
+
+    /// vim's swap idiom, which is why no separate nudge key is needed: `p`
+    /// puts *after* the cursor, so `dd` then `p` exchanges two rows.
+    #[test]
+    fn dd_then_p_swaps_a_track_with_the_next() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "swap");
+        new_playlist(&mut ui, &ctx, "mix");
+        for (id, _) in store.iter() {
+            ui.playlist.push(id);
+        }
+        let before = ui.playlist.entries().to_vec();
+        assert!(before.len() >= 3);
+
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "d d");
+        press(&mut ui, &ctx, "p");
+
+        assert_eq!(
+            ui.playlist.entries(),
+            [before[1], before[0], before[2]],
+            "the first two did not swap"
+        );
+    }
+
+    /// `P` puts before the cursor, `p` after — vim's distinction.
+    #[test]
+    fn capital_p_puts_before_the_cursor() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "put-before");
+        new_playlist(&mut ui, &ctx, "mix");
+        let ids: Vec<_> = store.iter().map(|(id, _)| id).collect();
+        ui.playlist.push(ids[0]);
+        ui.playlist.push(ids[1]);
+
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        ui.playlist_sel = 1;
+        ui.register = vec![ids[2]];
+
+        press(&mut ui, &ctx, "P");
+        assert_eq!(ui.playlist.entries(), [ids[0], ids[2], ids[1]]);
+    }
+
+    /// Counts compose on both halves, as in vim.
+    #[test]
+    fn counts_work_on_yank_and_put() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "counts");
+        new_playlist(&mut ui, &ctx, "mix");
+        for (id, _) in store.iter() {
+            ui.playlist.push(id);
+        }
+        let all = ui.playlist.len();
+
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "2 y y");
+        assert_eq!(ui.register.len(), 2, "the count was ignored");
+
+        press(&mut ui, &ctx, "2 p");
+        assert_eq!(ui.playlist.len(), all + 4, "`2p` should put it twice");
+    }
+
+    /// An edit is an edit: putting writes the file like `y` and `dd` do.
+    #[test]
+    fn putting_is_written_through() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "put-write");
+        new_playlist(&mut ui, &ctx, "mix");
+        ui.register = vec![store.iter().next().unwrap().0];
+
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "p");
+
+        let at = dir.join("playlists/mix.m3u8");
+        assert_eq!(crate::m3u::read(&at).unwrap().len(), 1, "{}", ui.status);
+    }
+
+    #[test]
+    fn putting_an_empty_register_says_so() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "put-empty");
+        new_playlist(&mut ui, &ctx, "mix");
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+
+        press(&mut ui, &ctx, "p");
+        assert!(ui.status.contains("register is empty"), "{}", ui.status);
+    }
+
+    /// A rule has no tracks of its own to put into.
+    #[test]
+    fn putting_into_a_rule_is_refused() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "put-rule");
+        open_playlist(&mut ui, &ctx, "electronic");
+        ui.register = vec![store.iter().next().unwrap().0];
+
+        press(&mut ui, &ctx, "p");
+        assert!(ui.status.contains(":freeze"), "{}", ui.status);
+    }
+
+    /// The case that asked for this: an accidental `p`, taken back.
+    #[test]
+    fn u_takes_back_a_put_and_a_cut() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, dir) = ui_with_saved(&store, "undo-basic");
+        new_playlist(&mut ui, &ctx, "mix");
+        for (id, _) in store.iter() {
+            ui.playlist.push(id);
+        }
+        let original = ui.playlist.entries().to_vec();
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+
+        press(&mut ui, &ctx, "y y");
+        press(&mut ui, &ctx, "p");
+        assert_eq!(ui.playlist.len(), original.len() + 1);
+
+        press(&mut ui, &ctx, "u");
+        assert_eq!(ui.playlist.entries(), original, "the put was not undone");
+
+        press(&mut ui, &ctx, "d d");
+        assert_eq!(ui.playlist.len(), original.len() - 1);
+        press(&mut ui, &ctx, "u");
+        assert_eq!(ui.playlist.entries(), original, "the cut was not undone");
+
+        // An undo is an edit like any other: the file follows.
+        let at = dir.join("playlists/mix.m3u8");
+        assert_eq!(crate::m3u::read(&at).unwrap().len(), original.len());
+    }
+
+    #[test]
+    fn ctrl_r_redoes_what_u_took_back() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "undo-redo");
+        new_playlist(&mut ui, &ctx, "mix");
+        ui.playlist.push(store.iter().next().unwrap().0);
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+
+        press(&mut ui, &ctx, "d d");
+        assert!(ui.playlist.is_empty());
+        press(&mut ui, &ctx, "u");
+        assert_eq!(ui.playlist.len(), 1);
+        press(&mut ui, &ctx, "^r");
+        assert!(ui.playlist.is_empty(), "redo did not reapply the cut");
+    }
+
+    /// vim's undo is per buffer, and a playlist is a buffer: undoing in one
+    /// must not reach into another you are no longer looking at.
+    #[test]
+    fn history_is_per_playlist() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "undo-per-list");
+        let ids: Vec<_> = store.iter().map(|(id, _)| id).collect();
+
+        new_playlist(&mut ui, &ctx, "one");
+        ui.view = View::Sorted;
+        press(&mut ui, &ctx, "a");
+        assert_eq!(ui.playlist.len(), 1);
+
+        // A second playlist, never edited: `u` there has nothing to do.
+        new_playlist(&mut ui, &ctx, "two");
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "u");
+        assert!(ui.status.contains("oldest"), "{}", ui.status);
+        assert!(ui.playlist.is_empty(), "it undid the other playlist");
+
+        // Back in the first, the step is still there — as a vim buffer keeps
+        // its history across being left and returned to.
+        let _ = ids;
+        open_playlist(&mut ui, &ctx, "one");
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "u");
+        assert!(ui.playlist.is_empty(), "the add was not undone");
+    }
+
+    /// The queue is edited by hand too, so it gets the same protection.
+    #[test]
+    fn the_queue_has_its_own_undo() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "undo-queue");
+        ui.view = View::Sorted;
+        press(&mut ui, &ctx, "e");
+        let before = ui.queue.len();
+        assert!(before > 0);
+
+        ui.view = View::Queue;
+        press(&mut ui, &ctx, "d d");
+        assert_eq!(ui.queue.len(), before - 1);
+        press(&mut ui, &ctx, "u");
+        assert_eq!(ui.queue.len(), before);
+    }
+
+    /// A rule cannot be edited, so it has nothing to undo — and `u` says that
+    /// rather than appearing to do nothing.
+    /// Saving over a playlist replaces its contents, so its history stops
+    /// describing anything — `u` must not restore a list that name never held.
+    #[test]
+    fn saving_over_a_playlist_forgets_its_history() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "undo-overwrite");
+        new_playlist(&mut ui, &ctx, "mix");
+        ui.view = View::Sorted;
+        press(&mut ui, &ctx, "a");
+        assert!(!ui.playlist.is_empty());
+
+        // Overwrite it with something else entirely.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist save mix");
+
+        ui.view = View::Playlist;
+        ui.playlist_pane = Pane::Tracks;
+        press(&mut ui, &ctx, "u");
+        assert!(
+            ui.status.contains("oldest"),
+            "stale history survived: {}",
+            ui.status
+        );
+    }
+
+    #[test]
+    fn a_rule_has_no_undo_history() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "undo-rule");
+        open_playlist(&mut ui, &ctx, "electronic");
+        ui.playlist_pane = Pane::Tracks;
+
+        press(&mut ui, &ctx, "u");
+        assert!(ui.status.contains("undo history"), "{}", ui.status);
+    }
+
     #[test]
     fn tab_swaps_the_two_panes_of_view_three() {
         let store = genre_fixture();
@@ -4724,7 +5242,7 @@ mod tests {
         new_playlist(&mut ui, &ctx, "mix");
         ui.view = View::Tree;
         let expected = ui.tree.tracks_for(&ui.library, &store).len();
-        press(&mut ui, &ctx, "y");
+        press(&mut ui, &ctx, "a");
         assert_eq!(ui.playlist.len(), expected);
         assert!(expected > 1, "the fixture should have a multi-track artist");
 
@@ -4740,7 +5258,7 @@ mod tests {
         ui.saved = Some(crate::playlist::Playlists::new(&scratch("remove-only")));
         new_playlist(&mut ui, &ctx, "mix");
         ui.view = View::Tree;
-        press(&mut ui, &ctx, "y");
+        press(&mut ui, &ctx, "a");
         let before = ui.playlist.len();
 
         ui.view = View::Playlist;

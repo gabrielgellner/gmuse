@@ -2187,6 +2187,46 @@ Append here as decisions are made. Format: date, decision, rationale.
   is counted twice and none is dropped, and both counts are reported so neither is silent. Only logs: a second
   `history.toml` is a base, not a stream of facts, and two of them cannot be folded.
 
+- **2026-08-30** **Registers, and the key reshuffle they force.** A playlist was in insert order with no way to change
+  it. vim offers two idioms — unimpaired's `[e`/`]e` nudge, and its own `dd`…`p` — and the second is strictly more
+  useful here, because **vim's registers are global**. Yank in one buffer, `:b other`, put: nothing about the register
+  is attached to where it came from. So `yy` … open another playlist … `p` moves a track _between_ playlists, which no
+  nudge key can do, and `p` putting **after** the cursor makes `dd`+`p` the swap idiom, so reordering needs no key of
+  its own either.
+
+  The analogy is tighter than "tabs" suggests. gmuse already has both vim concepts, separated correctly: **views 1–7 are
+  tabs** — numbered, anonymous, `gt`/`gT`/`3gt` — and **playlists are buffers** — named, listed, switched by name.
+  `:playlist open X` is `:b X`, `:playlist list` is `:ls`, and view 3's left pane is a buffer list. Playlists having
+  names is not a departure from vim; it is what makes them buffers rather than tabs.
+
+  `yy` makes `y` a prefix, and §6 refuses to let a chord extend a bound key — the same constraint that moved `expand`
+  off `space`. So the three cmus add-keys were reshuffled, and the result reads better than what it replaced: `a` for
+  add-to-playlist, which is the common one and the obvious mnemonic; `A` for add-to-library, which is rare and exists
+  for view 5 reaching music the library does not have; `e` for the queue, unchanged.
+
+  One register, unnamed. vim has named and numbered ones; whether they earn their surface when the "text" is tracks is a
+  question best answered by missing them.
+
+- **2026-08-30** **Undo is per list, and stores states rather than inverses.** vim's undo is per _buffer_, and a
+  playlist is a buffer (see the registers entry), so `u` in one playlist must not reach into another you are no longer
+  looking at. Keyed by name, so a list keeps its history across being closed and reopened.
+
+  A whole snapshot, not an inverse operation. A playlist is tens or hundreds of `TrackId`s at four bytes each, so
+  storing the _state_ costs nothing and cannot get the inverse wrong — which a hand-written "undo an insert by deleting
+  at index n" eventually does. Bounded at 100 steps per list; vim's `undolevels` is 1000, and a playlist is edited at
+  human speed.
+
+  `remember` is called **once**, in `execute`, rather than inside each editing command. An undo stack that is right
+  almost always is worse than none, because it is trusted until the once it is not — and one call site is what makes a
+  new editing command undoable by default.
+
+  Which list an edit belongs to is a property of the **command**, not of the view: `a` in the library adds to the open
+  playlist, so recording by view filed that edit under nothing and left it un-undoable. Caught by a test that pressed
+  `a` from view 2, which is how it is actually used.
+
+  `u` was `rescan`, which in the TUI only printed a message saying to use `:rescan` — so freeing it cost nothing. It
+  moved to `<leader>u`.
+
 ---
 
 ## 14. Prior art worth reading

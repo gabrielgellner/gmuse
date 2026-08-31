@@ -135,8 +135,11 @@ because an artist and an album are both jumpable. The playing track is emphasise
 
 Playback: `Enter` or `x` plays the selection, `c` pauses, `v` stops, `b`/`z` are next/previous, `←`/`→` seek 10s,
 `<`/`>` seek 60s, `-`/`+` adjust volume by 3 dB. Modes: `s` shuffle, `r` repeat, `R` repeat-one, `C` continue, `m`
-cycles all/artist/album. `a`/`y`/`e` add the selection to the library/playlist/queue. `dd` removes a row and takes a
-count (`3dd`); `D` removes from the cursor to the end, as in vim.
+cycles all/artist/album. `a` adds the selection to the open playlist, `e` to the queue, `A` to the library.
+
+`dd` cuts a row and takes a count (`3dd`), `D` cuts to the end; `yy`/`Y` copy the same way, and `p`/`P` put after or
+before the cursor. `u` undoes, `^r` redoes. vim's registers, so `dd` then `p` swaps two tracks, and `yy` — open another
+playlist — `p` copies one across.
 
 The queue, current track, position and playback modes come back on the next launch, **paused** — including the shuffle
 seed, so a shuffled sequence resumes rather than restarting. `--no-resume` starts fresh. Settings named in `config.toml`
@@ -380,9 +383,17 @@ Playlists are files, kept in `<data_dir>/playlists`:
 :playlist list              what there is
 ```
 
-`y` adds the selection to **the playlist you have open**, and `D` removes — both **written to the file immediately**,
-the same rule ratings and plays follow: losing what you meant is worse than the cost of a write. Adding with nothing
-open says so and points at `:playlist new`, rather than inventing a file you did not ask for.
+`a` adds the selection to **the playlist you have open**; `dd` cuts, `yy` copies, `p` puts. Every one of them is
+**written to the file immediately**, the same rule ratings and plays follow: losing what you meant is worse than the
+cost of a write. Adding with nothing open says so and points at `:playlist new`, rather than inventing a file you did
+not ask for.
+
+`u` undoes an edit and `^r` redoes it, per playlist — vim's undo is per buffer, and a playlist is a buffer, so undoing
+here never reaches into a list you are no longer looking at. The queue keeps its own history too.
+
+The register is **global**, as vim's are — that is what makes `yy` here, open another playlist, `p` there work, and it
+is why reordering needs no key of its own: `p` puts _after_ the cursor, so `dd` then `p` exchanges a track with the next
+one.
 
 `open` takes a **rule or a file** without caring which, because both are play sources — see
 [Smart playlists](#smart-playlists). A rule cannot be edited; `:playlist save <name>` copies its current contents into

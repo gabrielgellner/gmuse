@@ -331,6 +331,21 @@ pub enum Command {
     Expand,
     /// Remove the item under the cursor. Takes a count: `3dd`.
     Remove,
+    /// Copy rows into the register without removing them. Takes a count.
+    ///
+    /// vim's `yy`. The register is on the `Ui`, not on a playlist, because
+    /// vim's registers are **global** — that is what makes yank here, switch
+    /// there, put work at all.
+    Yank,
+    /// Copy from the cursor to the end of the list. vim's `Y`, mirroring `D`.
+    YankToEnd,
+    /// Put the register after the cursor (`p`) or before it (`P`).
+    Put {
+        before: bool,
+    },
+    /// Step back through this list's edits (`u`), or forward again (`^r`).
+    Undo,
+    Redo,
     /// Remove from the cursor to the end of the list.
     ///
     /// `D` in vim is delete-to-end-of-line. There is no "inside a line" here,

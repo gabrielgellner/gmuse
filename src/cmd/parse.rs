@@ -62,10 +62,15 @@ pub const VERBS: &[&str] = &[
     "playlist",
     "prev",
     "q",
+    "put",
+    "put-before",
     "quit",
     "rate",
     "remove",
     "remove-to-end",
+    "yank",
+    "yank-to-end",
+    "redo",
     "rescan",
     "rsearch",
     "search",
@@ -77,6 +82,7 @@ pub const VERBS: &[&str] = &[
     "toggle",
     "top",
     "unbind",
+    "undo",
     "up",
     "view",
     "view-last",
@@ -112,6 +118,10 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "expand" => Command::Expand,
         "remove" => Command::Remove,
         "remove-to-end" => Command::RemoveToEnd,
+        "yank" => Command::Yank,
+        "yank-to-end" => Command::YankToEnd,
+        "put" => Command::Put { before: false },
+        "put-before" => Command::Put { before: true },
         "pane-next" => Command::PaneNext,
         "pane-left" => Command::PaneLeft,
         "pane-right" => Command::PaneRight,
@@ -156,6 +166,8 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             path: optional_path(rest),
         },
         "rescan" => Command::Rescan,
+        "undo" => Command::Undo,
+        "redo" => Command::Redo,
 
         // State.
         "set" => {
@@ -482,6 +494,10 @@ pub fn format(cmd: &Command) -> String {
         Command::Expand => "expand".into(),
         Command::Remove => "remove".into(),
         Command::RemoveToEnd => "remove-to-end".into(),
+        Command::Yank => "yank".into(),
+        Command::YankToEnd => "yank-to-end".into(),
+        Command::Put { before: false } => "put".into(),
+        Command::Put { before: true } => "put-before".into(),
         Command::PaneNext => "pane-next".into(),
         Command::PaneLeft => "pane-left".into(),
         Command::PaneRight => "pane-right".into(),
@@ -511,6 +527,8 @@ pub fn format(cmd: &Command) -> String {
             }
         }
         Command::Rescan => "rescan".into(),
+        Command::Undo => "undo".into(),
+        Command::Redo => "redo".into(),
         Command::Set { key, value } => format!("set {}={}", key.name(), value),
         Command::Toggle(key) => format!("toggle {}", key.name()),
         Command::Bind { ctx, key, cmd } => {
