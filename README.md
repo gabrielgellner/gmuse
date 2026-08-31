@@ -130,6 +130,12 @@ another puts every track there, and `zm` walks back out. It works because the le
 the first level is an artist and every row at the second is an album, so "collapse to artists" is a real operation. A
 file explorer cannot offer it, because "three directories deep" is not a category.
 
+**Motions that use the shape rather than counting rows.** `}` and `{` step to the next row at the level you are on, `]]`
+and `[[` always mean artist, `-` goes up to what a row is filed under, `]z` to the end of its group, and `zj`/`zk` to
+the next and previous openable row. They mean the same thing in a flat list, where the album dividers _are_ the
+structure — so `}` is the next album in view 2, and `-` the top of the one you are in. One idea rather than a second set
+of keys.
+
 A level change **holds the cursor still on screen** and opens the tree behind it. nvim does not do this — it keeps the
 cursor on its buffer line and lets it slide down the window as the folds above it open — but here the cursor is the
 subject rather than the top of the window. Lists also draw vim's `~` past their last row, which is what makes holding

@@ -324,6 +324,82 @@ pub enum PlaylistSpec {
 /// Everything the application can be asked to do.
 ///
 /// One enum for keys, the `:` line and the rc file, per §6.
+/// A motion that uses the list's **structure** rather than counting rows.
+///
+/// The same eight ideas read in a tree and in a flat list, which is the point:
+/// in view 1 a "sibling" is a row at the cursor's own depth, and in view 2 it
+/// is the next album boundary — the divider you can already see. One concept,
+/// two shapes, rather than a second set of keys for flat lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    /// `}` and `{` — the next or previous row at the cursor's own depth,
+    /// stepping over everything nested under it.
+    NextSibling,
+    PrevSibling,
+    /// `]]` and `[[` — the next or previous top-level row, whatever depth the
+    /// cursor is at.
+    NextSection,
+    PrevSection,
+    /// `][` and `[]` — the *end* of a top-level group rather than its start.
+    /// vim's section motions are four keys, not two: `]]` `[[` land on starts
+    /// and `][` `[]` on ends, so a section can be left from either side.
+    NextSectionEnd,
+    PrevSectionEnd,
+    /// `-` and `[z` — the row this one is filed under.
+    Parent,
+    /// `]z` — the last row of the group this one is in.
+    GroupEnd,
+    /// `zj` and `zk` — the next or previous row that can be opened at all.
+    NextFold,
+    PrevFold,
+}
+
+impl Motion {
+    pub fn parse(word: &str) -> Option<Self> {
+        Some(match word {
+            "next-sibling" => Self::NextSibling,
+            "prev-sibling" => Self::PrevSibling,
+            "next-section" => Self::NextSection,
+            "prev-section" => Self::PrevSection,
+            "next-section-end" => Self::NextSectionEnd,
+            "prev-section-end" => Self::PrevSectionEnd,
+            "parent" => Self::Parent,
+            "group-end" => Self::GroupEnd,
+            "next-fold" => Self::NextFold,
+            "prev-fold" => Self::PrevFold,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NextSibling => "next-sibling",
+            Self::PrevSibling => "prev-sibling",
+            Self::NextSection => "next-section",
+            Self::PrevSection => "prev-section",
+            Self::NextSectionEnd => "next-section-end",
+            Self::PrevSectionEnd => "prev-section-end",
+            Self::Parent => "parent",
+            Self::GroupEnd => "group-end",
+            Self::NextFold => "next-fold",
+            Self::PrevFold => "prev-fold",
+        }
+    }
+
+    pub const ALL: &'static [Motion] = &[
+        Self::NextSibling,
+        Self::PrevSibling,
+        Self::NextSection,
+        Self::PrevSection,
+        Self::NextSectionEnd,
+        Self::PrevSectionEnd,
+        Self::Parent,
+        Self::GroupEnd,
+        Self::NextFold,
+        Self::PrevFold,
+    ];
+}
+
 /// Where to put the cursor's row in its pane — vim's `zt`, `zz` and `zb`.
 ///
 /// Not a fold operation, but it shares the `z` prefix because vim puts it
@@ -372,6 +448,10 @@ pub enum Fold {
     /// `zC` — this node and everything under it, so reopening does not spill
     /// the subtree you had expanded inside.
     CloseDeep,
+    /// `zA` — `zO` or `zC` depending on which way this node is currently set.
+    /// vim has the toggle for every fold operation that comes in a pair, and
+    /// shipping `zO`/`zC` without it left the recursive trio one short.
+    ToggleDeep,
     /// `zR` — every fold in the tree.
     All,
     /// `zM` — none of them.
@@ -393,6 +473,7 @@ impl Fold {
             "toggle" => Self::Toggle,
             "open-deep" => Self::OpenDeep,
             "close-deep" => Self::CloseDeep,
+            "toggle-deep" => Self::ToggleDeep,
             "all" => Self::All,
             "none" => Self::None,
             "more" => Self::More,
@@ -409,6 +490,7 @@ impl Fold {
             Self::Toggle => "toggle",
             Self::OpenDeep => "open-deep",
             Self::CloseDeep => "close-deep",
+            Self::ToggleDeep => "toggle-deep",
             Self::All => "all",
             Self::None => "none",
             Self::More => "more",
@@ -436,6 +518,7 @@ impl Fold {
         Self::Toggle,
         Self::OpenDeep,
         Self::CloseDeep,
+        Self::ToggleDeep,
         Self::All,
         Self::None,
         Self::More,
@@ -460,6 +543,8 @@ pub enum Command {
     Fold(Fold),
     /// Scroll so the cursor's row sits at the top, middle or bottom.
     Place(Place),
+    /// Move by the list's structure. Takes a count: `3}`.
+    Go(Motion),
     /// Put the cursor on the playing track, opening whatever folds were hiding
     /// it. Answers "where is the thing I am listening to?", which is a question
     /// neither selection nor search asks.

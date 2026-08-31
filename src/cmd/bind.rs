@@ -62,6 +62,7 @@ pub const DEFAULTS: &[&str] = &[
     "bind common \"z a\" fold toggle",
     "bind common \"z O\" fold open-deep",
     "bind common \"z C\" fold close-deep",
+    "bind common \"z A\" fold toggle-deep",
     "bind common \"z R\" fold all",
     "bind common \"z M\" fold none",
     "bind common \"z r\" fold more",
@@ -75,6 +76,27 @@ pub const DEFAULTS: &[&str] = &[
     "bind common \"z t\" place top",
     "bind common \"z z\" place centre",
     "bind common \"z b\" place bottom",
+    // Structural motions — #31. `{`/`}` is the one that earns its place:
+    // artist-to-artist without scrolling through 200 expanded tracks is the
+    // most frequent move there is, and `j`/`k` cannot say it. vim's paragraph
+    // motions are unused here and the semantics line up exactly.
+    "bind common } go next-sibling",
+    "bind common { go prev-sibling",
+    "bind common \"] ]\" go next-section",
+    "bind common \"[ [\" go prev-section",
+    // vim's section motions are four keys, not two: `]]`/`[[` for starts and
+    // `][`/`[]` for ends. Shipping half of them left no way to leave a section
+    // from the bottom, which is the move you want when the next thing you do
+    // is `j` into what follows.
+    "bind common \"] [\" go next-section-end",
+    "bind common \"[ ]\" go prev-section-end",
+    // `-` is netrw's "up a directory", and free now that transport moved
+    // behind the leader. `[z` is vim's name for the same move.
+    "bind common - go parent",
+    "bind common \"[ z\" go parent",
+    "bind common \"] z\" go group-end",
+    "bind common \"z j\" go next-fold",
+    "bind common \"z k\" go prev-fold",
     // "where is the thing I am listening to?" — a question neither the cursor
     // nor a search asks. `g` is already the go-somewhere prefix.
     "bind common \"g p\" playing",

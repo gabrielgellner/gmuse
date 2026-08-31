@@ -2474,6 +2474,78 @@ Append here as decisions are made. Format: date, decision, rationale.
   a binding no guide mentions and requires it to be reported, because a test that can only fail on absence would pass
   just as well if it looked at nothing.
 
+- **2026-08-31** **Structural motions, and one set of them for both shapes of list.** `{` `}` `[[` `]]` `-` `]z` `zj`
+  `zk` — #31. `}` is the one that earns its place: with an artist expanded, `j` walks every track of every open album,
+  and stepping artist-to-artist is the most frequent move there is. vim's paragraph motions are unused here and the
+  semantics line up exactly.
+
+  **The same eight ideas read in a flat list**, because there the album divider _is_ the structure: a "sibling" is the
+  next album, a "section" the next artist, the "group" the run of tracks sharing an album. So view 2 gets structure to
+  move through without a second set of keys, and `-` finally has the netrw meaning it should have had — free now that
+  transport moved behind the leader (#33).
+
+  Boundaries come from `list::album_starts`, derived from the same key `list::rows` uses to decide where to draw a
+  divider. Recomputing them would have been three lines and a standing invitation for a motion to land somewhere the eye
+  cannot see a boundary.
+
+  All eight are one function over `rows()` — scan from the cursor for the first row matching a predicate — because what
+  differs between them is the predicate and the direction. Eight separate walks would have been eight chances to get the
+  edges wrong. They stop at the ends rather than wrapping, as vim's do, so a count that overshoots lands on the last
+  match rather than nowhere.
+
+  `[z` is bound to the same command as `-`: in a three-level tree, "the start of the current fold" and "the parent" are
+  the same row. Binding both costs nothing and lets either muscle memory work, as `l` and `Enter` already do.
+
+- **2026-08-31** **A fixture has to be able to tell the answers apart.** Six of the first mutation run's survivors were
+  the same mistake: the tree fixture has one album per artist and two artists, so "the last track of the album" and "the
+  last track of the artist" are the same row, and a count of two lands where a count of one does. The tests passed for
+  reasons unrelated to the code being right.
+
+  `deep_fixture` is three artists, one of them with two albums and one of those with three tracks — the smallest shape
+  in which every one of these motions has a distinct answer. Similarly `two_albums_then_another_artist` for the flat
+  list, because the shared fixture's only multi-album artist sorts _last_, leaving `]]` nothing to reach.
+
+  The general lesson, and it is not the first time this project has paid for it: a passing test over a degenerate
+  fixture is indistinguishable from a passing test over a correct one.
+
+  **The mutation runner now refuses to start on a failing baseline.** A backgrounded run was killed between writing a
+  mutation and restoring the file, which left `tree.rs` mutated — and every subsequent mutation then reported CAUGHT,
+  because the suite was already red before anything was changed. A whole clean-looking run was worthless. Restoring in a
+  `finally` narrows the window; checking the baseline first is what makes the _next_ run's results mean anything.
+
+- **2026-08-31** **Three of #31's keys were vim-shaped but not vim, and are now canonical.** Trying the branch raised
+  the suspicion that the motions were tied to artist/album/track. Mostly they are not — `step` scans by depth and names
+  no level — but reading them against `:h` found three real divergences, and all three were _under_-taking vim rather
+  than departing from it.
+
+  **`zk` went to the previous fold's start; vim's goes to its end** (`:h zk`, against `:h zj`'s start). The pair is
+  deliberately not symmetric: read together they walk the gaps _between_ groups, which is a move the old version could
+  not make at all, and it left the end of a fold with no key. The test that covered it asserted `zj` then `zk` returns
+  to where it started — a round trip vim does not have — and it passed because on the two-artist fixture "the previous
+  fold's start" and "where I came from" are the same row. The same degenerate-fixture failure as the entry above, found
+  the same way. `is_fold_end` also implements vim's "a closed fold is counted as one fold", so `zk` still steps row to
+  row when the tree is collapsed.
+
+  **`][` and `[]` did not exist.** vim's section motions are four keys — `]]` `[[` for starts, `][` `[]` for ends — and
+  shipping the starts alone left no way to leave a section from the bottom, which is what you want when the next thing
+  you press is `j`. `]z` is not a substitute: it stops at the enclosing _group_, so on a track it reaches the end of the
+  album, never the end of the artist.
+
+  **`zA` did not exist**, leaving `zO`/`zC` as the one fold pair in the keymap without its toggle, while `zo`/`zc` had
+  `za`.
+
+  **What was deliberately _not_ changed: `]]` stays absolute.** The suggestion was to make it address "level 1" relative
+  to the cursor. Vim's `]]` is a fixed outermost level and nvim's modern answer — treesitter-textobjects, where `]f` is
+  bound to `@function.outer` — is keyed on _what a node is_, not on how deep it sits. Neither is relative, and for the
+  same reason: a motion whose meaning depends on where the cursor already is gives two answers you cannot tell apart
+  without first checking your own depth. The generalisation this actually wants is a level addressed **by name**
+  (`go next-level artist`), which is the treesitter model and fits "specs are data" — but it needs `ViewSpec` to exist
+  first, and is recorded as an issue rather than guessed at now.
+
+  One hardcode did go: `GroupEnd` asked `depth < 2` where it meant "is this row a container", which agrees only because
+  the tree is exactly three levels. `flat_step`'s `artist_starts`/`album_starts` remain the real tie and are noted with
+  the issue.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

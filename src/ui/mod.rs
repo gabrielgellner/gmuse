@@ -24,7 +24,8 @@ use crate::audio::PlayerHandle;
 use crate::cmd::bind::{self, Bindings};
 use crate::cmd::keys::Key;
 use crate::cmd::{
-    AddTarget, Command, Fold, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec, parse,
+    AddTarget, Command, Fold, Motion, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId,
+    VolSpec, parse,
 };
 use crate::library::Library;
 use crate::next::{self, ActiveSource, Playback, Source};
@@ -1547,6 +1548,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 Fold::Toggle => ui.tree.toggle(lib, ctx.store),
                 Fold::OpenDeep => ui.tree.open_deep(lib, ctx.store),
                 Fold::CloseDeep => ui.tree.close_deep(lib, ctx.store),
+                Fold::ToggleDeep => ui.tree.toggle_deep(lib, ctx.store),
                 Fold::All => ui.tree.open_everything(lib, ctx.store),
                 Fold::None => ui.tree.close_everything(lib, ctx.store),
                 Fold::More => ui.tree.more(lib, ctx.store),
@@ -1569,6 +1571,16 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Place(place) => {
             if let Some(scroll) = focused_scroll(ui) {
                 scroll.place(place);
+            }
+        }
+        // Structural motions — #31. In view 1 they read the tree's depths; in
+        // a flat list the album and artist boundaries are the structure, which
+        // is the same idea seen edge-on.
+        Command::Go(motion) => {
+            if ui.view == View::Tree {
+                ui.tree.go(&ui.library, ctx.store, motion, n);
+            } else if let Some(at) = flat_step(ui, ctx, motion, n) {
+                set_cursor(ui, at);
             }
         }
         Command::Playing => go_to_playing(ui, ctx),
@@ -2578,6 +2590,93 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
             ui.notify("the library is what you are looking at; use :add <path> to scan more")
         }
     }
+}
+
+/// A structural motion over a flat track list.
+///
+/// The album divider *is* the structure here — a "sibling" is the next album,
+/// a "section" the next artist, and the "group" the run of tracks sharing an
+/// album. Boundaries come from `list::album_starts`, the same key that decides
+/// where a divider is drawn, so a motion always lands where the eye expects.
+///
+/// Returns a **track** index, which is what every flat view's cursor counts.
+fn flat_step(ui: &Ui, ctx: &Context<'_>, motion: Motion, count: usize) -> Option<usize> {
+    let owned;
+    let ids: &[crate::store::TrackId] = match ui.view {
+        View::Sorted => ui.library.sorted(),
+        View::Playlist if ui.playlist_pane == Pane::Tracks => ui.playlist.entries(),
+        View::Queue => {
+            owned = ui.queue.entries().copied().collect::<Vec<_>>();
+            &owned
+        }
+        _ => return None,
+    };
+    if ids.is_empty() {
+        return None;
+    }
+
+    let starts = match motion {
+        Motion::NextSection
+        | Motion::PrevSection
+        | Motion::NextSectionEnd
+        | Motion::PrevSectionEnd => list::artist_starts(ctx.store, ids),
+        _ => list::album_starts(ctx.store, ids),
+    };
+    let mut at = current_cursor(ui).min(ids.len() - 1);
+
+    // The last row of the run `s` begins: everything up to the next start.
+    let run_end = |s: usize| {
+        starts
+            .iter()
+            .copied()
+            .find(|n| *n > s)
+            .map(|n| n - 1)
+            .unwrap_or(ids.len() - 1)
+    };
+    // The start of the run the cursor is in.
+    let run_start = |at: usize| starts.iter().rev().copied().find(|s| *s <= at);
+
+    for _ in 0..count.max(1) {
+        let next = match motion {
+            Motion::NextSibling | Motion::NextSection | Motion::NextFold => {
+                starts.iter().copied().find(|s| *s > at)
+            }
+            Motion::PrevSibling | Motion::PrevSection => {
+                starts.iter().rev().copied().find(|s| *s < at)
+            }
+            // vim's `zk` is the end of the previous fold. In a flat list the
+            // album run is the fold, so that is the row before this run began
+            // — and landing there puts the cursor in the previous run, so a
+            // second press walks back again.
+            Motion::PrevFold => run_start(at).filter(|s| *s > 0).map(|s| s - 1),
+            // The first track of the run the cursor is in — and if it is
+            // already there, the one above, so `-` walks out rather than
+            // sticking.
+            Motion::Parent => starts
+                .iter()
+                .rev()
+                .copied()
+                .find(|s| *s < at)
+                .filter(|_| starts.binary_search(&at).is_ok())
+                .or_else(|| run_start(at))
+                .filter(|s| *s != at),
+            // The last track before the next run begins.
+            Motion::GroupEnd => Some(run_end(at)).filter(|s| *s != at),
+            // `][` — the end of this artist's run, then the end of the next.
+            Motion::NextSectionEnd => match run_start(at).map(run_end) {
+                Some(end) if end > at => Some(end),
+                _ => starts.iter().copied().find(|s| *s > at).map(run_end),
+            },
+            // `[]` — the row before this run started is the last of the one
+            // before it.
+            Motion::PrevSectionEnd => run_start(at).filter(|s| *s > 0).map(|s| s - 1),
+        };
+        match next {
+            Some(to) => at = to,
+            None => break,
+        }
+    }
+    Some(at)
 }
 
 /// The list `zz`, `zt` and `zb` act on: the one you are looking at.
@@ -9027,5 +9126,203 @@ mod tests {
             parked,
             "the list of guides moved while the cursor was in the guide"
         );
+    }
+
+    /// The flat-list reading of #31: the album divider *is* the structure, so
+    /// the same keys work in view 2 without a second concept.
+    #[test]
+    fn braces_step_album_to_album_in_the_sorted_list() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 0;
+
+        let album_of = |ui: &Ui| {
+            store
+                .get(ui.library.sorted()[ui.sorted])
+                .and_then(|t| t.album.clone())
+        };
+        let first = album_of(&ui);
+
+        press(&mut ui, &ctx, "}");
+        assert_ne!(album_of(&ui), first, "`}}` should have crossed a boundary");
+
+        press(&mut ui, &ctx, "{");
+        assert_eq!(album_of(&ui), first, "`{{` should have come back");
+        assert_eq!(ui.sorted, 0, "and to the album's first track, not its last");
+    }
+
+    /// `]]` steps by artist, which in a compilation is a coarser boundary than
+    /// the album — the two must not collapse into the same motion.
+    #[test]
+    fn brackets_step_artist_to_artist() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 0;
+
+        let artist_of = |ui: &Ui| {
+            store
+                .get(ui.library.sorted()[ui.sorted])
+                .map(|t| t.file_under().to_string())
+        };
+        let first = artist_of(&ui);
+        press(&mut ui, &ctx, "] ]");
+        assert_ne!(artist_of(&ui), first);
+    }
+
+    /// `-` goes to the top of the run you are in, and only then out of it.
+    #[test]
+    fn minus_climbs_to_the_start_of_the_album_then_out_of_it() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        // Onto the second track of an album that has more than one.
+        press(&mut ui, &ctx, "}");
+        let start = ui.sorted;
+        press(&mut ui, &ctx, "j");
+        assert!(
+            ui.sorted > start,
+            "the fixture needs a multi-track album here"
+        );
+
+        press(&mut ui, &ctx, "-");
+        assert_eq!(
+            ui.sorted, start,
+            "`-` should climb to the album's first track"
+        );
+
+        press(&mut ui, &ctx, "-");
+        assert!(ui.sorted < start, "and then out to the album above");
+    }
+
+    /// `]z` is the far end of the run — the thing `G` cannot give you without
+    /// leaving the album entirely.
+    #[test]
+    fn group_end_reaches_the_last_track_of_the_run() {
+        // `many_artists` gives every album exactly two tracks, so landing one
+        // row late is a row that is still inside an album — which is what
+        // makes an off-by-one visible here and invisible in `fixture`.
+        let store = many_artists(5);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 0;
+
+        let album_of = |ui: &Ui| {
+            store
+                .get(ui.library.sorted()[ui.sorted])
+                .and_then(|t| t.album.clone())
+        };
+
+        press(&mut ui, &ctx, "] z");
+        let last = album_of(&ui);
+        assert_eq!(last, album_of(&ui));
+
+        press(&mut ui, &ctx, "j");
+        assert_ne!(
+            album_of(&ui),
+            last,
+            "`]z` should have landed on the last track of its album, so the \
+             next row belongs to a different one"
+        );
+    }
+
+    /// Counts, as everywhere else.
+    #[test]
+    fn a_structural_motion_takes_a_count() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 0;
+
+        press(&mut ui, &ctx, "}");
+        press(&mut ui, &ctx, "}");
+        let twice = ui.sorted;
+
+        ui.sorted = 0;
+        press(&mut ui, &ctx, "2 }");
+        assert_eq!(ui.sorted, twice, "`2}}` should be `}}` twice");
+    }
+
+    /// Two albums by one artist, followed by another artist — the shape that
+    /// separates `}` from `]]`. The shared fixture cannot: its only
+    /// two-album artist sorts last, so there is nothing for `]]` to reach.
+    fn two_albums_then_another_artist() -> Store {
+        let mut store = Store::new();
+        for (path, artist, album, title, n) in [
+            ("/m/a1.mp3", "Anna", "First", "one", 1u32),
+            ("/m/a2.mp3", "Anna", "First", "two", 2),
+            ("/m/a3.mp3", "Anna", "Second", "three", 1),
+            ("/m/a4.mp3", "Anna", "Second", "four", 2),
+            ("/m/b1.mp3", "Bruno", "Third", "five", 1),
+        ] {
+            store.upsert(Track {
+                path: PathBuf::from(path),
+                artist: Some(artist.into()),
+                album: Some(album.into()),
+                title: Some(title.into()),
+                tracknumber: Some(n),
+                duration: Duration::from_secs(100),
+                ..Default::default()
+            });
+        }
+        store
+    }
+
+    /// `]]` and `}` must not collapse into one motion: a section step has to
+    /// skip a boundary that a sibling step stops at.
+    #[test]
+    fn sections_skip_a_second_album_by_the_same_artist() {
+        let store = two_albums_then_another_artist();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        let artist_of = |ui: &Ui| {
+            store
+                .get(ui.library.sorted()[ui.sorted])
+                .map(|t| t.file_under().to_string())
+        };
+
+        ui.sorted = 0;
+        press(&mut ui, &ctx, "}");
+        assert_eq!(
+            artist_of(&ui).as_deref(),
+            Some("Anna"),
+            "`}}` should stop at Anna's second album"
+        );
+        assert_eq!(ui.sorted, 2);
+
+        ui.sorted = 0;
+        press(&mut ui, &ctx, "] ]");
+        assert_eq!(
+            artist_of(&ui).as_deref(),
+            Some("Bruno"),
+            "`]]` should step past both of Anna's albums"
+        );
+    }
+
+    /// And `[[` goes to the top of the artist you are in before it leaves —
+    /// vim's, and what makes it usable for "back to the start of this one".
+    #[test]
+    fn prev_section_climbs_to_the_top_of_this_artist_first() {
+        let store = two_albums_then_another_artist();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        ui.sorted = 3; // the second track of Anna's second album
+        press(&mut ui, &ctx, "[ [");
+        assert_eq!(ui.sorted, 0, "`[[` should reach the top of Anna");
+
+        ui.sorted = 4; // Bruno
+        press(&mut ui, &ctx, "[ [");
+        assert_eq!(ui.sorted, 0, "and from Bruno's only track, back to Anna");
     }
 }

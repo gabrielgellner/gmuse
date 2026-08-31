@@ -14,6 +14,41 @@ the top and bottom, and `12G` goes to row 12. `^f` and `^b` page. The arrow keys
 
 `gp` goes to whatever is playing, opening any folds that were hiding it.
 
+## Moving by structure
+
+`j` and `k` count rows. These move by what the list is made of, which is usually what you meant.
+
+    }            next row at this level
+    {            previous one
+    ]]           next artist
+    [[           previous artist
+    ][           end of this artist, then the next one's
+    []           end of the previous artist
+    -            up to what this is filed under
+    ]z           last row of this group
+    zj           next row that can be opened
+    zk           end of the previous fold
+
+`}` is the one to learn. With an artist expanded, `j` walks every track; `}` steps to the next artist and ignores the
+two hundred rows in between. On an album row it steps album to album, because "this level" is wherever the cursor
+already is.
+
+They mean the same thing in a flat list, where the album dividers are the structure: `}` is the next album, `]]` the
+next artist, `-` the top of the album you are in and `]z` its last track. One idea rather than a second set of keys for
+view 2.
+
+`-` is netrw's "up a directory". `[z` does the same thing, which is what vim calls it.
+
+`]]` and `][` are two halves of one idea, and vim spells them the same way: `]]` lands on where a section _starts_ and
+`][` on where it _ends_. Leaving an artist from the bottom is what you want when the next thing you do is `j` into
+whatever follows; leaving from the top is what you want when you are scanning. `[[` and `[]` are the same pair going
+backwards.
+
+`zj` and `zk` are **not** each other's undo, and that is vim's doing rather than an oversight — `zj` goes to the next
+fold's _start_ and `zk` to the previous fold's _end_. Read as a pair they walk you through the gaps between groups
+rather than through the groups themselves. A closed fold counts as one fold, so with everything collapsed `zk` simply
+steps to the previous row.
+
 ## Where you are on screen
 
     zt      put this row at the top of the pane

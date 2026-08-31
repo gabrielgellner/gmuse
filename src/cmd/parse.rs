@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use super::keys;
 use super::{
-    AaaMode, AddTarget, Command, Context, Fold, PaneTarget, Place, PlaylistSpec, Quality, RateSpec,
-    SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
+    AaaMode, AddTarget, Command, Context, Fold, Motion, PaneTarget, Place, PlaylistSpec, Quality,
+    RateSpec, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -46,6 +46,7 @@ pub const VERBS: &[&str] = &[
     "down",
     "filter",
     "fold",
+    "go",
     "place",
     "help",
     "freeze",
@@ -124,6 +125,17 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
                 });
             }
             Command::Fold(Fold::parse(word).ok_or_else(|| ParseError::Bad(word.into(), "fold"))?)
+        }
+        "go" => {
+            let word = rest.trim();
+            if word.is_empty() {
+                return Err(ParseError::Missing {
+                    cmd: "go",
+                    what: "one of next-sibling, prev-sibling, next-section, prev-section, parent, \
+                           group-end, next-fold, prev-fold",
+                });
+            }
+            Command::Go(Motion::parse(word).ok_or_else(|| ParseError::Bad(word.into(), "go"))?)
         }
         "place" => {
             let word = rest.trim();
@@ -511,6 +523,7 @@ pub fn format(cmd: &Command) -> String {
         Command::Activate => "activate".into(),
         Command::Fold(f) => format!("fold {}", f.name()),
         Command::Place(p) => format!("place {}", p.name()),
+        Command::Go(m) => format!("go {}", m.name()),
         Command::Playing => "playing".into(),
         Command::Remove => "remove".into(),
         Command::RemoveToEnd => "remove-to-end".into(),
@@ -798,6 +811,7 @@ mod tests {
         // covered the moment it exists.
         let mut samples: Vec<Command> = Fold::ALL.iter().copied().map(Command::Fold).collect();
         samples.extend(Place::ALL.iter().copied().map(Command::Place));
+        samples.extend(Motion::ALL.iter().copied().map(Command::Go));
         samples.push(Command::Playing);
         samples.extend(vec![
             Command::Up,
@@ -948,6 +962,7 @@ mod tests {
                 "rate" => "rate 4".to_string(),
                 "fold" => "fold toggle".to_string(),
                 "place" => "place centre".to_string(),
+                "go" => "go parent".to_string(),
                 "in" => "in tree down".to_string(),
                 "search" | "rsearch" => format!("{verb} text"),
                 other => other.to_string(),

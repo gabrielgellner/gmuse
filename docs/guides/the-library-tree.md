@@ -50,7 +50,24 @@ second is an album. A file explorer cannot offer this, because "three directorie
 were inside, so you keep your place and lose the mess. On an artist row it is simply `zM`.
 
 `zC` matters more than it looks: closing an artist with `h` leaves the albums you had open still open underneath, so
-reopening spills them back. `zC` closes the subtree with it.
+reopening spills them back. `zC` closes the subtree with it. `zA` is the toggle of the two, the way `za` is the toggle
+of `zo` and `zc`.
+
+## Getting about without counting rows
+
+With a few artists expanded the tree gets long, and `j` has to walk every track of every open album. `}` and `{` step to
+the next row at the level you are on — artist to artist, or album to album — and `]]` and `[[` always mean artist,
+whatever depth you are at.
+
+    }  {         next / previous at this level
+    ]]  [[       next / previous artist
+    ][  []       the *end* of an artist rather than its start
+    -            up to the album, or to the artist
+    ]z           the last track of this album
+    zj  zk       next fold's start / previous fold's end
+
+`-` walks out one level at a time and pairs with `l` walking in. `]z` is how you get to the end of a long album without
+`G` taking you out of it.
 
 ## Enter versus play
 

@@ -21,6 +21,48 @@ pub enum Row {
     Track(TrackId),
 }
 
+/// The track indices a divider would be drawn above — where a new album
+/// begins.
+///
+/// Derived from the same key [`rows`] uses, rather than recomputed, so that
+/// `{` and `}` land exactly on the boundaries the eye can see. A list with no
+/// dividers still has boundaries; `rows` only suppresses drawing them.
+pub fn album_starts(store: &Store, ids: &[TrackId]) -> Vec<usize> {
+    boundaries(store, ids, false)
+}
+
+/// The same for artists, which is what `[[` and `]]` step by.
+pub fn artist_starts(store: &Store, ids: &[TrackId]) -> Vec<usize> {
+    boundaries(store, ids, true)
+}
+
+fn boundaries(store: &Store, ids: &[TrackId], artist_only: bool) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut last: Option<(&str, &str, Option<u32>)> = None;
+    for (at, id) in ids.iter().enumerate() {
+        let Some(track) = store.get(*id) else {
+            continue;
+        };
+        let key = (
+            track.file_under(),
+            track.album_or_unknown(),
+            track.discnumber,
+        );
+        let changed = match last {
+            Some((artist, _, _)) if artist_only => artist != key.0,
+            Some((artist, album, disc)) => {
+                artist != key.0 || album != key.1 || disc.unwrap_or(1) != key.2.unwrap_or(1)
+            }
+            None => true,
+        };
+        if changed {
+            out.push(at);
+        }
+        last = Some(key);
+    }
+    out
+}
+
 /// Expand a track list into drawn rows, inserting a divider whenever the album
 /// changes.
 ///
