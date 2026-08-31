@@ -109,10 +109,25 @@ gmuse [OPTIONS] [FILE]
 ```
 
 The TUI opens on the library tree. Views are nvim-style tabs: `gt`/`gT` step, `3gt` jumps to view 3, and `g<Tab>`
-returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `space` expands
-an artist, `tab` swaps pane, `q` quits.
+returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `o` expands an
+artist, `tab` swaps pane, `q` quits. **`space` is the leader**, and `<leader>?` shows the keys that work in the current
+view.
 
-Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `settings`, `playlists`.
+Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `settings`.
+
+`<leader>` in a binding stands for whatever `leader` says, `space` by default:
+
+```toml
+leader = "space"
+
+[keys.common]
+"<leader> ?" = "help"
+"<leader> p" = "playlist list"
+```
+
+A leader must be a key that is **not bound on its own** — a chord cannot extend one that is — which is why `expand`
+moved off `space` to `o`. That is also the point: `?` keeps meaning reverse search, as in vim, and help lives behind the
+prefix rather than taking a key it should not have.
 
 `:set relative_numbers=true` adds a vim-style distance gutter — absolute on the cursor line, distance elsewhere. Track
 lists count **tracks**, so an album divider never shifts the number `3j` needs; the artist/album pane counts every row,

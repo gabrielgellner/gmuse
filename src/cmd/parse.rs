@@ -48,6 +48,7 @@ pub const VERBS: &[&str] = &[
     "expand",
     "expand-all",
     "filter",
+    "help",
     "freeze",
     "in",
     "next",
@@ -236,6 +237,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         } else {
             Some(crate::filter::Filter::parse(rest)?)
         }),
+        "help" => Command::Help,
         "quit" | "q" => Command::Quit,
 
         other => return Err(ParseError::UnknownCommand(other.to_string())),
@@ -563,6 +565,7 @@ pub fn format(cmd: &Command) -> String {
         },
         Command::SearchNext => "search-next".into(),
         Command::SearchPrev => "search-prev".into(),
+        Command::Help => "help".into(),
         Command::Quit => "quit".into(),
     }
 }

@@ -101,6 +101,12 @@ pub struct Config {
     /// you were is not a loss.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
+    /// The key `<leader>` stands for in a binding. Default `space`.
+    ///
+    /// A config key rather than a `:set`, because changing it would have to
+    /// rewrite every binding already resolved through it.
+    #[serde(default)]
+    pub leader: Option<String>,
     /// Library roots, for when you do not want named catalogs.
     ///
     /// The durable home for roots: the cache is derived data and is thrown
@@ -167,6 +173,11 @@ pub struct Loaded {
     pub playlists: crate::smart::SmartPlaylists,
     /// Resolved: the config's `data_dir` with `~` expanded, or the default.
     pub data_dir: PathBuf,
+    /// Resolved from `leader`, defaulting to `space`.
+    ///
+    /// `Option` only so `Loaded` can derive `Default`; `parse_text` and `load`
+    /// both fill it in, so nothing downstream sees `None`.
+    pub leader: Option<crate::cmd::keys::Key>,
     /// Whether the config named `active_catalogs` at all.
     ///
     /// Kept separate from its *value*, because `["all"]` is a legitimate
@@ -335,6 +346,22 @@ pub fn parse_text(text: &str) -> Loaded {
         .map(expand_tilde)
         .unwrap_or_else(default_data_dir);
 
+    out.leader = Some(match config.leader.as_deref() {
+        None => default_leader(),
+        Some(text) => match crate::cmd::keys::parse_seq(text).as_deref() {
+            Ok([one]) => *one,
+            // A leader is one key: a chord could not be extended, and a bad
+            // name should not silently leave `<leader>` meaning space.
+            _ => {
+                out.errors.push(ConfigError {
+                    where_: "leader".into(),
+                    message: format!("{text:?} is not a single key"),
+                });
+                default_leader()
+            }
+        },
+    });
+
     out.active_specified = !config.active_catalogs.is_empty();
     if !config.active_catalogs.is_empty() {
         let spec = if config.active_catalogs.iter().any(|n| n == "all") {
@@ -401,6 +428,11 @@ pub fn parse_text(text: &str) -> Loaded {
     out
 }
 
+/// Space, as in vim and nvim, where it is the conventional leader.
+pub fn default_leader() -> crate::cmd::keys::Key {
+    crate::cmd::keys::Key::new(crossterm::event::KeyCode::Char(' '))
+}
+
 /// `$XDG_STATE_HOME/gmuse`, falling back to `~/.local/state`.
 ///
 /// Where you were, not what you decided — the session, the audit log, and the
@@ -452,6 +484,7 @@ pub fn load(path: &Path) -> Loaded {
         Err(_) => Loaded {
             theme: Theme::default(),
             data_dir: default_data_dir(),
+            leader: Some(default_leader()),
             ..Default::default()
         },
     }

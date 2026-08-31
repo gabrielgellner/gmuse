@@ -370,6 +370,7 @@ fn run_tui(
         }
     }
 
+    state.set_leader(loaded.leader.unwrap_or_else(config::default_leader));
     state.theme = loaded.theme;
     state.now_playing = loaded.now_playing.clone();
 

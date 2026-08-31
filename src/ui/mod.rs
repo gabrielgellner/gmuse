@@ -306,8 +306,13 @@ pub struct Ui {
     /// permanent indicator taking up room.
     pub volume_hint: Option<f32>,
     pub bindings: Bindings,
+    /// What `<leader>` stands for. Substituted when a binding is inserted, so
+    /// the lookup path never has to know about it.
+    pub leader: crate::cmd::keys::Key,
     /// The `:` or `/` line, when one is open.
     pub prompt: Option<Prompt>,
+    /// The keys-that-work-here popup, when it is up. Dismissed by any key.
+    pub help: Option<Vec<String>>,
     /// The last search, for `n` and `N`.
     pub last_search: Option<(String, SearchDir)>,
     /// Keys typed so far that have not resolved to a binding, and the count
@@ -412,6 +417,14 @@ pub struct Ui {
 
 impl Ui {
     pub fn new(start_dir: PathBuf, library: Library) -> Self {
+        let mut ui = Self::bare(start_dir, library);
+        // Resolve the placeholder the defaults were written with, so the
+        // shipped `<leader> ?` works before any config is read.
+        ui.set_leader(crate::config::default_leader());
+        ui
+    }
+
+    fn bare(start_dir: PathBuf, library: Library) -> Self {
         Self {
             view: View::Tree,
             tree: TreeState::default(),
@@ -428,6 +441,8 @@ impl Ui {
             playback: Playback::default(),
             volume_hint: None,
             bindings: bind::defaults(),
+            leader: crate::config::default_leader(),
+            help: None,
             prompt: None,
             last_search: None,
             pending: Vec::new(),
@@ -473,6 +488,29 @@ impl Ui {
             // Shared with shuffle, so `sort = "random"` gives a new order on
             // the same occasions a shuffled pool does.
             seed: self.playback.rng_state,
+        }
+    }
+
+    /// Set the leader, re-keying every binding written with `<leader>`.
+    ///
+    /// The defaults are built by `bind::defaults()`, which cannot know the
+    /// leader, so the placeholder survives into the table and is resolved
+    /// here. Called once at startup and again if the config names one — a
+    /// binding added later goes through `execute`, which resolves as it
+    /// inserts.
+    pub fn set_leader(&mut self, leader: crate::cmd::keys::Key) {
+        self.leader = leader;
+        let unresolved: Vec<(crate::cmd::Context, crate::cmd::keys::Seq)> = self
+            .bindings
+            .keys()
+            .filter(|(_, seq)| seq.contains(&crate::cmd::keys::LEADER))
+            .cloned()
+            .collect();
+        for key in unresolved {
+            if let Some(cmd) = self.bindings.remove(&key) {
+                let resolved = crate::cmd::keys::resolve_leader(&key.1, leader);
+                self.bindings.insert((key.0, resolved), cmd);
+            }
         }
     }
 
@@ -1095,6 +1133,13 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
 /// the resulting [`Command`] is handed to [`execute`] — which is the only
 /// place UI state is mutated, per §6.
 fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
+    // Any key closes the help, and is swallowed doing it. Acting on the same
+    // press would mean reading the popup and pressing something is different
+    // from reading it and pressing nothing.
+    if ui.help.is_some() {
+        ui.help = None;
+        return;
+    }
     if ui.prompt.is_some() {
         handle_prompt_key(key, ui, ctx);
         return;
@@ -1102,7 +1147,15 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
 
     // Opening a prompt is a UI mode, not a command: there is nothing for it to
     // do until a line has been typed.
-    match key.code {
+    //
+    // **Unless a chord is part-typed.** `<leader> ?` cannot work if `?` always
+    // means reverse search, and the whole point of a leader is that the second
+    // key keeps its own meaning when pressed alone.
+    match if ui.pending.is_empty() {
+        key.code
+    } else {
+        KeyCode::Null
+    } {
         KeyCode::Char(':') => {
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Command,
@@ -1574,9 +1627,11 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             key,
             cmd,
         } => {
+            let key = crate::cmd::keys::resolve_leader(&key, ui.leader);
             ui.bindings.insert((bctx, key), *cmd);
         }
         Command::Unbind { ctx: bctx, key } => {
+            let key = crate::cmd::keys::resolve_leader(&key, ui.leader);
             if ui.bindings.remove(&(bctx, key.clone())).is_none() {
                 ui.notify(format!(
                     "{} is not bound in {}",
@@ -1645,6 +1700,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             }
             Err(e) => ui.notify(e),
         },
+        Command::Help => show_help(ui),
         Command::Quit => ui.quit = true,
     }
 }
@@ -1828,6 +1884,27 @@ fn load_saved(ui: &mut Ui, ctx: &Context<'_>, found: &crate::playlist::Saved) {
             ui.playlist.len()
         ),
     });
+}
+
+/// What works here, as `key  command` rows.
+///
+/// The current view's context and `common`, because that is what is actually
+/// reachable — and the view's own bindings first, since those are the ones
+/// that differ from everywhere else and so the ones worth learning.
+fn show_help(ui: &mut Ui) {
+    let here = ui.view.context();
+    let mut rows: Vec<String> = Vec::new();
+    for want in [here, crate::cmd::Context::Common] {
+        if want == crate::cmd::Context::Common && here == crate::cmd::Context::Common {
+            continue;
+        }
+        for (ctx, key, cmd) in bind::sorted(&ui.bindings) {
+            if ctx == want {
+                rows.push(format!("{key}  {}", crate::cmd::parse::format(cmd)));
+            }
+        }
+    }
+    ui.help = Some(rows);
 }
 
 /// Remove `n` rows from the cursor down, in whichever list is focused.
@@ -2413,11 +2490,14 @@ fn draw_catalogs(frame: &mut Frame, area: Rect, ui: &Ui) {
 pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     // A completion menu takes room from the bottom of the body, so the view
     // above stays visible rather than being replaced.
-    let menu_height = ui
-        .prompt
-        .as_ref()
-        .map(|p| menu_height(p, frame.area().width))
-        .unwrap_or(0);
+    // The help popup shares the completion menu's slot: same shape, same
+    // reason — a list of things you might type next, without covering the view
+    // it is helping you use.
+    let menu_height = match (&ui.prompt, &ui.help) {
+        (Some(p), _) => menu_height(p, frame.area().width),
+        (None, Some(rows)) => rows_height(rows, frame.area().width),
+        _ => 0,
+    };
 
     let [tabs, body, menu, status] = Layout::vertical([
         Constraint::Length(1),
@@ -2427,10 +2507,12 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     ])
     .areas(frame.area());
 
-    if menu_height > 0
-        && let Some(prompt) = &ui.prompt
-    {
-        draw_completions(frame, menu, ui, prompt);
+    if menu_height > 0 {
+        match (&ui.prompt, &ui.help) {
+            (Some(prompt), _) => draw_completions(frame, menu, ui, prompt),
+            (None, Some(rows)) => draw_help(frame, menu, ui, rows),
+            _ => {}
+        }
     }
 
     frame.render_widget(statusline::tabs(&ui.theme, ui.view), tabs);
@@ -2588,6 +2670,62 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui: &Ui) {
 
 /// Rows the completion menu needs, borders included. Zero when there is
 /// nothing to show.
+/// How tall a popup of `rows` needs to be, borders included and capped.
+fn rows_height(rows: &[String], width: u16) -> u16 {
+    if rows.is_empty() {
+        return 3;
+    }
+    // The same cap the completion menu uses, and for the same reason: a
+    // popup must not swallow the view it is helping you use.
+    (completion_rows(rows, width).len() as u16 + 2).min(10)
+}
+
+/// The keys that work here.
+///
+/// Laid out in the same columns as the completion menu, from the same helper —
+/// two popups in one slot that disagreed about their shape would read as two
+/// different things.
+fn draw_help(frame: &mut Frame, area: Rect, ui: &Ui, rows: &[String]) {
+    let laid_out = completion_rows(rows, area.width);
+    let column = completion_column(rows);
+    let available = (area.height.saturating_sub(2)) as usize;
+    let shown = if laid_out.len() > available {
+        available.saturating_sub(1)
+    } else {
+        available
+    };
+
+    let text = ui.theme.get(theme::Role::StatusText);
+    let mut lines: Vec<Line> = laid_out
+        .iter()
+        .take(shown)
+        .map(|row| {
+            let mut spans = Vec::with_capacity(row.len() * 2);
+            for (n, &i) in row.iter().enumerate() {
+                spans.push(Span::styled(rows[i].clone(), text));
+                if n + 1 < row.len() {
+                    spans.push(Span::raw(
+                        " ".repeat(column.saturating_sub(rows[i].chars().count())),
+                    ));
+                }
+            }
+            Line::from(spans)
+        })
+        .collect();
+    if laid_out.len() > shown {
+        lines.push(Line::from(Span::styled(
+            format!("… {} more — view 7 lists every one", laid_out.len() - shown),
+            ui.theme.get(theme::Role::StatusDim),
+        )));
+    }
+
+    let title = format!("{} — keys that work here", ui.view.title());
+    frame.render_widget(
+        Paragraph::new(lines).block(pane_block(&ui.theme, &title, false)),
+        area,
+    );
+}
+
 fn menu_height(prompt: &Prompt, width: u16) -> u16 {
     let Some(candidates) = prompt.menu.as_deref() else {
         return 0;
@@ -3818,7 +3956,7 @@ mod tests {
         ui.settings_sel = i;
         assert!(!ui.playback.shuffle);
 
-        press(&mut ui, &ctx, "space");
+        press(&mut ui, &ctx, "o");
         assert!(ui.playback.shuffle, "space did not toggle it");
         execute(&mut ui, &ctx, Command::Activate);
         assert!(!ui.playback.shuffle, "enter did not toggle it back");
@@ -3838,7 +3976,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(ui.playback.aaa_mode.label(), "all");
-        press(&mut ui, &ctx, "space");
+        press(&mut ui, &ctx, "o");
         assert_eq!(ui.playback.aaa_mode.label(), "artist");
     }
 
@@ -3855,7 +3993,7 @@ mod tests {
             .position(|k| *k == SettingKey::ResampleQuality)
             .unwrap();
 
-        press(&mut ui, &ctx, "space");
+        press(&mut ui, &ctx, "o");
         assert!(ui.status.contains(":set"), "{}", ui.status);
     }
 
@@ -3869,7 +4007,7 @@ mod tests {
         ui.view = View::Settings;
         ui.settings_sel = SettingKey::ALL.len() + ui.catalogs.defined().len();
 
-        press(&mut ui, &ctx, "space");
+        press(&mut ui, &ctx, "o");
         assert!(ui.status.contains(":bind"), "{}", ui.status);
     }
 
@@ -4134,6 +4272,116 @@ mod tests {
         assert!(ui.playlist.is_empty());
     }
 
+    /// The leader's whole purpose: `?` stays reverse search, as in vim, and
+    /// help lives behind a prefix instead of taking a key it should not.
+    #[test]
+    fn leader_question_mark_shows_the_keys_that_work_here() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "space");
+        assert!(ui.help.is_none(), "the leader alone must do nothing yet");
+        press(&mut ui, &ctx, "?");
+        let rows = ui.help.as_ref().expect("no help popup");
+
+        // The view's own bindings and common's, which is what is reachable.
+        assert!(rows.iter().any(|r| r.contains("quit")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.starts_with("j ")), "{rows:?}");
+        // View 1's own, which only work here.
+        assert!(rows.iter().any(|r| r.starts_with("^j ")), "{rows:?}");
+        // It is drawn, not merely stored.
+        let out = render(&ui, &ctx, 90, 20);
+        assert!(out.contains("keys that work here"), "{out}");
+    }
+
+    /// "What can I do *here*" — so another view's bindings must not appear.
+    /// View 7's flat list of every binding answers the other question.
+    #[test]
+    fn help_leaves_out_another_views_bindings() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 4");
+
+        press(&mut ui, &ctx, "space");
+        press(&mut ui, &ctx, "?");
+        let rows = ui.help.as_ref().expect("no help popup");
+
+        assert!(rows.iter().any(|r| r.contains("quit")), "common is missing");
+        assert!(
+            !rows.iter().any(|r| r.starts_with("^j ")),
+            "view 1's own bindings leaked in: {rows:?}"
+        );
+    }
+
+    /// `?` on its own is still reverse search — the reason for a leader.
+    #[test]
+    fn question_mark_alone_is_still_reverse_search() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "?");
+        assert!(ui.help.is_none());
+        assert!(ui.prompt.is_some(), "the search line did not open");
+    }
+
+    /// Any key closes it, and is swallowed doing so — reading the popup and
+    /// pressing something must not differ from reading it and pressing nothing.
+    #[test]
+    fn any_key_dismisses_the_help_without_acting() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let before = ui.view;
+
+        press(&mut ui, &ctx, "space");
+        press(&mut ui, &ctx, "?");
+        assert!(ui.help.is_some());
+
+        press(&mut ui, &ctx, "g");
+        assert!(ui.help.is_none(), "the popup stayed up");
+        press(&mut ui, &ctx, "t");
+        assert_eq!(ui.view, before, "the dismissing key also did something");
+    }
+
+    /// Space is the leader, so `expand` moved to `o` — a chord cannot extend a
+    /// key that is bound on its own.
+    #[test]
+    fn o_expands_and_space_no_longer_does() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let before = ui.tree.rows(&ui.library, &store).len();
+
+        press(&mut ui, &ctx, "space");
+        assert_eq!(
+            ui.tree.rows(&ui.library, &store).len(),
+            before,
+            "space still expands, so it cannot be a leader"
+        );
+        press(&mut ui, &ctx, "escape");
+
+        press(&mut ui, &ctx, "o");
+        assert!(ui.tree.rows(&ui.library, &store).len() > before);
+    }
+
+    /// `<leader>` is substituted where the configuration lives, so a binding
+    /// written with it lands on the configured key.
+    #[test]
+    fn a_binding_written_with_leader_resolves_to_the_configured_key() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.leader = keys::Key::new(KeyCode::Char(','));
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "bind common \"<leader> x\" quit");
+        press(&mut ui, &ctx, ", x");
+        assert!(ui.quit, "the comma leader did not fire");
+    }
+
     #[test]
     fn tab_swaps_the_two_panes_of_view_three() {
         let store = genre_fixture();
@@ -4297,6 +4545,9 @@ mod tests {
                 }),
             };
             ui.view = view;
+            // The table holds resolved keys; the default string says
+            // `<leader>`. Resolving here is what makes them comparable.
+            let key = crate::cmd::keys::resolve_leader(&key, ui.leader);
             let found = crate::cmd::bind::lookup(&ui.bindings, view.context(), &key);
             assert_eq!(found, Some(&*cmd), "{line:?} did not resolve");
 
@@ -5767,7 +6018,7 @@ mod tests {
 
         // Space turns the one under the cursor off. Everything was active, so
         // this has to name the others rather than collapsing to nothing.
-        press(&mut ui, &ctx, "space");
+        press(&mut ui, &ctx, "o");
         assert!(!ui.catalogs.is_active("alpha"), "space did not toggle");
         assert!(ui.catalogs.is_active("beta"), "it turned off the wrong one");
 

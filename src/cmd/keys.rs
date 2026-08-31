@@ -56,6 +56,10 @@ impl Key {
 
 impl std::fmt::Display for Key {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // So an unresolved binding round-trips through text as it was written.
+        if *self == LEADER {
+            return f.write_str("<leader>");
+        }
         if self.alt {
             write!(f, "M-")?;
         }
@@ -100,13 +104,41 @@ pub struct KeyParseError(pub String);
 /// was not an option — `-` and `+` are themselves bindable keys.
 pub type Seq = Vec<Key>;
 
+/// The placeholder `<leader>` parses to.
+///
+/// Parsing stays pure — it cannot know what the leader is — so the sentinel
+/// travels in the sequence and is substituted where the configuration lives,
+/// when a binding is inserted. `KeyCode::Null` is never produced by a real
+/// keypress, so it cannot collide with one.
+pub const LEADER: Key = Key {
+    code: KeyCode::Null,
+    ctrl: false,
+    alt: false,
+};
+
+/// Substitute the configured leader for any placeholder in `seq`.
+pub fn resolve_leader(seq: &[Key], leader: Key) -> Seq {
+    seq.iter()
+        .map(|k| if *k == LEADER { leader } else { *k })
+        .collect()
+}
+
 /// Parse a whitespace-separated key sequence.
 pub fn parse_seq(s: &str) -> Result<Seq, KeyParseError> {
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.is_empty() {
         return Err(KeyParseError(s.to_string()));
     }
-    parts.iter().map(|p| parse(p)).collect()
+    parts
+        .iter()
+        .map(|p| {
+            if p.eq_ignore_ascii_case("<leader>") {
+                Ok(LEADER)
+            } else {
+                parse(p)
+            }
+        })
+        .collect()
 }
 
 /// Render a sequence back to text.

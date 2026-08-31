@@ -52,7 +52,9 @@ pub const DEFAULTS: &[&str] = &[
     // not need a Tab over and a Tab back each time.
     "bind library ^j in tree down",
     "bind library ^k in tree up",
-    "bind common space expand",
+    // `o` for open, not `space`: space is the leader, and a chord cannot
+    // extend a key that is bound on its own.
+    "bind common o expand",
     "bind common enter activate",
     // vim's `dd`, and `D` for delete-to-end. `D` alone was cmus's, and sat
     // oddly in a keymap whose navigation is otherwise nvim's — in vim `D`
@@ -89,6 +91,9 @@ pub const DEFAULTS: &[&str] = &[
     "bind common n search-next",
     "bind common N search-prev",
     "bind common q quit",
+    // The leader's first tenant, and the reason it exists: `?` is reverse
+    // search, as in vim, so help needed somewhere else to live.
+    "bind common \"<leader> ?\" help",
 ];
 
 /// Build the default table.

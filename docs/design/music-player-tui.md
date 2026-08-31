@@ -2131,6 +2131,29 @@ Append here as decisions are made. Format: date, decision, rationale.
   holding one track. Better to drop `albumartist` entirely and let §11.4's fallback use the track artist, which files it
   beside that artist's other music.
 
+- **2026-08-30** **A `<leader>` key, `space` by default, and `<leader>?` for help.** The trigger was wanting a which-key
+  popup without losing `?` to it — `?` is reverse search, as in vim, and a keymap whose navigation is nvim's should not
+  take it back.
+
+  `<leader>` is a _placeholder_, not a key: parsing cannot know what the leader is and must stay pure, so `parse_seq`
+  produces a `LEADER` sentinel (`KeyCode::Null`, which no real keypress can produce) and the substitution happens where
+  the configuration lives. Bindings added at runtime resolve as `execute` inserts them; the shipped defaults are built
+  by `bind::defaults()`, which has no leader, so `Ui::set_leader` re-keys the table — once at startup, and again if the
+  config names one.
+
+  **A leader must not be bound on its own**, because §6's binding layer refuses to let a chord extend a bound key. That
+  is why `expand` moved from `space` to `o`. The alternative — a timeout that decides whether `space` was a leader or a
+  command — would put timing-dependent behaviour into a keymap, which is hard to test and worse to use.
+
+  It exposed a latent ordering bug: `:`, `/` and `?` open their prompts _before_ bindings are consulted, so `?` fired
+  even mid-chord. A part-typed chord now wins, which is what makes the second key of a leader sequence able to keep its
+  own meaning when pressed alone.
+
+  The help popup reuses the completion menu's slot and its column layout, because two popups in one place that disagreed
+  about their shape would read as two different things. It lists the current context's bindings and `common`'s — _what
+  can I do here_ — which is a different question from view 7's flat list of every binding in every context, and both are
+  worth being able to ask.
+
 ---
 
 ## 14. Prior art worth reading

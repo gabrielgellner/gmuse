@@ -405,5 +405,11 @@ pub enum Command {
     },
     SearchNext,
     SearchPrev,
+    /// Show the keys that work here, in the bottom pane.
+    ///
+    /// The context's own bindings and `common`'s, which is what "what can I do
+    /// here" actually means — view 7's flat list of every binding in every
+    /// context answers a different question.
+    Help,
     Quit,
 }
