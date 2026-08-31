@@ -334,6 +334,9 @@ pub struct Ui {
     pub last_search: Option<(String, SearchDir)>,
     /// Keys typed so far that have not resolved to a binding, and the count
     /// prefix in front of them.
+    /// Which keymap the keyboard is in (#33). Not persisted across a restart —
+    /// see the Decision Log.
+    pub mode: crate::cmd::Mode,
     pub pending: Vec<Key>,
     /// When the chord in `pending` began — **not** when its last key arrived.
     ///
@@ -527,6 +530,7 @@ impl Ui {
             undo: crate::undo::Undo::default(),
             register: Vec::new(),
             last_search: None,
+            mode: crate::cmd::Mode::default(),
             pending: Vec::new(),
             pending_since: None,
             help_scroll: 0,
@@ -670,6 +674,18 @@ impl Ui {
         {
             Some(left) if !left.is_zero() => left.min(TICK),
             _ => TICK,
+        }
+    }
+
+    /// The keymap a key is looked up in: the mode's when there is one,
+    /// otherwise the view's.
+    ///
+    /// A mode outranks a view because it is the coarser statement — "these
+    /// keys mean playback" is true whichever list you happen to be looking at.
+    pub fn context(&self) -> crate::cmd::Context {
+        match self.mode {
+            crate::cmd::Mode::Normal => self.view.context(),
+            crate::cmd::Mode::Transport => crate::cmd::Context::Transport,
         }
     }
 
@@ -1360,7 +1376,13 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     // **Unless a chord is part-typed.** `<leader> ?` cannot work if `?` always
     // means reverse search, and the whole point of a leader is that the second
     // key keeps its own meaning when pressed alone.
-    match if ui.pending.is_empty() {
+    // `/` and `?` are navigation, so they belong to normal mode — in transport
+    // mode there is no list you are looking through, and `?` is the mode's own
+    // "what works in here". `:` stays available from both: it is the way to
+    // everything, and a mode should not be able to trap you away from it.
+    let opens_prompt = ui.pending.is_empty()
+        && (ui.mode == crate::cmd::Mode::Normal || key.code == KeyCode::Char(':'));
+    match if opens_prompt {
         key.code
     } else {
         KeyCode::Null
@@ -1428,7 +1450,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     // above deliberately does *not* restart; only the content did.
     ui.help_scroll = 0;
     ui.pending.push(key);
-    match bind::resolve(&ui.bindings, ui.view.context(), &ui.pending) {
+    match bind::resolve(&ui.bindings, ui.context(), &ui.pending) {
         bind::Resolved::Exact(cmd) => {
             let cmd = cmd.clone();
             let count = ui.count.take();
@@ -1875,6 +1897,22 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 }
             }
         },
+        Command::Mode(want) => {
+            ui.mode = want;
+            // A part-typed chord belongs to the keymap it was started in.
+            ui.pending.clear();
+            ui.count = None;
+        }
+        // vim's `50%`, and the count is read the same way `12G` reads it.
+        Command::SeekPercent => {
+            let want = count.unwrap_or(50).min(100) as f64 / 100.0;
+            if let (Some(player), Some(id)) = (ctx.player, ui.playback.current)
+                && let Some(track) = ctx.store.get(id)
+            {
+                let to = track.duration.mul_f64(want);
+                player.seek(crate::audio::SeekTo::Absolute(to));
+            }
+        }
         Command::Pause => {
             if let Some(p) = ctx.player {
                 p.toggle();
@@ -2217,10 +2255,14 @@ fn load_saved(ui: &mut Ui, ctx: &Context<'_>, found: &crate::playlist::Saved) {
 /// reachable — and the view's own bindings first, since those are the ones
 /// that differ from everywhere else and so the ones worth learning.
 fn show_help(ui: &mut Ui) {
-    let here = ui.view.context();
+    let here = ui.context();
     let mut rows: Vec<String> = Vec::new();
+    // In a mode there *is* no fallback, so listing `common` would be listing
+    // keys that do nothing — the same rule `lookup` follows.
     for want in [here, crate::cmd::Context::Common] {
-        if want == crate::cmd::Context::Common && here == crate::cmd::Context::Common {
+        if want == crate::cmd::Context::Common
+            && (here == crate::cmd::Context::Common || !here.inherits_common())
+        {
             continue;
         }
         for (ctx, key, cmd) in bind::sorted(&ui.bindings) {
@@ -3278,7 +3320,16 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 menu,
                 ui,
                 rows,
-                &format!("{} — keys that work here", ui.view.title()),
+                // The mode's name when there is one: in transport mode these
+                // are the mode's keys and not the view's, and naming the view
+                // would be naming the thing they are *not* coming from.
+                &format!(
+                    "{} — keys that work here",
+                    match ui.mode {
+                        crate::cmd::Mode::Normal => ui.view.title(),
+                        crate::cmd::Mode::Transport => "transport",
+                    }
+                ),
             ),
             // Named for the prefix rather than the view: what you are looking
             // at is the continuation of something you started typing.
@@ -3397,7 +3448,7 @@ fn which_key_rows(ui: &Ui, now: Instant) -> Option<Vec<String>> {
     if !which_key_due(ui.pending_since, now, ui.which_key_delay) {
         return None;
     }
-    let rows: Vec<String> = bind::continuations(&ui.bindings, ui.view.context(), &ui.pending)
+    let rows: Vec<String> = bind::continuations(&ui.bindings, ui.context(), &ui.pending)
         .into_iter()
         .map(|(key, next)| match next {
             bind::Next::Runs(cmd) => format!("{key}  {}", crate::cmd::parse::format(cmd)),
@@ -5984,9 +6035,10 @@ mod tests {
             };
 
             let mut ui = ui_of(&store, true);
-            // The binding must be reachable through lookup from a real view.
-            let view = match bctx {
-                crate::cmd::Context::Common => View::Tree,
+            // The binding must be reachable through lookup from somewhere the
+            // user can actually be — a view, or a mode.
+            ui.view = match bctx {
+                crate::cmd::Context::Common | crate::cmd::Context::Transport => View::Tree,
                 other => View::from_id(match other {
                     crate::cmd::Context::Library => ViewId::Library,
                     crate::cmd::Context::SortedLibrary => ViewId::Sorted,
@@ -5995,14 +6047,18 @@ mod tests {
                     crate::cmd::Context::Browser => ViewId::Browser,
                     crate::cmd::Context::Filters => ViewId::Filters,
                     crate::cmd::Context::Guides => ViewId::Guides,
-                    crate::cmd::Context::Common => unreachable!(),
+                    crate::cmd::Context::Common | crate::cmd::Context::Transport => {
+                        unreachable!()
+                    }
                 }),
             };
-            ui.view = view;
+            if bctx == crate::cmd::Context::Transport {
+                ui.mode = crate::cmd::Mode::Transport;
+            }
             // The table holds resolved keys; the default string says
             // `<leader>`. Resolving here is what makes them comparable.
             let key = crate::cmd::keys::resolve_leader(&key, ui.leader);
-            let found = crate::cmd::bind::lookup(&ui.bindings, view.context(), &key);
+            let found = crate::cmd::bind::lookup(&ui.bindings, ui.context(), &key);
             assert_eq!(found, Some(&*cmd), "{line:?} did not resolve");
 
             // And running it must not panic, whatever the view state.
@@ -9219,6 +9275,156 @@ mod tests {
         press(&mut ui, &ctx, "escape");
         press(&mut ui, &ctx, "z");
         assert_eq!(ui.help_scroll, 0, "the offset survived into a new popup");
+    }
+
+    // ---- transport mode (#33) ---------------------------------------------
+
+    /// `i` in, `escape` out, and the status line says which.
+    #[test]
+    fn i_enters_transport_mode_and_escape_leaves() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        assert_eq!(ui.mode, crate::cmd::Mode::Normal);
+        assert!(!render(&ui, &ctx, 100, 24).contains("TRANSPORT"));
+
+        press(&mut ui, &ctx, "i");
+        assert_eq!(ui.mode, crate::cmd::Mode::Transport);
+        assert!(
+            render(&ui, &ctx, 100, 24).contains("-- TRANSPORT --"),
+            "a mode you cannot see is a mode you press the wrong key in"
+        );
+
+        press(&mut ui, &ctx, "escape");
+        assert_eq!(ui.mode, crate::cmd::Mode::Normal);
+    }
+
+    /// The indicator outranks a notice, because the four seconds after a
+    /// message is exactly when you are least sure what the keyboard is doing.
+    #[test]
+    fn the_mode_shows_even_while_a_notice_is_up() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "i");
+        ui.notify("something happened");
+
+        let out = render(&ui, &ctx, 100, 24);
+        assert!(out.contains("-- TRANSPORT --"), "{out}");
+        assert!(out.contains("something happened"), "{out}");
+    }
+
+    /// **A mode is a keymap of its own, not a layer over the normal one.** If
+    /// it fell through to `common`, `j` would still navigate in the mode where
+    /// it is supposed to be volume — which is the whole thing the mode is for.
+    #[test]
+    fn transport_mode_does_not_inherit_navigation() {
+        let store = big_fixture(50);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.sorted, 1, "j should navigate in normal mode");
+
+        press(&mut ui, &ctx, "i");
+        press(&mut ui, &ctx, "j");
+        assert_eq!(ui.sorted, 1, "j navigated in transport mode");
+        press(&mut ui, &ctx, "g");
+        press(&mut ui, &ctx, "g");
+        assert_eq!(ui.sorted, 1, "gg reached through from common");
+    }
+
+    /// The same letters, bare — one alphabet reached from two postures.
+    #[test]
+    fn the_transport_letters_are_bare_in_the_mode() {
+        for (normal, in_mode) in [
+            ("<leader> c", "c"),
+            ("<leader> b", "b"),
+            ("<leader> x", "x"),
+        ] {
+            let bindings = bind::defaults();
+            let normal_key = crate::cmd::keys::parse_seq(normal).expect("test keys");
+            let mode_key = crate::cmd::keys::parse_seq(in_mode).expect("test keys");
+            assert_eq!(
+                bind::lookup(&bindings, crate::cmd::Context::Common, &normal_key),
+                bind::lookup(&bindings, crate::cmd::Context::Transport, &mode_key),
+                "{normal} and {in_mode} should be the same command"
+            );
+        }
+    }
+
+    /// A closed keymap has to carry its own way out, or the mode is a trap.
+    #[test]
+    fn the_mode_carries_its_own_exit_and_its_own_help() {
+        let bindings = bind::defaults();
+        for key in ["escape", "?"] {
+            let seq = crate::cmd::keys::parse_seq(key).expect("test keys");
+            assert!(
+                bind::lookup(&bindings, crate::cmd::Context::Transport, &seq).is_some(),
+                "{key} is not bound in transport mode"
+            );
+        }
+    }
+
+    /// `<leader>?` lists what is reachable. In a mode nothing falls through,
+    /// so listing `common` would be listing keys that do nothing.
+    #[test]
+    fn the_help_popup_in_a_mode_lists_only_the_mode() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "i");
+        press(&mut ui, &ctx, "?");
+
+        assert!(
+            render(&ui, &ctx, 100, 24).contains("transport — keys that work here"),
+            "the popup should name the mode, not the view it is over"
+        );
+        let rows = ui.help.as_ref().expect("no help popup");
+        assert!(rows.iter().any(|r| r.starts_with("h  seek")), "{rows:?}");
+        assert!(
+            !rows.iter().any(|r| r.contains("down")),
+            "navigation leaked into the mode's help: {rows:?}"
+        );
+    }
+
+    /// vim's `50%`: a count and `%` goes that far into the track, and bare it
+    /// means halfway. The count is read exactly as `12G` reads it.
+    #[test]
+    fn a_count_and_percent_seeks_into_the_track() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "i");
+
+        // No player in tests, so this asserts the command resolves and runs
+        // rather than where the audio went — the seek itself is the player's.
+        let seq = crate::cmd::keys::parse_seq("%").expect("test keys");
+        assert_eq!(
+            bind::lookup(&ui.bindings, crate::cmd::Context::Transport, &seq),
+            Some(&Command::SeekPercent)
+        );
+        press(&mut ui, &ctx, "2");
+        press(&mut ui, &ctx, "5");
+        press(&mut ui, &ctx, "%");
+        assert!(ui.count.is_none(), "the count outlived the command");
+    }
+
+    /// A part-typed chord belongs to the keymap it was started in.
+    #[test]
+    fn changing_mode_abandons_a_pending_chord() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, "z");
+        assert!(!ui.pending.is_empty());
+        execute(&mut ui, &ctx, Command::Mode(crate::cmd::Mode::Transport));
+        assert!(ui.pending.is_empty(), "the chord survived the mode change");
     }
 
     /// Completing the chord takes it away again — it is a prompt, not a mode.

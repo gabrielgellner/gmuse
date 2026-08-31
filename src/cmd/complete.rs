@@ -150,6 +150,10 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
 
         "fold" if words.len() == 1 => Fold::ALL.iter().map(|f| f.name().to_string()).collect(),
         "place" if words.len() == 1 => Place::ALL.iter().map(|p| p.name().to_string()).collect(),
+        "mode" if words.len() == 1 => crate::cmd::Mode::ALL
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect(),
         "go" if words.len() == 1 => Motion::ALL.iter().map(|m| m.name().to_string()).collect(),
         "in" if words.len() == 1 => vec!["tree".into(), "tracks".into()],
         // Anything after the pane is a whole command again.
@@ -295,10 +299,12 @@ mod tests {
     #[test]
     fn a_verb_completes_to_its_unambiguous_extension() {
         // `search`, `search-next` and `search-prev` agree this far, so it
-        // stops on the bare verb without claiming to be finished.
+        // stops on the bare verb without claiming to be finished. `seek` and
+        // `seek-percent` became the same case with #33, as `add` and
+        // `add-playlist` were already.
         assert_eq!(line_of("sea"), "search");
+        assert_eq!(line_of("see"), "seek");
         // Unique, so it is finished, and says so with a space.
-        assert_eq!(line_of("see"), "seek ");
         assert_eq!(line_of("quí"), "");
         assert_eq!(line_of("qui"), "quit ");
     }

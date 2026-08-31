@@ -2687,6 +2687,43 @@ Append here as decisions are made. Format: date, decision, rationale.
   name table and completion, for a case the defaults never reach and for which there would be no default names to write.
   Left in the issue with the measurement recorded, so the decision is on file rather than rediscovered.
 
+- **2026-08-31** **Transport mode (issue #33), and the one rule that makes it worth having: a mode does not inherit.**
+  `i` enters, `escape` leaves, and `Context::Transport` is looked up _instead of_ the view's context rather than over
+  it. `Context::inherits_common()` is false for exactly one context, and that is the whole mechanism.
+
+  It is what vim does — insert mode does not fall through to normal mode — and it is not a detail. A mode that inherited
+  would leave `j` navigating in the mode where `j` is volume, and then the mode has bought nothing: the keys it wanted
+  were already taken. Everything else follows from it: the way out has to be bound inside the mode or it is a trap, `?`
+  has to be bound there or there is no way to ask, and `<leader>?` lists only the mode because listing `common` would be
+  listing keys that do nothing.
+
+  **The letters do not change, only the prefix.** `c` and `<leader>c` are one pause reached from two postures, which is
+  what the 2026-08-30 half of this promised when the transport row moved behind the leader.
+
+  `:` works from both and `/` and `?` do not. Searching is navigation and there is no list you are looking through in
+  transport mode; `:` is the way to everything and a mode should not be able to trap you away from it.
+
+- **2026-08-31** **The mode indicator is drawn before the notice, not after it.** #33 called a mode you cannot see
+  non-negotiable. The status line's first tenant is `ui.status`, which holds a message for four seconds — so putting the
+  indicator behind it would hide the mode for four seconds after every message, which is precisely when you are least
+  sure what the keyboard is about to do. It is unconditional and first, and normal mode draws nothing at all, as vim
+  draws nothing for it.
+
+- **2026-08-31** **The mode is not remembered across a restart.** The session remembers the view, and #33 asked whether
+  a mode is the same kind of fact. It is not: vim never resumes in insert mode, and starting in a keymap you did not
+  choose — with the indicator as the only warning, on a screen you have not looked at yet — is the "mode you press the
+  wrong key in" hazard in its purest form. Navigation is the safe default to land in because it does not touch the
+  audio.
+
+- **2026-08-31** **`50%` is vim's, and it reads the count the way `12G` does.** A count with `%` seeks that far into the
+  track, exactly as `50%` in vim goes that far into a file; bare it means halfway. It is the clearest argument for the
+  mode existing at all — there was no room for it in a keymap where the digits are counts for navigation and `%` had
+  nowhere to sit.
+
+  `seek-percent` shares a completion prefix with `seek`, so `see<Tab>` now stops on `seek` without the trailing space
+  that says "finished". That is the same shape as `search`/`search-next` and `add`/`add-playlist`, both of which predate
+  it, so it is consistent rather than a new wart.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

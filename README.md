@@ -159,6 +159,14 @@ deeper redraws it at once.
 
 **`space` is the leader**, and `<leader>?` shows the keys that work in the current view.
 
+**`i` enters transport mode**, `escape` leaves, and the status line says `-- TRANSPORT --` while you are in it. There
+the Winamp letters are bare — `x c v b z` — plus `space` for pause, `h`/`l` and `H`/`L` to seek, `j`/`k` for volume, and
+vim's `50%` to jump that far into the track. One alphabet: `c` and `<leader>c` are the same pause reached from two
+postures.
+
+A mode is a keymap of its own and does not fall through to the normal one, which is the point — `j` is volume in there,
+not "down". So the way out and `?` are bound inside it, and `:` works from either.
+
 **View 7 is the guides** — short pieces on how to do things, as against which key does what. `<leader>?` answers the
 second; the guides answer the first, which is the one you cannot find by pressing keys. Titles on the left, the guide on
 the right, `tab` between them, and the ordinary motions scroll it.

@@ -54,6 +54,8 @@ pub const VERBS: &[&str] = &[
     "next",
     "playing",
     "page-down",
+    "mode",
+    "seek-percent",
     "half-page-up",
     "half-page-down",
     "page-up",
@@ -115,6 +117,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "down" => Command::Down,
         "page-up" => Command::PageUp,
         "page-down" => Command::PageDown,
+        "seek-percent" => Command::SeekPercent,
         "half-page-up" => Command::HalfPageUp,
         "half-page-down" => Command::HalfPageDown,
         "top" => Command::Top,
@@ -140,6 +143,19 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
                 });
             }
             Command::Go(Motion::parse(word).ok_or_else(|| ParseError::Bad(word.into(), "go"))?)
+        }
+        "mode" => {
+            let word = rest.trim();
+            if word.is_empty() {
+                return Err(ParseError::Missing {
+                    cmd: "mode",
+                    what: "normal or transport",
+                });
+            }
+            Command::Mode(
+                crate::cmd::Mode::parse(word)
+                    .ok_or_else(|| ParseError::Bad(word.into(), "mode"))?,
+            )
         }
         "place" => {
             let word = rest.trim();
@@ -528,6 +544,8 @@ pub fn format(cmd: &Command) -> String {
     match cmd {
         Command::Up => "up".into(),
         Command::Down => "down".into(),
+        Command::Mode(m) => format!("mode {}", m.name()),
+        Command::SeekPercent => "seek-percent".into(),
         Command::PageUp => "page-up".into(),
         Command::PageDown => "page-down".into(),
         Command::HalfPageUp => "half-page-up".into(),
@@ -825,6 +843,8 @@ mod tests {
         // covered the moment it exists.
         let mut samples: Vec<Command> = Fold::ALL.iter().copied().map(Command::Fold).collect();
         samples.extend(Place::ALL.iter().copied().map(Command::Place));
+        samples.extend(crate::cmd::Mode::ALL.iter().copied().map(Command::Mode));
+        samples.push(Command::SeekPercent);
         samples.extend(Motion::ALL.iter().copied().map(Command::Go));
         samples.push(Command::Playing);
         samples.extend(vec![
@@ -978,6 +998,7 @@ mod tests {
                 "rate" => "rate 4".to_string(),
                 "fold" => "fold toggle".to_string(),
                 "place" => "place centre".to_string(),
+                "mode" => "mode transport".to_string(),
                 "go" => "go parent".to_string(),
                 "in" => "in tree down".to_string(),
                 "search" | "rsearch" => format!("{verb} text"),

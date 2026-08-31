@@ -27,6 +27,9 @@ pub enum Role {
     StatusDim,
     StatusPlaying,
     StatusNotice,
+    /// The `-- TRANSPORT --` indicator. Its own role because it must read as a
+    /// state you are *in*, not as a message that will expire.
+    Mode,
     StatusModes,
     StatusUnderrun,
     PromptSigil,
@@ -55,6 +58,7 @@ impl Role {
             Role::StatusDim => "status_dim",
             Role::StatusPlaying => "status_playing",
             Role::StatusNotice => "status_notice",
+            Role::Mode => "mode",
             Role::StatusModes => "status_modes",
             Role::StatusUnderrun => "status_underrun",
             Role::PromptSigil => "prompt_sigil",
@@ -85,6 +89,7 @@ impl Role {
         Role::StatusDim,
         Role::StatusPlaying,
         Role::StatusNotice,
+        Role::Mode,
         Role::StatusModes,
         Role::StatusUnderrun,
         Role::PromptSigil,
@@ -188,6 +193,7 @@ impl Default for Theme {
                 Role::StatusDim => Style::default().fg(Color::DarkGray),
                 Role::StatusPlaying => Style::default().fg(Color::Green),
                 Role::StatusNotice => Style::default().fg(Color::Yellow),
+                Role::Mode => Style::default().fg(Color::Magenta).bold(),
                 Role::StatusModes => Style::default().fg(Color::Magenta),
                 Role::StatusUnderrun => Style::default().fg(Color::Red),
                 Role::PromptSigil => Style::default()

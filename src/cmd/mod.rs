@@ -30,6 +30,9 @@ pub enum Context {
     Filters,
     /// View 7, the guides.
     Guides,
+    /// Transport mode's keymap (#33). Not a view — a *mode*, so it is the one
+    /// context that does not fall through to `Common`.
+    Transport,
 }
 
 impl Context {
@@ -43,6 +46,7 @@ impl Context {
             Context::Browser => "browser",
             Context::Filters => "filters",
             Context::Guides => "guides",
+            Context::Transport => "transport",
         }
     }
 
@@ -56,9 +60,52 @@ impl Context {
             "browser" => Context::Browser,
             "filters" => Context::Filters,
             "guides" => Context::Guides,
+            "transport" => Context::Transport,
             _ => return None,
         })
     }
+
+    /// Whether a key not bound here falls through to [`Context::Common`].
+    ///
+    /// **A view is an overlay on the common keymap; a mode is a keymap of its
+    /// own.** vim's insert mode does not inherit normal mode's, and if this
+    /// inherited, `j` would still navigate in the mode where it is volume —
+    /// which is the whole thing the mode exists to stop.
+    pub fn inherits_common(self) -> bool {
+        !matches!(self, Context::Transport)
+    }
+}
+
+/// What the keyboard currently means.
+///
+/// vim's arrangement, not inverted: **normal is navigation, transport is
+/// entered.** Playback running is the common *state*, but the common
+/// *interaction* is looking for something to play — transport is what your
+/// hands want once you have found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Normal,
+    Transport,
+}
+
+impl Mode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Normal => "normal",
+            Mode::Transport => "transport",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "normal" => Mode::Normal,
+            "transport" => Mode::Transport,
+            _ => return None,
+        })
+    }
+
+    pub const ALL: &'static [Mode] = &[Self::Normal, Self::Transport];
 }
 
 /// The views, by their binding digit.
@@ -634,6 +681,12 @@ pub enum Command {
     View(ViewId),
     ViewNext,
     ViewPrev,
+    /// `i` and `<Esc>` — which keymap the keyboard is in (#33).
+    Mode(Mode),
+    /// `50%` — seek to that much of the way through the track, as vim's `50%`
+    /// goes to that much of the way through a file. Takes the count, like
+    /// `12G`; bare, it means halfway.
+    SeekPercent,
     ViewLast,
     Catalog(crate::catalog::Spec),
     Playlist(PlaylistSpec),

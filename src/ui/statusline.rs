@@ -46,6 +46,15 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
     let mut spans = Vec::new();
 
     let theme = &ui.theme;
+    // First, and unconditional while the mode is on. #33 calls a mode you
+    // cannot see non-negotiable, and putting it behind the notice would mean
+    // exactly that for four seconds after every message — which is precisely
+    // when you are least sure what the keyboard is doing.
+    //
+    // Nothing is drawn in normal mode, as vim draws nothing for it.
+    if ui.mode == crate::cmd::Mode::Transport {
+        spans.push(Span::styled("-- TRANSPORT --  ", theme.get(Role::Mode)));
+    }
     if !ui.status.is_empty() {
         spans.push(Span::styled(
             ui.status.clone(),

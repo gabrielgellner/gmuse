@@ -1,6 +1,8 @@
 //! The binding table — DESIGN §6.
 //!
-//! Lookup falls back from the current context to [`Context::Common`], so a
+//! Lookup falls back from the current context to [`Context::Common`] — unless
+//! the context is a *mode* rather than a view; see [`Context::inherits_common`].
+//! So a
 //! view only has to name the keys that differ from the global set.
 
 use std::collections::HashMap;
@@ -147,6 +149,48 @@ pub const DEFAULTS: &[&str] = &[
     // what every player does.
     "bind common right seek +10",
     "bind common left seek -10",
+    // ── transport mode (#33) ────────────────────────────────────────────
+    // `i` enters, `escape` leaves — vim's arrangement, not inverted. Normal
+    // is navigation because the common *interaction* is looking for something
+    // to play, even though playback running is the common *state*.
+    "bind common i mode transport",
+    "bind transport escape mode normal",
+    // The letters are the same alphabet as `<leader>x` and friends, bare. One
+    // alphabet learned once; only the prefix changes with the mode.
+    "bind transport x play",
+    "bind transport c pause",
+    "bind transport v stop",
+    "bind transport b next",
+    "bind transport z prev",
+    // `space` is the leader in normal mode and cannot be play/pause there.
+    // Here it can, and it is the key every player in the world uses.
+    "bind transport space pause",
+    // What the mode is *for*: seeking gets a row it never had space for.
+    // `h`/`l` are the horizontal motions and a track is a horizontal thing.
+    "bind transport h seek -10",
+    "bind transport l seek +10",
+    "bind transport H seek -60",
+    "bind transport L seek +60",
+    "bind transport left seek -10",
+    "bind transport right seek +10",
+    // Volume on `j`/`k`, the vertical pair, for the same reason.
+    "bind transport j vol -5%",
+    "bind transport k vol +5%",
+    "bind transport - vol -5%",
+    "bind transport + vol +5%",
+    "bind transport = vol +5%",
+    // vim's `50%` goes half way through a file; here it goes half way through
+    // the track. Bare it means halfway, and it takes a count like `12G`.
+    "bind transport % seek-percent",
+    // Playback modes are transport state, so they keep their letters here too.
+    "bind transport s toggle shuffle",
+    "bind transport r toggle repeat",
+    "bind transport R toggle repeat_current",
+    "bind transport C toggle continue",
+    "bind transport m toggle aaa_mode",
+    // A closed keymap has to carry its own way out and its own way to ask.
+    "bind transport ? help",
+    "bind transport q quit",
     // modes
     "bind common s toggle shuffle",
     "bind common r toggle repeat",
@@ -197,9 +241,11 @@ pub fn defaults() -> Bindings {
 
 /// Find the command for a key sequence, falling back to `Common`.
 pub fn lookup<'a>(bindings: &'a Bindings, ctx: Context, keys: &[Key]) -> Option<&'a Command> {
-    bindings
-        .get(&(ctx, keys.to_vec()))
-        .or_else(|| bindings.get(&(Context::Common, keys.to_vec())))
+    bindings.get(&(ctx, keys.to_vec())).or_else(|| {
+        ctx.inherits_common()
+            .then(|| bindings.get(&(Context::Common, keys.to_vec())))
+            .flatten()
+    })
 }
 
 /// Resolve a partially typed sequence.
@@ -213,7 +259,9 @@ pub fn resolve<'a>(bindings: &'a Bindings, ctx: Context, keys: &[Key]) -> Resolv
         return Resolved::Exact(cmd);
     }
     let is_prefix = bindings.keys().any(|(c, seq)| {
-        (*c == ctx || *c == Context::Common) && seq.len() > keys.len() && seq.starts_with(keys)
+        (*c == ctx || (*c == Context::Common && ctx.inherits_common()))
+            && seq.len() > keys.len()
+            && seq.starts_with(keys)
     });
     if is_prefix {
         Resolved::Prefix
@@ -250,7 +298,8 @@ pub fn continuations<'a>(
 ) -> Vec<(String, Next<'a>)> {
     let mut best: HashMap<&Seq, (Context, &Command)> = HashMap::new();
     for ((c, seq), cmd) in bindings {
-        if (*c != ctx && *c != Context::Common) || seq.len() <= prefix.len() {
+        let inherited = *c == Context::Common && ctx.inherits_common();
+        if (*c != ctx && !inherited) || seq.len() <= prefix.len() {
             continue;
         }
         if !seq.starts_with(prefix) {

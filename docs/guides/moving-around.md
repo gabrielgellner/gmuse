@@ -106,9 +106,46 @@ Bind your own in the config, where `<leader>` stands for whatever `leader` says:
 The prefix is deliberate. Navigating is what your hands are doing in these views, and reaching for the transport is
 stepping outside that — so it costs a key, and the bare letters go to the folds and motions that browsing wants.
 
-The letters are Winamp's row, unchanged. That matters: there is one alphabet to learn rather than two, and the plan is
-that a future transport mode makes these same letters bare, so `c` and `<leader>c` will be one pause reached from two
-postures.
+The letters are Winamp's row, unchanged. That matters: there is one alphabet to learn rather than two — in transport
+mode the same letters are bare, so `c` and `<leader>c` are one pause reached from two postures.
+
+## Transport mode
+
+`i` enters it and `escape` leaves, as in vim. While you are in it the status line says `-- TRANSPORT --`, and the
+keyboard means playback rather than navigation.
+
+    x            play what the cursor is on
+    c            pause
+    v            stop
+    b            next
+    z            previous
+    space        pause, the key every other player uses
+    h            seek ten seconds back
+    l            ten seconds on
+    H            a minute back
+    L            a minute on
+    j            quieter
+    k            louder
+    +            louder
+    =            louder, for the key without the shift
+    -            quieter
+    50%          jump half way through the track
+    ?            what works in here
+    escape       back to normal
+
+The five toggles below — `s`, `r`, `R`, `C` and `m` — keep their letters in here too, because what plays next is
+transport state rather than navigation.
+
+`50%` is vim's: a count and `%` goes that far into the track, the way `50%` in vim goes that far into a file. Bare `%`
+means halfway.
+
+**Nothing falls through.** A mode is a keymap of its own, not a layer over the normal one — `j` is volume here and not
+"down", because a mode that leaked navigation would not have bought anything. That is why the way out is bound inside
+it, and why `?` lists only what actually works.
+
+The trade is deliberate: pausing costs `<leader>c` while you are browsing, and one key once you are listening. Normal
+mode is home because the common _interaction_ is looking for something to play, even though playing is the common
+_state_.
 
 ## What plays next
 
