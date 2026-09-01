@@ -199,9 +199,16 @@ def row_for(artist: str, album_name: str, album: Album, lookup: dict[str, dict[s
 
     # A compilation's tracks legitimately differ, and unioning them would flatten
     # every track of `YouTube Sessions` to one value — replacing four correct
-    # per-track genres with one wrong shared one. Genre is an album property only
-    # when the album is by one artist.
-    if artist == "Various Artists" or len(album.artists) > 1:
+    # per-track genres with one wrong shared one.
+    #
+    # Tested on the **albumartist** alone. An earlier version also treated any
+    # album whose `artist` tags varied as a compilation, and that fires on a
+    # guest credit: `Amon Tobin feat. MC Decimal R` on one track of *Out From
+    # Out Where* left the whole album skipped and still reading bare
+    # `Breakbeat`. Six albums were wrongly exempted that way. `Various Artists`
+    # is the explicit marker this library uses, and it is reserved for a
+    # compilation owned in full.
+    if artist == "Various Artists":
         return {
             "artist": artist,
             "album": album_name,

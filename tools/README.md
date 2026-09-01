@@ -31,6 +31,16 @@ record. Half the library was bare single words and a fifth was a Discogs slash-e
 | `genre.propose`           | cache + current tags → `review.tsv`. Writes no tags.                                                                                 |
 | **you edit `review.tsv`** | change `proposed`, or clear `apply` to skip a row                                                                                    |
 | `genre.apply`             | `review.tsv` → tags. **Dry run unless given `--write`.**                                                                             |
+| `genre.snapshot`          | every file's genre _before_ a change, so the apply can be undone                                                                     |
+
+`apply` edits in place and keeps no record of what was there, so take a snapshot first and keep it until you are happy:
+
+```sh
+./.venv/bin/python -m genre.snapshot ~/MusicLibrary
+./.venv/bin/python -m genre.apply ~/MusicLibrary --write
+# and if it was wrong:
+./.venv/bin/python -m genre.snapshot ~/MusicLibrary --restore --write
+```
 
 MusicBrainz is the _bridge_, not the source: it had genres for 3 of 40 releases, but 33 of them carry a Discogs link.
 
@@ -42,8 +52,9 @@ Each of these was a bug that destroyed good data, caught by reading the proposal
   than them.
 - **Do not reorder a `; ` value.** The slash form is machine output sorted alphabetically, so its order means nothing;
   the `; ` form is a human's judgement. Same operation, opposite verdict, decided by provenance.
-- **Compilations are per track.** Unioning `Various Artists` albums replaces several correct genres with one wrong
-  shared one.
+- **Compilations are per track, and are identified by `albumartist` alone.** Unioning a `Various Artists` album replaces
+  several correct genres with one wrong shared one — but testing "do the `artist` tags vary" instead catches a _guest
+  credit_, which silently exempted six real albums until the outcome was checked.
 - **No cap on the number of terms.** The filter matches substrings, so more terms strictly improve recall; length is a
   rendering problem `{genre:.40}` already solves.
 
