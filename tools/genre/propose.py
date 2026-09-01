@@ -23,7 +23,12 @@ from typing import Final
 
 from genre.common import album_key, fix_case, tags_of, walk
 
-#: Discogs' broad Genres — the vocabulary the convention's first term comes from.
+#: The terms this library treats as broad — Discogs' 15 Genres, **after**
+#: `RENAME`. Both spellings are in here on purpose: a source says
+#: `Folk, World, & Country` and the library says `Folk`, and if only the
+#: source's spelling were listed then a value already renamed would not be
+#: recognised as broad. That bug put `Folk` in twice — once from `IMPLIES`,
+#: once from the term itself — on every folk record in the library.
 BROAD: Final[frozenset[str]] = frozenset(
     {
         "Electronic",
@@ -34,20 +39,82 @@ BROAD: Final[frozenset[str]] = frozenset(
         "Classical",
         "Hip Hop",
         "Funk / Soul",
+        "Funk",
         "Folk, World, & Country",
+        "Folk",
         "Reggae",
         "Latin",
         "Stage & Screen",
         "Non-Music",
         "Brass & Military",
         "Children's",
+        # Not Discogs genres, but this library's own broad-first vocabulary uses
+        # them and they must not be given a second broad term on top.
+        "Country",
+        "R&B",
+        "Americana",
     }
 )
 #: This library's spellings, where they differ from Discogs'.
-RENAME: Final[dict[str, str]] = {"Funk / Soul": "Funk", "Folk, World, & Country": "Folk"}
+RENAME: Final[dict[str, str]] = {
+    "Funk / Soul": "Funk",
+    "Folk, World, & Country": "Folk",
+    # A source term that is a category, not a genre.
+    "General Country": "Country",
+}
+
+#: Terms that are not genres at all. `Other` says nothing, and an **artist name
+#: in a genre field** is a tagger's mistake — dropped by rule rather than by
+#: list, since the rule generalises and a list of artist names never would.
+DROP: Final[frozenset[str]] = frozenset({"other", "unknown", "misc", "miscellaneous", "none"})
 #: Bare values already in the library that are styles, not genres. These are the
 #: files that need a broad term *added* rather than replaced.
 IMPLIES: Final[dict[str, str]] = {
+    # ── rock ──────────────────────────────────────────────────────────────
+    "Alternative Rock": "Rock",
+    "Alternative": "Rock",
+    "Hard Rock": "Rock",
+    "Grunge": "Rock",
+    "Thrash Metal": "Rock",
+    "Doom Metal": "Rock",
+    "Heavy Metal": "Rock",
+    "Indie": "Rock",
+    "Punk": "Rock",
+    "Post-punk": "Rock",
+    "Art Rock": "Rock",
+    "Psychedelic Rock": "Rock",
+    # ── folk ──────────────────────────────────────────────────────────────
+    "Bluegrass": "Folk",
+    "Anti-folk": "Folk",
+    "Indie Folk": "Folk",
+    "Celtic": "Folk",
+    "Singer-songwriter": "Folk",
+    "Folk Rock": "Folk",
+    # ── country ───────────────────────────────────────────────────────────
+    "Alternative Country": "Country",
+    "Country Rock": "Country",
+    # ── pop ───────────────────────────────────────────────────────────────
+    # New Age is deliberately **not** Electronic. Discogs files Enya there, but
+    # much of it is acoustic — and her own self-titled record already reads
+    # `Pop; Folk; New Age`, so Pop is what this library already says.
+    "New Age": "Pop",
+    "Christmas Music": "Pop",
+    "French Pop": "Pop",
+    "Ballad": "Pop",
+    "Synth-pop": "Pop",
+    "Indie Pop": "Pop",
+    # ── the rest ──────────────────────────────────────────────────────────
+    "Ska": "Reggae",
+    "Dub": "Reggae",
+    "Contemporary Jazz": "Jazz",
+    "Jazz-rock": "Jazz",
+    "Free Jazz": "Jazz",
+    "Contemporary R&B": "R&B",
+    "Neo Soul": "R&B",
+    "Gangsta": "Hip Hop",
+    "Gangsta Rap": "Hip Hop",
+    "Alternative Dance": "Electronic",
+    "Dance": "Electronic",
     "House": "Electronic",
     "Techno": "Electronic",
     "Breakbeat": "Electronic",
@@ -91,7 +158,7 @@ def split_terms(value: str) -> list[str]:
     return [fix_case(p.strip()) for p in parts if p.strip()]
 
 
-def compose(terms: list[str], *, reorder: bool) -> str:
+def compose(terms: list[str], *, reorder: bool, artist: str = "") -> str:
     """Join terms into one value, de-duplicated, with a broad term leading.
 
     `reorder` is the whole subtlety. The slash form is **machine output sorted
@@ -104,6 +171,7 @@ def compose(terms: list[str], *, reorder: bool) -> str:
     Args:
         terms: Genre terms, in the order the source gave them.
         reorder: Whether the order is machine-made and may be rearranged.
+        artist: The album artist, so a genre that merely repeats it is dropped.
 
     Returns:
         The composed value, e.g. ``Electronic; Techno; Ambient``.
@@ -112,7 +180,11 @@ def compose(terms: list[str], *, reorder: bool) -> str:
     seen: set[str] = set()
     for raw in terms:
         term = RENAME.get(fix_case(raw), fix_case(raw))
-        if term and term.lower() not in seen:
+        # `Other` says nothing, and a genre equal to the album artist is a
+        # tagger's mistake — `Other; Tom Waits` was in this library.
+        if not term or term.lower() in DROP or term.lower() == artist.lower():
+            continue
+        if term.lower() not in seen:
             seen.add(term.lower())
             out.append(term)
 
@@ -225,7 +297,7 @@ def row_for(artist: str, album_name: str, album: Album, lookup: dict[str, dict[s
     human = len(current_values) == 1 and ";" in current_values[0] and source == "current-only"
     terms = current_terms if (human or not terms) else merge(terms, current_terms)
 
-    proposed = compose(terms, reorder=not human)
+    proposed = compose(terms, reorder=not human, artist=artist)
     current = current_values[0] if len(current_values) == 1 else " | ".join(current_values)
     return {
         "artist": artist,

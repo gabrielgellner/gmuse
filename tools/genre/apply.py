@@ -16,6 +16,7 @@ from pathlib import Path
 
 from mutagen import File as MutagenFile
 from mutagen.id3 import TCON
+from mutagen.mp4 import MP4Tags
 
 from genre.common import album_key, tags_of, walk
 
@@ -33,15 +34,26 @@ def wanted_from(review: Path) -> dict[tuple[str, str], str]:
 
 
 def set_genre(path: Path, value: str) -> bool:
-    """Set one file's genre in place. Returns False if mutagen cannot read it."""
+    """Set one file's genre in place. Returns False if mutagen cannot read it.
+
+    Three tag formats, three spellings, and **MP4 has to be named explicitly**.
+    An earlier version had two branches — ID3, and "everything else takes
+    ``genre``" — which is true of Vorbis comments and false of MP4: its genre
+    atom is ``©gen``, so ``audio["genre"]`` quietly created a *freeform* ``genr``
+    atom beside the real one and left it untouched. The write reported success
+    and changed nothing, which only the idempotence re-run caught.
+    """
     audio = MutagenFile(path)
     if audio is None:
         return False
     tags = getattr(audio, "tags", None)
-    if tags is not None and hasattr(tags, "setall"):
+    if isinstance(tags, MP4Tags):
+        tags.pop("genr", None)  # the bogus atom the earlier version wrote
+        tags["\xa9gen"] = [value]
+    elif tags is not None and hasattr(tags, "setall"):
         tags.setall("TCON", [TCON(encoding=3, text=[value])])  # ID3
     else:
-        audio["genre"] = value  # Vorbis comments, MP4 atoms
+        audio["genre"] = value  # Vorbis comments
     audio.save()
     return True
 
