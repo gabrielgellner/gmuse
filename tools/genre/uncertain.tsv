@@ -1,0 +1,24 @@
+artist	album	files	current	verdict	shared	our_tracks	their_tracks	matched	year	candidate
+Adele	21	15	Pop	weak	0.733	15	11	Adele (3) - 21	2011	Jazz; Funk / Soul; Blues; Pop; Soul-Jazz; Acoustic; Piano Blues; Neo Soul
+Anderson .Paak	Malibu	16	R&B; Hip Hop; Funk	weak	0.625	16	16	Anderson .Paak - Malibu	2017	Hip Hop; Funk / Soul; Disco
+Buck Owens	Young Buck: The Complete Pre-Capitol Recordings	21	Country	weak	0.762	21	22	Buck Owens - Young Buck, The Complete Pre-Capitol Recordings Of Buck Owens	2001	Folk, World, & Country; Rock; Country; Rock & Roll
+Cat Clyde	All The Black	1	Folk; Blues	weak	0.5	1	2	Cat Clyde - All The Black	2019	Folk, World, & Country
+Christian Löffler	A Life	11	Electronic; Deep House	weak	0.455	11	11	Christian Löffler - A Life	2024	Electronic; Deep House; Downtempo
+Dolly Parton	The RCA Years 1967-1986	30	Pop; Country; Country Pop; Country Rock; Traditional Country	close	0.933	30	30	Dolly Parton - The RCA Years 1967-1986	1993	Pop; Folk, World, & Country; Country
+Early James	Strange Time To Be Alive	12	Blues; Americana	close	0.917	12	12	Early James - Strange Time To Be Alive 	2022	Blues; Folk, World, & Country; Country; Folk
+Emmylou Harris	Portraits	60	Rock; Country; Country Rock; Folk	close	0.902	60	61	Emmylou Harris - Portraits	1996	Rock; Blues; Folk, World, & Country; Folk Rock; Country; Country Rock
+Hank Williams	Live at the Grand Ole Opry	25	Country; Traditional Country	weak	0.458	25	23	Hank Williams - Live At The Grand Ole Opry	1976	Folk, World, & Country; Country
+Hank Williams	Long Gone Lonesome Blues	22	Country; Traditional Country	weak	0.091	22	4	Hank Williams Jr. - Long Gone Lonesome Blues		Folk, World, & Country; Country
+Hank Williams	Lost Highway Volume III	21	Country; Traditional Country	close	0.833	21	24	Hank Williams - Lost Highway : December 1948 - March 1949 ; Volume III	1986	Folk, World, & Country; Country; Bluegrass; Honky Tonk
+Joe Purdy	You Can Tell Georgia	11	Folk	weak	0.75	11	15	Joe Purdy - You Can Tell Georgia	2007	Folk, World, & Country; Country
+Kinky Friedman	Old Testaments & New Revelations	21	Country	close	0.952	21	21	Kinky Friedman And The Texas Jewboys - Old Testaments And New Revelations		Rock; Blues; Pop; Folk, World, & Country; Country; Parody
+Mr. Oizo	The Church	10	Electronic; Electro	close	0.9	10	10	Mr. Oizo - The Church	2015	Electronic; Electro; Experimental
+Scott H. Biram	Nothin' But Blood	14	Blues; Country Blues	weak	0.733	14	15	Scott H. Biram - Nothin' But Blood	2014	Rock; Blues; Blues Rock; Country Rock; Texas Blues
+Stephan Bodzin	Boavista	15	Electronic; Melodic House & Techno	weak	0.0	15	2	Stephan Bodzin - Boavista	2022	Electronic; Deep Techno; Deep House
+Stephan Bodzin & Marc Romboy	Luna	32	Electronic; Melodic Techno	close	0.882	32	34	Stephan Bodzin Vs Marc Romboy* - Luna	2011	Electronic; House; Techno; Tech House; Minimal
+Stromae	Alors On Danse	2	Electronic; Dance	weak	0.5	2	3	Stromae - Alors On Danse	2010	Pop; Rock
+The Bug	London Zoo	1	Electronic; Dancehall	weak	0.0	1	12	The Bug - London Zoo	2008	Electronic; Reggae; Grime; Dubstep; Dancehall
+The Dead South	Good Company	14	Folk; Bluegrass	close	0.857	14	14	The Dead South - Good Company	2019	Folk, World, & Country; Bluegrass
+Thomas Brinkmann	Studio1-Variationen	13	Electronic; Minimal Techno	weak	0.0	13	13	Thomas Brinkmann - Studio 1 - Variationen	1997	Electronic; Techno; Minimal; Experimental
+Tom Waits	On Broadway	12	Tom Waits	weak	0.462	12	13	Tom Waits - On Broadway		Rock; Blues Rock
+Tom Waits	VH1 Storytellers	36	Other; Tom Waits	weak	0.212	36	7	Tom Waits - VH1 Storytellers	2005	Rock; Blues

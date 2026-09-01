@@ -7,6 +7,7 @@ writes, gmuse reads.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import subprocess
@@ -158,3 +159,76 @@ def secret(name: str) -> str | None:
     if service and (found := _from_keychain(service)):
         return found
     return _from_envfile(Path(__file__).parent / ".env", name)
+
+
+def compare_key(title: str) -> str:
+    """A track title reduced to what two sources can be expected to agree on.
+
+    Case, punctuation and spacing all differ between a tag and a Discogs
+    tracklist, and none of that
+    difference means the records are different — a curly apostrophe against a
+    straight one is the commonest case. Everything that is not a letter or a
+    digit goes.
+    """
+    return "".join(c for c in title.lower() if c.isalnum())
+
+
+#: Below this share of matching titles a candidate is not worth offering.
+CLOSE_ENOUGH: Final = 0.8
+
+
+def tracklist_match(ours: list[str], theirs: list[str]) -> tuple[str, float]:
+    """How well two tracklists agree, and a one-word verdict.
+
+    **`exact` is the only verdict a tool should act on unattended.** Picard's
+    rule, and the reason is that a name search returns plausible wrong answers:
+    searching for *Let It Be* offers a Korean pressing before the deluxe
+    edition. A different tracklist is the cheapest reliable signal that the
+    match is a different record.
+
+    Args:
+        ours: Track titles from the library.
+        theirs: Track titles from the candidate release.
+
+    Returns:
+        A verdict — `exact`, `close` or `weak` — and the fraction shared.
+    """
+    if not ours or not theirs:
+        return "weak", 0.0
+    a = {compare_key(t) for t in ours}
+    b = {compare_key(t) for t in theirs}
+    shared = len(a & b) / max(len(a), len(b))
+    if a == b and len(ours) == len(theirs):
+        return "exact", 1.0
+    return ("close" if shared >= CLOSE_ENOUGH else "weak"), shared
+
+
+class TabInFieldError(ValueError):
+    """A field held a tab or newline, which TSV cannot escape."""
+
+    def __init__(self, name: str, field: str, value: object) -> None:
+        """Name the file, the column, and the offending value."""
+        super().__init__(f"{name}: {field}={value!r} holds a tab or newline")
+
+
+def write_tsv(path: Path, rows: list[dict[str, object]]) -> None:
+    """Write rows as TSV, refusing rather than emitting a row that cannot be read back.
+
+    TSV has no escape mechanism: a tab inside a field silently shifts every
+    column right of it. Downstream that is a *dropped* row rather than a wrong
+    one — ``apply.py`` gates on a column that must read ``y`` — but a row that
+    vanishes without saying so is the failure worth spending three lines on.
+
+    This is the boundary, so the check belongs here and nothing below it needs
+    to wonder. CSV would escape instead of refusing, at the cost of quoting the
+    23-in-504 rows that hold a comma; these files are read by eye and by ``cut``,
+    so plain columns win and the guard covers the hazard.
+    """
+    for row in rows:
+        for field, value in row.items():
+            if "\t" in str(value) or "\n" in str(value):
+                raise TabInFieldError(path.name, field, value)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)

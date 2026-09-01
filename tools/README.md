@@ -44,6 +44,34 @@ record. Half the library was bare single words and a fifth was a Discogs slash-e
 
 MusicBrainz is the _bridge_, not the source: it had genres for 3 of 40 releases, but 33 of them carry a Discogs link.
 
+### Where the metadata comes from
+
+Three paths, in order, and the third is the only one that guesses:
+
+1. **The file's MusicBrainz id → its Discogs link.** An identification: nothing is matched by name.
+2. **The MusicBrainz release _group_.** Genres live there, not on the release — a release is a pressing, the group is
+   the album. Querying only the release made MusicBrainz look empty (3 of 49); it is 130 of 429.
+3. **A Discogs search by name, verified by tracklist.** Only an `exact` match — same count, same normalised titles — is
+   used unattended. Anything else lands in `uncertain.tsv` and is **not** proposed.
+
+That third rule is not caution for its own sake. The top hit for Stephan Bodzin's _Boavista_ is a **2-track single** of
+the same name, and _Adele — 21_ matches the 11-track standard against the 15-track deluxe this library holds.
+
+A **503 is not an answer**: MusicBrainz throttles with it, and treating every non-200 as "no data" cached records that
+have genres as having none. A 404 is final; a 503 waits and asks again.
+
+### Why TSV and not CSV
+
+The fields are full of commas and free of tabs. 23 of 504 rows carry one inside a field — `Basscad, EP`,
+`Hardcore Devo, Vol. 2: 1974-1977` — and Discogs' own vocabulary has `Folk, World, & Country` as a **single term**. CSV
+quotes all of those; TSV leaves the file readable as plain text, which matters because `uncertain.tsv` is meant to be
+read by a person, and it keeps `cut -f2` and `awk -F'\t'` correct rather than plausible.
+
+TSV's cost is that it has no escape mechanism, so `write_tsv` refuses a row instead of emitting one that cannot be read
+back. That is the boundary check §12 asks for: the failure downstream would be a _dropped_ row, not a wrong one —
+`apply.py` gates on a column that must read `y`, and no column shift puts a genre onto an album it doesn't belong to —
+but a row that vanishes silently is worth three lines to prevent.
+
 ### Rules the review taught us
 
 Each of these was a bug that destroyed good data, caught by reading the proposal rather than by a test:

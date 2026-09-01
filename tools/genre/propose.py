@@ -14,14 +14,13 @@ length is a *rendering* problem the format language already solves with
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from genre.common import album_key, fix_case, tags_of, walk
+from genre.common import album_key, fix_case, tags_of, walk, write_tsv
 
 #: The terms this library treats as broad — Discogs' 15 Genres, **after**
 #: `RENAME`. Both spellings are in here on purpose: a source says
@@ -224,6 +223,54 @@ def _strings(payload: dict[str, object], key: str) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
+def searched_terms(found: dict[str, object] | None) -> tuple[list[str], str]:
+    """Terms from the name-search fallback — **only when the tracklist agrees**.
+
+    Picard's discipline, and the reason is that a name search returns plausible
+    wrong answers: searching for *Let It Be* offers a Korean pressing before the
+    deluxe edition this library holds. An `exact` tracklist match is the cheapest
+    reliable signal that the record is the same one, and it is the only verdict
+    used unattended. Anything less is written to `uncertain.tsv` for a person to
+    look at, one album at a time.
+    """
+    if not found or found.get("verdict") != "exact":
+        return [], "current-only"
+    terms = _strings(found, "discogs_genres") + _strings(found, "discogs_styles")
+    if not terms:
+        return [], "current-only"
+    return terms, "discogs-search (tracklist matches exactly)"
+
+
+def write_uncertain(
+    path: Path,
+    albums: dict[tuple[str, str], Album],
+    searched: dict[tuple[str, str], dict[str, object]],
+) -> int:
+    """Write the candidates that need a person, and say how many there were."""
+    rows = [
+        {
+            "artist": artist,
+            "album": album,
+            "files": held.files,
+            "current": " | ".join(sorted(held.genres)),
+            "verdict": found.get("verdict", "?"),
+            "shared": found.get("share", 0),
+            "our_tracks": found.get("ours", 0),
+            "their_tracks": found.get("theirs", 0),
+            "matched": found.get("matched", ""),
+            "year": found.get("year", ""),
+            "candidate": "; ".join(_strings(found, "discogs_genres") + _strings(found, "discogs_styles")),
+        }
+        for (artist, album), held in sorted(albums.items())
+        if (found := searched.get((artist, album))) and found.get("verdict") != "exact"
+    ]
+    if not rows:
+        path.unlink(missing_ok=True)
+        return 0
+    write_tsv(path, rows)
+    return len(rows)
+
+
 def source_terms(payload: dict[str, object]) -> tuple[list[str], str]:
     """Pick the best available source for an album, and say which it was.
 
@@ -262,7 +309,13 @@ def merge(found: list[str], current: list[str]) -> list[str]:
     return found + [t for t in current if t not in found]
 
 
-def row_for(artist: str, album_name: str, album: Album, lookup: dict[str, dict[str, object]]) -> dict[str, object]:
+def row_for(
+    artist: str,
+    album_name: str,
+    album: Album,
+    lookup: dict[str, dict[str, object]],
+    searched: dict[tuple[str, str], dict[str, object]],
+) -> dict[str, object]:
     """Build one review row: what the album says now, and what it should say."""
     current_values = sorted(album.genres)
     current_terms: list[str] = []
@@ -293,6 +346,9 @@ def row_for(artist: str, album_name: str, album: Album, lookup: dict[str, dict[s
         }
 
     terms, source = source_terms(lookup.get(album.mbid, {}))
+    if not terms:
+        # Nothing a link reached; fall back to what a name search found.
+        terms, source = searched_terms(searched.get((artist, album_name)))
     # A value already in the convention's `; ` form has been through a human.
     human = len(current_values) == 1 and ";" in current_values[0] and source == "current-only"
     terms = current_terms if (human or not terms) else merge(terms, current_terms)
@@ -320,18 +376,15 @@ def main() -> None:
     here = Path(__file__).parent
     con = sqlite3.connect(here / "genre-cache.sqlite")
     lookup = {mbid: json.loads(payload) for mbid, payload in con.execute("SELECT mbid, payload FROM lookup")}
+    searched = {(a, b): json.loads(p) for a, b, p in con.execute("SELECT artist, album, payload FROM search")}
 
-    rows = [
-        row_for(artist, name, album, lookup)
-        for (artist, name), album in sorted(survey(Path(args.root).expanduser()).items())
-    ]
+    surveyed = survey(Path(args.root).expanduser())
+    rows = [row_for(artist, name, album, lookup, searched) for (artist, name), album in sorted(surveyed.items())]
 
     out_path = here / "review.tsv"
-    with out_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), delimiter="\t")
-        writer.writeheader()
-        writer.writerows(rows)
+    write_tsv(out_path, rows)
 
+    uncertain = write_uncertain(here / "uncertain.tsv", surveyed, searched)
     changing = sum(1 for r in rows if r["apply"] == "y")
     by_source: dict[str, int] = {}
     for row in rows:
@@ -339,6 +392,11 @@ def main() -> None:
     print(f"{len(rows)} albums -> {out_path}")
     print(f"  {changing} would change, {len(rows) - changing} already correct")
     print(f"  sources: {by_source}")
+    if uncertain:
+        print(
+            f"\n  {uncertain} album(s) matched a Discogs release whose tracklist differs.\n"
+            f"  They are in uncertain.tsv and are **not** proposed — look at each one."
+        )
     print("\nEdit the `proposed` column, clear `apply` to skip a row, then run apply.py.")
 
 

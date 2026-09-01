@@ -4,3 +4,4 @@ __pycache__/
 genre/genre-cache.sqlite
 genre/review.tsv
 genre/genre-snapshot.tsv
+genre/uncertain.tsv
