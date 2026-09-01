@@ -132,7 +132,7 @@ Options are parsed with clap (derive), and each also reads an env var as a fallb
 
 **Use clap with the derive API for anything CLI-shaped.** Parsing belongs at the boundary (§12): flags become typed
 values in `cli.rs` and travel down as `PlayerConfig`, so nothing below reads the environment or handles a raw string.
-The same rule applies to the stdin driver in `repl.rs` — a line becomes a typed `Line` before anything acts on it.
+The same rule applies to the `:` line — a line becomes a typed `Command` before anything acts on it.
 
 ## Building
 

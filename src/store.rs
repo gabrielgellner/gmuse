@@ -145,10 +145,17 @@ impl Store {
     }
 
     /// Size of the id space, including tombstones.
+    ///
+    /// Test-only since `--repl` was retired: `print_library` was the one
+    /// caller outside tests, and the arena's shape is not something any view
+    /// shows. Kept rather than inlined into the tests because the invariant it
+    /// checks — ids are never reused — is worth asserting by name.
+    #[cfg(test)]
     pub fn capacity(&self) -> usize {
         self.tracks.len()
     }
 
+    #[cfg(test)]
     pub fn tombstones(&self) -> usize {
         self.tombstones
     }

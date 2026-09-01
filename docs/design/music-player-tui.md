@@ -2907,6 +2907,36 @@ Append here as decisions are made. Format: date, decision, rationale.
   `--no-lock` opts out, because wanting a second instance is legitimate — auditioning a file with `--repl` while the
   player runs is the obvious case — and the refusal names the flag.
 
+- **2026-09-01** **`--repl` and the bare file argument are retired (issue #61).** This is a **TUI-first** program, and
+  the CLI is a way to do things _for_ the TUI — not a second way to be a player. `--repl` was the version that forgot
+  that: it was not an interface _to_ gmuse but a second gmuse, with its own audio device, library and session.
+
+  Its stated reason had expired. The 2026-08-27 entry above keeps it "because M4 is read-only by design, so making the
+  TUI the only interface would have removed the ability to play anything until M5." M5 shipped; M1–M8 are done. The
+  workaround outlived the thing it worked around, and the day's lock made it unusable — `just play` was `--repl`, so the
+  repl's last use case was precisely what the lock exists to prevent.
+
+  **The bare file went with it, and that is the sharper half.** `playback.current` is `Option<TrackId>`; `TrackSource`
+  is `{path, gain}` with no id. So `gmuse <file>` produced audio while `current` stayed `None`, and everything
+  downstream keys off `current`: `next()` could not run, nothing was recorded in history, nothing was displayed, and
+  §5's pure `next()` did not apply to it at all. Not a feature with limits — a **second, shadow notion of "a thing that
+  can play"** beside the real one. Library-first means everything that plays is a track in the library.
+
+  Removing it removes the only call to `player.load` with something the store does not know, so `TrackSource` is now
+  always built from a `Track` by `source_for` and the untracked-playing state stops existing rather than being handled.
+  `TrackSource::plain` survives `#[cfg(test)]`, which is not a leftover: the audio layer sits _below_ the store and is
+  deliberately ignorant of `TrackId`, so testing it should not require a library.
+
+  Deleted: `repl.rs`, and `run`, `print_library`, `print_matches`, `print_status`, `drain_events` and `fmt_time` from
+  `main.rs`. `PlayerHandle::gain` went with them, having no other caller; `Store::capacity` and `Store::tombstones` are
+  now `#[cfg(test)]`, `print_library` having been their only use outside tests. 683 tests pass, no warnings.
+
+  **Deliberately not replaced.** A `--play-and-exit` was considered and refused as the same incoherence in a smaller
+  wrapper. Auditioning an un-imported file is `afplay`'s job; gmuse's answer is to import it, after which it is a real
+  track with a real history. The one genuine loss is a _scriptable_ rescan — `just rescan` was headless through the repl
+  and now opens the TUI — which is M9's socket to restore, not a flag to add. That also retires the example given in
+  this morning's lock entry: `--no-lock` still exists, but not for auditioning a file with `--repl`.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

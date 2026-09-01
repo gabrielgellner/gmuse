@@ -79,7 +79,18 @@ pub struct TrackSource {
 }
 
 impl TrackSource {
-    /// Play a file untouched.
+    /// Play a file untouched, at unity gain.
+    ///
+    /// **Test-only, and that is the point.** Every source in the running
+    /// program is built from a `Track` by `source_for`, so nothing plays that
+    /// the library does not know — the shadow "playing something untracked"
+    /// state that `--repl` and a bare file argument created is gone with them.
+    ///
+    /// The decoder's own tests still want it, and may have it: this layer sits
+    /// *below* the store and is deliberately ignorant of `TrackId`. A path and
+    /// a gain is the whole of what it needs, which is why testing it does not
+    /// require a library.
+    #[cfg(test)]
     pub fn plain(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -414,11 +425,6 @@ impl PlayerHandle {
     /// step, not the gain — see [`gain_for`].
     pub fn volume(&self) -> f32 {
         f32::from_bits(self.shared.position.load(Ordering::Relaxed))
-    }
-
-    /// The gain actually applied to samples, for tests and diagnostics.
-    pub fn gain(&self) -> f32 {
-        f32::from_bits(self.shared.volume.load(Ordering::Relaxed))
     }
 
     /// Set the fader position, clamped to a sane range.

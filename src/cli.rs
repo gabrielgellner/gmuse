@@ -12,14 +12,10 @@ use crate::audio::{PlayerConfig, resample::Quality};
 
 /// gmuse — Gabriel's MUSical Experience.
 ///
-/// A cmus-shaped terminal music player. Until the UI lands, this drives the
-/// player from stdin lines; run without a file and type `help`.
+/// A cmus-shaped terminal music player.
 #[derive(Debug, Parser)]
 #[command(name = "gmuse", version, about, long_about = None)]
 pub struct Cli {
-    /// Audio file to load and play immediately.
-    pub file: Option<PathBuf>,
-
     /// Output device, matched by substring against the device id.
     #[arg(short, long, env = "GMUSE_DEVICE")]
     pub device: Option<String>,
@@ -90,13 +86,6 @@ pub struct Cli {
     #[arg(long, num_args = 0..=1, env = "GMUSE_LOG")]
     pub log: Option<Option<PathBuf>>,
 
-    /// Use the line-based prompt instead of the TUI.
-    ///
-    /// The TUI is read-only until M5 wires playback into it; this keeps the
-    /// M2 driver available in the meantime.
-    #[arg(long)]
-    pub repl: bool,
-
     /// Sort artists ignoring a leading "The"/"A"/"An".
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub smart_artist_sort: bool,
@@ -105,8 +94,8 @@ pub struct Cli {
     ///
     /// The lock exists because two instances both open the audio device and
     /// both write `session.toml`. Nothing stops you wanting a second one
-    /// anyway — auditioning a file with `--repl` while the player runs is the
-    /// obvious case — so the refusal is a default, not a rule.
+    /// anyway — a second machine's session over SSH, say — so the refusal is a
+    /// default, not a rule.
     #[arg(long)]
     pub no_lock: bool,
 }
@@ -185,14 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn a_file_argument_still_works_beside_the_log_flag() {
-        // The optional value must not swallow the positional argument.
-        let cli = parse(&["--log", "--", "song.mp3"]);
-        assert!(cli.log_path().is_some());
-        assert_eq!(cli.file, Some(PathBuf::from("song.mp3")));
-    }
-
-    #[test]
     fn every_flag_parses() {
         let cli = parse(&[
             "--device",
@@ -208,14 +189,14 @@ mod tests {
             "--rescan",
             "--no-cache",
             "--no-config",
-            "--repl",
+            "--no-lock",
             "--log",
             "/tmp/l.log",
         ]);
         assert_eq!(cli.device.as_deref(), Some("built-in"));
         assert_eq!(cli.rate, Some(48_000));
         assert_eq!(cli.volume, 0.5);
-        assert!(cli.rescan && cli.no_cache && cli.no_config && cli.repl);
+        assert!(cli.rescan && cli.no_cache && cli.no_config && cli.no_lock);
     }
 
     /// clap's own consistency check: duplicate short flags, bad defaults and

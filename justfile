@@ -25,16 +25,6 @@ ui dir="":
         cargo run --release
     fi
 
-# Play one file at the line prompt (the TUI cannot start playback until M5)
-[group('dev')]
-play file:
-    cargo run --release -- --repl "{{ file }}"
-
-# Open the line prompt with nothing loaded; type `help` there
-[group('dev')]
-repl:
-    cargo run --release -- --repl
-
 # Launch the TUI with session logging, for a listening test
 [group('dev')]
 listen dir="":
@@ -62,10 +52,10 @@ log:
     echo
     echo "underruns recorded: $(grep -c '^\[.*underrun' "$LOG" || true)"
 
-# Rebuild the library cache from scratch, ignoring stored mtimes
+# Rebuild the cache from scratch: opens the TUI, which scans on startup, then `q`
 [group('dev')]
 rescan dir:
-    echo quit | cargo run --release -- --library "{{ dir }}" --rescan --repl
+    cargo run --release -- --library "{{ dir }}" --rescan
 
 # Build without Opus support, dropping the only C dependency (needs no cmake)
 [group('dev')]

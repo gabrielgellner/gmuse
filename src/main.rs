@@ -25,7 +25,6 @@ mod lock;
 mod m3u;
 mod next;
 mod playlist;
-mod repl;
 mod scan;
 mod session;
 mod smart;
@@ -35,16 +34,13 @@ mod text;
 mod ui;
 mod undo;
 
-use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use clap::Parser;
 
-use audio::{PlayerEvent, PlayerHandle, State};
+use audio::PlayerHandle;
 use cli::Cli;
 use library::Library;
-use repl::Line;
 use store::Store;
 
 /// Everything the prompt operates on.
@@ -182,112 +178,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    if !args.repl {
-        // A file named on the command line still plays, even though the views
-        // themselves cannot start playback until M5 — silently ignoring an
-        // explicit argument would be worse than the milestone boundary.
-        if let Some(path) = &args.file {
-            app.player
-                .load(crate::audio::TrackSource::plain(path.clone()));
-        }
-        return run_tui(
-            &app,
-            args.smart_artist_sort,
-            loaded,
-            args.log_path(),
-            !args.no_resume,
-            args.migrate_data,
-        );
-    }
-
-    // The config sets up UI state, which the line prompt does not have. Say so
-    // rather than loading it and silently doing nothing.
-    if !loaded.commands.is_empty() {
-        println!(
-            "note: {} config command(s) ignored — the config applies to the TUI, not --repl",
-            loaded.commands.len()
-        );
-    }
-    for e in &loaded.errors {
-        eprintln!("config: {e}");
-    }
-    // Same shape as the config: the log records UI-loop events, which the line
-    // prompt has none of. Say so rather than opening a file nothing writes to.
-    if args.log_path().is_some() {
-        println!("note: --log applies to the TUI, not --repl");
-    }
-
-    match &args.file {
-        Some(path) => app
-            .player
-            .load(crate::audio::TrackSource::plain(path.clone())),
-        None => println!("{}", repl::HELP),
-    }
-
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
-
-    loop {
-        drain_events(&app.player);
-
-        print!("> ");
-        std::io::stdout().flush()?;
-
-        let Some(line) = lines.next() else { break };
-        let line = line?;
-
-        match repl::parse(&line) {
-            Ok(Line::Quit) => break,
-            Ok(Line::Empty) => {}
-            Ok(cmd) => run(&mut app, cmd),
-            Err(e) => println!("{e}"),
-        }
-
-        // Give the decoder a moment so its reply lands in this iteration
-        // rather than looking like it belongs to the next command.
-        std::thread::sleep(Duration::from_millis(60));
-        drain_events(&app.player);
-    }
-
-    save_cache(&app);
-    Ok(())
-}
-
-fn run(app: &mut App, cmd: Line) {
-    let player = &app.player;
-    match cmd {
-        Line::Load(p) => player.load(crate::audio::TrackSource::plain(p)),
-        Line::Play => player.play(),
-        Line::Pause => player.pause(),
-        Line::Toggle => player.toggle(),
-        Line::Stop => player.stop(),
-        Line::Seek(to) => player.seek(to),
-        Line::Volume(v) => {
-            player.set_volume(v);
-            println!("volume {:.2}", player.volume());
-        }
-        Line::Status => print_status(player),
-        Line::Rescan(dir) => {
-            if let Some(dir) = dir
-                && !app.roots.contains(&dir)
-            {
-                app.roots.push(dir);
-            }
-            if app.roots.is_empty() {
-                println!("no library roots — try 'scan <dir>'");
-                return;
-            }
-            let roots = app.roots.clone();
-            let report = scan::scan(&mut app.store, &roots);
-            println!("{report}");
-            report_errors(&report);
-            save_cache(app);
-        }
-        Line::Library => print_library(app),
-        Line::Find(query) => print_matches(app, &query),
-        Line::Help => println!("{}", repl::HELP),
-        Line::Quit | Line::Empty => {}
-    }
+    run_tui(
+        &app,
+        args.smart_artist_sort,
+        loaded,
+        args.log_path(),
+        !args.no_resume,
+        args.migrate_data,
+    )
 }
 
 /// Draw the views until the user quits.
@@ -595,148 +493,6 @@ fn report_errors(report: &scan::ScanReport) {
     }
 }
 
-fn print_library(app: &App) {
-    use std::collections::BTreeSet;
-    let mut artists: BTreeSet<&str> = BTreeSet::new();
-    let mut albums: BTreeSet<(&str, &str)> = BTreeSet::new();
-    let mut total = Duration::ZERO;
-    let mut untagged = 0usize;
-
-    // Report what the active catalogs actually cover, not the whole store —
-    // otherwise this contradicts what the views show.
-    // The line prompt keeps no history, so history-defined catalogs cannot be
-    // evaluated here — their fields read as missing, which is the honest
-    // answer rather than a guess.
-    let members = app
-        .catalogs
-        .members(&app.store, crate::filter::Env::default());
-    let mut counted = 0usize;
-
-    for (id, t) in app.store.iter() {
-        if !members.contains(&id) {
-            continue;
-        }
-        counted += 1;
-        artists.insert(t.file_under());
-        albums.insert((t.file_under(), t.album_or_unknown()));
-        total += t.duration;
-        if t.title.is_none() {
-            untagged += 1;
-        }
-    }
-
-    println!(
-        "{} tracks, {} albums, {} artists, {:.1} hours",
-        counted,
-        albums.len(),
-        artists.len(),
-        total.as_secs_f64() / 3600.0
-    );
-    if untagged > 0 {
-        println!("{untagged} without a title tag");
-    }
-    if app.store.tombstones() > 0 {
-        println!(
-            "{} removed this session ({} ids in use)",
-            app.store.tombstones(),
-            app.store.capacity()
-        );
-    }
-    if let Some(label) = app.catalogs.label() {
-        println!("  catalogs: {label}");
-    }
-    for root in &app.roots {
-        println!("  root: {}", root.display());
-    }
-}
-
-fn print_matches(app: &App, query: &str) {
-    let needle = text::Needle::new(query);
-    let hit = |s: Option<&str>| {
-        s.map(|s| text::Haystack::of(s).contains(&needle))
-            .unwrap_or(false)
-    };
-
-    let mut shown = 0;
-    let mut total = 0;
-    for (_, t) in app.store.iter() {
-        if hit(t.artist.as_deref())
-            || hit(t.albumartist.as_deref())
-            || hit(t.album.as_deref())
-            || hit(t.title.as_deref())
-        {
-            total += 1;
-            if shown < 20 {
-                println!(
-                    "  {} — {} — {}",
-                    t.file_under(),
-                    t.album_or_unknown(),
-                    t.display_title()
-                );
-                shown += 1;
-            }
-        }
-    }
-    if total == 0 {
-        println!("no matches");
-    } else if total > shown {
-        println!("  ... {total} matches, showing {shown}");
-    }
-}
-
-fn print_status(player: &PlayerHandle) {
-    let state = match player.state() {
-        State::Playing => "playing",
-        State::Paused => "paused",
-        State::Stopped => "stopped",
-    };
-    // Both numbers: the fader position is what was set, the gain is what the
-    // samples are actually multiplied by, and the two are no longer the same.
-    let gain = player.gain();
-    let db = if gain > 0.0 {
-        format!("{:+.1} dB", 20.0 * gain.log10())
-    } else {
-        "silent".into()
-    };
-    println!(
-        "{state}  {}  vol {:.0}% ({db})  underruns {}",
-        fmt_time(player.position()),
-        player.volume() * 100.0,
-        player.underruns()
-    );
-}
-
-fn drain_events(player: &PlayerHandle) {
-    while let Ok(event) = player.events().try_recv() {
-        match event {
-            PlayerEvent::Loaded {
-                path,
-                duration,
-                source_rate,
-                channels,
-                resampling,
-                gain: _,
-            } => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                let len = duration.map(fmt_time).unwrap_or_else(|| "??:??".into());
-                let conv = if resampling { " (resampling)" } else { "" };
-                println!("\n♪ {name}  [{len}]  {source_rate} Hz, {channels} ch{conv}");
-            }
-            // `--repl` plays whatever file it was handed, one at a time. It
-            // has no pool to resolve a successor from, so decline the splice
-            // and let the track finish.
-            PlayerEvent::NeedNext => player.set_next(None),
-            PlayerEvent::Finished => println!("\nfinished"),
-            PlayerEvent::Error(e) => println!("\nerror: {e}"),
-            PlayerEvent::DeviceLost(e) => println!("\ndevice lost: {e}"),
-            PlayerEvent::DeviceChanged => println!("\naudio output changed"),
-        }
-    }
-}
-
 /// `mm:ss.mmm` — millisecond resolution, because second resolution cannot show
 /// whether a seek landed where it was asked to.
 /// What to scan: what the config and `--library` say, or — only if they say
@@ -753,12 +509,6 @@ fn scan_roots(from_catalogs: Vec<PathBuf>, cached: Vec<PathBuf>) -> Vec<PathBuf>
     } else {
         from_catalogs
     }
-}
-
-fn fmt_time(d: Duration) -> String {
-    let total = d.as_secs_f64();
-    let mins = (total / 60.0).floor();
-    format!("{:02}:{:06.3}", mins as u64, total - mins * 60.0)
 }
 
 #[cfg(test)]
