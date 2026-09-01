@@ -3293,23 +3293,10 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     // same reason the pending-key indicator is — there is no second copy of
     // the truth to keep in step.
     let which = which_key_rows(ui, Instant::now());
-    // A fourth tenant of the one slot, and the lowest-priority one: `:` and
-    // `<leader>?` are things you just asked for, and the panel is a standing
-    // display. It comes back when they close.
-    // …and it yields on a short terminal. The other three tenants are things
-    // you just asked for and are gone in a keystroke; this one *stands*, so a
-    // panel that left the library pane with nothing but borders would be the
-    // "swallows the view it is helping you use" failure the slot's cap already
-    // guards against — but for as long as the mode lasts. The status line
-    // still says `-- TRANSPORT --`, so nothing is lost that has to be seen.
-    const BODY_FLOOR: u16 = 4;
-    let chrome = 2 + TRANSPORT_PANEL + BODY_FLOOR;
-    let transport_panel = ui.mode == crate::cmd::Mode::Transport && frame.area().height >= chrome;
     let menu_height = match (&ui.prompt, &ui.help, &which) {
         (Some(p), _, _) => menu_height(p, frame.area().width),
         (None, Some(rows), _) => rows_height(rows, frame.area().width),
         (None, None, Some(rows)) => rows_height(rows, frame.area().width),
-        _ if transport_panel => TRANSPORT_PANEL,
         _ => 0,
     };
 
@@ -3356,7 +3343,6 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 rows,
                 &format!("after {}", crate::cmd::keys::format_seq(&ui.pending)),
             ),
-            _ if transport_panel => draw_transport(frame, menu, ui, ctx),
             _ => {}
         }
     }
@@ -3440,6 +3426,18 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         View::Browser => draw_browser(frame, body, ui),
         View::Filters => draw_catalogs(frame, body, ui),
         View::Guide => draw_guides(frame, body, ui),
+    }
+
+    // **Last, and over the middle of the view.** #34 put this in the bottom
+    // slot, where it read as one more transient helper beside the completion
+    // menu — and a mode you do not notice is a mode you press navigation keys
+    // in, which is exactly what happened in use.
+    //
+    // Floating over the centre is the difference between a panel that *reports*
+    // the mode and one that *is* it. It covers the list on purpose: in transport
+    // mode the list is not what your hands are doing.
+    if ui.mode == crate::cmd::Mode::Transport {
+        draw_transport(frame, body, ui, ctx);
     }
 }
 
@@ -3555,6 +3553,28 @@ fn draw_help(frame: &mut Frame, area: Rect, ui: &Ui, rows: &[String], title: &st
 /// four things and a panel that resized as a track's tags changed would be
 /// worse than one that is simply this tall.
 const TRANSPORT_PANEL: u16 = 6;
+/// And how wide. Wide enough for a long artist — title line, narrow enough
+/// that the list is visibly still there around it.
+const TRANSPORT_WIDTH: u16 = 64;
+
+/// A rect of `width` by `height` centred in `area`, or `None` if it would not
+/// leave the view visible around it.
+///
+/// The margin is what makes this read as floating *over* something rather than
+/// as a replacement for it — if the panel would fill the pane, showing nothing
+/// is better than showing a panel that looks like the whole screen.
+fn centred(area: Rect, width: u16, height: u16) -> Option<Rect> {
+    const MARGIN: u16 = 2;
+    if area.width < width + MARGIN || area.height < height + MARGIN {
+        return None;
+    }
+    Some(Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    })
+}
 
 /// The panel that rises with the mode (#34).
 ///
@@ -3564,7 +3584,14 @@ const TRANSPORT_PANEL: u16 = 6;
 /// only once you have said — by entering the mode — that playback is what you
 /// are attending to. A panel you cannot dismiss is clutter; a panel that *is*
 /// the thing you switched to is the screen doing what you asked.
-fn draw_transport(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
+fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
+    let Some(area) = centred(body, TRANSPORT_WIDTH, TRANSPORT_PANEL) else {
+        // No room to float without covering the whole view. The status line
+        // still says `-- TRANSPORT --`, so the mode is never invisible.
+        return;
+    };
+    // Blank what is underneath, or the list shows through the panel's gaps.
+    frame.render_widget(ratatui::widgets::Clear, area);
     let theme = &ui.theme;
     let text = theme.get(theme::Role::StatusText);
     let dim = theme.get(theme::Role::StatusDim);
@@ -3635,8 +3662,20 @@ fn draw_transport(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         .unwrap_or_else(|| "next  —".to_string());
     lines.push(Line::from(Span::styled(next, dim)));
 
+    // **Not `pane_block`.** A pane border says "this is one of the panes"; the
+    // whole complaint was that the panel read as furniture rather than as the
+    // mode. It takes the mode's own role — the same one the status line's
+    // `-- TRANSPORT --` uses — and says so in its title, so the thing on screen
+    // and the thing in the status line are visibly one fact.
     frame.render_widget(
-        Paragraph::new(lines).block(pane_block(theme, "transport", true)),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Double)
+                .title(" -- TRANSPORT -- ")
+                .title_style(theme.get(theme::Role::Mode))
+                .border_style(theme.get(theme::Role::Mode)),
+        ),
         area,
     );
 }
@@ -9438,69 +9477,75 @@ mod tests {
 
         let browsing = render(&ui, &ctx, 84, 20);
         assert!(
-            !browsing.contains("┌ transport"),
+            !browsing.contains("TRANSPORT"),
             "the panel is up while browsing:\n{browsing}"
         );
 
         press(&mut ui, &ctx, "i");
         let out = render(&ui, &ctx, 84, 20);
-        assert!(out.contains("┌ transport"), "no panel in the mode:\n{out}");
         assert!(
-            out.contains("next  "),
-            "the panel should say what is next:\n{out}"
+            out.contains("╔ -- TRANSPORT --"),
+            "no panel in the mode:\n{out}"
+        );
+        assert!(out.contains("next  "), "it should say what is next:\n{out}");
+
+        // Over the middle of the view, not along the bottom edge. A panel in
+        // the bottom slot read as one more transient helper, and a mode you do
+        // not notice is a mode you press navigation keys in.
+        let row = out
+            .lines()
+            .position(|l| l.contains("╔ -- TRANSPORT --"))
+            .expect("a top border");
+        let rows = out.lines().count();
+        assert!(
+            row > 2 && row < rows - 4,
+            "the panel is at row {row} of {rows}, which is not the middle"
         );
 
         press(&mut ui, &ctx, "escape");
-        assert!(!render(&ui, &ctx, 84, 20).contains("┌ transport"));
+        assert!(!render(&ui, &ctx, 84, 20).contains("╔ -- TRANSPORT --"));
     }
 
-    /// It is the lowest-priority tenant of the slot: `:` and `<leader>?` are
-    /// things you just asked for, and it comes back when they close.
+    /// Floating means it no longer competes with the bottom slot at all — and
+    /// it **stays up while a prompt is open**, which the slot-based version
+    /// could not do. Opening `:` does not leave the mode, so an indicator that
+    /// vanished there would be missing at exactly the moment you are typing.
     #[test]
-    fn a_prompt_displaces_the_transport_panel() {
+    fn the_panel_stays_up_while_a_prompt_is_open() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         ui.playback.current = ui.library.sorted().first().copied();
         press(&mut ui, &ctx, "i");
-        assert!(render(&ui, &ctx, 84, 20).contains("┌ transport"));
+        assert!(render(&ui, &ctx, 84, 20).contains("-- TRANSPORT -- "));
 
         press(&mut ui, &ctx, ":");
         let out = render(&ui, &ctx, 84, 20);
         assert!(
-            !out.contains("┌ transport"),
-            "the panel outranked the prompt:\n{out}"
-        );
-
-        press(&mut ui, &ctx, "escape");
-        assert!(
-            render(&ui, &ctx, 84, 20).contains("┌ transport"),
-            "the panel did not come back"
+            out.contains("╔ -- TRANSPORT --"),
+            "the panel went when the prompt opened:\n{out}"
         );
     }
 
-    /// A standing panel must not leave the view with nothing but borders. The
-    /// other three tenants are gone in a keystroke; this one lasts as long as
-    /// the mode does.
+    /// A panel that filled the pane would not read as floating *over* it, so
+    /// below the margin it does not draw at all. The status line still carries
+    /// the indicator, which is the part that may never be lost.
     #[test]
-    fn the_panel_yields_on_a_short_terminal() {
+    fn the_panel_yields_when_there_is_no_room_to_float() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         ui.view = View::Tree;
         press(&mut ui, &ctx, "i");
 
-        let out = render(&ui, &ctx, 84, 10);
-        assert!(
-            !out.contains("┌ transport"),
-            "the panel swallowed the view:\n{out}"
-        );
-        assert!(
-            out.contains("Anderson .Paak"),
-            "no library rows left:\n{out}"
-        );
-        // The indicator is the part that may never be lost.
-        assert!(out.contains("-- TRANSPORT --"), "{out}");
+        for (w, h) in [(84u16, 8u16), (40, 20)] {
+            let out = render(&ui, &ctx, w, h);
+            assert!(!out.contains("╔"), "the panel drew at {w}x{h}:\n{out}");
+            assert!(
+                out.contains("-- TRANSPORT --"),
+                "the indicator was lost at {w}x{h}:\n{out}"
+            );
+        }
     }
 
     /// The bar is a fraction of the pane, not of anything it invented.

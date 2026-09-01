@@ -139,9 +139,10 @@ transport state rather than navigation.
 `50%` is vim's: a count and `%` goes that far into the track, the way `50%` in vim goes that far into a file. Bare `%`
 means halfway.
 
-A panel rises with the mode: what is playing in more detail than the status line has room for, a position bar, and what
-is next — which is worth a line precisely because shuffle makes it unguessable. It is not there at all while you are
-browsing, and it stands down on a terminal too short to spare the rows.
+A panel floats over the middle of the view while the mode is on: what is playing in more detail than the status line has
+room for, a position bar, and what is next — which is worth a line precisely because shuffle makes it unguessable. It
+covers the list on purpose. In transport mode the list is not what your hands are doing, and a panel tucked along the
+bottom edge reads as one more helper rather than as a mode you are in.
 
 **Nothing falls through.** A mode is a keymap of its own, not a layer over the normal one — `j` is volume here and not
 "down", because a mode that leaked navigation would not have bought anything. That is why the way out is bound inside

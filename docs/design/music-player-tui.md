@@ -2755,6 +2755,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   many terminals draw double-width or not at all — so `■` stands in for stop, and a mis-measured glyph cannot shift the
   row. #34 flagged this and the answer was already in the status line.
 
+- **2026-08-31** **The transport panel floats over the centre, because in the bottom slot it did not read as a mode.**
+  #34 put it in the slot beside the completion menu and `<leader>?`, on the reasoning that a fourth tenant was a `match`
+  arm rather than a new concept. That was true of the code and wrong about the screen: **the slot is where transient
+  helpers live**, so the panel read as one — and the reported symptom was pressing navigation keys while in transport
+  mode, over and over.
+
+  A mode indicator that can be mistaken for furniture is not doing the job §33 called non-negotiable. It now draws last,
+  over the middle of the body, in a double border in `Role::Mode` — the same role the status line's `-- TRANSPORT --`
+  uses — and titled the same, so the two are visibly one fact rather than two decorations. `Clear` blanks what is
+  underneath.
+
+  **It covers the list on purpose.** In transport mode the list is not what your hands are doing, and that is the whole
+  claim: a panel that reports the mode from the margin is furniture; a panel over the middle _is_ the mode.
+
+  Two things fall out. It no longer competes for the slot, so **it stays up while `:` is open** — opening a prompt does
+  not leave the mode, and the old version made the indicator vanish at exactly the moment you were about to type. And
+  the short-terminal rule inverts: rather than yielding rows it will not fit, it declines to draw when it could not
+  float with a margin around it, because a panel filling the pane is a replacement rather than an overlay. The status
+  line carries the indicator either way, which is what makes both refusals safe.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
