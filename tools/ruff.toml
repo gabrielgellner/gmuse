@@ -1,0 +1,49 @@
+# Same governance model as ../../sdmxlib: turn everything on, then subtract,
+# with a written reason per subtraction. These are standalone scripts rather
+# than a library, which changes what is *appropriate* — not how much is on.
+#
+# NOT `fix = true`, for sdmxlib's reason: a config-level fix flag means every
+# bare `ruff check` silently rewrites the working tree.
+indent-width = 4
+line-length = 120
+target-version = "py313"
+
+[format]
+docstring-code-format = true
+docstring-code-line-length = 88
+indent-style = "space"
+line-ending = "auto"
+quote-style = "double"
+skip-magic-trailing-comma = false
+
+[lint]
+select = ["ALL"]
+ignore = [
+  # ── Docstring style conflicts (as sdmxlib) ────────────────────────────────
+  "D203",   # one-blank-line-before-class — conflicts with D211
+  "D213",   # multi-line-summary-second-line — conflicts with D212
+  "COM812", # missing-trailing-comma — handled by the formatter
+  "ISC001", # single-line-implicit-string-concatenation — same
+
+  # ── Active development ────────────────────────────────────────────────────
+  "TD",  # flake8-todos
+  "FIX", # flake8-fixme
+
+  # ── Not this project ──────────────────────────────────────────────────────
+  "CPY001", # missing-copyright-notice
+]
+
+[lint.per-file-ignores]
+# These are **scripts**, and three rules are about libraries rather than code
+# quality. Deliberately narrow: `D` and `ANN` stay ON, because a tool that
+# rewrites tags across 900 files is worth documenting and annotating.
+#
+# T201  — `print` is the entire user interface; there is no logger to reach for.
+# INP001 — a directory of scripts is not an implicit namespace package.
+# S603/S607 — every subprocess call here is a fixed argv to a known binary
+#   (`ffprobe`, `security`) with no shell and no user-controlled program name.
+#   The rules cannot see that, and the alternative is a suppression per site.
+"*.py" = ["T201", "INP001", "S603", "S607"]
+
+[lint.pydocstyle]
+convention = "google"

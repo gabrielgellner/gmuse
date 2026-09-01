@@ -1,0 +1,29 @@
+# Second checker, same governance as ../../sdmxlib: `preset = "all"`, then
+# subtract with a written reason per subtraction. Keep this at 0 findings — a
+# new one is a real defect, not noise.
+#
+# The full-preset run on these scripts found five, and all five were real: a
+# `str | None` leaking Any out of a `.get()` chain, two `list()` calls on
+# unchecked JSON values, an empty container with no inferable type, and three
+# imports that only resolved because Python puts a script's own directory on
+# `sys.path`. All fixed in code; nothing suppressed.
+python-version = "3.13"
+search-path = ["."]
+project-includes = ["."]
+project-excludes = ["**/__pycache__", "**/.venv"]
+preset = "all"
+
+[errors]
+# ── Subtractions, all matching ../../sdmxlib's, for the same reasons ───────
+# `if not ids:` is idiomatic Python and this house writes it deliberately.
+implicit-bool = false
+# Third-party call sites we do not control: requests, mutagen, sqlite3, csv.
+unknown-argument-type = false
+unknown-variable-type = false
+# Overwhelmingly `parser.add_argument(...)`, whose returned `Action` nobody
+# wants. The same shape as sdmxlib's `conn.execute(...)`.
+unused-call-result = false
+# Flags every literal `Any` token, including the deliberate `dict[str, object]`
+# boundary where decoded JSON arrives. The check actually wanted is
+# `implicit-any` — a type *degrading* to Any — and that stays on via the preset.
+explicit-any = false

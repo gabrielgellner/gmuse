@@ -1,2 +1,5 @@
 CHANGELOG.md
 target/
+
+# The tag tools' virtualenv — third-party markdown we neither own nor format.
+tools/.venv/
