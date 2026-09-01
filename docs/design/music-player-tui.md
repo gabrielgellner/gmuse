@@ -2999,6 +2999,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   render loop runs five times a second and the clone is a handful of `String`s. A bad field errors once rather than
   printing blank forever, which is the failure a status bar would never notice.
 
+- **2026-09-01** **Repairing a stranded history means backdating the `moved` event, and that is not a detail.** A
+  renumber of `YouTube Sessions` renamed three files, and because history is keyed by path it stranded three entries —
+  one of them a **4-star rating** on a file that still existed. The event log already had the machinery: `Kind::Moved`
+  is folded by `History::rename`, with a test pinning that plays, rating and `added` all carry across. So the repair is
+  three appended lines, not a patch to `history.toml`.
+
+  Two behaviours decide whether those lines do anything, and both are silent when they do not:
+
+  1. **`fold_into` sorts events by timestamp** before applying them, so a `moved` event does not act "last" — it acts at
+     the moment it claims to have happened.
+  2. **`History::rename` refuses when the destination already has an entry**, returning `false` and changing nothing.
+     Conservative and right, since merging two histories is a decision the fold should not make on its own.
+
+  Together they mean a repair stamped _now_ is applied **after** the `seen` that the renamed file has already
+  accumulated, finds the destination occupied, and is refused — leaving a repair that looks done and did nothing. The
+  event has to be stamped inside the window when the rename actually happened: after the old path's last event, before
+  the new path's first. Here that was between `1788227551` and `1788233784`, and `1788233783` worked. Verified by
+  replaying the fold: 3 renamed, 0 refused, 0 dead paths, rating recovered.
+
+  `History::save` being dead code is what makes this safe to do with the player running: `history.toml` is an immutable
+  base and everything since is in the log, so nothing can overwrite the repair between appending it and folding it.
+
+  Recorded because it is also evidence for #35. The fix required knowing the rename window, the fold's sort order and a
+  refusal rule — none of which would exist if identity came from the audio rather than the path.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
