@@ -48,6 +48,7 @@ use thiserror::Error;
 
 use crate::audio::State;
 use crate::cmd::Command;
+use crate::store::Track;
 
 /// The socket's name inside the state directory.
 pub const NAME: &str = "socket";
@@ -67,7 +68,15 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
 pub struct Status {
     pub state: Option<State>,
     /// The current track through the `now_playing` template, when there is one.
-    pub track: Option<String>,
+    pub rendered: Option<String>,
+    /// The track itself, so a caller can ask for its own format.
+    ///
+    /// Cloned only when the current track *changes*, not every tick — see
+    /// `serve_remote`. A status bar that wants `{title}` alone cannot be served
+    /// from a pre-rendered string, and truncating one is worse than useless
+    /// here: this library's `now_playing` puts the title **last**, so cutting
+    /// to fit a bar throws away the only field you were looking for.
+    pub track: Option<Track>,
     pub position: Duration,
 }
 
@@ -79,7 +88,7 @@ impl Status {
             Some(State::Paused) => "paused",
             Some(State::Stopped) | None => "stopped",
         };
-        match &self.track {
+        match &self.rendered {
             Some(track) => format!("{state}\t{track}\t{}", self.position.as_secs()),
             None => state.to_string(),
         }
@@ -189,10 +198,20 @@ pub fn answer(line: &str, tx: &Sender<Command>, status: &Published) -> String {
     }
     // The one verb the `:` line does not have, because in the TUI the status is
     // simply on screen. Here it is the whole reason a status bar connects.
-    if line == "status" {
-        return match status.lock() {
-            Ok(s) => s.render(),
-            Err(poisoned) => poisoned.into_inner().render(),
+    if let Some(rest) = line.strip_prefix("status") {
+        let held = match status.lock() {
+            Ok(s) => s.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let rest = rest.trim();
+        // `status` alone is the human answer. `status <format>` is the one a
+        // status bar wants, and it is **the same format language** the config
+        // and the `:` line use — so asking for `{title}` here needs nothing
+        // learned and adds no second display vocabulary.
+        return if rest.is_empty() {
+            held.render()
+        } else {
+            render_with(&held, rest)
         };
     }
     let cmd = match crate::cmd::parse::command(line) {
@@ -213,6 +232,22 @@ pub fn answer(line: &str, tx: &Sender<Command>, status: &Published) -> String {
     match tx.send(cmd) {
         Ok(()) => "ok".into(),
         Err(_) => "err the player is shutting down".into(),
+    }
+}
+
+/// Render the current track through a caller-supplied format string.
+///
+/// Errors are returned rather than swallowed: a status bar with a typo in its
+/// template should say so once, not print a blank field forever.
+fn render_with(status: &Status, template: &str) -> String {
+    let Some(track) = &status.track else {
+        // Nothing playing is not an error, and a status bar wants an empty
+        // string for it rather than a word it then has to filter out.
+        return String::new();
+    };
+    match crate::format::Template::parse(template) {
+        Ok(t) => t.render(track),
+        Err(e) => format!("err {e}"),
     }
 }
 
@@ -286,6 +321,15 @@ mod tests {
         Arc::new(Mutex::new(status))
     }
 
+    fn a_track() -> Track {
+        Track {
+            artist: Some("Boards of Canada".into()),
+            album: Some("Music Has the Right to Children".into()),
+            title: Some("Roygbiv".into()),
+            ..Track::default()
+        }
+    }
+
     #[test]
     fn play_is_refused_and_says_what_to_send_instead() {
         // Not an arbitrary exclusion: `play` starts the *selected* track, so
@@ -338,7 +382,8 @@ mod tests {
         let (tx, rx) = unbounded();
         let status = published(Status {
             state: Some(State::Playing),
-            track: Some("Boards of Canada - Roygbiv".into()),
+            rendered: Some("Boards of Canada - Roygbiv".into()),
+            track: None,
             position: Duration::from_secs(72),
         });
         assert_eq!(
@@ -349,6 +394,46 @@ mod tests {
             rx.try_recv().is_err(),
             "a query must not post a command at all"
         );
+    }
+
+    #[test]
+    fn status_takes_a_format_so_a_status_bar_picks_its_own_fields() {
+        // The reason this exists: `now_playing` puts the title last, so a
+        // status bar that truncated the rendered line would throw away the one
+        // field it wanted.
+        let (tx, rx) = unbounded();
+        let status = published(Status {
+            state: Some(State::Playing),
+            rendered: Some("ignored".into()),
+            track: Some(a_track()),
+            position: Duration::from_secs(9),
+        });
+        assert_eq!(answer("status {title}", &tx, &status), "Roygbiv");
+        assert_eq!(
+            answer("status {title} — {artist}", &tx, &status),
+            "Roygbiv — Boards of Canada"
+        );
+        assert!(rx.try_recv().is_err(), "a query posts no command");
+    }
+
+    #[test]
+    fn a_format_with_nothing_playing_is_empty_rather_than_a_word() {
+        let (tx, _rx) = unbounded();
+        assert_eq!(
+            answer("status {title}", &tx, &published(Status::default())),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_bad_format_says_so_once_rather_than_printing_blank_forever() {
+        let (tx, _rx) = unbounded();
+        let status = published(Status {
+            track: Some(a_track()),
+            ..Status::default()
+        });
+        let reply = answer("status {nosuchfield}", &tx, &status);
+        assert!(reply.starts_with("err"), "got {reply:?}");
     }
 
     #[test]
@@ -387,7 +472,8 @@ mod tests {
         let server = serve(&path).expect("bind");
         *server.status.lock().unwrap() = Status {
             state: Some(State::Paused),
-            track: Some("A Track".into()),
+            rendered: Some("A Track".into()),
+            track: Some(a_track()),
             position: Duration::from_secs(5),
         };
 

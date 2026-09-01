@@ -2984,6 +2984,21 @@ Append here as decisions are made. Format: date, decision, rationale.
   client is not a player. A refusal from the player exits non-zero, or a status bar would show a stale line and call it
   success.
 
+- **2026-09-01** **`status` takes a format, because a status bar cannot use a rendered line.** M9 shipped `status`
+  returning the track through `now_playing`, which is right for a person typing it and wrong for the consumer §1 named.
+  This library's template is `{artist}[ — {album}] — {title}` — 41 columns for a real track, against maybe 30 free in
+  the bar — and **the title is last**, so truncating to fit throws away the only field you were looking for. Splitting
+  on the separator instead would depend on a template the caller does not control.
+
+  So `status <format>` renders the current track through a caller-supplied string, and it is **the same format language
+  as the config and the `:` line** — `status {title} · {artist}` needs nothing learned and adds no second display
+  vocabulary. The vision document's claim is one expression vocabulary behind every surface; this is a surface that
+  would otherwise have needed its own.
+
+  The snapshot carries a cloned `Track` for it, taken **when the current track changes** rather than every tick — the
+  render loop runs five times a second and the clone is a handful of `String`s. A bad field errors once rather than
+  printing blank forever, which is the failure a status bar would never notice.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

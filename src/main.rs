@@ -56,6 +56,12 @@ struct App {
     /// Carried here because the scan runs before the history is loaded, and
     /// the history is what most needs to know (#25).
     moves: Vec<scan::Move>,
+    /// Files that looked like audio and could not be read at all.
+    ///
+    /// Carried for the same reason as `moves`: the scan happens before the TUI
+    /// exists, and printing to a terminal that is about to be taken over by a
+    /// full-screen program is the same as not saying it (#53).
+    unreadable: Vec<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -176,6 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cache_path,
         catalogs,
         moves: Vec::new(),
+        unreadable: Vec::new(),
     };
 
     if !app.roots.is_empty() {
@@ -188,6 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("library: {report}");
         report_errors(&report);
         app.moves = report.moves.clone();
+        app.unreadable = report.errors.iter().map(|(p, _)| p.clone()).collect();
         save_cache(&app);
     } else if !app.store.is_empty() {
         println!("library: {} tracks (cached)", app.store.len());
@@ -422,6 +430,23 @@ fn run_tui(
     // to keep in step.
     for cmd in loaded.commands {
         ui::execute(&mut state, &ctx, cmd);
+    }
+    // Said in the TUI, not just on the terminal it replaced. A file gmuse
+    // cannot read is a song missing from the library, and the one place that
+    // matters is the place you are looking at (#53).
+    //
+    // The count is enough to say here: the tag fallback means these are *in*
+    // the library rather than absent, filed under "Unknown Artist" by their
+    // file name, so the message points at where to find them rather than at a
+    // list this UI has nowhere to put.
+    if !app.unreadable.is_empty() {
+        state.notify(format!(
+            "{} file(s) had unreadable tags — filed under Unknown Artist",
+            app.unreadable.len()
+        ));
+        for path in &app.unreadable {
+            state.audit.line("unreadable", &path.display().to_string());
+        }
     }
     if !loaded.errors.is_empty() {
         state.notify(format!("{} problem(s) in the config", loaded.errors.len()));

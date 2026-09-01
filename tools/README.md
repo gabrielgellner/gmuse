@@ -206,6 +206,158 @@ strings with no indication of what happened to them, which is a poor thing to ha
 Note the shapes: `was_value` shows the single `/`-joined string that was there, `became` shows the real multi-value list
 that replaced it. That difference _is_ the change this pass makes.
 
+## tags.py — one tag format per file (#53)
+
+Most of this library's mp3s carry **three tag formats at once**:
+
+```
+3770  ID3v2.4 + ID3v1 + APEv2      456  Vorbis   (ogg/opus)
+1225  ID3v2.4 + ID3v1               29  MP4      (m4a)
+ 527  ID3v2.3 + ID3v1 + APEv2       13  (none)
+ 395  ID3v2.4                       22  ID3v2.3
+  63  ID3v2.3 + ID3v1
+```
+
+Ordinary for a collection with history — each tool added its own rather than replacing what it found. Not free, though:
+
+- **APE cost 66 tracks.** One malformed item and `lofty` abandons the whole file, ID3 and audio included (#53).
+  Verified: a file that read `failed to parse Mpeg file` reads `Beirut — Carousels` once the APE tag is gone.
+- **The APE ReplayGain is stale.** 4218 files disagree with rsgain's ID3 values, and `MP3GAIN_UNDO` is non-zero on all
+  of them — mp3gain _altered the audio_, so the APE numbers describe bytes that no longer exist. gmuse reads ID3 and is
+  unaffected; a tool preferring APE would play them at the wrong level.
+- **612 files are ID3v2.3**, which cannot hold a multi-value frame — the reason `credits apply` skipped 17.
+
+```sh
+uv run python -m tags survey  ~/MusicLibrary          # -> out/tags-review.tsv
+uv run python -m tags apply   ~/MusicLibrary          # dry run
+uv run python -m tags apply   ~/MusicLibrary --write  # snapshots first
+uv run python -m tags restore ~/MusicLibrary --write
+```
+
+### Nothing is lost, and that was checked rather than assumed
+
+Of **1503** APE metadata fields, every one already exists in ID3 — and where the two disagree the ID3 value is the newer
+one, because the genre pass wrote it:
+
+```
+Genre   APE='Rock'   ID3='Rock; Pop; Pop Rock; Art Rock'
+Year    APE='1980'   ID3='1980-09-08'
+```
+
+**Lyrics are the exception.** 629 files carry them in APE; 328 also have an ID3 `USLT` frame, but **301 have them only
+in APE**. Those are migrated into ID3 _before_ the APE tag is deleted, and saved first — a crash between the two should
+lose the deletion, never the words.
+
+| step                     | files |
+| ------------------------ | ----: |
+| APEv2 removed            |  4297 |
+| ID3v1 removed            |  5585 |
+| ID3v2.3 → v2.4           |   612 |
+| lyrics migrated into ID3 |   301 |
+| already modern and alone |   893 |
+
+`restore` puts the APE tags back from the snapshot — content, not bytes, so a restored file is equivalent rather than
+identical. The audio is never touched.
+
+## quality.py — what the audio actually is, not what the header claims
+
+A file transcoded from 128 kbps and re-encoded at 320 still _says_ 320. The tags cannot tell you, and the LAME header
+records the last encode rather than the provenance. The **lowpass cutoff** can: every lossy encoder discards everything
+above a frequency chosen by bitrate, and re-encoding cannot put back what was thrown away.
+
+```sh
+uv run python -m quality survey ~/MusicLibrary          # -> out/quality-review.tsv
+uv run python -m quality survey ~/MusicLibrary --tier 320
+```
+
+### It looks for the wall, not the edge
+
+The first version took the highest frequency still within 45 dB of the 1-5 kHz peak. That measures _level_, so it
+measures the music: a track with a strong midrange and a soft top end reported a 3 kHz "cutoff", and **57% of the
+library came back unjudgeable** with nothing wrong with any of it.
+
+An encoder's lowpass is a **shape** — a near-vertical fall of 30-60 dB inside a kilohertz. So the detector walks the
+spectrum above 8 kHz in half-kilohertz steps and takes the steepest single drop. Content-independent: quiet music has a
+gentle slope wherever it ends, and a brick wall is a brick wall whatever is playing.
+
+An even earlier attempt using ffmpeg's band filters ranked 96 kbps _above_ 128 and was abandoned. The FFT is not
+gold-plating; the cheap versions do not work.
+
+### What it found here
+
+| verdict         |    files |
+| --------------- | -------: |
+| ok              |     5024 |
+| **TRANSCODE?**  | **1040** |
+| no sharp cutoff |      373 |
+| unmeasured      |       63 |
+
+Of the 1040, **441 declare 320 kbps** and cut off between 11.6 and 19 kHz. Another 413 declare 192.
+
+### The lo-fi question, and why the answer is still "transcode"
+
+The worst-hit albums are Ween's _GodWeenSatan_ and _The Pod_, Beck's _Stereopathetic Soulmanure_, _The Basement Tapes_,
+the White Stripes' debut — all famously recorded to cassette. The obvious worry is that the detector is flagging tape
+rolloff.
+
+It is not. Ween, _Strap on That Jammy Pac_:
+
+```
+10 kHz   -15.8 dB       16 kHz   -75.8 dB
+13 kHz   -39.8 dB       17 kHz  -109.1 dB     <- 33 dB in 1 kHz
+```
+
+The gradual fall from 10 to 13 kHz **is** the cassette. The cliff at 16 kHz is not — nothing analogue drops that fast.
+Both are present, and only the second is an encoder. Median cliff strength is 57 dB for the lo-fi albums against 54 dB
+for everything else, so they are not a softer case; they are old low-bitrate rips that were later re-encoded.
+
+### albums — the list to buy again
+
+```sh
+uv run python -m quality albums --limit 100     # -> out/quality-albums.tsv
+```
+
+Rolls the per-file findings up, ranked by `share x deficit`. Both halves matter: one bad track among twelve is a bad
+track, but an album where _every_ track cuts at 16 kHz is a bad **source**, and that is the one worth money. **52 of the
+worst 100 here are flagged end to end.**
+
+The deficit is measured against clean audio, not against the declaration. Ranking by how much a file _lied_ put a
+mislabelled 320 above a genuine 64 kbps rip, which is backwards for a list about what to re-buy — the 64 kbps album
+sounds worse. `declared` stays in the output, so the lie is still visible.
+
+```
+ 12.0  10/10 100%   64k decl    8.5 kHz  Emmylou Harris/Luxury Liner
+ 10.9  10/10 100%  192k decl    9.6 kHz  Bob Dylan/The Times They Are A-Changin'
+  6.7  15/15 100%  128k decl   13.8 kHz  Beck/Guero
+  5.0  10/10 100%  320k decl   15.5 kHz  Fiona Apple/Tidal
+```
+
+`--under` filters on what the audio _sounds like_, not on what it claims — an album declaring 320 whose cutoff says 128
+is under 190 by the only measure that matters here:
+
+```sh
+uv run python -m quality albums --under 190 --limit 500
+```
+
+104 albums here sound like they came from under 190k: 15 at 96, 5 at 112, 68 at 128, 16 at 160.
+
+Album totals come from the directory rather than from the review file, which lists only what was flagged — dividing
+flagged by flagged would score every album 100%.
+
+### Verdicts
+
+| verdict           | meaning                                                             |
+| ----------------- | ------------------------------------------------------------------- |
+| `ok`              | cutoff is where the declared bitrate would put it                   |
+| `TRANSCODE?`      | a sharp wall well below the declared bitrate's lowpass              |
+| `no sharp cutoff` | no wall found — a fact about the recording, not a charge against it |
+| `unmeasured`      | too short or silent in the sampled window                           |
+
+The question mark is meant. A wall this steep can only be an encoder, but _which_ encoder and when is not something a
+spectrum can say — only that the audio does not contain what the header promises.
+
+Needs `numpy` and `ffmpeg`.
+
 ## audit_library.py — tags, naming, ReplayGain, NFC (#49)
 
 ```sh

@@ -458,6 +458,10 @@ pub struct Ui {
     /// How the now-playing description is written. Parsed at config load; the
     /// status line only renders it.
     pub now_playing: crate::format::Template,
+    /// Which track the remote snapshot last carried a clone of.
+    ///
+    /// So the clone happens when the track changes rather than on every tick.
+    remote_track: Option<crate::store::TrackId>,
     /// The transport panel's headline (#34).
     pub transport_line: crate::format::Template,
     /// How a track row is written in the library tree.
@@ -571,6 +575,7 @@ impl Ui {
             guide_pane: Pane::Tree,
             theme: theme::Theme::default(),
             now_playing: crate::format::Template::default(),
+            remote_track: None,
             transport_line: crate::format::Template::transport_default(),
             track_line: crate::format::Template::parse("{track:2}  {display_title}  {duration}")
                 .expect("a literal template"),
@@ -815,22 +820,31 @@ fn serve_remote(ui: &mut Ui, ctx: &Context<'_>) {
     }
 
     if let Some(player) = ctx.player {
-        let track = ui
-            .playback
-            .current
-            .and_then(|id| ctx.store.get(id))
-            .map(|t| ui.now_playing.render(t));
+        let current = ui.playback.current.and_then(|id| ctx.store.get(id));
+        // The `Track` is cloned so the listener can render a caller's own
+        // format without reaching into the store from another thread. Only when
+        // the track *changes*, not every tick: it is a handful of `String`s and
+        // this loop runs five times a second.
+        let track = match (ui.playback.current, ui.remote_track) {
+            (Some(id), Some(seen)) if id == seen => None,
+            _ => current.cloned(),
+        };
         let next = crate::remote::Status {
             state: Some(player.state()),
+            rendered: current.map(|t| ui.now_playing.render(t)),
             track,
             position: player.position(),
         };
         // A poisoned lock is not worth losing the status over: the only writer
         // is this line and the only reader formats a string.
-        match server.status.lock() {
-            Ok(mut slot) => *slot = next,
-            Err(poisoned) => *poisoned.into_inner() = next,
-        }
+        let mut slot = match server.status.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // Carry the previous clone forward when this tick did not make one.
+        let track = next.track.or_else(|| slot.track.take());
+        *slot = crate::remote::Status { track, ..next };
+        ui.remote_track = ui.playback.current;
     }
 }
 

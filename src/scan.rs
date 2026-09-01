@@ -279,21 +279,75 @@ fn is_audio(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Build a track for a file whose tags could not be read.
+///
+/// The audio is fine — these come from a *tag* parse failure, not a decode one
+/// — so the properties are whatever the second read recovered, and the name is
+/// whatever the path can say. A track filed under "Unknown Artist" with its
+/// file name for a title is the same shape as a genuinely untagged file, which
+/// the library already handles; the point is that it is **there**.
+fn from_path_alone(
+    path: &Path,
+    mtime: i64,
+    size: u64,
+    props: &lofty::properties::FileProperties,
+) -> Track {
+    Track {
+        path: path.to_path_buf(),
+        size,
+        duration: props.duration(),
+        bitrate: props.audio_bitrate().or_else(|| props.overall_bitrate()),
+        samplerate: props.sample_rate(),
+        channels: props.channels(),
+        mtime,
+        // Deliberately not guessed from the directory layout. `Artist/Album`
+        // holds here and would not hold everywhere, and a wrong artist is worse
+        // than an honest "Unknown" — it files the track somewhere you will not
+        // think to look. The file name is the one thing the path says for
+        // certain about *this* track.
+        title: path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty()),
+        ..Default::default()
+    }
+}
+
 /// Read one file's tags and audio properties.
 ///
 /// Missing tags are normal, not errors: an untagged file still belongs in the
 /// library, filed under "Unknown Artist" and shown by file name.
 pub fn read_track(path: &Path, mtime: i64, size: u64) -> Result<Track, String> {
-    let tagged = Probe::open(path)
-        .map_err(|e| e.to_string())?
-        // Guess from content as well as extension: a mislabelled file is
-        // common enough in a real library that trusting the extension alone
-        // loses tracks.
-        .guess_file_type()
-        .map_err(|e| e.to_string())?
-        .options(ParseOptions::new())
-        .read()
-        .map_err(|e| e.to_string())?;
+    let probe = || {
+        Probe::open(path)
+            .map_err(|e| e.to_string())?
+            // Guess from content as well as extension: a mislabelled file is
+            // common enough in a real library that trusting the extension alone
+            // loses tracks.
+            .guess_file_type()
+            .map_err(|e| e.to_string())
+    };
+
+    let tagged = match probe()?.options(ParseOptions::new()).read() {
+        Ok(tagged) => tagged,
+        // **A tag we cannot read must not cost us the track.** Five files here
+        // carry an APEv2 tag with one malformed item, and lofty abandons the
+        // whole file over it — including the ID3 tag beside it, which is
+        // perfectly good, and the audio, which plays. Dropping them left songs
+        // missing from the library with nothing on screen to say so.
+        //
+        // Reading again with tags off recovers everything else: duration,
+        // bitrate, sample rate and channels all come back correct. Paired with
+        // a title from the file name that is a playable, sortable track rather
+        // than a hole.
+        Err(tags_err) => {
+            let bare = probe()?
+                .options(ParseOptions::new().read_tags(false))
+                .read()
+                .map_err(|_| tags_err.to_string())?;
+            return Ok(from_path_alone(path, mtime, size, bare.properties()));
+        }
+    };
 
     let props = tagged.properties();
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
@@ -697,6 +751,46 @@ mod tests {
         assert_eq!(parse_year("unknown"), None);
         // Two digits is not a year we can trust.
         assert_eq!(parse_year("97"), None);
+    }
+
+    /// The recovery a failed tag parse falls back to (#53).
+    ///
+    /// Tested directly rather than by provoking `lofty`: the real trigger is an
+    /// APEv2 tag with one malformed item, which five files in this library have
+    /// and which cannot be synthesised reliably — an APE footer appended to a
+    /// WAV is simply ignored, so a test built that way passes without ever
+    /// reaching the fallback. Whether `lofty` trips is `lofty`'s business; what
+    /// this project must guarantee is that when it does, the track survives
+    /// with a name and its properties.
+    #[test]
+    fn a_track_recovered_from_a_bad_tag_keeps_its_name_and_properties() {
+        let d = scan_dir("recovered");
+        let path = d.join("07 A Real Song.wav");
+        write_wav(&path, 4410);
+
+        let props = Probe::open(&path)
+            .unwrap()
+            .options(ParseOptions::new().read_tags(false))
+            .read()
+            .unwrap();
+        let track = from_path_alone(&path, 42, 999, props.properties());
+
+        assert_eq!(track.path, path);
+        assert_eq!(
+            track.title.as_deref(),
+            Some("07 A Real Song"),
+            "named by its file, so it can be found rather than being a hole"
+        );
+        assert_eq!(track.mtime, 42);
+        assert_eq!(track.size, 999);
+        assert!(
+            track.duration > Duration::ZERO,
+            "the properties survive even when the tags do not"
+        );
+        // Not guessed from the directory layout: a wrong artist files the
+        // track somewhere you would never think to look.
+        assert_eq!(track.artist, None);
+        assert_eq!(track.album, None);
     }
 
     /// A label sampler's imprint belongs in `TPUB`, not in `albumartist`
