@@ -21,6 +21,7 @@ mod format;
 mod guides;
 mod history;
 mod library;
+mod lock;
 mod m3u;
 mod next;
 mod playlist;
@@ -62,6 +63,37 @@ struct App {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
+
+    // Before the device is opened, so a refused second instance never makes a
+    // sound and never touches state. Held for the whole of `main`: the binding
+    // must outlive the player, and the kernel drops it whichever way we exit.
+    let _lock = if args.no_lock {
+        None
+    } else {
+        match lock::acquire(&lock::default_path()) {
+            Ok(held) => Some(held),
+            Err(err @ lock::LockError::Held { .. }) => {
+                eprintln!("{err}");
+                eprintln!(
+                    "\nTwo players share one audio device and one session.toml, so this one\n\
+                     stops here. Reach the running player instead, or pass --no-lock if you\n\
+                     meant to have two."
+                );
+                // Exit rather than return: `main`'s error type prints its
+                // Debug form, which would repeat all of the above as a struct
+                // literal underneath the sentence written for a person.
+                std::process::exit(1);
+            }
+            // Anything other than "someone has it" is a real failure — an
+            // unwritable state directory, say. Refusing to start over it would
+            // be worse than the problem, so say it and carry on unlocked.
+            Err(err) => {
+                eprintln!("warning: {err}; continuing without a lock");
+                None
+            }
+        }
+    };
+
     let player = PlayerHandle::new(args.player_config())?;
     println!("gmuse — device at {} Hz", player.device_rate());
 

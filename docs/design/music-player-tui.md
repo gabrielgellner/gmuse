@@ -2881,6 +2881,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   that prompted this one — multi-artist credits, where the tags already settle 332 of 367 tracks and three strings need
   a person — argues for a `tools/` pass rather than an editor.
 
+- **2026-09-01** **One player at a time, held by the kernel (`std::fs::File::try_lock`).** Dogfooding put gmuse in a
+  long-lived tmux session, where a second instance started by hand is easy and silent. What it actually breaks was
+  measured rather than assumed, and is narrower than expected: **ratings and plays are safe**, because an event is one
+  short `write_all` to a file opened `O_APPEND` and two writers interleave whole lines without tearing one — the
+  append-only design that exists for syncing two _machines_ turns out to make two _processes_ safe too. The library
+  cache is a whole-file write of something regenerable. What is not safe is `session.toml`, written whole on quit so the
+  last quit decides what the next launch restores, and the audio device, which both instances open and both play.
+
+  So the lock is for the position file and the speakers, and is deliberately not sold as protecting the history.
+
+  **An OS lock, not a pid file.** The kernel releases it when the process ends _however_ it ends — `kill -9`, a panic, a
+  terminal closing under a tmux popup. A pid file needs a liveness check, a staleness rule and cleanup on every exit
+  path, and is still racy between the check and the write. Tested: after `kill -9` the next launch starts, and a
+  leftover file containing a dead pid does not block. A pid **is** written, as the file's contents, so the refusal can
+  name the other process — never to decide whether the lock is held.
+
+  **No dependency and no `unsafe`**, which is why this is worth doing now rather than earlier: `File::try_lock` was
+  stabilised in Rust 1.89 and the toolchain here is 1.98. Before that it meant `libc::flock` behind `unsafe` — barred
+  outside `src/audio/` — or a crate.
+
+  It lives in `$XDG_STATE_HOME`, not `data_dir`: `data_dir` is the shared and possibly synced directory, a lock there
+  would claim to speak for machines it cannot see, and advisory locking over a network filesystem is not dependable.
+
+  `--no-lock` opts out, because wanting a second instance is legitimate — auditioning a file with `--repl` while the
+  player runs is the obvious case — and the refusal names the flag.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

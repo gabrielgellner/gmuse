@@ -100,6 +100,15 @@ pub struct Cli {
     /// Sort artists ignoring a leading "The"/"A"/"An".
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub smart_artist_sort: bool,
+
+    /// Start even if another gmuse is already running.
+    ///
+    /// The lock exists because two instances both open the audio device and
+    /// both write `session.toml`. Nothing stops you wanting a second one
+    /// anyway — auditioning a file with `--repl` while the player runs is the
+    /// obvious case — so the refusal is a default, not a rule.
+    #[arg(long)]
+    pub no_lock: bool,
 }
 
 impl Cli {
