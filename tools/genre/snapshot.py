@@ -13,7 +13,7 @@ import csv
 from pathlib import Path
 
 from genre.apply import set_genre
-from genre.common import tags_of, walk
+from genre.common import out_path, tags_of, walk
 
 
 def take(root: Path, path: Path) -> None:
@@ -46,13 +46,13 @@ def main() -> None:
     """Write a snapshot of the library's genres, or restore one."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", nargs="?", default="~/MusicLibrary", help="library root")
-    parser.add_argument("--out", default="genre-snapshot.tsv", help="snapshot file, beside this script")
+    parser.add_argument("--out", default="genre-snapshot.tsv", help="snapshot file, inside tools/out/")
     parser.add_argument("--restore", action="store_true", help="put the snapshot's genres back")
     parser.add_argument("--write", action="store_true", help="with --restore, actually change the files")
     args = parser.parse_args()
 
     root = Path(args.root).expanduser()
-    path = Path(__file__).parent / args.out
+    path = out_path(args.out)
     if args.restore:
         restore(root, path, write=args.write)
     else:

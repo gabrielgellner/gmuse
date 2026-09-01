@@ -67,8 +67,9 @@ browser, it is a way of asking a question and standing inside the answer. That i
 
 Three consequences, stated plainly:
 
-1. **Tag editing has to happen somewhere.** The brief's §1 lists it as out of scope, reading only. That boundary is
-   under real pressure and §7 below says how it should move if it moves.
+1. **Tag editing has to happen somewhere.** It now does: §1's "reading only" was withdrawn on 2026-09-01, with the
+   guardrails recorded there and in the Decision Log. What is still open is the _shape_ — where an edit is expressed and
+   how it is undone — which is #41, and which §7 below argues.
 2. **Analysis is not gmuse's job; reading its result is.** The pattern is established twice already — rsgain computes
    ReplayGain and we read the tag; bliss would analyse and we read the output. BPM, key and embeddings arrive the same
    way: an external tool writes, gmuse reads, and a new kind of knowledge becomes a set of _fields_ rather than a
@@ -205,11 +206,19 @@ whether or not the audio is on this machine.
 The brief's 2026-08-29 amendment set the standard for this: a boundary may move to a **principled** place, argued and
 recorded, and may not erode by increments. Judged by that standard, here is where the pressure is, honestly.
 
-**Tag editing** — the brief says reading only. The librarian use makes editing central, and there is no coherent version
-of this project in which correcting a genre requires leaving it. The principled version of the move is: **gmuse edits
-tags through a buffer and an event log, and never becomes a tag _guesser_.** No online lookup deciding what a track is,
-no automatic rewriting, nothing that changes files because a server said so. What is out stays out; what comes in is
-_my_ edit, expressed as data, revertible.
+**Tag editing** — ~~the brief says reading only~~. **Moved 2026-09-01**, and it moved the way this section asked: argued
+and recorded, admitting the capability without also granting a shape. The librarian use makes editing central, and there
+is no coherent version of this project in which correcting a genre requires leaving it.
+
+The principled version still holds and is now the constraint on what gets built: **gmuse edits tags through a buffer and
+an event log, and never becomes a tag _guesser_.** No online lookup deciding what a track is, no automatic rewriting,
+nothing that changes files because a server said so. What is out stays out; what comes in is _my_ edit, expressed as
+data, revertible.
+
+The first real case sharpened that line rather than blurring it. Multi-artist credits looked like the argument for an
+editor — until the tags turned out to settle 332 of 367 tracks on their own, leaving three strings for a person. The
+lesson generalises: **most of what looks like editing is normalisation**, and normalisation belongs to `tools/`. The
+editor is for what remains, which is smaller than it looks.
 
 **Two decks and a mixer** — this is the one that touches an INVARIANT. §3's three-thread architecture assumes one
 decoder feeding one ring feeding one callback. Two decks with per-channel EQ, filter, faders and varispeed is a

@@ -45,7 +45,6 @@ front of you. When a feature is arguable, the question is whether it makes actin
 - Lyrics, synced or otherwise
 - Podcasts, RSS
 - Commercial and scraped streaming services: no Spotify, no YouTube, no yt-dlp
-- Tag _editing_ (reading only)
 - Any async runtime. No `tokio`, no `async-std`. Threads and channels.
 
 Dropping these is a deliberate scope decision, not an oversight. They are the reason comparable projects carry 40+
@@ -68,6 +67,32 @@ Three things hold regardless, and they are what keep this from being the slope �
 2. **No account, no catalogue, no recommendations from anyone else's server.**
 3. **Anything networked is opt-in and behind a feature flag**, so the default build stays what it is today, and an HTTP
    client is a dependency like any other — recorded in the Decision Log with a rationale.
+
+### Tag editing — admitted 2026-09-01
+
+The original rule was "tag _editing_ (reading only)", and it is **withdrawn**. Writing tags is in scope.
+
+The rule was written when the open question was whether a terminal player was worth building at all. Under that
+question, every excluded feature was cheap to exclude, because the thing being protected was a proof of concept with no
+demonstrated shape. That is no longer the question. The shape is settled, and a scope rule that was load-bearing for a
+POC is not automatically load-bearing for the project it became — the focus has already been paid for and the return
+collected.
+
+What it is _not_ is an argument that scope creep stopped being the failure mode. §1 keeps its other exclusions, and the
+2026-08-29 standard still governs: **a boundary may move to a principled place, and may not erode by increments.** So:
+
+1. **The library is still read at scan time.** Editing is a distinct, explicit act on a selection — never a side effect
+   of playing, scanning or importing.
+2. **Bulk retagging belongs to `tools/`, not the player.** The genre pipeline is the pattern: a script proposes, a
+   person reviews a file, a second pass writes. A player that could rewrite a library in a keystroke is a different
+   program.
+3. **An edit is undoable.** Whether that is #41's `kind = tagged` event or a snapshot is still open, but "no undo" is
+   not an acceptable answer for an operation that mutates files the player does not own.
+
+The immediate case is multi-artist credits (#60): 367 tracks whose `artist` reads as joined, of which the tags already
+settle 332 and **three strings** need a person. That case argues for `tools/` normalisation rather than for an editor —
+which is why this entry admits tag editing to scope without also committing to a tag editor in the UI. #41 remains the
+place where that is decided.
 
 See the Decision Log entry of 2026-08-29 for the reasoning, and the tracking issues for the work.
 
@@ -2841,6 +2866,20 @@ Append here as decisions are made. Format: date, decision, rationale.
   permutation but with track 7 moved to position 3". The queue is a real list and a playlist is a real list; the pool's
   order is a function. So the natural shape for editing later is that moving a row _is_ a queue insertion — the concept
   already there, finally visible — and removal from the tail has no home short of #28's exclusion set.
+
+- **2026-09-01** **Tag editing is in scope; §1's "reading only" is withdrawn.** The exclusion was written while the open
+  question was whether a terminal player was worth building; it is not, and a scope rule that protected a proof of
+  concept does not automatically bind the project it became. The focus was real and it was paid for — the other §1
+  exclusions stand, and the 2026-08-29 standard governs the move: a boundary may move to a principled place, and may not
+  erode by increments.
+
+  Three guardrails come with it, in §1: scanning stays read-only and editing is an explicit act on a selection; bulk
+  retagging lives in `tools/` on the genre pipeline's propose/review/apply pattern; and an edit must be undoable.
+
+  Deliberately **not** decided here: whether the UI grows a tag editor, and whether edits are `kind = tagged` events or
+  snapshots. That is #41. Admitting the capability to scope and choosing its shape are separate decisions, and the case
+  that prompted this one — multi-artist credits, where the tags already settle 332 of 367 tracks and three strings need
+  a person — argues for a `tools/` pass rather than an editor.
 
 ## 14. Prior art worth reading
 

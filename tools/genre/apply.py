@@ -18,7 +18,7 @@ from mutagen import File as MutagenFile
 from mutagen.id3 import TCON
 from mutagen.mp4 import MP4Tags
 
-from genre.common import album_key, tags_of, walk
+from genre.common import album_key, out_path, tags_of, walk
 
 TRUTHY = frozenset({"y", "yes", "1"})
 
@@ -66,7 +66,7 @@ def main() -> None:
     args = parser.parse_args()
 
     root = Path(args.root).expanduser()
-    wanted = wanted_from(Path(__file__).parent / "review.tsv")
+    wanted = wanted_from(out_path("genre-review.tsv"))
     if not wanted:
         print("nothing marked to apply")
         return

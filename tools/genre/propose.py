@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from genre.common import album_key, fix_case, tags_of, walk, write_tsv
+from genre.common import album_key, fix_case, out_path, tags_of, walk, write_tsv
 
 #: The terms this library treats as broad — Discogs' 15 Genres, **after**
 #: `RENAME`. Both spellings are in here on purpose: a source says
@@ -230,7 +230,7 @@ def searched_terms(found: dict[str, object] | None) -> tuple[list[str], str]:
     wrong answers: searching for *Let It Be* offers a Korean pressing before the
     deluxe edition this library holds. An `exact` tracklist match is the cheapest
     reliable signal that the record is the same one, and it is the only verdict
-    used unattended. Anything less is written to `uncertain.tsv` for a person to
+    used unattended. Anything less is written to `out/genre-uncertain.tsv` for a person to
     look at, one album at a time.
     """
     if not found or found.get("verdict") != "exact":
@@ -239,6 +239,30 @@ def searched_terms(found: dict[str, object] | None) -> tuple[list[str], str]:
     if not terms:
         return [], "current-only"
     return terms, "discogs-search (tracklist matches exactly)"
+
+
+def show_terms(terms: list[str]) -> str:
+    """Join terms for a human, quoting any whose own name contains the separator.
+
+    Discogs' vocabulary includes `Folk, World, & Country` — **one** genre whose
+    name holds two commas. Joined plainly it reads as three:
+
+        Blues; Folk, World, & Country; Country; Folk
+
+    which invites `& Country` to be read as a genre code. It is not one, and no
+    such term ever reaches `proposed` because `RENAME` maps the whole string to
+    `Folk`. But this column is raw evidence from the source, so it keeps the
+    source's spelling and makes the boundary unambiguous instead:
+
+        Blues; [Folk, World, & Country]; Country; Folk
+
+    Brackets rather than quotes: the field is written by `csv`, which escapes a
+    quote character by doubling it, so quoting the term here wrapped it in three
+    of them on each side — a fix that made the column harder to read than the
+    problem it addressed. A comma needs no escaping when the delimiter is a tab,
+    and a bracket needs none at all.
+    """
+    return "; ".join(f"[{t}]" if "," in t or ";" in t else t for t in terms)
 
 
 def write_uncertain(
@@ -259,7 +283,7 @@ def write_uncertain(
             "their_tracks": found.get("theirs", 0),
             "matched": found.get("matched", ""),
             "year": found.get("year", ""),
-            "candidate": "; ".join(_strings(found, "discogs_genres") + _strings(found, "discogs_styles")),
+            "candidate": show_terms(_strings(found, "discogs_genres") + _strings(found, "discogs_styles")),
         }
         for (artist, album), held in sorted(albums.items())
         if (found := searched.get((artist, album))) and found.get("verdict") != "exact"
@@ -341,7 +365,7 @@ def row_for(
             "current": " | ".join(current_values),
             "proposed": "",
             "source": COMPILATION,
-            "mbid": album.mbid,
+            "release_mbid": album.mbid,
             "apply": "",
         }
 
@@ -362,7 +386,7 @@ def row_for(
         "current": current,
         "proposed": proposed,
         "source": source,
-        "mbid": album.mbid,
+        "release_mbid": album.mbid,
         "apply": "" if proposed == current else "y",
     }
 
@@ -371,31 +395,36 @@ def main() -> None:
     """Write the review file and summarise what it proposes."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", nargs="?", default="~/MusicLibrary", help="library root to scan")
+    parser.add_argument("--all", action="store_true", help="include albums that need no change")
     args = parser.parse_args()
 
-    here = Path(__file__).parent
-    con = sqlite3.connect(here / "genre-cache.sqlite")
+    con = sqlite3.connect(out_path("genre-cache.sqlite"))
     lookup = {mbid: json.loads(payload) for mbid, payload in con.execute("SELECT mbid, payload FROM lookup")}
     searched = {(a, b): json.loads(p) for a, b, p in con.execute("SELECT artist, album, payload FROM search")}
 
     surveyed = survey(Path(args.root).expanduser())
     rows = [row_for(artist, name, album, lookup, searched) for (artist, name), album in sorted(surveyed.items())]
 
-    out_path = here / "review.tsv"
-    write_tsv(out_path, rows)
+    review = out_path("genre-review.tsv")
+    # Only rows that propose something. The survey covers every album, but a row
+    # whose `proposed` already equals `current` asks nothing of a reader, and 396
+    # of them buried the 108 that do. `--all` puts the full survey back.
+    shown = rows if args.all else [r for r in rows if r["apply"] == "y"]
+    write_tsv(review, shown)
 
-    uncertain = write_uncertain(here / "uncertain.tsv", surveyed, searched)
+    uncertain_path = out_path("genre-uncertain.tsv")
+    uncertain = write_uncertain(uncertain_path, surveyed, searched)
     changing = sum(1 for r in rows if r["apply"] == "y")
     by_source: dict[str, int] = {}
     for row in rows:
         by_source[str(row["source"])] = by_source.get(str(row["source"]), 0) + 1
-    print(f"{len(rows)} albums -> {out_path}")
+    print(f"{len(rows)} albums surveyed; {len(shown)} row(s) -> {review}")
     print(f"  {changing} would change, {len(rows) - changing} already correct")
     print(f"  sources: {by_source}")
     if uncertain:
         print(
             f"\n  {uncertain} album(s) matched a Discogs release whose tracklist differs.\n"
-            f"  They are in uncertain.tsv and are **not** proposed — look at each one."
+            f"  They are in {uncertain_path.name} and are **not** proposed — look at each one."
         )
     print("\nEdit the `proposed` column, clear `apply` to skip a row, then run apply.py.")
 

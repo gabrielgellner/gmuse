@@ -43,6 +43,20 @@ CASE: Final[dict[str, str]] = {
 KEYCHAIN: Final[dict[str, str]] = {"DISCOGS_TOKEN": "gmuse-discogs"}
 
 
+#: Where generated files go: review tables, snapshots, and the API cache.
+#:
+#: Beside the code they were indistinguishable from it — six .tsv files mixed
+#: in with the modules that write them. One folder, and every name prefixed by
+#: the pass that owns it, so `ls out/` reads as a list of results.
+OUT: Final = Path(__file__).resolve().parent.parent / "out"
+
+
+def out_path(name: str) -> Path:
+    """Path to a generated file, creating the folder on first use."""
+    OUT.mkdir(exist_ok=True)
+    return OUT / name
+
+
 def tags_of(path: Path) -> dict[str, str]:
     """Read every tag on a file, lowercased.
 
@@ -229,6 +243,11 @@ def write_tsv(path: Path, rows: list[dict[str, object]]) -> None:
             if "\t" in str(value) or "\n" in str(value):
                 raise TabInFieldError(path.name, field, value)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), delimiter="\t")
+        # `lineterminator` is not a default worth taking: csv writes CRLF, and a
+        # CRLF TSV on this platform means the last column of every row ends in a
+        # stray \r. `awk -F'\t' '$8=="y"'` then matches nothing, silently, which
+        # is exactly the kind of wrong-but-plausible shell result the tab
+        # separator was chosen to avoid.
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), delimiter="\t", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)

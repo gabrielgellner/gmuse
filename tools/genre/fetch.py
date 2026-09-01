@@ -23,7 +23,7 @@ from typing import Any, Final
 
 import requests
 
-from genre.common import album_key, secret, tags_of, tracklist_match, walk
+from genre.common import album_key, out_path, secret, tags_of, tracklist_match, walk
 
 USER_AGENT: Final = {"User-Agent": "gmuse-genre-tool/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
 MB_RELEASE: Final = "https://musicbrainz.org/ws/2/release/{}"
@@ -244,8 +244,7 @@ def main() -> None:
     parser.add_argument("root", nargs="?", default="~/MusicLibrary", help="library root to scan")
     args = parser.parse_args()
 
-    here = Path(__file__).parent
-    con = open_cache(here / "genre-cache.sqlite")
+    con = open_cache(out_path("genre-cache.sqlite"))
     token = secret("DISCOGS_TOKEN")
 
     albums = albums_in(Path(args.root).expanduser())

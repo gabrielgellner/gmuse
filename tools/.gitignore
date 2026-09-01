@@ -1,7 +1,4 @@
 .venv/
 __pycache__/
 .env
-genre/genre-cache.sqlite
-genre/review.tsv
-genre/genre-snapshot.tsv
-genre/uncertain.tsv
+out/
