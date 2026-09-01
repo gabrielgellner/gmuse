@@ -2812,6 +2812,36 @@ Append here as decisions are made. Format: date, decision, rationale.
   Now checked as an **assignment**: split each line on `=` and compare the key. A substring is how a vacuous test gets
   written by accident, and this one had been silently passing for a role that fell back to its default.
 
+- **2026-08-31** **View 4 shows what would play next, and it cost nothing because shuffle is a permutation (#56).** The
+  question was whether the transient queue is the right shape, or whether the future should be something you can see and
+  manipulate. The answer turned on a decision made on 2026-08-27 and never cashed in.
+
+  Shuffle is a **seeded permutation**, so the play order is a pure function of the pool and the seed — `step` already
+  materialises the whole order on every call and keeps one element of it. `upcoming` reads the rest. **No new state, no
+  simulation, no bookkeeping**, and §5 is untouched: nothing about what `next()` decides has changed, only what is shown
+  of it. A played-set could not have answered this question at all, which is the payoff the original entry recorded a
+  cost for.
+
+  The projection is checked _against_ `next()` rather than beside it: the tests assert its head is what would play, and
+  that walking `next()` by hand traces exactly the projected path.
+
+  **A queued track appears twice**, once from the queue and again where the pool reaches it. That is correct — §5 says
+  playing a queued track does not move the library cursor — and it is shown rather than hidden, because hiding it would
+  display a future that does not happen.
+
+  **The limit is the contract, not a cap.** With `repeat` the true answer is infinite, and one row past the wrap is all
+  that can honestly be shown: `Source::Wrapped` advances the seed, so the second lap is a different permutation from the
+  one on screen.
+
+- **2026-08-31** **Only the queued rows are editable, and the divider says where they stop.** The cursor ranges over the
+  whole projection, but `dd` on a projected row is refused by name rather than silently eating a row the queue never
+  owned.
+
+  The reason is not caution, it is that there is nowhere for the edit to land: there is no seed that yields "this
+  permutation but with track 7 moved to position 3". The queue is a real list and a playlist is a real list; the pool's
+  order is a function. So the natural shape for editing later is that moving a row _is_ a queue insertion — the concept
+  already there, finally visible — and removal from the tail has no home short of #28's exclusion set.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

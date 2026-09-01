@@ -157,6 +157,12 @@ It waits 300ms first, so a chord you already know is never interrupted by a pane
 waiting to find out. The delay is only about when to draw, and it is charged once per chord: once the panel is up, going
 deeper redraws it at once.
 
+**View 4 is what would play next**, not merely what you queued. The queued tracks come first — those are the ones you
+can move — and below a divider is the pool's own order from where you are, shuffled or not. A queued track appears
+twice, once from the queue and again where the pool reaches it, because playing a queued track does not move the library
+cursor; showing that is more honest than hiding it. It is a _projection_, recomputed whenever the pool moves: a
+`:filter`, a catalog switch, a rating that changes a smart playlist all change what comes next.
+
 **`space` is the leader**, and `<leader>?` shows the keys that work in the current view.
 
 **`i` enters transport mode**, `escape` leaves, and the status line says `-- TRANSPORT --` while you are in it. There

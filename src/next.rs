@@ -119,6 +119,86 @@ pub fn next_with_source(input: NextInput<'_>) -> Option<(TrackId, Source)> {
     step(&input, Direction::Forward)
 }
 
+/// Where a projected track comes from, and therefore whether it can be moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upcoming {
+    /// From the queue: a real list, so this row is reorderable.
+    Queued,
+    /// From the pool's order. A projection, not a promise — see [`upcoming`].
+    Pool,
+    /// The first track after `repeat` wraps the pool. The order **after** this
+    /// point is not the order shown: `Source::Wrapped` advances `rng_state`, so
+    /// a shuffled second lap is a different permutation.
+    Wraps,
+}
+
+/// What would play next, in order, if nothing else were done.
+///
+/// **This costs nothing new**, and that is the point. Shuffle is a seeded
+/// permutation (see [`shuffled`]), so the play order is already a pure function
+/// of the pool and the seed — `step` materialises the whole thing on every call
+/// and keeps one element of it. Projecting the future is reading the rest of
+/// the list that was computed anyway, not simulating forward.
+///
+/// **A projection, not a promise.** The tail is recomputed whenever the pool
+/// moves — a `:filter`, a catalog switch, a rating that changes a smart
+/// playlist's membership. That follows from §7's "you hear what you can see"
+/// and is correct; it is also why a caller should draw this as a *projection*
+/// rather than as a queue that has been promised.
+///
+/// Stops at `limit`, because `repeat` makes the real answer infinite.
+pub fn upcoming(input: &NextInput<'_>, limit: usize) -> Vec<(TrackId, Upcoming)> {
+    let mut out = Vec::with_capacity(limit);
+    if input.repeat_current {
+        // Nothing else is coming: the current track holds until the setting
+        // changes. Saying so is more useful than listing a future that will
+        // not happen.
+        return out;
+    }
+    out.extend(
+        input
+            .queue
+            .entries()
+            .take(limit)
+            .map(|id| (*id, Upcoming::Queued)),
+    );
+    if out.len() >= limit {
+        return out;
+    }
+
+    let pool = pool(input);
+    if pool.is_empty() {
+        return out;
+    }
+    let order = if input.shuffle {
+        shuffled(&pool, input.rng_state)
+    } else {
+        pool
+    };
+    // Where the pool's own successor would start, by exactly the rule `step`
+    // uses — including its fallback when the current track is not in the pool
+    // at all, which happens after a queued track or an `aaa_mode` change.
+    let start = input
+        .current
+        .and_then(|c| order.iter().position(|id| *id == c))
+        .map_or(0, |p| p + 1);
+
+    for id in order.iter().skip(start) {
+        if out.len() >= limit {
+            return out;
+        }
+        out.push((*id, Upcoming::Pool));
+    }
+    if input.repeat && out.len() < limit {
+        // One row past the wrap, and no further: after this the seed advances
+        // and the order shown would be wrong.
+        if let Some(first) = order.first() {
+            out.push((*first, Upcoming::Wraps));
+        }
+    }
+    out
+}
+
 /// The previous track, or `None` at the start of the pool.
 ///
 /// The queue is deliberately ignored: it is consumed as it plays, and there is
@@ -350,6 +430,147 @@ mod tests {
                 current: Some(id_of(&self.store, title)),
                 ..Default::default()
             }
+        }
+    }
+
+    // ---- the projected future (#56) --------------------------------------
+
+    /// The first thing `upcoming` has to agree with is `next()` itself: its
+    /// head must be the track that would actually play.
+    #[test]
+    fn the_projection_agrees_with_next() {
+        let mut ctx = Ctx::new();
+        for (label, p) in [
+            ("in order", ctx.at("a-first-1")),
+            (
+                "shuffled",
+                Playback {
+                    shuffle: true,
+                    rng_state: 42,
+                    ..ctx.at("a-first-1")
+                },
+            ),
+            (
+                "nothing playing",
+                Playback {
+                    current: None,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let head = upcoming(&ctx.input(p), 8).first().map(|(id, _)| *id);
+            assert_eq!(
+                head,
+                next(ctx.input(p)),
+                "{label}: the head is not what plays"
+            );
+        }
+
+        // …and with a queued track in front, which wins unconditionally.
+        ctx.queue.push_back(id_of(&ctx.store, "c-solo-1"));
+        let p = ctx.at("a-first-1");
+        let projection = upcoming(&ctx.input(p), 8);
+        assert_eq!(projection[0].1, Upcoming::Queued);
+        assert_eq!(projection.first().map(|(id, _)| *id), next(ctx.input(p)));
+    }
+
+    /// The queue comes first and is marked as such, because those rows are the
+    /// only ones a future edit could reorder.
+    #[test]
+    fn the_queue_leads_and_is_marked() {
+        let mut ctx = Ctx::new();
+        ctx.queue.push_back(id_of(&ctx.store, "c-solo-1"));
+        ctx.queue.push_back(id_of(&ctx.store, "b-only-2"));
+
+        let out = upcoming(&ctx.input(ctx.at("a-first-1")), 8);
+        let titles: Vec<&str> = out
+            .iter()
+            .map(|(id, _)| title_of(&ctx.store, *id))
+            .collect();
+        assert_eq!(&titles[..2], &["c-solo-1", "b-only-2"]);
+        assert_eq!(out[0].1, Upcoming::Queued);
+        assert_eq!(out[1].1, Upcoming::Queued);
+        assert_eq!(out[2].1, Upcoming::Pool, "the pool should follow the queue");
+    }
+
+    /// Shuffled, the projection is the permutation's tail — which is the whole
+    /// reason this is cheap. A played-set could not have answered this at all.
+    #[test]
+    fn shuffled_projects_the_rest_of_the_permutation() {
+        let ctx = Ctx::new();
+        let p = Playback {
+            shuffle: true,
+            rng_state: 7,
+            ..ctx.at("a-first-1")
+        };
+        let projected: Vec<TrackId> = upcoming(&ctx.input(p), 8)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Walk `next()` by hand and check it takes exactly that path.
+        let mut walked = Vec::new();
+        let mut at = p;
+        for _ in 0..projected.len() {
+            let Some(id) = next(ctx.input(at)) else { break };
+            walked.push(id);
+            at = Playback {
+                current: Some(id),
+                ..at
+            };
+        }
+        assert_eq!(projected, walked, "the projection is not the path taken");
+    }
+
+    /// Without `repeat` the list simply ends — no wrap row, nothing invented.
+    #[test]
+    fn the_projection_ends_when_the_pool_does() {
+        let ctx = Ctx::new();
+        let out = upcoming(&ctx.input(ctx.at("c-solo-1")), 8);
+        assert!(out.is_empty(), "c-solo-1 is last in order: {out:?}");
+    }
+
+    /// With `repeat` it shows **one** row past the wrap and stops. Going
+    /// further would be a lie when shuffling: `Source::Wrapped` advances the
+    /// seed, so the second lap is a different permutation from the one shown.
+    #[test]
+    fn repeat_shows_one_row_past_the_wrap_and_no_more() {
+        let ctx = Ctx::new();
+        let p = Playback {
+            repeat: true,
+            ..ctx.at("c-solo-1")
+        };
+        let out = upcoming(&ctx.input(p), 8);
+        assert_eq!(out.len(), 1, "only the wrap row: {out:?}");
+        assert_eq!(out[0].1, Upcoming::Wraps);
+        assert_eq!(out.first().map(|(id, _)| *id), next(ctx.input(p)));
+    }
+
+    /// `repeat_current` means nothing else is coming, and saying so is more
+    /// useful than listing a future that will not happen.
+    #[test]
+    fn repeat_current_projects_nothing() {
+        let ctx = Ctx::new();
+        let p = Playback {
+            repeat_current: true,
+            ..ctx.at("a-first-1")
+        };
+        assert!(upcoming(&ctx.input(p), 8).is_empty());
+    }
+
+    /// `repeat` makes the true answer infinite, so the limit is the contract.
+    #[test]
+    fn the_limit_is_honoured() {
+        let mut ctx = Ctx::new();
+        for t in ["c-solo-1", "b-only-1", "b-only-2"] {
+            ctx.queue.push_back(id_of(&ctx.store, t));
+        }
+        let p = Playback {
+            repeat: true,
+            ..ctx.at("a-first-1")
+        };
+        for limit in [0, 1, 2, 4] {
+            assert_eq!(upcoming(&ctx.input(p), limit).len(), limit, "limit {limit}");
         }
     }
 

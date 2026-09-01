@@ -2133,6 +2133,35 @@ fn apply_catalog_spec(ui: &mut Ui, ctx: &Context<'_>, spec: crate::catalog::Spec
 ///
 /// Names the escape hatch rather than only saying no: the wish is legitimate,
 /// it just cannot be granted while a rule owns the list.
+/// How far ahead view 4 projects. `repeat` makes the true answer infinite, so
+/// a limit is not a cap on a finite thing — it is the contract.
+const UP_NEXT: usize = 200;
+
+/// What would play next, if nothing else were done (#56).
+///
+/// Costs nothing new: shuffle is a seeded permutation, so `next()` already
+/// materialises the whole play order on every call and keeps one element. This
+/// reads the rest of it.
+fn up_next(ui: &Ui, ctx: &Context<'_>) -> Vec<(crate::store::TrackId, crate::next::Upcoming)> {
+    let _ = ctx;
+    crate::next::upcoming(&next_input(ui), UP_NEXT)
+}
+
+/// Whether the row under the cursor in view 4 is one the queue owns.
+///
+/// Only those can be edited. The rest is a **projection** — the pool's own
+/// order, which has no seed that would yield "this permutation but with one
+/// track moved", so an edit there has nowhere real to land.
+fn queued_at_cursor(ui: &Ui, ctx: &Context<'_>) -> bool {
+    up_next(ui, ctx)
+        .get(ui.queue_sel)
+        .is_some_and(|(_, from)| *from == crate::next::Upcoming::Queued)
+}
+
+fn projected(what: &str) -> String {
+    format!("that row is what would play next, not a queued one — nothing to {what}")
+}
+
 fn rule_owned(what: &str) -> String {
     format!("this playlist is a rule — `:freeze` it to {what} it by hand")
 }
@@ -2534,6 +2563,7 @@ fn remove_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
             ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
             persist_open(ui, ctx);
         }
+        View::Queue if !queued_at_cursor(ui, ctx) => ui.notify(projected("remove")),
         View::Queue => {
             ui.register = rows_at_cursor(ui, n);
             for _ in 0..n {
@@ -3111,7 +3141,9 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
             Pane::Tree => ui.playlist_rows.len(),
             Pane::Tracks => ui.playlist.len(),
         },
-        View::Queue => ui.queue.len(),
+        // The whole projection, not just the queued part: the cursor ranges
+        // over what would play next, and only the edits are confined.
+        View::Queue => up_next(ui, ctx).len(),
         View::Browser => ui.browser.entries.len(),
         View::Filters => ui.catalogs.defined().len(),
         View::Guide => match ui.guide_pane {
@@ -3439,6 +3471,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 title: "sorted",
                 focused: true,
                 divide: true,
+                section: None,
             },
         ),
         View::Playlist => {
@@ -3460,11 +3493,17 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                     title: &playlist_title,
                     focused: ui.playlist_pane == Pane::Tracks,
                     divide: false,
+                    section: None,
                 },
             );
         }
         View::Queue => {
-            let entries: Vec<_> = ui.queue.entries().copied().collect();
+            let rows = up_next(ui, ctx);
+            let entries: Vec<_> = rows.iter().map(|(id, _)| *id).collect();
+            let queued = rows
+                .iter()
+                .take_while(|(_, from)| *from == crate::next::Upcoming::Queued)
+                .count();
             draw_tracks(
                 frame,
                 body,
@@ -3474,9 +3513,14 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                     scroll: &ui.queue_scroll,
                     ids: &entries,
                     selected: ui.queue_sel,
-                    title: "queue",
+                    title: "up next",
                     focused: true,
                     divide: false,
+                    // Drawn above the first row the queue does not own, so the
+                    // line between "you can move this" and "this is what would
+                    // happen" is shown rather than described.
+                    section: (queued < entries.len())
+                        .then(|| (queued, "the pool, from here".to_string())),
                 },
             )
         }
@@ -4083,6 +4127,11 @@ struct TrackList<'a> {
     /// orderings, and dividing an interleaved one puts a header on nearly
     /// every row.
     divide: bool,
+    /// A divider to draw above a given **track** index, for a list whose
+    /// sections are not albums. View 4 uses one to say where the queue stops
+    /// and the projection begins, which is the difference between a row you can
+    /// move and a row you can only read.
+    section: Option<(usize, String)>,
 }
 
 fn draw_tracks(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: TrackList<'_>) {
@@ -4103,11 +4152,27 @@ fn draw_tracks(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: 
 /// index, so this is the one place the two coordinate systems meet — every
 /// other caller counts tracks.
 fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: TrackList<'_>) {
-    let rows = if spec.divide && ui.album_headers {
+    let mut rows = if spec.divide && ui.album_headers {
         list::rows(ctx.store, spec.ids)
     } else {
         spec.ids.iter().copied().map(list::Row::Track).collect()
     };
+    if let Some((at, ref text)) = spec.section {
+        // Counted in tracks, then converted — the two coordinate systems meet
+        // here, as they do for `selected` just below.
+        let mut seen = 0usize;
+        let screen_row = rows
+            .iter()
+            .position(|r| {
+                matches!(r, list::Row::Track(_)) && {
+                    let hit = seen == at;
+                    seen += 1;
+                    hit
+                }
+            })
+            .unwrap_or(rows.len());
+        rows.insert(screen_row, list::Row::Header(text.clone()));
+    }
     let items = list::items(
         &ui.theme,
         ctx.store,
@@ -9629,7 +9694,76 @@ mod tests {
         assert_eq!(painted(&ui), 0, "`<Esc>` should have cleared it");
     }
 
-    /// `i` in, `escape` out, and the status line says which.    /// `i` in, `escape` out, and the status line says which.
+    // ---- the up-next projection (#56) -------------------------------------
+
+    /// View 4 shows what would play next, not just what was queued — the queue
+    /// first, then the pool's own order, with a divider between them.
+    #[test]
+    fn view_four_projects_the_pool_after_the_queue() {
+        let store = big_fixture(8);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Queue;
+        ui.playback.current = ui.library.sorted().first().copied();
+        ui.queue.push_back(ui.library.sorted()[5]);
+
+        let out = render(&ui, &ctx, 62, 14);
+        assert!(out.contains("up next"), "{out}");
+        assert!(out.contains("── the pool, from here"), "no divider:\n{out}");
+        // Seven rows follow the one queued: tracks 2..8 of eight.
+        assert!(
+            out.contains("Track 0002"),
+            "the pool tail is missing:\n{out}"
+        );
+    }
+
+    /// **A queued track does not move the pool cursor** (§5), so it genuinely
+    /// plays twice — once from the queue and again when the pool reaches it.
+    /// The projection shows that rather than hiding it, because hiding it
+    /// would be showing a future that does not happen.
+    #[test]
+    fn a_queued_track_still_appears_in_the_tail() {
+        let store = big_fixture(8);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Queue;
+        ui.playback.current = ui.library.sorted().first().copied();
+        let sixth = ui.library.sorted()[5];
+        ui.queue.push_back(sixth);
+
+        let rows = up_next(&ui, &ctx);
+        let times = rows.iter().filter(|(id, _)| *id == sixth).count();
+        assert_eq!(times, 2, "queued once and reached once: {rows:?}");
+        assert_eq!(rows[0].1, crate::next::Upcoming::Queued);
+    }
+
+    /// The cursor ranges over the whole projection, but only the queued rows
+    /// can be edited — the pool's order has no seed that would yield "this
+    /// permutation with one track moved", so an edit there has nowhere to go.
+    #[test]
+    fn a_projected_row_refuses_to_be_removed() {
+        let store = big_fixture(8);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Queue;
+        ui.playback.current = ui.library.sorted().first().copied();
+        ui.queue.push_back(ui.library.sorted()[5]);
+
+        // Row 0 is queued and removable.
+        ui.queue_sel = 0;
+        press(&mut ui, &ctx, "d");
+        press(&mut ui, &ctx, "d");
+        assert_eq!(ui.queue.len(), 0, "a queued row should be removable");
+
+        // Now everything is projection, and `dd` says so rather than eating a
+        // row that was never the queue's.
+        ui.queue_sel = 1;
+        press(&mut ui, &ctx, "d");
+        press(&mut ui, &ctx, "d");
+        assert!(ui.status.contains("not a queued one"), "{}", ui.status);
+    }
+
+    /// `i` in, `escape` out, and the status line says which.    /// `i` in, `escape` out, and the status line says which.    /// `i` in, `escape` out, and the status line says which.
     #[test]
     fn i_enters_transport_mode_and_escape_leaves() {
         let store = fixture();
