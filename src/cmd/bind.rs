@@ -212,6 +212,9 @@ pub const DEFAULTS: &[&str] = &[
     "bind common p put",
     "bind common P put-before",
     // search and quit
+    // `<Esc>` stops the highlighting without losing the search, which is what
+    // the local nvim config maps it to and what vim's `:nohlsearch` means.
+    "bind common escape nohlsearch",
     "bind common n search-next",
     "bind common N search-prev",
     "bind common q quit",

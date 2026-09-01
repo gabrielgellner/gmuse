@@ -276,7 +276,9 @@ the menu up saying `no matches` rather than vanishing. `C-n`/`C-p` or the arrows
 the menu and a second `Esc` the line.
 
 `:` opens the command line — `Tab` completes verbs and their arguments, including catalog names, setting keys and the
-values each key accepts. `/` and `?` search, `n`/`N` repeat the search.
+values each key accepts. `/` and `?` search **as you type**, painting every match; `n`/`N` repeat, and `escape` stops
+the painting without losing the search. Nothing is committed until `Enter` — `escape` mid-search puts the cursor back
+where it started. Smart-case, as the filter language already was: `/burial` is insensitive, `/Burial` is precise.
 
 **The `Index` guide** lists every binding, generated from the binding table rather than checked in, so a `:bind` typed a
 moment ago is already in it. It is a listing and not an editor: settings live in `config.toml` and change with `:set`

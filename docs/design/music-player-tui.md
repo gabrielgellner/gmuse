@@ -2775,6 +2775,43 @@ Append here as decisions are made. Format: date, decision, rationale.
   float with a margin around it, because a panel filling the pane is a replacement rather than an overlay. The status
   line carries the indicator either way, which is what makes both refusals safe.
 
+- **2026-08-31** **`/` searches as you type and paints what it matched (issue #55), and `/` was silently
+  case-insensitive while the guide said otherwise.** Three things, and the third was found by reading:
+
+  **incsearch.** The search ran only on `Enter`; it now runs on every keystroke, from the position the prompt opened at
+  rather than from the cursor. Searching from the **origin** is what makes it a preview rather than a chain: `bur` then
+  `i` refines one search, so deleting a character walks back exactly where adding it went. `Esc` restores the cursor and
+  `Enter` commits — without that an abandoned search is an unintentional jump, which is the detail most
+  reimplementations of this miss.
+
+  **Highlighting**, and the offset problem underneath it. `text::flatten` folds marks before comparing, and folding does
+  not preserve length: `ß` folds to `ss`, `＂` to `"`. So an offset into the folded string means nothing in the
+  original, and `match_range` walks both at once to report a char range in the **source**. It runs per _visible_ row,
+  not per stored row — a screenful is thirty rows where the search walks thousands.
+
+  **Smart-case**, which `docs/guides/finding-things.md` already promised — _"Typing a capital still asks for case to
+  matter"_ — and which `text::needle` did not do: it lower-cased unconditionally. §7 committed the filter language to
+  smart-case and `/` quietly disagreed. `Needle` now carries the decision, made once at the boundary, and both surfaces
+  answer the same way. One existing test asserted `"LOFFLER"` matched `Löffler`, which smart-case correctly makes
+  precise; updated, because the old assertion was the old behaviour rather than a property.
+
+- **2026-08-31** **nvim's `CurSearch` is not copied, and the reason is that its cursor is a thin bar and ours is not.**
+  #55 proposed two roles, as nvim has: `Search` for every match and `CurSearch` for the one the cursor is on, inverted
+  relative to it. Built both, then looked at the rendered buffer: the cursor row is painted **end to end** by
+  `SelectionFocused`, and ratatui's `highlight_style` overrides any per-span style within the selected item — so
+  `SearchCurrent` could not be seen even where it was set.
+
+  It is also unnecessary. nvim needs the distinction because a thin cursor does not tell you which match you are on; a
+  fully highlighted row already does. One role, and the second removed rather than left in as decoration.
+
+- **2026-08-31** **The theme-coverage test passed for a role the theme never named.**
+  `the_shipped_theme_covers_every_role` asserted `text.contains(role.name())` — a plain substring over the whole file.
+  `Role::Mode` was added with the transport work and never written into `examples/catppuccin-frappe.toml`, and the test
+  stayed green because the file contains `status_modes`, which contains `mode`.
+
+  Now checked as an **assignment**: split each line on `=` and compare the key. A substring is how a vacuous test gets
+  written by accident, and this one had been silently passing for a role that fell back to its default.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

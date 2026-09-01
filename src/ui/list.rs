@@ -161,7 +161,7 @@ pub fn row_of_track(rows: &[Row], track_index: usize) -> Option<usize> {
 
 /// How to draw a list's rows.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct RowStyle {
+pub struct RowStyle<'a> {
     /// Show the relative-distance gutter.
     pub relative: bool,
     /// Which **track** the cursor is on. Distances are measured in tracks, not
@@ -171,6 +171,9 @@ pub struct RowStyle {
     /// several lists at once, since a track can be in the library, a playlist
     /// and the queue.
     pub playing: Option<TrackId>,
+    /// The search pattern in force, so a row can paint what it matched.
+    /// `None` once `<Esc>` has cleared it, as vim's `nohlsearch` does.
+    pub needle: Option<&'a crate::text::Needle>,
 }
 
 /// The distance gutter for one row.
@@ -231,16 +234,59 @@ pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], style: RowStyle) ->
                 } else {
                     Style::default()
                 };
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(lead, theme.get(Role::Gutter)),
                     Span::styled(format!("{num}  "), body),
-                    Span::styled(track.display_title().to_string(), body),
-                    Span::styled("  ", body),
-                    Span::styled(fmt_duration(track.duration), body),
-                ]))
+                ];
+                spans.extend(highlighted(
+                    track.display_title(),
+                    body,
+                    style.needle,
+                    theme,
+                ));
+                spans.push(Span::styled("  ", body));
+                spans.push(Span::styled(fmt_duration(track.duration), body));
+                ListItem::new(Line::from(spans))
             }
         })
         .collect()
+}
+
+/// Split `text` into spans, painting the part a search matched.
+///
+/// One helper for every list, so the tree and the flat lists highlight
+/// identically. It paints only what is **on screen**: the search compares
+/// against artist, album and title together, so a match on the artist leaves a
+/// track row unpainted — the row is still where the cursor went, and claiming
+/// a highlight that is not there would be worse.
+///
+/// nvim's second role, `CurSearch`, is deliberately **not** copied: it exists
+/// there because the cursor is a thin bar, and here the cursor row is already
+/// painted end to end by `SelectionFocused` — which ratatui's `highlight_style`
+/// applies over any span style anyway, so it could not be seen even if it were
+/// wanted.
+pub fn highlighted(
+    text: &str,
+    base: Style,
+    needle: Option<&crate::text::Needle>,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let Some(range) = needle.and_then(|n| crate::text::match_range(text, n)) else {
+        return vec![Span::styled(text.to_string(), base)];
+    };
+    let take =
+        |from: usize, to: usize| -> String { text.chars().skip(from).take(to - from).collect() };
+    let hit = theme.get(Role::SearchMatch);
+    let mut spans = Vec::with_capacity(3);
+    if range.start > 0 {
+        spans.push(Span::styled(take(0, range.start), base));
+    }
+    spans.push(Span::styled(take(range.start, range.end), hit));
+    let len = text.chars().count();
+    if range.end < len {
+        spans.push(Span::styled(take(range.end, len), base));
+    }
+    spans
 }
 
 pub fn fmt_duration(d: std::time::Duration) -> String {

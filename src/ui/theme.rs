@@ -30,6 +30,16 @@ pub enum Role {
     /// The `-- TRANSPORT --` indicator. Its own role because it must read as a
     /// state you are *in*, not as a message that will expire.
     Mode,
+    /// What a search matched, as vim's `Search`.
+    ///
+    /// **One role, not nvim's two.** nvim separates `Search` from `CurSearch`
+    /// because its cursor is a thin bar, so the match you are *on* needs its
+    /// own colour to be findable. Here the cursor is a whole highlighted row —
+    /// `SelectionFocused` paints the entire line, and ratatui's
+    /// `highlight_style` overrides any per-span style within it. So the
+    /// distinction is both unreachable and unnecessary: the row you are on is
+    /// already the most obvious thing on screen.
+    SearchMatch,
     StatusModes,
     StatusUnderrun,
     PromptSigil,
@@ -59,6 +69,7 @@ impl Role {
             Role::StatusPlaying => "status_playing",
             Role::StatusNotice => "status_notice",
             Role::Mode => "mode",
+            Role::SearchMatch => "search_match",
             Role::StatusModes => "status_modes",
             Role::StatusUnderrun => "status_underrun",
             Role::PromptSigil => "prompt_sigil",
@@ -90,6 +101,7 @@ impl Role {
         Role::StatusPlaying,
         Role::StatusNotice,
         Role::Mode,
+        Role::SearchMatch,
         Role::StatusModes,
         Role::StatusUnderrun,
         Role::PromptSigil,
@@ -194,6 +206,11 @@ impl Default for Theme {
                 Role::StatusPlaying => Style::default().fg(Color::Green),
                 Role::StatusNotice => Style::default().fg(Color::Yellow),
                 Role::Mode => Style::default().fg(Color::Magenta).bold(),
+                // Yellow, as vim's is, and bold rather than a background: a
+                // background inside a row that already has a selection
+                // background fights with it, and the rule that nothing may put
+                // a dark foreground on a light background rules the swap out.
+                Role::SearchMatch => Style::default().fg(Color::Yellow).bold(),
                 Role::StatusModes => Style::default().fg(Color::Magenta),
                 Role::StatusUnderrun => Style::default().fg(Color::Red),
                 Role::PromptSigil => Style::default()
@@ -520,13 +537,23 @@ mod tests {
 
     /// Every role the shipped theme names must exist, and vice versa — a role
     /// added in code and forgotten in the example silently keeps its default.
+    ///
+    /// Checked as an **assignment**, not as a substring. This used
+    /// `text.contains(role.name())`, and `mode` passed because the file
+    /// contains `status_modes` — so a role that the theme never named was
+    /// reported as covered. A green test that checks nothing is worse than no
+    /// test, and a substring is exactly how one is written by accident.
     #[test]
     fn the_shipped_theme_covers_every_role() {
         let text = include_str!("../../examples/catppuccin-frappe.toml");
+        let assigned: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.split_once('=').map(|(key, _)| key.trim()))
+            .collect();
         for role in Role::ALL.iter().copied() {
             assert!(
-                text.contains(role.name()),
-                "{} is missing from examples/catppuccin-frappe.toml",
+                assigned.contains(&role.name()),
+                "{} is not assigned in examples/catppuccin-frappe.toml",
                 role.name()
             );
         }

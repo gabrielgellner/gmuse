@@ -709,6 +709,9 @@ pub enum Command {
     },
     SearchNext,
     SearchPrev,
+    /// vim's `:nohlsearch`, which the local nvim config puts on `<Esc>`. The
+    /// match stays *found* — `n` still works — it just stops being painted.
+    NoHighlight,
     /// Show the keys that work here, in the bottom pane.
     ///
     /// The context's own bindings and `common`'s, which is what "what can I do

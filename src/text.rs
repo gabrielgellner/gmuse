@@ -45,25 +45,121 @@ pub fn needle(s: &str) -> String {
     flatten(s).to_lowercase()
 }
 
+/// A search pattern, folded once, carrying its own case rule.
+///
+/// **Smart-case, as §7's filter language already has it and as vim and ripgrep
+/// do**: insensitive unless the pattern contains a capital. `/burial` finds
+/// `Burial`; `/Burial` is precise. `/` was unconditionally insensitive before
+/// this, which meant the two search surfaces in one program disagreed about
+/// what a capital meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Needle {
+    text: String,
+    sensitive: bool,
+}
+
+impl Needle {
+    pub fn new(pattern: &str) -> Self {
+        let folded = flatten(pattern);
+        let sensitive = folded.chars().any(char::is_uppercase);
+        Self {
+            text: if sensitive {
+                folded.into_owned()
+            } else {
+                folded.to_lowercase()
+            },
+            sensitive,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+}
+
+/// Where `needle` matches in `s`, as **char** indices into `s` itself.
+///
+/// Folding does not preserve length — `ö` is one char and folds to one, but
+/// `ß` folds to `ss` and `＂` to `"` — so an offset into the folded string
+/// means nothing in the original. This walks both at once and reports the
+/// range in the *source*, which is what a highlight has to paint.
+///
+/// Called per **visible** row rather than stored per row: highlighting is a
+/// rendering concern and a screenful is thirty rows, where the search itself
+/// walks thousands.
+pub fn match_range(s: &str, needle: &Needle) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    for spell in [false, true] {
+        // One pass building the folded form and, for each folded char, the
+        // char index in `s` it came from.
+        let mut folded = String::with_capacity(s.len());
+        let mut origin: Vec<usize> = Vec::with_capacity(s.len());
+        for (i, c) in s.chars().enumerate() {
+            let piece: String = match folding(c) {
+                Some((flat, spelled)) => (if spell { spelled } else { flat }).to_string(),
+                None => c.to_string(),
+            };
+            for folded_char in piece.chars() {
+                let folded_char = if needle.sensitive {
+                    folded_char
+                } else {
+                    folded_char.to_lowercase().next().unwrap_or(folded_char)
+                };
+                folded.push(folded_char);
+                origin.push(i);
+            }
+        }
+        if let Some(byte) = folded.find(&needle.text) {
+            let start = folded[..byte].chars().count();
+            let end = start + needle.text.chars().count();
+            // `end` indexes one past the last folded char, so the source range
+            // ends one past *its* origin — not at `origin[end]`, which would
+            // be the next character along.
+            let last = origin.get(end.saturating_sub(1)).copied()?;
+            return Some(origin[start]..last + 1);
+        }
+        if expanded(s).is_none() {
+            break; // the spelled pass would repeat the flat one
+        }
+    }
+    None
+}
+
 /// One row folded once, so a search that walks the whole view does the work
 /// per row rather than per row per keystroke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Haystack {
+    /// Folded, case preserved — what a case-*sensitive* pattern compares to.
     flat: String,
+    /// The same lower-cased. Both are kept because smart-case decides which is
+    /// wanted per pattern, and lowering at compare time would allocate on every
+    /// row of every keystroke.
+    flat_lower: String,
     spelled: Option<String>,
+    spelled_lower: Option<String>,
 }
 
 impl Haystack {
     pub fn of(s: &str) -> Self {
+        let flat = flatten(s).into_owned();
+        let spelled = expanded(s);
         Self {
-            flat: needle(s),
-            spelled: expanded(s).map(|e| e.to_lowercase()),
+            flat_lower: flat.to_lowercase(),
+            flat,
+            spelled_lower: spelled.as_deref().map(str::to_lowercase),
+            spelled,
         }
     }
 
-    /// `needle` must already have been through [`needle`].
-    pub fn contains(&self, needle: &str) -> bool {
-        self.flat.contains(needle) || self.spelled.as_deref().is_some_and(|s| s.contains(needle))
+    pub fn contains(&self, needle: &Needle) -> bool {
+        let (flat, spelled) = if needle.sensitive {
+            (&self.flat, self.spelled.as_deref())
+        } else {
+            (&self.flat_lower, self.spelled_lower.as_deref())
+        };
+        flat.contains(&needle.text) || spelled.is_some_and(|s| s.contains(&needle.text))
     }
 }
 
@@ -241,6 +337,86 @@ fn lower_folding(c: char) -> Option<(&'static str, &'static str)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The whole point of `match_range`: folding does not preserve length, so
+    /// an offset into the folded string is not an offset into the original.
+    #[test]
+    fn a_match_range_indexes_the_source_not_the_folded_form() {
+        // `ö` is one char and folds to one, so this is the easy case.
+        let r = match_range("Christian Löffler", &Needle::new("loffler")).expect("a match");
+        assert_eq!(
+            "Christian Löffler"
+                .chars()
+                .skip(r.start)
+                .take(r.len())
+                .collect::<String>(),
+            "Löffler"
+        );
+
+        // `ß` folds to `ss`: one source char becomes two folded ones, and a
+        // naive offset would land one character late.
+        let r = match_range("Straße", &Needle::new("strasse")).expect("a match");
+        assert_eq!(
+            "Straße"
+                .chars()
+                .skip(r.start)
+                .take(r.len())
+                .collect::<String>(),
+            "Straße"
+        );
+
+        // The library's own fullwidth stand-ins, which are what folding is for.
+        let title = "Have You Got It In You？";
+        let r = match_range(title, &Needle::new("in you?")).expect("a match");
+        assert_eq!(
+            title
+                .chars()
+                .skip(r.start)
+                .take(r.len())
+                .collect::<String>(),
+            "In You？"
+        );
+    }
+
+    /// Spelled-out marks find it too, and report the source range either way.
+    #[test]
+    fn a_spelled_match_still_points_at_the_source() {
+        let r = match_range("Christian Löffler", &Needle::new("loeffler")).expect("a match");
+        assert_eq!(
+            "Christian Löffler"
+                .chars()
+                .skip(r.start)
+                .take(r.len())
+                .collect::<String>(),
+            "Löffler"
+        );
+    }
+
+    /// Smart-case, as §7's filter language has it and as vim and ripgrep do.
+    #[test]
+    fn a_capital_makes_the_search_precise() {
+        let hay = Haystack::of("Burial — Untrue");
+        assert!(
+            hay.contains(&Needle::new("burial")),
+            "lower-case should be insensitive"
+        );
+        assert!(
+            hay.contains(&Needle::new("Burial")),
+            "and still find the real thing"
+        );
+        assert!(
+            !hay.contains(&Needle::new("BURIAL")),
+            "a capital should mean it"
+        );
+        // The rule is about the *pattern*, so an all-lower pattern matches a
+        // capitalised haystack, which is the common case.
+        assert!(Haystack::of("BURIAL").contains(&Needle::new("burial")));
+    }
+
+    #[test]
+    fn an_empty_needle_matches_nothing_to_highlight() {
+        assert!(match_range("anything", &Needle::new("")).is_none());
+    }
     use super::*;
 
     #[test]
@@ -265,19 +441,27 @@ mod tests {
     #[test]
     fn either_spelling_finds_him() {
         let hay = Haystack::of("Christian Löffler");
-        for typed in ["löffler", "loffler", "loeffler", "Löffler", "LOFFLER"] {
+        for typed in ["löffler", "loffler", "loeffler", "Löffler"] {
             assert!(
-                hay.contains(&needle(typed)),
+                hay.contains(&Needle::new(typed)),
                 "{typed:?} should have matched"
             );
         }
+        // `LOFFLER` used to match too, when every search was unconditionally
+        // insensitive. Under smart-case a capital means it, so an all-caps
+        // pattern is precise and correctly misses — which is what vim and
+        // ripgrep do, and what §7's filter language already did.
+        assert!(
+            !hay.contains(&Needle::new("LOFFLER")),
+            "smart-case should make an all-caps pattern precise"
+        );
     }
 
     #[test]
     fn a_wrong_spelling_still_misses() {
         let hay = Haystack::of("Christian Löffler");
         assert!(
-            !hay.contains(&needle("lieffler")),
+            !hay.contains(&Needle::new("lieffler")),
             "folding must not turn search into fuzzy matching"
         );
     }
@@ -286,15 +470,18 @@ mod tests {
     fn the_fullwidth_stand_ins_fold_back_to_what_the_tag_says() {
         // What this library writes to disk, and what the tag it came from says.
         let hay = Haystack::of("HEK004 - Air & Lack Thereof ⧸ Sparing the Horses");
-        assert!(hay.contains(&needle("Air & Lack Thereof / Sparing")));
-        assert!(hay.contains(&needle("thereof ⧸ sparing")), "and as written");
+        assert!(hay.contains(&Needle::new("Air & Lack Thereof / Sparing")));
+        assert!(
+            hay.contains(&Needle::new("thereof ⧸ sparing")),
+            "and as written"
+        );
     }
 
     #[test]
     fn a_typographic_apostrophe_is_an_apostrophe() {
         let hay = Haystack::of("Baby, Please Don’t Go");
-        assert!(hay.contains(&needle("don't go")));
-        assert!(hay.contains(&needle("don’t go")));
+        assert!(hay.contains(&Needle::new("don't go")));
+        assert!(hay.contains(&Needle::new("don’t go")));
     }
 
     #[test]
@@ -315,7 +502,7 @@ mod tests {
 
     #[test]
     fn a_soft_hyphen_does_not_hide_a_word() {
-        assert!(Haystack::of("Un\u{00AD}known").contains(&needle("unknown")));
+        assert!(Haystack::of("Un\u{00AD}known").contains(&Needle::new("unknown")));
     }
 
     #[test]

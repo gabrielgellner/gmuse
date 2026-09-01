@@ -332,6 +332,15 @@ pub struct Ui {
     pub register: Vec<TrackId>,
     /// The last search, for `n` and `N`.
     pub last_search: Option<(String, SearchDir)>,
+    /// What is highlighted: the pattern in force, from `/` or the last search.
+    /// Cleared by `Esc`, as vim's `nohlsearch` does.
+    pub highlight: Option<crate::text::Needle>,
+    /// Where the cursor was when a `/` prompt opened.
+    ///
+    /// vim's incsearch is a **preview**: it moves the view while you type and
+    /// puts you back if you cancel. Only `Enter` commits. Without this an
+    /// abandoned search is an unintentional jump.
+    search_origin: Option<usize>,
     /// Keys typed so far that have not resolved to a binding, and the count
     /// prefix in front of them.
     /// Which keymap the keyboard is in (#33). Not persisted across a restart —
@@ -532,6 +541,8 @@ impl Ui {
             undo: crate::undo::Undo::default(),
             register: Vec::new(),
             last_search: None,
+            highlight: None,
+            search_origin: None,
             mode: crate::cmd::Mode::default(),
             pending: Vec::new(),
             pending_since: None,
@@ -1400,6 +1411,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             return;
         }
         KeyCode::Char('/') => {
+            ui.search_origin = Some(current_cursor(ui));
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Search(SearchDir::Forward),
                 buffer: String::new(),
@@ -1409,6 +1421,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             return;
         }
         KeyCode::Char('?') => {
+            ui.search_origin = Some(current_cursor(ui));
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Search(SearchDir::Backward),
                 buffer: String::new(),
@@ -1549,15 +1562,18 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
                 prompt.dismiss();
             } else {
                 ui.prompt = None;
+                abandon_search(ui);
             }
         }
         KeyCode::Backspace => {
             if prompt.buffer.pop().is_none() {
                 // Backspacing past the sigil closes the line, as in vi.
                 ui.prompt = None;
+                abandon_search(ui);
             } else {
                 // Widens the menu again, rather than dismissing it.
                 refilter(ui);
+                incsearch(ui, ctx);
             }
         }
         // Guarded on ctrl, or every chord types its letter: `C-n` on a bare
@@ -1568,6 +1584,7 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
             // Narrows the menu rather than closing it: you type to home in on
             // something, and throwing the list away is the opposite of that.
             refilter(ui);
+            incsearch(ui, ctx);
         }
         // With a menu already open Tab cycles it, as vim's wildmenu does.
         // Re-completing would be a no-op — the candidate set has not changed —
@@ -1621,14 +1638,18 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
                     Ok(None) => {}
                     Err(e) => ui.notify(e.to_string()),
                 },
-                PromptKind::Search(dir) => execute(
-                    ui,
-                    ctx,
-                    Command::Search {
-                        pattern: prompt.buffer,
-                        dir,
-                    },
-                ),
+                PromptKind::Search(dir) => {
+                    // The preview is over; where it landed is where we stay.
+                    ui.search_origin = None;
+                    execute(
+                        ui,
+                        ctx,
+                        Command::Search {
+                            pattern: prompt.buffer,
+                            dir,
+                        },
+                    );
+                }
             }
         }
         _ => {}
@@ -2025,8 +2046,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 return;
             }
             ui.last_search = Some((pattern.clone(), dir));
+            ui.highlight = Some(crate::text::Needle::new(&pattern));
             run_search(ui, ctx, &pattern, dir);
         }
+        Command::NoHighlight => ui.highlight = None,
         Command::SearchNext | Command::SearchPrev => {
             let Some((pattern, dir)) = ui.last_search.clone() else {
                 ui.notify("no previous search");
@@ -2980,9 +3003,43 @@ fn go_to_playing(ui: &mut Ui, ctx: &Context<'_>) {
     }
 }
 
+/// Search from where the `/` prompt opened, on every keystroke.
+///
+/// vim's `incsearch`. Searching from the **origin** rather than from the
+/// cursor is what makes it a preview: typing `bur` then `i` refines one search
+/// rather than starting a second from wherever the first landed, so deleting a
+/// character walks back to exactly where adding it went.
+fn incsearch(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(prompt) = ui.prompt.as_ref() else {
+        return;
+    };
+    let PromptKind::Search(dir) = prompt.kind else {
+        return;
+    };
+    let pattern = prompt.buffer.clone();
+    if let Some(origin) = ui.search_origin {
+        set_cursor(ui, origin);
+    }
+    if pattern.is_empty() {
+        ui.highlight = None;
+        return;
+    }
+    ui.highlight = Some(crate::text::Needle::new(&pattern));
+    run_search(ui, ctx, &pattern, dir);
+}
+
+/// `Esc`, or backspacing past the sigil: put the cursor back and stop
+/// highlighting. The search never happened.
+fn abandon_search(ui: &mut Ui) {
+    if let Some(origin) = ui.search_origin.take() {
+        set_cursor(ui, origin);
+    }
+    ui.highlight = None;
+}
+
 /// Move the cursor to the next row matching `pattern`, wrapping once.
 fn run_search(ui: &mut Ui, ctx: &Context<'_>, pattern: &str, dir: SearchDir) {
-    let needle = crate::text::needle(pattern);
+    let needle = crate::text::Needle::new(pattern);
     let haystack = search_rows(ui, ctx);
     if haystack.is_empty() {
         return;
@@ -4059,6 +4116,7 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
             relative: ui.relative_numbers,
             selected: spec.selected,
             playing: ui.playback.current,
+            needle: ui.highlight.as_ref(),
         },
     );
     let mut items = items;
@@ -9443,7 +9501,135 @@ mod tests {
 
     // ---- transport mode (#33) ---------------------------------------------
 
-    /// `i` in, `escape` out, and the status line says which.
+    // ---- incremental search (#55) -----------------------------------------
+
+    /// vim's `incsearch`: the cursor moves as you type, before anything is
+    /// committed.
+    #[test]
+    fn the_search_runs_as_you_type() {
+        let store = big_fixture(12);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "/");
+        assert_eq!(ui.sorted, 0);
+        for c in "track 0007".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        assert_eq!(ui.sorted, 6, "the cursor did not follow what was typed");
+        assert!(ui.prompt.is_some(), "nothing was committed yet");
+    }
+
+    /// Each keystroke refines **one** search from where the prompt opened,
+    /// rather than starting a fresh one from wherever the last landed — so
+    /// backspacing walks back exactly where typing went.
+    #[test]
+    fn deleting_a_character_walks_the_search_back() {
+        let store = big_fixture(12);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "/");
+        for c in "track".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        // Wherever `/track` alone lands. vim searches from *past* the cursor,
+        // so that is the second row rather than the first — the property here
+        // is the round trip, not the index.
+        let with_prefix = ui.sorted;
+
+        for c in " 0009".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        assert_eq!(ui.sorted, 8, "the longer pattern did not move it");
+
+        for _ in 0..5 {
+            handle_key(KeyEvent::from(KeyCode::Backspace), &mut ui, &ctx);
+        }
+        assert_eq!(
+            ui.sorted, with_prefix,
+            "backspacing did not walk back to where typing had gone"
+        );
+    }
+
+    /// **The preview must be undoable.** vim moves the view while you type and
+    /// puts you back if you cancel; only `Enter` commits. Without this an
+    /// abandoned search is an unintentional jump.
+    #[test]
+    fn escape_puts_the_cursor_back_where_the_search_started() {
+        let store = big_fixture(12);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 3;
+
+        press(&mut ui, &ctx, "/");
+        for c in "track 0009".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        assert_eq!(ui.sorted, 8, "the preview did not move");
+
+        handle_key(KeyEvent::from(KeyCode::Esc), &mut ui, &ctx);
+        assert_eq!(ui.sorted, 3, "escape did not restore the cursor");
+        assert!(ui.highlight.is_none(), "escape left the highlight up");
+    }
+
+    /// And `Enter` keeps it, which is the whole difference between the two.
+    #[test]
+    fn enter_commits_where_the_preview_landed() {
+        let store = big_fixture(12);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+        ui.sorted = 3;
+
+        press(&mut ui, &ctx, "/");
+        for c in "track 0009".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+        assert_eq!(ui.sorted, 8, "enter did not keep the match");
+        assert!(ui.highlight.is_some(), "the match stopped being painted");
+    }
+
+    /// Painted where it matched, and `<Esc>` stops painting without losing the
+    /// search — vim's `:nohlsearch`, which the local nvim puts on `<Esc>`.
+    #[test]
+    fn the_match_is_painted_and_escape_stops_painting_it() {
+        use ratatui::style::Color;
+        let store = big_fixture(12);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Sorted;
+
+        press(&mut ui, &ctx, "/");
+        for c in "rack".chars() {
+            handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
+        }
+        handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
+
+        let painted = |ui: &Ui| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12))
+                .expect("a terminal");
+            term.draw(|f| draw(f, ui, &ctx)).expect("a frame");
+            let buf = term.backend().buffer().clone();
+            (0..12u16)
+                .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+                .filter(|(x, y)| buf[(*x, *y)].style().fg == Some(Color::Yellow))
+                .count()
+        };
+        assert!(painted(&ui) >= 4, "the match was not painted");
+
+        // `n` keeps it painted; `<Esc>` stops.
+        press(&mut ui, &ctx, "n");
+        assert!(painted(&ui) >= 4, "`n` should not clear the highlight");
+        press(&mut ui, &ctx, "escape");
+        assert_eq!(painted(&ui), 0, "`<Esc>` should have cleared it");
+    }
+
+    /// `i` in, `escape` out, and the status line says which.    /// `i` in, `escape` out, and the status line says which.
     #[test]
     fn i_enters_transport_mode_and_escape_leaves() {
         let store = fixture();

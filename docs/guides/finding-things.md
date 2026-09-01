@@ -10,6 +10,23 @@ why he files under Lo rather than after every artist beginning Lz.
 
 Typing a capital still asks for case to matter. It never asks for the mark back — those are different questions.
 
+## `/` — search as you type
+
+    /            search forwards
+    ?            backwards
+    n  N         the next match, and the previous
+    escape       stop painting the matches
+
+The list follows as you type — vim's `incsearch` — and every match is painted where it matched. **Nothing is committed
+until `Enter`**: `escape` puts the cursor back exactly where the search started, so an abandoned search is not an
+accidental jump. Each keystroke refines one search from that origin rather than starting a new one from wherever the
+last landed, which is why backspacing walks back precisely where typing went.
+
+`escape` afterwards stops the painting without losing the search — vim's `:nohlsearch` — so `n` still works.
+
+`/` searches the artist, the album and the title together, and paints whatever part of the match the row actually shows.
+A row that matched on its artist is still where the cursor goes, even in a list that only displays titles.
+
 ## Filters — a question
 
     :filter genre="jazz"|genre="blues"

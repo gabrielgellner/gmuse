@@ -619,7 +619,7 @@ fn print_library(app: &App) {
 }
 
 fn print_matches(app: &App, query: &str) {
-    let needle = text::needle(query);
+    let needle = text::Needle::new(query);
     let hit = |s: Option<&str>| {
         s.map(|s| text::Haystack::of(s).contains(&needle))
             .unwrap_or(false)
