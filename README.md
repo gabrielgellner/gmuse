@@ -171,11 +171,11 @@ not "down". So the way out and `?` are bound inside it, and `:` works from eithe
 the whole argument for it — while you are browsing it is not there, and it appears only once you have said, by entering
 the mode, that playback is what you are attending to. `[format] transport` sets its headline.
 
-**View 7 is the guides** — short pieces on how to do things, as against which key does what. `<leader>?` answers the
+**View 7 is the guide** — short pieces on how to do things, as against which key does what. `<leader>?` answers the
 second; the guides answer the first, which is the one you cannot find by pressing keys. Titles on the left, the guide on
 the right, `tab` between them, and the ordinary motions scroll it.
 
-Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `guides`.
+Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `guide`, `transport`.
 
 `<leader>` in a binding stands for whatever `leader` says, `space` by default:
 

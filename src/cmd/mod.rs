@@ -29,7 +29,7 @@ pub enum Context {
     Browser,
     Filters,
     /// View 7, the guides.
-    Guides,
+    Guide,
     /// Transport mode's keymap (#33). Not a view — a *mode*, so it is the one
     /// context that does not fall through to `Common`.
     Transport,
@@ -45,7 +45,7 @@ impl Context {
             Context::Queue => "queue",
             Context::Browser => "browser",
             Context::Filters => "filters",
-            Context::Guides => "guides",
+            Context::Guide => "guide",
             Context::Transport => "transport",
         }
     }
@@ -59,7 +59,7 @@ impl Context {
             "queue" => Context::Queue,
             "browser" => Context::Browser,
             "filters" => Context::Filters,
-            "guides" => Context::Guides,
+            "guide" => Context::Guide,
             "transport" => Context::Transport,
             _ => return None,
         })
@@ -117,7 +117,7 @@ pub enum ViewId {
     Queue = 4,
     Browser = 5,
     Filters = 6,
-    Guides = 7,
+    Guide = 7,
 }
 
 impl ViewId {
@@ -129,7 +129,7 @@ impl ViewId {
             4 => ViewId::Queue,
             5 => ViewId::Browser,
             6 => ViewId::Filters,
-            7 => ViewId::Guides,
+            7 => ViewId::Guide,
             _ => return None,
         })
     }

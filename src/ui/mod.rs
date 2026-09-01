@@ -45,7 +45,7 @@ pub enum View {
     Filters = 6,
     /// Prose: how to do the things, as against which key does what — plus the
     /// generated index of every binding, which is what view 7 used to be (#47).
-    Guides = 7,
+    Guide = 7,
 }
 
 impl View {
@@ -57,7 +57,7 @@ impl View {
             View::Queue => "queue",
             View::Browser => "browser",
             View::Filters => "scope",
-            View::Guides => "guides",
+            View::Guide => "guide",
         }
     }
 
@@ -69,7 +69,7 @@ impl View {
             ViewId::Queue => View::Queue,
             ViewId::Browser => View::Browser,
             ViewId::Filters => View::Filters,
-            ViewId::Guides => View::Guides,
+            ViewId::Guide => View::Guide,
         }
     }
 
@@ -94,7 +94,7 @@ impl View {
         View::Queue,
         View::Browser,
         View::Filters,
-        View::Guides,
+        View::Guide,
     ];
 
     pub fn context(self) -> crate::cmd::Context {
@@ -106,7 +106,7 @@ impl View {
             View::Queue => C::Queue,
             View::Browser => C::Browser,
             View::Filters => C::Filters,
-            View::Guides => C::Guides,
+            View::Guide => C::Guide,
         }
     }
 }
@@ -720,7 +720,7 @@ impl Ui {
             View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
-            View::Browser | View::Filters | View::Guides => None,
+            View::Browser | View::Filters | View::Guide => None,
         }
     }
 }
@@ -1690,7 +1690,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             recentre(ui);
         }
         Command::PaneNext => {
-            if ui.view == View::Guides {
+            if ui.view == View::Guide {
                 ui.guide_pane = match ui.guide_pane {
                     Pane::Tree => Pane::Tracks,
                     Pane::Tracks => Pane::Tree,
@@ -1774,12 +1774,12 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Playing => go_to_playing(ui, ctx),
         Command::PaneLeft => match ui.view {
             View::Playlist => ui.playlist_pane = Pane::Tree,
-            View::Guides => ui.guide_pane = Pane::Tree,
+            View::Guide => ui.guide_pane = Pane::Tree,
             _ => {}
         },
         Command::PaneRight => match ui.view {
             View::Playlist => ui.playlist_pane = Pane::Tracks,
-            View::Guides => ui.guide_pane = Pane::Tracks,
+            View::Guide => ui.guide_pane = Pane::Tracks,
             _ => {}
         },
         // Run a command as though the named pane had focus, then put focus
@@ -1803,7 +1803,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             View::Browser => ui.browser.enter(),
             // The list picks; Enter moves into what you picked, which is the
             // same thing it does everywhere else.
-            View::Guides => ui.guide_pane = Pane::Tracks,
+            View::Guide => ui.guide_pane = Pane::Tracks,
             // The left pane picks, so Enter there opens rather than plays —
             // and moves focus to the contents, which is what you wanted next.
             View::Playlist if ui.playlist_pane == Pane::Tree => {
@@ -2935,8 +2935,8 @@ fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
         View::Playlist if ui.playlist_pane == Pane::Tracks => &ui.playlist_scroll,
         View::Queue => &ui.queue_scroll,
         View::Browser => &ui.browser_scroll,
-        View::Guides if ui.guide_pane == Pane::Tree => &ui.guides_scroll,
-        View::Playlist | View::Guides | View::Filters => return None,
+        View::Guide if ui.guide_pane == Pane::Tree => &ui.guides_scroll,
+        View::Playlist | View::Guide | View::Filters => return None,
     })
 }
 
@@ -3042,7 +3042,7 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
             .iter()
             .map(|p| crate::text::Haystack::of(&p.display().to_string()))
             .collect(),
-        View::Filters | View::Guides => Vec::new(),
+        View::Filters | View::Guide => Vec::new(),
     }
 }
 
@@ -3057,7 +3057,7 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
         View::Queue => ui.queue.len(),
         View::Browser => ui.browser.entries.len(),
         View::Filters => ui.catalogs.defined().len(),
-        View::Guides => match ui.guide_pane {
+        View::Guide => match ui.guide_pane {
             Pane::Tree => crate::guides::GUIDES.len(),
             // Scrolling *is* moving a cursor down the text, so the pane's
             // length is its line count and `G` reaches the end for free.
@@ -3082,7 +3082,7 @@ fn current_cursor(ui: &Ui) -> usize {
         View::Queue => ui.queue_sel,
         View::Browser => ui.browser.selected,
         View::Filters => ui.catalog_sel,
-        View::Guides => match ui.guide_pane {
+        View::Guide => match ui.guide_pane {
             Pane::Tree => ui.guide_sel,
             Pane::Tracks => ui.guide_scroll,
         },
@@ -3100,7 +3100,7 @@ fn set_cursor(ui: &mut Ui, next: usize) {
         View::Queue => ui.queue_sel = next,
         View::Browser => ui.browser.selected = next,
         View::Filters => ui.catalog_sel = next,
-        View::Guides => match ui.guide_pane {
+        View::Guide => match ui.guide_pane {
             Pane::Tree => {
                 ui.guide_sel = next;
                 // A new guide starts at its top, not wherever the last one
@@ -3132,7 +3132,7 @@ fn draw_guides(frame: &mut Frame, area: Rect, ui: &Ui) {
     pad_to_view(&mut titles, theme, left, state.offset());
     frame.render_stateful_widget(
         List::new(titles)
-            .block(pane_block(theme, "guides", ui.guide_pane == Pane::Tree))
+            .block(pane_block(theme, "guide", ui.guide_pane == Pane::Tree))
             .highlight_style(highlight(theme, ui.guide_pane == Pane::Tree)),
         left,
         &mut state,
@@ -3439,7 +3439,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         }
         View::Browser => draw_browser(frame, body, ui),
         View::Filters => draw_catalogs(frame, body, ui),
-        View::Guides => draw_guides(frame, body, ui),
+        View::Guide => draw_guides(frame, body, ui),
     }
 }
 
@@ -4901,7 +4901,7 @@ mod tests {
         fresh.saved = ui.saved.clone();
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
 
-        assert_eq!(fresh.view, View::Guides, "it landed on the playlist view");
+        assert_eq!(fresh.view, View::Guide, "it landed on the playlist view");
         // And the playlist still came back — the view restore is on top of it,
         // not instead of it.
         assert_eq!(fresh.open.as_ref().map(Open::name), Some("mix"));
@@ -5148,7 +5148,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guides;
+        ui.view = View::Guide;
         ui.guide_pane = Pane::Tracks;
         let _ = render(&ui, &ctx, 100, 24);
 
@@ -5916,10 +5916,10 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 7");
-        assert_eq!(ui.view, View::Guides);
+        assert_eq!(ui.view, View::Guide);
 
         let out = render(&ui, &ctx, 96, 18);
-        assert!(out.contains("7:guides"), "{out}");
+        assert!(out.contains("7:guide"), "{out}");
         // Both panes: the titles, and the first guide's text.
         assert!(out.contains("Moving around"), "{out}");
         assert!(out.contains("The library tree"), "{out}");
@@ -5937,7 +5937,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guides;
+        ui.view = View::Guide;
 
         press(&mut ui, &ctx, "j");
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
@@ -5962,7 +5962,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guides;
+        ui.view = View::Guide;
         ui.guide_pane = Pane::Tracks;
         // The cursor's range comes from what was last drawn, so draw first —
         // as the event loop does before it ever sees a keypress.
@@ -5995,7 +5995,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guides;
+        ui.view = View::Guide;
         ui.guide_pane = Pane::Tracks;
         let _ = render(&ui, &ctx, 56, 10);
 
@@ -6171,7 +6171,7 @@ mod tests {
                     crate::cmd::Context::Queue => ViewId::Queue,
                     crate::cmd::Context::Browser => ViewId::Browser,
                     crate::cmd::Context::Filters => ViewId::Filters,
-                    crate::cmd::Context::Guides => ViewId::Guides,
+                    crate::cmd::Context::Guide => ViewId::Guide,
                     crate::cmd::Context::Common | crate::cmd::Context::Transport => {
                         unreachable!()
                     }
@@ -6417,7 +6417,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guides;
+        ui.view = View::Guide;
         ui.guide_sel = crate::guides::GUIDES
             .iter()
             .position(|g| g.title == "Index")
@@ -6427,7 +6427,7 @@ mod tests {
         let out = render(&ui, &ctx, 100, 24);
         assert!(out.contains("common"), "no context heading:\n{out}");
         assert!(
-            out.contains("7:guides"),
+            out.contains("7:guide"),
             "the tab strip should end at 7:\n{out}"
         );
 
@@ -9975,7 +9975,7 @@ mod tests {
         let store = many_artists(4);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guides;
+        ui.view = View::Guide;
         ui.guide_pane = Pane::Tree;
 
         press(&mut ui, &ctx, "G");

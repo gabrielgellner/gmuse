@@ -88,7 +88,7 @@ which_key_delay = 300       # ms before a prefix shows what can follow it; 0 is 
 # where = 'rating>=4&genre="*jazz*"'
 # sort = "-rating, artist, album, track"
 
-# Contexts: common, library, sorted, playlist, queue, browser, filters, guides,
+# Contexts: common, library, sorted, playlist, queue, browser, filters, guide,
 # transport. The last is a *mode* rather than a view, and is the one context
 # that does not fall back to `common` — see the guide on transport mode.
 # A binding in a view's own context wins over the same key in `common`.

@@ -916,7 +916,7 @@ mod tests {
                 ctx: Context::Queue,
                 key: vec![keys::Key::new(KeyCode::Char(' '))],
             },
-            Command::View(ViewId::Guides),
+            Command::View(ViewId::Guide),
             Command::Search {
                 pattern: "burial".into(),
                 dir: SearchDir::Forward,

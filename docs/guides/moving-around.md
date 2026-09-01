@@ -4,7 +4,7 @@ Seven views, switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight t
 you were on before.
 
     1 library    2 sorted     3 playlist   4 queue
-    5 browser    6 scope      7 guides
+    5 browser    6 scope      7 guide
 
 Within any of them the motions are vim's. `j` and `k` move, and take a count — `3j` goes down three. `gg` and `G` go to
 the top and bottom, and `12G` goes to row 12. The arrow keys — `up`, `down`, `left`, `right` — and `home`, `end`,

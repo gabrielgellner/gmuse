@@ -3,3 +3,8 @@
 
 # macOS
 .DS_Store
+
+# Credentials for the out-of-tree tag tools (Discogs, AcoustID). Prefer the
+# macOS Keychain; this is the backstop for when a token lands here anyway.
+.env
+.env.*
