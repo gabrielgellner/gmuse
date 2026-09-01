@@ -154,6 +154,23 @@ Three threads. The split is not negotiable; it is what determines whether playba
                      evt
 ```
 
+### A fourth thread for the socket — amended 2026-09-01
+
+The rule above says three, and M9 adds a fourth: a listener that blocks on `accept` and posts typed commands to the UI
+thread. The amendment is narrow and the wording of the rule is what makes it necessary — **"the split is not negotiable;
+it is what determines whether playback is glitch-free"** names its own scope. The three threads that carry audio are
+unchanged: UI to decoder to callback, the same channels, the same ring buffer.
+
+What is added is _off_ that path entirely. The listener never touches the ring, the decoder or the callback. It reads a
+line, parses it, and either posts a `Command` to the UI thread or answers from a snapshot the UI publishes. It cannot
+delay a decode and it cannot delay the callback, because it shares nothing with either.
+
+Blocking on `accept` is precisely the work that must not live on a thread with a deadline — putting it on the UI thread
+would mean a non-blocking accept, partial-read state, and a client able to interleave with rendering. So the fourth
+thread exists to _protect_ the three rather than to dilute them.
+
+The callback rules below are untouched and remain absolute.
+
 ### Rules for the audio callback — **INVARIANT**
 
 The cpal callback runs on a real-time thread. Inside it, the following are forbidden without exception:
@@ -518,7 +535,7 @@ src/
     statusline.rs   format-string rendering, mode indicators
     cmdline.rs      ':' input, search input
     settings.rs     view 7 — renders Bindings + settings
-  remote.rs         unix socket server, cmus-remote-compatible commands
+  remote.rs         unix socket server + `--remote` client; one line in, one line out
 ```
 
 ---
@@ -558,7 +575,8 @@ defined by expressions, and view 6.
 _Note: the resampler was pulled forward out of milestone order (done 2026-08-27), because Opus playback is impossible
 without it on a 44.1k-only output device._
 
-**M9 — remote socket, MPRIS if wanted.**
+**M9 — remote socket, MPRIS if wanted.** ✅ _socket done 2026-09-01._ `remote.rs`, `gmuse --remote`, and a fourth thread
+amended into §3. MPRIS not done and not currently wanted.
 
 ---
 
@@ -2936,6 +2954,35 @@ Append here as decisions are made. Format: date, decision, rationale.
   track with a real history. The one genuine loss is a _scriptable_ rescan — `just rescan` was headless through the repl
   and now opens the TUI — which is M9's socket to restore, not a flag to add. That also retires the example given in
   this morning's lock entry: `--no-lock` still exists, but not for auditioning a file with `--repl`.
+
+- **2026-09-01** **M9: a unix socket, and a fourth thread to serve it.** §1 asks for a `cmus-remote` equivalent "for
+  media keys and status bars", and that phrase is the design — the socket exists for the two things a TUI cannot do: be
+  reached from a key binding not focused on it, and answer a question asked by someone else's status line.
+
+  **One parser.** A request is parsed by `cmd::parse::command`, the same function the `:` line uses, so there is no
+  second command language. That was the standing complaint against `--repl` (#61), which had `load`, `status`, `library`
+  and `find` that the `:` line did not. Commands are applied through `ui::execute` — the same door every key binding
+  uses — so a remote `pause` is not a second implementation of pausing.
+
+  **Queries and commands are served differently, deliberately.** A command is posted to the UI thread and applied on its
+  next tick. A query is answered by the listener from a snapshot the UI _publishes_ each tick, so a status bar polling
+  once a second never waits on a render and can never hold one up.
+
+  **`play` does not travel, and that was the surprise.** It reads like the most obvious transport verb there is, but
+  here it means _play what the cursor is on_ — `execute` starts `ui.selected_track(ctx)`. Down a socket it would start
+  whatever row the player happens to be sitting on, which the caller cannot know. `next` is the cursor-free way to
+  begin, because `advance` resolves from the **pool** through `next()` and never consults the screen. The refusal says
+  so by name rather than returning a generic "needs a cursor", which would read as a bug rather than a fact.
+
+  **The stale socket problem does not exist**, and that is a dividend of the morning's lock. `UnixListener::bind` fails
+  if the path is there, which normally means guessing whether a leftover socket belongs to a live process. It cannot
+  here: the lock is taken before the bind, so holding it proves no other gmuse is running and any socket present is
+  stale by construction. Verified end to end — a socket left by a killed player is rebound over on the next launch with
+  no warning.
+
+  The client is `gmuse --remote "<command>"`: one binary, so the existing symlink keeps working, and no lock, because a
+  client is not a player. A refusal from the player exits non-zero, or a status bar would show a stale line and call it
+  success.
 
 ## 14. Prior art worth reading
 

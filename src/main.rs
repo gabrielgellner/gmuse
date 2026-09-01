@@ -25,6 +25,7 @@ mod lock;
 mod m3u;
 mod next;
 mod playlist;
+mod remote;
 mod scan;
 mod session;
 mod smart;
@@ -59,6 +60,26 @@ struct App {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
+
+    // Before the lock, and before anything is opened: a remote client is not a
+    // player. It writes one line to the running player and prints the reply.
+    if let Some(line) = &args.remote {
+        return match remote::send(&remote::default_path(), line) {
+            Ok(reply) => {
+                println!("{reply}");
+                // A refusal from the player is the client's failure too, or a
+                // status bar would show a stale line and call it success.
+                if reply.starts_with("err ") {
+                    std::process::exit(1);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        };
+    }
 
     // Before the device is opened, so a refused second instance never makes a
     // sound and never touches state. Held for the whole of `main`: the binding
@@ -334,9 +355,21 @@ fn run_tui(
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("/"));
 
+    // A socket that will not bind is a warning, not a failure: the player is
+    // still a player without one, and refusing to start over a missing remote
+    // would be the tail wagging the dog.
+    let server = match remote::serve(&remote::default_path()) {
+        Ok(server) => Some(server),
+        Err(err) => {
+            eprintln!("warning: {err}; --remote will not reach this player");
+            None
+        }
+    };
+
     let ctx = ui::Context {
         store: &app.store,
         player: Some(&app.player),
+        remote: server.as_ref(),
     };
     let mut state = ui::Ui::new(start_dir, library);
     state.catalogs = app.catalogs.clone();

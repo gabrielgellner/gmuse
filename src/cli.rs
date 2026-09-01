@@ -90,6 +90,14 @@ pub struct Cli {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub smart_artist_sort: bool,
 
+    /// Send one command to the running player and print its reply, then exit.
+    ///
+    /// A client, not a player: it opens no audio device, reads no library and
+    /// takes no lock. `--remote status` is what a status bar asks; the rest is
+    /// the same vocabulary as the `:` line, because there is only one.
+    #[arg(long, value_name = "COMMAND")]
+    pub remote: Option<String>,
+
     /// Start even if another gmuse is already running.
     ///
     /// The lock exists because two instances both open the audio device and

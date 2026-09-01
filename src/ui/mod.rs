@@ -742,6 +742,8 @@ pub struct Context<'a> {
     pub store: &'a Store,
     /// `None` in tests, which have no audio device.
     pub player: Option<&'a PlayerHandle>,
+    /// `None` in tests, and when the socket could not be bound.
+    pub remote: Option<&'a crate::remote::Server>,
 }
 
 /// which-key's own default is 200ms; this is the value the config that
@@ -785,11 +787,51 @@ where
             handle_key(key, ui, ctx);
         }
         drain_player_events(ui, ctx);
+        serve_remote(ui, ctx);
         note_play_progress(ui, ctx);
         audit_underruns(ui, ctx);
         ui.expire_status();
     }
     Ok(())
+}
+
+/// Apply what the socket received, and publish what it should answer with.
+///
+/// Both halves live on this thread on purpose. Commands are applied through
+/// [`execute`] — the same door the `:` line and every key binding use, so a
+/// remote `pause` is not a second implementation of pausing. And the status is
+/// *published* rather than served: the listener thread reads the snapshot and
+/// replies on its own, so a status bar polling once a second never waits for a
+/// render and can never hold one up.
+fn serve_remote(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(server) = ctx.remote else { return };
+
+    // `try_iter` and not `for`: the channel stays open for the program's life,
+    // so iterating it would block here until the player shut down.
+    let pending: Vec<_> = server.commands.try_iter().collect();
+    for cmd in pending {
+        ui.audit.line("remote", &format!("{cmd:?}"));
+        execute(ui, ctx, cmd);
+    }
+
+    if let Some(player) = ctx.player {
+        let track = ui
+            .playback
+            .current
+            .and_then(|id| ctx.store.get(id))
+            .map(|t| ui.now_playing.render(t));
+        let next = crate::remote::Status {
+            state: Some(player.state()),
+            track,
+            position: player.position(),
+        };
+        // A poisoned lock is not worth losing the status over: the only writer
+        // is this line and the only reader formats a string.
+        match server.status.lock() {
+            Ok(mut slot) => *slot = next,
+            Err(poisoned) => *poisoned.into_inner() = next,
+        }
+    }
 }
 
 /// Count a play once enough of the track has actually been heard.
@@ -4398,6 +4440,7 @@ mod tests {
         let ctx = Context {
             store: &store,
             player: None,
+            remote: None,
         };
         let ui = ui_of(&store, true);
         let out = render(&ui, &ctx, 74, 12);
@@ -4421,6 +4464,7 @@ mod tests {
         let ctx = Context {
             store: &store,
             player: None,
+            remote: None,
         };
         let mut ui = ui_of(&store, true);
         // Select "Various Artists" and expand it.
@@ -4445,6 +4489,7 @@ mod tests {
         let ctx = Context {
             store: &store,
             player: None,
+            remote: None,
         };
         let mut ui = ui_of(&store, true);
         let rows = ui.tree.rows(&ui.library, &store);
@@ -4466,6 +4511,7 @@ mod tests {
         let ctx = Context {
             store: &store,
             player: None,
+            remote: None,
         };
         let mut ui = ui_of(&store, true);
         let rows = ui.tree.rows(&ui.library, &store);
@@ -4486,6 +4532,7 @@ mod tests {
         let ctx = Context {
             store: &store,
             player: None,
+            remote: None,
         };
         let mut ui = ui_of(&store, true);
         ui.view = View::Playlist;
@@ -4502,6 +4549,7 @@ mod tests {
         let ctx = Context {
             store: &store,
             player: None,
+            remote: None,
         };
         let mut ui = ui_of(&store, true);
         let rows = ui.tree.rows(&ui.library, &store).len();
@@ -4526,6 +4574,7 @@ mod tests {
         Context {
             store,
             player: None,
+            remote: None,
         }
     }
 
