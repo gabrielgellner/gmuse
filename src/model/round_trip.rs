@@ -253,6 +253,101 @@ fn what_is_written_after_a_sync_sorts_after_what_the_sync_brought() {
     );
 }
 
+/// **The slice, over real files.** Everything above builds its scan from a
+/// fixture, which tests merging but not reading. This does the same round trip
+/// starting from bytes on disk, so the ingest ladder is inside the assertion
+/// rather than beside it.
+#[test]
+fn two_instances_ingesting_the_same_real_files() {
+    use crate::model::ingest;
+
+    let dir = std::env::temp_dir().join("gmuse-round-trip-files");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Two tracks, one tagged by Picard and one not — the 91% case and the 9%.
+    let mut paths = Vec::new();
+    for (n, (title, mbid)) in [
+        ("Callisto", Some("183105b5-0000-4000-8000-000000000000")),
+        ("Luna", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let p = dir.join(format!("{:02} {title}.wav", n + 1));
+        write_wav(&p, 4410 + n * 10);
+        write_tags(&p, title, "Stephan Bodzin & Marc Romboy", mbid);
+        paths.push(p);
+    }
+
+    let scan: Vec<_> = paths
+        .iter()
+        .map(|p| ingest::read(p).expect("reads"))
+        .collect();
+    assert_eq!(scan[0].title, "Callisto");
+    assert!(scan[0].mb_recording.is_some() && scan[1].mb_recording.is_none());
+
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    m1.ingest(100, &scan);
+    m2.ingest(140, &scan);
+    cross_merge(&mut m1, &mut m2, 200);
+
+    let (one, two) = (m1.catalogue(), m2.catalogue());
+    assert_eq!(
+        postcard::to_allocvec(&one).unwrap(),
+        postcard::to_allocvec(&two).unwrap(),
+        "reading real files does not change the agreement"
+    );
+    assert_eq!(one.distributions.len(), 2, "two files, two encodings");
+    assert_eq!(
+        one.conflicts.len(),
+        1,
+        "exactly the untagged track collides; the Picard-tagged one converges"
+    );
+}
+
+/// A tiny real WAV, so there is something to hash.
+fn write_wav(path: &std::path::Path, frames: usize) {
+    use std::io::Write;
+    let bytes = 4 * frames;
+    let mut f = std::fs::File::create(path).unwrap();
+    f.write_all(b"RIFF").unwrap();
+    f.write_all(&((36 + bytes) as u32).to_le_bytes()).unwrap();
+    f.write_all(b"WAVEfmt ").unwrap();
+    f.write_all(&16u32.to_le_bytes()).unwrap();
+    f.write_all(&1u16.to_le_bytes()).unwrap();
+    f.write_all(&2u16.to_le_bytes()).unwrap();
+    f.write_all(&44100u32.to_le_bytes()).unwrap();
+    f.write_all(&176_400u32.to_le_bytes()).unwrap();
+    f.write_all(&4u16.to_le_bytes()).unwrap();
+    f.write_all(&16u16.to_le_bytes()).unwrap();
+    f.write_all(b"data").unwrap();
+    f.write_all(&(bytes as u32).to_le_bytes()).unwrap();
+    for i in 0..frames {
+        let s = ((i % 100) as i16).wrapping_mul(300);
+        f.write_all(&s.to_le_bytes()).unwrap();
+        f.write_all(&s.to_le_bytes()).unwrap();
+    }
+}
+
+/// The tag Picard writes: a real `UFID` frame, not a text item.
+fn write_tags(path: &std::path::Path, title: &str, artist: &str, mbid: Option<&str>) {
+    use lofty::config::WriteOptions;
+    use lofty::id3::v2::{Frame, Id3v2Tag, UniqueFileIdentifierFrame};
+    use lofty::prelude::{Accessor, TagExt};
+
+    let mut t = Id3v2Tag::default();
+    t.set_title(title.to_string());
+    t.set_artist(artist.to_string());
+    if let Some(id) = mbid {
+        t.insert(Frame::UniqueFileIdentifier(UniqueFileIdentifierFrame::new(
+            "http://musicbrainz.org",
+            id.as_bytes().to_vec(),
+        )));
+    }
+    t.save_to_path(path, WriteOptions::default()).unwrap();
+}
+
 /// A device whose clock is set wrong still sorts, and is still reported.
 #[test]
 fn a_wrong_clock_is_reported_across_a_sync() {

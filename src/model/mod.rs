@@ -14,6 +14,7 @@
 pub mod clock;
 pub mod entity;
 pub mod id;
+pub mod ingest;
 pub mod instance;
 pub mod log;
 pub mod merge;
