@@ -42,6 +42,8 @@ use std::marker::PhantomData;
 
 use uuid::Uuid;
 
+use super::entity::Entity;
+
 /// The namespace every derived id is minted under.
 ///
 /// **This constant is load-bearing and must never change.** Every convergent
@@ -66,15 +68,6 @@ impl<T> Id<T> {
         Self::from_uuid(Uuid::new_v4())
     }
 
-    /// Mint the identity that these bytes always mint, on any machine.
-    ///
-    /// The whole point is that it is *not* random: two devices scanning the
-    /// same file arrive at the same id without talking to each other, which is
-    /// what `library-sync-design.md` §2 requires of anything that syncs.
-    pub fn derived(seed: &[u8]) -> Self {
-        Self::from_uuid(Uuid::new_v5(&NAMESPACE, seed))
-    }
-
     /// Wrap a UUID that is already an identity — a MusicBrainz id being read
     /// back, or a value from storage.
     pub const fn from_uuid(uuid: Uuid) -> Self {
@@ -86,6 +79,27 @@ impl<T> Id<T> {
 
     pub const fn as_uuid(&self) -> Uuid {
         self.uuid
+    }
+}
+
+impl<T: Entity> Id<T> {
+    /// Mint the identity that this seed always mints, on any machine.
+    ///
+    /// The whole point is that it is *not* random: two devices reading the
+    /// same fact arrive at the same id without talking to each other, which is
+    /// what `library-sync-design.md` §2 requires of anything that syncs.
+    ///
+    /// The seed is **domain-separated** by [`Entity::KIND`]. Without that, a
+    /// recording and a distribution minted from the same bytes would land on
+    /// the same UUID — the Rust types would still not unify, but the values
+    /// would be identical on disk and in every export, which is where identity
+    /// has to hold.
+    pub fn derived(seed: &[u8]) -> Self {
+        let mut bytes = Vec::with_capacity(T::KIND.len() + 1 + seed.len());
+        bytes.extend_from_slice(T::KIND.as_bytes());
+        bytes.push(0x1f); // a unit separator, so no kind name can be a prefix of another's seed
+        bytes.extend_from_slice(seed);
+        Self::from_uuid(Uuid::new_v5(&NAMESPACE, &bytes))
     }
 }
 
@@ -299,34 +313,64 @@ impl<'de, T> serde::Deserialize<'de> for Ref<T> {
 mod tests {
     use super::*;
 
-    // Marker types. They are never constructed and implement nothing, which is
-    // the point: the impls above must not demand anything of them.
-    struct Recording;
-    struct Release;
+    use crate::model::entity::{Distribution, Recording, Release};
+
+    /// A tag implementing nothing at all, to prove the impls demand nothing.
+    struct Untagged;
 
     #[test]
     fn a_minted_id_is_unique() {
         assert_ne!(Id::<Recording>::new(), Id::<Recording>::new());
     }
 
-    /// The whole reason for the namespace: two devices, no coordination, one
-    /// id. Convergent minting (#66) is this and nothing else.
+    /// The same fact, read on two machines, is the same entity. This is the
+    /// whole no-coordinator bet in one assertion.
     #[test]
-    fn a_derived_id_is_the_same_on_every_machine() {
-        let a = Id::<Recording>::derived(b"v1:8fb0dcfbf145dfff6649784265da0229");
-        let b = Id::<Recording>::derived(b"v1:8fb0dcfbf145dfff6649784265da0229");
-        assert_eq!(a, b, "the same seed must mint the same id");
-        assert_ne!(a, Id::<Recording>::derived(b"something else"));
+    fn the_same_seed_mints_the_same_id_anywhere() {
+        assert_eq!(
+            Id::<Recording>::derived(b"seed"),
+            Id::<Recording>::derived(b"seed")
+        );
+        assert_ne!(
+            Id::<Recording>::derived(b"seed"),
+            Id::<Recording>::derived(b"other")
+        );
     }
 
-    /// **The guard against a silent namespace change.** Every derived id in
-    /// every log depends on `NAMESPACE`, so a change re-mints the library.
+    /// **Domain separation.** Two kinds minted from identical bytes must not
+    /// collide, because the collision would be invisible in Rust and total on
+    /// disk.
+    #[test]
+    fn two_kinds_from_the_same_bytes_do_not_collide() {
+        let seed = b"1f2a6b8d";
+        assert_ne!(
+            Id::<Recording>::derived(seed).as_uuid(),
+            Id::<Distribution>::derived(seed).as_uuid(),
+            "kind must be part of the seed"
+        );
+    }
+
+    /// A separator no kind name contains, so `"track"` + `"xy"` can never seed
+    /// the same bytes as `"trackx"` + `"y"`.
+    #[test]
+    fn a_kind_name_cannot_run_into_its_seed() {
+        assert_ne!(
+            Id::<Release>::derived(b"-group-x").as_uuid(),
+            Id::<crate::model::entity::ReleaseGroup>::derived(b"x").as_uuid()
+        );
+    }
+
+    /// **The guard against a silent re-minting.** Every derived id in every log
+    /// depends on `NAMESPACE`, on `Entity::KIND`, and on how the two are
+    /// joined. Any of the three changing re-mints the library, so all three are
+    /// pinned by this one literal.
     #[test]
     fn the_namespace_is_pinned() {
         assert_eq!(
             Id::<Recording>::derived(b"gmuse").to_string(),
-            "bbd4433a-ac75-57ce-9db2-26115a92645e",
-            "NAMESPACE changed: every derived id ever written is now wrong"
+            "fbe97152-eb36-5636-b283-624ea1863ac7",
+            "the namespace, the kind name, or the seed layout changed: every \
+             derived id ever written is now wrong"
         );
     }
 
@@ -405,11 +449,11 @@ mod tests {
     #[test]
     fn the_marker_type_is_never_required_to_do_anything() {
         use std::collections::HashSet;
-        let id = Id::<Recording>::new();
+        let id = Id::<Untagged>::new();
         let copied = id;
         let mut set = HashSet::new();
         set.insert(copied);
-        let mut ids = [Id::<Recording>::new(), id];
+        let mut ids = [Id::<Untagged>::new(), id];
         ids.sort();
         assert!(set.contains(&id) && ids.len() == 2);
     }
