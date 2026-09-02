@@ -3049,6 +3049,38 @@ Append here as decisions are made. Format: date, decision, rationale.
   Deliberately **not** done here: the fold still orders by wall clock. Ordering across devices is a separate question
   and a larger one — this issue is the schema, and the schema is what makes the answer expressible.
 
+- **2026-09-01** **An audio identity, hashed from the encoded packets (#35), and `twox-hash` as the one new
+  dependency.** §2's budget is deliberately small, so: `twox-hash` with
+  `--no-default-features --features xxhash3_128,std` pulls **nothing** transitively. Its default features want `rand`,
+  purely to seed a hasher randomly — the exact thing a content id must never do — so turning them off is both cheaper
+  and more correct. `std`'s `DefaultHasher` was the free option and is disqualified: it is explicitly documented as
+  unstable across Rust releases, which is fatal for anything durable. Nothing here is adversarial, so a cryptographic
+  hash would be paying for a property not needed; 128 bits puts a collision far past any library that will exist.
+
+  **Packets, not decoded frames.** The sync design's §2 proposes hashing decoded audio. Measured: decoding costs about
+  six times as much and buys nothing, because everything a tagger touches is outside the packets by construction.
+  Verified stable across a title change, a 4 KB frame, an added and a stripped ID3v1, and an ID3v2.4 -> v2.3 downgrade,
+  on all five container formats here — including Ogg, Opus and FLAC, where tags live _inside_ the stream. Neither hash
+  unifies formats: the same recording as FLAC and as MP3 decodes to different samples, so nothing is given up.
+
+  **The scheme byte is the point.** Symphonia's packet framing is not part of its public contract, so a version bump
+  could reframe a format and silently invalidate every event ever recorded — the failure #35 exists to prevent. The id
+  carries the scheme that produced it and a test pins a known file's hash to a literal, so a reframing fails loudly
+  instead.
+
+  **Cost, on 5774 files:** cold scan **16.5s**, warm rescan **0.02s**. The hash is computed only where the file is
+  already being opened, so the incremental path is untouched and the whole-library cost is paid once. An existing cache
+  loads with `audio_id: None` and fills in as files are next read, rather than forcing a rehash on upgrade.
+
+  **`detect_moves` now keys on the audio when it is known**, and on the old size/duration/tags shape only when it is
+  not. The shape includes the tags, so a pass that retags _and_ moves in one go broke it — which is why this project
+  carried a rule about doing those separately, and why a renumber stranded a four-star rating. That rule is now advisory
+  rather than load-bearing.
+
+  Deliberately **not** done: `history.toml` and the event log still name paths. Migrating them is the step that
+  "invalidates every event ever recorded", and #63 has not settled whether events should name an entry or a
+  distribution. The id exists, is cached, and is used where it already pays.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

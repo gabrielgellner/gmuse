@@ -69,6 +69,16 @@ pub struct Track {
     /// unchanged and whose path is not (#25).
     #[serde(default)]
     pub size: u64,
+    /// What this file's *audio* is, independent of its tags and its path.
+    ///
+    /// `#[serde(default)]` so an existing cache loads with `None` and fills in
+    /// as files are next read, rather than forcing a whole-library rehash on
+    /// the first launch after an upgrade.
+    ///
+    /// `Option` because a file gmuse cannot parse still belongs in the library
+    /// (#53) — it simply has no identity yet.
+    #[serde(default)]
+    pub audio_id: Option<crate::audio_id::AudioId>,
     pub replaygain: Option<ReplayGain>,
 }
 

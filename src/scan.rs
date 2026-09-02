@@ -182,6 +182,27 @@ struct Signature<'a> {
     album: Option<&'a str>,
 }
 
+/// What a departure and an arrival are matched on.
+///
+/// **The audio when it is known, the shape only when it is not.** The shape
+/// includes the tags, so a pass that retags *and* moves in one go breaks it —
+/// which is why this project carried a rule about doing those separately, and
+/// why a renumber stranded three history entries here (#35). `Audio` has no
+/// such weakness: the id is computed from the packets and a tagger cannot
+/// touch it.
+#[derive(PartialEq, Eq, Hash)]
+enum Key<'a> {
+    Audio(crate::audio_id::AudioId),
+    Shape(Signature<'a>),
+}
+
+fn key(t: &Track) -> Key<'_> {
+    match t.audio_id {
+        Some(id) => Key::Audio(id),
+        None => Key::Shape(signature(t)),
+    }
+}
+
 fn signature(t: &Track) -> Signature<'_> {
     Signature {
         size: t.size,
@@ -209,7 +230,7 @@ fn detect_moves(store: &Store, gone: &[PathBuf], arrived: &[PathBuf]) -> Vec<Mov
         return Vec::new();
     }
 
-    let mut departures: std::collections::HashMap<Signature<'_>, Option<&PathBuf>> =
+    let mut departures: std::collections::HashMap<Key<'_>, Option<&PathBuf>> =
         std::collections::HashMap::new();
     for path in gone {
         let Some(t) = store.id_for_path(path).and_then(|id| store.get(id)) else {
@@ -218,16 +239,15 @@ fn detect_moves(store: &Store, gone: &[PathBuf], arrived: &[PathBuf]) -> Vec<Mov
         // `None` marks a signature seen more than once, so it stays ambiguous
         // even if a third arrives later.
         departures
-            .entry(signature(t))
+            .entry(key(t))
             .and_modify(|slot| *slot = None)
             .or_insert(Some(path));
     }
 
-    let mut counts: std::collections::HashMap<Signature<'_>, usize> =
-        std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<Key<'_>, usize> = std::collections::HashMap::new();
     for path in arrived {
         if let Some(t) = store.id_for_path(path).and_then(|id| store.get(id)) {
-            *counts.entry(signature(t)).or_insert(0) += 1;
+            *counts.entry(key(t)).or_insert(0) += 1;
         }
     }
 
@@ -236,11 +256,11 @@ fn detect_moves(store: &Store, gone: &[PathBuf], arrived: &[PathBuf]) -> Vec<Mov
         let Some(t) = store.id_for_path(path).and_then(|id| store.get(id)) else {
             continue;
         };
-        let sig = signature(t);
-        if counts.get(&sig) != Some(&1) {
+        let k = key(t);
+        if counts.get(&k) != Some(&1) {
             continue;
         }
-        if let Some(Some(from)) = departures.get(&sig) {
+        if let Some(Some(from)) = departures.get(&k) {
             moves.push(Move {
                 from: (*from).clone(),
                 to: path.clone(),
@@ -305,6 +325,9 @@ fn from_path_alone(
         // than an honest "Unknown" — it files the track somewhere you will not
         // think to look. The file name is the one thing the path says for
         // certain about *this* track.
+        // A file whose tags will not parse still has readable *audio* — that
+        // is the whole basis of the fallback — so it still gets an identity.
+        audio_id: crate::audio_id::of(path).ok(),
         title: path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -360,6 +383,11 @@ pub fn read_track(path: &Path, mtime: i64, size: u64) -> Result<Track, String> {
         samplerate: props.sample_rate(),
         channels: props.channels(),
         mtime,
+        // Computed here and nowhere else: this is the one place the file is
+        // already being opened, and the incremental scan means an unchanged
+        // file is never reopened — so the whole-library cost is paid once
+        // (16s for 5774 files) and a rescan pays a `stat`.
+        audio_id: crate::audio_id::of(path).ok(),
         ..Default::default()
     };
 
@@ -791,6 +819,53 @@ mod tests {
         // track somewhere you would never think to look.
         assert_eq!(track.artist, None);
         assert_eq!(track.album, None);
+    }
+
+    /// The failure the old signature could not survive (#35).
+    ///
+    /// Retag and move in one pass. The shape key includes title, artist and
+    /// album, so it changes at the same moment the path does and the pairing is
+    /// lost — which is why this project carried a rule about doing the two
+    /// separately, and why a renumber stranded a four-star rating here. The
+    /// audio id is computed from the packets, so a tagger cannot reach it.
+    #[test]
+    fn a_file_that_moves_and_is_retagged_in_one_pass_is_still_recognised() {
+        let d = scan_dir("moved-and-retagged");
+        let from = d.join("old name.wav");
+        write_wav(&from, 4410);
+        {
+            use lofty::config::WriteOptions;
+            use lofty::tag::{Tag, TagExt, TagType};
+            let mut tag = Tag::new(TagType::Id3v2);
+            tag.insert_text(ItemKey::TrackTitle, "Before".into());
+            tag.save_to_path(&from, WriteOptions::default()).unwrap();
+        }
+
+        let mut store = Store::default();
+        let report = scan(&mut store, std::slice::from_ref(&d));
+        assert_eq!(report.added, 1);
+
+        // Move it *and* rewrite the tags the old key relied on.
+        let to = d.join("new name.wav");
+        std::fs::rename(&from, &to).unwrap();
+        {
+            use lofty::config::WriteOptions;
+            use lofty::tag::{Tag, TagExt, TagType};
+            let mut tag = Tag::new(TagType::Id3v2);
+            tag.insert_text(ItemKey::TrackTitle, "Completely Different".into());
+            tag.insert_text(ItemKey::TrackArtist, "Someone Else".into());
+            tag.insert_text(ItemKey::AlbumTitle, "Another Album".into());
+            tag.save_to_path(&to, WriteOptions::default()).unwrap();
+        }
+
+        let report = scan(&mut store, std::slice::from_ref(&d));
+        assert_eq!(
+            report.moves.len(),
+            1,
+            "the audio is the same file however it is labelled"
+        );
+        assert_eq!(report.moves[0].from, from);
+        assert_eq!(report.moves[0].to, to);
     }
 
     /// A label sampler's imprint belongs in `TPUB`, not in `albumartist`

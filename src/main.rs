@@ -8,6 +8,7 @@
 //! position display does not jump on seek.
 
 mod audio;
+mod audio_id;
 mod audit;
 mod cache;
 mod catalog;
