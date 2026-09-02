@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
-use crate::model::entity::{Artist, Distribution, Recording};
+use crate::model::entity::{Artist, Device, Distribution, Recording};
 use crate::model::id::Id;
 
 /// One thing a device wrote down.
@@ -70,6 +70,24 @@ pub enum Fact {
         genre: String,
     },
 
+    /// **Everything this device holds, as of now.**
+    ///
+    /// The whole set, not a diff — which is what a scan produces anyway, and
+    /// what lets a device whose holdings drifted be corrected by its next scan
+    /// rather than by someone noticing the difference and emitting it.
+    ///
+    /// This is the one fact that **supersedes** rather than accumulates. Union
+    /// would resurrect: delete a file on this machine and a stale replica hands
+    /// the row straight back. Only the latest assertion per device is live, and
+    /// what makes that safe rather than lossy is that holdings are
+    /// single-writer — no other device ever writes this one's.
+    HoldingsAsserted {
+        device: Id<Device>,
+        /// Where each encoding sits on that device. The locator's shape is the
+        /// device's business (§2), so it is opaque here.
+        held: BTreeMap<Id<Distribution>, String>,
+    },
+
     /// A play. Counted, never a stored number.
     Played {
         recording: Id<Recording>,
@@ -89,8 +107,22 @@ pub struct Catalogue {
     pub distributions: BTreeMap<Id<Distribution>, Distributed>,
     pub genres: BTreeSet<(Id<Recording>, String)>,
     pub plays: BTreeMap<Id<Recording>, u32>,
+    /// What each device last said it holds, and when it said so.
+    ///
+    /// The stamp is not decoration. You cannot stat another machine's disk, so
+    /// a remote holding is the claim "device X had this, there, as of X's last
+    /// sync" — and a row that reads "on asnas, as of Tuesday" is honest where
+    /// one that reads "on asnas" is not.
+    pub holdings: BTreeMap<Id<Device>, Asserted>,
     /// Structural disagreements. Never resolved silently — §4.
     pub conflicts: Vec<Conflict>,
+}
+
+/// One device's holdings, as of one moment.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Asserted {
+    pub at: Stamp,
+    pub held: BTreeMap<Id<Distribution>, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -182,6 +214,16 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             Fact::GenreAssigned { recording, genre } => {
                 cat.genres.insert((*recording, genre.clone()));
             }
+            Fact::HoldingsAsserted { device, held } => {
+                // Records arrive in stamp order, so the last one simply wins.
+                cat.holdings.insert(
+                    *device,
+                    Asserted {
+                        at: *stamp,
+                        held: held.clone(),
+                    },
+                );
+            }
             Fact::Played { recording, .. } => {
                 *cat.plays.entry(*recording).or_insert(0) += 1;
             }
@@ -206,6 +248,58 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     }
     cat.conflicts.sort_by_key(|c| c.distribution);
     cat
+}
+
+impl Catalogue {
+    /// Every device that claims to hold this encoding, with where and when.
+    ///
+    /// Deliberately not "is it available": that needs to know which device is
+    /// *this* one and which are reachable right now, neither of which is a fact
+    /// about the library. #38 layers Local / Remote / Absent over this.
+    pub fn holders(&self, distribution: Id<Distribution>) -> Vec<(Id<Device>, &str, Stamp)> {
+        self.holdings
+            .iter()
+            .filter_map(|(device, a)| {
+                a.held
+                    .get(&distribution)
+                    .map(|locator| (*device, locator.as_str(), a.at))
+            })
+            .collect()
+    }
+}
+
+/// Drop the holdings assertions nothing reads any more.
+///
+/// **The one event type that may be compacted.** A superseded assertion
+/// carries nothing — the later one says everything it said and more — where a
+/// superseded play still carries a listen and a superseded rating still carries
+/// what someone once thought.
+///
+/// Without this the log grows by a full file listing every time a device scans.
+/// Measured on the live library, scan observations were 6227 of 6572 events
+/// after three days of use: 95% of the log, and none of it worth keeping.
+///
+/// Folding a compacted set gives exactly what folding the original gives, which
+/// is the property that makes this safe to run whenever, and the one the tests
+/// assert directly.
+pub fn compact(records: &BTreeSet<Record>) -> BTreeSet<Record> {
+    let mut newest: BTreeMap<Id<Device>, Stamp> = BTreeMap::new();
+    for Record { stamp, fact } in records {
+        if let Fact::HoldingsAsserted { device, .. } = fact {
+            let entry = newest.entry(*device).or_insert(*stamp);
+            if *stamp > *entry {
+                *entry = *stamp;
+            }
+        }
+    }
+    records
+        .iter()
+        .filter(|Record { stamp, fact }| match fact {
+            Fact::HoldingsAsserted { device, .. } => newest.get(device) == Some(stamp),
+            _ => true,
+        })
+        .cloned()
+        .collect()
 }
 
 impl PartialOrd for Record {

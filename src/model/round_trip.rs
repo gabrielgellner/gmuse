@@ -364,3 +364,134 @@ fn a_wrong_clock_is_reported_across_a_sync() {
         "a machine that far ahead is something to be told about"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Holdings — the one table where merge is not union (#71).
+// ---------------------------------------------------------------------------
+
+use std::collections::BTreeMap;
+
+fn held(pairs: &[(Id<Distribution>, &str)]) -> BTreeMap<Id<Distribution>, String> {
+    pairs.iter().map(|(d, l)| (*d, l.to_string())).collect()
+}
+
+/// **The failure the supersede rule exists to prevent.** Delete a file, and a
+/// stale replica must not hand the row back.
+#[test]
+fn a_deleted_file_does_not_come_back_from_a_stale_replica() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let (a, b) = (
+        Id::<Distribution>::of_audio(&scan[0].audio),
+        Id::<Distribution>::of_audio(&scan[1].audio),
+    );
+    m1.ingest(100, &scan);
+
+    // m1 holds both, and m2 syncs while that is still true.
+    m1.assert_holdings(200, held(&[(a, "/m/1.mp3"), (b, "/m/2.mp3")]));
+    let stale = m1.records().clone();
+    m2.merge(210, &stale);
+
+    // Then one is deleted on m1, which says so by asserting the new whole set.
+    m1.assert_holdings(300, held(&[(a, "/m/1.mp3")]));
+
+    // Sync both ways. The stale assertion is still in both logs.
+    cross_merge(&mut m1, &mut m2, 400);
+
+    for cat in [m1.catalogue(), m2.catalogue()] {
+        let holdings = &cat.holdings[&m1.device()].held;
+        assert!(holdings.contains_key(&a));
+        assert!(
+            !holdings.contains_key(&b),
+            "union would have resurrected the deleted file"
+        );
+    }
+}
+
+/// Only the owning device's own assertion is superseded; one device's scan
+/// never speaks for another's disk.
+#[test]
+fn each_device_speaks_only_for_itself() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let a = Id::<Distribution>::of_audio(&scan[0].audio);
+    m1.ingest(100, &scan);
+
+    m1.assert_holdings(200, held(&[(a, "/laptop/1.mp3")]));
+    m2.assert_holdings(210, held(&[(a, "/Volumes/Media/1.mp3")]));
+    cross_merge(&mut m1, &mut m2, 300);
+
+    let cat = m1.catalogue();
+    let mut holders = cat.holders(a);
+    holders.sort_by_key(|(d, _, _)| *d);
+    assert_eq!(holders.len(), 2, "both devices hold a copy");
+    assert!(holders.iter().any(|(_, l, _)| *l == "/laptop/1.mp3"));
+    assert!(holders.iter().any(|(_, l, _)| *l == "/Volumes/Media/1.mp3"));
+}
+
+/// A remote holding is an assertion **with an age**, which is what lets the UI
+/// say "as of Tuesday" rather than pretending it is live.
+#[test]
+fn a_holding_carries_when_it_was_claimed() {
+    let mut m1 = Instance::new(device(1));
+    let scan = album();
+    let a = Id::<Distribution>::of_audio(&scan[0].audio);
+    m1.ingest(100, &scan);
+    m1.assert_holdings(1_788_115_007_000, held(&[(a, "/m/1.mp3")]));
+
+    let cat = m1.catalogue();
+    let (_, _, at) = cat.holders(a)[0];
+    assert_eq!(at.wall, 1_788_115_007_000, "the claim knows its own age");
+}
+
+/// **The property that makes compaction safe.** Folding a compacted log gives
+/// exactly what folding the original gives, so it can run whenever.
+#[test]
+fn compaction_cannot_change_what_the_library_says() {
+    let mut m1 = Instance::new(device(1));
+    let scan = album();
+    let (_, callisto, file) = ids(&scan);
+    m1.ingest(100, &scan);
+    m1.play(150, callisto, file);
+    for n in 0..5 {
+        m1.assert_holdings(200 + n * 10, held(&[(file, "/m/1.mp3")]));
+    }
+
+    let before = m1.catalogue();
+    let counted = m1.records().len();
+    m1.compact();
+
+    assert_eq!(m1.catalogue(), before, "the answer is untouched");
+    assert_eq!(
+        m1.records().len(),
+        counted - 4,
+        "four superseded assertions went, and nothing else"
+    );
+    assert_eq!(m1.catalogue().plays[&callisto], 1, "the play survived");
+}
+
+/// Compaction on one device and not another must not make them disagree — a
+/// compacted record arriving back from a stale replica is simply superseded
+/// again.
+#[test]
+fn compacting_one_device_does_not_split_the_answer() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let a = Id::<Distribution>::of_audio(&scan[0].audio);
+    m1.ingest(100, &scan);
+    m1.assert_holdings(200, held(&[(a, "/old.mp3")]));
+    m1.assert_holdings(300, held(&[(a, "/new.mp3")]));
+
+    let uncompacted = m1.records().clone();
+    m1.compact();
+    m2.merge(400, &uncompacted); // m2 still has the superseded one
+    let from_m2 = m2.records().clone();
+    m1.merge(410, &from_m2); // and hands it back
+
+    assert_eq!(
+        m1.catalogue().holdings[&m1.device()].held[&a],
+        "/new.mp3",
+        "the stale assertion is superseded again, not resurrected"
+    );
+    assert_eq!(m1.catalogue(), m2.catalogue());
+}

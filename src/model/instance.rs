@@ -12,13 +12,13 @@
 //! after what the sync brought in — and it is why merging is a method here
 //! rather than a set operation at the call site.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::audio_id::AudioId;
 use crate::model::clock::{Drift, HybridClock, Stamp};
 use crate::model::entity::{Artist, Device, Distribution, Recording};
 use crate::model::id::Id;
-use crate::model::log::{Catalogue, Fact, Record, fold};
+use crate::model::log::{Catalogue, Fact, Record, compact, fold};
 
 /// What a scan says about one file.
 ///
@@ -118,6 +118,26 @@ impl Instance {
                 },
             );
         }
+    }
+
+    /// Say what this device holds, right now, in full.
+    ///
+    /// A scan produces the whole list, so this takes the whole list. Emitting a
+    /// diff instead would mean noticing deletions, and a deletion that goes
+    /// unnoticed is a row that never goes away.
+    pub fn assert_holdings(&mut self, now: i64, held: BTreeMap<Id<Distribution>, String>) {
+        let device = self.clock.device();
+        self.append(now, Fact::HoldingsAsserted { device, held });
+    }
+
+    /// Drop this instance's superseded holdings assertions.
+    ///
+    /// Safe at any moment, because folding a compacted log gives exactly what
+    /// folding the original gives — and safe to run on one device and not
+    /// another, because a compacted record that arrives back from a stale
+    /// replica is simply superseded again.
+    pub fn compact(&mut self) {
+        self.records = compact(&self.records);
     }
 
     pub fn rename_artist(&mut self, now: i64, artist: Id<Artist>, name: &str) {
