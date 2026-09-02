@@ -2,7 +2,9 @@
 //!
 //! Rescans are incremental by mtime — a file whose mtime is unchanged is not
 //! reopened. On a library of any size the second scan is a `stat` per file and
-//! nothing else, which is what makes a scan-on-startup tolerable.
+//! nothing else. That is what *used* to make a scan on every startup
+//! tolerable; since 2026-09-01 a launch does not scan at all, and this cheap
+//! second pass is what makes an explicit `--rescan` feel free.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

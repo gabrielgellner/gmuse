@@ -52,7 +52,7 @@ struct App {
     roots: Vec<PathBuf>,
     cache_path: Option<PathBuf>,
     catalogs: catalog::Catalogs,
-    /// Files recognised at a new path by the startup scan.
+    /// Files recognised at a new path by a scan, when one ran.
     ///
     /// Carried here because the scan runs before the history is loaded, and
     /// the history is what most needs to know (#25).
@@ -186,7 +186,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unreadable: Vec::new(),
     };
 
-    if !app.roots.is_empty() {
+    // **The library is not rebuilt because the app opened.** Scanning on every
+    // launch made the library a function of gmuse having been run, which is
+    // backwards: the library is the thing, and the player reads it. A file
+    // appearing on disk is a change to the library, and a change to the library
+    // is something you make, not something a launch notices on your behalf.
+    //
+    // Two cases still scan, and only two. `--rescan` is the deliberate ask.
+    // An empty store is a first run, where the alternative is an empty library
+    // and no way to tell why — the cache stays derivable, which keeps the
+    // 2026-08-27 decision that it may be discarded at any time.
+    let first_run = app.store.is_empty();
+    if !app.roots.is_empty() && (args.rescan || first_run) {
         if args.rescan {
             // Forget mtimes so every file is re-read.
             app.store = Store::new();
@@ -199,7 +210,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.unreadable = report.errors.iter().map(|(p, _)| p.clone()).collect();
         save_cache(&app);
     } else if !app.store.is_empty() {
-        println!("library: {} tracks (cached)", app.store.len());
+        println!(
+            "library: {} tracks — `gmuse --rescan` to take in changes on disk",
+            app.store.len()
+        );
     } else {
         println!(
             "library: empty — scan one with `gmuse --library <dir>`, or set\n\

@@ -3081,6 +3081,25 @@ Append here as decisions are made. Format: date, decision, rationale.
   "invalidates every event ever recorded", and #63 has not settled whether events should name an entry or a
   distribution. The id exists, is cached, and is used where it already pays.
 
+- **2026-09-01** **A launch does not scan.** Startup rebuilt the library from disk every time, which made the library a
+  function of gmuse having been run. That is backwards under #63's reading: the library is the thing and the player
+  reads it. A file appearing on disk is a change to the _library_, and a change to the library is something you make —
+  not something a launch notices on your behalf and applies without being asked.
+
+  Two cases still scan, and only two. `--rescan` is the deliberate ask. An empty store is a first run, where the
+  alternative is an empty library and nothing to explain it. So the cache stays **derivable**, which keeps the
+  2026-08-27 decision that it is derived data and may be discarded at any time — what changed is _when_ the derivation
+  runs, not whether it can.
+
+  Measured: a launch goes from a 16s scan to loading 5774 tracks and starting. A file added to disk is correctly ignored
+  until asked for, and `--rescan` takes it in.
+
+  **The gap this opens, honestly.** `Command::Rescan` in the UI is a stub — it notifies "rescan lands with `:rescan` in
+  the app" and does nothing. While startup scanned, that stub cost nothing. Now it means the only way to take in a
+  change is to quit and run `gmuse --rescan`, which is the coupling this entry set out to remove, one step further away.
+  The obstacle is real rather than an oversight: the UI holds `&Store` and a scan needs `&mut Store`, so it wants the
+  loop to return a reason for stopping rather than only ever stopping. Filed as its own issue.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
