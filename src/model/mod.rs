@@ -14,4 +14,5 @@
 pub mod clock;
 pub mod entity;
 pub mod id;
+pub mod merge;
 pub mod mint;
