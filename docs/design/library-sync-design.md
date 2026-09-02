@@ -3,9 +3,14 @@
 Third document in the set, after `tree-view-design.md` and `tree-navigation-design.md`. Those define how a row set
 becomes a navigable tree. This one defines where the rows come from when the library lives in more than one place.
 
-**Governing constraint:** the NAS is the source of truth but is _not_ assumed reachable. A device must be fully
-functional — browsing, playback, event recording — having never contacted it. Bundles move by removable media. Airgapped
+**Governing constraint:** no machine is the source of truth. A device must be fully functional — browsing, playback,
+event recording, **and editing** — having never contacted any other. Bundles move by removable media. Airgapped
 operation is the design target, not a degraded mode.
+
+An earlier draft named the NAS as the authority, and that was never true of how this library is actually kept:
+`~/MusicLibrary` is the curated side and wins every conflict, while the NAS predates the tooling and is explicitly not a
+gold standard. It is a **file store and a meeting point for logs**, not a catalogue authority. Nothing below depends on
+which machine a file happens to sit on.
 
 ---
 
@@ -13,11 +18,11 @@ operation is the design target, not a degraded mode.
 
 The single most consequential decision here. Keep these separate and each is trivial; merge them and you need CRDTs.
 
-| State                                               | Writer           | Discipline         | Travels?   |
-| --------------------------------------------------- | ---------------- | ------------------ | ---------- |
-| **Catalog** — tags, duration, MBIDs, audio hash     | one (see §6)     | immutable snapshot | yes, pull  |
-| **Local state** — path, present, mtime, verified_at | this device only | mutable, private   | **never**  |
-| **Events** — plays, skips, ratings, tag edits       | every device     | append-only log    | yes, union |
+| State                                           | Writer            | Discipline            | Travels?          |
+| ----------------------------------------------- | ----------------- | --------------------- | ----------------- |
+| **Catalog** — tags, duration, MBIDs, audio hash | every device (§6) | projection + snapshot | rebuilt, not sent |
+| **Local state** — path, present, mtime, `seen`  | this device only  | mutable, private      | **never**         |
+| **History** — plays, skips, ratings, tag edits  | every device      | append-only log       | yes, union        |
 
 Two rules follow, and both are easy to violate by accident:
 
@@ -25,6 +30,14 @@ Two rules follow, and both are easy to violate by accident:
   device's copy_ of the track. Putting it in the catalog is the mistake that makes bundles non-portable.
 - **`play_count` is never a stored number.** It is an aggregate over the event log, recomputed. Incrementing a counter
   across disconnected devices loses writes silently and you will not notice until you have two devices.
+- **A scan observation is local state, not history.** `seen` says a file exists on _this disk_. It is regenerable by
+  rescanning, meaningless on another machine, and it dominates the log by volume: measured on the live library after
+  three days of use, **6227 of 6572 events — 95% — were `seen`**, against 329 `played`, 13 `rated` and 3 `moved`.
+  Putting it in the travelling log makes sync 20× larger than the facts it carries.
+
+**What the remaining 5% costs, which is the number that matters.** At the measured rate — about 110 real events a day —
+a year is ~40k events and roughly 4 MB; a decade is 400k and 40 MB, folded in well under a second. History is never
+going to be big enough to need anything clever.
 
 ---
 
@@ -156,20 +169,74 @@ rating set on two devices during the same disconnected window resolves arbitrari
 
 ---
 
-## 6. Catalog writers: the real fork
+## 6. Catalog writers: settled
 
-Two options. Pick deliberately.
+Two options were on the table.
 
-**A — Satellites are read-only.** Catalog is a snapshot pulled from the NAS; all tagging happens there. Simple, and
-correct if the NAS is where you rip and tag.
+**A — Satellites are read-only.** The catalog is a snapshot pulled from one machine and all tagging happens there.
 
 **B — Tag edits are events.** `kind = tagged`, payload `(field, value)`, last-write-wins per `(track_id, field)`. The
-catalog becomes a _projection_ of the tag-event log rather than a primary artifact. Uniform — one merge mechanism for
-everything — and it is what you need the moment the airgapped machine is where the work actually happens.
+catalog becomes a _projection_ of the log rather than a primary artifact.
 
-**Recommendation:** start with A, but reserve `kind = tagged` in the schema now. The upgrade path is then a new
-projection query, not a redesign. Choosing A with a schema that cannot express B is the version of this decision that
-costs real work later.
+**Decided: B.** A was the earlier recommendation and it fails a case that is not exotic — it is Tuesday. Listening on m1
+you notice a typo and fix it; the next evening you are on m2 and notice another one. Under A the second fix is either
+forbidden or deferred to a note you will not write. A rule you break within a week is worse than no rule, because you
+break it silently.
+
+B removes the concept of a writer entirely. Every machine appends to its own log; nothing is designated. It also
+collapses two mechanisms into one — A needs a catalogue snapshot _plus_ an event union, B needs only the union — and
+`domain-model.md` §4 already describes B, having settled that "a change is an event carrying
+`(field, from, to, basis)`". The two documents disagreed and this is the resolution.
+
+### What a two-machine session looks like
+
+```
+m1                              store                        m2
+──────────────────────────      ────────────────             ──────────────────────────
+history/m1.log   (append)  ──▶  history/m1.log  ──────▶      history/m1.log   (copy)
+history/m2.log   (copy)    ◀──  history/m2.log  ◀──────      history/m2.log   (append)
+                                MusicLibrary/   ◀─────▶      files, partial
+catalog/  ← projection                                       catalog/  ← projection
+local state (never moves)                                    local state (never moves)
+```
+
+Fixing a typo on m1 appends one line, beside the plays that preceded it:
+
+```
+2026-09-02T14:11  m1:44  tagged  rec=2c19…  artist  "Teh Bug" → "The Bug"
+```
+
+Sync is copying a file that only ever grows. m2 applies the events it has not seen and its projection reads `The Bug`.
+Play counts are an aggregate over the union of both logs, so listening on either simply adds up.
+
+**The concurrent case** — both machines offline, both edit the same field — resolves last-writer-wins per
+`(entity, field)`, which is `domain-model.md` §4's Type 1. Nothing is lost: both edits stay in the log, so the UI can
+say the field was edited twice concurrently and show both. That is the "stop and show me" discipline §4 already requires
+rather than a silent resolution.
+
+The whole merge algorithm is: **union the logs, sort by time, last wins per field, surface collisions.** No vector
+clocks, no CRDT library, no rebase.
+
+### Snapshots are checkpoints, not the sync unit
+
+A materialised catalogue is worth having, and not for speed — the sizing in §1 says replay will never hurt. It is worth
+having because you can open it and read it, because it bounds what a damaged log costs you, because a new machine can
+start from it instead of replaying from genesis, and because "what changed this week" is far easier to read as a state
+diff than as a log.
+
+Two rules keep them safe:
+
+- **A snapshot carries the log position it was taken at** — `(m1:44, m2:16)`. Without it you cannot tell which events it
+  already includes, and you will either double-apply or drop some.
+- **Snapshots are never merged.** Exchanging snapshots between machines means diffing domain objects across replicas,
+  which is the hard problem this whole design exists to avoid. Logs are the sync unit; a snapshot travels only as a
+  **bootstrap** for a machine that has nothing.
+
+This shape is already running. `~/MusicLibrary/.gmuse/` holds `events-*.log` beside `history.toml`, and `history.toml`
+is exactly this snapshot — a reified projection folded from the log. What it lacks is the stamped log position.
+
+So this document describes **a library that keeps its history**, not an event-sourced system. The distinction is not
+pedantic: the former has a current state you can look at, and only the latter obliges you to replay to know anything.
 
 ---
 
