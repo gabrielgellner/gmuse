@@ -30,7 +30,7 @@ front of you. When a feature is arguable, the question is whether it makes actin
 ### In scope
 
 - Local filesystem library: scan, tag-index, persist, incremental update
-- The four cmus views (library tree, sorted library, playlist, queue) plus browser, filters, and settings
+- The four cmus views (library tree, sorted library, playlist, queue) plus filters and the guide
 - Gapless playback of MP3, Ogg Vorbis, FLAC, WAV, AAC/M4A, ALAC
 - Sample-accurate seeking
 - cmus's next-track semantics: queue precedence, `aaa_mode`, shuffle, repeat, continue
@@ -366,7 +366,7 @@ pub enum Command {
     Quit,
 }
 
-pub enum Context { Common, Library, SortedLibrary, Playlist, Queue, Browser, Filters, Settings }
+pub enum Context { Common, Library, SortedLibrary, Playlist, Queue, Filters, Guide, Transport }
 
 pub type Bindings = HashMap<(Context, KeyEvent), Command>;
 ```
@@ -3093,6 +3093,18 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   Measured: a launch goes from a 16s scan to loading 5774 tracks and starting. A file added to disk is correctly ignored
   until asked for, and `--rescan` takes it in.
+
+- **2026-09-02** **View 5, the file browser, is removed — and `5` stays unbound.** It was the last surface in the UI
+  that navigated a filesystem rather than the library, and under `domain-model.md` that is not a gap to fill but a leak
+  to close: whether a file exists on this disk is a `Holding`, and the thing you navigate is a `Recording`. The
+  alternative readings were both worse. Making enter catalogue-then-play reintroduces the special case `--repl` and the
+  bare file argument were retired for (#61), and playing a path ephemerally gives a play event no recording to name, so
+  history has nowhere to land.
+
+  Removing a view leaves a hole in the digits, which are the bindings. **The gap is deliberate**: renumbering `scope`
+  and `guide` to 5 and 6 would move two keys already in muscle memory to save one dead digit, and the empty slot is an
+  honest record that something was there. §1's scope list loses "browser"; `Context::Browser` and `ViewId::Browser` go
+  with it, so `:bind` no longer accepts `browser` and `:view 5` is an error rather than a no-op.
 
   **The gap this opens, honestly.** `Command::Rescan` in the UI is a stub — it notifies "rescan lands with `:rescan` in
   the app" and does nothing. While startup scanned, that stub cost nothing. Now it means the only way to take in a

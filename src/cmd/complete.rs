@@ -160,7 +160,7 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
         "in" if words.len() >= 2 => parse::VERBS.iter().map(|s| s.to_string()).collect(),
 
         "bind" | "unbind" if words.len() == 1 => [
-            "common", "library", "sorted", "playlist", "queue", "browser", "filters", "settings",
+            "common", "library", "sorted", "playlist", "queue", "filters", "settings",
         ]
         .iter()
         .map(|s| s.to_string())

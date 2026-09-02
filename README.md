@@ -182,7 +182,7 @@ by entering the mode, that playback is what you are attending to. `[format] tran
 second; the guides answer the first, which is the one you cannot find by pressing keys. Titles on the left, the guide on
 the right, `tab` between them, and the ordinary motions scroll it.
 
-Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `browser`, `filters`, `guide`, `transport`.
+Contexts for binding: `common`, `library`, `sorted`, `playlist`, `queue`, `filters`, `guide`, `transport`.
 
 `<leader>` in a binding stands for whatever `leader` says, `space` by default:
 

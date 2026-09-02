@@ -366,13 +366,6 @@ fn run_tui(
         ),
         smart_artist_sort,
     );
-    let start_dir = app
-        .roots
-        .first()
-        .cloned()
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"));
-
     // A socket that will not bind is a warning, not a failure: the player is
     // still a player without one, and refusing to start over a missing remote
     // would be the tail wagging the dog.
@@ -389,7 +382,7 @@ fn run_tui(
         player: Some(&app.player),
         remote: server.as_ref(),
     };
-    let mut state = ui::Ui::new(start_dir, library);
+    let mut state = ui::Ui::new(library);
     state.catalogs = app.catalogs.clone();
     state.playlists = loaded.playlists.clone();
     state.saved = Some(playlist::Playlists::new(&loaded.data_dir));

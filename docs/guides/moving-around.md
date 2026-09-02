@@ -1,10 +1,13 @@
 # Moving around
 
-Seven views, switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight to view 3; `g<Tab>` returns to the one
-you were on before.
+Six views, switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight to view 3; `g<Tab>` returns to the one you
+were on before.
 
     1 library    2 sorted     3 playlist   4 queue
-    5 browser    6 scope      7 guide
+                 6 scope      7 guide
+
+`5` is unbound. It was a file browser, and gmuse navigates the library rather than a filesystem — the digit is left
+empty rather than moving `scope` and `guide` out from under your fingers.
 
 Within any of them the motions are vim's. `j` and `k` move, and take a count — `3j` goes down three. `gg` and `G` go to
 the top and bottom, and `12G` goes to row 12. The arrow keys — `up`, `down`, `left`, `right` — and `home`, `end`,

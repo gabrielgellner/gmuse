@@ -26,7 +26,6 @@ pub enum Context {
     SortedLibrary,
     Playlist,
     Queue,
-    Browser,
     Filters,
     /// View 7, the guides.
     Guide,
@@ -43,7 +42,6 @@ impl Context {
             Context::SortedLibrary => "sorted",
             Context::Playlist => "playlist",
             Context::Queue => "queue",
-            Context::Browser => "browser",
             Context::Filters => "filters",
             Context::Guide => "guide",
             Context::Transport => "transport",
@@ -57,7 +55,6 @@ impl Context {
             "sorted" | "sorted_library" => Context::SortedLibrary,
             "playlist" => Context::Playlist,
             "queue" => Context::Queue,
-            "browser" => Context::Browser,
             "filters" => Context::Filters,
             "guide" => Context::Guide,
             "transport" => Context::Transport,
@@ -115,7 +112,8 @@ pub enum ViewId {
     Sorted = 2,
     Playlist = 3,
     Queue = 4,
-    Browser = 5,
+    // 5 was the file browser, removed: gmuse navigates the library, not a
+    // filesystem, and the digit is left unbound rather than renumbering 6 and 7.
     Filters = 6,
     Guide = 7,
 }
@@ -127,7 +125,6 @@ impl ViewId {
             2 => ViewId::Sorted,
             3 => ViewId::Playlist,
             4 => ViewId::Queue,
-            5 => ViewId::Browser,
             6 => ViewId::Filters,
             7 => ViewId::Guide,
             _ => return None,

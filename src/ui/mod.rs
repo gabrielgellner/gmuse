@@ -41,7 +41,9 @@ pub enum View {
     Sorted = 2,
     Playlist = 3,
     Queue = 4,
-    Browser = 5,
+    // 5 was the file browser. It is gone rather than renumbered: gmuse
+    // navigates the library, and a filesystem view leaks the file-based model
+    // back into a library-first player.
     Filters = 6,
     /// Prose: how to do the things, as against which key does what — plus the
     /// generated index of every binding, which is what view 7 used to be (#47).
@@ -55,7 +57,6 @@ impl View {
             View::Sorted => "sorted",
             View::Playlist => "playlist",
             View::Queue => "queue",
-            View::Browser => "browser",
             View::Filters => "scope",
             View::Guide => "guide",
         }
@@ -67,7 +68,6 @@ impl View {
             ViewId::Sorted => View::Sorted,
             ViewId::Playlist => View::Playlist,
             ViewId::Queue => View::Queue,
-            ViewId::Browser => View::Browser,
             ViewId::Filters => View::Filters,
             ViewId::Guide => View::Guide,
         }
@@ -92,7 +92,6 @@ impl View {
         View::Sorted,
         View::Playlist,
         View::Queue,
-        View::Browser,
         View::Filters,
         View::Guide,
     ];
@@ -104,7 +103,6 @@ impl View {
             View::Sorted => C::SortedLibrary,
             View::Playlist => C::Playlist,
             View::Queue => C::Queue,
-            View::Browser => C::Browser,
             View::Filters => C::Filters,
             View::Guide => C::Guide,
         }
@@ -193,71 +191,6 @@ impl Prompt {
     }
 }
 
-/// A directory listing for view 5.
-#[derive(Debug, Default)]
-pub struct BrowserState {
-    pub cwd: PathBuf,
-    pub entries: Vec<PathBuf>,
-    pub selected: usize,
-}
-
-impl BrowserState {
-    pub fn at(dir: PathBuf) -> Self {
-        let mut b = BrowserState {
-            cwd: dir,
-            ..Default::default()
-        };
-        b.refresh();
-        b
-    }
-
-    /// Directories first, then files, each alphabetical — the order that makes
-    /// a browser navigable rather than a lucky dip.
-    pub fn refresh(&mut self) {
-        let mut dirs = Vec::new();
-        let mut files = Vec::new();
-        if let Ok(read) = std::fs::read_dir(&self.cwd) {
-            for entry in read.flatten() {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with('.'))
-                {
-                    continue;
-                }
-                if path.is_dir() { &mut dirs } else { &mut files }.push(path);
-            }
-        }
-        dirs.sort();
-        files.sort();
-        self.entries = Vec::with_capacity(dirs.len() + files.len() + 1);
-        if self.cwd.parent().is_some() {
-            self.entries.push(self.cwd.join(".."));
-        }
-        self.entries.append(&mut dirs);
-        self.entries.append(&mut files);
-        self.selected = self.selected.min(self.entries.len().saturating_sub(1));
-    }
-
-    fn enter(&mut self) {
-        let Some(path) = self.entries.get(self.selected).cloned() else {
-            return;
-        };
-        if path.file_name().and_then(|n| n.to_str()) == Some("..") {
-            if let Some(parent) = self.cwd.parent() {
-                self.cwd = parent.to_path_buf();
-                self.selected = 0;
-                self.refresh();
-            }
-        } else if path.is_dir() {
-            self.cwd = path;
-            self.selected = 0;
-            self.refresh();
-        }
-    }
-}
-
 /// Which playlist view 3 has open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Open {
@@ -299,7 +232,6 @@ pub struct Ui {
     pub sorted: usize,
     pub playlist_sel: usize,
     pub queue_sel: usize,
-    pub browser: BrowserState,
     pub status: String,
     /// Views 3 and 4 live here rather than in the application, because the UI
     /// is what mutates them.
@@ -436,7 +368,6 @@ pub struct Ui {
     pub sorted_scroll: Scroll,
     pub playlist_scroll: Scroll,
     pub queue_scroll: Scroll,
-    pub browser_scroll: Scroll,
     pub guides_scroll: Scroll,
     /// Which half of view 7 has focus: the list of guides, or the guide.
     pub guide_pane: Pane,
@@ -510,15 +441,15 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(start_dir: PathBuf, library: Library) -> Self {
-        let mut ui = Self::bare(start_dir, library);
+    pub fn new(library: Library) -> Self {
+        let mut ui = Self::bare(library);
         // Resolve the placeholder the defaults were written with, so the
         // shipped `<leader> ?` works before any config is read.
         ui.set_leader(crate::config::default_leader());
         ui
     }
 
-    fn bare(start_dir: PathBuf, library: Library) -> Self {
+    fn bare(library: Library) -> Self {
         Self {
             view: View::Tree,
             tree: TreeState::default(),
@@ -526,12 +457,10 @@ impl Ui {
             sorted_scroll: Scroll::default(),
             playlist_scroll: Scroll::default(),
             queue_scroll: Scroll::default(),
-            browser_scroll: Scroll::default(),
             guides_scroll: Scroll::default(),
             sorted: 0,
             playlist_sel: 0,
             queue_sel: 0,
-            browser: BrowserState::at(start_dir),
             status: String::new(),
             playlist: Playlist::new(),
             playlists: crate::smart::SmartPlaylists::default(),
@@ -739,7 +668,7 @@ impl Ui {
             View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
-            View::Browser | View::Filters | View::Guide => None,
+            View::Filters | View::Guide => None,
         }
     }
 }
@@ -1876,7 +1805,6 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             ui.playlist_pane = focused;
         }
         Command::Activate => match ui.view {
-            View::Browser => ui.browser.enter(),
             // The list picks; Enter moves into what you picked, which is the
             // same thing it does everywhere else.
             View::Guide => ui.guide_pane = Pane::Tracks,
@@ -1968,7 +1896,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 }
                 play(ui, ctx, id);
             }
-            // Nothing selectable here — scope, settings, the browser. Resuming
+            // Nothing selectable here — scope and the guide. Resuming
             // is the only sensible reading of "play".
             None => {
                 if let Some(p) = ctx.player {
@@ -3042,7 +2970,6 @@ fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
         View::Sorted => &ui.sorted_scroll,
         View::Playlist if ui.playlist_pane == Pane::Tracks => &ui.playlist_scroll,
         View::Queue => &ui.queue_scroll,
-        View::Browser => &ui.browser_scroll,
         View::Guide if ui.guide_pane == Pane::Tree => &ui.guides_scroll,
         View::Playlist | View::Guide | View::Filters => return None,
     })
@@ -3178,12 +3105,6 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
         View::Sorted => ui.library.sorted().iter().map(describe).collect(),
         View::Playlist => ui.playlist.entries().iter().map(describe).collect(),
         View::Queue => ui.queue.entries().map(describe).collect(),
-        View::Browser => ui
-            .browser
-            .entries
-            .iter()
-            .map(|p| crate::text::Haystack::of(&p.display().to_string()))
-            .collect(),
         View::Filters | View::Guide => Vec::new(),
     }
 }
@@ -3199,7 +3120,6 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
         // The whole projection, not just the queued part: the cursor ranges
         // over what would play next, and only the edits are confined.
         View::Queue => up_next(ui, ctx).len(),
-        View::Browser => ui.browser.entries.len(),
         View::Filters => ui.catalogs.defined().len(),
         View::Guide => match ui.guide_pane {
             Pane::Tree => crate::guides::GUIDES.len(),
@@ -3224,7 +3144,6 @@ fn current_cursor(ui: &Ui) -> usize {
             Pane::Tracks => ui.playlist_sel,
         },
         View::Queue => ui.queue_sel,
-        View::Browser => ui.browser.selected,
         View::Filters => ui.catalog_sel,
         View::Guide => match ui.guide_pane {
             Pane::Tree => ui.guide_sel,
@@ -3242,7 +3161,6 @@ fn set_cursor(ui: &mut Ui, next: usize) {
             Pane::Tracks => ui.playlist_sel = next,
         },
         View::Queue => ui.queue_sel = next,
-        View::Browser => ui.browser.selected = next,
         View::Filters => ui.catalog_sel = next,
         View::Guide => match ui.guide_pane {
             Pane::Tree => {
@@ -3579,7 +3497,6 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 },
             )
         }
-        View::Browser => draw_browser(frame, body, ui),
         View::Filters => draw_catalogs(frame, body, ui),
         View::Guide => draw_guides(frame, body, ui),
     }
@@ -4267,44 +4184,6 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
     spec.scroll.remember(&state);
 }
 
-fn draw_browser(frame: &mut Frame, area: Rect, ui: &Ui) {
-    let items: Vec<ListItem> = ui
-        .browser
-        .entries
-        .iter()
-        .map(|p| {
-            let name = p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("..")
-                .to_string();
-            let label = if p.is_dir() && name != ".." {
-                format!("{name}/")
-            } else {
-                name
-            };
-            ListItem::new(Line::from(label))
-        })
-        .collect();
-    let mut items = items;
-    let mut state =
-        ui.browser_scroll
-            .state_within(Some(ui.browser.selected), items.len(), view_height(area));
-    pad_to_view(&mut items, &ui.theme, area, state.offset());
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(pane_block(
-                &ui.theme,
-                &ui.browser.cwd.display().to_string(),
-                true,
-            ))
-            .highlight_style(highlight(&ui.theme, true)),
-        area,
-        &mut state,
-    );
-    ui.browser_scroll.remember(&state);
-}
-
 fn empty_hint(theme: &theme::Theme, title: &str) -> Vec<Line<'static>> {
     let dim = theme.get(theme::Role::StatusDim);
     vec![
@@ -4603,7 +4482,7 @@ mod tests {
 
     /// A `Ui` over the whole fixture library.
     fn ui_of(store: &Store, smart: bool) -> Ui {
-        Ui::new(PathBuf::from("/m"), Library::rebuild(store, smart))
+        Ui::new(Library::rebuild(store, smart))
     }
 
     #[test]
@@ -5476,21 +5355,39 @@ mod tests {
     /// unreachable and invisible while still being a legal `:view <n>` target.
     /// Its order must match the ids, which is what lets the strip be numbered
     /// at all.
+    ///
+    /// **The ids are ascending and unique, not contiguous.** 5 is deliberately
+    /// unbound — it was the file browser (§13, 2026-09-02) — and asserting a
+    /// dense `1..=n` here would make leaving that gap look like a bug.
     #[test]
     fn every_view_is_in_all_exactly_once_and_in_id_order() {
         let ids: Vec<u8> = View::ALL.iter().map(|v| *v as u8).collect();
-        assert_eq!(
-            ids,
-            (1..=View::ALL.len() as u8).collect::<Vec<_>>(),
-            "ALL is missing a view, has one twice, or is out of id order"
-        );
-        for n in 1..=View::ALL.len() as u8 {
-            let id = crate::cmd::ViewId::from_number(n).expect("a legal :view target");
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(ids, sorted, "ALL has a view twice, or is out of id order");
+
+        for id in &ids {
+            let parsed = crate::cmd::ViewId::from_number(*id).expect("a legal :view target");
             assert!(
-                View::ALL.contains(&View::from_id(id)),
-                "view {n} unreachable"
+                View::ALL.contains(&View::from_id(parsed)),
+                "view {id} unreachable"
             );
         }
+    }
+
+    /// The gap is load-bearing, so it is asserted rather than left to drift
+    /// back: `:view 5` must be an error, not a no-op or a surprise view.
+    #[test]
+    fn five_is_unbound_because_the_browser_is_gone() {
+        assert!(
+            crate::cmd::ViewId::from_number(5).is_none(),
+            "5 was the file browser and must stay unbound"
+        );
+        assert!(
+            crate::cmd::Context::parse("browser").is_none(),
+            ":bind must not accept a context that no view provides"
+        );
     }
 
     /// The tab strip numbers from each view's own id, which is what `3gt` and
@@ -5519,13 +5416,13 @@ mod tests {
         // Rules sort first, so the cursor starts on `electronic`.
         execute(&mut ui, &ctx, Command::Activate);
 
-        assert_eq!(ui.view, View::Playlist, "the browser is a place to leave");
+        assert_eq!(ui.view, View::Playlist, "the left pane is a place to leave");
         assert_eq!(ui.open.as_ref().map(Open::name), Some("electronic"));
         assert_eq!(ui.playlist.len(), 2);
     }
 
     /// Saving is the one thing that changes the set from inside the app, so
-    /// the browser has to notice without being left and re-entered.
+    /// the left pane has to notice without being left and re-entered.
     #[test]
     fn saving_a_playlist_shows_up_in_the_left_pane() {
         let store = genre_fixture();
@@ -5541,7 +5438,7 @@ mod tests {
         type_line(&mut ui, &ctx, "playlist save keepers");
         assert!(
             ui.playlist_rows.iter().any(|r| r.name == "keepers"),
-            "the browser did not notice the save"
+            "the left pane did not notice the save"
         );
     }
 
@@ -6393,7 +6290,6 @@ mod tests {
                     crate::cmd::Context::SortedLibrary => ViewId::Sorted,
                     crate::cmd::Context::Playlist => ViewId::Playlist,
                     crate::cmd::Context::Queue => ViewId::Queue,
-                    crate::cmd::Context::Browser => ViewId::Browser,
                     crate::cmd::Context::Filters => ViewId::Filters,
                     crate::cmd::Context::Guide => ViewId::Guide,
                     crate::cmd::Context::Common | crate::cmd::Context::Transport => {
@@ -6691,14 +6587,11 @@ mod tests {
         let mut catalogs = Catalogs::default();
         catalogs.define("paak", vec![PathBuf::from("/m/paak")], None);
         catalogs.define("va", vec![PathBuf::from("/m/va")], None);
-        let mut ui = Ui::new(
-            PathBuf::from("/m"),
-            Library::from_members(
-                store,
-                catalogs.members(store, crate::filter::Env::default()),
-                true,
-            ),
-        );
+        let mut ui = Ui::new(Library::from_members(
+            store,
+            catalogs.members(store, crate::filter::Env::default()),
+            true,
+        ));
         ui.catalogs = catalogs;
         ui
     }
