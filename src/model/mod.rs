@@ -14,5 +14,8 @@
 pub mod clock;
 pub mod entity;
 pub mod id;
+pub mod instance;
+pub mod log;
 pub mod merge;
 pub mod mint;
+pub mod round_trip;

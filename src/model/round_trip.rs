@@ -1,0 +1,271 @@
+//! **The test the architecture stands or falls on** — issue #69.
+//!
+//! Two instances, one album, ingested independently, edited differently,
+//! played on both, then merged in both directions. It touches every risky
+//! decision at once — convergent minting, the clock, row-union merging and
+//! collision surfacing — and its passing is the difference between the
+//! no-coordinator bet holding in code and holding only in prose.
+//!
+//! Everything here is a test. The module exists so the assertions have one
+//! place to live and one name to fail under.
+
+#![cfg(test)]
+
+use std::collections::BTreeSet;
+
+use crate::audio_id::AudioId;
+use crate::model::entity::{Artist, Device, Distribution, Recording};
+use crate::model::id::Id;
+use crate::model::instance::{Instance, Scanned};
+use crate::model::log::Record;
+
+fn device(n: u128) -> Id<Device> {
+    Id::from_uuid(uuid::Uuid::from_u128(n))
+}
+
+fn audio(hash: u128) -> AudioId {
+    AudioId { scheme: 1, hash }
+}
+
+/// Two tracks off one album, as a scan would report them. Both carry a
+/// MusicBrainz id, which is the 83% case.
+fn album() -> Vec<Scanned> {
+    vec![
+        Scanned {
+            audio: audio(0x8fb0_dcfb_f145_dfff_6649_7842_65da_0229),
+            title: "Callisto".into(),
+            artist: "Stephan Bodzin & Marc Romboy".into(),
+            mb_recording: Some(uuid::Uuid::from_u128(
+                0xca11_1500_0000_4000_8000_0000_0000_0001,
+            )),
+        },
+        Scanned {
+            audio: audio(0x1111_2222_3333_4444_5555_6666_7777_8888),
+            title: "Luna".into(),
+            artist: "Stephan Bodzin & Marc Romboy".into(),
+            mb_recording: Some(uuid::Uuid::from_u128(
+                0x1a2b_0000_0000_4000_8000_0000_0000_0002,
+            )),
+        },
+    ]
+}
+
+/// The same album, with no MusicBrainz ids — so each device must mint locally
+/// and the two cannot converge on their own.
+fn album_unbound() -> Vec<Scanned> {
+    album()
+        .into_iter()
+        .map(|s| Scanned {
+            mb_recording: None,
+            ..s
+        })
+        .collect()
+}
+
+fn ids(scan: &[Scanned]) -> (Id<Artist>, Id<Recording>, Id<Distribution>) {
+    let s = &scan[0];
+    (
+        Id::<Artist>::derived(s.artist.as_bytes()),
+        Id::<Recording>::of_musicbrainz(s.mb_recording.expect("bound fixture")),
+        Id::<Distribution>::of_audio(&s.audio),
+    )
+}
+
+/// Merge both ways round, as a real sync eventually does.
+fn cross_merge(a: &mut Instance, b: &mut Instance, now: i64) {
+    let (from_a, from_b): (BTreeSet<Record>, BTreeSet<Record>) =
+        (a.records().clone(), b.records().clone());
+    a.merge(now, &from_b);
+    b.merge(now, &from_a);
+}
+
+/// **The whole test.** The four assertions the design is betting on.
+#[test]
+fn two_instances_one_album_and_a_full_round_trip() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let (artist, callisto, callisto_file) = ids(&scan);
+
+    // 1. Both ingest the same album, independently, having never met.
+    m1.ingest(100, &scan);
+    m2.ingest(140, &scan);
+
+    // 2. One renames an artist; the other assigns a genre.
+    m1.rename_artist(200, artist, "Bodzin & Romboy");
+    m2.assign_genre(240, callisto, "Techno");
+
+    // 3. Each plays a track.
+    m1.play(300, callisto, callisto_file);
+    m2.play(340, callisto, callisto_file);
+
+    // 4. Sync, both directions.
+    cross_merge(&mut m1, &mut m2, 400);
+
+    let (one, two) = (m1.catalogue(), m2.catalogue());
+
+    // Agreement through determinism — no coordination happened.
+    assert_eq!(
+        postcard::to_allocvec(&one).unwrap(),
+        postcard::to_allocvec(&two).unwrap(),
+        "the two folds must be byte-identical"
+    );
+
+    // Convergent minting: the same bytes are one encoding, not two.
+    assert_eq!(
+        one.distributions.len(),
+        2,
+        "one distribution per encoding, not one per device"
+    );
+
+    // Nothing collided, because both devices derived the same recording ids.
+    assert!(
+        one.conflicts.is_empty(),
+        "bound tags converge: {:?}",
+        one.conflicts
+    );
+
+    // The rename is an LWW register; the assignment is row existence.
+    assert_eq!(one.artist_names[&artist], "Bodzin & Romboy");
+    assert!(one.genres.contains(&(callisto, "Techno".to_string())));
+
+    // Plays are counted, so two devices' listening adds up.
+    assert_eq!(one.plays[&callisto], 2, "neither play replaced the other");
+}
+
+/// The other half of §11: without a binding to derive from, two devices mint
+/// different recordings — and the encoding they agree on is what makes the
+/// disagreement visible.
+#[test]
+fn unbound_tags_surface_a_collision_rather_than_resolving_it() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album_unbound();
+
+    m1.ingest(100, &scan);
+    m2.ingest(140, &scan);
+    cross_merge(&mut m1, &mut m2, 200);
+
+    let (one, two) = (m1.catalogue(), m2.catalogue());
+    assert_eq!(
+        postcard::to_allocvec(&one).unwrap(),
+        postcard::to_allocvec(&two).unwrap(),
+        "they still agree on what happened, including the disagreement"
+    );
+
+    assert_eq!(
+        one.distributions.len(),
+        2,
+        "the encodings still converge — that is what makes this detectable"
+    );
+    assert_eq!(
+        one.conflicts.len(),
+        2,
+        "one per encoding: each was bound to two different recordings"
+    );
+
+    let c = &one.conflicts[0];
+    assert_eq!(c.base, None, "both moved it from nothing — the same base");
+    assert_eq!(c.asserted.len(), 2);
+    assert_eq!(
+        one.distributions[&c.distribution].recording,
+        Some(c.winner()),
+        "a value still shows; the disagreement is recorded beside it"
+    );
+}
+
+/// Merge order must not change the answer, or "both devices agree" is luck.
+#[test]
+fn the_result_does_not_depend_on_which_way_the_sync_ran() {
+    let scan = album();
+    let build = |first_device, second_device, forward: bool| {
+        let (mut a, mut b) = (
+            Instance::new(device(first_device)),
+            Instance::new(device(second_device)),
+        );
+        a.ingest(100, &scan);
+        b.ingest(140, &scan);
+        b.assign_genre(200, ids(&scan).1, "Techno");
+        if forward {
+            let from_b = b.records().clone();
+            a.merge(300, &from_b);
+            a.catalogue()
+        } else {
+            let from_a = a.records().clone();
+            b.merge(300, &from_a);
+            b.catalogue()
+        }
+    };
+    assert_eq!(build(1, 2, true), build(1, 2, false));
+}
+
+/// Syncing twice is a no-op, so a bundle copied round a loop cannot
+/// double-count a play.
+#[test]
+fn merging_the_same_log_twice_changes_nothing() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let (_, callisto, file) = ids(&scan);
+    m1.ingest(100, &scan);
+    m2.ingest(140, &scan);
+    m2.play(200, callisto, file);
+
+    let from_m2 = m2.records().clone();
+    m1.merge(300, &from_m2);
+    let once = m1.catalogue();
+    m1.merge(400, &from_m2);
+
+    assert_eq!(m1.catalogue(), once, "a repeated sync adds nothing");
+    assert_eq!(once.plays[&callisto], 1);
+}
+
+/// **Causality across a sync.** After reading another device's log, everything
+/// this device writes sorts after what it read — which is what makes "last
+/// wins" mean "last" rather than "whichever clock ran faster".
+///
+/// Without this the round trip still passes, which is why it is asserted
+/// separately: a sync that does not advance the clock is invisible until two
+/// machines disagree about what happened after what.
+#[test]
+fn what_is_written_after_a_sync_sorts_after_what_the_sync_brought() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let (artist, _, _) = ids(&scan);
+
+    // m2 is far ahead in wall time, as an unsynced laptop would be.
+    m2.ingest(9_000, &scan);
+    m1.ingest(100, &scan);
+
+    let newest_from_m2 = m2.records().iter().next_back().expect("m2 wrote").stamp;
+    let from_m2 = m2.records().clone();
+    m1.merge(200, &from_m2);
+
+    // Physical time here is still behind m2's — only `observe` can save this.
+    m1.rename_artist(200, artist, "Bodzin & Romboy");
+    let ours = m1.records().iter().next_back().expect("m1 wrote").stamp;
+
+    assert!(
+        ours > newest_from_m2,
+        "a write after a sync must follow what the sync brought in"
+    );
+    assert_eq!(
+        m1.catalogue().artist_names[&artist],
+        "Bodzin & Romboy",
+        "and therefore it is the value that shows"
+    );
+}
+
+/// A device whose clock is set wrong still sorts, and is still reported.
+#[test]
+fn a_wrong_clock_is_reported_across_a_sync() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    m1.ingest(100, &scan);
+    m2.ingest(100 + crate::model::clock::IMPLAUSIBLE_DRIFT_MS * 2, &scan);
+
+    let from_m2 = m2.records().clone();
+    m1.merge(200, &from_m2);
+
+    assert!(
+        !m1.drifts.is_empty(),
+        "a machine that far ahead is something to be told about"
+    );
+}
