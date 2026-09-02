@@ -11,6 +11,7 @@
 //! reads through this module, something did not get wired up.
 #![allow(dead_code)]
 
+pub mod clock;
 pub mod entity;
 pub mod id;
 pub mod mint;
