@@ -27,6 +27,7 @@ symphonia-adapter-libopus = { version = "0.3.0", optional = true }
 thiserror = "2.0.20"
 toml = "1.1.4"
 twox-hash = { version = "2.1.4", default-features = false, features = ["xxhash3_128", "std"] }
+uuid = { version = "1.26.0", features = ["v4", "v5", "serde"] }
 walkdir = "2.5.0"
 
 [features]

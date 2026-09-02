@@ -3106,6 +3106,18 @@ Append here as decisions are made. Format: date, decision, rationale.
   honest record that something was there. §1's scope list loses "browser"; `Context::Browser` and `ViewId::Browser` go
   with it, so `:bind` no longer accepts `browser` and `:view 5` is an error rather than a no-op.
 
+- **2026-09-02** **`uuid` is the one new dependency the model layer needs (#65).** `Id<T>` is a UUID because these ids
+  are exported, compared against MusicBrainz ids — which _are_ UUIDs — and read by people; a private 128-bit id would be
+  a gratuitous divergence in the one place the library talks to the outside world. `v5` is what makes convergent minting
+  possible (#66), and `v4` mints everything with no binding to derive from.
+
+  Measured cost: **one** new crate in the lock, `sha1_smol`. `getrandom`, `cfg-if`, `libc` and `serde_core` are already
+  in the tree via cpal and serde, and `sha1_smol` is a dependency-free SHA-1 that exists precisely to avoid pulling the
+  RustCrypto tree in for a non-cryptographic hash.
+
+  `NAMESPACE` in `model/id.rs` is pinned by a test, for the reason `AudioId::SCHEME` is: every derived id in every log
+  depends on it, so a change re-mints the library silently.
+
   **The gap this opens, honestly.** `Command::Rescan` in the UI is a stub — it notifies "rescan lands with `:rescan` in
   the app" and does nothing. While startup scanned, that stub cost nothing. Now it means the only way to take in a
   change is to quit and run `gmuse --rescan`, which is the coupling this entry set out to remove, one step further away.

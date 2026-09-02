@@ -24,6 +24,7 @@ mod history;
 mod library;
 mod lock;
 mod m3u;
+mod model;
 mod next;
 mod playlist;
 mod remote;
