@@ -388,6 +388,8 @@ pub struct Ui {
     /// that is what lets two machines share a directory without one's whole
     /// file losing to the other's (#26).
     pub events_path: Option<PathBuf>,
+    /// Which machine this is, stamped on every event it records (#36).
+    pub machine: String,
     /// The current track has already been counted, so a long listen does not
     /// count twice. Cleared whenever a different track becomes audible.
     counted_current: bool,
@@ -560,6 +562,7 @@ impl Ui {
             session_path: None,
             history: crate::history::History::default(),
             events_path: None,
+            machine: String::new(),
             counted_current: false,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
@@ -952,12 +955,8 @@ pub fn record(ui: &mut Ui, kind: crate::events::Kind) {
     let Some(path) = ui.events_path.clone() else {
         return;
     };
-    let event = crate::events::Event {
-        at: crate::history::now(),
-        kind,
-    };
-    match crate::events::append(&path, &event) {
-        Ok(()) => ui.history.mark_saved(),
+    match crate::events::append(&path, &ui.machine, crate::history::now(), kind) {
+        Ok(_) => ui.history.mark_saved(),
         Err(e) => ui.audit.line("history", &format!("could not record: {e}")),
     }
 }

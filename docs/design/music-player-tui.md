@@ -3024,6 +3024,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   Recorded because it is also evidence for #35. The fix required knowing the rename window, the fold's sort order and a
   refusal rule — none of which would exist if identity came from the audio rather than the path.
 
+- **2026-09-01** **Events carry a device and a sequence, and the id is `device:seq` rather than a ULID (issue #36).**
+  Two things were broken. Dedup on import was whole-line string equality, so **two plays of the same track in the same
+  second on two machines are the same line and one was silently dropped** — rare, invisible and permanent. And the fold
+  ordered every machine's events together by wall clock, which §5 of the sync design explicitly forbids: a device
+  offline for six months with a drifting RTC produces timestamps that interleave wrongly with everything else.
+
+  **`device:seq`, not a ULID.** The sync design reaches for a ULID; the pair already has every property the merge needs
+  — unique without coordination, monotonic per device, and a watermark that is an integer comparison — and it has one a
+  ULID does not: **it cannot be sorted across devices**. A ULID embeds a timestamp, so it silently invites the exact
+  mistake §5 forbids. This makes that mistake unexpressible, and costs no dependency.
+
+  **No migration, and two formats in one file.** They are told apart by the first column: a legacy line opens with a
+  timestamp, which parses as an integer; a line written since ids exist opens with a device id, which does not. An
+  append-only log should not be rewritten to change its schema, and the old lines still say everything they said. A
+  legacy line's id is a hash of its own content — which is exactly the dedup those lines have always had, so nothing is
+  retrofitted with an identity it never had and the imprecision ages out.
+
+  **The counter is read back from the log**, not kept in a state file beside it. Two copies of a monotonic counter is
+  one more than can be kept honest across a crash, and the log is the thing that must be right.
+
+  Verified against the real 6492-line log: folds to 6564 events, 5774 tracks, both formats together.
+
+  Deliberately **not** done here: the fold still orders by wall clock. Ordering across devices is a separate question
+  and a larger one — this issue is the schema, and the schema is what makes the answer expressible.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

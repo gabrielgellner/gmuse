@@ -216,14 +216,24 @@ fn plan_log(incoming: &Path, existing: &Path) -> Option<(PathBuf, String, usize,
         std::fs::read_to_string(incoming).ok()?,
         std::fs::read_to_string(existing).ok()?,
     );
-    let theirs: std::collections::HashSet<&str> = theirs_text
+    // Compared by `event_id`, not by line text. Two plays of the same track in
+    // the same second on two machines are the same *line* and different
+    // *events*; content equality silently kept one and dropped the other, and
+    // the loss was invisible and permanent (#36). A line that predates ids
+    // falls back to a hash of itself, so legacy data keeps exactly the dedup it
+    // has always had.
+    let theirs: std::collections::HashSet<String> = theirs_text
         .lines()
         .filter(|l| !l.trim().is_empty())
+        .filter_map(crate::events::id_of)
         .collect();
 
     let (mut content, mut took, mut already) = (String::new(), 0usize, 0usize);
     for line in mine.lines().filter(|l| !l.trim().is_empty()) {
-        if theirs.contains(line) {
+        // A line that will not decode is kept rather than dropped: it is not
+        // ours to discard, and the destination can decide it is junk later.
+        let known = crate::events::id_of(line).is_some_and(|id| theirs.contains(&id));
+        if known {
             already += 1;
         } else {
             content.push_str(line);

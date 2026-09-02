@@ -53,8 +53,51 @@ pub struct Event {
     /// Seconds since the epoch. **Wall clock, not session-relative** — the
     /// audit log's elapsed times cannot be ordered across two sessions, let
     /// alone two machines, which is exactly what folding needs.
+    ///
+    /// Display and within-device ordering only. §5 of the sync design is
+    /// explicit that events are **never** ordered across devices by this: a
+    /// machine offline for six months with a drifting clock produces
+    /// timestamps that interleave wrongly with everything else.
     pub at: i64,
+    /// Which machine recorded this. Empty for a line written before ids
+    /// existed — see [`Event::id`].
+    pub device: String,
+    /// A per-device counter, monotonic, assigned at append.
+    ///
+    /// Zero on a legacy line, which is why [`Event::id`] and not `(device,
+    /// seq)` is the thing to compare.
+    pub seq: u64,
     pub kind: Kind,
+}
+
+impl Event {
+    /// The identity a merge unions over.
+    ///
+    /// **`device:seq`, not a ULID**, which is what the design reached for. The
+    /// pair already has every property the merge needs — unique with no
+    /// coordination, monotonic per device, and a watermark that is an integer
+    /// comparison — and it has one a ULID does not: it **cannot be sorted
+    /// across devices**. A ULID embeds a timestamp, so it silently invites the
+    /// one thing §5 forbids. This makes that mistake unexpressible.
+    ///
+    /// A line written before ids existed has no pair, so it falls back to a
+    /// hash of its own content — which is exactly the dedup those lines have
+    /// always had. Legacy data keeps legacy behaviour; nothing is retrofitted
+    /// with an id it never had, and the imprecision shrinks as they age out.
+    pub fn id(&self) -> String {
+        if self.device.is_empty() {
+            return format!("legacy:{:016x}", legacy_hash(&encode(self)));
+        }
+        format!("{}:{}", self.device, self.seq)
+    }
+}
+
+/// A stable hash of a legacy line, standing in for the id it never had.
+fn legacy_hash(line: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    line.trim_end().hash(&mut h);
+    h.finish()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -153,7 +196,7 @@ pub fn logs_in(data_dir: &Path) -> Vec<PathBuf> {
 /// Opened, written and closed each time rather than held open: a rating is
 /// worth more than a play count and losing one to a crash would be worse than
 /// the cost of an open. There are only a few of these an hour.
-pub fn append(path: &Path, event: &Event) -> Result<(), EventError> {
+pub fn append(path: &Path, device: &str, at: i64, kind: Kind) -> Result<Event, EventError> {
     let fail = |source| EventError::Append {
         path: path.to_path_buf(),
         source,
@@ -161,13 +204,42 @@ pub fn append(path: &Path, event: &Event) -> Result<(), EventError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(fail)?;
     }
+    // Read the counter back out of the log rather than keeping it in a state
+    // file beside it. Two copies of a monotonic counter is one more than can be
+    // kept honest across a crash, and the log is the thing that must be right.
+    // Cheap at this rate — there are a few of these an hour.
+    let event = Event {
+        at,
+        device: device.to_string(),
+        seq: next_seq(path, device),
+        kind,
+    };
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(fail)?;
-    file.write_all(encode(event).as_bytes()).map_err(fail)?;
-    file.flush().map_err(fail)
+    file.write_all(encode(&event).as_bytes()).map_err(fail)?;
+    file.flush().map_err(fail)?;
+    Ok(event)
+}
+
+/// The next sequence number for `device` in this log.
+///
+/// One past the highest already there, so it survives a restart without any
+/// state of its own. A log that cannot be read starts at 1 rather than
+/// refusing: a missing counter must not stop a play being recorded.
+fn next_seq(path: &Path, device: &str) -> u64 {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return 1;
+    };
+    text.lines()
+        .filter_map(decode)
+        .filter(|e| e.device == device)
+        .map(|e| e.seq)
+        .max()
+        .unwrap_or(0)
+        + 1
 }
 
 /// One line: `<seconds>\t<verb>\t<field>…`, newline-terminated.
@@ -181,7 +253,14 @@ fn encode(e: &Event) -> String {
         Kind::Seen(p) => ("seen", vec![p]),
         Kind::Moved(from, to) => ("moved", vec![from, to]),
     };
-    let mut line = format!("{}\t{}", e.at, verb);
+    // `device` and `seq` lead, and that is what makes the two formats tellable
+    // apart without a version marker: a legacy line starts with a timestamp,
+    // which parses as an integer; a device id does not.
+    let mut line = if e.device.is_empty() {
+        format!("{}\t{}", e.at, verb)
+    } else {
+        format!("{}\t{}\t{}\t{}", e.device, e.seq, e.at, verb)
+    };
     for p in rest {
         line.push('\t');
         line.push_str(&escape(&p.to_string_lossy()));
@@ -242,7 +321,20 @@ fn unescape(s: &str) -> String {
 /// than fatal — a truncated last line after a crash must not cost the rest.
 fn decode(line: &str) -> Option<Event> {
     let mut f = line.split('\t');
-    let at: i64 = f.next()?.trim().parse().ok()?;
+    let head = f.next()?.trim();
+    // Two formats in one file, told apart by the first column: a legacy line
+    // opens with a timestamp, which parses as an integer, and a line written
+    // since ids exist opens with a device id, which does not. No version
+    // marker and no migration — an append-only log should not be rewritten to
+    // change its schema, and the old lines still say everything they said.
+    let (device, seq, at) = match head.parse::<i64>() {
+        Ok(at) => (String::new(), 0, at),
+        Err(_) => {
+            let seq: u64 = f.next()?.trim().parse().ok()?;
+            let at: i64 = f.next()?.trim().parse().ok()?;
+            (head.to_string(), seq, at)
+        }
+    };
     let verb = f.next()?;
     let first = PathBuf::from(unescape(f.next()?));
     let kind = match verb {
@@ -258,7 +350,18 @@ fn decode(line: &str) -> Option<Event> {
         }
         _ => return None,
     };
-    Some(Event { at, kind })
+    Some(Event {
+        at,
+        device,
+        seq,
+        kind,
+    })
+}
+
+/// The identity of one logged line, for a merge that unions rather than
+/// compares text.
+pub fn id_of(line: &str) -> Option<String> {
+    decode(line).map(|e| e.id())
 }
 
 /// Read every log in `data_dir` and apply it to `base`.
@@ -323,6 +426,8 @@ pub fn folded(base_path: &Path, data_dir: &Path) -> (History, usize) {
 pub fn seed_from(path: &Path, entry: &Entry) -> Vec<Event> {
     let mut out = vec![Event {
         at: entry.added,
+        device: String::new(),
+        seq: 0,
         kind: Kind::Seen(path.to_path_buf()),
     }];
     // The base records *how many* plays, never when, so they all carry the one
@@ -331,12 +436,16 @@ pub fn seed_from(path: &Path, entry: &Entry) -> Vec<Event> {
     for _ in 0..entry.plays {
         out.push(Event {
             at: when,
+            device: String::new(),
+            seq: 0,
             kind: Kind::Played(path.to_path_buf()),
         });
     }
     if let Some(stars) = entry.rating {
         out.push(Event {
             at: when,
+            device: String::new(),
+            seq: 0,
             kind: Kind::Rated(path.to_path_buf(), Some(stars)),
         });
     }
@@ -354,8 +463,32 @@ mod tests {
         d
     }
 
+    /// A legacy-shaped event: no device, no sequence — the format every line
+    /// in an existing log already has. Kept as the default so the older tests
+    /// go on exercising exactly the data they were written against.
     fn ev(at: i64, kind: Kind) -> Event {
-        Event { at, kind }
+        Event {
+            at,
+            device: String::new(),
+            seq: 0,
+            kind,
+        }
+    }
+
+    /// An event as it is written now.
+    fn ev_id(device: &str, seq: u64, at: i64, kind: Kind) -> Event {
+        Event {
+            at,
+            device: device.into(),
+            seq,
+            kind,
+        }
+    }
+
+    /// `append` assigns the sequence itself, so a test that wants a written
+    /// event says only what happened.
+    fn put(log: &Path, device: &str, at: i64, kind: Kind) {
+        append(log, device, at, kind).unwrap();
     }
 
     fn round_trip(e: &Event) -> Event {
@@ -412,7 +545,7 @@ mod tests {
             ev(300, Kind::Played("/m/a.mp3".into())),
             ev(400, Kind::Rated("/m/a.mp3".into(), Some(5))),
         ] {
-            append(&log, &e).unwrap();
+            append(&log, "dev", e.at, e.kind.clone()).unwrap();
         }
 
         let (h, applied) = folded(&d.join("history.toml"), &d);
@@ -434,10 +567,15 @@ mod tests {
         let laptop = d.join("events-laptop.log");
         let desktop = d.join("events-desktop.log");
 
-        append(&laptop, &ev(100, Kind::Seen("/m/a.mp3".into()))).unwrap();
-        append(&laptop, &ev(200, Kind::Played("/m/a.mp3".into()))).unwrap();
-        append(&desktop, &ev(250, Kind::Played("/m/a.mp3".into()))).unwrap();
-        append(&desktop, &ev(300, Kind::Rated("/m/a.mp3".into(), Some(5)))).unwrap();
+        put(&laptop, "dev", 100, Kind::Seen("/m/a.mp3".into()));
+        put(&laptop, "dev", 200, Kind::Played("/m/a.mp3".into()));
+        put(&desktop, "dev", 250, Kind::Played("/m/a.mp3".into()));
+        put(
+            &desktop,
+            "dev",
+            300,
+            Kind::Rated("/m/a.mp3".into(), Some(5)),
+        );
 
         let (h, _) = folded(&d.join("history.toml"), &d);
         let e = h.get(Path::new("/m/a.mp3")).unwrap();
@@ -455,16 +593,18 @@ mod tests {
     fn the_latest_rating_wins_whatever_order_the_logs_are_read() {
         let d = dir("latest-rating");
         // Deliberately written out of order and to the file that sorts first.
-        append(
+        put(
             &d.join("events-a.log"),
-            &ev(900, Kind::Rated("/m/a.mp3".into(), Some(2))),
-        )
-        .unwrap();
-        append(
+            "a",
+            900,
+            Kind::Rated("/m/a.mp3".into(), Some(2)),
+        );
+        put(
             &d.join("events-b.log"),
-            &ev(100, Kind::Rated("/m/a.mp3".into(), Some(5))),
-        )
-        .unwrap();
+            "b",
+            100,
+            Kind::Rated("/m/a.mp3".into(), Some(5)),
+        );
 
         let (h, _) = folded(&d.join("history.toml"), &d);
         assert_eq!(
@@ -480,14 +620,15 @@ mod tests {
     fn a_move_carries_the_history_when_folded_elsewhere() {
         let d = dir("moved");
         let log = log_path(&d, "test");
-        append(&log, &ev(100, Kind::Seen("/m/old.mp3".into()))).unwrap();
-        append(&log, &ev(200, Kind::Played("/m/old.mp3".into()))).unwrap();
-        append(&log, &ev(300, Kind::Rated("/m/old.mp3".into(), Some(4)))).unwrap();
-        append(
+        put(&log, "dev", 100, Kind::Seen("/m/old.mp3".into()));
+        put(&log, "dev", 200, Kind::Played("/m/old.mp3".into()));
+        put(&log, "dev", 300, Kind::Rated("/m/old.mp3".into(), Some(4)));
+        put(
             &log,
-            &ev(400, Kind::Moved("/m/old.mp3".into(), "/m/new.mp3".into())),
-        )
-        .unwrap();
+            "dev",
+            400,
+            Kind::Moved("/m/old.mp3".into(), "/m/new.mp3".into()),
+        );
 
         let (h, _) = folded(&d.join("history.toml"), &d);
         let e = h.get(Path::new("/m/new.mp3")).expect("carried");
@@ -495,15 +636,88 @@ mod tests {
         assert!(h.get(Path::new("/m/old.mp3")).is_none());
     }
 
+    /// The failure this issue exists for: two identical-looking events on two
+    /// machines are two events, and content dedup kept one (#36).
+    #[test]
+    fn two_plays_in_the_same_second_on_two_machines_are_two_events() {
+        let a = ev_id("laptop", 1, 100, Kind::Played("/m/a.mp3".into()));
+        let b = ev_id("desktop", 1, 100, Kind::Played("/m/a.mp3".into()));
+        assert_eq!(
+            encode(&a).split_once('\t').map(|(_, rest)| rest),
+            encode(&b).split_once('\t').map(|(_, rest)| rest),
+            "the two lines differ only in their device — that is the point"
+        );
+        assert_ne!(a.id(), b.id(), "and they must not share an identity");
+    }
+
+    /// The sequence survives a restart because it is read back from the log,
+    /// not held in a counter beside it.
+    #[test]
+    fn the_sequence_continues_where_the_log_left_off() {
+        let d = dir("seq");
+        let log = log_path(&d, "test");
+        for _ in 0..3 {
+            put(&log, "dev", 100, Kind::Played("/m/a.mp3".into()));
+        }
+        let last = append(&log, "dev", 100, Kind::Played("/m/a.mp3".into())).unwrap();
+        assert_eq!(last.seq, 4);
+        // The shape on disk, asserted rather than described.
+        assert_eq!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+            "dev\t4\t100\tplayed\t/m/a.mp3"
+        );
+
+        // A second device counts on its own, in the same file.
+        let other = append(&log, "other", 100, Kind::Played("/m/a.mp3".into())).unwrap();
+        assert_eq!(other.seq, 1, "each device has its own sequence");
+    }
+
+    /// A log written before ids existed still reads, and still folds.
+    #[test]
+    fn a_legacy_line_decodes_and_keeps_its_old_identity() {
+        let legacy = "100\tplayed\t/m/a.mp3";
+        let e = decode(legacy).expect("legacy lines must still parse");
+        assert_eq!(e.at, 100);
+        assert!(e.device.is_empty());
+        assert!(
+            e.id().starts_with("legacy:"),
+            "no id is invented for a line that never had one: {}",
+            e.id()
+        );
+        // Identical text means identical identity — exactly the dedup those
+        // lines have always had, neither better nor worse.
+        assert_eq!(e.id(), decode(legacy).unwrap().id());
+    }
+
+    /// Both formats in one file, which is what an existing log becomes the
+    /// moment anything is appended to it.
+    #[test]
+    fn a_log_may_hold_both_formats() {
+        let d = dir("mixed");
+        let log = log_path(&d, "test");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(&log, "100\tplayed\t/m/a.mp3\n").unwrap();
+        put(&log, "dev", 200, Kind::Played("/m/a.mp3".into()));
+
+        let (h, applied) = folded(&d.join("history.toml"), &d);
+        assert_eq!(applied, 2, "both lines fold");
+        assert_eq!(h.get(Path::new("/m/a.mp3")).unwrap().plays, 2);
+    }
+
     /// A play whose `seen` never reached the disk still has to land somewhere.
     #[test]
     fn a_play_without_a_sighting_still_counts() {
         let d = dir("orphan-play");
-        append(
+        put(
             &log_path(&d, "test"),
-            &ev(500, Kind::Played("/m/a.mp3".into())),
-        )
-        .unwrap();
+            "test",
+            500,
+            Kind::Played("/m/a.mp3".into()),
+        );
         let (h, _) = folded(&d.join("history.toml"), &d);
         let e = h.get(Path::new("/m/a.mp3")).expect("created by the play");
         assert_eq!((e.plays, e.added), (1, 500));
@@ -519,11 +733,12 @@ mod tests {
         seed.note_played(Path::new("/m/a.mp3"), 60);
         seed.save(&base).unwrap();
 
-        append(
+        put(
             &log_path(&d, "test"),
-            &ev(700, Kind::Played("/m/a.mp3".into())),
-        )
-        .unwrap();
+            "test",
+            700,
+            Kind::Played("/m/a.mp3".into()),
+        );
         let (h, _) = folded(&base, &d);
         let e = h.get(Path::new("/m/a.mp3")).unwrap();
         assert_eq!(e.plays, 2, "the base's play was lost or the log's was");
@@ -533,11 +748,12 @@ mod tests {
     #[test]
     fn only_event_logs_are_read() {
         let d = dir("stray-files");
-        append(
+        put(
             &log_path(&d, "test"),
-            &ev(100, Kind::Played("/m/a.mp3".into())),
-        )
-        .unwrap();
+            "test",
+            100,
+            Kind::Played("/m/a.mp3".into()),
+        );
         std::fs::write(d.join("history.toml"), "not events").unwrap();
         std::fs::write(d.join("notes.txt"), "100\tplayed\t/m/b.mp3\n").unwrap();
         std::fs::write(d.join("events-x.log.bak"), "100\tplayed\t/m/c.mp3\n").unwrap();

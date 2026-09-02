@@ -308,13 +308,8 @@ fn run_tui(
         println!("history: {applied} events");
     }
     let log = |event: crate::events::Kind| {
-        if let Err(e) = crate::events::append(
-            &events_path,
-            &crate::events::Event {
-                at: crate::history::now(),
-                kind: event,
-            },
-        ) {
+        if let Err(e) = crate::events::append(&events_path, &machine, crate::history::now(), event)
+        {
             eprintln!("history: {e}");
         }
     };
@@ -462,6 +457,7 @@ fn run_tui(
         let total = history.len();
         state.history = history;
         state.events_path = Some(events_path);
+        state.machine = machine.clone();
         state.audit.line(
             "history",
             &if first_run {
