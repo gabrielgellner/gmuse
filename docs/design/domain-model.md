@@ -90,7 +90,8 @@ classDiagram
         Option~String~ title_on_release
     }
     class Distribution {
-        AudioId id
+        Id~Distribution~ id
+        AudioId audio
         Format format
         u32 bitrate
         Option~Measured~ cutoff_khz
@@ -98,6 +99,7 @@ classDiagram
         Option~u32~ encoder_delay
     }
     class Holding {
+        Ref~Distribution~ distribution
         Ref~Device~ device
         String locator
         Instant asserted
@@ -132,6 +134,8 @@ classDiagram
         ReleaseGroup
         Artist
         Genre
+        Role
+        Label
     }
 
     Recording "0..*" --> "0..1" Work : realises
@@ -139,7 +143,7 @@ classDiagram
     WorkDerivation "0..*" --> "1" Work : to
     RecordingDerivation "0..*" --> "1" Recording : from
     RecordingDerivation "0..*" --> "1" Recording : to
-    MixEntry "1..*" --> "1" Recording : in
+    MixEntry "0..*" --> "1" Recording : in
     MixEntry "0..*" --> "1" Recording : sources
     Medium "1..*" --> "1" Release : on
     Track "1..*" --> "1" Medium : on
@@ -428,6 +432,15 @@ spelling is legitimate, so a typo does not acquire the authority of a sleeve cre
 to be one, where the loser's _id_ forwards. Both keep old references working, and a merge usually mints both — the
 losing entity's label becomes an alias of the winner.
 
+**Three mechanisms can hold a name, and ingest needs to know which.** Without a rule, three sessions make three
+different choices for the same artist. The entityhood test decides it:
+
+| the name                                                     | mechanism            | because                               |
+| ------------------------------------------------------------ | -------------------- | ------------------------------------- |
+| has its own discography — releases credited to _AFX_ as such | `Artist` + `AliasOf` | things point at it                    |
+| is a variant nothing distinguishes — `Emmy Lou Harris`       | an `Alias` row       | nobody printed it deliberately        |
+| belongs to one printed credit — `vs.` on one release         | `as_credited`        | a fact about a credit, not the artist |
+
 ### An encoding is not a copy
 
 A `Distribution` is an **encoding**; a `Holding` is a **copy of it on a device**. DCAT is explicit that a distribution
@@ -438,7 +451,8 @@ Every field of an encoding is a fact about the bytes and travels; only the locat
 
 ```rust
 struct Distribution {              // an encoding
-    id: AudioId,
+    id: Id<Distribution>,          // UUIDv5(namespace, audio) — derived, not random
+    audio: AudioId,                // the binding it was derived from
     recording: Option<Ref<Recording>>,
     format: Format,
     bitrate: u32,
@@ -448,7 +462,7 @@ struct Distribution {              // an encoding
 }
 
 struct Holding {                   // a copy on a device
-    distribution: AudioId,
+    distribution: Ref<Distribution>,
     device: Ref<Device>,
     locator: String,               // the device's kind says how to read it
     asserted: Instant,             // when that device last said so
@@ -458,11 +472,23 @@ struct Holding {                   // a copy on a device
 Keeping them apart is what lets spectral cutoff and ReplayGain be measured **once** rather than once per machine per
 file, and what lets "is there a good copy of this anywhere" be answered on a laptop holding 2% of the library.
 
-**A distribution's id is its content.** This is the one deliberate exception to §3's rule that `Id<T>` is a locally
-minted UUID, and it is forced: two devices scanning the same file must arrive at the same distribution without talking
-to each other, or a union merge produces two rows for one encoding. `library-sync-design.md` §2 requires exactly this —
-"identical on every device, generated without coordination, and stable under retagging". The rule holds for everything
-editorial; an encoding is not editorial.
+**A distribution's id is _derived from_ its content, and is still a UUID.**
+
+```
+Id<Distribution> = UUIDv5(gmuse_namespace, audio_id)
+```
+
+Two devices scanning the same file must arrive at the same distribution without talking to each other, which
+`library-sync-design.md` §2 requires — "identical on every device, generated without coordination, and stable under
+retagging". Deriving the UUID gets that without making an encoding a special case: `Ref`, the redirect map,
+`ExternalBinding` and `CatalogRecord` are all defined over `Id<T>`, and a distribution keyed by a bare `AudioId` could
+be the target of none of them — `Recording.pinned` would not typecheck.
+
+It also defuses the scheme byte. `AudioId` is stamped `v1:` precisely because that framing may one day have to change.
+Were the hash the identity, a scheme bump would **re-identify every distribution at once** — every pin, every play
+event, every holding dangling together, and the redirect map unable to repair it because it is typed over `Id<T>`.
+Derived instead, `audio_id` is exactly what §3 says a foreign identifier is: **a binding on the entity, not the entity's
+key.** A scheme bump mints new bindings, and ordinary redirects where two schemes disagree.
 
 **Presence is never stored.** A local copy is checked by resolving its locator when you need it, which has to happen
 anyway, so a stored `present` flag would only be something that can go stale.
@@ -477,6 +503,10 @@ replica would hand the row back. They are **single-writer** — only the owning 
 convention suffices: **a device publishes its holding set whole, and the new set replaces that device's previous one.**
 That suits how the set is produced, since a scan yields the complete list rather than a diff, and it self-heals, since a
 device whose holdings have drifted is corrected by its next scan.
+
+In an append-only log this is one event — `HoldingsAsserted { device, set }` — of which **only the latest per device is
+live**. It is therefore the one event type that may be **compacted**: superseded assertions carry no information, where
+a superseded play does. Without that, the log grows by a full file listing every time a device scans.
 
 **Measured fields carry the version of what measured them.** `cutoff_khz` and `gain` are functions of the bytes _and_ of
 the analyser, so "measured once, travels forever" would quietly become "measured once, with the old code" the day the
@@ -566,9 +596,23 @@ Row existence means multi-genre falls out and devices union cleanly, and the ass
 how confident it is — which is exactly what `genre-uncertain.tsv` tracks today and throws away at the end of every pass.
 
 **The default subject is the release group**, because that is how this library is curated and where the data lives:
-querying the release found genres for 3 of 49 records, the group for 130 of 429. Recording-level assignments are the
-override, and they are needed — on a various-artists or mix compilation each track's genre differs from the container's,
-and a classical release mixing works has no single genre.
+querying the release found genres for 3 of 49 records, the group for 130 of 429.
+
+Assignments are rows and rows union, so "recording-level overrides" is not something the storage does — it is a **read
+rule**, and it has to be written down or every caller invents its own:
+
+```
+effective_genres(recording) =
+    its own assignments, if it has any
+    else assignments on the release groups it is on, preferring non-compilations
+    else none
+```
+
+The middle line is where the compilation case lives. A rock song on its album and on _80s Hits_ is reached through two
+release groups, and the naive union files it under the compilation's `Pop`. Preferring `ReleaseType` values that are not
+compilations resolves it with data the model already carries, and falling back to all of them keeps a compilation-only
+recording from having no genre at all. Where that still gets it wrong, the fix is an assignment on the recording — which
+is the override working as intended, rather than a rule guessing harder.
 
 ### Enumerations, entities, attributes
 
@@ -768,6 +812,11 @@ If provisionals ever accumulate faster than they are cleared, the upgrade is **s
 queue of proposals carrying basis and confidence, accepted by a keystroke. That is the propose / review / apply shape
 `tools/` already uses, and it moves the searching to the machine while leaving the deciding with the owner.
 
+**`NotSame` is reserved now, unimplemented.** Rejecting a proposal has to be recordable, or a staged queue re-proposes
+`ANTIGONE` against `Antigone` every time it runs and the review never converges. It is a cannot-link constraint between
+two ids, it is cheap to reserve in the event schema, and it is expensive to add afterwards — a rejection that was never
+written down cannot be recovered.
+
 ### The artefact ladder
 
 SDMX stacks Annotable → Identifiable → Nameable → Versionable → Maintainable. Here: **Identifiable** is kept and is the
@@ -789,10 +838,24 @@ Not one merge rule. Fields differ in nature, and pretending otherwise loses data
 | **event**       | plays, skips, ratings     | fact   | union; cannot conflict by construction |
 | **local**       | locator, `seen`, mtime    | —      | never merged                           |
 
+**"Last wins" needs a clock, and a wall clock is not one.** A laptop and a NAS drift, and a device whose clock runs fast
+would silently win every conflict for as long as the skew lasts. The order is therefore:
+
+1. **causal order** where it is determinable — `device:seq` (#36) already carries this
+2. a **hybrid logical clock** where two writes are genuinely concurrent — physical time advanced by a logical counter,
+   so it never runs backwards
+3. **device id** as the final tiebreak, so the result is total and every replica agrees
+
+This is baked into every event ever written, so it is settled before the first one is.
+
 **Structural fields are correctable, not final.** They demonstrably change: MusicBrainz corrected two track titles
 during an import and merged a recording id away entirely. A change is an event carrying `(field, from, to, basis)`, so
 nothing is lost, and a conflict is two corrections from the same base — which requires causality, which is `device:seq`
 on every event (#36).
+
+**A rating is the latest rating event for that recording**, by the order above. The events union like any others and
+none is discarded, so a rating set on two devices during one disconnected window resolves to a single value and both
+remain in the log.
 
 **A play event names the distribution it played, where one is known.** The recording is what the event is _about_ and
 what conforms with the library cube; the distribution pins which encoding — and through it which release — a play came
@@ -835,6 +898,11 @@ and the compound string stops being load-bearing.
 
 **Hierarchies are separate from the vocabulary**, as in SDMX and unlike SKOS's `skos:broader` on the concept itself. One
 genre list can carry several hierarchies — one for browsing, another for filtering — without the concepts changing.
+
+**A hierarchy can acquire a cycle, and tolerating it is not enough.** Edges are rows and rows union, so one device
+adding `A parent-of B` while another adds `B parent-of A` produces a cycle that neither authored. The depth bound in §5
+stops it hanging a render, but that hides the problem rather than fixing it: a detected cycle puts a row in the review
+queue, because the data is wrong and only a person can say which edge was meant.
 
 ### Many-valued dimensions do not sum, and that is correct
 
@@ -886,8 +954,12 @@ file lands early against another. The fix is not to make cues encoding-level —
 was supposed to stop being. Cues are stored against a canonical timeline, each `Distribution` records its own encoder
 delay (LAME's gapless header carries it), and the offset is corrected at load.
 
-This is unbuilt and belongs to the two-deck work, but it is recorded here because it decides where a field lives, which
-is expensive to change later.
+**The canonical timeline is the decoded signal with encoder delay removed.** That is the one frame of reference every
+encoding of a source agrees on, which is what makes a cue point portable across a re-rip.
+
+Beatgrid and cue-point entities are not specified here. They are recording-keyed and expressed against that timeline,
+and the rest belongs to the two-deck work. This much is recorded because it decides where a field lives, which is
+expensive to change later.
 
 ---
 
@@ -1098,15 +1170,20 @@ widget over the same cube, and a mix-compatibility view is configuration rather 
 
 ---
 
-## 11. Open question
+## 11. Convergence without a coordinator
 
-**Do two devices that catalogue the same library independently mint the same entities?** A `Distribution` is safe, since
-its id is its content. A `Recording` is not: it is a locally minted UUID, so two machines cataloguing the same files
-before they have ever synced produce two recordings per song. Reconciling through the `audio_id` → recording binding at
-first sync is the likely answer, but that is a mechanism rather than a decision. This is the cost of the ruling in §3
-that our keys are ours, and it is worth paying — it just has to be paid somewhere.
+Two machines cataloguing the same files before they have ever synced mint two `Recording`s for one song, because those
+ids are ours. That is the cost of §3's ruling, and it is paid at first sync rather than avoided.
 
-It cannot arise until a second machine runs gmuse, so it is not urgent.
+**Mint convergently wherever a binding permits it.** A `Distribution` already converges, since its id is derived from
+its content. Where a file carries a MusicBrainz recording id — 83% of this library — the recording's id derives the same
+way, `UUIDv5(namespace, mbid)`, and two machines agree without having met. The residue is unbound material.
+
+**For the residue, the collision is the detector.** Both machines mint the same `Distribution` and each sets its
+`recording` to its own new `Recording`. That is one structural field receiving two different writes from the same empty
+base — which §4 already routes to "correction event, **surfaced**". No new mechanism is required: the duplicate
+announces itself at exactly the moment there is enough information to see it, and a person decides, as §3 requires for
+every other identity change.
 
 ### Keeping this document honest
 
