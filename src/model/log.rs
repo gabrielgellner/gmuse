@@ -88,6 +88,16 @@ pub enum Fact {
         held: BTreeMap<Id<Distribution>, String>,
     },
 
+    /// A rating, or its removal with `None`.
+    ///
+    /// **The latest by causal order wins**, and none is discarded — a rating
+    /// set on two devices during one disconnected window resolves to a single
+    /// value while both stay in the log.
+    Rated {
+        recording: Id<Recording>,
+        stars: Option<u8>,
+    },
+
     /// A play. Counted, never a stored number.
     Played {
         recording: Id<Recording>,
@@ -107,6 +117,8 @@ pub struct Catalogue {
     pub distributions: BTreeMap<Id<Distribution>, Distributed>,
     pub genres: BTreeSet<(Id<Recording>, String)>,
     pub plays: BTreeMap<Id<Recording>, u32>,
+    /// The latest rating per recording. A fold, never a stored number.
+    pub ratings: BTreeMap<Id<Recording>, u8>,
     /// What each device last said it holds, and when it said so.
     ///
     /// The stamp is not decoration. You cannot stat another machine's disk, so
@@ -223,6 +235,17 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         held: held.clone(),
                     },
                 );
+            }
+            Fact::Rated { recording, stars } => {
+                // Records arrive in stamp order, so the last simply wins.
+                match stars {
+                    Some(n) => {
+                        cat.ratings.insert(*recording, *n);
+                    }
+                    None => {
+                        cat.ratings.remove(recording);
+                    }
+                }
             }
             Fact::Played { recording, .. } => {
                 *cat.plays.entry(*recording).or_insert(0) += 1;

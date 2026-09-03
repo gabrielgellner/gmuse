@@ -160,6 +160,10 @@ impl Instance {
         );
     }
 
+    pub fn rate(&mut self, now: i64, recording: Id<Recording>, stars: Option<u8>) {
+        self.append(now, Fact::Rated { recording, stars });
+    }
+
     pub fn play(&mut self, now: i64, recording: Id<Recording>, distribution: Id<Distribution>) {
         self.append(
             now,

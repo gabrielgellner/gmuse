@@ -307,7 +307,7 @@ fn two_instances_ingesting_the_same_real_files() {
 }
 
 /// A tiny real WAV, so there is something to hash.
-fn write_wav(path: &std::path::Path, frames: usize) {
+pub(crate) fn write_wav(path: &std::path::Path, frames: usize) {
     use std::io::Write;
     let bytes = 4 * frames;
     let mut f = std::fs::File::create(path).unwrap();
@@ -331,7 +331,7 @@ fn write_wav(path: &std::path::Path, frames: usize) {
 }
 
 /// The tag Picard writes: a real `UFID` frame, not a text item.
-fn write_tags(path: &std::path::Path, title: &str, artist: &str, mbid: Option<&str>) {
+pub(crate) fn write_tags(path: &std::path::Path, title: &str, artist: &str, mbid: Option<&str>) {
     use lofty::config::WriteOptions;
     use lofty::id3::v2::{Frame, Id3v2Tag, UniqueFileIdentifierFrame};
     use lofty::prelude::{Accessor, TagExt};
