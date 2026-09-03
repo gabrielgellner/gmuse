@@ -672,6 +672,12 @@ impl Ui {
 /// What the UI needs to render. Borrowed, never owned — the library is the
 /// application's, not the UI's.
 pub struct Context<'a> {
+    /// What the library knows, assembled and ready to draw.
+    ///
+    /// The direction of travel (#77): a read asks this and gets back a `Row`
+    /// with no path in it. `store` is what has not moved yet, and the two are
+    /// built from one scan so they cannot disagree.
+    pub library: &'a crate::model::seam::Librarian,
     pub store: &'a Store,
     /// `None` in tests, which have no audio device.
     pub player: Option<&'a PlayerHandle>,
@@ -836,14 +842,21 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
         ui.notify("nothing to rate");
         return;
     };
-    let Some(track) = ctx.store.get(id) else {
+    // **Read through the library, not the store** (#77). A rating is a fact
+    // about a recording at both ends now: the row that says what is being
+    // rated comes from the same place the rating goes, so the two cannot
+    // describe different things.
+    let Some(recording) = ctx.store.recording_of(id) else {
+        ui.notify("this file has no identity to rate — it cannot be read as audio");
         return;
     };
-    let recording = ctx.store.recording_of(id);
-    let title = format!("{} — {}", track.file_under(), track.display_title());
+    let Some(row) = ctx.library.row(recording) else {
+        return;
+    };
+    let title = format!("{} — {}", row.file_under, row.title);
 
     if spec == RateSpec::Report {
-        let current = match recording.and_then(|r| ui.listened.ratings.get(&r).copied()) {
+        let current = match ui.listened.ratings.get(&recording).copied() {
             Some(n) => format!("{n}/5"),
             None => "unrated".into(),
         };
@@ -855,10 +868,6 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
         ui.notify("ratings need somewhere to record them");
         return;
     }
-    let Some(recording) = recording else {
-        ui.notify("this file has no identity to rate — it cannot be read as audio");
-        return;
-    };
     // `note_rating` takes zero as "clear", which is the storage-level spelling
     // of `RateSpec::Clear`; the command language does not have a zero.
     let stars = match spec {
@@ -4356,6 +4365,7 @@ mod tests {
     fn tree_view_renders_artists_collapsed() {
         let store = fixture();
         let ctx = Context {
+            library: lib_of(&store),
             store: &store,
             player: None,
             remote: None,
@@ -4380,6 +4390,7 @@ mod tests {
     fn compilation_stays_one_artist_with_every_track() {
         let store = fixture();
         let ctx = Context {
+            library: lib_of(&store),
             store: &store,
             player: None,
             remote: None,
@@ -4405,6 +4416,7 @@ mod tests {
     fn multi_disc_album_does_not_interleave() {
         let store = fixture();
         let ctx = Context {
+            library: lib_of(&store),
             store: &store,
             player: None,
             remote: None,
@@ -4427,6 +4439,7 @@ mod tests {
     fn untagged_track_shows_its_file_name() {
         let store = fixture();
         let ctx = Context {
+            library: lib_of(&store),
             store: &store,
             player: None,
             remote: None,
@@ -4448,6 +4461,7 @@ mod tests {
     fn empty_playlist_says_so_rather_than_rendering_blank() {
         let store = fixture();
         let ctx = Context {
+            library: lib_of(&store),
             store: &store,
             player: None,
             remote: None,
@@ -4465,6 +4479,7 @@ mod tests {
     fn navigation_clamps_at_both_ends() {
         let store = fixture();
         let ctx = Context {
+            library: lib_of(&store),
             store: &store,
             player: None,
             remote: None,
@@ -4488,8 +4503,23 @@ mod tests {
     // `ctx.player` is None here: these cover the decisions the UI makes, which
     // is where the bugs are. Whether cpal then makes a sound is M1/M2's ground.
 
+    /// A librarian for this store, leaked so a `Context` can borrow it.
+    ///
+    /// Leaking is the cheap way to give a test borrow a `'static` life. The
+    /// process is about to end, and the alternative is threading a second
+    /// local through every call site in a ten-thousand-line file.
+    fn lib_of(store: &Store) -> &'static crate::model::seam::Librarian {
+        Box::leak(Box::new(crate::bridge::librarian(
+            store,
+            &std::collections::BTreeSet::new(),
+            crate::model::id::Id::derived(b"test"),
+            0,
+        )))
+    }
+
     fn ctx_of(store: &Store) -> Context<'_> {
         Context {
+            library: lib_of(store),
             store,
             player: None,
             remote: None,

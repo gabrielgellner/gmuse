@@ -10,6 +10,7 @@
 mod audio;
 mod audio_id;
 mod audit;
+mod bridge;
 mod cache;
 mod catalog;
 mod cli;
@@ -350,8 +351,8 @@ fn run_tui(
     let machine = crate::events::machine_id(&config::default_state_dir());
     let device = crate::model::id::Id::derived(machine.as_bytes());
     let now = crate::history::now();
-    let (log, damage) =
-        crate::model::instance::Instance::open(&loaded.data_dir, device, crate::history::now_ms());
+    let now_ms = crate::history::now_ms();
+    let (log, damage) = crate::model::instance::Instance::open(&loaded.data_dir, device, now_ms);
     let listened = log.catalogue();
     if !log.records().is_empty() {
         println!("history: {} records", log.records().len());
@@ -390,7 +391,19 @@ fn run_tui(
         }
     };
 
+    // One scan, two shapes. The store is what the player still reads through;
+    // the librarian is what it is moving to (#77), and building both from the
+    // same pass is what keeps them from disagreeing.
+    let assembling = std::time::Instant::now();
+    let library_view = crate::bridge::librarian(&app.store, log.records(), device, now_ms);
+    println!(
+        "librarian: {} recordings in {:.1}s",
+        library_view.recordings().count(),
+        assembling.elapsed().as_secs_f64()
+    );
+
     let ctx = ui::Context {
+        library: &library_view,
         store: &app.store,
         player: Some(&app.player),
         remote: server.as_ref(),

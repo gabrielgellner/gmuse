@@ -485,21 +485,32 @@ mod tests {
     #[test]
     fn the_leak_from_the_player_only_narrows() {
         const STORE: usize = 5;
-        const PATHS: usize = 8;
+        const PATHS: usize = 4;
+        /// **The number that actually measures the seam.** The player reaches
+        /// through `ctx.store` far more often than it names the type, so
+        /// counting `Store` alone said 5 while sixteen reads went around the
+        /// librarian. Replacing a read lowers this and leaves the others flat,
+        /// which is exactly the progress #77 is made of.
+        const REACHES: usize = 16;
 
-        let (mut store, mut paths) = (0, 0);
+        let (mut store, mut paths, mut reaches) = (0, 0, 0);
         for (_, text) in read("src/ui") {
             let live = production(&text);
             store += live.matches("Store").count();
             paths += live.matches("PathBuf").count();
+            reaches += live.matches("ctx.store.").count();
         }
 
         assert!(
-            store <= STORE && paths <= PATHS,
-            "the seam widened: Store {store} (was {STORE}), PathBuf {paths} (was {PATHS})"
+            store <= STORE && paths <= PATHS && reaches <= REACHES,
+            "the seam widened: Store {store} (was {STORE}), \
+             PathBuf {paths} (was {PATHS}), reaches {reaches} (was {REACHES})"
         );
-        if store < STORE || paths < PATHS {
-            eprintln!("seam narrowed to Store {store}, PathBuf {paths} — lower the constants");
+        if store < STORE || paths < PATHS || reaches < REACHES {
+            eprintln!(
+                "seam narrowed to Store {store}, PathBuf {paths}, reaches {reaches} \
+                 — lower the constants"
+            );
         }
     }
 
