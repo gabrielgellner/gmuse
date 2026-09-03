@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 pub mod clock;
+pub mod encoding;
 pub mod entity;
 pub mod id;
 pub mod ingest;
