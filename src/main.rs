@@ -223,6 +223,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if args.migrate_log {
+        let machine = crate::events::machine_id(&config::default_state_dir());
+        match crate::model::migrate::run(
+            &loaded.data_dir,
+            &app.roots,
+            &machine,
+            crate::history::now(),
+        ) {
+            Ok(outcome) => {
+                println!("{outcome}");
+                for (path, what) in &outcome.report.unresolved {
+                    println!("  unresolved {what}: {path}");
+                }
+            }
+            Err(e) => {
+                eprintln!("migrate: {e}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     run_tui(
         &app,
         args.smart_artist_sort,

@@ -458,3 +458,63 @@ mod tests {
         );
     }
 }
+
+/// What a run over a real data directory did.
+#[derive(Debug)]
+pub struct Outcome {
+    /// What the scan had to say, since the conversion is only as good as it.
+    pub scan: crate::model::populate::Report,
+    pub report: Report,
+    /// Records written. Fewer than `report.converted` on a second run, because
+    /// what is already on disk is not written again.
+    pub written: usize,
+}
+
+impl std::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}\nmigrate: {} — {} written",
+            self.scan, self.report, self.written
+        )
+    }
+}
+
+/// Convert this machine's event logs into the identity-keyed log, once.
+///
+/// **Only history is converted.** The old log's `seen` events are 95% of it
+/// and are local state that a scan regenerates; the catalogue — artists,
+/// recordings, encodings, holdings — is likewise re-derived by scanning, so
+/// writing it here would persist what is already reproducible. What cannot be
+/// reproduced is a rating somebody gave and a play that happened, and that is
+/// what this carries across.
+///
+/// **Nothing is deleted.** The old logs stay exactly where they are. Running
+/// this again after a scan that identifies more files converts more and
+/// re-writes nothing, because what is already on disk is subtracted first.
+pub fn run(
+    data_dir: &Path,
+    roots: &[std::path::PathBuf],
+    device_name: &str,
+    now: i64,
+) -> Result<Outcome, crate::model::durable::LogError> {
+    let device = Id::<Device>::derived(device_name.as_bytes());
+    let events = crate::events::events_in(data_dir);
+    let (_, scan) = crate::model::populate::read_library(device_name, roots, now);
+
+    let (records, report) = to_records(&events, device, |path| scan.identified.get(path).copied());
+
+    // Subtract what is already there, so a second run is free rather than
+    // additive. The set semantics would collapse duplicates on read anyway;
+    // this keeps the file from growing by its own size every time.
+    let path = crate::model::durable::log_path(data_dir, device);
+    let (existing, _) = crate::model::durable::read(&path);
+    let fresh: BTreeSet<Record> = records.difference(&existing).cloned().collect();
+    let written = crate::model::durable::append(&path, &fresh)?;
+
+    Ok(Outcome {
+        scan,
+        report,
+        written,
+    })
+}

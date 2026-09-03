@@ -56,6 +56,15 @@ pub struct Cli {
     #[arg(long)]
     pub migrate_data: bool,
 
+    /// Convert the path-keyed event log into the identity-keyed one, once.
+    ///
+    /// Scans the library so it can answer what each recorded path *was*, then
+    /// writes the facts it could place and names the ones it could not. It
+    /// reads the old log and never deletes it, so it can be run again after a
+    /// scan that identifies more (#82).
+    #[arg(long)]
+    pub migrate_log: bool,
+
     /// Re-read every file, ignoring the mtime fast path.
     #[arg(long)]
     pub rescan: bool,

@@ -18,7 +18,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::model::entity::Encoding;
+use std::collections::BTreeMap;
+
+use crate::model::entity::{Encoding, Recording};
 use crate::model::id::Id;
 use crate::model::ingest;
 use crate::model::instance::Instance;
@@ -39,6 +41,14 @@ pub struct Report {
     /// collision.
     pub provisional: usize,
     pub elapsed: Duration,
+    /// What each scanned path turned out to be.
+    ///
+    /// Read back out of the catalogue rather than recomputed, so it cannot
+    /// drift from the ladder in `Instance::ingest`. A migration needs exactly
+    /// this — "what is this path?" is the one question the old log cannot
+    /// answer about itself — and re-deriving it here is how two answers to one
+    /// question get into the codebase.
+    pub identified: BTreeMap<PathBuf, Id<Recording>>,
 }
 
 impl Report {
@@ -108,6 +118,13 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
 
     let mut scanned = Vec::with_capacity(paths.len());
     let mut held = std::collections::BTreeMap::new();
+    // Path to encoding, kept **per path** rather than read back out of
+    // `held`. Two files with identical bytes mint one encoding, so a map keyed
+    // by encoding holds one of their paths and forgets the other — which is
+    // not hypothetical: the migration lost nine play events to a duplicated
+    // album before this existed, and reported them as unidentifiable files
+    // that were sitting on disk under the exact names it had just printed.
+    let mut minted: Vec<(PathBuf, Id<Encoding>)> = Vec::with_capacity(paths.len());
 
     for path in paths {
         match ingest::read(&path) {
@@ -117,10 +134,9 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
                 } else {
                     report.provisional += 1;
                 }
-                held.insert(
-                    Id::<Encoding>::of_audio(&s.audio),
-                    path.display().to_string(),
-                );
+                let encoding = Id::<Encoding>::of_audio(&s.audio);
+                held.insert(encoding, path.display().to_string());
+                minted.push((path, encoding));
                 scanned.push(s);
                 report.ingested += 1;
             }
@@ -129,6 +145,17 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
     }
 
     instance.ingest(now, &scanned);
+
+    // Which recording each file became, taken from the catalogue the ingest
+    // just produced. Not recomputed: the ladder that chooses a recording id
+    // lives in one place and this reads its answer.
+    let catalogue = instance.catalogue();
+    for (path, encoding) in minted {
+        if let Some(recording) = catalogue.encodings.get(&encoding).and_then(|e| e.recording) {
+            report.identified.insert(path, recording);
+        }
+    }
+
     instance.assert_holdings(now, held);
     report.elapsed = started.elapsed();
     report
@@ -163,6 +190,41 @@ mod tests {
             write_tags(&p, title, "Stephan Bodzin", *mbid);
         }
         dir
+    }
+
+    /// **Two files, identical bytes, and both paths still answer.**
+    ///
+    /// Duplicates mint one encoding, so a path map read back out of an
+    /// encoding-keyed collection keeps one of them and forgets the other. The
+    /// migration found this for real: nine play events on a duplicated album
+    /// came back as unidentifiable files that were sitting on disk under the
+    /// exact names the report had just printed.
+    #[test]
+    fn a_duplicated_file_identifies_under_both_of_its_paths() {
+        let dir = std::env::temp_dir().join("gmuse-populate-duplicate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (one, two) = (dir.join("01 Callisto.wav"), dir.join("1 - Callisto.wav"));
+        for path in [&one, &two] {
+            write_wav(path, 4410);
+            write_tags(path, "Callisto", "Stephan Bodzin", None);
+        }
+
+        let (_, report) = read_library("laptop", &[dir], 100);
+        assert_eq!(report.ingested, 2, "both files were read");
+        assert_eq!(
+            report.identified.get(&one),
+            report.identified.get(&two),
+            "same bytes, same recording"
+        );
+        assert!(
+            report.identified.contains_key(&one),
+            "and the first path answers"
+        );
+        assert!(
+            report.identified.contains_key(&two),
+            "and so does the second"
+        );
     }
 
     /// **Every file is accounted for.** A scan that loses files without saying

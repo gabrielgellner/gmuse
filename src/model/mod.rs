@@ -13,6 +13,7 @@
 
 pub mod arena;
 pub mod clock;
+pub mod durable;
 pub mod encoding;
 pub mod entity;
 pub mod id;
