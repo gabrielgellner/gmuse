@@ -19,6 +19,16 @@ pub use crate::model::sortkey::{SortKey, sort_key};
 pub struct Library {
     members: HashSet<TrackId>,
     tree: BTreeMap<SortKey, BTreeMap<SortKey, Vec<TrackId>>>,
+    /// What to *show* for each sort key.
+    ///
+    /// The tree is keyed by a normalised sort key — case folded, marks
+    /// flattened, article moved — which is right for ordering and unreadable
+    /// on screen. Without this every renderer has to reach back into the
+    /// `Store` for a track under the node just to recover the string, which is
+    /// how a projection that exists to answer questions ends up unable to
+    /// answer the simplest one.
+    artist_names: BTreeMap<SortKey, String>,
+    album_names: BTreeMap<(SortKey, SortKey), String>,
     sorted: Vec<TrackId>,
     smart_artist_sort: bool,
 }
@@ -54,12 +64,22 @@ impl Library {
     fn reindex(&mut self, store: &Store) {
         self.tree.clear();
         self.sorted.clear();
+        self.artist_names.clear();
+        self.album_names.clear();
 
         for &id in &self.members {
             let Some(track) = store.get(id) else { continue };
             let artist = sort_key(track.file_under(), self.smart_artist_sort);
             // Albums keep their article: "The Wall" belongs under T.
             let album = sort_key(track.album_or_unknown(), false);
+            // First one under a node names it, which is what every renderer
+            // was doing by hand.
+            self.artist_names
+                .entry(artist.clone())
+                .or_insert_with(|| track.file_under().to_string());
+            self.album_names
+                .entry((artist.clone(), album.clone()))
+                .or_insert_with(|| track.album_or_unknown().to_string());
             self.tree
                 .entry(artist)
                 .or_default()
@@ -96,6 +116,22 @@ impl Library {
     }
 
     /// Artists, in sort order.
+    /// What to show for an artist, rather than what to sort it by.
+    pub fn artist_name<'a>(&'a self, artist: &'a SortKey) -> &'a str {
+        self.artist_names
+            .get(artist)
+            .map(String::as_str)
+            .unwrap_or_else(|| artist.as_str())
+    }
+
+    /// What to show for an album under an artist.
+    pub fn album_name<'a>(&'a self, artist: &SortKey, album: &'a SortKey) -> &'a str {
+        self.album_names
+            .get(&(artist.clone(), album.clone()))
+            .map(String::as_str)
+            .unwrap_or_else(|| album.as_str())
+    }
+
     pub fn artists(&self) -> impl Iterator<Item = (&SortKey, &BTreeMap<SortKey, Vec<TrackId>>)> {
         self.tree.iter()
     }

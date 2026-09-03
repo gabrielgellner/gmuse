@@ -651,20 +651,15 @@ impl Ui {
     }
 
     /// The track the cursor is on in the current view, if any.
-    pub fn selected_track(&self, ctx: &Context<'_>) -> Option<TrackId> {
+    pub fn selected_track(&self, _ctx: &Context<'_>) -> Option<TrackId> {
         match self.view {
             // The row itself when it is a track, and otherwise the first
             // track underneath — so `x` on a closed album plays it from the
             // top rather than doing nothing.
             View::Tree => self
                 .tree
-                .selected_track(&self.library, ctx.store)
-                .or_else(|| {
-                    self.tree
-                        .tracks_for(&self.library, ctx.store)
-                        .first()
-                        .copied()
-                }),
+                .selected_track(&self.library)
+                .or_else(|| self.tree.tracks_for(&self.library).first().copied()),
             View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
@@ -1734,19 +1729,19 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
 
             let lib = &ui.library;
             match what {
-                Fold::Open => ui.tree.open(lib, ctx.store),
+                Fold::Open => ui.tree.open(lib),
                 Fold::Close => {
-                    ui.tree.close(lib, ctx.store);
+                    ui.tree.close(lib);
                 }
-                Fold::Toggle => ui.tree.toggle(lib, ctx.store),
-                Fold::OpenDeep => ui.tree.open_deep(lib, ctx.store),
-                Fold::CloseDeep => ui.tree.close_deep(lib, ctx.store),
-                Fold::ToggleDeep => ui.tree.toggle_deep(lib, ctx.store),
-                Fold::All => ui.tree.open_everything(lib, ctx.store),
-                Fold::None => ui.tree.close_everything(lib, ctx.store),
-                Fold::More => ui.tree.more(lib, ctx.store),
-                Fold::Less => ui.tree.less(lib, ctx.store),
-                Fold::Only => ui.tree.only(lib, ctx.store),
+                Fold::Toggle => ui.tree.toggle(lib),
+                Fold::OpenDeep => ui.tree.open_deep(lib),
+                Fold::CloseDeep => ui.tree.close_deep(lib),
+                Fold::ToggleDeep => ui.tree.toggle_deep(lib),
+                Fold::All => ui.tree.open_everything(lib),
+                Fold::None => ui.tree.close_everything(lib),
+                Fold::More => ui.tree.more(lib),
+                Fold::Less => ui.tree.less(lib),
+                Fold::Only => ui.tree.only(lib),
             }
 
             // Only the level forms: `zo` and friends act on the node under the
@@ -1771,7 +1766,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // is the same idea seen edge-on.
         Command::Go(motion) => {
             if ui.view == View::Tree {
-                ui.tree.go(&ui.library, ctx.store, motion, n);
+                ui.tree.go(&ui.library, motion, n);
             } else if let Some(at) = flat_step(ui, ctx, motion, n) {
                 set_cursor(ui, at);
             }
@@ -1832,7 +1827,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             View::Tree => {
                 let leaf = ui
                     .tree
-                    .rows(&ui.library, ctx.store)
+                    .rows(&ui.library)
                     .get(ui.tree.selected)
                     .map(|r| r.is_leaf())
                     .unwrap_or(false);
@@ -1842,7 +1837,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                         play(ui, ctx, id);
                     }
                 } else {
-                    ui.tree.toggle(&ui.library, ctx.store);
+                    ui.tree.toggle(&ui.library);
                 }
             }
             // Elsewhere there is nothing to confirm. Inert in a context is
@@ -2797,7 +2792,7 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
     let ids: Vec<crate::store::TrackId> = match ui.view {
         // From the tree, add everything the cursor covers — an album or an
         // artist — which is the whole point of adding from a tree.
-        View::Tree => ui.tree.tracks_for(&ui.library, ctx.store),
+        View::Tree => ui.tree.tracks_for(&ui.library),
         _ => ui.selected_track(ctx).into_iter().collect(),
     };
     if ids.is_empty() {
@@ -2979,13 +2974,13 @@ fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
 ///
 /// In view 1 that means opening the folds hiding it, and nothing else — the
 /// point is to find it without losing the shape you built up looking for it.
-fn go_to_playing(ui: &mut Ui, ctx: &Context<'_>) {
+fn go_to_playing(ui: &mut Ui, _ctx: &Context<'_>) {
     let Some(id) = ui.playback.current else {
         ui.notify("nothing is playing");
         return;
     };
     let found = match ui.view {
-        View::Tree => ui.tree.reveal(&ui.library, ctx.store, id),
+        View::Tree => ui.tree.reveal(&ui.library, id),
         View::Sorted => match ui.library.sorted().iter().position(|t| *t == id) {
             Some(at) => {
                 ui.sorted = at;
@@ -3095,7 +3090,7 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
         // lot — which is what a single buffer should do.
         View::Tree => ui
             .tree
-            .rows(&ui.library, ctx.store)
+            .rows(&ui.library)
             .iter()
             .map(|row| match row {
                 tree::Row::Track { id, .. } => describe(id),
@@ -3111,7 +3106,7 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
 
 fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
     match ui.view {
-        View::Tree => ui.tree.rows(&ui.library, ctx.store).len(),
+        View::Tree => ui.tree.rows(&ui.library).len(),
         View::Sorted => ui.library.sorted().len(),
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlist_rows.len(),
@@ -3928,7 +3923,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         return;
     }
 
-    let rows = ui.tree.rows(&ui.library, ctx.store);
+    let rows = ui.tree.rows(&ui.library);
     // Artists, albums and tracks in one list. A track row is rendered through
     // the format template rather than labelled, because it has to look
     // different from the artist row above it — which is what makes a single
@@ -4360,7 +4355,7 @@ mod tests {
         };
         let mut ui = ui_of(&store, true);
         // Select "Various Artists" and expand it.
-        let rows = ui.tree.rows(&ui.library, &store);
+        let rows = ui.tree.rows(&ui.library);
         ui.tree.selected = rows
             .iter()
             .position(|r| r.label().contains("Various Artists"))
@@ -4384,7 +4379,7 @@ mod tests {
             remote: None,
         };
         let mut ui = ui_of(&store, true);
-        let rows = ui.tree.rows(&ui.library, &store);
+        let rows = ui.tree.rows(&ui.library);
         ui.tree.selected = rows
             .iter()
             .position(|r| r.label().contains("Wall Builders"))
@@ -4406,7 +4401,7 @@ mod tests {
             remote: None,
         };
         let mut ui = ui_of(&store, true);
-        let rows = ui.tree.rows(&ui.library, &store);
+        let rows = ui.tree.rows(&ui.library);
         ui.tree.selected = rows
             .iter()
             .position(|r| r.label().contains("Unknown Artist"))
@@ -4444,7 +4439,7 @@ mod tests {
             remote: None,
         };
         let mut ui = ui_of(&store, true);
-        let rows = ui.tree.rows(&ui.library, &store).len();
+        let rows = ui.tree.rows(&ui.library).len();
 
         for _ in 0..rows * 2 {
             handle_key(KeyEvent::from(KeyCode::Char('j')), &mut ui, &ctx);
@@ -4472,11 +4467,11 @@ mod tests {
 
     /// Open the artist under the cursor and its first album, so the tracks
     /// are on screen. Tracks live inline now, two folds down.
-    fn expand_to_tracks(ui: &mut Ui, store: &Store) {
+    fn expand_to_tracks(ui: &mut Ui, _store: &Store) {
         let lib = std::mem::take(&mut ui.library);
-        ui.tree.toggle(&lib, store);
+        ui.tree.toggle(&lib);
         ui.tree.selected += 1;
-        ui.tree.toggle(&lib, store);
+        ui.tree.toggle(&lib);
         ui.library = lib;
     }
 
@@ -4495,7 +4490,7 @@ mod tests {
         // Down onto the second track of the open album.
         press(&mut ui, &ctx, "j");
         press(&mut ui, &ctx, "j");
-        let expected = ui.tree.tracks_for(&ui.library, &store)[0];
+        let expected = ui.tree.tracks_for(&ui.library)[0];
         press(&mut ui, &ctx, "<leader> x");
 
         let played = ui.playback.current.expect("nothing started playing");
@@ -4507,11 +4502,11 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        let closed = ui.tree.rows(&ui.library, &store).len();
+        let closed = ui.tree.rows(&ui.library).len();
 
         // On an artist, Enter opens it — there is nothing to play there.
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
-        assert!(ui.tree.rows(&ui.library, &store).len() > closed);
+        assert!(ui.tree.rows(&ui.library).len() > closed);
         assert!(ui.playback.current.is_none(), "Enter played an artist");
 
         // Down to the album, open it, down to the first track.
@@ -4523,7 +4518,7 @@ mod tests {
         // At a track there is nothing left to open, so Enter plays it —
         // snacks' rule, and the reason `Enter` and `x` are not redundant.
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
-        let rows = ui.tree.rows(&ui.library, &store);
+        let rows = ui.tree.rows(&ui.library);
         assert!(
             ui.playback.current.is_some(),
             "Enter did not play the track; rows: {:?}",
@@ -5621,18 +5616,18 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        let before = ui.tree.rows(&ui.library, &store).len();
+        let before = ui.tree.rows(&ui.library).len();
 
         press(&mut ui, &ctx, "space");
         assert_eq!(
-            ui.tree.rows(&ui.library, &store).len(),
+            ui.tree.rows(&ui.library).len(),
             before,
             "space still expands, so it cannot be a leader"
         );
         press(&mut ui, &ctx, "escape");
 
         press(&mut ui, &ctx, "o");
-        assert!(ui.tree.rows(&ui.library, &store).len() > before);
+        assert!(ui.tree.rows(&ui.library).len() > before);
     }
 
     /// `<leader>` is substituted where the configuration lives, so a binding
@@ -5997,12 +5992,12 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        let closed = ui.tree.rows(&ui.library, &store).len();
+        let closed = ui.tree.rows(&ui.library).len();
 
         press(&mut ui, &ctx, "z R");
-        assert!(ui.tree.rows(&ui.library, &store).len() > closed);
+        assert!(ui.tree.rows(&ui.library).len() > closed);
         press(&mut ui, &ctx, "z M");
-        assert_eq!(ui.tree.rows(&ui.library, &store).len(), closed);
+        assert_eq!(ui.tree.rows(&ui.library).len(), closed);
     }
 
     /// The graduated version, which is the reason the level exists at all.
@@ -6011,19 +6006,19 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        let artists = ui.tree.rows(&ui.library, &store).len();
+        let artists = ui.tree.rows(&ui.library).len();
 
         press(&mut ui, &ctx, "z r");
-        let albums = ui.tree.rows(&ui.library, &store).len();
+        let albums = ui.tree.rows(&ui.library).len();
         press(&mut ui, &ctx, "z r");
-        let tracks = ui.tree.rows(&ui.library, &store).len();
+        let tracks = ui.tree.rows(&ui.library).len();
         assert!(
             artists < albums && albums < tracks,
             "zr should add a level each time, got {artists} then {albums} then {tracks}"
         );
 
         press(&mut ui, &ctx, "z m");
-        assert_eq!(ui.tree.rows(&ui.library, &store).len(), albums);
+        assert_eq!(ui.tree.rows(&ui.library).len(), albums);
     }
 
     /// `<leader>?` says what a key does; the guides say how to do the thing.
@@ -6478,7 +6473,7 @@ mod tests {
         ui.saved = Some(crate::playlist::Playlists::new(&scratch("add-tree")));
         new_playlist(&mut ui, &ctx, "mix");
         ui.view = View::Tree;
-        let expected = ui.tree.tracks_for(&ui.library, &store).len();
+        let expected = ui.tree.tracks_for(&ui.library).len();
         press(&mut ui, &ctx, "a");
         assert_eq!(ui.playlist.len(), expected);
         assert!(expected > 1, "the fixture should have a multi-track artist");
@@ -7118,10 +7113,10 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        let closed = ui.tree.rows(&ui.library, &store).len();
+        let closed = ui.tree.rows(&ui.library).len();
 
         press(&mut ui, &ctx, "l");
-        let with_albums = ui.tree.rows(&ui.library, &store).len();
+        let with_albums = ui.tree.rows(&ui.library).len();
         assert!(with_albums > closed, "`l` did not open the artist");
 
         // Down onto an album and open that too: tracks appear inline, which
@@ -7129,17 +7124,17 @@ mod tests {
         press(&mut ui, &ctx, "j");
         press(&mut ui, &ctx, "l");
         assert!(
-            ui.tree.rows(&ui.library, &store).len() > with_albums,
+            ui.tree.rows(&ui.library).len() > with_albums,
             "`l` did not open the album"
         );
 
         // `h` closes the album we are on.
         press(&mut ui, &ctx, "h");
-        assert_eq!(ui.tree.rows(&ui.library, &store).len(), with_albums);
+        assert_eq!(ui.tree.rows(&ui.library).len(), with_albums);
 
         // Already closed, so `h` closes the parent and moves to it.
         press(&mut ui, &ctx, "h");
-        assert_eq!(ui.tree.rows(&ui.library, &store).len(), closed);
+        assert_eq!(ui.tree.rows(&ui.library).len(), closed);
         assert_eq!(ui.tree.selected, 0, "the cursor did not follow up");
     }
 
@@ -10051,17 +10046,17 @@ mod tests {
         ui.view = View::Tree;
 
         press(&mut ui, &ctx, "z R");
-        let wide = ui.tree.rows(&ui.library, &store).len();
+        let wide = ui.tree.rows(&ui.library).len();
         // Onto a track, three levels down.
         press(&mut ui, &ctx, "j j j");
-        let on = ui.tree.rows(&ui.library, &store)[ui.tree.selected].clone();
+        let on = ui.tree.rows(&ui.library)[ui.tree.selected].clone();
         assert!(
             matches!(on, tree::Row::Track { .. }),
             "expected a track: {on:?}"
         );
 
         press(&mut ui, &ctx, "z x");
-        let rows = ui.tree.rows(&ui.library, &store);
+        let rows = ui.tree.rows(&ui.library);
         assert!(rows.len() < wide, "nothing closed");
         assert_eq!(
             rows[ui.tree.selected], on,
@@ -10086,7 +10081,7 @@ mod tests {
 
         press(&mut ui, &ctx, "z R");
         press(&mut ui, &ctx, "z x");
-        assert_eq!(ui.tree.rows(&ui.library, &store).len(), 8);
+        assert_eq!(ui.tree.rows(&ui.library).len(), 8);
     }
 
     /// It holds the row on screen, for the same reason `zm` does — closing
@@ -10197,10 +10192,10 @@ mod tests {
         press(&mut ui, &ctx, "<leader> x");
         let playing = ui.playback.current.expect("nothing started");
         press(&mut ui, &ctx, "z M");
-        assert_eq!(ui.tree.rows(&ui.library, &store).len(), 8, "all closed");
+        assert_eq!(ui.tree.rows(&ui.library).len(), 8, "all closed");
 
         press(&mut ui, &ctx, "g p");
-        let rows = ui.tree.rows(&ui.library, &store);
+        let rows = ui.tree.rows(&ui.library);
         assert!(
             matches!(&rows[ui.tree.selected], tree::Row::Track { id, .. } if *id == playing),
             "the cursor should be on the playing track: {:?}",

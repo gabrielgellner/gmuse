@@ -13,7 +13,7 @@
 
 use crate::cmd::Motion;
 use crate::library::{Library, SortKey};
-use crate::store::{Store, TrackId};
+use crate::store::TrackId;
 use crate::ui::fold::Expansion;
 
 /// One visible line.
@@ -96,16 +96,10 @@ impl TreeState {
     ///
     /// Display names come from the first track under each node, since §4 keeps
     /// display strings on the `Track` and only sort keys in the tree.
-    pub fn rows(&self, lib: &Library, store: &Store) -> Vec<Row> {
+    pub fn rows(&self, lib: &Library) -> Vec<Row> {
         let mut rows = Vec::new();
         for (artist_key, albums) in lib.artists() {
-            let display = albums
-                .values()
-                .flatten()
-                .next()
-                .and_then(|id| store.get(*id))
-                .map(|t| t.file_under().to_string())
-                .unwrap_or_else(|| artist_key.as_str().to_string());
+            let display = lib.artist_name(artist_key).to_string();
             let expanded = self.folds.is_open(std::slice::from_ref(artist_key));
             rows.push(Row::Artist {
                 key: artist_key.clone(),
@@ -117,11 +111,7 @@ impl TreeState {
                 continue;
             }
             for (album_key, tracks) in albums {
-                let display = tracks
-                    .first()
-                    .and_then(|id| store.get(*id))
-                    .map(|t| t.album_or_unknown().to_string())
-                    .unwrap_or_else(|| album_key.as_str().to_string());
+                let display = lib.album_name(artist_key, album_key).to_string();
                 let open = self.folds.is_open(&[artist_key.clone(), album_key.clone()]);
                 rows.push(Row::Album {
                     artist: artist_key.clone(),
@@ -167,8 +157,8 @@ impl TreeState {
 
     /// Every track under the selected row: one track, one album, or everything
     /// by an artist. What `a` and `e` add, and what `x` plays the first of.
-    pub fn tracks_for(&self, lib: &Library, store: &Store) -> Vec<TrackId> {
-        let rows = self.rows(lib, store);
+    pub fn tracks_for(&self, lib: &Library) -> Vec<TrackId> {
+        let rows = self.rows(lib);
         let Some(row) = rows.get(self.selected) else {
             return Vec::new();
         };
@@ -189,8 +179,8 @@ impl TreeState {
     }
 
     /// The track on the selected row, if it is one.
-    pub fn selected_track(&self, lib: &Library, store: &Store) -> Option<TrackId> {
-        match self.rows(lib, store).get(self.selected) {
+    pub fn selected_track(&self, lib: &Library) -> Option<TrackId> {
+        match self.rows(lib).get(self.selected) {
             Some(Row::Track { id, .. }) => Some(*id),
             _ => None,
         }
@@ -201,23 +191,23 @@ impl TreeState {
     /// Deliberately **not** `close()` then `open()`: `close` walks up when the
     /// node is already shut, which is right for `h` and wrong here — toggling
     /// a closed album would close its artist instead of opening the album.
-    pub fn toggle(&mut self, lib: &Library, store: &Store) {
-        let Some(path) = self.path_under(lib, store) else {
+    pub fn toggle(&mut self, lib: &Library) {
+        let Some(path) = self.path_under(lib) else {
             return;
         };
         self.folds.toggle(&path);
     }
 
     /// `zo` — open the node under the cursor, and only it.
-    pub fn open(&mut self, lib: &Library, store: &Store) {
-        if let Some(path) = self.path_under(lib, store) {
+    pub fn open(&mut self, lib: &Library) {
+        if let Some(path) = self.path_under(lib) {
             self.folds.open(&path);
         }
     }
 
     /// `zO` — open the node under the cursor and everything beneath it.
-    pub fn open_deep(&mut self, lib: &Library, store: &Store) {
-        let Some(path) = self.path_under(lib, store) else {
+    pub fn open_deep(&mut self, lib: &Library) {
+        let Some(path) = self.path_under(lib) else {
             return;
         };
         let mut paths = vec![path.clone()];
@@ -227,13 +217,13 @@ impl TreeState {
 
     /// `zC` — close the node under the cursor and everything beneath it, so
     /// that reopening it does not spill the subtree you had expanded inside.
-    pub fn close_deep(&mut self, lib: &Library, store: &Store) {
-        let Some(path) = self.path_under(lib, store) else {
+    pub fn close_deep(&mut self, lib: &Library) {
+        let Some(path) = self.path_under(lib) else {
             return;
         };
         let mut paths = vec![path.clone()];
         paths.extend(self.descendants(lib, &path));
-        self.keeping_cursor(lib, store, |t| t.folds.close_all(paths));
+        self.keeping_cursor(lib, |t| t.folds.close_all(paths));
     }
 
     /// `zA` — whichever of `zO` and `zC` this node is not already.
@@ -241,36 +231,36 @@ impl TreeState {
     /// Reads the node's own state rather than its subtree's, as vim does: the
     /// question `zA` answers is "is this one open", and what is underneath it
     /// follows rather than votes.
-    pub fn toggle_deep(&mut self, lib: &Library, store: &Store) {
-        let Some(path) = self.path_under(lib, store) else {
+    pub fn toggle_deep(&mut self, lib: &Library) {
+        let Some(path) = self.path_under(lib) else {
             return;
         };
         if self.folds.is_open(&path) {
-            self.close_deep(lib, store);
+            self.close_deep(lib);
         } else {
-            self.open_deep(lib, store);
+            self.open_deep(lib);
         }
     }
 
     /// `zR` — every fold open. Depth 2 is the whole tree: artists at 0,
     /// albums at 1.
-    pub fn open_everything(&mut self, lib: &Library, store: &Store) {
-        self.keeping_cursor(lib, store, |t| t.folds.set_level(DEPTH));
+    pub fn open_everything(&mut self, lib: &Library) {
+        self.keeping_cursor(lib, |t| t.folds.set_level(DEPTH));
     }
 
     /// `zM` — every fold closed.
-    pub fn close_everything(&mut self, lib: &Library, store: &Store) {
-        self.keeping_cursor(lib, store, |t| t.folds.set_level(0));
+    pub fn close_everything(&mut self, lib: &Library) {
+        self.keeping_cursor(lib, |t| t.folds.set_level(0));
     }
 
     /// `zr` — one level more. From nothing that is artists, then albums.
-    pub fn more(&mut self, lib: &Library, store: &Store) {
-        self.keeping_cursor(lib, store, |t| t.folds.more());
+    pub fn more(&mut self, lib: &Library) {
+        self.keeping_cursor(lib, |t| t.folds.more());
     }
 
     /// `zm` — one level fewer.
-    pub fn less(&mut self, lib: &Library, store: &Store) {
-        self.keeping_cursor(lib, store, |t| t.folds.less());
+    pub fn less(&mut self, lib: &Library) {
+        self.keeping_cursor(lib, |t| t.folds.less());
     }
 
     /// How deep a row sits: artists 0, albums 1, tracks 2.
@@ -292,9 +282,9 @@ impl TreeState {
     /// Stops at the ends rather than wrapping, as vim's `}` and `]]` do. A
     /// motion that finds nothing leaves the cursor alone, so a count that
     /// overshoots lands on the last match instead of nowhere.
-    pub fn go(&mut self, lib: &Library, store: &Store, motion: Motion, count: usize) {
+    pub fn go(&mut self, lib: &Library, motion: Motion, count: usize) {
         for _ in 0..count.max(1) {
-            let rows = self.rows(lib, store);
+            let rows = self.rows(lib);
             let Some(at) = self.step(&rows, motion) else {
                 return;
             };
@@ -429,8 +419,8 @@ impl TreeState {
     /// sits on a row that `rows()` produced, so it is visible by construction.
     /// It is only meaningful *after* something has closed underneath it, which
     /// is exactly this.
-    pub fn only(&mut self, lib: &Library, store: &Store) {
-        let rows = self.rows(lib, store);
+    pub fn only(&mut self, lib: &Library) {
+        let rows = self.rows(lib);
         let Some(row) = rows.get(self.selected) else {
             return;
         };
@@ -440,11 +430,7 @@ impl TreeState {
         self.folds.set_level(0);
         self.folds.open_all(opens);
 
-        if let Some(at) = self
-            .rows(lib, store)
-            .iter()
-            .position(|r| Self::mark_of(r) == want)
-        {
+        if let Some(at) = self.rows(lib).iter().position(|r| Self::mark_of(r) == want) {
             self.selected = at;
         }
     }
@@ -453,7 +439,7 @@ impl TreeState {
     ///
     /// Nothing else is disturbed — the point is to find the playing track
     /// without losing the shape you had built up looking for it.
-    pub fn reveal(&mut self, lib: &Library, store: &Store, id: TrackId) -> bool {
+    pub fn reveal(&mut self, lib: &Library, id: TrackId) -> bool {
         let Some((artist, album)) = lib.artists().find_map(|(artist, albums)| {
             albums
                 .iter()
@@ -465,7 +451,7 @@ impl TreeState {
         self.folds
             .open_all(vec![vec![artist.clone()], vec![artist, album]]);
         match self
-            .rows(lib, store)
+            .rows(lib)
             .iter()
             .position(|r| matches!(r, Row::Track { id: got, .. } if *got == id))
         {
@@ -488,10 +474,8 @@ impl TreeState {
     }
 
     /// The openable path under the cursor, if the cursor is on one.
-    fn path_under(&self, lib: &Library, store: &Store) -> Option<Vec<SortKey>> {
-        self.rows(lib, store)
-            .get(self.selected)
-            .and_then(Self::path_of)
+    fn path_under(&self, lib: &Library) -> Option<Vec<SortKey>> {
+        self.rows(lib).get(self.selected).and_then(Self::path_of)
     }
 
     /// Every openable path strictly under `path`. Only albums can be under
@@ -514,10 +498,10 @@ impl TreeState {
     /// A level change can close the row out from under you. vim puts the
     /// cursor on the start of the fold that swallowed it, which here means the
     /// deepest visible ancestor of where you were.
-    fn keeping_cursor(&mut self, lib: &Library, store: &Store, change: impl FnOnce(&mut Self)) {
-        let seat = self.rows(lib, store).get(self.selected).map(Self::seat_of);
+    fn keeping_cursor(&mut self, lib: &Library, change: impl FnOnce(&mut Self)) {
+        let seat = self.rows(lib).get(self.selected).map(Self::seat_of);
         change(self);
-        let rows = self.rows(lib, store);
+        let rows = self.rows(lib);
         let Some(seat) = seat else {
             self.selected = self.selected.min(rows.len().saturating_sub(1));
             return;
@@ -541,8 +525,8 @@ impl TreeState {
     /// rule, and it is what lets repeated `h` walk up and out without anything
     /// needing a concept of "level". `zc` is bound to it too, which is what
     /// vim's `zc` does on a line inside a fold.
-    pub fn close(&mut self, lib: &Library, store: &Store) -> bool {
-        let rows = self.rows(lib, store);
+    pub fn close(&mut self, lib: &Library) -> bool {
+        let rows = self.rows(lib);
         let Some(row) = rows.get(self.selected) else {
             return false;
         };
@@ -559,7 +543,7 @@ impl TreeState {
         self.folds.close(&target);
         // The row would otherwise vanish from under the cursor.
         if let Some(pos) = self
-            .rows(lib, store)
+            .rows(lib)
             .iter()
             .position(|r| Self::path_of(r).as_deref() == Some(target.as_slice()))
         {
@@ -572,6 +556,7 @@ impl TreeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Store;
     use crate::store::Track;
     use std::path::PathBuf;
 
@@ -602,9 +587,9 @@ mod tests {
 
     #[test]
     fn collapsed_shows_only_artists() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let state = TreeState::default();
-        let rows = state.rows(&lib, &store);
+        let rows = state.rows(&lib);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].label(), "▸ Burial");
         assert_eq!(rows[1].label(), "▸ Mr. Oizo");
@@ -612,11 +597,11 @@ mod tests {
 
     #[test]
     fn expanding_reveals_albums_indented() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.toggle(&lib, &store);
+        state.toggle(&lib);
 
-        let rows = state.rows(&lib, &store);
+        let rows = state.rows(&lib);
         assert_eq!(
             rows.iter().map(Row::label).collect::<Vec<_>>(),
             ["▾ Burial", "  ▸ Burial", "  ▸ Untrue", "▸ Mr. Oizo"]
@@ -627,13 +612,13 @@ mod tests {
     /// several albums across several artists can be open at once.
     #[test]
     fn opening_an_album_puts_its_tracks_inline() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.toggle(&lib, &store); // the artist
+        state.toggle(&lib); // the artist
         state.selected = 1;
-        state.toggle(&lib, &store); // its first album
+        state.toggle(&lib); // its first album
 
-        let rows = state.rows(&lib, &store);
+        let rows = state.rows(&lib);
         assert!(
             matches!(rows.get(2), Some(Row::Track { .. })),
             "no track inline: {:?}",
@@ -642,8 +627,8 @@ mod tests {
 
         // A second artist can be open at the same time.
         state.selected = rows.len() - 1;
-        state.toggle(&lib, &store);
-        let both = state.rows(&lib, &store);
+        state.toggle(&lib);
+        let both = state.rows(&lib);
         assert!(both.len() > rows.len(), "the second artist did not open");
         assert!(
             both.iter().any(|r| matches!(r, Row::Track { .. })),
@@ -653,84 +638,84 @@ mod tests {
 
     #[test]
     fn selecting_an_album_narrows_the_track_pane() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.toggle(&lib, &store); // expand Burial
+        state.toggle(&lib); // expand Burial
 
         // Artist row selected: everything by that artist.
         state.selected = 0;
-        assert_eq!(state.tracks_for(&lib, &store).len(), 3);
+        assert_eq!(state.tracks_for(&lib).len(), 3);
 
         // "Burial" the album: one track.
         state.selected = 1;
-        assert_eq!(state.tracks_for(&lib, &store).len(), 1);
+        assert_eq!(state.tracks_for(&lib).len(), 1);
 
         // "Untrue": two.
         state.selected = 2;
-        assert_eq!(state.tracks_for(&lib, &store).len(), 2);
+        assert_eq!(state.tracks_for(&lib).len(), 2);
     }
 
     #[test]
     fn collapsing_from_an_album_row_moves_the_cursor_to_the_artist() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.toggle(&lib, &store);
+        state.toggle(&lib);
         state.selected = 2; // an album row
 
         // `close` walks up when the row is already shut, which is how `h`
         // collapses outward without needing a concept of "level".
-        state.close(&lib, &store);
+        state.close(&lib);
 
         // The album rows are gone, so the selection must not be left dangling
         // over what is now a different artist.
         assert_eq!(state.selected, 0);
-        assert_eq!(state.rows(&lib, &store).len(), 2);
+        assert_eq!(state.rows(&lib).len(), 2);
     }
 
     /// Toggling an album must open it, not close its artist — `toggle` and
     /// `close` differ precisely here.
     #[test]
     fn toggling_a_closed_album_opens_it_rather_than_closing_the_artist() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.toggle(&lib, &store);
-        let with_albums = state.rows(&lib, &store).len();
+        state.toggle(&lib);
+        let with_albums = state.rows(&lib).len();
         state.selected = 1;
 
-        state.toggle(&lib, &store);
+        state.toggle(&lib);
         assert!(
-            state.rows(&lib, &store).len() > with_albums,
+            state.rows(&lib).len() > with_albums,
             "the artist collapsed instead of the album opening"
         );
     }
 
     #[test]
     fn zr_walks_down_a_level_at_a_time_and_zm_walks_back() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        assert_eq!(state.rows(&lib, &store).len(), 2, "2 artists");
+        assert_eq!(state.rows(&lib).len(), 2, "2 artists");
 
-        state.more(&lib, &store);
-        assert_eq!(state.rows(&lib, &store).len(), 5, "+ 3 albums");
+        state.more(&lib);
+        assert_eq!(state.rows(&lib).len(), 5, "+ 3 albums");
 
-        state.more(&lib, &store);
-        assert_eq!(state.rows(&lib, &store).len(), 9, "+ 4 tracks");
+        state.more(&lib);
+        assert_eq!(state.rows(&lib).len(), 9, "+ 4 tracks");
 
-        state.less(&lib, &store);
-        assert_eq!(state.rows(&lib, &store).len(), 5);
-        state.less(&lib, &store);
-        assert_eq!(state.rows(&lib, &store).len(), 2);
+        state.less(&lib);
+        assert_eq!(state.rows(&lib).len(), 5);
+        state.less(&lib);
+        assert_eq!(state.rows(&lib).len(), 2);
     }
 
     #[test]
     fn zm_at_the_top_stays_there_rather_than_wrapping() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.less(&lib, &store);
-        state.less(&lib, &store);
-        state.more(&lib, &store);
+        state.less(&lib);
+        state.less(&lib);
+        state.more(&lib);
         assert_eq!(
-            state.rows(&lib, &store).len(),
+            state.rows(&lib).len(),
             5,
             "one zr after bottoming out should open the albums, not undo a debt"
         );
@@ -738,22 +723,22 @@ mod tests {
 
     #[test]
     fn zr_opens_everything_and_zm_closes_it() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_everything(&lib, &store);
-        assert_eq!(state.rows(&lib, &store).len(), 9);
-        state.close_everything(&lib, &store);
-        assert_eq!(state.rows(&lib, &store).len(), 2);
+        state.open_everything(&lib);
+        assert_eq!(state.rows(&lib).len(), 9);
+        state.close_everything(&lib);
+        assert_eq!(state.rows(&lib).len(), 2);
     }
 
     #[test]
     fn a_level_change_discards_what_was_opened_by_hand() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.toggle(&lib, &store); // open Burial by hand
-        state.close_everything(&lib, &store);
+        state.toggle(&lib); // open Burial by hand
+        state.close_everything(&lib);
         assert_eq!(
-            state.rows(&lib, &store).len(),
+            state.rows(&lib).len(),
             2,
             "zM has to close what was opened by hand too, or it is not `all`"
         );
@@ -764,18 +749,18 @@ mod tests {
     /// nothing.
     #[test]
     fn collapsing_past_the_cursor_lands_it_on_the_row_that_swallowed_it() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_everything(&lib, &store);
-        let rows = state.rows(&lib, &store);
+        state.open_everything(&lib);
+        let rows = state.rows(&lib);
         let oizo_track = rows
             .iter()
             .position(|r| matches!(r, Row::Track { artist, .. } if artist.as_str() == "mr. oizo"))
             .expect("Mr. Oizo's track should be on screen with every fold open");
         state.selected = oizo_track;
 
-        state.close_everything(&lib, &store);
-        let rows = state.rows(&lib, &store);
+        state.close_everything(&lib);
+        let rows = state.rows(&lib);
         assert_eq!(
             rows.len(),
             2,
@@ -790,15 +775,15 @@ mod tests {
 
     #[test]
     fn za_closes_what_it_opened() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        let shut = state.rows(&lib, &store).len();
+        let shut = state.rows(&lib).len();
 
-        state.toggle(&lib, &store);
-        assert!(state.rows(&lib, &store).len() > shut);
-        state.toggle(&lib, &store);
+        state.toggle(&lib);
+        assert!(state.rows(&lib).len() > shut);
+        state.toggle(&lib);
         assert_eq!(
-            state.rows(&lib, &store).len(),
+            state.rows(&lib).len(),
             shut,
             "za has to go both ways — that is the whole of what it is"
         );
@@ -806,11 +791,11 @@ mod tests {
 
     #[test]
     fn zo_opens_only_the_node_under_the_cursor() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open(&lib, &store);
+        state.open(&lib);
         assert_eq!(
-            state.rows(&lib, &store).len(),
+            state.rows(&lib).len(),
             4,
             "Burial's 2 albums, Mr. Oizo still shut"
         );
@@ -818,13 +803,13 @@ mod tests {
 
     #[test]
     fn zo_opens_the_node_and_zo_again_does_not_close_it() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open(&lib, &store);
-        let opened = state.rows(&lib, &store).len();
-        state.open(&lib, &store);
+        state.open(&lib);
+        let opened = state.rows(&lib).len();
+        state.open(&lib);
         assert_eq!(
-            state.rows(&lib, &store).len(),
+            state.rows(&lib).len(),
             opened,
             "zo is not a toggle — that is za"
         );
@@ -832,11 +817,11 @@ mod tests {
 
     #[test]
     fn zo_deep_opens_the_albums_too() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_deep(&lib, &store);
+        state.open_deep(&lib);
         assert_eq!(
-            state.rows(&lib, &store).len(),
+            state.rows(&lib).len(),
             7,
             "Burial, its 2 albums and their 3 tracks, plus Mr. Oizo"
         );
@@ -844,15 +829,15 @@ mod tests {
 
     #[test]
     fn zc_deep_does_not_spill_the_subtree_when_reopened() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_deep(&lib, &store);
-        state.close_deep(&lib, &store);
-        assert_eq!(state.rows(&lib, &store).len(), 2);
+        state.open_deep(&lib);
+        state.close_deep(&lib);
+        assert_eq!(state.rows(&lib).len(), 2);
 
-        state.open(&lib, &store);
+        state.open(&lib);
         assert_eq!(
-            state.rows(&lib, &store).len(),
+            state.rows(&lib).len(),
             4,
             "reopening Burial should show its albums closed, not the tracks it had open"
         );
@@ -860,9 +845,9 @@ mod tests {
 
     /// Rows as `depth:label`, so a test can say what the tree looks like
     /// without reproducing the render.
-    fn shape(state: &TreeState, lib: &Library, store: &Store) -> Vec<String> {
+    fn shape(state: &TreeState, lib: &Library) -> Vec<String> {
         state
-            .rows(lib, store)
+            .rows(lib)
             .iter()
             .map(|r| format!("{}:{}", TreeState::depth_of(r), r.label().trim()))
             .collect()
@@ -870,95 +855,95 @@ mod tests {
 
     #[test]
     fn next_sibling_steps_over_everything_nested() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_everything(&lib, &store);
+        state.open_everything(&lib);
 
         // On the first artist, with both its albums and three tracks open.
         assert_eq!(state.selected, 0);
-        state.go(&lib, &store, Motion::NextSibling, 1);
+        state.go(&lib, Motion::NextSibling, 1);
 
-        let rows = state.rows(&lib, &store);
+        let rows = state.rows(&lib);
         assert!(
             matches!(&rows[state.selected], Row::Artist { display, .. } if display == "Mr. Oizo"),
             "`}}` should have skipped Burial's albums and tracks: {:?}",
-            shape(&state, &lib, &store)
+            shape(&state, &lib)
         );
     }
 
     #[test]
     fn a_sibling_is_at_the_cursors_own_level() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_everything(&lib, &store);
+        state.open_everything(&lib);
         state.selected = 1; // Burial's first album
 
-        state.go(&lib, &store, Motion::NextSibling, 1);
-        let rows = state.rows(&lib, &store);
+        state.go(&lib, Motion::NextSibling, 1);
+        let rows = state.rows(&lib);
         assert!(
             matches!(&rows[state.selected], Row::Album { .. }),
             "from an album `}}` should reach an album: {:?}",
-            shape(&state, &lib, &store)
+            shape(&state, &lib)
         );
     }
 
     #[test]
     fn a_section_is_always_an_artist() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_everything(&lib, &store);
+        state.open_everything(&lib);
         state.selected = 2; // a track, three levels down
 
-        state.go(&lib, &store, Motion::NextSection, 1);
-        let rows = state.rows(&lib, &store);
+        state.go(&lib, Motion::NextSection, 1);
+        let rows = state.rows(&lib);
         assert!(
             matches!(&rows[state.selected], Row::Artist { .. }),
             "`]]` from a track should reach an artist: {:?}",
-            shape(&state, &lib, &store)
+            shape(&state, &lib)
         );
     }
 
     #[test]
     fn parent_walks_out_one_level_at_a_time() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_everything(&lib, &store);
+        state.open_everything(&lib);
         state.selected = 2; // a track
 
-        state.go(&lib, &store, Motion::Parent, 1);
+        state.go(&lib, Motion::Parent, 1);
         assert!(matches!(
-            &state.rows(&lib, &store)[state.selected],
+            &state.rows(&lib)[state.selected],
             Row::Album { .. }
         ));
 
-        state.go(&lib, &store, Motion::Parent, 1);
+        state.go(&lib, Motion::Parent, 1);
         assert!(matches!(
-            &state.rows(&lib, &store)[state.selected],
+            &state.rows(&lib)[state.selected],
             Row::Artist { .. }
         ));
 
         // And stops rather than wrapping to the bottom.
         let at = state.selected;
-        state.go(&lib, &store, Motion::Parent, 1);
+        state.go(&lib, Motion::Parent, 1);
         assert_eq!(state.selected, at, "`-` on an artist has nowhere to go");
     }
 
     #[test]
     fn group_end_finds_the_last_track_of_the_album() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_everything(&lib, &store);
+        state.open_everything(&lib);
 
         // Untrue has two tracks; land on the first of them.
-        let rows = shape(&state, &lib, &store);
+        let rows = shape(&state, &lib);
         let first = rows
             .iter()
             .position(|r| r.starts_with("2:"))
             .expect("a track is on screen");
         state.selected = first;
 
-        state.go(&lib, &store, Motion::GroupEnd, 1);
-        let now = shape(&state, &lib, &store);
+        state.go(&lib, Motion::GroupEnd, 1);
+        let now = shape(&state, &lib);
         assert!(
             now[state.selected].starts_with("2:"),
             "still a track: {now:?}"
@@ -972,13 +957,13 @@ mod tests {
 
     #[test]
     fn group_end_on_an_album_reaches_its_own_last_track() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.open_everything(&lib, &store);
+        state.open_everything(&lib);
         state.selected = 1; // an album row
 
-        state.go(&lib, &store, Motion::GroupEnd, 1);
-        let now = shape(&state, &lib, &store);
+        state.go(&lib, Motion::GroupEnd, 1);
+        let now = shape(&state, &lib);
         assert!(
             now[state.selected].starts_with("2:"),
             "`]z` on an album should reach a track under it: {now:?}"
@@ -992,19 +977,19 @@ mod tests {
     /// and "where I came from" are the same row.
     #[test]
     fn zj_goes_to_a_start_and_zk_to_an_end() {
-        let (store, lib) = deep_fixture();
-        let mut state = opened(&lib, &store);
+        let (_store, lib) = deep_fixture();
+        let mut state = opened(&lib);
 
         // Row 6 is `four`, the first track of Anna's second album.
         state.selected = 6;
-        state.go(&lib, &store, Motion::PrevFold, 1);
+        state.go(&lib, Motion::PrevFold, 1);
         assert_eq!(
             state.selected, 4,
             "`zk` should land on `three`, the last track of the album before — \
              not on either album's row"
         );
 
-        state.go(&lib, &store, Motion::NextFold, 1);
+        state.go(&lib, Motion::NextFold, 1);
         assert_eq!(state.selected, 5, "`zj` should land on `Second`, a start");
     }
 
@@ -1013,14 +998,14 @@ mod tests {
     /// them even though no depth ever changes.
     #[test]
     fn a_closed_fold_is_one_fold_and_ends_at_itself() {
-        let (store, lib) = deep_fixture();
+        let (_store, lib) = deep_fixture();
         // Cleo, with everything closed.
         let mut state = TreeState {
             selected: 2,
             ..Default::default()
         };
 
-        state.go(&lib, &store, Motion::PrevFold, 1);
+        state.go(&lib, Motion::PrevFold, 1);
         assert_eq!(
             state.selected, 1,
             "`zk` should step to Bruno, the previous closed fold"
@@ -1031,24 +1016,24 @@ mod tests {
     /// ends the way repeating `]]` walks section starts.
     #[test]
     fn the_section_end_motions_walk_the_other_edge() {
-        let (store, lib) = deep_fixture();
-        let mut state = opened(&lib, &store);
+        let (_store, lib) = deep_fixture();
+        let mut state = opened(&lib);
         state.selected = 2; // `one`, inside Anna
 
-        state.go(&lib, &store, Motion::NextSectionEnd, 1);
+        state.go(&lib, Motion::NextSectionEnd, 1);
         assert_eq!(
             state.selected, 7,
             "`][` should reach `five`, the last row under Anna — past the \
              album boundary at 5, which `]z` would have stopped at"
         );
 
-        state.go(&lib, &store, Motion::NextSectionEnd, 1);
+        state.go(&lib, Motion::NextSectionEnd, 1);
         assert_eq!(
             state.selected, 10,
             "a second `][` should reach `six`, the end of the next artist"
         );
 
-        state.go(&lib, &store, Motion::PrevSectionEnd, 1);
+        state.go(&lib, Motion::PrevSectionEnd, 1);
         assert_eq!(
             state.selected, 7,
             "`[]` should come back to the previous artist's last row"
@@ -1057,10 +1042,10 @@ mod tests {
 
     #[test]
     fn a_count_that_overshoots_lands_on_the_last_match() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
         // Two artists, closed.
-        state.go(&lib, &store, Motion::NextSection, 99);
+        state.go(&lib, Motion::NextSection, 99);
         assert_eq!(
             state.selected, 1,
             "it should stop at the last artist rather than giving up"
@@ -1069,9 +1054,9 @@ mod tests {
 
     #[test]
     fn a_motion_with_nowhere_to_go_stays_put() {
-        let (store, lib) = fixture();
+        let (_store, lib) = fixture();
         let mut state = TreeState::default();
-        state.go(&lib, &store, Motion::PrevSibling, 1);
+        state.go(&lib, Motion::PrevSibling, 1);
         assert_eq!(state.selected, 0);
     }
 
@@ -1101,9 +1086,9 @@ mod tests {
     ///
     ///     0 Anna  1 First  2 one  3 two  4 three  5 Second  6 four  7 five
     ///     8 Bruno  9 Third  10 six  11 Cleo  12 Fourth  13 seven
-    fn opened(lib: &Library, store: &Store) -> TreeState {
+    fn opened(lib: &Library) -> TreeState {
         let mut state = TreeState::default();
-        state.open_everything(lib, store);
+        state.open_everything(lib);
         state
     }
 
@@ -1112,16 +1097,16 @@ mod tests {
     /// above.
     #[test]
     fn parent_is_a_container_not_the_row_above() {
-        let (store, lib) = deep_fixture();
-        let mut state = opened(&lib, &store);
+        let (_store, lib) = deep_fixture();
+        let mut state = opened(&lib);
         state.selected = 3; // the second track of "First"
 
-        state.go(&lib, &store, Motion::Parent, 1);
+        state.go(&lib, Motion::Parent, 1);
         assert_eq!(
             state.selected,
             1,
             "`-` should reach the album, not the track above it: {:?}",
-            shape(&state, &lib, &store)
+            shape(&state, &lib)
         );
     }
 
@@ -1129,42 +1114,42 @@ mod tests {
     /// followed by another album of the same artist is what tells them apart.
     #[test]
     fn group_end_stops_at_the_album_not_the_artist() {
-        let (store, lib) = deep_fixture();
-        let mut state = opened(&lib, &store);
+        let (_store, lib) = deep_fixture();
+        let mut state = opened(&lib);
         state.selected = 2; // the first track of "First"
 
-        state.go(&lib, &store, Motion::GroupEnd, 1);
+        state.go(&lib, Motion::GroupEnd, 1);
         assert_eq!(
             state.selected,
             4,
             "`]z` should stop at the last track of \"First\", not run into \
              \"Second\": {:?}",
-            shape(&state, &lib, &store)
+            shape(&state, &lib)
         );
     }
 
     #[test]
     fn group_end_on_an_album_uses_that_album() {
-        let (store, lib) = deep_fixture();
-        let mut state = opened(&lib, &store);
+        let (_store, lib) = deep_fixture();
+        let mut state = opened(&lib);
         state.selected = 1; // the album "First"
 
-        state.go(&lib, &store, Motion::GroupEnd, 1);
+        state.go(&lib, Motion::GroupEnd, 1);
         assert_eq!(
             state.selected,
             4,
             "`]z` on an album is its own last track: {:?}",
-            shape(&state, &lib, &store)
+            shape(&state, &lib)
         );
     }
 
     /// Three artists, so two steps and one step differ.
     #[test]
     fn a_count_repeats_the_motion() {
-        let (store, lib) = deep_fixture();
+        let (_store, lib) = deep_fixture();
         let mut state = TreeState::default();
 
-        state.go(&lib, &store, Motion::NextSection, 2);
+        state.go(&lib, Motion::NextSection, 2);
         assert_eq!(state.selected, 2, "`2]]` should reach the third artist");
     }
 
@@ -1172,12 +1157,12 @@ mod tests {
     /// only observable when that is not already the top.
     #[test]
     fn a_motion_with_no_match_does_not_move_the_cursor() {
-        let (store, lib) = deep_fixture();
-        let mut state = opened(&lib, &store);
-        let last = state.rows(&lib, &store).len() - 1;
+        let (_store, lib) = deep_fixture();
+        let mut state = opened(&lib);
+        let last = state.rows(&lib).len() - 1;
         state.selected = last;
 
-        state.go(&lib, &store, Motion::NextSibling, 1);
+        state.go(&lib, Motion::NextSibling, 1);
         assert_eq!(state.selected, last, "it jumped instead of staying put");
     }
 
@@ -1185,16 +1170,16 @@ mod tests {
     /// cursor and the next openable row.
     #[test]
     fn zj_skips_over_tracks_to_the_next_container() {
-        let (store, lib) = deep_fixture();
-        let mut state = opened(&lib, &store);
+        let (_store, lib) = deep_fixture();
+        let mut state = opened(&lib);
         state.selected = 2; // a track, with two more tracks below it
 
-        state.go(&lib, &store, Motion::NextFold, 1);
+        state.go(&lib, Motion::NextFold, 1);
         assert_eq!(
             state.selected,
             5,
             "`zj` should reach the album \"Second\": {:?}",
-            shape(&state, &lib, &store)
+            shape(&state, &lib)
         );
     }
 }

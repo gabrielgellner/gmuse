@@ -469,10 +469,18 @@ mod tests {
     /// 10,000-line migration into a ratchet, and makes any new leak a test
     /// failure rather than something to be found later.
     ///
-    /// **Lower these as #78 and #79 land. Never raise them.**
+    /// **Lower these as the migration lands. Never raise them.**
+    ///
+    /// Most of what is left is test fixtures rather than the player: of the 42
+    /// `Store` mentions, only **12 are outside `#[cfg(test)]`**, and they are
+    /// in `list.rs`, `fold.rs` and a handful in `mod.rs`. The tree renderer
+    /// stopped needing one when the projection started carrying its own
+    /// display names (#84), which is the shape the rest of the migration
+    /// follows: a caller reaches for the store because the projection cannot
+    /// answer, not because it wants a store.
     #[test]
     fn the_leak_from_the_player_only_narrows() {
-        const STORE: usize = 62;
+        const STORE: usize = 42;
         const PATHS: usize = 28;
 
         let (mut store, mut paths) = (0, 0);
