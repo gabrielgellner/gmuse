@@ -20,6 +20,32 @@ cd tools
 ruff check . && ruff format --check . && pyrefly check
 ```
 
+## identify.py — find the MusicBrainz recording id (#89)
+
+The gap that looked like an identity problem is a **tagging** problem. Of 6500 files in `~/MusicLibrary`, 477 carry no
+MusicBrainz recording id — and they are Adele, Stromae, James Blake, Stephan Bodzin and Burial. The DJ crate is the same
+story from a worse start: zero of 592 tagged, and MusicBrainz has about 62% of them.
+
+| step               | what it does                                                                      |
+| ------------------ | --------------------------------------------------------------------------------- |
+| `identify fetch`   | ask MusicBrainz about every file with no recording id. Raw responses cached (#58) |
+| `identify propose` | cache + tags → jsonl, each row graded `matched` / `probable` / `uncertain`        |
+
+```sh
+./.venv/bin/python identify.py fetch ~/MusicLibrary
+./.venv/bin/python identify.py propose ~/MusicLibrary
+jq -r 'select(.confidence=="uncertain")' out/identify-musiclibrary.jsonl
+```
+
+**The query has to be normalised or it reports a gap that is not there.** `artist:` does not match a joined credit, so
+`"Stephan Bodzin & Marc Romboy"` scores zero where `"Stephan Bodzin"` scores 100; and `(Original Mix)` is Beatport's
+word for "not a remix", not a MusicBrainz convention. Fixing both took a sample of the crate from 3/30 to 19/30. The
+suffix strip is narrow on purpose — `(Nolah Remix)` names a different recording and must survive.
+
+**Duration is the second opinion.** A name match can be wrong: the first run turned up a "Vienna Calling" matching by
+name at 100 and differing by 172 seconds, which is a different mix. A candidate is only `matched` when its length agrees
+within five seconds.
+
 ## genre/ — normalise genre tags (#52)
 
 The convention is compound, `; `-separated, **broad term first**, so `genre="*electronic*"` finds every electronic
