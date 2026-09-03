@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::audio_id::AudioId;
 use crate::model::clock::{Drift, HybridClock, Stamp};
 use crate::model::encoding::Format;
-use crate::model::entity::{Artist, Device, Distribution, Recording, ReleaseGroup};
+use crate::model::entity::{Artist, Device, Encoding, Recording, ReleaseGroup};
 use crate::model::id::Id;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
 
@@ -110,7 +110,7 @@ impl Instance {
 
         for s in scan {
             let artist = Id::<Artist>::derived(s.artist.as_bytes());
-            let distribution = Id::<Distribution>::of_audio(&s.audio);
+            let encoding = Id::<Encoding>::of_audio(&s.audio);
             let recording = match s.mb_recording {
                 Some(mbid) => Id::<Recording>::of_musicbrainz(mbid),
                 // No external id to converge on, so converge on the bytes
@@ -123,8 +123,8 @@ impl Instance {
                 // mints a new recording, where a MusicBrainz id would have held
                 // it together. That is the 8% with nothing to hold it by.
                 None => known
-                    .distributions
-                    .get(&distribution)
+                    .encodings
+                    .get(&encoding)
                     .and_then(|d| d.recording)
                     .unwrap_or_else(|| Id::<Recording>::derived(s.audio.to_string().as_bytes())),
             };
@@ -186,8 +186,8 @@ impl Instance {
 
             self.append(
                 now,
-                Fact::DistributionCatalogued {
-                    distribution,
+                Fact::EncodingCatalogued {
+                    encoding,
                     audio: s.audio,
                     format: s.format,
                     bitrate: s.bitrate,
@@ -195,8 +195,8 @@ impl Instance {
             );
             self.append(
                 now,
-                Fact::DistributionBound {
-                    distribution,
+                Fact::EncodingBound {
+                    encoding,
                     from: None,
                     to: recording,
                 },
@@ -209,7 +209,7 @@ impl Instance {
     /// A scan produces the whole list, so this takes the whole list. Emitting a
     /// diff instead would mean noticing deletions, and a deletion that goes
     /// unnoticed is a row that never goes away.
-    pub fn assert_holdings(&mut self, now: i64, held: BTreeMap<Id<Distribution>, String>) {
+    pub fn assert_holdings(&mut self, now: i64, held: BTreeMap<Id<Encoding>, String>) {
         let device = self.clock.device();
         self.append(now, Fact::HoldingsAsserted { device, held });
     }
@@ -249,17 +249,11 @@ impl Instance {
     /// Deliberately not part of `ingest`: measuring is minutes where hashing
     /// is seconds, and the answer only changes when the bytes or the analyser
     /// do.
-    pub fn measured(
-        &mut self,
-        now: i64,
-        distribution: Id<Distribution>,
-        cutoff_hz: u32,
-        analyser: u16,
-    ) {
+    pub fn measured(&mut self, now: i64, encoding: Id<Encoding>, cutoff_hz: u32, analyser: u16) {
         self.append(
             now,
             Fact::Measured {
-                distribution,
+                encoding,
                 cutoff_hz,
                 analyser,
             },
@@ -270,12 +264,12 @@ impl Instance {
         self.append(now, Fact::Rated { recording, stars });
     }
 
-    pub fn play(&mut self, now: i64, recording: Id<Recording>, distribution: Id<Distribution>) {
+    pub fn play(&mut self, now: i64, recording: Id<Recording>, encoding: Id<Encoding>) {
         self.append(
             now,
             Fact::Played {
                 recording,
-                distribution: Some(distribution),
+                encoding: Some(encoding),
             },
         );
     }

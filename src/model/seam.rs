@@ -163,7 +163,7 @@ impl Librarian {
     /// there is nothing that can drift out of step with the record of how it
     /// got there.
     ///
-    /// Deliberately total. A distribution bound to a recording that no record
+    /// Deliberately total. A encoding bound to a recording that no record
     /// catalogued still lands — that is the unidentified 16%, and it must not
     /// be second class.
     pub fn from_catalogue(cat: &Catalogue) -> Self {
@@ -295,7 +295,7 @@ impl Librarian {
                 a.sort_name = name.clone();
             }
         }
-        for (id, d) in &cat.distributions {
+        for (id, d) in &cat.encodings {
             l.encodings.encodings.insert(
                 *id,
                 Encoding {
@@ -318,7 +318,7 @@ impl Librarian {
         for (device, asserted) in &cat.holdings {
             for (dist, locator) in &asserted.held {
                 l.encodings.holdings.push(crate::model::encoding::Holding {
-                    distribution: crate::model::id::Ref::to(*dist),
+                    encoding: crate::model::id::Ref::to(*dist),
                     device: crate::model::id::Ref::to(*device),
                     locator: locator.clone(),
                 });
@@ -564,11 +564,7 @@ mod tests {
 
         let rec = *m1.catalogue().recordings.keys().next().unwrap();
         m1.rate(200, rec, Some(4));
-        m2.play(
-            240,
-            rec,
-            *m2.catalogue().distributions.keys().next().unwrap(),
-        );
+        m2.play(240, rec, *m2.catalogue().encodings.keys().next().unwrap());
 
         let from_m2 = m2.records().clone();
         m1.merge(300, &from_m2);

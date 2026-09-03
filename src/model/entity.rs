@@ -52,8 +52,6 @@ macro_rules! tags {
 }
 
 tags! {
-    /// An **encoding** — not a copy. Fields with #75.
-    Distribution,
     /// A copy of an encoding, on one device. Fields with #75.
     Holding,
     /// A machine that holds copies. Fields with #75.
@@ -85,7 +83,7 @@ kinds! {
     Release => "release",
     Medium => "medium",
     Track => "track",
-    Distribution => "distribution",
+    Encoding => "encoding",
     Holding => "holding",
     Device => "device",
     Artist => "artist",
@@ -100,6 +98,7 @@ kinds! {
     GenreAssignment => "genre-assignment",
 }
 
+pub use crate::model::encoding::Encoding;
 pub use crate::model::spine::{Medium, MixEntry, Recording, Release, ReleaseGroup, Track, Work};
 
 #[cfg(test)]
@@ -118,7 +117,7 @@ mod tests {
             Release::KIND,
             Medium::KIND,
             Track::KIND,
-            Distribution::KIND,
+            Encoding::KIND,
             Holding::KIND,
             Device::KIND,
             Artist::KIND,

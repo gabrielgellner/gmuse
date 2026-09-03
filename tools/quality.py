@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import json
 import shutil
 import subprocess
 from concurrent.futures import ProcessPoolExecutor
@@ -513,6 +514,63 @@ def unquarantine(manifest: Path, *, write: bool) -> None:
         print("dry run — pass --write to actually restore")
 
 
+def propose(rows: Path, out: Path, analyser: int) -> None:
+    """Turn a survey into facts the library will take.
+
+    **Reads the query output, not the survey TSV.** The survey names files by
+    path, and a path is not an identifier: it is a property of one device's
+    copy, stale the moment a file moves and meaningless on another machine.
+
+    So the input is what `gmuse library query --format jsonl` handed us, which
+    carries both halves — the `encoding` id to propose against and the
+    `locator` to open. This tool never computes an identity and should not:
+    `audio_id` is a hash over Symphonia's packet boundaries.
+
+    Files that could not be measured are **skipped rather than proposed as
+    zero**. A missing measurement and a measurement of nothing are different
+    facts, and only one of them is true.
+    """
+    if not rows.exists():
+        print(f"no {rows.name} — run `gmuse library query … --format jsonl` first")
+        return
+
+    written = skipped = 0
+    with rows.open(encoding="utf-8") as handle, out.open("w", encoding="utf-8") as sink:
+        sink.write(f"# measured by quality.py, analyser {analyser}\n")
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            row = json.loads(line)
+            encoding, locator = row.get("encoding"), row.get("locator")
+            if not encoding or not locator:
+                # Nothing here holds a copy, so there is nothing to measure.
+                skipped += 1
+                continue
+            found = measure(locator)
+            if found is None:
+                skipped += 1
+                continue
+            cutoff_khz, _cliff = found
+            sink.write(
+                json.dumps(
+                    {
+                        "fact": "measured",
+                        "encoding": encoding,
+                        "cutoff_hz": round(cutoff_khz * 1000),
+                        "analyser": analyser,
+                    }
+                )
+                + "\n"
+            )
+            written += 1
+
+    print(f"{written} measurement(s) -> {out}")
+    if skipped:
+        print(f"  {skipped} row(s) had nothing to measure and were left out, not proposed as zero")
+    print(f"\nreview it, then: gmuse library apply {out}")
+
+
 def main() -> None:
     """Parse the command line and run the survey."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -527,6 +585,15 @@ def main() -> None:
     q.add_argument("root", nargs="?", default="~/MusicLibrary")
     q.add_argument("--dest", default="~/LowQualityMusic")
     q.add_argument("--write", action="store_true", help="actually move")
+    pr = sub.add_parser("propose", help="measure what a query listed, and say so")
+    pr.add_argument("rows", help="jsonl from `gmuse library query --format jsonl`")
+    pr.add_argument("--out", default="quality-proposals.jsonl")
+    pr.add_argument(
+        "--analyser",
+        type=int,
+        default=1,
+        help="must match model::encoding::ANALYSER, so a re-measure can find stale rows",
+    )
     u = sub.add_parser("unquarantine", help="put them back")
     u.add_argument("--write", action="store_true", help="actually restore")
     a.add_argument(
@@ -556,6 +623,15 @@ def main() -> None:
         unquarantine(manifest, write=args.write)
     elif args.phase == "survey":
         survey(Path(args.root).expanduser(), review, args.tier, args.workers)
+    elif args.phase == "propose":
+        # Not under `out_path`: a proposal is a work product rather than this
+        # tool's state, so it goes where the caller says and defaults to the
+        # working directory — see `docs/design/library-api.md` §7.
+        propose(
+            Path(args.rows).expanduser(),
+            Path(args.out).expanduser(),
+            args.analyser,
+        )
     else:
         albums(review, out_path("quality-albums.tsv"), args.limit, args.under, args.min_share)
 

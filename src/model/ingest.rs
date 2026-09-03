@@ -47,6 +47,9 @@ use crate::model::instance::Scanned;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
+// Lowercase on the wire, for the reason `Source` is: a proposal file is
+// something a person types.
+#[serde(rename_all = "snake_case")]
 pub enum Confidence {
     /// Minted because nothing matched. A guess, and marked as one.
     Provisional,

@@ -59,9 +59,9 @@ There is no "update the library" call. There is only **appending a fact**.
 ```rust
 Fact::RecordingCatalogued { recording, title, artist }
 Fact::GenreAssigned { recording, genre }        // and its basis and confidence
-Fact::Measured { distribution, cutoff_hz, analyser }
+Fact::Measured { encoding, cutoff_hz, analyser }
 Fact::Rated { recording, stars }
-Fact::Played { recording, distribution }
+Fact::Played { recording, encoding }
 ```
 
 Three things follow, and they are the reason for the shape:

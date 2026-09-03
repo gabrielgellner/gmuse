@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 
 use crate::audio_id::AudioId;
-use crate::model::entity::{Artist, Device, Distribution, Recording};
+use crate::model::entity::{Artist, Device, Encoding, Recording};
 use crate::model::id::Id;
 use crate::model::instance::{Instance, Scanned};
 use crate::model::log::Record;
@@ -73,12 +73,12 @@ fn album_unbound() -> Vec<Scanned> {
         .collect()
 }
 
-fn ids(scan: &[Scanned]) -> (Id<Artist>, Id<Recording>, Id<Distribution>) {
+fn ids(scan: &[Scanned]) -> (Id<Artist>, Id<Recording>, Id<Encoding>) {
     let s = &scan[0];
     (
         Id::<Artist>::derived(s.artist.as_bytes()),
         Id::<Recording>::of_musicbrainz(s.mb_recording.expect("bound fixture")),
-        Id::<Distribution>::of_audio(&s.audio),
+        Id::<Encoding>::of_audio(&s.audio),
     )
 }
 
@@ -123,9 +123,9 @@ fn two_instances_one_album_and_a_full_round_trip() {
 
     // Convergent minting: the same bytes are one encoding, not two.
     assert_eq!(
-        one.distributions.len(),
+        one.encodings.len(),
         2,
-        "one distribution per encoding, not one per device"
+        "one encoding per encoding, not one per device"
     );
 
     // Nothing collided, because both devices derived the same recording ids.
@@ -168,7 +168,7 @@ fn a_tagged_and_an_untagged_copy_surface_a_collision() {
         "they agree on what happened, including the disagreement"
     );
     assert_eq!(
-        one.distributions.len(),
+        one.encodings.len(),
         2,
         "the encodings converge — that is what makes this detectable"
     );
@@ -177,7 +177,7 @@ fn a_tagged_and_an_untagged_copy_surface_a_collision() {
     let c = &one.conflicts[0];
     assert_eq!(c.base, None, "both moved it from nothing — the same base");
     assert_eq!(
-        one.distributions[&c.distribution].recording,
+        one.encodings[&c.encoding].recording,
         Some(c.winner()),
         "a value still shows; the disagreement is recorded beside it"
     );
@@ -194,11 +194,8 @@ fn a_tagged_and_an_untagged_copy_surface_a_collision() {
          title and an artist attached to nothing, and only a merge can \
          retire it"
     );
-    let bound: std::collections::BTreeSet<_> = one
-        .distributions
-        .values()
-        .filter_map(|d| d.recording)
-        .collect();
+    let bound: std::collections::BTreeSet<_> =
+        one.encodings.values().filter_map(|d| d.recording).collect();
     assert_eq!(bound.len(), 2, "and half of them are bound to nothing");
 
     // The orphan is not swept, because a recording nothing holds is an
@@ -361,7 +358,7 @@ fn two_instances_ingesting_the_same_real_files() {
         postcard::to_allocvec(&two).unwrap(),
         "reading real files does not change the agreement"
     );
-    assert_eq!(one.distributions.len(), 2, "two files, two encodings");
+    assert_eq!(one.encodings.len(), 2, "two files, two encodings");
     assert!(
         one.conflicts.is_empty(),
         "two devices reading the same disk have nothing to disagree about — \
@@ -436,7 +433,7 @@ fn a_wrong_clock_is_reported_across_a_sync() {
 
 use std::collections::BTreeMap;
 
-fn held(pairs: &[(Id<Distribution>, &str)]) -> BTreeMap<Id<Distribution>, String> {
+fn held(pairs: &[(Id<Encoding>, &str)]) -> BTreeMap<Id<Encoding>, String> {
     pairs.iter().map(|(d, l)| (*d, l.to_string())).collect()
 }
 
@@ -447,8 +444,8 @@ fn a_deleted_file_does_not_come_back_from_a_stale_replica() {
     let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
     let scan = album();
     let (a, b) = (
-        Id::<Distribution>::of_audio(&scan[0].audio),
-        Id::<Distribution>::of_audio(&scan[1].audio),
+        Id::<Encoding>::of_audio(&scan[0].audio),
+        Id::<Encoding>::of_audio(&scan[1].audio),
     );
     m1.ingest(100, &scan);
 
@@ -479,7 +476,7 @@ fn a_deleted_file_does_not_come_back_from_a_stale_replica() {
 fn each_device_speaks_only_for_itself() {
     let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
     let scan = album();
-    let a = Id::<Distribution>::of_audio(&scan[0].audio);
+    let a = Id::<Encoding>::of_audio(&scan[0].audio);
     m1.ingest(100, &scan);
 
     m1.assert_holdings(200, held(&[(a, "/laptop/1.mp3")]));
@@ -500,7 +497,7 @@ fn each_device_speaks_only_for_itself() {
 fn a_holding_carries_when_it_was_claimed() {
     let mut m1 = Instance::new(device(1));
     let scan = album();
-    let a = Id::<Distribution>::of_audio(&scan[0].audio);
+    let a = Id::<Encoding>::of_audio(&scan[0].audio);
     m1.ingest(100, &scan);
     m1.assert_holdings(1_788_115_007_000, held(&[(a, "/m/1.mp3")]));
 
@@ -542,7 +539,7 @@ fn compaction_cannot_change_what_the_library_says() {
 fn compacting_one_device_does_not_split_the_answer() {
     let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
     let scan = album();
-    let a = Id::<Distribution>::of_audio(&scan[0].audio);
+    let a = Id::<Encoding>::of_audio(&scan[0].audio);
     m1.ingest(100, &scan);
     m1.assert_holdings(200, held(&[(a, "/old.mp3")]));
     m1.assert_holdings(300, held(&[(a, "/new.mp3")]));

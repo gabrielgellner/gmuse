@@ -23,6 +23,7 @@ pub mod merge;
 pub mod migrate;
 pub mod mint;
 pub mod populate;
+pub mod proposal;
 pub mod provenance;
 pub mod reference;
 pub mod round_trip;

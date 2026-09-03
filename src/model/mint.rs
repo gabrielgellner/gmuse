@@ -24,7 +24,7 @@
 //! mint different recordings.
 //!
 //! That is not a hole, because it lands in the case §11 already handles: both
-//! devices mint the *same* `Distribution` from the same bytes and each points
+//! devices mint the *same* `Encoding` from the same bytes and each points
 //! it at its own recording, which is one structural field taking two writes
 //! from the same base. §4 routes that to a surfaced correction. **The
 //! collision is the duplicate detector**, and convergent minting is the thing
@@ -33,10 +33,10 @@
 use uuid::Uuid;
 
 use crate::audio_id::AudioId;
-use crate::model::entity::{Artist, Distribution, Recording, Release, ReleaseGroup, Work};
+use crate::model::entity::{Artist, Encoding, Recording, Release, ReleaseGroup, Work};
 use crate::model::id::Id;
 
-impl Id<Distribution> {
+impl Id<Encoding> {
     /// The id these exact bytes always mint.
     ///
     /// An encoding is the one entity whose identity is fully determined by
@@ -46,7 +46,7 @@ impl Id<Distribution> {
     /// therefore mints different ids — deliberately, because a differently
     /// framed hash is a different measurement. What makes that survivable is
     /// that these are ordinary `Id<T>`s: the redirect map can reconcile a v1
-    /// and a v2 distribution, where an `AudioId` used *as* the key could not
+    /// and a v2 encoding, where an `AudioId` used *as* the key could not
     /// have been repaired at all.
     pub fn of_audio(audio: &AudioId) -> Self {
         Id::derived(audio.to_string().as_bytes())
@@ -83,7 +83,7 @@ mod tests {
     /// The no-coordinator bet, at the level it is actually made: two machines
     /// hash the same file and agree on the entity without a conversation.
     #[test]
-    fn the_same_file_mints_the_same_distribution_anywhere() {
+    fn the_same_file_mints_the_same_encoding_anywhere() {
         let a = audio(1, 0x8fb0_dcfb_f145_dfff_6649_7842_65da_0229);
         assert_eq!(Id::of_audio(&a), Id::of_audio(&a));
         assert_ne!(Id::of_audio(&a), Id::of_audio(&audio(1, 0x1234)));
@@ -93,7 +93,7 @@ mod tests {
     /// intended: the point of deriving is that a redirect can reconcile them,
     /// where a hash used as the key could not have been repaired.
     #[test]
-    fn a_scheme_bump_mints_a_different_distribution() {
+    fn a_scheme_bump_mints_a_different_encoding() {
         let hash = 0x8fb0_dcfb_f145_dfff_6649_7842_65da_0229;
         assert_ne!(Id::of_audio(&audio(1, hash)), Id::of_audio(&audio(2, hash)));
     }
@@ -125,13 +125,19 @@ mod tests {
     }
 
     /// The literals every derived id in every log depends on.
+    ///
+    /// This changed exactly once, when `Distribution` became `Encoding` and
+    /// took its `KIND` with it. That was free only because no log had yet been
+    /// written: nothing on any disk held a derived id, so there was nothing to
+    /// re-identify. It will never be free again, and this test is what makes
+    /// the next attempt loud.
     #[test]
     fn the_minting_is_pinned() {
         let a = audio(1, 0x8fb0_dcfb_f145_dfff_6649_7842_65da_0229);
         assert_eq!(
             Id::of_audio(&a).to_string(),
-            "50544207-35ae-5e5b-beb4-55ebb41f99c8",
-            "distribution minting changed: every stored id is now wrong"
+            "fcda6141-233b-5b1f-8d1d-ec0af7926402",
+            "encoding minting changed: every stored id is now wrong"
         );
         let mbid = Uuid::parse_str("183105b5-0000-4000-8000-000000000000").unwrap();
         assert_eq!(

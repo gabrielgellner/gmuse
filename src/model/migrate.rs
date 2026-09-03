@@ -146,7 +146,7 @@ impl Carried {
             // cannot have it retroactively, so it is absent rather than guessed.
             Carried::Play => Fact::Played {
                 recording,
-                distribution: None,
+                encoding: None,
             },
             Carried::Rating(stars) => Fact::Rated { recording, stars },
         }
@@ -260,7 +260,7 @@ mod tests {
             records.iter().next().unwrap().fact,
             Fact::Played {
                 recording: rec(1),
-                distribution: None
+                encoding: None
             },
             "and it found the track under its new name"
         );
@@ -324,7 +324,7 @@ mod tests {
         let facts: Vec<_> = records.iter().map(|r| r.fact.clone()).collect();
         assert!(facts.contains(&Fact::Played {
             recording: rec(1),
-            distribution: None
+            encoding: None
         }));
         assert!(facts.contains(&Fact::Rated {
             recording: rec(2),

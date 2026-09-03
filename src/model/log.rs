@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
-use crate::model::entity::{Artist, Device, Distribution, Recording, ReleaseGroup};
+use crate::model::entity::{Artist, Device, Encoding, Recording, ReleaseGroup};
 use crate::model::id::Id;
 
 /// One thing a device wrote down.
@@ -51,8 +51,8 @@ pub enum Fact {
 
     /// An encoding exists. Its id is derived from `audio`, so two devices
     /// reading the same bytes emit the *same* fact.
-    DistributionCatalogued {
-        distribution: Id<Distribution>,
+    EncodingCatalogued {
+        encoding: Id<Encoding>,
         audio: AudioId,
         /// `None` when the prober could not say — an unreadable header, not a
         /// missing format.
@@ -62,8 +62,8 @@ pub enum Fact {
 
     /// Which recording an encoding holds. **Structural** — §4 Type 2, so it
     /// carries what it replaced and a disagreement is surfaced.
-    DistributionBound {
-        distribution: Id<Distribution>,
+    EncodingBound {
+        encoding: Id<Encoding>,
         from: Option<Id<Recording>>,
         to: Id<Recording>,
     },
@@ -89,7 +89,7 @@ pub enum Fact {
         device: Id<Device>,
         /// Where each encoding sits on that device. The locator's shape is the
         /// device's business (§2), so it is opaque here.
-        held: BTreeMap<Id<Distribution>, String>,
+        held: BTreeMap<Id<Encoding>, String>,
     },
 
     /// An album exists, and what it is called.
@@ -124,7 +124,7 @@ pub enum Fact {
     /// This is what makes a verdict possible, and without it every encoding is
     /// `Unmeasured` and "is this a transcode" cannot be asked at all.
     Measured {
-        distribution: Id<Distribution>,
+        encoding: Id<Encoding>,
         /// Where the spectrum stops, in Hz.
         cutoff_hz: u32,
         analyser: u16,
@@ -143,7 +143,7 @@ pub enum Fact {
     /// A play. Counted, never a stored number.
     Played {
         recording: Id<Recording>,
-        distribution: Option<Id<Distribution>>,
+        encoding: Option<Id<Encoding>>,
     },
 }
 
@@ -156,13 +156,13 @@ pub enum Fact {
 pub struct Catalogue {
     pub artist_names: BTreeMap<Id<Artist>, String>,
     pub recordings: BTreeMap<Id<Recording>, Recorded>,
-    pub distributions: BTreeMap<Id<Distribution>, Distributed>,
+    pub encodings: BTreeMap<Id<Encoding>, Encoded>,
     pub genres: BTreeSet<(Id<Recording>, String)>,
     pub plays: BTreeMap<Id<Recording>, u32>,
     /// The latest rating per recording. A fold, never a stored number.
     pub ratings: BTreeMap<Id<Recording>, u8>,
     /// Cutoff and the analyser that found it, per encoding.
-    pub measurements: BTreeMap<Id<Distribution>, (u32, u16)>,
+    pub measurements: BTreeMap<Id<Encoding>, (u32, u16)>,
     pub groups: BTreeMap<Id<ReleaseGroup>, Grouped>,
     /// Where each recording sits: which album, which disc, which track.
     pub placements: BTreeMap<Id<Recording>, (Id<ReleaseGroup>, u16, u16)>,
@@ -181,7 +181,7 @@ pub struct Catalogue {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Asserted {
     pub at: Stamp,
-    pub held: BTreeMap<Id<Distribution>, String>,
+    pub held: BTreeMap<Id<Encoding>, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -197,7 +197,7 @@ pub struct Recorded {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Distributed {
+pub struct Encoded {
     pub audio: AudioId,
     pub recording: Option<Id<Recording>>,
     pub format: Option<crate::model::encoding::Format>,
@@ -211,7 +211,7 @@ pub struct Distributed {
 /// me" needs something to show.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Conflict {
-    pub distribution: Id<Distribution>,
+    pub encoding: Id<Encoding>,
     pub base: Option<Id<Recording>>,
     /// Every value asserted, ordered by stamp. The last one is what shows.
     pub asserted: Vec<(Stamp, Id<Recording>)>,
@@ -240,7 +240,7 @@ impl Conflict {
 /// Grouping by the **base** is what distinguishes a disagreement from a
 /// correction: two writes from the same base disagree, where a write from a
 /// base someone else established is a correction of it.
-type Bindings = BTreeMap<(Id<Distribution>, Option<Id<Recording>>), Vec<(Stamp, Id<Recording>)>>;
+type Bindings = BTreeMap<(Id<Encoding>, Option<Id<Recording>>), Vec<(Stamp, Id<Recording>)>>;
 
 /// Fold a set of records into the catalogue they describe.
 ///
@@ -270,28 +270,22 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     },
                 );
             }
-            Fact::DistributionCatalogued {
-                distribution,
+            Fact::EncodingCatalogued {
+                encoding,
                 audio,
                 format,
                 bitrate,
             } => {
-                cat.distributions
-                    .entry(*distribution)
-                    .or_insert(Distributed {
-                        audio: *audio,
-                        recording: None,
-                        format: *format,
-                        bitrate: *bitrate,
-                    });
+                cat.encodings.entry(*encoding).or_insert(Encoded {
+                    audio: *audio,
+                    recording: None,
+                    format: *format,
+                    bitrate: *bitrate,
+                });
             }
-            Fact::DistributionBound {
-                distribution,
-                from,
-                to,
-            } => {
+            Fact::EncodingBound { encoding, from, to } => {
                 bindings
-                    .entry((*distribution, *from))
+                    .entry((*encoding, *from))
                     .or_default()
                     .push((*stamp, *to));
             }
@@ -330,13 +324,12 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 cat.placements.insert(*recording, (*group, *disc, *track));
             }
             Fact::Measured {
-                distribution,
+                encoding,
                 cutoff_hz,
                 analyser,
             } => {
                 // Last measurement wins, which is what a re-measure means.
-                cat.measurements
-                    .insert(*distribution, (*cutoff_hz, *analyser));
+                cat.measurements.insert(*encoding, (*cutoff_hz, *analyser));
             }
             Fact::Rated { recording, stars } => {
                 // Records arrive in stamp order, so the last simply wins.
@@ -355,23 +348,23 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
         }
     }
 
-    for ((distribution, base), mut asserted) in bindings {
+    for ((encoding, base), mut asserted) in bindings {
         asserted.sort();
         let distinct: BTreeSet<_> = asserted.iter().map(|(_, r)| *r).collect();
         let winner = asserted.last().expect("non-empty by construction").1;
 
-        if let Some(d) = cat.distributions.get_mut(&distribution) {
+        if let Some(d) = cat.encodings.get_mut(&encoding) {
             d.recording = Some(winner);
         }
         if distinct.len() > 1 {
             cat.conflicts.push(Conflict {
-                distribution,
+                encoding,
                 base,
                 asserted,
             });
         }
     }
-    cat.conflicts.sort_by_key(|c| c.distribution);
+    cat.conflicts.sort_by_key(|c| c.encoding);
     cat
 }
 
@@ -406,12 +399,12 @@ impl Catalogue {
     /// Deliberately not "is it available": that needs to know which device is
     /// *this* one and which are reachable right now, neither of which is a fact
     /// about the library. #38 layers Local / Remote / Absent over this.
-    pub fn holders(&self, distribution: Id<Distribution>) -> Vec<(Id<Device>, &str, Stamp)> {
+    pub fn holders(&self, encoding: Id<Encoding>) -> Vec<(Id<Device>, &str, Stamp)> {
         self.holdings
             .iter()
             .filter_map(|(device, a)| {
                 a.held
-                    .get(&distribution)
+                    .get(&encoding)
                     .map(|locator| (*device, locator.as_str(), a.at))
             })
             .collect()

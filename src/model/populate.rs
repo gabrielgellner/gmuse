@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::model::entity::Distribution;
+use crate::model::entity::Encoding;
 use crate::model::id::Id;
 use crate::model::ingest;
 use crate::model::instance::Instance;
@@ -118,7 +118,7 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
                     report.provisional += 1;
                 }
                 held.insert(
-                    Id::<Distribution>::of_audio(&s.audio),
+                    Id::<Encoding>::of_audio(&s.audio),
                     path.display().to_string(),
                 );
                 scanned.push(s);
@@ -241,8 +241,8 @@ mod tests {
             b.recordings.keys().collect::<Vec<_>>()
         );
         assert_eq!(
-            a.distributions.keys().collect::<Vec<_>>(),
-            b.distributions.keys().collect::<Vec<_>>()
+            a.encodings.keys().collect::<Vec<_>>(),
+            b.encodings.keys().collect::<Vec<_>>()
         );
         assert!(a.conflicts.is_empty() && b.conflicts.is_empty());
     }
@@ -285,7 +285,7 @@ mod tests {
             "fold     {} records -> {} recordings, {} encodings",
             instance.records().len(),
             cat.recordings.len(),
-            cat.distributions.len()
+            cat.encodings.len()
         );
 
         let started = Instant::now();

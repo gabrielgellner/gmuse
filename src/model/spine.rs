@@ -36,7 +36,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::model::entity::Distribution;
+use crate::model::entity::Encoding;
 use crate::model::id::{Id, Ref};
 
 /// A date known to whatever precision the source knew it.
@@ -111,7 +111,7 @@ pub struct Recording {
     pub bpm: Option<Bpm>,
     pub length: Duration,
     /// A human overruling the canonical-encoding policy. Empty almost always.
-    pub pinned: Option<Ref<Distribution>>,
+    pub pinned: Option<Ref<Encoding>>,
 }
 
 /// The album across its editions.

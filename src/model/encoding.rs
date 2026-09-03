@@ -1,10 +1,12 @@
 //! Encodings, copies, and which one represents — issue #75,
 //! `domain-model.md` §2.
 //!
-//! A [`Encoding`] is an **encoding**; a [`Holding`] is a copy of it on a
-//! device. DCAT is explicit that a distribution is "a specific representation
-//! or serialization of a dataset, *not* a physical copy", and it carries a
-//! checksum — which here is `audio_id`. The copy is FRBR's `Item`.
+//! An [`Encoding`] is a **serialization**; a [`Holding`] is a copy of it on a
+//! device. DCAT names the same concept `Distribution` — "a specific
+//! representation or serialization of a dataset, *not* a physical copy" —
+//! and carries a checksum, which here is `audio_id`. The copy is FRBR's
+//! `Item`. Nothing in the state of the art agrees on the noun; see
+//! `domain-model.md` §7 for the five standards and their five words.
 //!
 //! Keeping them apart is what lets spectral cutoff and ReplayGain be measured
 //! **once** rather than once per machine per file, and what lets "is there a
@@ -26,7 +28,7 @@
 use std::collections::BTreeMap;
 
 use crate::audio_id::AudioId;
-use crate::model::entity::{Device, Distribution, Recording};
+use crate::model::entity::{Device, Recording};
 use crate::model::id::{Id, Ref};
 
 /// Which analyser produced a measurement.
@@ -121,7 +123,7 @@ pub enum Verdict {
 /// An encoding of a recording.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Encoding {
-    pub id: Id<Distribution>,
+    pub id: Id<Encoding>,
     pub audio: AudioId,
     pub recording: Option<Ref<Recording>>,
     pub format: Format,
@@ -166,7 +168,7 @@ impl Encoding {
 /// A copy of an encoding, on one device.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Holding {
-    pub distribution: Ref<Distribution>,
+    pub encoding: Ref<Encoding>,
     pub device: Ref<Device>,
     /// Interpreted by the device's kind — a path on a disk, a rating key on a
     /// server. Opaque here on purpose.
@@ -203,7 +205,7 @@ pub const POLICY: u16 = 1;
 /// else, so there is no holding and no setting in scope to read: every replica
 /// computes the same answer without coordinating, and a later edit *cannot*
 /// quietly make it machine-dependent without changing this line.
-pub fn canonical_key(e: &Encoding) -> (Verdict, u32, u32, std::cmp::Reverse<u8>, Id<Distribution>) {
+pub fn canonical_key(e: &Encoding) -> (Verdict, u32, u32, std::cmp::Reverse<u8>, Id<Encoding>) {
     (
         e.verdict(),
         e.cutoff_hz.map(|c| c.value).unwrap_or(0),
@@ -217,7 +219,7 @@ pub fn canonical_key(e: &Encoding) -> (Verdict, u32, u32, std::cmp::Reverse<u8>,
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(bound = "")]
 pub struct Encodings {
-    pub encodings: BTreeMap<Id<Distribution>, Encoding>,
+    pub encodings: BTreeMap<Id<Encoding>, Encoding>,
     pub holdings: Vec<Holding>,
     pub devices: BTreeMap<Id<Device>, DeviceRecord>,
 }
@@ -260,14 +262,14 @@ impl Encodings {
     pub fn for_playback(
         &self,
         recording: Id<Recording>,
-        pinned: Option<Id<Distribution>>,
+        pinned: Option<Id<Encoding>>,
         reachable: &[Id<Device>],
         prefers: &[Format],
     ) -> Option<&Encoding> {
         let here = |e: &Encoding| {
             self.holdings
                 .iter()
-                .any(|h| h.distribution.id() == e.id && reachable.contains(&h.device.id()))
+                .any(|h| h.encoding.id() == e.id && reachable.contains(&h.device.id()))
         };
         let candidates: Vec<_> = self.of(recording).into_iter().filter(|e| here(e)).collect();
 
@@ -287,16 +289,16 @@ impl Encodings {
     }
 
     /// Every device claiming to hold this encoding, and where.
-    pub fn holders(&self, distribution: Id<Distribution>) -> Vec<&Holding> {
+    pub fn holders(&self, encoding: Id<Encoding>) -> Vec<&Holding> {
         self.holdings
             .iter()
-            .filter(|h| h.distribution.id() == distribution)
+            .filter(|h| h.encoding.id() == encoding)
             .collect()
     }
 
     /// Measurements taken by an older analyser, so a re-measure pass can target
     /// them instead of the whole library.
-    pub fn stale_measurements(&self) -> Vec<Id<Distribution>> {
+    pub fn stale_measurements(&self) -> Vec<Id<Encoding>> {
         self.encodings
             .values()
             .filter(|e| {
@@ -345,7 +347,7 @@ mod tests {
 
     fn holding(e: &Encoding, device: Id<Device>, at: &str) -> Holding {
         Holding {
-            distribution: Ref::to(e.id),
+            encoding: Ref::to(e.id),
             device: Ref::to(device),
             locator: at.into(),
         }
@@ -433,7 +435,7 @@ mod tests {
         let worst = e.of(rec).into_iter().min_by_key(|x| x.bitrate).unwrap().id;
         for name in [&b"laptop"[..], &b"nas"[..]] {
             e.holdings.push(Holding {
-                distribution: Ref::to(worst),
+                encoding: Ref::to(worst),
                 device: Ref::to(Id::<Device>::derived(name)),
                 locator: "/x.mp3".into(),
             });
@@ -608,7 +610,7 @@ mod tests {
         let here_id = here.id;
         e.encodings.insert(here.id, here);
 
-        let gone = Id::<Distribution>::of_audio(&audio(0xdead));
+        let gone = Id::<Encoding>::of_audio(&audio(0xdead));
         assert_eq!(
             e.for_playback(rec, Some(gone), &[laptop], &[]).unwrap().id,
             here_id,

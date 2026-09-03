@@ -21,7 +21,7 @@
 //! > less.
 //!
 //! Something local may name something global — a `Holding` names its
-//! `Distribution`, a copy naming the encoding it holds. The reverse cannot be
+//! `Encoding`, a copy naming the encoding it holds. The reverse cannot be
 //! written: a `Recording` naming one machine's copy would be inert on every
 //! other machine. The type system enforces the sharp end of this, because
 //! [`Handle`] has no `Serialize`, so a persisted struct can only hold an
@@ -90,7 +90,7 @@ impl<T: Entity> Id<T> {
     /// what `library-sync-design.md` §2 requires of anything that syncs.
     ///
     /// The seed is **domain-separated** by [`Entity::KIND`]. Without that, a
-    /// recording and a distribution minted from the same bytes would land on
+    /// recording and a encoding minted from the same bytes would land on
     /// the same UUID — the Rust types would still not unify, but the values
     /// would be identical on disk and in every export, which is where identity
     /// has to hold.
@@ -136,7 +136,7 @@ impl<T> Handle<T> {
 /// A reference to an entity, which *may* know where it currently lives.
 ///
 /// **A reference is valid when its target is absent.** A recording with no
-/// distribution, or a release not currently loaded, is ordinary — resolution
+/// encoding, or a release not currently loaded, is ordinary — resolution
 /// is an optimisation, not a precondition.
 pub struct Ref<T> {
     id: Id<T>,
@@ -327,7 +327,7 @@ impl<'de, T> serde::Deserialize<'de> for Ref<T> {
 mod tests {
     use super::*;
 
-    use crate::model::entity::{Distribution, Recording, Release};
+    use crate::model::entity::{Encoding, Recording, Release};
 
     /// A tag implementing nothing at all, to prove the impls demand nothing.
     struct Untagged;
@@ -359,7 +359,7 @@ mod tests {
         let seed = b"1f2a6b8d";
         assert_ne!(
             Id::<Recording>::derived(seed).as_uuid(),
-            Id::<Distribution>::derived(seed).as_uuid(),
+            Id::<Encoding>::derived(seed).as_uuid(),
             "kind must be part of the seed"
         );
     }

@@ -2908,6 +2908,15 @@ Append here as decisions are made. Format: date, decision, rationale.
   library a cache of it; "edit the library and serialize when you want to" makes the library the thing. Only the second
   survives a second machine, and the first is what stranded a four-star rating. See `library-api.md` §6.
 
+- **2026-09-02** **`serde_json`, for the proposal format and nothing else.** A tool says what it found by writing one
+  JSON object per line, which `library-api.md` §5 settles: facts are heterogeneous, and a TSV covering every kind anyone
+  might assert would need a column union — a shape this project has already been bitten by once, when a genre containing
+  the separator fought its own quoting.
+
+  Measured cost: two crates in the lock, `serde_json` and `zmij`. It is used at the boundary only; the stored form stays
+  postcard, which encodes a variant by index rather than by name — so `Source` and `Confidence` are lowercased on the
+  wire, because a proposal file is something a person types, and it costs the stored form nothing.
+
 - **2026-09-01** **One player at a time, held by the kernel (`std::fs::File::try_lock`).** Dogfooding put gmuse in a
   long-lived tmux session, where a second instance started by hand is easy and silent. What it actually breaks was
   measured rather than assumed, and is narrower than expected: **ratings and plays are safe**, because an event is one
@@ -3087,8 +3096,8 @@ Append here as decisions are made. Format: date, decision, rationale.
   rather than load-bearing.
 
   Deliberately **not** done: `history.toml` and the event log still name paths. Migrating them is the step that
-  "invalidates every event ever recorded", and #63 has not settled whether events should name an entry or a
-  distribution. The id exists, is cached, and is used where it already pays.
+  "invalidates every event ever recorded", and #63 has not settled whether events should name an entry or a encoding.
+  The id exists, is cached, and is used where it already pays.
 
 - **2026-09-01** **A launch does not scan.** Startup rebuilt the library from disk every time, which made the library a
   function of gmuse having been run. That is backwards under #63's reading: the library is the thing and the player

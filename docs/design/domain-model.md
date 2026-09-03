@@ -89,8 +89,8 @@ classDiagram
         u16 position
         Option~String~ title_on_release
     }
-    class Distribution {
-        Id~Distribution~ id
+    class Encoding {
+        Id~Encoding~ id
         AudioId audio
         Format format
         u32 bitrate
@@ -99,7 +99,7 @@ classDiagram
         Option~u32~ encoder_delay
     }
     class Holding {
-        Ref~Distribution~ distribution
+        Ref~Encoding~ encoding
         Ref~Device~ device
         String locator
         Instant asserted
@@ -149,10 +149,10 @@ classDiagram
     Track "1..*" --> "1" Medium : on
     Track "0..*" --> "1" Recording : of
     Release "1..*" --> "1" ReleaseGroup : edition of
-    Distribution "0..*" --> "0..1" Recording : encodes
-    Holding "0..*" --> "1" Distribution : of
+    Encoding "0..*" --> "0..1" Recording : encodes
+    Holding "0..*" --> "1" Encoding : of
     Holding "1..*" --> "1" Device : on
-    Recording "0..1" --> "0..1" Distribution : pinned
+    Recording "0..1" --> "0..1" Encoding : pinned
     CatalogRecord "0..*" --> "1" Cataloguable : about
 ```
 
@@ -270,17 +270,17 @@ classDiagram
 | **Genre**         | a concept in the vocabulary     | name                                                                 |
 | **Collection**    | a curated set, ordered or not   | name, whether its order means anything                               |
 | **Device**        | a machine holding copies        | name, kind                                                           |
-| **Distribution**  | **an encoding** of a recording  | `audio_id`, format, bitrate, cutoff, gain, encoder delay — the bytes |
-| **Holding**       | a copy, on one device           | which distribution, which device, a locator, when the claim was made |
+| **Encoding**      | **an encoding** of a recording  | `audio_id`, format, bitrate, cutoff, gain, encoder delay — the bytes |
+| **Holding**       | a copy, on one device           | which encoding, which device, a locator, when the claim was made     |
 
 `Work` is optional on a `Recording`. 16% of this library has no MusicBrainz id and some music never will; a recording
 that realises no known work is an ordinary row, not a broken one.
 
 ### Associations are stored on the child
 
-**Every to-one association is a scalar reference on the child** — `Medium.release`, `Track.medium`,
-`Holding.distribution` — and no entity stores a collection of its children. "The tracks of a medium" is a derived index,
-never a stored field. The API still presents containment; only the storage direction changes.
+**Every to-one association is a scalar reference on the child** — `Medium.release`, `Track.medium`, `Holding.encoding` —
+and no entity stores a collection of its children. "The tracks of a medium" is a derived index, never a stored field.
+The API still presents containment; only the storage direction changes.
 
 This is not a weaker claim about the relation. A single scalar reference makes multi-parenting **unrepresentable**, and
 a required one makes membership mandatory — a parent-side `Vec` cheerfully represents a track on two media, or on none.
@@ -333,8 +333,8 @@ enum RecordingDerivationKind { Remix, Edit, Dub, Mashup, Sample }      // versio
 ```
 
 **`Remaster` is deliberately absent from both.** A remaster is the same recording issued again — a new `Release` and new
-`Distribution`s — not a derived anything. Nothing in this library disputes it: zero of 5774 tagged files carry a
-remaster tell in an album or track title.
+`Encoding`s — not a derived anything. Nothing in this library disputes it: zero of 5774 tagged files carry a remaster
+tell in an album or track title.
 
 ### A DJ mix is a tracklist
 
@@ -443,15 +443,43 @@ different choices for the same artist. The entityhood test decides it:
 
 ### An encoding is not a copy
 
-A `Distribution` is an **encoding**; a `Holding` is a **copy of it on a device**. DCAT is explicit that a distribution
-is "a specific representation or serialization of a dataset, _not_ a physical copy", and it carries `spdx:checksum` —
-which here is `audio_id`. The copy is FRBR's `Item`, or the Music Ontology's `MusicalItem`.
+An `Encoding` is a **serialization**; a `Holding` is a **copy of it on a device**. DCAT names this concept
+`Distribution` and is explicit about the distinction: "a specific representation or serialization of a dataset, _not_ a
+physical copy", carrying `spdx:checksum` — which here is `audio_id`. The copy is FRBR's `Item`, or the Music Ontology's
+`MusicalItem`.
+
+**No standard agrees on the noun**, which is why this one is ours. Five name the same concept five ways:
+
+| standard       | its name for it       | what it carries                            |
+| -------------- | --------------------- | ------------------------------------------ |
+| DCAT           | `dcat:Distribution`   | mediaType, byteSize, `spdx:checksum`       |
+| PREMIS         | `premis:File`         | format, size, **fixity** — but OS-scoped   |
+| PBCore         | `pbcoreInstantiation` | dataRate, fileSize, essenceTrack, location |
+| Music Ontology | `mo:AudioFile`        | `mo:encoding`, `mo:encodes → Signal`       |
+| schema.org     | `AudioObject`         | `encodingFormat`, `bitrate`, **`sha256`**  |
+
+`Distribution` was the first choice and is wrong for **music**, where distribution means the label supply chain.
+`Instantiation` — PBCore's word, and the closest domain to this one — is wrong for **Rust**, where instantiation means
+constructing a value and `Instance` is already taken. `File` is PREMIS's and is wrong outright: PREMIS scopes it to
+"known by an operating system", which is a `Holding`. What is left is the word every one of those standards reaches for
+when it names the _relation_ — `schema:encoding`, `mo:encodes`, `encodingFormat` — promoted to name the thing.
+
+**This level has no WEMI slot, and that is why the naming is hard.** LRM's Manifestation is "the set of all carriers
+assumed to share the same characteristics as to content and physical form" — which is `Release`, already taken; Item is
+"a single exemplar", which is `Holding`. WEMI has four levels because when it was written a manifestation's carriers
+were identical by construction. Born-digital breaks that: two 320k transcodes of one FLAC are one Manifestation and two
+different things. DCAT invented `Distribution` for exactly this gap, and this model needs the same fifth level:
+
+```
+Work → Recording → Release → Encoding → Holding
+       Expression   Manifestation   ???     Item
+```
 
 Every field of an encoding is a fact about the bytes and travels; only the locator belongs to a machine.
 
 ```rust
-struct Distribution {              // an encoding
-    id: Id<Distribution>,          // UUIDv5(namespace, audio) — derived, not random
+struct Encoding {              // an encoding
+    id: Id<Encoding>,          // UUIDv5(namespace, audio) — derived, not random
     audio: AudioId,                // the binding it was derived from
     recording: Option<Ref<Recording>>,
     format: Format,
@@ -462,7 +490,7 @@ struct Distribution {              // an encoding
 }
 
 struct Holding {                   // a copy on a device
-    distribution: Ref<Distribution>,
+    encoding: Ref<Encoding>,
     device: Ref<Device>,
     locator: String,               // the device's kind says how to read it
     asserted: Instant,             // when that device last said so
@@ -472,23 +500,23 @@ struct Holding {                   // a copy on a device
 Keeping them apart is what lets spectral cutoff and ReplayGain be measured **once** rather than once per machine per
 file, and what lets "is there a good copy of this anywhere" be answered on a laptop holding 2% of the library.
 
-**A distribution's id is _derived from_ its content, and is still a UUID.**
+**A encoding's id is _derived from_ its content, and is still a UUID.**
 
 ```
-Id<Distribution> = UUIDv5(gmuse_namespace, audio_id)
+Id<Encoding> = UUIDv5(gmuse_namespace, audio_id)
 ```
 
-Two devices scanning the same file must arrive at the same distribution without talking to each other, which
+Two devices scanning the same file must arrive at the same encoding without talking to each other, which
 `library-sync-design.md` §2 requires — "identical on every device, generated without coordination, and stable under
 retagging". Deriving the UUID gets that without making an encoding a special case: `Ref`, the redirect map,
-`ExternalBinding` and `CatalogRecord` are all defined over `Id<T>`, and a distribution keyed by a bare `AudioId` could
-be the target of none of them — `Recording.pinned` would not typecheck.
+`ExternalBinding` and `CatalogRecord` are all defined over `Id<T>`, and a encoding keyed by a bare `AudioId` could be
+the target of none of them — `Recording.pinned` would not typecheck.
 
 It also defuses the scheme byte. `AudioId` is stamped `v1:` precisely because that framing may one day have to change.
-Were the hash the identity, a scheme bump would **re-identify every distribution at once** — every pin, every play
-event, every holding dangling together, and the redirect map unable to repair it because it is typed over `Id<T>`.
-Derived instead, `audio_id` is exactly what §3 says a foreign identifier is: **a binding on the entity, not the entity's
-key.** A scheme bump mints new bindings, and ordinary redirects where two schemes disagree.
+Were the hash the identity, a scheme bump would **re-identify every encoding at once** — every pin, every play event,
+every holding dangling together, and the redirect map unable to repair it because it is typed over `Id<T>`. Derived
+instead, `audio_id` is exactly what §3 says a foreign identifier is: **a binding on the entity, not the entity's key.**
+A scheme bump mints new bindings, and ordinary redirects where two schemes disagree.
 
 **Presence is never stored.** A local copy is checked by resolving its locator when you need it, which has to happen
 anyway, so a stored `present` flag would only be something that can go stale.
@@ -523,13 +551,13 @@ for_playback     which copy this machine opens right now       derived, differs 
 rec.pinned       a human overruling the first                  stored, empty almost always
 ```
 
-**The default is computed and never stored.** `canonical` is `argmax` over the recording's distributions — a fold, like
+**The default is computed and never stored.** `canonical` is `argmax` over the recording's encodings — a fold, like
 `max()`. When a better encode arrives the answer changes by itself. Persisting it would be caching a fold as a synced
-field: stale on every new distribution, rewritten by every device, syncing derived data.
+field: stale on every new encoding, rewritten by every device, syncing derived data.
 
-**The pin is a stored override**, `Recording.pinned: Option<Ref<Distribution>>`. It is a pin rather than a preference
+**The pin is a stored override**, `Recording.pinned: Option<Ref<Encoding>>`. It is a pin rather than a preference
 because that is what it is — a judgement the policy cannot reconstruct, the vinyl rip that measures worse and sounds
-right. It hangs off `Recording` and names a `Distribution` because a pin is about **an encoding**, about how something
+right. It hangs off `Recording` and names a `Encoding` because a pin is about **an encoding**, about how something
 sounds; pinning a `Holding` would say "prefer the laptop's copy", which nobody means. It must survive the file moving, a
 device dying, or a second machine acquiring the same encode.
 
@@ -548,11 +576,11 @@ and the quality tables, so a changed ordering should read as an explainable diff
 
 **Defined once, at the model.** Every leaf showing a recording also wants _its_ format, bitrate and quality, and a
 recording with three encodings has three answers. The argmax is a derived index the library maintains, and no caller
-reaches past it to raw distributions for display. If it ever shows in a profile it is materialised — rebuilt locally,
-never synced.
+reaches past it to raw encodings for display. If it ever shows in a profile it is materialised — rebuilt locally, never
+synced.
 
-**A dangling pin is information, not an error.** If a pinned distribution loses its last holding, the policy answers
-again and a row lands in the review queue.
+**A dangling pin is information, not an error.** If a pinned encoding loses its last holding, the policy answers again
+and a row lands in the review queue.
 
 Roon, Plex and MDM survivorship arrived at this shape independently: computed default, explicit override, no stored
 automatic choice.
@@ -732,12 +760,12 @@ half and stays exactly what it is: `history.rs` is right that "a history keyed b
 different tracks", but that rejects the arena index, not identity.
 
 **A reference points at something at least as portable as itself — never less.** Something local may name something
-global: a `Holding` names its `Distribution`, a copy naming the encoding it holds. The reverse cannot be written, since
-a `Recording` naming one machine's copy would be inert on every other machine. This is the cheapest of the model's
+global: a `Holding` names its `Encoding`, a copy naming the encoding it holds. The reverse cannot be written, since a
+`Recording` naming one machine's copy would be inert on every other machine. This is the cheapest of the model's
 invariants to check and it decides several arrow directions on its own.
 
 **A reference is valid when its target is absent.** `Ref` carries the id and _may_ carry the resolution. A recording
-with no distribution, or a release not currently loaded, is normal.
+with no encoding, or a release not currently loaded, is normal.
 
 **The key is ours; foreign identifiers are bindings.** MusicBrainz merged a recording id out from under this library —
 `183105b5…` now redirects to `859d0860…`. Were the MBID the key, someone else's editorial decision would change an
@@ -857,10 +885,10 @@ on every event (#36).
 none is discarded, so a rating set on two devices during one disconnected window resolves to a single value and both
 remain in the log.
 
-**A play event names the distribution it played, where one is known.** The recording is what the event is _about_ and
-what conforms with the library cube; the distribution pins which encoding — and through it which release — a play came
-from. That answers "which of these four releases did I actually listen to" with data instead of a policy, and when it is
-absent the policy applies once, at the model, rather than differently in each query.
+**A play event names the encoding it played, where one is known.** The recording is what the event is _about_ and what
+conforms with the library cube; the encoding pins which encoding — and through it which release — a play came from. That
+answers "which of these four releases did I actually listen to" with data instead of a policy, and when it is absent the
+policy applies once, at the model, rather than differently in each query.
 
 **A disagreement between a file's tags and the library is an error, not a precedence question.** It is a bad binding, a
 library error, or a stale export. None is resolved by a rule about who wins; all three are "stop and show me", which is
@@ -951,8 +979,8 @@ argument that put ratings and plays there.
 Cue points want to be recording-level for exactly that reason, and there is a trap. **Absolute sample positions differ
 between encodings of the same audio:** an MP3's encoder delay and padding shift every offset, so a cue set against one
 file lands early against another. The fix is not to make cues encoding-level — that reintroduces the loss re-encoding
-was supposed to stop being. Cues are stored against a canonical timeline, each `Distribution` records its own encoder
-delay (LAME's gapless header carries it), and the offset is corrected at load.
+was supposed to stop being. Cues are stored against a canonical timeline, each `Encoding` records its own encoder delay
+(LAME's gapless header carries it), and the offset is corrected at load.
 
 **The canonical timeline is the decoded signal with encoder delay removed.** That is the one frame of reference every
 encoding of a source agrees on, which is what makes a cue point portable across a re-rip.
@@ -965,16 +993,16 @@ expensive to change later.
 
 ## 7. Prior art
 
-| model               | takes                                                                           | leaves                                |
-| ------------------- | ------------------------------------------------------------------------------- | ------------------------------------- |
-| **FRBR / IFLA LRM** | Work / Expression / Manifestation / Item; derivation between works              | strict disjointness                   |
-| **OpenWEMI**        | classes need not be disjoint; an item may stand alone — for incomplete data     | RDF                                   |
-| **Music Ontology**  | derivation between recordings; a track is a manifestation, not a join           | the RDF stack; a dormant vocabulary   |
-| **MusicBrainz**     | the working shape; 83% of these files carry its ids                             | its editorial cadence as our identity |
-| **DCAT / DCAT-AP**  | Distribution as a representation; themes as concepts in a scheme; CatalogRecord | triples, URIs, open world             |
-| **SDMX**            | codelists; hierarchies separate from lists; the artefact ladder; `Ref`          | XML; versioning as identity           |
-| **Kimball**         | grain, conformed dimensions, SCD types                                          | star-schema denormalisation           |
-| **beets**           | the warning that this can be over-modelled                                      | its two flat tables                   |
+| model               | takes                                                                             | leaves                                |
+| ------------------- | --------------------------------------------------------------------------------- | ------------------------------------- |
+| **FRBR / IFLA LRM** | Work / Expression / Manifestation / Item; derivation between works                | strict disjointness                   |
+| **OpenWEMI**        | classes need not be disjoint; an item may stand alone — for incomplete data       | RDF                                   |
+| **Music Ontology**  | derivation between recordings; a track is a manifestation, not a join             | the RDF stack; a dormant vocabulary   |
+| **MusicBrainz**     | the working shape; 83% of these files carry its ids                               | its editorial cadence as our identity |
+| **DCAT / DCAT-AP**  | `Distribution` as a representation; themes as concepts in a scheme; CatalogRecord | triples, URIs, open world             |
+| **SDMX**            | codelists; hierarchies separate from lists; the artefact ladder; `Ref`            | XML; versioning as identity           |
+| **Kimball**         | grain, conformed dimensions, SCD types                                            | star-schema denormalisation           |
+| **beets**           | the warning that this can be over-modelled                                        | its two flat tables                   |
 
 **Two deliberate departures.** `Recording` is one class where the Music Ontology splits a `Performance` from the
 `Signal` it produced. That split earns its place in classical cataloguing, and MusicBrainz manages thirty million
@@ -1034,7 +1062,7 @@ struct Track {
 struct Recording {
     id: Id<Recording>,
     work: Option<Ref<Work>>,             // credits point here; there is no credits: Vec
-    pinned: Option<Ref<Distribution>>,
+    pinned: Option<Ref<Encoding>>,
 }
 ```
 
@@ -1052,8 +1080,8 @@ may be one of four things is a sum type, where RDF would allow all four at once.
 Recording  "Big Science" — Laurie Anderson              rating 4
   ├─ track of      Big Science (1982)             disc 1, track 2
   ├─ track of      Talk Normal: Anthology (2000)  disc 1, track 3
-  ├─ Distribution  192k, cutoff 19.1 kHz
-  └─ Distribution  128k, cutoff 15.9 kHz
+  ├─ Encoding  192k, cutoff 19.1 kHz
+  └─ Encoding  128k, cutoff 15.9 kHz
 ```
 
 104 recordings in this library are already held twice. Today they are unrelated tracks: play one and the other's count
@@ -1105,7 +1133,7 @@ is not.
 ### One encoding, two machines
 
 ```
-Distribution v1:8fb0…   320k, cutoff 19.8 kHz          measured once
+Encoding v1:8fb0…   320k, cutoff 19.8 kHz          measured once
   ├─ Holding  laptop  /Users/g/MusicLibrary/…/03 Callisto.mp3   as of now
   └─ Holding  asnas   /Volumes/Media/Music/…/03 Callisto.mp3    as of Tuesday
 ```
@@ -1115,8 +1143,8 @@ The laptop can answer "is there a good copy anywhere" without holding one, and n
 ### Replacing a bad rip
 
 ```
-before   Recording "Isn't Love" ── Distribution  320k declared, 15.7 kHz  ← lying
-after    Recording "Isn't Love" ── Distribution  320k, 19.8 kHz
+before   Recording "Isn't Love" ── Encoding  320k declared, 15.7 kHz  ← lying
+after    Recording "Isn't Love" ── Encoding  320k, 19.8 kHz
 ```
 
 The recording did not change, so plays and ratings never move. Keeping the old encoding or deleting it are both
@@ -1126,9 +1154,9 @@ ordinary: the model is neutral, because history hangs off the recording.
 
 ```
 Recording "…"  rating 5
-  └─ (no Distribution)                                available = none
+  └─ (no Encoding)                                available = none
 
-Distribution  v1:8fb0…   no Recording bound           Holding on laptop
+Encoding  v1:8fb0…   no Recording bound           Holding on laptop
 ```
 
 The second is 16% of this library, and it must not be second class.
@@ -1190,15 +1218,15 @@ but to propose retiring it: one encoding cannot be two performances, so the pair
 settles it without deleting anything. That is what feeds the staged queue in §3 — the machine finds them, a person
 decides.
 
-**Mint convergently wherever a binding permits it.** A `Distribution` already converges, since its id is derived from
-its content. Where a file carries a MusicBrainz recording id — 83% of this library — the recording's id derives the same
+**Mint convergently wherever a binding permits it.** A `Encoding` already converges, since its id is derived from its
+content. Where a file carries a MusicBrainz recording id — 83% of this library — the recording's id derives the same
 way, `UUIDv5(namespace, mbid)`, and two machines agree without having met. The residue is unbound material.
 
-**For the residue, the collision is the detector.** Both machines mint the same `Distribution` and each sets its
-`recording` to its own new `Recording`. That is one structural field receiving two different writes from the same empty
-base — which §4 already routes to "correction event, **surfaced**". No new mechanism is required: the duplicate
-announces itself at exactly the moment there is enough information to see it, and a person decides, as §3 requires for
-every other identity change.
+**For the residue, the collision is the detector.** Both machines mint the same `Encoding` and each sets its `recording`
+to its own new `Recording`. That is one structural field receiving two different writes from the same empty base — which
+§4 already routes to "correction event, **surfaced**". No new mechanism is required: the duplicate announces itself at
+exactly the moment there is enough information to see it, and a person decides, as §3 requires for every other identity
+change.
 
 ### Keeping this document honest
 

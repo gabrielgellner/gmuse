@@ -111,6 +111,10 @@ pub struct Credit {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
+// Lowercase on the wire, because a proposal file is something a person types
+// and `"basis":"discogs"` is what they will type. Postcard encodes a variant by
+// index rather than by name, so this costs the stored form nothing.
+#[serde(rename_all = "snake_case")]
 pub enum Source {
     /// Read off a file. The weakest thing a name can be.
     TagVariant,
