@@ -370,7 +370,11 @@ pub fn id_of(line: &str) -> Option<String> {
 /// only meaningful in order, and a `moved` applied out of order would carry
 /// the wrong history. A stable sort keeps same-second events in file order, so
 /// one machine's own log always folds the way it was written.
-pub fn fold_into(base: &mut History, data_dir: &Path) -> usize {
+/// Every event in a directory's logs, in the order they were written.
+///
+/// Exposed so a migration can read the log without folding it into a history
+/// keyed by the very thing the migration exists to stop using (#82).
+pub fn events_in(data_dir: &Path) -> Vec<Event> {
     let mut events: Vec<Event> = Vec::new();
     for log in logs_in(data_dir) {
         let Ok(text) = std::fs::read_to_string(&log) else {
@@ -379,6 +383,11 @@ pub fn fold_into(base: &mut History, data_dir: &Path) -> usize {
         events.extend(text.lines().filter_map(decode));
     }
     events.sort_by_key(|e| e.at);
+    events
+}
+
+pub fn fold_into(base: &mut History, data_dir: &Path) -> usize {
+    let events = events_in(data_dir);
     let applied = events.len();
     for e in &events {
         apply(base, e);

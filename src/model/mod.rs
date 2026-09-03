@@ -20,6 +20,7 @@ pub mod ingest;
 pub mod instance;
 pub mod log;
 pub mod merge;
+pub mod migrate;
 pub mod mint;
 pub mod populate;
 pub mod provenance;

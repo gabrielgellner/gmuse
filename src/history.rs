@@ -62,6 +62,18 @@ const LONG_ENOUGH: Duration = Duration::from_secs(240);
 /// re-encode still loses their history. That is the case with nothing to hold
 /// it by, and #57's fingerprints are what would close it.
 pub fn key_for(mb_recording: Option<uuid::Uuid>, audio: Option<AudioId>) -> Option<String> {
+    recording_id_for(mb_recording, audio).map(|id| id.to_string())
+}
+
+/// The same identity, typed.
+///
+/// [`key_for`] is what a TOML map key has to be; this is what everything else
+/// should use, and having both means the string form exists in one place
+/// rather than being spelled out wherever a key is needed.
+pub fn recording_id_for(
+    mb_recording: Option<uuid::Uuid>,
+    audio: Option<AudioId>,
+) -> Option<Id<Recording>> {
     let id = match (mb_recording, audio) {
         (Some(mbid), _) => Id::<Recording>::of_musicbrainz(mbid),
         (None, Some(a)) => Id::<Recording>::derived(a.to_string().as_bytes()),
@@ -70,7 +82,7 @@ pub fn key_for(mb_recording: Option<uuid::Uuid>, audio: Option<AudioId>) -> Opti
         // next scan.
         (None, None) => return None,
     };
-    Some(id.to_string())
+    Some(id)
 }
 
 #[cfg(test)]
