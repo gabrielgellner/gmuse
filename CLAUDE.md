@@ -12,6 +12,10 @@ project brief and it is authoritative. Sections marked **INVARIANT** are not to 
 decision in its Decision Log (§13). Anything in the §1 "out of scope" list stays out, even when a crate makes it trivial
 — scope creep is the named failure mode for this project.
 
+[`docs/design/library-api.md`](docs/design/library-api.md) is the contract: **nothing is implicit.** Import, relink and
+forget are named operations; a scan reconciles holdings and reads no tags; the UI edits library metadata and writing
+tags is a separate export. There is no tag editor.
+
 [`docs/design/layers.md`](docs/design/layers.md) says which system may talk to which — the librarian, the player, the
 scanner and the `tools/` scripts. Read it before adding a caller in either direction.
 

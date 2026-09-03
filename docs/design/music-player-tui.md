@@ -2899,6 +2899,15 @@ Append here as decisions are made. Format: date, decision, rationale.
   that prompted this one — multi-artist credits, where the tags already settle 332 of 367 tracks and three strings need
   a person — argues for a `tools/` pass rather than an editor.
 
+  **Decided 2026-09-02: there is no tag editor, and the capability was admitted under the wrong name.** What the UI
+  edits is _library metadata_ — a credit, a genre, a rating, a pin — which lives in the library whether or not a file
+  exists to carry it. Writing tags is a separate flow in the other direction: an **export**, invoked over a selection
+  when you want other programs to see what you know.
+
+  The distinction is not pedantic. "Edit the tag and let the scan pick it up" makes the file the authority and the
+  library a cache of it; "edit the library and serialize when you want to" makes the library the thing. Only the second
+  survives a second machine, and the first is what stranded a four-star rating. See `library-api.md` §6.
+
 - **2026-09-01** **One player at a time, held by the kernel (`std::fs::File::try_lock`).** Dogfooding put gmuse in a
   long-lived tmux session, where a second instance started by hand is easy and silent. What it actually breaks was
   measured rather than assumed, and is narrower than expected: **ratings and plays are safe**, because an event is one

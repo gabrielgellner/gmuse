@@ -112,6 +112,10 @@ They are not a special case. They are a fourth writer, and they divide by what t
 The first four should append facts. The last one should not: normalising a tag is writing the _serialization_, which is
 downstream of the library and always will be.
 
+The verbs they use are in [`library-api.md`](library-api.md): `query` for asking, `apply` for a file of proposed facts,
+and `import` / `relink` / `forget` for the operations that change what the library _is_. All of them work with no player
+running, because a tool must be able to say something whether or not you are listening to music.
+
 ### What the tools cannot do for themselves
 
 **Compute an identity.** `Id<Recording>` derives from a MusicBrainz id or from `audio_id`, and `audio_id` is XXH3 over
