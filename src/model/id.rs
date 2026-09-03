@@ -230,6 +230,20 @@ impl<T> PartialEq for Ref<T> {
     }
 }
 impl<T> Eq for Ref<T> {}
+
+/// Ordered by the id alone, which is what equality already compares — so a
+/// reference sorts the same whether or not this process happened to resolve it,
+/// and a `BTreeSet` of references cannot change shape when one gets looked up.
+impl<T> Ord for Ref<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+impl<T> PartialOrd for Ref<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 impl<T> Hash for Ref<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
@@ -418,6 +432,17 @@ mod tests {
             postcard::to_allocvec(&r.id()).unwrap(),
             "a reference costs exactly an id on disk"
         );
+    }
+
+    /// Resolving must not move a reference in an ordered collection, or a
+    /// `BTreeSet` would change shape as things got looked up.
+    #[test]
+    fn resolving_does_not_reorder_a_reference() {
+        let (a, b) = (Id::<Recording>::new(), Id::<Recording>::new());
+        let (mut ra, rb) = (Ref::to(a), Ref::to(b));
+        let before = ra.cmp(&rb);
+        ra.resolve(Handle::new(99));
+        assert_eq!(ra.cmp(&rb), before, "order follows the id, nothing else");
     }
 
     /// A rebuild invalidates every handle, and saying so is one call.

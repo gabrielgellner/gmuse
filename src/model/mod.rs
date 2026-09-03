@@ -22,3 +22,4 @@ pub mod mint;
 pub mod reference;
 pub mod round_trip;
 pub mod spine;
+pub mod vocabulary;

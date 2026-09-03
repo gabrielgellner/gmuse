@@ -656,9 +656,9 @@ struct HierarchyEdge { hierarchy: Ref<Hierarchy>, parent: Ref<Genre>, child: Ref
 
 Hierarchy membership is edge-row existence, so it unions across devices and there is no `Genre.children`. External
 identifiers bind onto locally minted concepts exactly as MBIDs bind onto artists, so **the vocabulary is ours**, with
-Discogs' and MusicBrainz's as exact-match bindings. The 169 assertions in `tools/genre/propose.py` — `IMPLIES` as
-narrower-of, `RENAME` as aliases, `BROAD` as top concepts — become model data, and the Python dictionary stops being
-load-bearing.
+Discogs' and MusicBrainz's as exact-match bindings. The **81 assertions** in `tools/genre/propose.py` — 53 `IMPLIES` as
+narrower-of, 20 `BROAD` as top concepts, 3 `RENAME` as aliases and 5 `DROP` for terms that are not genres at all —
+become model data, and the Python dictionary stops being load-bearing.
 
 **Keeping the derivation kinds as enums is the load-bearing half of the rule.** Promoting them would make the set of
 derivation _semantics_ user-editable while the code implementing those semantics stayed closed, and the two would drift.
