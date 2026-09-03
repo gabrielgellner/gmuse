@@ -310,7 +310,7 @@ fn cell(key: Key, id: TrackId, t: &Track, env: &SortEnv<'_>) -> Cell {
         // Hashed rather than drawn, so the comparator stays a valid ordering:
         // a key that answered differently each time it was asked would make
         // `sort_by` produce garbage rather than a shuffle.
-        Key::Random => Cell::Num(mix(u64::from(id.0), env.seed) as i64),
+        Key::Random => Cell::Num(mix(u64::from(id.index()), env.seed) as i64),
     }
 }
 

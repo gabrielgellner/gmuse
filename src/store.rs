@@ -11,11 +11,37 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::entity::Recording;
+use crate::model::id::Handle;
+
 /// A handle to a track. Stable for the life of the store.
 ///
 /// Never derived from a path at read time — look it up once and keep the id.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
-pub struct TrackId(pub u32);
+/// A track's place in the arena.
+///
+/// **The same type the model uses**, not a second name for it. There were two
+/// arena-index types with the same meaning and the same shape; keeping both
+/// meant every site had to be read to know which world it belonged to, and
+/// `history.rs`'s warning — "a history keyed by id would silently reattach to
+/// different tracks" — had to be remembered rather than enforced.
+///
+/// It is a `Handle`, so it has no `Serialize` and cannot be written down. The
+/// durable thing is `Id<Recording>`.
+///
+/// ## A hazard that exists only during the migration
+///
+/// There are two arenas right now — this `Store` and `model::arena::Arena` —
+/// and their handles are now the same type. `Arena` stamps a generation into
+/// the top byte and refuses a handle from an older one; a handle minted here
+/// carries generation zero, which is what a *fresh* `Arena` also hands out.
+/// So a `Store` index passed to a new `Arena` could resolve rather than being
+/// refused.
+///
+/// Nothing does that today: the player does not touch `Arena`, and the model
+/// does not touch `Store`. It stops being possible at all when this type goes
+/// (#86) and there is one arena. Until then it is written down here rather
+/// than left to be discovered.
+pub type TrackId = Handle<Recording>;
 
 /// ReplayGain, as found in tags. Values are dB (gain) and linear (peak).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -129,7 +155,7 @@ pub const NO_ALBUM: &str = "singles";
 
 /// The arena.
 ///
-/// `tracks[n]` is `TrackId(n)`. Removal leaves a `None` tombstone rather than
+/// `tracks[n]` is `TrackId::new(n)`. Removal leaves a `None` tombstone rather than
 /// shifting, because shifting would invalidate every `TrackId` held in a
 /// playlist or the queue (DESIGN §4).
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -164,7 +190,7 @@ impl Store {
             .tracks
             .iter()
             .enumerate()
-            .filter_map(|(i, t)| t.as_ref().map(|t| (t.path.clone(), TrackId(i as u32))))
+            .filter_map(|(i, t)| t.as_ref().map(|t| (t.path.clone(), TrackId::new(i as u32))))
             .collect();
     }
 
@@ -194,7 +220,7 @@ impl Store {
     }
 
     pub fn get(&self, id: TrackId) -> Option<&Track> {
-        self.tracks.get(id.0 as usize)?.as_ref()
+        self.tracks.get(id.index() as usize)?.as_ref()
     }
 
     pub fn id_for_path(&self, path: &Path) -> Option<TrackId> {
@@ -206,7 +232,7 @@ impl Store {
         self.tracks
             .iter()
             .enumerate()
-            .filter_map(|(i, t)| t.as_ref().map(|t| (TrackId(i as u32), t)))
+            .filter_map(|(i, t)| t.as_ref().map(|t| (TrackId::new(i as u32), t)))
     }
 
     /// Insert a new track, or update the one already at that path.
@@ -215,10 +241,10 @@ impl Store {
     /// whose tags changed keeps the id a playlist is holding.
     pub fn upsert(&mut self, track: Track) -> TrackId {
         if let Some(id) = self.by_path.get(&track.path).copied() {
-            self.tracks[id.0 as usize] = Some(track);
+            self.tracks[id.index() as usize] = Some(track);
             return id;
         }
-        let id = TrackId(self.tracks.len() as u32);
+        let id = TrackId::new(self.tracks.len() as u32);
         self.by_path.insert(track.path.clone(), id);
         self.tracks.push(Some(track));
         id
@@ -227,7 +253,7 @@ impl Store {
     /// Tombstone the track at `path`, if present.
     pub fn remove_path(&mut self, path: &Path) -> Option<TrackId> {
         let id = self.by_path.remove(path)?;
-        if let Some(slot) = self.tracks.get_mut(id.0 as usize)
+        if let Some(slot) = self.tracks.get_mut(id.index() as usize)
             && slot.take().is_some()
         {
             self.tombstones += 1;
@@ -251,8 +277,8 @@ impl Store {
         let mut fresh = Vec::with_capacity(self.len());
         for (i, slot) in self.tracks.drain(..).enumerate() {
             if let Some(track) = slot {
-                let new = TrackId(fresh.len() as u32);
-                remap.insert(TrackId(i as u32), new);
+                let new = TrackId::new(fresh.len() as u32);
+                remap.insert(TrackId::new(i as u32), new);
                 fresh.push(Some(track));
             }
         }
@@ -263,7 +289,7 @@ impl Store {
             .tracks
             .iter()
             .enumerate()
-            .filter_map(|(i, t)| t.as_ref().map(|t| (t.path.clone(), TrackId(i as u32))))
+            .filter_map(|(i, t)| t.as_ref().map(|t| (t.path.clone(), TrackId::new(i as u32))))
             .collect();
         self.by_path.extend(entries);
         remap
@@ -363,8 +389,8 @@ mod tests {
         let remap = s.compact();
         assert_eq!(s.tombstones(), 0);
         assert_eq!(s.capacity(), 2);
-        assert_eq!(remap[&b], TrackId(0));
-        assert_eq!(remap[&c], TrackId(1));
+        assert_eq!(remap[&b], TrackId::new(0));
+        assert_eq!(remap[&c], TrackId::new(1));
         assert_eq!(s.get(remap[&b]).unwrap().path, PathBuf::from("/b.mp3"));
         // Lookups still work after ids move.
         assert_eq!(s.id_for_path(Path::new("/c.mp3")), Some(remap[&c]));

@@ -1046,7 +1046,7 @@ mod tests {
 
     #[test]
     fn shuffled_is_a_permutation() {
-        let pool: Vec<TrackId> = (0..50).map(TrackId).collect();
+        let pool: Vec<TrackId> = (0..50).map(TrackId::new).collect();
         for seed in [0u64, 1, 42, u64::MAX] {
             let mut got = shuffled(&pool, seed);
             got.sort();

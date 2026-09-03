@@ -280,23 +280,26 @@ mod tests {
     #[test]
     fn playlist_allows_duplicates_and_keeps_order() {
         let mut p = Playlist::new();
-        p.push(TrackId(3));
-        p.push(TrackId(1));
-        p.push(TrackId(3));
-        assert_eq!(p.entries(), [TrackId(3), TrackId(1), TrackId(3)]);
-        assert_eq!(p.remove(1), Some(TrackId(1)));
-        assert_eq!(p.entries(), [TrackId(3), TrackId(3)]);
+        p.push(TrackId::new(3));
+        p.push(TrackId::new(1));
+        p.push(TrackId::new(3));
+        assert_eq!(
+            p.entries(),
+            [TrackId::new(3), TrackId::new(1), TrackId::new(3)]
+        );
+        assert_eq!(p.remove(1), Some(TrackId::new(1)));
+        assert_eq!(p.entries(), [TrackId::new(3), TrackId::new(3)]);
         assert_eq!(p.remove(99), None);
     }
 
     #[test]
     fn queue_is_consumed_from_the_front() {
         let mut q = Queue::new();
-        q.push_back(TrackId(1));
-        q.push_back(TrackId(2));
-        assert_eq!(q.pop_front(), Some(TrackId(1)));
+        q.push_back(TrackId::new(1));
+        q.push_back(TrackId::new(2));
+        assert_eq!(q.pop_front(), Some(TrackId::new(1)));
         assert_eq!(q.len(), 1);
-        assert_eq!(q.pop_front(), Some(TrackId(2)));
+        assert_eq!(q.pop_front(), Some(TrackId::new(2)));
         assert_eq!(q.pop_front(), None);
         assert!(q.is_empty());
     }
