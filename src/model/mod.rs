@@ -11,6 +11,7 @@
 //! reads through this module, something did not get wired up.
 #![allow(dead_code)]
 
+pub mod arena;
 pub mod clock;
 pub mod encoding;
 pub mod entity;
@@ -23,5 +24,6 @@ pub mod mint;
 pub mod provenance;
 pub mod reference;
 pub mod round_trip;
+pub mod seam;
 pub mod spine;
 pub mod vocabulary;
