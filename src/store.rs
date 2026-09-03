@@ -105,6 +105,15 @@ pub struct Track {
     /// (#53) — it simply has no identity yet.
     #[serde(default)]
     pub audio_id: Option<crate::audio_id::AudioId>,
+    /// The MusicBrainz recording id from the tags, where there is one — 91% of
+    /// this library.
+    ///
+    /// Read here because the file is already open and the tags are already
+    /// parsed, and because without it a history key would have to derive from
+    /// the audio for every file, losing the one thing an external id buys: a
+    /// re-encode keeping its history.
+    #[serde(default)]
+    pub mb_recording: Option<uuid::Uuid>,
     pub replaygain: Option<ReplayGain>,
 }
 
@@ -239,6 +248,16 @@ impl Store {
     ///
     /// Updating in place is what keeps a rescan from invalidating ids: a file
     /// whose tags changed keeps the id a playlist is holding.
+    /// The identity history hangs off, for a track this store holds.
+    ///
+    /// Here rather than on `Track` so that the *store* answers it: the key is a
+    /// library fact, and a caller holding a `Track` is holding a copy of what
+    /// the library knows.
+    pub fn history_key(&self, id: TrackId) -> Option<String> {
+        let t = self.get(id)?;
+        crate::history::key_for(t.mb_recording, t.audio_id)
+    }
+
     pub fn upsert(&mut self, track: Track) -> TrackId {
         if let Some(id) = self.by_path.get(&track.path).copied() {
             self.tracks[id.index() as usize] = Some(track);

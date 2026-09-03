@@ -156,7 +156,10 @@ mod tests {
         Scanned {
             audio: crate::audio_id::AudioId {
                 scheme: 1,
-                hash: title.len() as u128 * 7919 + track as u128,
+                // Hash the title's bytes, not its length: `"a"` and `"z"`
+                // are different songs, and a fixture that gives them the same
+                // audio makes them the same recording.
+                hash: title.bytes().fold(1u128, |h, b| h * 31 + b as u128) + track as u128,
             },
             title: title.into(),
             artist: artist.into(),

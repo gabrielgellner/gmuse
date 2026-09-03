@@ -196,6 +196,19 @@ impl Conflict {
     pub fn winner(&self) -> Id<Recording> {
         self.asserted.last().expect("a conflict has candidates").1
     }
+
+    /// The recordings this collision left behind.
+    ///
+    /// One encoding cannot be two performances, so every loser here is the
+    /// same song as the winner under a different id — which is a **merge**
+    /// waiting to be proposed, not rubbish waiting to be collected.
+    pub fn losers(&self) -> impl Iterator<Item = Id<Recording>> + '_ {
+        let winner = self.winner();
+        self.asserted
+            .iter()
+            .map(|(_, r)| *r)
+            .filter(move |r| *r != winner)
+    }
 }
 
 /// Every recording asserted for one `(encoding, base)` pair, in stamp order.
@@ -325,6 +338,31 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
 }
 
 impl Catalogue {
+    /// The merges the collisions are asking for.
+    ///
+    /// **Why an orphan is left rather than swept.** A recording that nothing
+    /// holds is an ordinary row — §1 is explicit that a wishlist entry is
+    /// exactly one of those, so "delete what nothing points at" would delete
+    /// everything you have decided about and do not own. Structurally the two
+    /// are identical.
+    ///
+    /// The model can still tell them apart, because a collision *names* its
+    /// loser. So the answer is not to collect the orphan but to propose
+    /// retiring it: one encoding cannot be two performances, so the pair is
+    /// the same song twice and a redirect (§3) settles it without deleting
+    /// anything. This is what feeds the staged queue in §3 — the machine finds
+    /// them, a person decides.
+    pub fn proposed_merges(&self) -> Vec<(Id<Recording>, Id<Recording>)> {
+        let mut out: Vec<_> = self
+            .conflicts
+            .iter()
+            .flat_map(|c| c.losers().map(move |l| (l, c.winner())))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Every device that claims to hold this encoding, with where and when.
     ///
     /// Deliberately not "is it available": that needs to know which device is

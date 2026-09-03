@@ -104,11 +104,20 @@ impl Instance {
             let distribution = Id::<Distribution>::of_audio(&s.audio);
             let recording = match s.mb_recording {
                 Some(mbid) => Id::<Recording>::of_musicbrainz(mbid),
+                // No external id to converge on, so converge on the bytes
+                // instead. Random minting would make two devices reading one
+                // disk disagree about a song neither has any doubt about, and
+                // would make the *same* device disagree with itself across a
+                // rescan — which is what rung zero below was patching over.
+                //
+                // The cost is honest and small: a re-encode of an unbound file
+                // mints a new recording, where a MusicBrainz id would have held
+                // it together. That is the 8% with nothing to hold it by.
                 None => known
                     .distributions
                     .get(&distribution)
                     .and_then(|d| d.recording)
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| Id::<Recording>::derived(s.audio.to_string().as_bytes())),
             };
 
             self.append(

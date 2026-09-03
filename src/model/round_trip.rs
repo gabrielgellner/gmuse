@@ -141,44 +141,96 @@ fn two_instances_one_album_and_a_full_round_trip() {
     assert_eq!(one.plays[&callisto], 2, "neither play replaced the other");
 }
 
-/// The other half of §11: without a binding to derive from, two devices mint
-/// different recordings — and the encoding they agree on is what makes the
-/// disagreement visible.
+/// **The collision §11 actually describes**, now that unbound files converge
+/// on their bytes.
+///
+/// It is not two devices reading one untagged disk — they agree, because the
+/// audio is the same and the id derives from it. It is one machine's copy
+/// being Picard-tagged and the other's not: same bytes, so the same encoding,
+/// but one names a MusicBrainz recording and the other names the bytes.
+///
+/// That is an ordinary situation — you tag a library on one machine and copy
+/// it to another before syncing — and it is exactly the shape §4 routes to a
+/// surfaced correction: one structural field, two writes, the same empty base.
 #[test]
-fn unbound_tags_surface_a_collision_rather_than_resolving_it() {
+fn a_tagged_and_an_untagged_copy_surface_a_collision() {
     let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
-    let scan = album_unbound();
-
-    m1.ingest(100, &scan);
-    m2.ingest(140, &scan);
+    m1.ingest(100, &album()); // Picard-tagged
+    m2.ingest(140, &album_unbound()); // the same files, untagged
     cross_merge(&mut m1, &mut m2, 200);
 
     let (one, two) = (m1.catalogue(), m2.catalogue());
     assert_eq!(
         postcard::to_allocvec(&one).unwrap(),
         postcard::to_allocvec(&two).unwrap(),
-        "they still agree on what happened, including the disagreement"
+        "they agree on what happened, including the disagreement"
     );
-
     assert_eq!(
         one.distributions.len(),
         2,
-        "the encodings still converge — that is what makes this detectable"
+        "the encodings converge — that is what makes this detectable"
     );
-    assert_eq!(
-        one.conflicts.len(),
-        2,
-        "one per encoding: each was bound to two different recordings"
-    );
+    assert_eq!(one.conflicts.len(), 2, "one per encoding");
 
     let c = &one.conflicts[0];
     assert_eq!(c.base, None, "both moved it from nothing — the same base");
-    assert_eq!(c.asserted.len(), 2);
     assert_eq!(
         one.distributions[&c.distribution].recording,
         Some(c.winner()),
         "a value still shows; the disagreement is recorded beside it"
     );
+
+    // **Why convergent minting is not something last-writer-wins could have
+    // done instead.** Creating an entity is row existence, and row existence
+    // has no field to overwrite — so both recordings are here. LWW decided
+    // which one the *encoding* points at; it could not decide that the other
+    // should not exist.
+    assert_eq!(
+        one.recordings.len(),
+        4,
+        "two songs, and two recordings each — the loser is an orphan with a \
+         title and an artist attached to nothing, and only a merge can \
+         retire it"
+    );
+    let bound: std::collections::BTreeSet<_> = one
+        .distributions
+        .values()
+        .filter_map(|d| d.recording)
+        .collect();
+    assert_eq!(bound.len(), 2, "and half of them are bound to nothing");
+
+    // The orphan is not swept, because a recording nothing holds is an
+    // ordinary row — a wishlist entry looks exactly the same. It is
+    // *proposed for merging* instead, which retires it without deleting it.
+    let proposals = one.proposed_merges();
+    assert_eq!(proposals.len(), 2, "one per song");
+    for (loser, winner) in proposals {
+        assert!(!bound.contains(&loser), "the loser is the unbound one");
+        assert!(bound.contains(&winner));
+        assert_eq!(
+            one.recordings[&loser].title, one.recordings[&winner].title,
+            "and they are the same song, which is what makes it a merge"
+        );
+    }
+}
+
+/// And the case that is **no longer** a collision, which is the point of
+/// deriving an unbound recording from its bytes: two devices reading the same
+/// untagged disk have nothing to disagree about, and now say so.
+#[test]
+fn two_devices_reading_one_untagged_disk_agree() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    m1.ingest(100, &album_unbound());
+    m2.ingest(140, &album_unbound());
+    cross_merge(&mut m1, &mut m2, 200);
+
+    let one = m1.catalogue();
+    assert!(
+        one.conflicts.is_empty(),
+        "nothing to reconcile: {:?}",
+        one.conflicts
+    );
+    assert_eq!(one.recordings.len(), 2, "two songs, not four");
 }
 
 /// Merge order must not change the answer, or "both devices agree" is luck.
@@ -308,10 +360,12 @@ fn two_instances_ingesting_the_same_real_files() {
         "reading real files does not change the agreement"
     );
     assert_eq!(one.distributions.len(), 2, "two files, two encodings");
-    assert_eq!(
-        one.conflicts.len(),
-        1,
-        "exactly the untagged track collides; the Picard-tagged one converges"
+    assert!(
+        one.conflicts.is_empty(),
+        "two devices reading the same disk have nothing to disagree about — \
+         the tagged track converges on its MusicBrainz id and the untagged one \
+         on its bytes: {:?}",
+        one.conflicts
     );
 }
 

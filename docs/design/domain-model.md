@@ -1175,6 +1175,21 @@ widget over the same cube, and a mix-compatibility view is configuration rather 
 Two machines cataloguing the same files before they have ever synced mint two `Recording`s for one song, because those
 ids are ours. That is the cost of §3's ruling, and it is paid at first sync rather than avoided.
 
+**Creating an entity is row existence, and row existence cannot last-writer-win.** This is why convergent minting is not
+something the merge rules could have handled instead. A field takes the later of two writes; an entity has no field to
+overwrite, so two devices that mint different ids for one song leave **both** in the catalogue. Last-writer-wins then
+decides which of them the encoding points at — and cannot decide that the other should not exist. The loser is an orphan
+carrying a title and an artist, attached to nothing, and only a merge (§3) retires it.
+
+**The loser is not swept, because it cannot be told apart from a wishlist.** A recording that nothing holds is an
+ordinary row — §1 is explicit that "decided about, not owned" is exactly that — so a rule of "delete what nothing points
+at" would delete everything you have decided about and do not own. Structurally the two are identical.
+
+The model can still tell them apart, because a collision **names** its loser. So the answer is not to collect the orphan
+but to propose retiring it: one encoding cannot be two performances, so the pair is the same song twice, and a redirect
+settles it without deleting anything. That is what feeds the staged queue in §3 — the machine finds them, a person
+decides.
+
 **Mint convergently wherever a binding permits it.** A `Distribution` already converges, since its id is derived from
 its content. Where a file carries a MusicBrainz recording id — 83% of this library — the recording's id derives the same
 way, `UUIDv5(namespace, mbid)`, and two machines agree without having met. The residue is unbound material.

@@ -11,9 +11,20 @@
 //! state directory is exactly what a backup tool skips. The session and the
 //! audit log stay behind: losing where you were is not a loss.
 //!
-//! **Keyed by path, not `TrackId`.** An arena index is meaningful only while
-//! the cache that produced it survives; a discarded cache reassigns every one,
-//! and a history keyed by id would silently reattach to different tracks.
+//! **Keyed by identity, not by path and not by `TrackId`.**
+//!
+//! An arena index is meaningful only while the cache that produced it
+//! survives, so a history keyed by *that* would silently reattach to different
+//! tracks — which is what the original warning here was about, and it still
+//! holds.
+//!
+//! A path is no better for the opposite reason: it is a property of a device's
+//! copy rather than of the track, and it does not even survive a rename on one
+//! machine. A renumber of one album stranded three entries here, one of them a
+//! four-star rating on a file that still existed (§13, 2026-09-01).
+//!
+//! So the key is [`key_for`] — the recording id the model would mint, computed
+//! from the file alone.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,10 +32,114 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio_id::AudioId;
+use crate::model::entity::Recording;
+use crate::model::id::Id;
+
 const VERSION: u32 = 1;
 
 /// Four minutes, or half the track — last.fm's rule, and the usual one.
 const LONG_ENOUGH: Duration = Duration::from_secs(240);
+
+/// The identity history hangs off, computable from a file alone.
+///
+/// **The same id the model would mint**, by the same two rules: a MusicBrainz
+/// recording id where the tags carry one, otherwise the audio's own hash. That
+/// matters because history has to survive being migrated exactly once — a
+/// second key would mean a second migration of the one file in this project
+/// that cannot be rebuilt.
+///
+/// ## What it fixes
+///
+/// A path is a property of *a device's copy* of a track, not of the track. A
+/// renumber of one album stranded three history entries here, one of them a
+/// four-star rating on a file that still existed. Keyed by identity, a rename,
+/// a move and a retag all leave history exactly where it was.
+///
+/// ## What it does not fix
+///
+/// For the 8% with no MusicBrainz id, the key derives from the bytes — so a
+/// re-encode still loses their history. That is the case with nothing to hold
+/// it by, and #57's fingerprints are what would close it.
+pub fn key_for(mb_recording: Option<uuid::Uuid>, audio: Option<AudioId>) -> Option<String> {
+    let id = match (mb_recording, audio) {
+        (Some(mbid), _) => Id::<Recording>::of_musicbrainz(mbid),
+        (None, Some(a)) => Id::<Recording>::derived(a.to_string().as_bytes()),
+        // Neither: nothing stable to hang history on, so it stays under its
+        // path rather than being given an identity that would change on the
+        // next scan.
+        (None, None) => return None,
+    };
+    Some(id.to_string())
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    fn audio(hash: u128) -> AudioId {
+        AudioId { scheme: 1, hash }
+    }
+
+    /// **The bug this exists to end.** A rename moves the path and nothing
+    /// else, so the key does not move — and the four-star rating stays where
+    /// it was put.
+    #[test]
+    fn a_rename_cannot_strand_history() {
+        let a = audio(0x8fb0_dcfb);
+        assert_eq!(key_for(None, Some(a)), key_for(None, Some(a)));
+    }
+
+    /// A retag moves no bytes, so it moves no history. `audio_id` hashes the
+    /// encoded packets and nothing else, which is what makes that true.
+    #[test]
+    fn a_retag_cannot_strand_history() {
+        let mbid = uuid::Uuid::from_u128(0x1831_05b5);
+        let a = audio(1);
+        assert_eq!(
+            key_for(Some(mbid), Some(a)),
+            key_for(Some(mbid), Some(audio(2))),
+            "an external id outranks the bytes, so even a re-encode keeps it"
+        );
+    }
+
+    /// Different songs get different keys, or history would pool.
+    #[test]
+    fn two_songs_are_two_keys() {
+        assert_ne!(key_for(None, Some(audio(1))), key_for(None, Some(audio(2))));
+        assert_ne!(
+            key_for(Some(uuid::Uuid::from_u128(1)), None),
+            key_for(Some(uuid::Uuid::from_u128(2)), None)
+        );
+    }
+
+    /// **The same id the model mints**, which is what keeps this to one
+    /// migration rather than two.
+    #[test]
+    fn the_key_agrees_with_what_ingest_would_mint() {
+        let mbid = uuid::Uuid::from_u128(0x1831_05b5);
+        assert_eq!(
+            key_for(Some(mbid), None).unwrap(),
+            crate::model::id::Id::<crate::model::entity::Recording>::of_musicbrainz(mbid)
+                .to_string()
+        );
+        let a = audio(0xdead_beef);
+        assert_eq!(
+            key_for(None, Some(a)).unwrap(),
+            crate::model::id::Id::<crate::model::entity::Recording>::derived(
+                a.to_string().as_bytes()
+            )
+            .to_string()
+        );
+    }
+
+    /// Nothing stable to hang history on means no key, rather than one that
+    /// would change on the next scan.
+    #[test]
+    fn a_file_with_nothing_to_identify_it_gets_no_key() {
+        assert_eq!(key_for(None, None), None);
+    }
+}
 
 /// `<data_dir>/history.toml`.
 pub fn path_in(data_dir: &Path) -> PathBuf {
