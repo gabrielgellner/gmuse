@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// A handle to a track. Stable for the life of the store.
 ///
 /// Never derived from a path at read time — look it up once and keep the id.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct TrackId(pub u32);
 
 /// ReplayGain, as found in tags. Values are dB (gain) and linear (peak).
@@ -135,6 +135,15 @@ pub const NO_ALBUM: &str = "singles";
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Store {
     tracks: Vec<Option<Track>>,
+    /// **Rebuilt on load, never persisted.** It is derivable from `tracks` in
+    /// one pass, and not writing it is what lets [`TrackId`] have no
+    /// `Serialize` at all — so the rule that an arena index must not outlive
+    /// its arena stops being a comment and becomes something the compiler
+    /// refuses to let anyone break.
+    ///
+    /// The same trick `Handle<T>` uses in `model/id.rs`, applied to the type
+    /// it was modelled on.
+    #[serde(skip)]
     by_path: HashMap<PathBuf, TrackId>,
     /// Count of tombstones, so callers can decide when a compaction is worth it.
     tombstones: usize,
@@ -143,6 +152,20 @@ pub struct Store {
 impl Store {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuild the path index after loading.
+    ///
+    /// Must be called once on anything that came back from the cache, because
+    /// the index is deliberately not stored. One pass over the arena, which at
+    /// 5774 tracks is not a cost anybody can measure.
+    pub fn reindex(&mut self) {
+        self.by_path = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| t.as_ref().map(|t| (t.path.clone(), TrackId(i as u32))))
+            .collect();
     }
 
     /// Number of live tracks.

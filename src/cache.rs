@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::store::Store;
 
 /// Bump on any change to `Track`, `Store`, or this envelope.
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 const MAGIC: &[u8; 5] = b"gmuse";
 
 #[derive(Serialize, Deserialize)]
@@ -79,7 +79,14 @@ pub fn load(path: &Path) -> Result<Outcome, CacheError> {
 
     match postcard::from_bytes::<Envelope>(&bytes[MAGIC.len()..]) {
         Ok(env) if env.version == FORMAT_VERSION => Ok(Outcome::Loaded {
-            store: env.store,
+            store: {
+                // The path index is derived and deliberately not stored, so
+                // that a `TrackId` cannot be serialised at all. Rebuilding it
+                // here is the price, and it is one pass.
+                let mut store = env.store;
+                store.reindex();
+                store
+            },
             roots: env.roots,
             active: env.active,
         }),
