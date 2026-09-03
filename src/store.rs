@@ -327,6 +327,19 @@ impl crate::model::rows::Listing for Store {
             duration: t.duration,
         })
     }
+
+    fn playable(&self, id: TrackId) -> Option<crate::model::rows::Playable<'_>> {
+        let t = self.get(id)?;
+        Some(crate::model::rows::Playable {
+            locator: t.path.to_str()?,
+            gain: t.replaygain.as_ref().map(|g| crate::model::rows::Loudness {
+                track_db: g.track_gain,
+                track_peak: g.track_peak,
+                album_db: g.album_gain,
+                album_peak: g.album_peak,
+            }),
+        })
+    }
 }
 
 #[cfg(test)]

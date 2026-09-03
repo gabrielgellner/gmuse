@@ -28,6 +28,7 @@ use crate::cmd::{
     VolSpec, parse,
 };
 use crate::library::Library;
+use crate::model::rows::Listing;
 use crate::next::{self, ActiveSource, Playback, Source};
 use crate::playlist::{Playlist, Queue};
 use crate::store::{Store, TrackId};
@@ -1053,7 +1054,7 @@ fn announce_next(ui: &mut Ui, ctx: &Context<'_>) -> Option<crate::audio::TrackSo
         Source::Wrapped if ui.playback.shuffle => ui.playback.reshuffle(),
         _ => {}
     }
-    let source = source_for(ui, ctx.store.get(id)?);
+    let source = source_for(ui, ctx.store, id)?;
     ui.pending_next = Some(id);
     Some(source)
 }
@@ -1183,7 +1184,6 @@ pub fn restore_session(
 
     if let Some(path) = saved.current.as_ref()
         && let Some(id) = ctx.store.id_for_path(path)
-        && let Some(track) = ctx.store.get(id)
     {
         ui.playback.current = Some(id);
         // Held until the resumed track's `Loaded` has been seen, so that the
@@ -1193,7 +1193,9 @@ pub fn restore_session(
             // Load, seek, then pause: resuming playback unbidden on launch
             // would be obnoxious. The commands queue in order, so the decoder
             // opens the file, moves to where you were, and stops there.
-            player.load(source_for(ui, track));
+            if let Some(source) = source_for(ui, ctx.store, id) {
+                player.load(source);
+            }
             if saved.position_secs > 0.0 {
                 player.seek(crate::audio::SeekTo::Absolute(
                     std::time::Duration::from_secs_f64(saved.position_secs),
@@ -1223,17 +1225,18 @@ fn db_label(gain: f32) -> String {
 /// Untagged files come back at unity, so this is inert until something has
 /// been tagged. Analysis is deliberately somebody else's job: §1 puts tag
 /// *editing* out of scope, and `rsgain` already does it well.
-fn source_for(ui: &Ui, track: &crate::store::Track) -> crate::audio::TrackSource {
-    crate::audio::TrackSource {
-        path: track.path.clone(),
-        gain: replay_gain(ui, track),
-    }
+fn source_for(ui: &Ui, lib: &dyn Listing, id: TrackId) -> Option<crate::audio::TrackSource> {
+    let playable = lib.playable(id)?;
+    Some(crate::audio::TrackSource {
+        path: PathBuf::from(playable.locator),
+        gain: replay_gain(ui, playable.gain),
+    })
 }
 
-fn replay_gain(ui: &Ui, track: &crate::store::Track) -> f32 {
+fn replay_gain(ui: &Ui, loudness: Option<crate::model::rows::Loudness>) -> f32 {
     use crate::cmd::ReplayGainMode as Mode;
 
-    let Some(rg) = track.replaygain.as_ref() else {
+    let Some(rg) = loudness else {
         return 1.0;
     };
     let mode = match ui.replaygain {
@@ -1247,14 +1250,8 @@ fn replay_gain(ui: &Ui, track: &crate::store::Track) -> f32 {
         m => m,
     };
     let (db, peak) = match mode {
-        Mode::Album => (
-            rg.album_gain.or(rg.track_gain),
-            rg.album_peak.or(rg.track_peak),
-        ),
-        _ => (
-            rg.track_gain.or(rg.album_gain),
-            rg.track_peak.or(rg.album_peak),
-        ),
+        Mode::Album => (rg.album_db.or(rg.track_db), rg.album_peak.or(rg.track_peak)),
+        _ => (rg.track_db.or(rg.album_db), rg.track_peak.or(rg.album_peak)),
     };
     let Some(db) = db else { return 1.0 };
     let gain = 10f32.powf(db / 20.0);
@@ -1284,7 +1281,9 @@ fn next_input(ui: &Ui) -> next::NextInput<'_> {
 }
 
 fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
-    let Some(track) = ctx.store.get(id) else {
+    // The locator is produced here and used immediately. Nothing above this
+    // line holds one, which is what stops anything being keyed by a path.
+    let Some(source) = source_for(ui, ctx.store, id) else {
         return;
     };
     ui.playback.current = Some(id);
@@ -1293,7 +1292,7 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
     // player drops it too, on `Load`.
     ui.pending_next = None;
     if let Some(player) = ctx.player {
-        player.load(source_for(ui, track));
+        player.load(source);
     }
 }
 
@@ -7284,17 +7283,18 @@ mod tests {
         );
     }
 
-    fn tagged(gain: Option<f32>, peak: Option<f32>, album: Option<f32>) -> crate::store::Track {
-        crate::store::Track {
-            path: PathBuf::from("/x.flac"),
-            replaygain: Some(crate::store::ReplayGain {
-                track_gain: gain,
-                track_peak: peak,
-                album_gain: album,
-                album_peak: None,
-            }),
-            ..Default::default()
-        }
+    /// The loudness a tagged file would report, as the library hands it over.
+    fn tagged(
+        gain: Option<f32>,
+        peak: Option<f32>,
+        album: Option<f32>,
+    ) -> Option<crate::model::rows::Loudness> {
+        Some(crate::model::rows::Loudness {
+            track_db: gain,
+            track_peak: peak,
+            album_db: album,
+            album_peak: None,
+        })
     }
 
     /// A ReplayGain figure is decibels; the player multiplies by a linear
@@ -7306,10 +7306,10 @@ mod tests {
         ui.replaygain = crate::cmd::ReplayGainMode::Track;
 
         let track = tagged(Some(-6.0206), None, None);
-        assert!((replay_gain(&ui, &track) - 0.5).abs() < 1e-3);
+        assert!((replay_gain(&ui, track) - 0.5).abs() < 1e-3);
 
         let quiet = tagged(Some(6.0206), None, None);
-        assert!((replay_gain(&ui, &quiet) - 2.0).abs() < 1e-3);
+        assert!((replay_gain(&ui, quiet) - 2.0).abs() < 1e-3);
     }
 
     /// A positive gain on a quiet master is exactly where clipping happens,
@@ -7324,11 +7324,11 @@ mod tests {
         // +6 dB wanted, but the file already peaks at 0.8: 1/0.8 = 1.25 is
         // all that fits.
         let track = tagged(Some(6.0206), Some(0.8), None);
-        assert!((replay_gain(&ui, &track) - 1.25).abs() < 1e-3);
+        assert!((replay_gain(&ui, track) - 1.25).abs() < 1e-3);
 
         // A cut is never capped — it cannot clip.
         let cut = tagged(Some(-6.0206), Some(0.99), None);
-        assert!((replay_gain(&ui, &cut) - 0.5).abs() < 1e-3);
+        assert!((replay_gain(&ui, cut) - 0.5).abs() < 1e-3);
     }
 
     /// `auto` follows the play order: shuffling jumps between masters so each
@@ -7343,13 +7343,13 @@ mod tests {
 
         ui.playback.shuffle = false;
         assert!(
-            (replay_gain(&ui, &track) - 0.25).abs() < 1e-3,
+            (replay_gain(&ui, track) - 0.25).abs() < 1e-3,
             "in order, the album gain should win"
         );
 
         ui.playback.shuffle = true;
         assert!(
-            (replay_gain(&ui, &track) - 0.5).abs() < 1e-3,
+            (replay_gain(&ui, track) - 0.5).abs() < 1e-3,
             "shuffled, the track gain should win"
         );
     }
@@ -7363,11 +7363,10 @@ mod tests {
         let track = tagged(Some(-6.0206), None, None);
 
         ui.replaygain = crate::cmd::ReplayGainMode::Off;
-        assert_eq!(replay_gain(&ui, &track), 1.0);
+        assert_eq!(replay_gain(&ui, track), 1.0);
 
         ui.replaygain = crate::cmd::ReplayGainMode::Track;
-        let untagged = crate::store::Track::default();
-        assert_eq!(replay_gain(&ui, &untagged), 1.0);
+        assert_eq!(replay_gain(&ui, None), 1.0, "an untagged file is unity");
     }
 
     /// Album mode falls back to the track figure rather than giving up: a file
@@ -7378,7 +7377,7 @@ mod tests {
         let mut ui = ui_of(&store, true);
         ui.replaygain = crate::cmd::ReplayGainMode::Album;
         let track = tagged(Some(-6.0206), None, None);
-        assert!((replay_gain(&ui, &track) - 0.5).abs() < 1e-3);
+        assert!((replay_gain(&ui, track) - 0.5).abs() < 1e-3);
     }
 
     /// Silence has no decibel value, and a log that printed `-inf dB` or

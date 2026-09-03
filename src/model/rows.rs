@@ -38,6 +38,32 @@ pub struct Listed<'a> {
     pub duration: std::time::Duration,
 }
 
+/// What is needed to *open* a row, as against to draw it.
+///
+/// Produced at the moment of playing and never stored. That is the whole
+/// discipline: a player that cannot hold a locator cannot key anything by one,
+/// and keying by path is what stranded three history entries and a four-star
+/// rating on a file that still existed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Playable<'a> {
+    /// Where this device can find it. A path today; a device's kind will say
+    /// how to read it when a holding may be remote (#38).
+    pub locator: &'a str,
+    /// The ReplayGain tags, if any. Turned into a number by the caller,
+    /// because how loud to play is a player question and what the tags say is
+    /// a library one.
+    pub gain: Option<Loudness>,
+}
+
+/// ReplayGain as the tags carry it: decibels and a linear peak.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Loudness {
+    pub track_db: Option<f32>,
+    pub track_peak: Option<f32>,
+    pub album_db: Option<f32>,
+    pub album_peak: Option<f32>,
+}
+
 /// Answering, for any id, what a list needs to draw it.
 ///
 /// Implemented by `Store` today and by the librarian when it takes over (#86).
@@ -45,6 +71,13 @@ pub struct Listed<'a> {
 /// argument and nothing else.
 pub trait Listing {
     fn listed(&self, id: Row) -> Option<Listed<'_>>;
+
+    /// Where to find it, and how loud the tags say it is.
+    ///
+    /// Separate from [`Listing::listed`] because they are asked at different
+    /// moments and one of them must not be kept: a row is drawn now and
+    /// forgotten, a locator is used immediately and never written down.
+    fn playable(&self, id: Row) -> Option<Playable<'_>>;
 
     /// How many distinct albums and artists a slice covers.
     ///
