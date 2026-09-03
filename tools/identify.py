@@ -123,9 +123,43 @@ def read(path: Path) -> tuple[dict[str, str], float | None]:
         return {}, None
     if handle is None:
         return {}, None
-    tags = {str(key).lower(): str(value) for key, value in dict(handle.tags or {}).items()}
+    raw = {str(key).lower(): str(value) for key, value in dict(handle.tags or {}).items()}
     length = getattr(handle.info, "length", None)
-    return tags, (float(length) if isinstance(length, (int, float)) else None)
+    return normalise(raw), (float(length) if isinstance(length, (int, float)) else None)
+
+
+#: What each container calls the same field. **The reason this exists is a
+#: defect.** Switching from ffprobe to mutagen traded one problem for another:
+#: ffprobe could not see `UFID`, and mutagen reports ID3 by its raw frame ids,
+#: so `tags["artist"]` came back empty for every MP3 in the library. The lookup
+#: then queried MusicBrainz with no artist and a filename for a title, and
+#: reported that MusicBrainz had none of 591 dance tracks — a result that was
+#: wrong in the same direction as the earlier query bug, and for the same
+#: reason: a normalisation gap reads as a gap in the source.
+NAMES: Final = {
+    "title": ("tit2", "\xa9nam", "----:com.apple.itunes:title"),
+    "artist": ("tpe1", "\xa9art", "----:com.apple.itunes:artist"),
+    "album": ("talb", "\xa9alb"),
+    "albumartist": ("tpe2", "aart"),
+}
+
+
+def normalise(raw: dict[str, str]) -> dict[str, str]:
+    """One name per field, whatever the container calls it.
+
+    Vorbis and Opus already use the plain names, so they pass through; ID3 and
+    MP4 are mapped. Raw keys are kept alongside, because `has_recording_id`
+    needs `ufid:...` exactly as it is written.
+    """
+    tags = dict(raw)
+    for name, spellings in NAMES.items():
+        if tags.get(name):
+            continue
+        for key in spellings:
+            if raw.get(key):
+                tags[name] = raw[key]
+                break
+    return tags
 
 
 def has_recording_id(tags: dict[str, str]) -> bool:
@@ -231,6 +265,28 @@ def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:
     return "uncertain", f"name score {score} but duration off by {drift:.0f}s"
 
 
+def unreadable(todo: list[tuple[Path, dict[str, str]]]) -> str | None:
+    """Why this batch should not be sent, or None if it is fine.
+
+    **A guard, because this failure has happened twice and is silent both
+    times.** A tag reader that returns nothing does not raise; it queries
+    MusicBrainz with an empty artist and a filename, gets no match, and reports
+    that MusicBrainz has none of your music. The first time it was a query the
+    `artist:` field could not match; the second, mutagen's raw ID3 frame ids
+    where plain names were expected. Both read as a gap in the source rather
+    than a gap in the code, which is what makes them expensive: 591 requests at
+    one a second, spent learning nothing.
+
+    A library where *nothing* has an artist is not a real library. One where
+    some files do and some do not is ordinary, and passes.
+    """
+    if not todo:
+        return None
+    if not any(tags.get("artist") for _, tags in todo):
+        return f"not one of {len(todo)} files has a readable artist — the tag reader is broken"
+    return None
+
+
 def fetch(root: Path, cache: Path, *, limit: int | None) -> None:
     """Look up every file under `root` that does not already name its recording."""
     con = open_cache(cache)
@@ -244,6 +300,9 @@ def fetch(root: Path, cache: Path, *, limit: int | None) -> None:
         todo = todo[:limit]
 
     print(f"{len(files)} files under {root}, {len(todo)} without a recording id")
+    if problem := unreadable(todo):
+        print(f"refusing to ask MusicBrainz: {problem}")
+        return
     asked = cached = 0
     for index, (path, tags) in enumerate(todo, start=1):
         artist = first_artist(tags.get("artist", ""))
