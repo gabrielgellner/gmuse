@@ -158,6 +158,14 @@ def get(
         return int(row[1]), _decode(row[2])
 
     status, body = _ask(url, params, headers)
+    if status == 0:
+        # **Never cached.** A connection reset or a run of 503s means we did
+        # not get an answer, and that is not the same as being told there is
+        # none. Storing it would freeze a network blip into a permanent "no"
+        # that no later run would retry — the 503 bug this module was written
+        # to prevent, reintroduced one layer down. The caller gets the miss and
+        # the next run asks again.
+        return status, None
     # Belt as well as braces. A token reaching the key would be written to a
     # file on disk and stay there, which is a different class of mistake from a
     # wasted request — so it is checked at the moment of writing rather than
@@ -183,25 +191,34 @@ def _decode(body: str) -> object | None:
 
 
 def _ask(url: str, params: dict[str, str] | None, headers: dict[str, str]) -> tuple[int, str]:
-    """One request, retried while the server says it is busy.
+    """One request, retried while the server is busy or the wire drops.
 
-    A 404 is final and worth recording. A 503 means wait and ask again, and a
-    run of them ends with the status stored rather than a silent zero — an
-    entry that says "we were throttled" is something a later run can retry on
-    purpose, where one that said "no data" could not be told from the truth.
+    Returns status `0` for "no answer was obtained", which the caller must not
+    cache. A 404 is an answer and worth recording; an exhausted run of 503s or
+    a connection reset is not.
+
+    **The reset is not hypothetical.** A 1068-request pass died at 417 on
+    `ConnectionResetError(54)` — one blip, and twenty minutes of somebody
+    else's rate limit went with it, because a transport error propagated out of
+    the loop instead of being retried like a throttle.
     """
     delay = COURTESY_DELAY
-    status = 0
     for _ in range(RETRIES):
-        response = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
+        except requests.RequestException:
+            # A reset, a timeout, a name that would not resolve. Same remedy as
+            # a throttle: wait longer and ask again.
+            time.sleep(delay)
+            delay *= 2
+            continue
         time.sleep(delay)
-        status = response.status_code
-        if status == HTTP_OK:
-            return status, response.text
-        if status != HTTP_BUSY:
-            return status, ""
+        if response.status_code == HTTP_OK:
+            return response.status_code, response.text
+        if response.status_code != HTTP_BUSY:
+            return response.status_code, ""
         delay *= 2
-    return status, ""
+    return 0, ""
 
 
 def stats(con: sqlite3.Connection) -> dict[str, int]:
