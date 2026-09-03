@@ -96,7 +96,6 @@ impl SmartPlaylists {
 mod tests {
     use super::*;
     use crate::filter::Env;
-    use crate::history::History;
     use crate::sort::Sort;
     use crate::store::Track;
     use std::path::PathBuf;
@@ -104,11 +103,14 @@ mod tests {
 
     fn store() -> Store {
         let mut s = Store::new();
-        for (path, artist, genre, year) in [
+        for (n, (path, artist, genre, year)) in [
             ("/m/General/a.mp3", "Abba", "pop", 1976),
             ("/m/General/b.mp3", "Burial", "electronic", 2007),
             ("/m/Dance/c.mp3", "Caribou", "electronic", 2020),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             s.upsert(Track {
                 path: PathBuf::from(path),
                 artist: Some(artist.into()),
@@ -116,16 +118,37 @@ mod tests {
                 genre: Some(genre.into()),
                 date: Some(year),
                 duration: Duration::from_secs(200),
+                // History hangs off an identity now, so a test track needs one.
+                audio_id: Some(crate::audio_id::AudioId {
+                    scheme: 1,
+                    hash: n as u128 + 1,
+                }),
                 ..Default::default()
             });
         }
         s
     }
 
-    fn env(h: &History) -> SortEnv<'_> {
+    /// The library's answers about listening, built by hand.
+    ///
+    /// A real `Catalogue` rather than a stub, because it is the thing the
+    /// player actually asks and its fields are the fold's own output.
+    fn listening() -> crate::model::log::Catalogue {
+        crate::model::log::Catalogue::default()
+    }
+
+    /// Note a play against whatever recording `path` is, the way the log would.
+    fn played(cat: &mut crate::model::log::Catalogue, s: &Store, path: &str, at: i64) {
+        let id = s.id_for_path(&PathBuf::from(path)).expect("a known track");
+        let recording = s.recording_of(id).expect("with an identity");
+        *cat.plays.entry(recording).or_insert(0) += 1;
+        cat.last_played.insert(recording, at);
+    }
+
+    fn env(h: &crate::model::log::Catalogue) -> SortEnv<'_> {
         SortEnv {
             env: Env {
-                history: Some(h),
+                listened: Some(h),
                 now: 1_000_000,
             },
             smart_artist_sort: false,
@@ -152,14 +175,14 @@ mod tests {
 
     #[test]
     fn members_are_the_rule_in_the_given_order() {
-        let (s, h) = (store(), History::default());
+        let (s, h) = (store(), listening());
         let p = playlist("genre=\"electronic\"", Some("-year"));
         assert_eq!(names(&p, &s, env(&h)), ["Caribou", "Burial"]);
     }
 
     #[test]
     fn an_omitted_sort_is_the_library_order() {
-        let (s, h) = (store(), History::default());
+        let (s, h) = (store(), listening());
         let p = playlist("year>0", None);
         assert_eq!(p.sort, Sort::library_order());
         assert_eq!(names(&p, &s, env(&h)), ["Abba", "Burial", "Caribou"]);
@@ -171,7 +194,7 @@ mod tests {
     /// catalog would show.
     #[test]
     fn membership_crosses_catalogs() {
-        let (s, h) = (store(), History::default());
+        let (s, h) = (store(), listening());
         let p = playlist("genre=\"electronic\"", Some("artist"));
         // One lives under General and one under Dance; both are here.
         let paths: Vec<String> = p
@@ -184,7 +207,7 @@ mod tests {
 
     #[test]
     fn a_rule_that_matches_nothing_is_empty_rather_than_everything() {
-        let (s, h) = (store(), History::default());
+        let (s, h) = (store(), listening());
         let p = playlist("genre=\"polka\"", None);
         assert!(p.members(&s, env(&h)).is_empty());
     }
@@ -194,11 +217,11 @@ mod tests {
     #[test]
     fn history_rules_answer_differently_as_history_changes() {
         let s = store();
-        let mut h = History::default();
+        let mut h = listening();
         let p = playlist("play_count>0", None);
         assert!(p.members(&s, env(&h)).is_empty());
 
-        h.note_played(&PathBuf::from("/m/General/b.mp3"), 900_000);
+        played(&mut h, &s, "/m/General/b.mp3", 900_000);
         assert_eq!(names(&p, &s, env(&h)), ["Burial"]);
     }
 

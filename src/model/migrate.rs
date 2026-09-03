@@ -465,6 +465,10 @@ pub struct Outcome {
     /// What the scan had to say, since the conversion is only as good as it.
     pub scan: crate::model::populate::Report,
     pub report: Report,
+    /// Entries whose acquisition date was carried over from `history.toml`.
+    pub acquired: usize,
+    /// Paths the base still names that no file answers to any more.
+    pub orphaned: Vec<String>,
     /// Records written. Fewer than `report.converted` on a second run, because
     /// what is already on disk is not written again.
     pub written: usize,
@@ -474,8 +478,12 @@ impl std::fmt::Display for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}\nmigrate: {} — {} written",
-            self.scan, self.report, self.written
+            "{}\nmigrate: {} — {} acquired ({} orphaned), {} written",
+            self.scan,
+            self.report,
+            self.acquired,
+            self.orphaned.len(),
+            self.written
         )
     }
 }
@@ -502,7 +510,39 @@ pub fn run(
     let events = crate::events::events_in(data_dir);
     let (_, scan) = crate::model::populate::read_library(device_name, roots, now);
 
-    let (records, report) = to_records(&events, device, |path| scan.identified.get(path).copied());
+    let (mut records, report) =
+        to_records(&events, device, |path| scan.identified.get(path).copied());
+
+    // `history.toml`'s `added` has no event to carry it — it was written into
+    // the base and never appended — so it is read straight from the file. It
+    // is worth carrying: the thing it records already happened, and cannot be
+    // re-derived from anything on disk.
+    //
+    // Stamped from its own clock, so these sort after the events they came
+    // with rather than interleaving with them.
+    let base = crate::history::History::load(&crate::history::path_in(data_dir));
+    let mut clock = HybridClock::new(device);
+    let mut acquired = 0;
+    let mut orphaned = Vec::new();
+    for (path, entry) in base.by_path() {
+        let Some(recording) = scan.identified.get(Path::new(path)).copied() else {
+            // A path the base still names and the disk no longer has. Named
+            // rather than counted, because "three dates were dropped" is a
+            // different thing to be told than which three.
+            orphaned.push(path.to_string());
+            continue;
+        };
+        {
+            records.insert(Record {
+                stamp: at(&mut clock, entry.added),
+                fact: Fact::Acquired {
+                    recording,
+                    at: entry.added,
+                },
+            });
+            acquired += 1;
+        }
+    }
 
     // Subtract what is already there, so a second run is free rather than
     // additive. The set semantics would collapse duplicates on read anyway;
@@ -515,6 +555,8 @@ pub fn run(
     Ok(Outcome {
         scan,
         report,
+        acquired,
+        orphaned,
         written,
     })
 }

@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::model::entity::Recording;
-use crate::model::id::Handle;
+use crate::model::id::{Handle, Id};
 
 /// A handle to a track. Stable for the life of the store.
 ///
@@ -256,6 +256,16 @@ impl Store {
     pub fn history_key(&self, id: TrackId) -> Option<String> {
         let t = self.get(id)?;
         crate::history::key_for(t.mb_recording, t.audio_id)
+    }
+
+    /// The same identity, typed — what a fact about this track names.
+    ///
+    /// `None` for a file with neither a MusicBrainz id nor readable audio.
+    /// That is a real answer: there is nothing durable to record against, and
+    /// recording against the path instead is the bug #81 closes.
+    pub fn recording_of(&self, id: TrackId) -> Option<Id<Recording>> {
+        let t = self.get(id)?;
+        crate::history::recording_id_for(t.mb_recording, t.audio_id)
     }
 
     pub fn upsert(&mut self, track: Track) -> TrackId {

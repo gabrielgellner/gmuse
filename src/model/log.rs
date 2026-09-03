@@ -145,6 +145,28 @@ pub enum Fact {
         recording: Id<Recording>,
         encoding: Option<Id<Encoding>>,
     },
+
+    /// When this entered the library.
+    ///
+    /// **Folded as a minimum, which makes it the one fact needing no rule.**
+    /// Min is commutative, associative and idempotent, so two devices that
+    /// each acquired a recording converge on the earlier date without a clock
+    /// comparison, a last-writer rule, or anything to surface. Where §4 has to
+    /// decide between two writes, this one does not have two.
+    ///
+    /// It replaces `history.toml`'s `added`, and is a better fact than it was:
+    /// "when the library got this" travels between machines, where "when this
+    /// device first saw the file" was true only here and reset whenever a file
+    /// was re-imported. Deliberately **not** the file's mtime, which moves for
+    /// reasons that have nothing to do with the music — writing ReplayGain
+    /// across the library reset every one of them in an afternoon.
+    Acquired {
+        recording: Id<Recording>,
+        /// Seconds since the epoch. Carried rather than taken from the stamp,
+        /// so a migration can say when something was *actually* acquired
+        /// instead of when it was converted.
+        at: i64,
+    },
 }
 
 /// What the catalogue looks like after folding a set of records.
@@ -159,6 +181,11 @@ pub struct Catalogue {
     pub encodings: BTreeMap<Id<Encoding>, Encoded>,
     pub genres: BTreeSet<(Id<Recording>, String)>,
     pub plays: BTreeMap<Id<Recording>, u32>,
+    /// When each recording entered the library, as the earliest anyone says.
+    pub acquired: BTreeMap<Id<Recording>, i64>,
+    /// The most recent play, in **seconds** since the epoch — the same unit
+    /// as `acquired` and as the filter language's clock, not the stamp's.
+    pub last_played: BTreeMap<Id<Recording>, i64>,
     /// The latest rating per recording. A fold, never a stored number.
     pub ratings: BTreeMap<Id<Recording>, u8>,
     /// Cutoff and the analyser that found it, per encoding.
@@ -344,6 +371,21 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             }
             Fact::Played { recording, .. } => {
                 *cat.plays.entry(*recording).or_insert(0) += 1;
+                // The latest play, by the wall time the play happened, which
+                // is what "days since played" is asking about. The stamp
+                // orders the log; this answers the question.
+                //
+                // **In seconds**, like every other fact and like the filter
+                // language's clock. A stamp is in milliseconds, and handing
+                // that straight out made "played a minute ago" read as fifty
+                // years from now.
+                let seconds = stamp.wall / 1_000;
+                let latest = cat.last_played.entry(*recording).or_insert(seconds);
+                *latest = (*latest).max(seconds);
+            }
+            Fact::Acquired { recording, at } => {
+                let first = cat.acquired.entry(*recording).or_insert(*at);
+                *first = (*first).min(*at);
             }
         }
     }
@@ -456,5 +498,120 @@ impl PartialOrd for Record {
 impl Ord for Record {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.stamp.cmp(&other.stamp)
+    }
+}
+
+/// The catalogue answers the player's history questions directly.
+///
+/// One impl rather than a wrapper type, because the fold already *is* the
+/// answer — plays counted, the latest rating decided, the earliest acquisition
+/// taken. Anything in between would be a second place for these to be wrong.
+impl crate::filter::Listened for Catalogue {
+    fn plays(&self, recording: Id<Recording>) -> u32 {
+        self.plays.get(&recording).copied().unwrap_or(0)
+    }
+
+    fn last_played(&self, recording: Id<Recording>) -> Option<i64> {
+        self.last_played.get(&recording).copied()
+    }
+
+    fn acquired(&self, recording: Id<Recording>) -> Option<i64> {
+        self.acquired.get(&recording).copied()
+    }
+
+    fn rating(&self, recording: Id<Recording>) -> Option<u8> {
+        self.ratings.get(&recording).copied()
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crate::model::clock::HybridClock;
+    use crate::model::entity::Device;
+
+    fn device(n: u128) -> Id<Device> {
+        Id::from_uuid(uuid::Uuid::from_u128(n))
+    }
+
+    fn recording(n: u128) -> Id<Recording> {
+        Id::from_uuid(uuid::Uuid::from_u128(n))
+    }
+
+    /// **The earliest wins, whatever order it is heard in.** Min is
+    /// commutative, associative and idempotent, so two devices converge on the
+    /// acquisition date with no rule to apply and nothing to surface.
+    #[test]
+    fn acquired_folds_to_the_earliest_anyone_says() {
+        let rec = recording(1);
+        let mut clock = HybridClock::new(device(1));
+        // Deliberately out of order: the later claim is stamped first.
+        let records: BTreeSet<Record> = [
+            Record {
+                stamp: clock.stamp(1_000),
+                fact: Fact::Acquired {
+                    recording: rec,
+                    at: 9_999,
+                },
+            },
+            Record {
+                stamp: clock.stamp(2_000),
+                fact: Fact::Acquired {
+                    recording: rec,
+                    at: 500,
+                },
+            },
+            Record {
+                stamp: clock.stamp(3_000),
+                fact: Fact::Acquired {
+                    recording: rec,
+                    at: 7_000,
+                },
+            },
+        ]
+        .into();
+        assert_eq!(
+            fold(&records).acquired.get(&rec).copied(),
+            Some(500),
+            "the earliest, not the latest and not the last heard"
+        );
+    }
+
+    /// `days_since_played` asks when the play happened, so the fold keeps the
+    /// most recent one rather than the count alone.
+    #[test]
+    fn last_played_is_the_most_recent_play() {
+        let rec = recording(1);
+        let mut clock = HybridClock::new(device(1));
+        // Stamped in milliseconds, which is the clock's unit.
+        let records: BTreeSet<Record> = [5_000_000i64, 9_000_000, 7_000_000]
+            .into_iter()
+            .map(|wall| Record {
+                stamp: clock.stamp(wall),
+                fact: Fact::Played {
+                    recording: rec,
+                    encoding: None,
+                },
+            })
+            .collect();
+        let cat = fold(&records);
+        assert_eq!(cat.plays.get(&rec).copied(), Some(3), "all three counted");
+        // Read back in **seconds**, like every other date the player compares.
+        // Handing out the stamp's milliseconds made "played a minute ago" read
+        // as fifty years from now, and only running the thing showed it.
+        assert_eq!(
+            cat.last_played.get(&rec).copied(),
+            Some(9_000),
+            "the newest play, and in seconds"
+        );
+    }
+
+    /// A recording nobody has played or acquired has neither, which is what
+    /// makes `!play_count?` and `!days_since_added?` findable.
+    #[test]
+    fn a_silent_recording_has_no_history() {
+        let cat = fold(&BTreeSet::new());
+        assert!(cat.acquired.is_empty());
+        assert!(cat.last_played.is_empty());
     }
 }

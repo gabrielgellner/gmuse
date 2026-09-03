@@ -270,6 +270,34 @@ impl Instance {
         self.append(now, Fact::Rated { recording, stars });
     }
 
+    /// Record when a recording entered the library.
+    ///
+    /// Idempotent by construction: the fold takes the minimum, so saying it
+    /// twice, or saying it later than another device did, changes nothing.
+    pub fn acquire(&mut self, now: i64, recording: Id<Recording>, at: i64) {
+        self.append(now, Fact::Acquired { recording, at });
+    }
+
+    /// A play whose encoding may not be known.
+    ///
+    /// The recording is what the play is *about*; the encoding pins which
+    /// bytes it came from and is worth having but is not what makes the fact
+    /// meaningful. A file gmuse could not hash still played.
+    pub fn play_maybe(
+        &mut self,
+        now: i64,
+        recording: Id<Recording>,
+        encoding: Option<Id<Encoding>>,
+    ) {
+        self.append(
+            now,
+            Fact::Played {
+                recording,
+                encoding,
+            },
+        );
+    }
+
     pub fn play(&mut self, now: i64, recording: Id<Recording>, encoding: Id<Encoding>) {
         self.append(
             now,

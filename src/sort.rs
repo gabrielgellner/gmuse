@@ -24,6 +24,8 @@ use std::cmp::Ordering;
 use crate::filter::Env;
 use crate::format::{Field, Kind};
 use crate::library::sort_key;
+use crate::model::entity::Recording;
+use crate::model::id::Id;
 use crate::store::{Store, Track, TrackId};
 
 /// What one sort key looks at.
@@ -256,6 +258,19 @@ fn flip(ord: Ordering, descending: bool) -> Ordering {
     if descending { ord.reverse() } else { ord }
 }
 
+/// The history source and the identity to ask it about.
+///
+/// Both or neither: without an identity there is no question to ask, which is
+/// what #81 replaces "look it up by path, and hope it has not moved" with.
+fn listened_of<'a>(
+    t: &Track,
+    env: &SortEnv<'a>,
+) -> Option<(&'a dyn crate::filter::Listened, Id<Recording>)> {
+    let listened = env.env.listened?;
+    let recording = crate::history::recording_id_for(t.mb_recording, t.audio_id)?;
+    Some((listened, recording))
+}
+
 fn cell(key: Key, id: TrackId, t: &Track, env: &SortEnv<'_>) -> Cell {
     match key {
         Key::Field(f) => match f.kind() {
@@ -277,36 +292,20 @@ fn cell(key: Key, id: TrackId, t: &Track, env: &SortEnv<'_>) -> Cell {
         // Never played is zero plays, not "cannot say" — the same answer the
         // filter language gives `play_count=0`.
         Key::PlayCount => Cell::Num(i64::from(
-            env.env
-                .history
-                .and_then(|h| h.get(&t.path))
-                .map(|e| e.plays)
-                .unwrap_or(0),
+            listened_of(t, env).map(|(l, r)| l.plays(r)).unwrap_or(0),
         )),
-        Key::Rating => match env
-            .env
-            .history
-            .and_then(|h| h.get(&t.path))
-            .and_then(|e| e.rating)
-        {
+        Key::Rating => match listened_of(t, env).and_then(|(l, r)| l.rating(r)) {
             Some(r) => Cell::Num(i64::from(r)),
             None => Cell::Missing,
         },
-        Key::Added => match env.env.history.and_then(|h| h.get(&t.path)) {
-            Some(e) => Cell::Num(e.added),
+        Key::Added => match listened_of(t, env).and_then(|(l, r)| l.acquired(r)) {
+            Some(at) => Cell::Num(at),
             None => Cell::Missing,
         },
-        Key::LastPlayed => {
-            match env
-                .env
-                .history
-                .and_then(|h| h.get(&t.path))
-                .and_then(|e| e.last_played)
-            {
-                Some(v) => Cell::Num(v),
-                None => Cell::Missing,
-            }
-        }
+        Key::LastPlayed => match listened_of(t, env).and_then(|(l, r)| l.last_played(r)) {
+            Some(v) => Cell::Num(v),
+            None => Cell::Missing,
+        },
         // Hashed rather than drawn, so the comparator stays a valid ordering:
         // a key that answered differently each time it was asked would make
         // `sort_by` produce garbage rather than a shuffle.
@@ -330,7 +329,7 @@ fn mix(id: u64, seed: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::History;
+    use crate::model::log::Catalogue;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -338,17 +337,26 @@ mod tests {
         let mut s = Store::new();
         // Track numbers either side of ten: the case foobar2000's
         // format-pattern sorting gets wrong without `$num()` padding.
-        for (path, artist, title, track) in [
+        for (n, (path, artist, title, track)) in [
             ("/m/b.mp3", "The Beatles", "Beta", 10u32),
             ("/m/a.mp3", "abba", "Alpha", 2),
             ("/m/c.mp3", "Zappa", "Gamma", 1),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             s.upsert(Track {
                 path: PathBuf::from(path),
                 artist: Some(artist.into()),
                 title: Some(title.into()),
                 tracknumber: Some(track),
                 duration: Duration::from_secs(100),
+                // History hangs off an identity now, so a sortable track
+                // needs one. The orphan below deliberately has none.
+                audio_id: Some(crate::audio_id::AudioId {
+                    scheme: 1,
+                    hash: n as u128 + 1,
+                }),
                 ..Default::default()
             });
         }
@@ -365,10 +373,30 @@ mod tests {
         s.iter().map(|(id, _)| id).collect()
     }
 
-    fn env(history: &History) -> SortEnv<'_> {
+    /// The recording a test path is, so a fact can name it.
+    fn rec_of(s: &Store, path: &str) -> Id<Recording> {
+        let id = s.id_for_path(&PathBuf::from(path)).expect("a known track");
+        s.recording_of(id).expect("with an identity")
+    }
+
+    fn acquired(cat: &mut Catalogue, s: &Store, path: &str, at: i64) {
+        cat.acquired.insert(rec_of(s, path), at);
+    }
+
+    fn played(cat: &mut Catalogue, s: &Store, path: &str, at: i64) {
+        let r = rec_of(s, path);
+        *cat.plays.entry(r).or_insert(0) += 1;
+        cat.last_played.insert(r, at);
+    }
+
+    fn rated(cat: &mut Catalogue, s: &Store, path: &str, stars: u8) {
+        cat.ratings.insert(rec_of(s, path), stars);
+    }
+
+    fn env(listened: &Catalogue) -> SortEnv<'_> {
         SortEnv {
             env: Env {
-                history: Some(history),
+                listened: Some(listened),
                 now: 1_000_000,
             },
             smart_artist_sort: false,
@@ -475,7 +503,7 @@ mod tests {
 
     #[test]
     fn text_sorts_case_folded() {
-        let (s, h) = (store(), History::default());
+        let (s, h) = (store(), Catalogue::default());
         // "abba" before "The Beatles" before "Zappa" — and lower-case `abba`
         // must not sort after every capital, which a byte comparison would do.
         assert_eq!(
@@ -497,7 +525,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let h = History::default();
+        let h = Catalogue::default();
 
         let mut e = env(&h);
         e.smart_artist_sort = true;
@@ -519,7 +547,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let h = History::default();
+        let h = Catalogue::default();
         let mut e = env(&h);
         e.smart_artist_sort = true;
         // Under T, so before Ummagumma. Stripping the article would put
@@ -531,7 +559,7 @@ mod tests {
     /// model without `$num()` — would put track 10 before track 2.
     #[test]
     fn numbers_do_not_sort_lexically() {
-        let (s, h) = (store(), History::default());
+        let (s, h) = (store(), Catalogue::default());
         assert_eq!(
             order("track", &s, env(&h))[..3],
             ["c.mp3", "a.mp3", "b.mp3"]
@@ -541,7 +569,7 @@ mod tests {
     /// Missing last in *both* directions, so a list never opens with blanks.
     #[test]
     fn a_missing_value_sorts_last_whichever_way_the_key_points() {
-        let (s, h) = (store(), History::default());
+        let (s, h) = (store(), Catalogue::default());
         assert_eq!(order("track", &s, env(&h))[3], "z_orphan.mp3");
         assert_eq!(order("-track", &s, env(&h))[3], "z_orphan.mp3");
         assert_eq!(order("artist", &s, env(&h))[3], "z_orphan.mp3");
@@ -550,7 +578,7 @@ mod tests {
 
     #[test]
     fn descending_reverses_the_present_values() {
-        let (s, h) = (store(), History::default());
+        let (s, h) = (store(), Catalogue::default());
         assert_eq!(
             order("-track", &s, env(&h))[..3],
             ["b.mp3", "a.mp3", "c.mp3"]
@@ -572,7 +600,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let h = History::default();
+        let h = Catalogue::default();
         assert_eq!(
             order("album, track", &s, env(&h)),
             ["2.mp3", "3.mp3", "1.mp3"]
@@ -591,13 +619,13 @@ mod tests {
                 ..Default::default()
             });
         }
-        let h = History::default();
+        let h = Catalogue::default();
         assert_eq!(order("album", &s, env(&h)), ["a.mp3", "b.mp3", "c.mp3"]);
     }
 
     #[test]
     fn random_is_a_permutation_that_follows_the_seed() {
-        let (s, h) = (store(), History::default());
+        let (s, h) = (store(), Catalogue::default());
         let a = order("random", &s, env(&h));
         let b = order("random", &s, env(&h));
         assert_eq!(a, b, "the same seed must give the same order");
@@ -618,11 +646,11 @@ mod tests {
     #[test]
     fn history_keys_read_the_history() {
         let s = store();
-        let mut h = History::default();
-        h.note_seen(&PathBuf::from("/m/a.mp3"), 100);
-        h.note_seen(&PathBuf::from("/m/b.mp3"), 200);
-        h.note_played(&PathBuf::from("/m/b.mp3"), 500);
-        h.note_rating(&PathBuf::from("/m/a.mp3"), 5, 500);
+        let mut h = Catalogue::default();
+        acquired(&mut h, &s, "/m/a.mp3", 100);
+        acquired(&mut h, &s, "/m/b.mp3", 200);
+        played(&mut h, &s, "/m/b.mp3", 500);
+        rated(&mut h, &s, "/m/a.mp3", 5);
 
         // Newest first.
         assert_eq!(order("-added", &s, env(&h))[..2], ["b.mp3", "a.mp3"]);
@@ -640,9 +668,9 @@ mod tests {
     #[test]
     fn play_count_is_zero_rather_than_missing() {
         let s = store();
-        let mut h = History::default();
-        h.note_seen(&PathBuf::from("/m/a.mp3"), 100);
-        h.note_played(&PathBuf::from("/m/a.mp3"), 500);
+        let mut h = Catalogue::default();
+        acquired(&mut h, &s, "/m/a.mp3", 100);
+        played(&mut h, &s, "/m/a.mp3", 500);
         // The unplayed ones sort first ascending, which they could not do if
         // they were missing.
         assert_eq!(order("play_count", &s, env(&h))[3], "a.mp3");

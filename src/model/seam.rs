@@ -476,24 +476,22 @@ mod tests {
     ///
     /// **Lower these as the migration lands. Never raise them.**
     ///
-    /// Most of what is left is test fixtures rather than the player: of the 36
-    /// `Store` mentions, only **five are outside `#[cfg(test)]`** — one of them
-    /// the word "Stored" in a comment, and the rest the `Context` that hands a
-    /// store to whoever still wants one.
-    ///
-    /// Both renderers stopped needing a store for the same reason: they were
-    /// reaching for it because the projection could not answer, never because
-    /// they wanted a store. The tree got display names beside its sort keys
-    /// (#84); the list got a trait saying what a row files under.
+    /// **Test code is not counted**, and that is a correction rather than a
+    /// loophole. Counting it measured the wrong thing twice over: most of what
+    /// it found was fixtures building a library to test against, and the first
+    /// test written to *prove* the seam had moved — that a rename can no
+    /// longer strand a rating — failed the ratchet for naming the store it
+    /// renamed a file in. A fixture is not a leak. What leaks is the player.
     #[test]
     fn the_leak_from_the_player_only_narrows() {
-        const STORE: usize = 36;
-        const PATHS: usize = 28;
+        const STORE: usize = 5;
+        const PATHS: usize = 8;
 
         let (mut store, mut paths) = (0, 0);
         for (_, text) in read("src/ui") {
-            store += text.matches("Store").count();
-            paths += text.matches("PathBuf").count();
+            let live = production(&text);
+            store += live.matches("Store").count();
+            paths += live.matches("PathBuf").count();
         }
 
         assert!(
@@ -502,6 +500,19 @@ mod tests {
         );
         if store < STORE || paths < PATHS {
             eprintln!("seam narrowed to Store {store}, PathBuf {paths} — lower the constants");
+        }
+    }
+
+    /// Everything before the file's test module.
+    ///
+    /// Crude on purpose: this codebase puts `#[cfg(test)]` last and once per
+    /// file, so a split on the first occurrence is exact here and obvious when
+    /// it stops being. A parser would be more correct and less readable, and
+    /// what is being measured is a trend rather than a total.
+    fn production(text: &str) -> &str {
+        match text.find("#[cfg(test)]") {
+            Some(at) => &text[..at],
+            None => text,
         }
     }
 

@@ -8,7 +8,8 @@
 //! see the Decision Log for the counts that decided this.
 
 use crate::format::{Field, Kind};
-use crate::history::History;
+use crate::model::entity::Recording;
+use crate::model::id::Id;
 use crate::store::Track;
 
 /// What a filter can see besides the track itself.
@@ -18,12 +19,45 @@ use crate::store::Track;
 /// `None` means "no history available", and every history field is then
 /// *missing* rather than zero — the difference between "never played" and
 /// "cannot say".
-#[derive(Debug, Clone, Copy, Default)]
+/// `Debug` by hand: a trait object cannot derive it, and what a caller wants
+/// to see here is whether history was supplied at all rather than all of it.
+#[derive(Clone, Copy, Default)]
 pub struct Env<'a> {
-    pub history: Option<&'a History>,
+    /// What the library knows about how things have been listened to.
+    ///
+    /// Keyed by **identity**, not by path, which is the whole of #81: a
+    /// renumber moved a file and stranded a four-star rating because the key
+    /// moved with it. A recording's id does not move.
+    pub listened: Option<&'a dyn Listened>,
     /// Seconds since the epoch, for the `days_since_*` fields. Passed in so a
     /// test can fix the clock.
     pub now: i64,
+}
+
+impl std::fmt::Debug for Env<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Env")
+            .field("listened", &self.listened.is_some())
+            .field("now", &self.now)
+            .finish()
+    }
+}
+
+/// What the library knows about a recording's listening history.
+///
+/// A trait rather than the `Catalogue` itself so that `filter` keeps not
+/// knowing what a log is — it asks four questions and does not care whether
+/// the answers were folded, cached or made up by a test.
+pub trait Listened {
+    /// Times played. Zero is an answer, not a missing value: `play_count=0`
+    /// is how you ask for what you have never heard.
+    fn plays(&self, recording: Id<Recording>) -> u32;
+    /// When it was last played, if it ever was.
+    fn last_played(&self, recording: Id<Recording>) -> Option<i64>;
+    /// When it entered the library, if anyone has said.
+    fn acquired(&self, recording: Id<Recording>) -> Option<i64>;
+    /// Stars. `None` is unrated, which is not the same as nought stars.
+    fn rating(&self, recording: Id<Recording>) -> Option<u8>;
 }
 
 /// A glob pattern. `*` is the only metacharacter; `\*` is a literal asterisk.
@@ -351,18 +385,22 @@ const ANY_FIELDS: &[Field] = &[
 /// A history field's value. `None` is "cannot say" — no history, or never
 /// played — and a comparison against it is false, like any missing field.
 fn history_number(f: HistoryField, t: &Track, env: &Env) -> Option<i64> {
-    let history = env.history?;
-    let entry = history.get(&t.path);
+    let listened = env.listened?;
+    // The file's identity, not its path. A file with neither a MusicBrainz id
+    // nor readable audio has nothing to hang history on and answers nothing —
+    // which is honest, where filing it under a path was an answer that went
+    // wrong the moment anything moved.
+    let recording = crate::history::recording_id_for(t.mb_recording, t.audio_id)?;
     Some(match f {
         // An unplayed track has played zero times, which is an answer;
         // `play_count=0` is how you ask for the ones you have never heard.
-        HistoryField::PlayCount => i64::from(entry.map(|e| e.plays).unwrap_or(0)),
-        HistoryField::DaysSincePlayed => days_since(entry?.last_played?, env.now),
-        HistoryField::DaysSinceAdded => days_since(entry?.added, env.now),
+        HistoryField::PlayCount => i64::from(listened.plays(recording)),
+        HistoryField::DaysSincePlayed => days_since(listened.last_played(recording)?, env.now),
+        HistoryField::DaysSinceAdded => days_since(listened.acquired(recording)?, env.now),
         // Unrated is *missing*, not zero — `!rating?` is how you find the
         // tracks you have not judged, and calling them nought stars would
         // make them look actively disliked.
-        HistoryField::Rating => i64::from(entry?.rating?),
+        HistoryField::Rating => i64::from(listened.rating(recording)?),
     })
 }
 
@@ -735,6 +773,9 @@ mod tests {
             date: Some(2021),
             duration: Duration::from_secs(221),
             bitrate: Some(320),
+            // History hangs off an identity now (#81), so a track that is
+            // meant to have any needs one.
+            audio_id: Some(crate::audio_id::AudioId { scheme: 1, hash: 7 }),
             ..Default::default()
         }
     }
@@ -927,22 +968,47 @@ mod tests {
 
     const DAY: i64 = 86_400;
 
-    fn with_history(plays: u32, last_played: Option<i64>, added: i64) -> History {
-        let mut h = History::default();
-        let p = track().path;
-        h.note_seen(&p, added);
-        for _ in 0..plays {
-            h.note_played(&p, last_played.unwrap_or(added));
-        }
-        // `note_played` stamps `added` only when the entry is new, so the
-        // first-seen date above survives.
-        h
+    /// A stand-in library, answering for whatever recording the test track is.
+    ///
+    /// Written by hand rather than folded from a log, which is the point of
+    /// `Listened` being a trait: the filter language is tested against the
+    /// four questions it asks, not against the machinery behind them.
+    #[derive(Default)]
+    struct Fake {
+        plays: u32,
+        last_played: Option<i64>,
+        acquired: Option<i64>,
+        rating: Option<u8>,
     }
 
-    fn matches_env(expr: &str, t: &Track, h: &History, now: i64) -> bool {
+    impl Listened for Fake {
+        fn plays(&self, _: Id<Recording>) -> u32 {
+            self.plays
+        }
+        fn last_played(&self, _: Id<Recording>) -> Option<i64> {
+            self.last_played
+        }
+        fn acquired(&self, _: Id<Recording>) -> Option<i64> {
+            self.acquired
+        }
+        fn rating(&self, _: Id<Recording>) -> Option<u8> {
+            self.rating
+        }
+    }
+
+    fn with_history(plays: u32, last_played: Option<i64>, added: i64) -> Fake {
+        Fake {
+            plays,
+            last_played,
+            acquired: Some(added),
+            rating: None,
+        }
+    }
+
+    fn matches_env(expr: &str, t: &Track, h: &Fake, now: i64) -> bool {
         let e = Expr::parse(expr).expect("should parse");
         let env = Env {
-            history: Some(h),
+            listened: Some(h),
             now,
         };
         e.compile(env)(t)
@@ -961,7 +1027,7 @@ mod tests {
 
         // A track the history has never seen has played zero times — an
         // answer, not a missing value, so `play_count=0` finds it.
-        let empty = History::default();
+        let empty = Fake::default();
         assert!(matches_env("play_count=0", &t, &empty, now));
         assert!(!matches_env("play_count>0", &t, &empty, now));
     }
@@ -997,8 +1063,10 @@ mod tests {
     fn a_track_never_played_has_no_days_since() {
         let t = track();
         let now = 100 * DAY;
-        let mut h = History::default();
-        h.note_seen(&t.path, now - 5 * DAY);
+        let h = Fake {
+            acquired: Some(now - 5 * DAY),
+            ..Fake::default()
+        };
 
         assert!(!matches_env("days_since_played?", &t, &h, now));
         assert!(matches_env("!days_since_played?", &t, &h, now));
@@ -1028,13 +1096,15 @@ mod tests {
     fn unrated_is_missing_not_zero() {
         let t = track();
         let now = 100 * DAY;
-        let mut h = History::default();
-        h.note_seen(&t.path, now);
+        let mut h = Fake {
+            acquired: Some(now),
+            ..Fake::default()
+        };
 
         assert!(!matches_env("rating?", &t, &h, now));
         assert!(matches_env("!rating?", &t, &h, now));
 
-        h.note_rating(&t.path, 4, now);
+        h.rating = Some(4);
         assert!(matches_env("rating?", &t, &h, now));
         assert!(matches_env("rating=4", &t, &h, now));
         assert!(matches_env("rating>=4", &t, &h, now));

@@ -71,7 +71,7 @@ pub fn has_data(dir: &Path) -> bool {
     if dir.join("history.toml").exists() || dir.join("playlists").is_dir() {
         return true;
     }
-    !crate::events::logs_in(dir).is_empty()
+    !crate::events::logs_in(dir).is_empty() || !crate::model::durable::logs_in(dir).is_empty()
 }
 
 pub fn remembered(state_dir: &Path) -> Option<PathBuf> {
@@ -148,6 +148,9 @@ pub fn move_data(from: &Path, to: &Path) -> Result<Moved, MoveError> {
     })?;
 
     let mut wanted: Vec<PathBuf> = vec![from.join("history.toml"), from.join("playlists")];
+    // Both logs: the identity-keyed one is the library now, and the old
+    // path-keyed one is still the only copy of anything not yet migrated.
+    wanted.extend(crate::model::durable::logs_in(from));
     wanted.extend(crate::events::logs_in(from));
 
     for path in wanted {
@@ -434,9 +437,11 @@ mod tests {
         assert!(to.join("events-a-recovered.log").exists());
         assert!(!from.join("events-a.log").exists(), "the original stayed");
 
-        let (folded, applied) = crate::events::folded(&to.join("nothing.toml"), &to);
-        assert_eq!(applied, 2, "both logs did not fold");
-        assert_eq!(folded.len(), 2);
+        assert_eq!(
+            crate::events::events_in(&to).len(),
+            2,
+            "both logs did not survive the move"
+        );
     }
 
     /// A log **copied** forward rather than moved holds only events the
@@ -487,10 +492,17 @@ mod tests {
             }]
         );
         // Exactly the new event, so the shared one cannot be counted twice.
-        let (folded, applied) = crate::events::folded(&to.join("nothing.toml"), &to);
-        assert_eq!(applied, 3, "an event was lost or duplicated");
-        assert_eq!(folded.get(Path::new("/m/a.mp3")).unwrap().plays, 1);
-        assert_eq!(folded.get(Path::new("/m/c.mp3")).unwrap().plays, 1);
+        let events = crate::events::events_in(&to);
+        assert_eq!(events.len(), 3, "an event was lost or duplicated");
+        let played: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crate::events::Kind::Played(p) => Some(p.display().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(played.iter().any(|p| p.ends_with("a.mp3")));
+        assert!(played.iter().any(|p| p.ends_with("c.mp3")));
     }
 
     /// Only logs merge. A second `history.toml` is a *base*, not a stream of

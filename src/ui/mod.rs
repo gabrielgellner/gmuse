@@ -310,19 +310,17 @@ pub struct Ui {
     pub audit: crate::audit::Audit,
     /// Where to write "where I was". `None` disables resumption entirely.
     pub session_path: Option<PathBuf>,
-    /// Play counts, ratings and first-seen dates — the folded state.
+    /// The library's own log, and the one this device appends to.
     ///
-    /// Held in memory so the UI answers immediately; what makes it durable is
-    /// the event appended beside each change, not this.
-    pub history: crate::history::History,
-    /// Where to append events. `None` disables recording entirely.
-    ///
-    /// Nothing here ever rewrites `history.toml`: the base is immutable, and
-    /// that is what lets two machines share a directory without one's whole
-    /// file losing to the other's (#26).
-    pub events_path: Option<PathBuf>,
-    /// Which machine this is, stamped on every event it records (#36).
-    pub machine: String,
+    /// Ratings and plays are facts about a **recording**, not about a file. A
+    /// renumber used to strand them because the key was a path (#81); a
+    /// recording's id does not move when the file does.
+    pub log: crate::model::instance::Instance,
+    /// The fold, refreshed after every fact. Held so the UI answers a rating
+    /// immediately; what makes it durable is the record appended beside it.
+    pub listened: crate::model::log::Catalogue,
+    /// Where the log lives. `None` disables recording entirely.
+    pub data_dir: Option<PathBuf>,
     /// The current track has already been counted, so a long listen does not
     /// count twice. Cleared whenever a different track becomes audible.
     counted_current: bool,
@@ -490,9 +488,11 @@ impl Ui {
             relative_numbers: false,
             pending_next: None,
             session_path: None,
-            history: crate::history::History::default(),
-            events_path: None,
-            machine: String::new(),
+            log: crate::model::instance::Instance::new(crate::model::id::Id::derived(
+                b"unconfigured",
+            )),
+            listened: crate::model::log::Catalogue::default(),
+            data_dir: None,
             counted_current: false,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
@@ -529,7 +529,7 @@ impl Ui {
     pub fn sort_env(&self) -> crate::sort::SortEnv<'_> {
         crate::sort::SortEnv {
             env: crate::filter::Env {
-                history: Some(&self.history),
+                listened: Some(&self.listened),
                 now: crate::history::now(),
             },
             smart_artist_sort: self.smart_artist_sort,
@@ -792,7 +792,7 @@ fn note_play_progress(ui: &mut Ui, ctx: &Context<'_>) {
 /// once-only guard is only reachable with a real audio device, which is to say
 /// untestable. An earlier version had exactly that hole.
 fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
-    if ui.counted_current || ui.events_path.is_none() {
+    if ui.counted_current || ui.data_dir.is_none() {
         return;
     }
     let Some(id) = ui.playback.current else {
@@ -805,14 +805,23 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
         return;
     }
     ui.counted_current = true;
-    let now = crate::history::now();
-    ui.history.note_played(&track.path, now);
-    let plays = ui.history.get(&track.path).map(|e| e.plays).unwrap_or(0);
+    // Milliseconds: this is a clock stamp, not a fact's date.
+    let now = crate::history::now_ms();
+    let Some(recording) = ctx.store.recording_of(id) else {
+        // Nothing stable to hang a play on. Better to count nothing than to
+        // count it against a path, which is the failure #81 exists to end.
+        ui.audit.line("played", "unidentified file, not counted");
+        return;
+    };
+    let encoding = track
+        .audio_id
+        .map(|a| crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&a));
+    record(ui, now, |log| log.play_maybe(now, recording, encoding));
+    let plays = ui.listened.plays.get(&recording).copied().unwrap_or(0);
     ui.audit.line(
         "played",
-        &format!("{} (play {plays})", track.path.display()),
+        &format!("{} (play {plays})", track.display_title()),
     );
-    record(ui, crate::events::Kind::Played(track.path.clone()));
     // A rule mentioning `play_count` or `last_played` now answers differently.
     refresh_smart(ui, ctx);
 }
@@ -830,11 +839,11 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
     let Some(track) = ctx.store.get(id) else {
         return;
     };
-    let path = track.path.clone();
+    let recording = ctx.store.recording_of(id);
     let title = format!("{} — {}", track.file_under(), track.display_title());
 
     if spec == RateSpec::Report {
-        let current = match ui.history.get(&path).and_then(|e| e.rating) {
+        let current = match recording.and_then(|r| ui.listened.ratings.get(&r).copied()) {
             Some(n) => format!("{n}/5"),
             None => "unrated".into(),
         };
@@ -842,28 +851,30 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
         return;
     }
 
-    if ui.events_path.is_none() {
+    if ui.data_dir.is_none() {
         ui.notify("ratings need somewhere to record them");
         return;
     }
+    let Some(recording) = recording else {
+        ui.notify("this file has no identity to rate — it cannot be read as audio");
+        return;
+    };
     // `note_rating` takes zero as "clear", which is the storage-level spelling
     // of `RateSpec::Clear`; the command language does not have a zero.
     let stars = match spec {
         RateSpec::Set(n) => n,
         _ => 0,
     };
-    ui.history.note_rating(&path, stars, crate::history::now());
-    record(
-        ui,
-        crate::events::Kind::Rated(path.clone(), (stars > 0).then_some(stars)),
-    );
+    let now = crate::history::now_ms();
+    record(ui, now, |log| {
+        log.rate(now, recording, (stars > 0).then_some(stars));
+    });
 
     let said = match spec {
         RateSpec::Set(n) => format!("{n}/5"),
         _ => "unrated".into(),
     };
-    ui.audit
-        .line("rated", &format!("{said} {}", path.display()));
+    ui.audit.line("rated", &format!("{said} {title}"));
     ui.notify(format!("{title}: {said}"));
     // A rule mentioning `rating` now answers differently.
     refresh_smart(ui, ctx);
@@ -876,13 +887,15 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
 ///
 /// Written immediately rather than at exit: a rating is worth more than a play
 /// count, and losing one to a crash would be worse than the cost of an open.
-pub fn record(ui: &mut Ui, kind: crate::events::Kind) {
-    let Some(path) = ui.events_path.clone() else {
+pub fn record(ui: &mut Ui, _now: i64, say: impl FnOnce(&mut crate::model::instance::Instance)) {
+    let Some(dir) = ui.data_dir.clone() else {
         return;
     };
-    match crate::events::append(&path, &ui.machine, crate::history::now(), kind) {
-        Ok(_) => ui.history.mark_saved(),
-        Err(e) => ui.audit.line("history", &format!("could not record: {e}")),
+    say(&mut ui.log);
+    // Refold before flushing, so the screen is right even if the disk is not.
+    ui.listened = ui.log.catalogue();
+    if let Err(e) = ui.log.flush(&dir) {
+        ui.audit.line("history", &format!("could not record: {e}"));
     }
 }
 
@@ -2712,7 +2725,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         // Scoped so the borrows of `history` and `filter` end before the
         // library is replaced below.
         let env = crate::filter::Env {
-            history: Some(&ui.history),
+            listened: Some(&ui.listened),
             now: crate::history::now(),
         };
         let mut m = ui.catalogs.members(ctx.store, env);
@@ -4222,10 +4235,29 @@ mod tests {
     /// compilation, a multi-disc album, and a track with no tags at all.
     /// A library long enough that a page motion has somewhere to go, on one
     /// album so the flat list has no dividers to complicate the arithmetic.
+    /// Give a test track an identity.
+    ///
+    /// History hangs off a recording now, and a recording's id derives from
+    /// the audio (#81). A fixture track with no `audio_id` is a file gmuse
+    /// could not read — a real case, but not the one most of these tests are
+    /// about, and it would silently make every rating and play a no-op.
+    type Recording2 = crate::model::id::Id<crate::model::entity::Recording>;
+
+    fn identified(mut track: Track) -> Track {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        track.path.hash(&mut h);
+        track.audio_id = Some(crate::audio_id::AudioId {
+            scheme: 1,
+            hash: u128::from(h.finish()),
+        });
+        track
+    }
+
     fn big_fixture(n: u32) -> Store {
         let mut store = Store::new();
         for i in 1..=n {
-            store.upsert(Track {
+            store.upsert(identified(Track {
                 path: PathBuf::from(format!("/m/long/{i:04}.mp3")),
                 artist: Some("One Artist".into()),
                 albumartist: Some("One Artist".into()),
@@ -4234,7 +4266,7 @@ mod tests {
                 tracknumber: Some(i),
                 duration: Duration::from_secs(200),
                 ..Default::default()
-            });
+            }));
         }
         store
     }
@@ -4248,7 +4280,7 @@ mod tests {
             (1u32, "The Bird", "Anderson .Paak"),
             (3, "The Waters", "Anderson Paak, BJ The Chicago Kid"),
         ] {
-            store.upsert(Track {
+            store.upsert(identified(Track {
                 path: PathBuf::from(format!("/m/paak/{n}.mp3")),
                 artist: Some(artist.into()),
                 albumartist: Some("Anderson .Paak".into()),
@@ -4257,7 +4289,7 @@ mod tests {
                 tracknumber: Some(n),
                 duration: Duration::from_secs(180 + n as u64),
                 ..Default::default()
-            });
+            }));
         }
 
         // A compilation: three different artists, one albumartist.
@@ -4265,7 +4297,7 @@ mod tests {
             (1u32, "The Mountain", "Benjamin Tod"),
             (2, "Years", "Sierra Ferrell"),
         ] {
-            store.upsert(Track {
+            store.upsert(identified(Track {
                 path: PathBuf::from(format!("/m/va/{n}.opus")),
                 artist: Some(artist.into()),
                 albumartist: Some("Various Artists".into()),
@@ -4274,7 +4306,7 @@ mod tests {
                 tracknumber: Some(n),
                 duration: Duration::from_secs(200),
                 ..Default::default()
-            });
+            }));
         }
 
         // A multi-disc album, inserted with disc 2 first.
@@ -4282,7 +4314,7 @@ mod tests {
             (2u32, 1u32, "Second Disc Opener"),
             (1, 1, "First Disc Opener"),
         ] {
-            store.upsert(Track {
+            store.upsert(identified(Track {
                 path: PathBuf::from(format!("/m/multi/d{disc}t{n}.flac")),
                 artist: Some("The Wall Builders".into()),
                 album: Some("Long Player".into()),
@@ -4291,15 +4323,15 @@ mod tests {
                 tracknumber: Some(n),
                 duration: Duration::from_secs(240),
                 ..Default::default()
-            });
+            }));
         }
 
         // No tags whatsoever.
-        store.upsert(Track {
+        store.upsert(identified(Track {
             path: PathBuf::from("/m/orphan/unlabelled.mp3"),
             duration: Duration::from_secs(65),
             ..Default::default()
-        });
+        }));
 
         store
     }
@@ -4754,7 +4786,8 @@ mod tests {
             crate::filter::Filter::parse("rating>=4").unwrap(),
             None,
         );
-        ui.events_path = Some(crate::events::log_path(&scratch("smart-playlists"), "test"));
+        ui.data_dir = Some(scratch("smart-playlists"));
+        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         ui
     }
 
@@ -4766,7 +4799,7 @@ mod tests {
             ("/m/b.mp3", "Antelope", "electronic"),
             ("/m/c.mp3", "Marmot", "folk"),
         ] {
-            s.upsert(Track {
+            s.upsert(identified(Track {
                 path: PathBuf::from(path),
                 artist: Some("Someone".into()),
                 album: Some("An Album".into()),
@@ -4774,7 +4807,7 @@ mod tests {
                 genre: Some(genre.into()),
                 duration: Duration::from_secs(200),
                 ..Default::default()
-            });
+            }));
         }
         s
     }
@@ -7802,23 +7835,24 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        ui.events_path = Some(crate::events::log_path(&scratch("history-ui"), "test"));
+        ui.data_dir = Some(scratch("history-ui"));
 
         let (id, track) = store.iter().next().unwrap();
-        let (path, half) = (track.path.clone(), track.duration / 2);
+        let half = track.duration / 2;
+        let full = track.duration;
         ui.playback.current = Some(id);
 
         // Too early: a skip is not a play.
         record_play_if_earned(&mut ui, &ctx, Duration::from_secs(1));
-        assert!(ui.history.get(&path).is_none(), "counted a skip");
+        assert_eq!(play_count(&ui, store.recording_of(id)), 0, "counted a skip");
 
         record_play_if_earned(&mut ui, &ctx, half);
-        assert_eq!(ui.history.get(&path).unwrap().plays, 1);
+        assert_eq!(play_count(&ui, store.recording_of(id)), 1);
 
         // Still playing, later in the same track: it must not count again.
-        record_play_if_earned(&mut ui, &ctx, track.duration);
+        record_play_if_earned(&mut ui, &ctx, full);
         assert_eq!(
-            ui.history.get(&path).unwrap().plays,
+            play_count(&ui, store.recording_of(id)),
             1,
             "the same track was counted twice"
         );
@@ -7826,41 +7860,42 @@ mod tests {
         // A different track becoming audible clears the guard, so the next one
         // can earn its own play.
         ui.counted_current = false;
-        record_play_if_earned(&mut ui, &ctx, track.duration);
-        assert_eq!(ui.history.get(&path).unwrap().plays, 2);
+        record_play_if_earned(&mut ui, &ctx, full);
+        assert_eq!(play_count(&ui, store.recording_of(id)), 2);
     }
 
-    /// A change is durable because an event was appended, not because a file
-    /// was rewritten — and folding that log back must reproduce the state.
+    /// A change is durable because a record was appended, and reading the log
+    /// back must reproduce it.
     #[test]
     fn a_change_is_appended_and_folds_back() {
         let store = fixture();
-        let mut ui = ui_of(&store, true);
-        let dir = scratch("history-append");
-        ui.events_path = Some(crate::events::log_path(&dir, "test"));
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "history-append");
+        let dir = ui.data_dir.clone().unwrap();
+        let (id, track) = store.iter().next().unwrap();
+        ui.playback.current = Some(id);
+        record_play_if_earned(&mut ui, &ctx, track.duration);
 
-        ui.history.note_played(std::path::Path::new("/m/x.mp3"), 5);
-        assert!(ui.history.is_dirty());
-        record(&mut ui, crate::events::Kind::Played("/m/x.mp3".into()));
-        assert!(!ui.history.is_dirty(), "recording should clear the flag");
-
-        // The base is untouched — that is what lets two machines share a
-        // directory without one whole file losing to the other.
+        // The old base is never written. Nothing rewrites a whole file, which
+        // is what lets two machines share a directory.
         assert!(
             !dir.join("history.toml").exists(),
-            "recording must not rewrite the base"
+            "recording must not rewrite a base"
         );
 
-        let (folded, applied) = crate::events::folded(&dir.join("history.toml"), &dir);
-        assert_eq!(applied, 1);
+        let device = crate::model::id::Id::derived(b"test");
+        let (back, damage) = crate::model::instance::Instance::open(&dir, device, 0);
+        assert!(damage.is_empty());
+        let recording = store.recording_of(id).unwrap();
         assert_eq!(
-            folded.get(std::path::Path::new("/m/x.mp3")).unwrap().plays,
-            1
+            back.catalogue().plays.get(&recording).copied(),
+            Some(1),
+            "the play was on disk, under the recording's id"
         );
     }
 
-    /// With nowhere to record — the default until a path is set — nothing is
-    /// counted and nothing is written.
+    /// With nowhere to record — the default until a directory is set — nothing
+    /// is counted and nothing is written.
     #[test]
     fn without_a_history_path_nothing_is_recorded() {
         let store = fixture();
@@ -7869,7 +7904,37 @@ mod tests {
         let (id, _) = store.iter().next().unwrap();
         ui.playback.current = Some(id);
         record_play_if_earned(&mut ui, &ctx, Duration::from_secs(9999));
-        assert!(ui.history.is_empty());
+        assert!(ui.listened.plays.is_empty());
+        assert!(ui.log.records().is_empty());
+    }
+
+    /// **The bug this whole model exists to end.** A file is renumbered, and
+    /// its rating is still there — with no `moved` event, no repair pass, and
+    /// nothing having noticed the rename at all.
+    #[test]
+    fn a_rename_cannot_strand_a_rating() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "rename");
+        let (id, track) = store.iter().next().unwrap();
+        let moved_from = track.path.clone();
+        ui.playback.current = Some(id);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 4");
+        assert_eq!(stars(&ui, store.recording_of(id)), Some(4));
+
+        // The same audio, renumbered on disk — which is exactly what stranded
+        // a four-star rating when history was keyed by path.
+        let mut renamed = crate::store::Store::new();
+        let mut track = store.get(id).unwrap().clone();
+        track.path = moved_from.with_file_name("99 renumbered.mp3");
+        let after = renamed.upsert(track);
+
+        assert_eq!(
+            stars(&ui, renamed.recording_of(after)),
+            Some(4),
+            "the rating did not follow the audio across a rename"
+        );
     }
 
     /// A clean directory of its own, so tests never see each other's files.
@@ -7888,8 +7953,24 @@ mod tests {
 
     fn ui_with_history(store: &Store, name: &str) -> Ui {
         let mut ui = ui_of(store, true);
-        ui.events_path = Some(crate::events::log_path(&scratch(name), "test"));
+        ui.data_dir = Some(scratch(name));
+        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         ui
+    }
+
+    /// What the library says about a recording, after a change.
+    ///
+    /// Takes the identity rather than a store and an index, which is the shape
+    /// the seam is moving to anyway — and keeps the `Store` count in this file
+    /// falling rather than rising.
+    fn stars(ui: &Ui, recording: Option<Recording2>) -> Option<u8> {
+        ui.listened.ratings.get(&recording?).copied()
+    }
+
+    fn play_count(ui: &Ui, recording: Option<Recording2>) -> u32 {
+        recording
+            .and_then(|r| ui.listened.plays.get(&r).copied())
+            .unwrap_or(0)
     }
 
     /// `:rate` acts on what is playing — you rate a song you are hearing.
@@ -7913,13 +7994,9 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 5");
 
-        let played_path = &store.get(playing).unwrap().path;
-        assert_eq!(ui.history.get(played_path).unwrap().rating, Some(5));
+        assert_eq!(stars(&ui, store.recording_of(playing)), Some(5));
         assert!(
-            ui.history
-                .get(&store.get(selected).unwrap().path)
-                .and_then(|e| e.rating)
-                .is_none(),
+            stars(&ui, store.recording_of(selected)).is_none(),
             "it rated the selection instead of what was playing"
         );
     }
@@ -7938,13 +8015,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 3");
-        assert_eq!(
-            ui.history
-                .get(&store.get(under_cursor).unwrap().path)
-                .unwrap()
-                .rating,
-            Some(3)
-        );
+        assert_eq!(stars(&ui, store.recording_of(under_cursor)), Some(3));
     }
 
     /// A rating is written straight away — it is a judgement, and losing it to
@@ -7954,24 +8025,17 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "rating-saved");
-        let dir = ui
-            .events_path
-            .clone()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        let dir = ui.data_dir.clone().unwrap();
         let id = store.iter().next().unwrap().0;
         ui.playback.current = Some(id);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 4");
 
-        let (back, _) = crate::events::folded(&dir.join("history.toml"), &dir);
-        assert_eq!(
-            back.get(&store.get(id).unwrap().path).unwrap().rating,
-            Some(4)
-        );
+        let device = crate::model::id::Id::derived(b"test");
+        let (back, _) = crate::model::instance::Instance::open(&dir, device, 0);
+        let recording = store.recording_of(id).unwrap();
+        assert_eq!(back.catalogue().ratings.get(&recording).copied(), Some(4));
     }
 
     /// Clearing is an event too, and `none` must fold back to unrated rather
@@ -7981,13 +8045,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "rating-cleared");
-        let dir = ui
-            .events_path
-            .clone()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        let dir = ui.data_dir.clone().unwrap();
         let id = store.iter().next().unwrap().0;
         ui.playback.current = Some(id);
 
@@ -7996,9 +8054,11 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate none");
 
-        let (back, _) = crate::events::folded(&dir.join("history.toml"), &dir);
+        let device = crate::model::id::Id::derived(b"test");
+        let (back, _) = crate::model::instance::Instance::open(&dir, device, 0);
+        let recording = store.recording_of(id).unwrap();
         assert_eq!(
-            back.get(&store.get(id).unwrap().path).unwrap().rating,
+            back.catalogue().ratings.get(&recording).copied(),
             None,
             "the later `rate none` did not win"
         );
@@ -8012,17 +8072,16 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "clear");
         let id = store.iter().next().unwrap().0;
-        let path = store.get(id).unwrap().path.clone();
         ui.playback.current = Some(id);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 4");
-        assert_eq!(ui.history.get(&path).unwrap().rating, Some(4));
+        assert_eq!(stars(&ui, store.recording_of(id)), Some(4));
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 0");
         assert_eq!(
-            ui.history.get(&path).unwrap().rating,
+            stars(&ui, store.recording_of(id)),
             Some(4),
             "`rate 0` should have been refused, not silently cleared"
         );
@@ -8030,7 +8089,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate none");
-        assert_eq!(ui.history.get(&path).unwrap().rating, None);
+        assert_eq!(stars(&ui, store.recording_of(id)), None);
     }
 
     /// A bare `:rate` reports rather than changing anything.
@@ -8052,7 +8111,7 @@ mod tests {
         type_line(&mut ui, &ctx, "rate");
         assert!(ui.status.contains("2/5"), "{:?}", ui.status);
         assert_eq!(
-            ui.history.get(&store.get(id).unwrap().path).unwrap().rating,
+            stars(&ui, store.recording_of(id)),
             Some(2),
             "reporting changed the rating"
         );

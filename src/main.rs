@@ -236,6 +236,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for (path, what) in &outcome.report.unresolved {
                     println!("  unresolved {what}: {path}");
                 }
+                for path in &outcome.orphaned {
+                    println!("  orphaned acquisition date: {path}");
+                }
             }
             Err(e) => {
                 eprintln!("migrate: {e}");
@@ -338,52 +341,39 @@ fn run_tui(
         }
     }
 
-    // The base plus every log, this machine's and any that arrived by sync.
+    // Every log in the directory — this device's and any that arrived by sync.
+    //
+    // **No `moved` bookkeeping and no `seen` sweep.** Both existed to keep a
+    // path-keyed history attached to files that move, and neither has anything
+    // to do now that a fact names a recording (#81). A rename is invisible to
+    // the log, which is the point.
     let machine = crate::events::machine_id(&config::default_state_dir());
-    let events_path = crate::events::log_path(&loaded.data_dir, &machine);
-    let (mut history, applied) = crate::events::folded(&history_path, &loaded.data_dir);
-    if applied > 0 {
-        println!("history: {applied} events");
-    }
-    let log = |event: crate::events::Kind| {
-        if let Err(e) = crate::events::append(&events_path, &machine, crate::history::now(), event)
-        {
-            eprintln!("history: {e}");
-        }
-    };
-
-    // Before `note_seen` below, which would otherwise create a fresh entry at
-    // the new path and make the carried one lose to it — leaving the ratings
-    // stranded under a path no file has.
-    let mut carried = 0;
-    for m in &app.moves {
-        if history.rename(&m.from, &m.to) {
-            carried += 1;
-            // Recorded rather than re-inferred: another machine folding this
-            // log has no scan to work it out from.
-            log(crate::events::Kind::Moved(m.from.clone(), m.to.clone()));
-        }
-    }
-    if carried > 0 {
-        println!("history: carried {carried} across a move");
-    }
-
-    let first_run = history.is_empty();
-    let known = history.len();
+    let device = crate::model::id::Id::derived(machine.as_bytes());
     let now = crate::history::now();
-    for (_, track) in app.store.iter() {
-        if history.note_seen(&track.path, now) {
-            log(crate::events::Kind::Seen(track.path.clone()));
-        }
+    let (log, damage) =
+        crate::model::instance::Instance::open(&loaded.data_dir, device, crate::history::now_ms());
+    let listened = log.catalogue();
+    if !log.records().is_empty() {
+        println!("history: {} records", log.records().len());
     }
-    let fresh = history.len() - known;
+    for torn in &damage {
+        eprintln!(
+            "history: unreadable line {} in {}",
+            torn.line,
+            torn.path.display()
+        );
+    }
+    for drift in &log.drifts {
+        eprintln!("history: clock drift, {drift:?}");
+    }
+    let first_run = log.records().is_empty();
 
     let library = Library::from_members(
         &app.store,
         app.catalogs.members(
             &app.store,
             crate::filter::Env {
-                history: Some(&history),
+                listened: Some(&listened),
                 now,
             },
         ),
@@ -481,20 +471,21 @@ fn run_tui(
         }
     }
 
-    // Every track gets a first-seen date, so "recently added" means something
-    // from here on. It cannot be recovered for an existing library: the file's
-    // mtime is not it — writing ReplayGain tags moved every one of them.
+    // An acquisition date is a *library* fact now, so it arrives with an
+    // import rather than being invented by whichever machine noticed the file
+    // first. Nothing is stamped here.
     {
-        let total = history.len();
-        state.history = history;
-        state.events_path = Some(events_path);
-        state.machine = machine.clone();
+        let records = log.records().len();
+        let known = listened.ratings.len() + listened.plays.len();
+        state.log = log;
+        state.listened = listened;
+        state.data_dir = Some(loaded.data_dir.clone());
         state.audit.line(
             "history",
             &if first_run {
-                format!("{fresh} tracks, all first seen now — added dates start here")
+                "no history yet — ratings and plays start here".to_string()
             } else {
-                format!("{total} known, {fresh} new since last run")
+                format!("{records} records, {known} recordings with history")
             },
         );
     }

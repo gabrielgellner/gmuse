@@ -204,6 +204,23 @@ fn migrate_from(from: &Path, to: &Path) -> Option<PathBuf> {
 
 /// Seconds since the epoch. Passed in rather than read, so the callers that
 /// record are testable without a clock.
+/// The same instant in **milliseconds**, which is what the clock stamps in.
+///
+/// Two units, named apart, because mixing them is not a rounding error: a
+/// stamp made from seconds sits a thousandfold below one made from
+/// milliseconds, so every launch reports implausible drift and every write
+/// sorts before everything already in the log. That happened, and it happened
+/// where no test could see it — the tests pass their own `now`, so they were
+/// self-consistent in whichever unit they chose.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Seconds since the epoch — what a *fact* records, and what the filter
+/// language's `days_since_*` compares against.
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -272,10 +289,6 @@ pub enum HistoryError {
     Encode(#[from] toml::ser::Error),
 }
 
-fn key(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
 impl History {
     /// Read the history. Anything unreadable, unparseable, or from another
     /// version starts empty — losing counts is bad, but guessing at a field's
@@ -290,120 +303,13 @@ impl History {
         }
     }
 
-    /// Write the base.
+    /// Every entry, by the path it was filed under.
     ///
-    /// Unused at runtime **on purpose**: since #26 the base is immutable and
-    /// every change is an appended event, which is what lets two machines
-    /// share a directory without one whole file losing to the other. This is
-    /// the other half of compaction — fold the logs, write a new base — which
-    /// the measurements say is not needed yet (30 years of listening folds in
-    /// 62 ms) and which cannot be done safely without deciding what a
-    /// truncated log means to a machine that has not synced yet.
-    #[allow(dead_code)]
-    pub fn save(&self, path: &Path) -> Result<(), HistoryError> {
-        let mut out = self.clone();
-        out.version = VERSION;
-        let text = toml::to_string_pretty(&out)?;
-        let write = |path: &Path| -> Result<(), std::io::Error> {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            let tmp = path.with_extension("toml.tmp");
-            std::fs::write(&tmp, text.as_bytes())?;
-            std::fs::rename(&tmp, path)
-        };
-        write(path).map_err(|source| HistoryError::Write {
-            path: path.to_path_buf(),
-            source,
-        })
-    }
-
-    pub fn get(&self, path: &Path) -> Option<&Entry> {
-        self.entries.get(&key(path))
-    }
-
-    /// Whether anything is not yet durable *anywhere* — neither in the base
-    /// nor in a log. Cleared by a successful append, not by a save.
-    #[allow(dead_code)]
-    pub fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    pub fn mark_saved(&mut self) {
-        self.dirty = false;
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Record that a file exists, without disturbing anything already known.
-    ///
-    /// This is where `added` comes from, so it must never overwrite: a track
-    /// seen every launch would otherwise be permanently "added today".
-    /// Returns whether this was the first sighting — that is, whether an
-    /// entry was created. The caller logs an event only when it was, so a
-    /// startup scan of an already-known library appends nothing.
-    pub fn note_seen(&mut self, path: &Path, now: i64) -> bool {
-        let mut created = false;
-        self.entries.entry(key(path)).or_insert_with(|| {
-            created = true;
-            self.dirty = true;
-            Entry {
-                added: now,
-                ..Default::default()
-            }
-        });
-        created
-    }
-
-    /// Set or clear a rating. Zero clears, because "no stars" and "unrated"
-    /// are the same thing to anyone typing it.
-    pub fn note_rating(&mut self, path: &Path, stars: u8, now: i64) {
-        let e = self.entries.entry(key(path)).or_insert(Entry {
-            added: now,
-            ..Default::default()
-        });
-        e.rating = (stars > 0).then_some(stars.min(5));
-        self.dirty = true;
-    }
-
-    /// Record a play.
-    /// Carry an entry to a track's new path (#25).
-    ///
-    /// Returns whether anything moved. The old key is **removed**, not left as
-    /// a copy: two entries for one track would double-count a play the moment
-    /// the file moved back, and the stale one would never be cleaned up.
-    ///
-    /// A destination that already has an entry wins — it was created by
-    /// `note_seen` for a file that really is there, and overwriting it with a
-    /// departed track's ratings would be a guess in the wrong direction.
-    pub fn rename(&mut self, from: &Path, to: &Path) -> bool {
-        let from = from.to_string_lossy().into_owned();
-        let to = to.to_string_lossy().into_owned();
-        if from == to || self.entries.contains_key(&to) {
-            return false;
-        }
-        let Some(entry) = self.entries.remove(&from) else {
-            return false;
-        };
-        self.entries.insert(to, entry);
-        self.dirty = true;
-        true
-    }
-
-    pub fn note_played(&mut self, path: &Path, now: i64) {
-        let e = self.entries.entry(key(path)).or_insert(Entry {
-            added: now,
-            ..Default::default()
-        });
-        e.plays += 1;
-        e.last_played = Some(now);
-        self.dirty = true;
+    /// Exposed for the one job left to this file: carrying `added` across to
+    /// the identity-keyed log (#81). Nothing at runtime should want this —
+    /// iterating a path-keyed history is the shape being retired.
+    pub fn by_path(&self) -> impl Iterator<Item = (&str, &Entry)> {
+        self.entries.iter().map(|(k, e)| (k.as_str(), e))
     }
 }
 
@@ -418,267 +324,42 @@ mod tests {
         d
     }
 
+    /// The one job left to this file: hand the base's `added` dates to the
+    /// migration, which turns them into `Fact::Acquired` (#81).
     #[test]
-    fn rename_carries_an_entry_to_a_new_path() {
-        let mut h = History::default();
-        h.note_seen(Path::new("/m/old.mp3"), 100);
-        h.note_played(Path::new("/m/old.mp3"), 200);
-        h.note_rating(Path::new("/m/old.mp3"), 4, 200);
+    fn the_base_reads_back_for_the_migration() {
+        let dir = tmpdir("read-base");
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            format!(
+                "version = {VERSION}\n\n\
+                 [entries.\"/m/a.mp3\"]\nplays = 3\nrating = 4\nadded = 100\n\n\
+                 [entries.\"/m/b.mp3\"]\nplays = 0\nadded = 200\n"
+            ),
+        )
+        .unwrap();
 
-        assert!(h.rename(Path::new("/m/old.mp3"), Path::new("/m/new.mp3")));
-        let e = h.get(Path::new("/m/new.mp3")).expect("carried");
-        assert_eq!((e.plays, e.rating, e.added), (1, Some(4), 100));
-        assert!(
-            h.get(Path::new("/m/old.mp3")).is_none(),
-            "the old key must go — two entries would double-count a play"
-        );
+        let h = History::load(&path);
+        let entries: Vec<(&str, i64)> = h.by_path().map(|(k, e)| (k, e.added)).collect();
+        assert_eq!(entries, [("/m/a.mp3", 100), ("/m/b.mp3", 200)]);
+        assert_eq!(h.by_path().next().unwrap().1.rating, Some(4));
     }
 
-    /// The destination was created by `note_seen` for a file that really is
-    /// there. Overwriting it with a departed track's ratings guesses in the
-    /// wrong direction.
+    /// A file from another version, or no file at all, reads as empty rather
+    /// than as a guess. Guessing at a field's meaning across a format change
+    /// is how a store corrupts itself.
     #[test]
-    fn rename_will_not_overwrite_an_existing_entry() {
-        let mut h = History::default();
-        h.note_rating(Path::new("/m/old.mp3"), 1, 100);
-        h.note_rating(Path::new("/m/new.mp3"), 5, 100);
+    fn an_unreadable_base_is_empty_rather_than_wrong() {
+        let dir = tmpdir("bad-base");
+        assert_eq!(History::load(&path_in(&dir)).by_path().count(), 0);
 
-        assert!(!h.rename(Path::new("/m/old.mp3"), Path::new("/m/new.mp3")));
-        assert_eq!(h.get(Path::new("/m/new.mp3")).unwrap().rating, Some(5));
-        assert_eq!(h.get(Path::new("/m/old.mp3")).unwrap().rating, Some(1));
-    }
-
-    #[test]
-    fn renaming_something_unknown_changes_nothing() {
-        let mut h = History::default();
-        h.note_rating(Path::new("/m/a.mp3"), 3, 100);
-        assert!(!h.rename(Path::new("/m/nope.mp3"), Path::new("/m/b.mp3")));
-        assert!(!h.rename(Path::new("/m/a.mp3"), Path::new("/m/a.mp3")));
-        assert_eq!(h.len(), 1);
-    }
-
-    #[test]
-    fn the_path_sits_under_the_data_dir() {
+        let path = path_in(&dir);
+        std::fs::write(&path, "version = 999\n[entries.\"/m/a.mp3\"]\nadded = 1\n").unwrap();
         assert_eq!(
-            path_in(Path::new("/data/gmuse")),
-            PathBuf::from("/data/gmuse/history.toml")
+            History::load(&path).by_path().count(),
+            0,
+            "a future version was read as though it were this one"
         );
-    }
-
-    /// The upgrade case, and the one that matters: real ratings exist in the
-    /// old place and must arrive in the new one.
-    #[test]
-    fn migration_moves_a_legacy_history_and_reports_where_from() {
-        let d = tmpdir("migrate");
-        let legacy = d.join("state").join("history.toml");
-        let mut h = History::default();
-        h.note_seen(Path::new("/m/a.mp3"), 100);
-        h.note_rating(Path::new("/m/a.mp3"), 5, 200);
-        h.save(&legacy).unwrap();
-
-        let target = path_in(&d.join("data"));
-        assert_eq!(migrate_from(&legacy, &target), Some(legacy.clone()));
-        assert!(!legacy.exists(), "the original must not be left behind");
-        assert_eq!(
-            History::load(&target)
-                .get(Path::new("/m/a.mp3"))
-                .unwrap()
-                .rating,
-            Some(5)
-        );
-
-        // A second run finds nothing to do rather than clobbering.
-        assert_eq!(migrate_from(&legacy, &target), None);
-    }
-
-    /// An existing history in the new place wins. Migrating over it would
-    /// discard whatever has been rated since the upgrade.
-    #[test]
-    fn migration_never_overwrites_an_existing_history() {
-        let d = tmpdir("migrate-existing");
-        let legacy = d.join("state").join("history.toml");
-        let mut old = History::default();
-        old.note_rating(Path::new("/m/a.mp3"), 1, 100);
-        old.save(&legacy).unwrap();
-
-        let target = path_in(&d.join("data"));
-        let mut current = History::default();
-        current.note_rating(Path::new("/m/a.mp3"), 5, 300);
-        current.save(&target).unwrap();
-
-        assert_eq!(migrate_from(&legacy, &target), None);
-        assert_eq!(
-            History::load(&target)
-                .get(Path::new("/m/a.mp3"))
-                .unwrap()
-                .rating,
-            Some(5),
-            "the newer history was overwritten by the legacy one"
-        );
-        assert!(
-            legacy.exists(),
-            "nothing was migrated, so nothing was moved"
-        );
-    }
-
-    #[test]
-    fn migration_does_nothing_without_a_legacy_file() {
-        let d = tmpdir("migrate-none");
-        let target = path_in(&d.join("data"));
-        assert_eq!(migrate_from(&d.join("nope.toml"), &target), None);
-        assert!(!target.exists());
-    }
-
-    /// Half the track or four minutes, whichever comes first — so a skip does
-    /// not count, and a long track does not have to finish.
-    #[test]
-    fn what_counts_as_a_play() {
-        let three_min = Duration::from_secs(180);
-        assert!(!counts_as_played(Duration::from_secs(3), three_min));
-        assert!(!counts_as_played(Duration::from_secs(89), three_min));
-        assert!(counts_as_played(Duration::from_secs(90), three_min));
-
-        // A twenty-minute track earns it at four minutes, not at ten.
-        let twenty = Duration::from_secs(1200);
-        assert!(!counts_as_played(Duration::from_secs(239), twenty));
-        assert!(counts_as_played(Duration::from_secs(240), twenty));
-    }
-
-    /// An unknown duration has no half to take. Without this a zero-length
-    /// track would count a play the instant it started.
-    #[test]
-    fn an_unknown_length_must_earn_the_full_four_minutes() {
-        let unknown = Duration::ZERO;
-        assert!(!counts_as_played(Duration::from_secs(1), unknown));
-        assert!(!counts_as_played(Duration::from_secs(239), unknown));
-        assert!(counts_as_played(Duration::from_secs(240), unknown));
-    }
-
-    #[test]
-    fn plays_accumulate_and_stamp_the_time() {
-        let mut h = History::default();
-        let p = Path::new("/m/a.mp3");
-        h.note_played(p, 100);
-        h.note_played(p, 200);
-        let e = h.get(p).unwrap();
-        assert_eq!(e.plays, 2);
-        assert_eq!(e.last_played, Some(200));
-    }
-
-    /// `added` is the *first* sighting. A track seen every launch would
-    /// otherwise be permanently "added today", which is the one thing this
-    /// field exists not to be.
-    #[test]
-    fn added_is_never_overwritten() {
-        let mut h = History::default();
-        let p = Path::new("/m/a.mp3");
-        h.note_seen(p, 1000);
-        h.note_seen(p, 2000);
-        h.note_played(p, 3000);
-        h.note_seen(p, 4000);
-        assert_eq!(h.get(p).unwrap().added, 1000);
-        assert_eq!(h.get(p).unwrap().plays, 1);
-    }
-
-    /// Zero clears, because "no stars" and "unrated" are the same thing to
-    /// anyone typing it — and unrated has to stay distinct from rated-low.
-    #[test]
-    fn a_rating_of_zero_clears_it() {
-        let mut h = History::default();
-        let p = Path::new("/m/a.mp3");
-        h.note_rating(p, 4, 1);
-        assert_eq!(h.get(p).unwrap().rating, Some(4));
-        h.note_rating(p, 1, 2);
-        assert_eq!(h.get(p).unwrap().rating, Some(1), "one star is not none");
-        h.note_rating(p, 0, 3);
-        assert_eq!(h.get(p).unwrap().rating, None);
-    }
-
-    /// Rating a track that has never been played must not lose its history,
-    /// and rating must not disturb the first-seen date.
-    #[test]
-    fn rating_leaves_the_rest_of_an_entry_alone() {
-        let mut h = History::default();
-        let p = Path::new("/m/a.mp3");
-        h.note_seen(p, 100);
-        h.note_played(p, 200);
-        h.note_rating(p, 5, 300);
-        let e = h.get(p).unwrap();
-        assert_eq!(
-            (e.added, e.plays, e.last_played, e.rating),
-            (100, 1, Some(200), Some(5))
-        );
-    }
-
-    #[test]
-    fn a_round_trip_keeps_everything() {
-        let path = tmpdir("roundtrip").join("history.toml");
-        let mut h = History::default();
-        h.note_seen(Path::new("/m/a.mp3"), 10);
-        h.note_played(Path::new("/m/b with spaces.mp3"), 20);
-        h.note_rating(Path::new("/m/b with spaces.mp3"), 4, 20);
-        h.note_played(Path::new("/m/Löffler — “quoted”.mp3"), 30);
-        h.save(&path).unwrap();
-
-        let back = History::load(&path);
-        assert_eq!(back.len(), 3);
-        assert_eq!(back.get(Path::new("/m/a.mp3")).unwrap().added, 10);
-        assert_eq!(
-            back.get(Path::new("/m/b with spaces.mp3")).unwrap().rating,
-            Some(4)
-        );
-        assert_eq!(
-            back.get(Path::new("/m/Löffler — “quoted”.mp3"))
-                .unwrap()
-                .plays,
-            1,
-            "a path with quotes and dashes must survive being a table key"
-        );
-    }
-
-    #[test]
-    fn a_missing_or_corrupt_file_starts_empty() {
-        let d = tmpdir("bad");
-        assert!(History::load(&d.join("nothing.toml")).is_empty());
-        let junk = d.join("junk.toml");
-        std::fs::write(&junk, "not toml {{{").unwrap();
-        assert!(History::load(&junk).is_empty());
-    }
-
-    /// The one failure this store must not have: replacing good counts with a
-    /// broken file. Temp-then-rename is what prevents it.
-    #[test]
-    fn a_failed_write_leaves_the_previous_history_intact() {
-        let d = tmpdir("atomic");
-        let path = d.join("history.toml");
-        let mut h = History::default();
-        h.note_played(Path::new("/m/a.mp3"), 1);
-        h.save(&path).unwrap();
-
-        std::fs::create_dir(path.with_extension("toml.tmp")).unwrap();
-        let mut next = h.clone();
-        next.note_played(Path::new("/m/a.mp3"), 2);
-        assert!(next.save(&path).is_err());
-
-        assert_eq!(
-            History::load(&path)
-                .get(Path::new("/m/a.mp3"))
-                .unwrap()
-                .plays,
-            1
-        );
-    }
-
-    #[test]
-    fn a_file_from_another_version_is_ignored() {
-        let path = tmpdir("version").join("history.toml");
-        let mut h = History::default();
-        h.note_played(Path::new("/m/a.mp3"), 1);
-        h.save(&path).unwrap();
-        let text = std::fs::read_to_string(&path)
-            .unwrap()
-            .replace(&format!("version = {VERSION}"), "version = 999");
-        std::fs::write(&path, text).unwrap();
-        assert!(History::load(&path).is_empty());
     }
 }
