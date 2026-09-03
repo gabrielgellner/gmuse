@@ -26,13 +26,9 @@ pub trait Entity {
     const KIND: &'static str;
 }
 
-macro_rules! entities {
+macro_rules! kinds {
     ($($(#[$doc:meta])* $name:ident => $kind:literal),* $(,)?) => {
         $(
-            $(#[$doc])*
-            #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-            pub struct $name;
-
             impl Entity for $name {
                 const KIND: &'static str = $kind;
             }
@@ -40,46 +36,71 @@ macro_rules! entities {
     };
 }
 
-entities! {
-    /// A composition, independent of any performance of it.
+/// Declare the kinds that are still only tags.
+///
+/// Their fields arrive with their own issue; until then they exist so that
+/// `Id<T>` can name them. Giving one fields later does not disturb anything
+/// already minted, because an id only ever uses `T` as a tag.
+macro_rules! tags {
+    ($($(#[$doc:meta])* $name:ident),* $(,)?) => {
+        $(
+            $(#[$doc])*
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+            pub struct $name;
+        )*
+    };
+}
+
+tags! {
+    /// An **encoding** — not a copy. Fields with #75.
+    Distribution,
+    /// A copy of an encoding, on one device. Fields with #75.
+    Holding,
+    /// A machine that holds copies. Fields with #75.
+    Device,
+    /// A person or an ensemble. Fields with #73.
+    Artist,
+    /// An imprint. Fields with #73.
+    Label,
+    /// A concept in the genre vocabulary. Fields with #74.
+    Genre,
+    /// One grouping of genre concepts. Fields with #74.
+    Hierarchy,
+    /// What an artist did on something. Fields with #73.
+    Role,
+    /// A curated set, ordered or not. Fields with #76.
+    Collection,
+    /// An artist on a work, recording, release group or release. Fields with #73.
+    Credit,
+    /// One recording's membership of one collection. Fields with #76.
+    CollectionEntry,
+    /// One genre assigned to one subject. Fields with #74.
+    GenreAssignment,
+}
+
+kinds! {
     Work => "work",
-    /// One performance. **The grain** — what plays, and what history hangs off.
     Recording => "recording",
-    /// The album across its editions.
     ReleaseGroup => "release-group",
-    /// One edition, with its catalogue number.
     Release => "release",
-    /// A disc or a side.
     Medium => "medium",
-    /// A recording's slot on a medium.
     Track => "track",
-    /// An **encoding** — not a copy. Its id derives from its audio.
     Distribution => "distribution",
-    /// A copy of an encoding, on one device.
     Holding => "holding",
-    /// A machine that holds copies.
     Device => "device",
-    /// A person or an ensemble.
     Artist => "artist",
-    /// An imprint.
     Label => "label",
-    /// A concept in the genre vocabulary.
     Genre => "genre",
-    /// One grouping of genre concepts — a list may carry several.
     Hierarchy => "hierarchy",
-    /// What an artist did on something, as a codelist entry.
     Role => "role",
-    /// A curated set, ordered or not.
     Collection => "collection",
-    /// An artist on a work, recording, release group or release.
     Credit => "credit",
-    /// A recording's place in a mix, with its entry time.
     MixEntry => "mix-entry",
-    /// One recording's membership of one collection.
     CollectionEntry => "collection-entry",
-    /// One genre assigned to one subject, with why and how confidently.
     GenreAssignment => "genre-assignment",
 }
+
+pub use crate::model::spine::{Medium, MixEntry, Recording, Release, ReleaseGroup, Track, Work};
 
 #[cfg(test)]
 mod tests {
