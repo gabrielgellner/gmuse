@@ -23,6 +23,7 @@ from typing import Any, Final
 
 import requests
 
+import bronze
 from genre.common import album_key, out_path, secret, tags_of, tracklist_match, walk
 
 USER_AGENT: Final = {"User-Agent": "gmuse-genre-tool/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
@@ -142,15 +143,25 @@ def discogs_id(release: dict[str, Any]) -> str | None:
 
 
 def discogs_release(release_id: str, token: str) -> dict[str, Any] | None:
-    """Fetch one release from Discogs, for its genres and styles."""
-    response = requests.get(
+    """Fetch one release from Discogs, for its genres and styles.
+
+    **Through the cache (#58).** This is the expensive half of the fallback —
+    up to three of these per album, behind a rate limiter — and it was the
+    only call in this file that was not cached at all. The search beside it
+    was, which had the caching exactly backwards.
+
+    The whole response is kept, not the two fields read here. `tracklist` with
+    durations, `formats` carrying "Deluxe Edition", `labels` and `catno` are
+    all in it, and every one of them has already been wanted.
+    """
+    con = bronze.open_cache()
+    status, body = bronze.get(
+        con,
         DISCOGS_RELEASE.format(release_id),
+        {"token": token},
         headers=USER_AGENT,
-        timeout=TIMEOUT,
-        params={"token": token},
     )
-    time.sleep(COURTESY_DELAY)
-    return response.json() if response.status_code == HTTP_OK else None
+    return body if status == HTTP_OK and isinstance(body, dict) else None
 
 
 def verify(artist: str, album: str, ours: list[str], token: str) -> dict[str, Any] | None:
@@ -286,6 +297,16 @@ def main() -> None:
     for i, ((artist, album), held) in enumerate(stranded, 1):
         found = verify(artist, album, held.titles, token)
         if found is None:
+            # **Recorded, not just printed.** An album Discogs has never heard
+            # of costs four requests to establish, and was costing them again
+            # on every run because `None` was reported and never written down.
+            # "Nobody knows" and "nobody asked" are different, and only one of
+            # them is worth repeating.
+            con.execute(
+                "INSERT OR REPLACE INTO search (artist, album, fetched_at, payload) VALUES (?, ?, ?, ?)",
+                (artist, album, dt.datetime.now(tz=dt.UTC).isoformat(), json.dumps(None)),
+            )
+            con.commit()
             print(f"  [{i}/{len(stranded)}] {artist[:18]:20} {album[:24]:26} no hit")
             continue
         con.execute(

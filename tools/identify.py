@@ -45,28 +45,23 @@ at one request per second, the two roots together are about twenty minutes.
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import json
 import re
-import sqlite3
 import sys
-import time
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import mutagen
-import requests
 
+import bronze
 from genre.common import out_path, walk
+
+if TYPE_CHECKING:
+    import sqlite3
 
 USER_AGENT: Final = {"User-Agent": "gmuse-identify/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
 MB_RECORDING: Final = "https://musicbrainz.org/ws/2/recording"
-#: MusicBrainz asks for no more than one request a second, and means it.
-COURTESY_DELAY: Final = 1.05
-TIMEOUT: Final = 30
 HTTP_OK: Final = 200
-HTTP_BUSY: Final = 503
-RETRIES: Final = 4
 #: How many candidates to keep. Past the third, a match is not one to trust.
 CANDIDATES: Final = 3
 #: A Lucene score at or above this is a name match worth considering. Below it
@@ -185,59 +180,32 @@ def has_recording_id(tags: dict[str, str]) -> bool:
     return False
 
 
-def open_cache(path: Path) -> sqlite3.Connection:
-    """Open the lookup cache, creating it if this is the first run."""
-    con = sqlite3.connect(path)
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS search "
-        "(artist TEXT, title TEXT, fetched_at TEXT, payload TEXT, PRIMARY KEY (artist, title))"
-    )
-    con.commit()
-    return con
+def lucene(artist: str, title: str) -> str:
+    """The query MusicBrainz is asked, in one place so it cannot drift."""
+    return f'recording:"{title}" AND artist:"{artist}"' if artist else f'recording:"{title}"'
 
 
-def get_json(params: dict[str, str]) -> dict[str, Any] | None:
-    """One request, retried while the server says it is busy.
+def params_for(artist: str, title: str) -> dict[str, str]:
+    """The request, as parameters."""
+    return {"query": lucene(artist, title), "fmt": "json", "limit": str(CANDIDATES)}
 
-    **A 503 is not an answer.** The genre pass learned this the expensive way:
-    treating every non-200 as "no data" cached a release *with* genres as
-    having none, and the run printed a dash that read as a gap in MusicBrainz
-    rather than as a throttle we caused.
-    """
-    delay = COURTESY_DELAY
-    for _ in range(RETRIES):
-        response = requests.get(MB_RECORDING, headers=USER_AGENT, timeout=TIMEOUT, params=params)
-        time.sleep(delay)
-        if response.status_code == HTTP_OK:
-            body = response.json()
-            return body if isinstance(body, dict) else None
-        if response.status_code != HTTP_BUSY:
-            return None
-        delay *= 2
-    return None
+
+def query_key(artist: str, title: str) -> str:
+    """The cache key this question lands on, for reporting hits and misses."""
+    return bronze.key_of(MB_RECORDING, params_for(artist, title))
 
 
 def search(con: sqlite3.Connection, artist: str, title: str) -> dict[str, Any] | None:
-    """Ask MusicBrainz for a recording, or return what it said last time.
+    """Ask MusicBrainz for a recording, or recall having asked.
 
-    The whole response is cached, not the conclusion drawn from it. Scoring
-    changes; a network round trip at one per second does not come back.
+    **Keyed by the request, not by `(artist, title)`** — which is what this
+    used and paid for twice in one afternoon. Normalising the query changed
+    every key, so improving the question threw away every answer to the old
+    one. Through `bronze` the key is the URL that was actually fetched, so a
+    better query adds rows and the old ones stay readable (#58).
     """
-    row = con.execute("SELECT payload FROM search WHERE artist = ? AND title = ?", (artist, title)).fetchone()
-    if row is not None:
-        payload = json.loads(row[0])
-        return payload if isinstance(payload, dict) else None
-
-    query = f'recording:"{title}" AND artist:"{artist}"' if artist else f'recording:"{title}"'
-    body = get_json({"query": query, "fmt": "json", "limit": str(CANDIDATES)})
-    if body is None:
-        return None
-    con.execute(
-        "INSERT OR REPLACE INTO search VALUES (?, ?, ?, ?)",
-        (artist, title, dt.datetime.now(tz=dt.UTC).isoformat(), json.dumps(body)),
-    )
-    con.commit()
-    return body
+    status, body = bronze.get(con, MB_RECORDING, params_for(artist, title), headers=USER_AGENT)
+    return body if status == HTTP_OK and isinstance(body, dict) else None
 
 
 def credit_of(recording: dict[str, Any]) -> str:
@@ -287,9 +255,9 @@ def unreadable(todo: list[tuple[Path, dict[str, str]]]) -> str | None:
     return None
 
 
-def fetch(root: Path, cache: Path, *, limit: int | None) -> None:
+def fetch(root: Path, *, limit: int | None) -> None:
     """Look up every file under `root` that does not already name its recording."""
-    con = open_cache(cache)
+    con = bronze.open_cache()
     files = walk(root)
     todo = []
     for path in files:
@@ -309,7 +277,7 @@ def fetch(root: Path, cache: Path, *, limit: int | None) -> None:
         title = searchable_title(tags.get("title", "") or path.stem)
         if not title:
             continue
-        before = con.execute("SELECT 1 FROM search WHERE artist = ? AND title = ?", (artist, title)).fetchone()
+        before = con.execute("SELECT 1 FROM response WHERE key = ?", (query_key(artist, title),)).fetchone()
         search(con, artist, title)
         if before is None:
             asked += 1
@@ -320,14 +288,14 @@ def fetch(root: Path, cache: Path, *, limit: int | None) -> None:
     print(f"done: {asked} asked, {cached} already cached")
 
 
-def propose(root: Path, cache: Path, out: Path, *, limit: int | None) -> None:
+def propose(root: Path, out: Path, *, limit: int | None) -> None:
     """Turn the cache into a reviewable file of identifications.
 
     JSONL rather than a review table because the rows are heterogeneous — a
     confident match carries different evidence from an uncertain one — and
     because this feeds a strict `import`, which wants a machine to read it.
     """
-    con = open_cache(cache)
+    con = bronze.open_cache()
     todo = []
     for path in walk(root):
         tags, seconds = read(path)
@@ -389,17 +357,16 @@ def main() -> None:
     pr.add_argument("--limit", type=int, default=None)
 
     args = parser.parse_args()
-    cache = out_path("identify-cache.sqlite")
     root = Path(args.root).expanduser()
     if not root.exists():
         print(f"no such root: {root}")
         sys.exit(1)
 
     if args.command == "fetch":
-        fetch(root, cache, limit=args.limit)
+        fetch(root, limit=args.limit)
     else:
         default = out_path(f"identify-{root.name.lower()}.jsonl")
-        propose(root, cache, Path(args.out).expanduser() if args.out else default, limit=args.limit)
+        propose(root, Path(args.out).expanduser() if args.out else default, limit=args.limit)
 
 
 if __name__ == "__main__":

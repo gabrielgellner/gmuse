@@ -268,7 +268,7 @@ def show_terms(terms: list[str]) -> str:
 def write_uncertain(
     path: Path,
     albums: dict[tuple[str, str], Album],
-    searched: dict[tuple[str, str], dict[str, object]],
+    searched: dict[tuple[str, str], dict[str, object] | None],
 ) -> int:
     """Write the candidates that need a person, and say how many there were."""
     rows = [
@@ -338,7 +338,7 @@ def row_for(
     album_name: str,
     album: Album,
     lookup: dict[str, dict[str, object]],
-    searched: dict[tuple[str, str], dict[str, object]],
+    searched: dict[tuple[str, str], dict[str, object] | None],
 ) -> dict[str, object]:
     """Build one review row: what the album says now, and what it should say."""
     current_values = sorted(album.genres)
@@ -400,6 +400,9 @@ def main() -> None:
 
     con = sqlite3.connect(out_path("genre-cache.sqlite"))
     lookup = {mbid: json.loads(payload) for mbid, payload in con.execute("SELECT mbid, payload FROM lookup")}
+    # A `null` payload is a recorded "Discogs has never heard of this" (#58),
+    # which is an answer and not a gap — it is what stops the four requests it
+    # cost from being spent again on every run.
     searched = {(a, b): json.loads(p) for a, b, p in con.execute("SELECT artist, album, payload FROM search")}
 
     surveyed = survey(Path(args.root).expanduser())

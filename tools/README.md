@@ -20,6 +20,36 @@ cd tools
 ruff check . && ruff format --check . && pyrefly check
 ```
 
+## bronze.py — a request cache, not library state (#58)
+
+Every MusicBrainz and Discogs call goes through it. The rule that decides what belongs here:
+
+> Deleting this may cost time. It must never cost a fact.
+
+So it lives in `~/Library/Caches/gmuse/` (or `$XDG_CACHE_HOME/gmuse`) — **not** the library's `data_dir`, which syncs
+between machines and would turn one machine's lookups into the other's facts, and not `out/`, which is the repository.
+Anything worth keeping has to be extracted into the library before the cache goes; that is what the proposal files are
+for. If a claim only exists in here, it is not yet known.
+
+**Nothing is evicted automatically.** Keeping it a year and dropping it tomorrow are both correct, and neither is a
+decision the module makes — which is how it can be as persistent as you like without being coupled to anything.
+
+```sh
+./.venv/bin/python bronze.py stats
+./.venv/bin/python bronze.py prune --older-than 90
+```
+
+Three things it fixes:
+
+|                             | before                                                                                      | now                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `discogs_release`           | never cached — up to 3 per album, every run                                                 | cached, whole response kept         |
+| a search that finds nothing | printed, never written down; re-asked forever at 4 requests each                            | recorded, so the second run is free |
+| `identify`'s key            | `(artist, title)` — a cache of the _current guess_, thrown away whenever the query improved | the URL actually fetched            |
+
+**Secrets never land in it.** Discogs takes its token as a query parameter; it is stripped from the key and the stored
+URL, and a check at write time refuses the row if one gets through anyway.
+
 ## identify.py — find the MusicBrainz recording id (#89)
 
 The gap that looked like an identity problem is a **tagging** problem. Of 6500 files in `~/MusicLibrary`, 477 carry no
