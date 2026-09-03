@@ -26,5 +26,7 @@ pub mod provenance;
 pub mod reference;
 pub mod round_trip;
 pub mod seam;
+pub mod sortkey;
 pub mod spine;
+pub mod tree;
 pub mod vocabulary;

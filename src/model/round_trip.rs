@@ -30,23 +30,32 @@ fn audio(hash: u128) -> AudioId {
 /// Two tracks off one album, as a scan would report them. Both carry a
 /// MusicBrainz id, which is the 83% case.
 fn album() -> Vec<Scanned> {
+    let track = |hash: u128, title: &str, mbid: u128, n: u16| Scanned {
+        audio: audio(hash),
+        title: title.into(),
+        artist: "Stephan Bodzin & Marc Romboy".into(),
+        mb_recording: Some(uuid::Uuid::from_u128(mbid)),
+        album: Some("Luna".into()),
+        album_artist: Some("Stephan Bodzin & Marc Romboy".into()),
+        disc: Some(1),
+        track: Some(n),
+        mb_release_group: Some(uuid::Uuid::from_u128(
+            0x9e11_0000_0000_4000_8000_0000_0000_00aa,
+        )),
+    };
     vec![
-        Scanned {
-            audio: audio(0x8fb0_dcfb_f145_dfff_6649_7842_65da_0229),
-            title: "Callisto".into(),
-            artist: "Stephan Bodzin & Marc Romboy".into(),
-            mb_recording: Some(uuid::Uuid::from_u128(
-                0xca11_1500_0000_4000_8000_0000_0000_0001,
-            )),
-        },
-        Scanned {
-            audio: audio(0x1111_2222_3333_4444_5555_6666_7777_8888),
-            title: "Luna".into(),
-            artist: "Stephan Bodzin & Marc Romboy".into(),
-            mb_recording: Some(uuid::Uuid::from_u128(
-                0x1a2b_0000_0000_4000_8000_0000_0000_0002,
-            )),
-        },
+        track(
+            0x8fb0_dcfb_f145_dfff_6649_7842_65da_0229,
+            "Callisto",
+            0xca11_1500_0000_4000_8000_0000_0000_0001,
+            1,
+        ),
+        track(
+            0x1111_2222_3333_4444_5555_6666_7777_8888,
+            "Luna",
+            0x1a2b_0000_0000_4000_8000_0000_0000_0002,
+            2,
+        ),
     ]
 }
 

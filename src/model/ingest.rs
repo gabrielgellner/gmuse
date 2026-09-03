@@ -97,6 +97,7 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
             title: stem(),
             artist: String::new(),
             mb_recording: None,
+            ..Default::default()
         });
     };
 
@@ -123,7 +124,25 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // One key, every format: lofty maps ID3's UFID and Vorbis's
         // `musicbrainz_trackid` onto it, and both mean the recording.
         mb_recording: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzRecordingId)).ok(),
+        album: some(tag.and_then(|t| t.album()).map(|s| s.trim().to_string())),
+        // Album artist first, because a guest credit on one track must not
+        // split the album off from the artist it files under.
+        album_artist: some(Some(get(ItemKey::AlbumArtist))),
+        disc: number(&get(ItemKey::DiscNumber)),
+        track: number(&get(ItemKey::TrackNumber)),
+        mb_release_group: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzReleaseGroupId)).ok(),
     })
+}
+
+/// An empty string is an absent tag, not a value.
+fn some(s: Option<String>) -> Option<String> {
+    s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// `4`, `4/12` and ` 4 ` are all four. A tag that says something else is
+/// absent rather than zero, because zero is a position and "no idea" is not.
+fn number(s: &str) -> Option<u16> {
+    s.split(['/', '-']).next()?.trim().parse().ok()
 }
 
 /// How confidently this file names a recording, before anything is minted.

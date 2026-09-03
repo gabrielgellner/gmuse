@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::audio_id::AudioId;
 use crate::model::clock::{Drift, HybridClock, Stamp};
-use crate::model::entity::{Artist, Device, Distribution, Recording};
+use crate::model::entity::{Artist, Device, Distribution, Recording, ReleaseGroup};
 use crate::model::id::Id;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
 
@@ -25,15 +25,27 @@ use crate::model::log::{Catalogue, Fact, Record, compact, fold};
 /// The boundary between reading files and cataloguing them. #70 fills this
 /// from real tags; the round trip fills it directly, because tag parsing is not
 /// one of the risky decisions this slice exists to test.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Scanned {
     pub audio: AudioId,
     pub title: String,
     pub artist: String,
-    /// A MusicBrainz recording id, where the tags carry one — 83% of this
+    /// A MusicBrainz recording id, where the tags carry one — 91% of this
     /// library. Its presence is what lets two devices converge without
     /// meeting.
     pub mb_recording: Option<uuid::Uuid>,
+    /// The album this sits on, as the tags name it.
+    pub album: Option<String>,
+    /// Who the *album* is credited to, which is not always who the track is.
+    /// A guest credit must not split an album off from its artist.
+    pub album_artist: Option<String>,
+    /// Where on the album, as the tags claim. Claims, because they are
+    /// checkable and this library has media whose numbering does not add up.
+    pub disc: Option<u16>,
+    pub track: Option<u16>,
+    /// The release group id, where the tags carry one — what makes two devices
+    /// agree on an *album* without meeting.
+    pub mb_release_group: Option<uuid::Uuid>,
 }
 
 pub struct Instance {
@@ -114,6 +126,46 @@ impl Instance {
                     artist,
                 },
             );
+            // An album, where the tags name one. Its id derives from the
+            // release group MBID when there is one, so two devices agree on
+            // the *album* as well as the track; otherwise from the album
+            // artist and title together, because two artists' "Greatest Hits"
+            // are not one album.
+            if let Some(album) = &s.album {
+                let credited = s.album_artist.as_deref().unwrap_or(&s.artist);
+                let group = match s.mb_release_group {
+                    Some(mbid) => Id::<ReleaseGroup>::of_musicbrainz(mbid),
+                    None => {
+                        Id::<ReleaseGroup>::derived(format!("{credited}\u{1f}{album}").as_bytes())
+                    }
+                };
+                let group_artist = Id::<Artist>::derived(credited.as_bytes());
+                self.append(
+                    now,
+                    Fact::ArtistNamed {
+                        artist: group_artist,
+                        name: credited.to_string(),
+                    },
+                );
+                self.append(
+                    now,
+                    Fact::ReleaseGroupCatalogued {
+                        group,
+                        title: album.clone(),
+                        artist: group_artist,
+                    },
+                );
+                self.append(
+                    now,
+                    Fact::TrackPlaced {
+                        recording,
+                        group,
+                        disc: s.disc.unwrap_or(1),
+                        track: s.track.unwrap_or(0),
+                    },
+                );
+            }
+
             self.append(
                 now,
                 Fact::DistributionCatalogued {

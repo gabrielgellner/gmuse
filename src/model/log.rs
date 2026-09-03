@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
-use crate::model::entity::{Artist, Device, Distribution, Recording};
+use crate::model::entity::{Artist, Device, Distribution, Recording, ReleaseGroup};
 use crate::model::id::Id;
 
 /// One thing a device wrote down.
@@ -88,6 +88,27 @@ pub enum Fact {
         held: BTreeMap<Id<Distribution>, String>,
     },
 
+    /// An album exists, and what it is called.
+    ReleaseGroupCatalogued {
+        group: Id<ReleaseGroup>,
+        title: String,
+        /// Who the album is credited to, which is not always who a track is.
+        artist: Id<Artist>,
+    },
+
+    /// Where a recording sits on an album.
+    ///
+    /// Disc and track are what the **tags claim**, not where the row happens
+    /// to fall. A claim can be checked against its neighbours; a position
+    /// derived from ordering cannot disagree with itself and so can never say
+    /// the source was wrong.
+    TrackPlaced {
+        recording: Id<Recording>,
+        group: Id<ReleaseGroup>,
+        disc: u16,
+        track: u16,
+    },
+
     /// A rating, or its removal with `None`.
     ///
     /// **The latest by causal order wins**, and none is discarded — a rating
@@ -119,6 +140,9 @@ pub struct Catalogue {
     pub plays: BTreeMap<Id<Recording>, u32>,
     /// The latest rating per recording. A fold, never a stored number.
     pub ratings: BTreeMap<Id<Recording>, u8>,
+    pub groups: BTreeMap<Id<ReleaseGroup>, Grouped>,
+    /// Where each recording sits: which album, which disc, which track.
+    pub placements: BTreeMap<Id<Recording>, (Id<ReleaseGroup>, u16, u16)>,
     /// What each device last said it holds, and when it said so.
     ///
     /// The stamp is not decoration. You cannot stat another machine's disk, so
@@ -135,6 +159,12 @@ pub struct Catalogue {
 pub struct Asserted {
     pub at: Stamp,
     pub held: BTreeMap<Id<Distribution>, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Grouped {
+    pub title: String,
+    pub artist: Id<Artist>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -235,6 +265,27 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         held: held.clone(),
                     },
                 );
+            }
+            Fact::ReleaseGroupCatalogued {
+                group,
+                title,
+                artist,
+            } => {
+                cat.groups.insert(
+                    *group,
+                    Grouped {
+                        title: title.clone(),
+                        artist: *artist,
+                    },
+                );
+            }
+            Fact::TrackPlaced {
+                recording,
+                group,
+                disc,
+                track,
+            } => {
+                cat.placements.insert(*recording, (*group, *disc, *track));
             }
             Fact::Rated { recording, stars } => {
                 // Records arrive in stamp order, so the last simply wins.

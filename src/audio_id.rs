@@ -62,8 +62,21 @@ use twox_hash::xxhash3_128::Hasher as XxHash3_128;
 pub const SCHEME: u8 = 1;
 
 /// A file's audio, identified.
+/// `Default` is scheme 0 and hash 0 — a value no real file produces, since
+/// [`SCHEME`] starts at 1. It exists so partial test fixtures can be built with
+/// `..Default::default()`, and it is deliberately not a *valid* id.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct AudioId {
     pub scheme: u8,

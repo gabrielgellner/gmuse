@@ -23,7 +23,7 @@
 //! migration into something with a number on it that can only go down.
 
 use crate::model::encoding::{Encoding, Encodings, Format, Verdict};
-use crate::model::entity::{Device, Recording};
+use crate::model::entity::{Device, Recording, ReleaseGroup};
 use crate::model::id::Id;
 use crate::model::log::Catalogue;
 use crate::model::provenance::Provenance;
@@ -216,6 +216,78 @@ impl Librarian {
             });
         }
 
+        // The album spine. A scan sees one release per album, so the release
+        // and the medium are minted from the group rather than read — a
+        // pressing this library does not hold is not a thing to invent.
+        for (group, g) in &cat.groups {
+            l.spine.groups.insert(
+                *group,
+                crate::model::spine::ReleaseGroup {
+                    id: *group,
+                    title: g.title.clone(),
+                    first_released: None,
+                    kind: crate::model::spine::ReleaseType::Album,
+                },
+            );
+            let release =
+                Id::<crate::model::entity::Release>::derived(group.to_string().as_bytes());
+            l.spine.releases.insert(
+                release,
+                crate::model::spine::Release {
+                    id: release,
+                    group: crate::model::id::Ref::to(*group),
+                    title: g.title.clone(),
+                    released: None,
+                    catalogue_number: None,
+                },
+            );
+            l.reference.artists.entry(g.artist).or_insert_with(|| {
+                crate::model::reference::ArtistRecord {
+                    id: g.artist,
+                    name: cat.artist_names.get(&g.artist).cloned().unwrap_or_default(),
+                    sort_name: cat.artist_names.get(&g.artist).cloned().unwrap_or_default(),
+                }
+            });
+            // Album-level credit, which is what `file_under` asks for first.
+            l.reference.credits.push(crate::model::reference::Credit {
+                subject: CreditOn::ReleaseGroup(*group),
+                artist: crate::model::id::Ref::to(g.artist),
+                role: crate::model::id::Ref::to(performer),
+                position: 0,
+                as_credited: None,
+                join_phrase: None,
+            });
+        }
+
+        for (recording, (group, disc, track)) in &cat.placements {
+            let release =
+                Id::<crate::model::entity::Release>::derived(group.to_string().as_bytes());
+            let medium =
+                Id::<crate::model::entity::Medium>::derived(format!("{release}/{disc}").as_bytes());
+            l.spine
+                .media
+                .entry(medium)
+                .or_insert(crate::model::spine::Medium {
+                    id: medium,
+                    release: crate::model::id::Ref::to(release),
+                    position: *disc,
+                    format: None,
+                });
+            let id = Id::<crate::model::entity::Track>::derived(
+                format!("{medium}/{recording}").as_bytes(),
+            );
+            l.spine.tracks.insert(
+                id,
+                crate::model::spine::Track {
+                    id,
+                    medium: crate::model::id::Ref::to(medium),
+                    recording: crate::model::id::Ref::to(*recording),
+                    position: *track,
+                    title_on_release: None,
+                },
+            );
+        }
+
         // Names are a register: whatever the fold settled on is the label.
         for (id, name) in &cat.artist_names {
             if let Some(a) = l.reference.artists.get_mut(id) {
@@ -250,6 +322,33 @@ impl Librarian {
         l.ratings = cat.ratings.clone();
         l.plays = cat.plays.clone();
         l
+    }
+
+    /// The album a recording sits on, if any.
+    pub fn group_of(&self, recording: Id<Recording>) -> Option<Id<ReleaseGroup>> {
+        let track = self.spine.tracks_of_recording(recording).first().copied()?;
+        let medium = self.spine.media.get(&track.medium.id())?;
+        let release = self.spine.releases.get(&medium.release.id())?;
+        Some(release.group.id())
+    }
+
+    /// Where a recording sits: disc, then track, as the tags claim.
+    ///
+    /// Sorts unplaced recordings last rather than first, because a track with
+    /// no number is a gap in what is known, and putting it at the top of an
+    /// album would state something the tags never did.
+    pub fn place_of(&self, recording: Id<Recording>) -> (u16, u16) {
+        self.spine
+            .tracks_of_recording(recording)
+            .first()
+            .and_then(|t| {
+                self.spine
+                    .media
+                    .get(&t.medium.id())
+                    .map(|m| (m.position, t.position))
+            })
+            .map(|(d, tr)| (d, if tr == 0 { u16::MAX } else { tr }))
+            .unwrap_or((u16::MAX, u16::MAX))
     }
 
     /// Everything playable, in a stable order.
@@ -483,7 +582,7 @@ mod tests {
                 audio: crate::audio_id::AudioId { scheme: 1, hash: 7 },
                 title: "04 Unknown Thing".into(), // what ingest put there
                 artist: String::new(),
-                mb_recording: None,
+                ..Default::default()
             }],
         );
         let cat = i.catalogue();

@@ -9,45 +9,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::store::{Store, Track, TrackId};
 
-/// A normalised sort key: case-folded, marks flattened, and with a leading
-/// article moved out of the way when `smart_artist_sort` is on.
-///
-/// Kept separate from the display string, which stays on the `Track` — "The
-/// Beatles" must sort under B and still render with its "The".
-///
-/// The marks are flattened for **ordering**, not only for looks: `ö` is U+00F6,
-/// so a raw comparison files Löffler after every artist beginning `lz`, which
-/// is to say off the end of the L section entirely.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SortKey(String);
-
-impl SortKey {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Leading articles stripped for sorting. Lower-case; the input is folded first.
-const ARTICLES: &[&str] = &["the ", "a ", "an "];
-
-/// Build a sort key.
-///
-/// `smart` strips a leading article, matching cmus's `smart_artist_sort`. It is
-/// applied to artists only — "The Wall" is an album whose T matters.
-pub fn sort_key(s: &str, smart: bool) -> SortKey {
-    let folded = crate::text::needle(s.trim());
-    if smart {
-        for article in ARTICLES {
-            if let Some(rest) = folded.strip_prefix(article) {
-                let rest = rest.trim_start();
-                if !rest.is_empty() {
-                    return SortKey(rest.to_string());
-                }
-            }
-        }
-    }
-    SortKey(folded)
-}
+/// Re-exported so callers keep saying `library::SortKey`. It lives in the
+/// model now, because how a library orders its own names is a librarian
+/// question rather than a player one (#84).
+pub use crate::model::sortkey::{SortKey, sort_key};
 
 /// Views 1 and 2. Same membership, two shapes.
 #[derive(Debug, Default)]
