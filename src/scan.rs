@@ -276,7 +276,7 @@ fn detect_moves(store: &Store, gone: &[PathBuf], arrived: &[PathBuf]) -> Vec<Mov
 ///
 /// `Path::starts_with` compares whole components, so `/a/bc` is not under
 /// `/a/b` — which is why this is not string prefix matching.
-fn prune_nested(roots: &[PathBuf]) -> Vec<PathBuf> {
+pub(crate) fn prune_nested(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut kept: Vec<PathBuf> = Vec::new();
     for root in roots {
         // Already covered by something kept — including by itself, which is
@@ -291,7 +291,7 @@ fn prune_nested(roots: &[PathBuf]) -> Vec<PathBuf> {
     kept
 }
 
-fn is_audio(path: &Path) -> bool {
+pub(crate) fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| {

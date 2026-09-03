@@ -79,13 +79,25 @@ impl Instance {
     /// recording is minted locally — which is the case §11 leaves to the
     /// collision, and the case this instance cannot resolve alone.
     pub fn ingest(&mut self, now: i64, scan: &[Scanned]) {
+        // Rung zero of the ladder: have these exact bytes been bound before?
+        //
+        // Without it a rescan mints a fresh recording for every unbound file,
+        // every pass, and the library doubles each time it is looked at. The
+        // encoding's id is content-derived, so this costs one lookup and is
+        // the cheapest rung there is.
+        let known = self.catalogue();
+
         for s in scan {
             let artist = Id::<Artist>::derived(s.artist.as_bytes());
+            let distribution = Id::<Distribution>::of_audio(&s.audio);
             let recording = match s.mb_recording {
                 Some(mbid) => Id::<Recording>::of_musicbrainz(mbid),
-                None => Id::<Recording>::new(),
+                None => known
+                    .distributions
+                    .get(&distribution)
+                    .and_then(|d| d.recording)
+                    .unwrap_or_default(),
             };
-            let distribution = Id::<Distribution>::of_audio(&s.audio);
 
             self.append(
                 now,
