@@ -19,5 +19,6 @@ pub mod instance;
 pub mod log;
 pub mod merge;
 pub mod mint;
+pub mod reference;
 pub mod round_trip;
 pub mod spine;
