@@ -128,6 +128,13 @@ pub struct Encoding {
     pub recording: Option<Ref<Recording>>,
     pub format: Format,
     pub bitrate: u32,
+    /// How long these bytes play.
+    ///
+    /// **Per encoding, and not reconciled with any other.** An edit, a radio
+    /// cut and a truncated rip are one recording and three durations, and
+    /// picking between them would be answering a question nobody asked: what
+    /// the player wants to know is how long *the thing it opened* is.
+    pub length: std::time::Duration,
     pub cutoff_hz: Option<Measured<u32>>,
     pub gain: Option<Measured<Gain>>,
     /// Encoder delay and padding, for correcting a cue point across encodings
@@ -326,6 +333,7 @@ mod tests {
             recording: Some(Ref::to(rec)),
             format,
             bitrate,
+            length: std::time::Duration::from_secs(200),
             cutoff_hz: cutoff.map(Measured::now),
             gain: None,
             encoder_delay: None,

@@ -804,30 +804,31 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
     let Some(id) = ui.playback.current else {
         return;
     };
-    let Some(track) = ctx.store.get(id) else {
-        return;
-    };
-    if !crate::history::counts_as_played(position, track.duration) {
-        return;
-    }
-    ui.counted_current = true;
-    // Milliseconds: this is a clock stamp, not a fact's date.
-    let now = crate::history::now_ms();
     let Some(recording) = ctx.store.recording_of(id) else {
         // Nothing stable to hang a play on. Better to count nothing than to
         // count it against a path, which is the failure #81 exists to end.
         ui.audit.line("played", "unidentified file, not counted");
         return;
     };
-    let encoding = track
-        .audio_id
-        .map(|a| crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&a));
+    // **How long it is comes from the library**, not from the file in front of
+    // us (#77). It is the same number today, and it stops being the same
+    // number the moment a second machine holds a longer copy of a rip that was
+    // cut short here — at which point "did I hear enough of it" should be
+    // asked of the song rather than of this device's copy.
+    let Some(row) = ctx.library.row(recording) else {
+        return;
+    };
+    if !crate::history::counts_as_played(position, row.length) {
+        return;
+    }
+    ui.counted_current = true;
+    // Milliseconds: this is a clock stamp, not a fact's date.
+    let now = crate::history::now_ms();
+    let encoding = ctx.library.encodings.canonical(recording).map(|e| e.id);
     record(ui, now, |log| log.play_maybe(now, recording, encoding));
     let plays = ui.listened.plays.get(&recording).copied().unwrap_or(0);
-    ui.audit.line(
-        "played",
-        &format!("{} (play {plays})", track.display_title()),
-    );
+    ui.audit
+        .line("played", &format!("{} (play {plays})", row.title));
     // A rule mentioning `play_count` or `last_played` now answers differently.
     refresh_smart(ui, ctx);
 }

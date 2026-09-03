@@ -81,7 +81,15 @@ impl Librarian {
             title: rec.title.clone(),
             file_under: self.files_under(recording),
             album: self.album_of(recording),
-            length: rec.length,
+            // **The length of the copy this would open**, not of the
+            // recording — a recording has no single length. An edit, a radio
+            // cut and a truncated rip are one recording and three durations,
+            // and "did I hear enough of it" is a question about the file that
+            // played. Ranking them by length was a rule invented to fill a
+            // field that should not have been filled: under it, a twelve-second
+            // rip measured against a four-minute sibling could never earn a
+            // play at all.
+            length: canonical.map(|e| e.length).unwrap_or_default(),
             rating: self.ratings.get(&recording).copied(),
             plays: self.plays.get(&recording).copied().unwrap_or(0),
             format: canonical.map(|e| e.format),
@@ -171,6 +179,9 @@ impl Librarian {
         use crate::model::spine::Recording as Rec;
 
         let mut l = Librarian::new();
+
+        // How long each recording plays, taken from an encoding of it.
+        //
         for (id, r) in &cat.recordings {
             l.spine.recordings.insert(
                 *id,
@@ -180,6 +191,8 @@ impl Librarian {
                     work: None,
                     recorded: None,
                     bpm: None,
+                    // Not filled: a recording has no length of its own.
+                    // Its encodings do, and `Row` takes the one it would play.
                     length: std::time::Duration::ZERO,
                     pinned: None,
                 },
@@ -304,6 +317,7 @@ impl Librarian {
                     recording: d.recording.map(crate::model::id::Ref::to),
                     format: d.format.unwrap_or(Format::Mp3),
                     bitrate: d.bitrate,
+                    length: std::time::Duration::from_millis(u64::from(d.length_ms)),
                     cutoff_hz: cat.measurements.get(id).map(|(hz, analyser)| {
                         crate::model::encoding::Measured {
                             value: *hz,
@@ -491,7 +505,7 @@ mod tests {
         /// counting `Store` alone said 5 while sixteen reads went around the
         /// librarian. Replacing a read lowers this and leaves the others flat,
         /// which is exactly the progress #77 is made of.
-        const REACHES: usize = 16;
+        const REACHES: usize = 15;
 
         let (mut store, mut paths, mut reaches) = (0, 0, 0);
         for (_, text) in read("src/ui") {
@@ -512,6 +526,59 @@ mod tests {
                  — lower the constants"
             );
         }
+    }
+
+    /// **Every fact names its subject.**
+    ///
+    /// `[Subject][PastTenseVerb]` is the event-sourcing convention, and four
+    /// variants used to break it — `Measured`, `Rated`, `Played`, `Acquired`.
+    /// Each dropped the one word that mattered: `Measured` measured *what*? An
+    /// encoding, not a recording, which is the distinction this whole model
+    /// exists to draw.
+    ///
+    /// Asserted rather than remembered, because the next variant will be
+    /// written by someone reaching for the shortest name that compiles.
+    #[test]
+    fn every_fact_names_its_subject() {
+        const SUBJECTS: &[&str] = &[
+            "Artist",
+            "Collection",
+            "Credit",
+            "Device",
+            "Encoding",
+            "Genre",
+            "Holdings",
+            "Label",
+            "Release",
+            "ReleaseGroup",
+            "Recording",
+            "Track",
+            "Work",
+        ];
+
+        let (_, text) = read("src/model")
+            .into_iter()
+            .find(|(f, _)| f.ends_with("log.rs"))
+            .expect("log.rs");
+        let start = text.find("pub enum Fact {").expect("the Fact enum");
+        let body = &text[start..text[start..].find("\n}\n").unwrap() + start];
+
+        let mut nameless = Vec::new();
+        for line in body.lines() {
+            let Some(name) = line.strip_prefix("    ").and_then(|l| l.split(' ').next()) else {
+                continue;
+            };
+            if !name.starts_with(char::is_uppercase) || !line.ends_with('{') {
+                continue;
+            }
+            if !SUBJECTS.iter().any(|s| name.starts_with(s)) {
+                nameless.push(name.to_string());
+            }
+        }
+        assert!(
+            nameless.is_empty(),
+            "these facts do not say what they are about: {nameless:?}"
+        );
     }
 
     /// Everything before the file's test module.

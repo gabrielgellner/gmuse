@@ -142,6 +142,7 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // The audio bitrate where the container reports one, else the overall
         // rate. A verdict compares a cutoff against what the file *claims*, so
         // the claim has to come from the file rather than from a guess.
+        length_ms: tagged.properties().duration().as_millis() as u32,
         bitrate: tagged
             .properties()
             .audio_bitrate()

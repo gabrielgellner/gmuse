@@ -397,7 +397,7 @@ mod tests {
         let recording = Id::<Recording>::from_uuid(uuid::Uuid::from_u128(7));
         let records: BTreeSet<Record> = [Record {
             stamp: clock.stamp(1_000),
-            fact: Fact::Rated {
+            fact: Fact::RecordingRated {
                 recording,
                 stars: Some(4),
             },
@@ -408,7 +408,7 @@ mod tests {
 
         let (back, _) = read(&path);
         match &back.iter().next().expect("one record").fact {
-            Fact::Rated {
+            Fact::RecordingRated {
                 recording: r,
                 stars,
             } => {

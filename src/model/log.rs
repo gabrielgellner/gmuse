@@ -36,6 +36,17 @@ pub struct Record {
 
 /// The facts this slice needs. The catalogue's full vocabulary arrives with
 /// #72–#76; these are the five that the round trip actually exercises.
+/// ## Naming
+///
+/// Every variant is `[Subject][PastTenseVerb]`, which is the event-sourcing
+/// convention — `OrderPlaced`, `CustomerRegistered` — and it is followed here
+/// without exception.
+///
+/// Four of these used to be a bare verb: `Measured`, `Rated`, `Played`,
+/// `Acquired`. Shorter, and each dropped the one word that mattered.
+/// **`Measured` measured what?** An encoding, not a recording — which is the
+/// exact distinction this model spends its whole length drawing, thrown away
+/// by the name of the fact that carries it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fact {
     /// An artist's label. **Descriptive** — §4 Type 1, so last writer wins and
@@ -49,15 +60,23 @@ pub enum Fact {
         artist: Id<Artist>,
     },
 
-    /// An encoding exists. Its id is derived from `audio`, so two devices
-    /// reading the same bytes emit the *same* fact.
-    EncodingCatalogued {
+    /// An encoding exists, and what it is. Its id is derived from `audio`, so
+    /// two devices reading the same bytes emit the *same* fact.
+    ///
+    /// **Described, not catalogued.** Cataloguing is the bibliographic act and
+    /// it happens one level up, to the `Recording`; DCAT *describes* a
+    /// distribution and PREMIS *ingests* an object. Borrowing the word from
+    /// the level above suggested this was the same kind of event, and it is
+    /// not: nobody makes an editorial decision about a file's bitrate.
+    EncodingDescribed {
         encoding: Id<Encoding>,
         audio: AudioId,
         /// `None` when the prober could not say — an unreadable header, not a
         /// missing format.
         format: Option<crate::model::encoding::Format>,
         bitrate: u32,
+        /// Playing time in milliseconds. Zero means nobody has said.
+        length_ms: u32,
     },
 
     /// Which recording an encoding holds. **Structural** — §4 Type 2, so it
@@ -123,7 +142,7 @@ pub enum Fact {
     ///
     /// This is what makes a verdict possible, and without it every encoding is
     /// `Unmeasured` and "is this a transcode" cannot be asked at all.
-    Measured {
+    EncodingMeasured {
         encoding: Id<Encoding>,
         /// Where the spectrum stops, in Hz.
         cutoff_hz: u32,
@@ -135,13 +154,13 @@ pub enum Fact {
     /// **The latest by causal order wins**, and none is discarded — a rating
     /// set on two devices during one disconnected window resolves to a single
     /// value while both stay in the log.
-    Rated {
+    RecordingRated {
         recording: Id<Recording>,
         stars: Option<u8>,
     },
 
     /// A play. Counted, never a stored number.
-    Played {
+    RecordingPlayed {
         recording: Id<Recording>,
         encoding: Option<Id<Encoding>>,
     },
@@ -160,7 +179,7 @@ pub enum Fact {
     /// was re-imported. Deliberately **not** the file's mtime, which moves for
     /// reasons that have nothing to do with the music — writing ReplayGain
     /// across the library reset every one of them in an afternoon.
-    Acquired {
+    RecordingAcquired {
         recording: Id<Recording>,
         /// Seconds since the epoch. Carried rather than taken from the stamp,
         /// so a migration can say when something was *actually* acquired
@@ -229,6 +248,8 @@ pub struct Encoded {
     pub recording: Option<Id<Recording>>,
     pub format: Option<crate::model::encoding::Format>,
     pub bitrate: u32,
+    /// Playing time in milliseconds. Zero means nobody has said.
+    pub length_ms: u32,
 }
 
 /// Two devices bound one encoding to different recordings, from the same base.
@@ -297,17 +318,19 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     },
                 );
             }
-            Fact::EncodingCatalogued {
+            Fact::EncodingDescribed {
                 encoding,
                 audio,
                 format,
                 bitrate,
+                length_ms,
             } => {
                 cat.encodings.entry(*encoding).or_insert(Encoded {
                     audio: *audio,
                     recording: None,
                     format: *format,
                     bitrate: *bitrate,
+                    length_ms: *length_ms,
                 });
             }
             Fact::EncodingBound { encoding, from, to } => {
@@ -350,7 +373,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             } => {
                 cat.placements.insert(*recording, (*group, *disc, *track));
             }
-            Fact::Measured {
+            Fact::EncodingMeasured {
                 encoding,
                 cutoff_hz,
                 analyser,
@@ -358,7 +381,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 // Last measurement wins, which is what a re-measure means.
                 cat.measurements.insert(*encoding, (*cutoff_hz, *analyser));
             }
-            Fact::Rated { recording, stars } => {
+            Fact::RecordingRated { recording, stars } => {
                 // Records arrive in stamp order, so the last simply wins.
                 match stars {
                     Some(n) => {
@@ -369,7 +392,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     }
                 }
             }
-            Fact::Played { recording, .. } => {
+            Fact::RecordingPlayed { recording, .. } => {
                 *cat.plays.entry(*recording).or_insert(0) += 1;
                 // The latest play, by the wall time the play happened, which
                 // is what "days since played" is asking about. The stamp
@@ -383,7 +406,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 let latest = cat.last_played.entry(*recording).or_insert(seconds);
                 *latest = (*latest).max(seconds);
             }
-            Fact::Acquired { recording, at } => {
+            Fact::RecordingAcquired { recording, at } => {
                 let first = cat.acquired.entry(*recording).or_insert(*at);
                 *first = (*first).min(*at);
             }
@@ -549,21 +572,21 @@ mod history_tests {
         let records: BTreeSet<Record> = [
             Record {
                 stamp: clock.stamp(1_000),
-                fact: Fact::Acquired {
+                fact: Fact::RecordingAcquired {
                     recording: rec,
                     at: 9_999,
                 },
             },
             Record {
                 stamp: clock.stamp(2_000),
-                fact: Fact::Acquired {
+                fact: Fact::RecordingAcquired {
                     recording: rec,
                     at: 500,
                 },
             },
             Record {
                 stamp: clock.stamp(3_000),
-                fact: Fact::Acquired {
+                fact: Fact::RecordingAcquired {
                     recording: rec,
                     at: 7_000,
                 },
@@ -588,7 +611,7 @@ mod history_tests {
             .into_iter()
             .map(|wall| Record {
                 stamp: clock.stamp(wall),
-                fact: Fact::Played {
+                fact: Fact::RecordingPlayed {
                     recording: rec,
                     encoding: None,
                 },

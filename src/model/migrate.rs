@@ -144,11 +144,11 @@ impl Carried {
         match self {
             // The old log never recorded which encoding played. §4 wants it and
             // cannot have it retroactively, so it is absent rather than guessed.
-            Carried::Play => Fact::Played {
+            Carried::Play => Fact::RecordingPlayed {
                 recording,
                 encoding: None,
             },
-            Carried::Rating(stars) => Fact::Rated { recording, stars },
+            Carried::Rating(stars) => Fact::RecordingRated { recording, stars },
         }
     }
 
@@ -258,7 +258,7 @@ mod tests {
         assert!(report.unresolved.is_empty());
         assert_eq!(
             records.iter().next().unwrap().fact,
-            Fact::Played {
+            Fact::RecordingPlayed {
                 recording: rec(1),
                 encoding: None
             },
@@ -322,11 +322,11 @@ mod tests {
         );
 
         let facts: Vec<_> = records.iter().map(|r| r.fact.clone()).collect();
-        assert!(facts.contains(&Fact::Played {
+        assert!(facts.contains(&Fact::RecordingPlayed {
             recording: rec(1),
             encoding: None
         }));
-        assert!(facts.contains(&Fact::Rated {
+        assert!(facts.contains(&Fact::RecordingRated {
             recording: rec(2),
             stars: Some(4)
         }));
@@ -451,7 +451,7 @@ mod tests {
         let (records, _) = to_records(&events, dev(), known);
         assert_eq!(
             records.iter().next().unwrap().fact,
-            Fact::Rated {
+            Fact::RecordingRated {
                 recording: rec(1),
                 stars: None
             }
@@ -535,7 +535,7 @@ pub fn run(
         {
             records.insert(Record {
                 stamp: at(&mut clock, entry.added),
-                fact: Fact::Acquired {
+                fact: Fact::RecordingAcquired {
                     recording,
                     at: entry.added,
                 },

@@ -39,6 +39,7 @@ fn album() -> Vec<Scanned> {
         album_artist: Some("Stephan Bodzin & Marc Romboy".into()),
         disc: Some(1),
         track: Some(n),
+        length_ms: 200_000 + u32::from(n),
         mb_release_group: Some(uuid::Uuid::from_u128(
             0x9e11_0000_0000_4000_8000_0000_0000_00aa,
         )),

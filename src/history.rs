@@ -325,7 +325,7 @@ mod tests {
     }
 
     /// The one job left to this file: hand the base's `added` dates to the
-    /// migration, which turns them into `Fact::Acquired` (#81).
+    /// migration, which turns them into `Fact::RecordingAcquired` (#81).
     #[test]
     fn the_base_reads_back_for_the_migration() {
         let dir = tmpdir("read-base");

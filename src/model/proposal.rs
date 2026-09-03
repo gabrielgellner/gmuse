@@ -197,7 +197,7 @@ fn into_fact(proposal: Proposal) -> Fact {
             encoding,
             cutoff_hz,
             analyser,
-        } => Fact::Measured {
+        } => Fact::EncodingMeasured {
             encoding,
             cutoff_hz,
             analyser,
@@ -208,7 +208,7 @@ fn into_fact(proposal: Proposal) -> Fact {
         Proposal::GenreAssigned {
             recording, genre, ..
         } => Fact::GenreAssigned { recording, genre },
-        Proposal::Rated { recording, stars } => Fact::Rated { recording, stars },
+        Proposal::Rated { recording, stars } => Fact::RecordingRated { recording, stars },
     }
 }
 
@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(report.applied, 1, "{report}");
         assert_eq!(
             records.iter().next().unwrap().fact,
-            Fact::Measured {
+            Fact::EncodingMeasured {
                 encoding: enc(1),
                 cutoff_hz: 15_700,
                 analyser: 1,
@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(report.applied, 1, "{report}");
         assert_eq!(
             records.iter().next().unwrap().fact,
-            Fact::Measured {
+            Fact::EncodingMeasured {
                 encoding: enc(1),
                 cutoff_hz: 19_800,
                 analyser: 1,

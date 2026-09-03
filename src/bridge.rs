@@ -64,6 +64,7 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                 disc: t.discnumber.map(|d| d as u16),
                 track: t.tracknumber.map(|n| n as u16),
                 mb_release_group: None,
+                length_ms: t.duration.as_millis() as u32,
                 format: format_of(t),
                 bitrate: t.bitrate.unwrap_or(0),
             })
@@ -177,7 +178,35 @@ mod tests {
         assert_eq!(row.plays, 1);
     }
 
-    /// A file with no readable audio has no identity, so there is nothing to
+    /// **A recording has no length; its encodings do.**
+    ///
+    /// An edit, a radio cut and a truncated rip are one recording and three
+    /// durations. A row reports the copy it would open, because "did I hear
+    /// enough of it" is a question about the file that played — and ranking
+    /// the copies to pick one was a rule invented to fill a field that should
+    /// not have been filled. Under it, a twelve-second rip measured against a
+    /// four-minute sibling could never have earned a play at all.
+    #[test]
+    fn a_row_reports_the_length_of_the_copy_it_would_open() {
+        let mut store = Store::new();
+        let mbid = uuid::Uuid::from_u128(0x1831_05b5);
+
+        // One recording, one copy here, and it is the short one.
+        let mut partial = track("/m/partial.mp3", "Callisto", "Stephan Bodzin", 2);
+        partial.mb_recording = Some(mbid);
+        partial.duration = Duration::from_secs(12);
+        store.upsert(partial);
+
+        let l = librarian(&store, &BTreeSet::new(), device(), 1_000);
+        let recording = l.recordings().next().expect("one recording");
+        assert_eq!(
+            l.row(recording).unwrap().length,
+            Duration::from_secs(12),
+            "the row reported something other than the copy it holds"
+        );
+    }
+
+    /// A file with no readable audio has no identity, so there is nothing to    /// A file with no readable audio has no identity, so there is nothing to
     /// catalogue it as. Left out rather than invented.
     #[test]
     fn a_file_with_no_audio_id_is_left_out() {

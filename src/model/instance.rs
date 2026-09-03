@@ -49,6 +49,13 @@ pub struct Scanned {
     /// The release group id, where the tags carry one — what makes two devices
     /// agree on an *album* without meeting.
     pub mb_release_group: Option<uuid::Uuid>,
+    /// How long it plays, in milliseconds.
+    ///
+    /// A fact about the **bytes**, not about the performance: an edit and its
+    /// original are one recording to MusicBrainz and different lengths on
+    /// disk. It rides with the encoding for that reason, and because a player
+    /// deciding whether a listen counted needs it before anything else.
+    pub length_ms: u32,
     /// How the audio is coded, and at what rate.
     ///
     /// Facts about the bytes, read while the file is already open. A verdict
@@ -192,11 +199,12 @@ impl Instance {
 
             self.append(
                 now,
-                Fact::EncodingCatalogued {
+                Fact::EncodingDescribed {
                     encoding,
                     audio: s.audio,
                     format: s.format,
                     bitrate: s.bitrate,
+                    length_ms: s.length_ms,
                 },
             );
             self.append(
@@ -258,7 +266,7 @@ impl Instance {
     pub fn measured(&mut self, now: i64, encoding: Id<Encoding>, cutoff_hz: u32, analyser: u16) {
         self.append(
             now,
-            Fact::Measured {
+            Fact::EncodingMeasured {
                 encoding,
                 cutoff_hz,
                 analyser,
@@ -267,7 +275,7 @@ impl Instance {
     }
 
     pub fn rate(&mut self, now: i64, recording: Id<Recording>, stars: Option<u8>) {
-        self.append(now, Fact::Rated { recording, stars });
+        self.append(now, Fact::RecordingRated { recording, stars });
     }
 
     /// Record when a recording entered the library.
@@ -275,7 +283,7 @@ impl Instance {
     /// Idempotent by construction: the fold takes the minimum, so saying it
     /// twice, or saying it later than another device did, changes nothing.
     pub fn acquire(&mut self, now: i64, recording: Id<Recording>, at: i64) {
-        self.append(now, Fact::Acquired { recording, at });
+        self.append(now, Fact::RecordingAcquired { recording, at });
     }
 
     /// A play whose encoding may not be known.
@@ -291,7 +299,7 @@ impl Instance {
     ) {
         self.append(
             now,
-            Fact::Played {
+            Fact::RecordingPlayed {
                 recording,
                 encoding,
             },
@@ -301,7 +309,7 @@ impl Instance {
     pub fn play(&mut self, now: i64, recording: Id<Recording>, encoding: Id<Encoding>) {
         self.append(
             now,
-            Fact::Played {
+            Fact::RecordingPlayed {
                 recording,
                 encoding: Some(encoding),
             },
