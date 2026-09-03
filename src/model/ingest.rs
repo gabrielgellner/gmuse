@@ -11,9 +11,13 @@
 //! ## Why it never rejects
 //!
 //! A validator that refuses bad tags makes a library of this age unimportable.
-//! Measured here: 4806 of 5774 files carry MusicBrainz ids in ID3 and another
-//! 462 carry them as Vorbis comments — 91%, which leaves **507 files** that
-//! step 1 cannot help with, and some of them never will be helped.
+//! Measured 2026-09-03 over 6500 files: 5532 of 6002 carry MusicBrainz ids in
+//! ID3, 462 of 469 as Vorbis comments and 29 of 29 in MP4 atoms — 92.7%, which
+//! leaves **477 files** that step 1 cannot help with.
+//!
+//! Those 477 are not obscure. The largest groups are Adele, Stromae, James
+//! Blake, Stephan Bodzin and Burial — all thoroughly catalogued upstream. It is
+//! a **tagging** gap, not an identity gap, and a lookup pass closes most of it.
 //!
 //! So bad input degrades to "needs review" rather than to rejection or, far
 //! worse, to a silently invented fact. [`Confidence`] is what records the

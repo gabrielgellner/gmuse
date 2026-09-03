@@ -103,7 +103,7 @@ pub struct Work {
 pub struct Recording {
     pub id: Id<Recording>,
     pub title: String,
-    /// **Optional, and that is not a defect.** 16% of this library has no
+    /// **Optional, and that is not a defect.** 7.3% of this library has no
     /// MusicBrainz id and some music never will; a recording that realises no
     /// known work is an ordinary row.
     pub work: Option<Ref<Work>>,

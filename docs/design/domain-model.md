@@ -273,7 +273,7 @@ classDiagram
 | **Encoding**      | **an encoding** of a recording  | `audio_id`, format, bitrate, cutoff, gain, encoder delay — the bytes |
 | **Holding**       | a copy, on one device           | which encoding, which device, a locator, when the claim was made     |
 
-`Work` is optional on a `Recording`. 16% of this library has no MusicBrainz id and some music never will; a recording
+`Work` is optional on a `Recording`. 7.3% of this library has no MusicBrainz id and some music never will; a recording
 that realises no known work is an ordinary row, not a broken one.
 
 ### Associations are stored on the child
@@ -776,7 +776,7 @@ it.
 | --------------- | ------------------------------------------- | ----------------------- |
 | `audio_id`      | an **encoding** — these exact bytes         | XXH3 over packets (#35) |
 | AcoustID        | a **signal** — the content, however encoded | Chromaprint (#57)       |
-| MB recording id | a **performance**, canonically named        | `UFID`, 83% of files    |
+| MB recording id | a **performance**, canonically named        | `UFID`, 92.7% of files  |
 
 **One mechanism, every subject.** Artists, works, releases and genres all carry other people's identifiers, and Discogs'
 genre codes bind onto our concepts exactly as an MBID binds onto an artist.
@@ -806,7 +806,7 @@ Tags are claims, not facts. The boundary resolves them against the catalogue in 
 3. a name and title match, including aliases, above a stated threshold
 4. otherwise a **provisional** entity, flagged for review
 
-**Ingest is total.** A validator that refuses bad tags makes a library of this age unimportable — 16% of these files
+**Ingest is total.** A validator that refuses bad tags makes a library of this age unimportable — 7.3% of these files
 carry no MusicBrainz id and some never will. Provisional entities let bad input degrade to "needs review" rather than to
 rejection or, far worse, to a silently invented fact. `Confidence` on the `CatalogRecord` records the degradation, which
 is what makes it reviewable later instead of indistinguishable from certainty.
@@ -998,7 +998,7 @@ expensive to change later.
 | **FRBR / IFLA LRM** | Work / Expression / Manifestation / Item; derivation between works                | strict disjointness                   |
 | **OpenWEMI**        | classes need not be disjoint; an item may stand alone — for incomplete data       | RDF                                   |
 | **Music Ontology**  | derivation between recordings; a track is a manifestation, not a join             | the RDF stack; a dormant vocabulary   |
-| **MusicBrainz**     | the working shape; 83% of these files carry its ids                               | its editorial cadence as our identity |
+| **MusicBrainz**     | the working shape; 92.7% of these files carry its ids                             | its editorial cadence as our identity |
 | **DCAT / DCAT-AP**  | `Distribution` as a representation; themes as concepts in a scheme; CatalogRecord | triples, URIs, open world             |
 | **SDMX**            | codelists; hierarchies separate from lists; the artefact ladder; `Ref`            | XML; versioning as identity           |
 | **Kimball**         | grain, conformed dimensions, SCD types                                            | star-schema denormalisation           |
@@ -1159,7 +1159,7 @@ Recording "…"  rating 5
 Encoding  v1:8fb0…   no Recording bound           Holding on laptop
 ```
 
-The second is 16% of this library, and it must not be second class.
+The second is 7.3% of this library, and it must not be second class.
 
 ---
 
@@ -1219,7 +1219,7 @@ settles it without deleting anything. That is what feeds the staged queue in §3
 decides.
 
 **Mint convergently wherever a binding permits it.** A `Encoding` already converges, since its id is derived from its
-content. Where a file carries a MusicBrainz recording id — 83% of this library — the recording's id derives the same
+content. Where a file carries a MusicBrainz recording id — 92.7% of this library — the recording's id derives the same
 way, `UUIDv5(namespace, mbid)`, and two machines agree without having met. The residue is unbound material.
 
 **For the residue, the collision is the detector.** Both machines mint the same `Encoding` and each sets its `recording`
@@ -1237,6 +1237,14 @@ Two mechanical passes, worth running after any revision:
 
 And one specific to this library: **every claim with a number in it, re-run.** The claims here are census results, and a
 census is only true of the library it was taken from.
+
+**Last re-run 2026-09-03**, over `~/MusicLibrary`: 6500 audio files, of which 6023 carry a MusicBrainz recording id
+(5532/6002 ID3, 462/469 Vorbis, 29/29 MP4) — **92.7%**, leaving 477. Two earlier vintages of this figure, 83% and 91%,
+had reached six places between them before anyone noticed they disagreed; that is what this instruction is for.
+
+**The 477 are not obscure.** The largest groups are Adele, Stromae, James Blake, Stephan Bodzin and Burial — all
+thoroughly catalogued upstream. The residue is a **tagging** gap, not an identity gap, and it matters because the two
+have different remedies: a tagging gap closes with a lookup pass, an identity gap does not close at all.
 
 ---
 

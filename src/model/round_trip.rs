@@ -28,7 +28,7 @@ fn audio(hash: u128) -> AudioId {
 }
 
 /// Two tracks off one album, as a scan would report them. Both carry a
-/// MusicBrainz id, which is the 83% case.
+/// MusicBrainz id, which is the 92.7% case.
 fn album() -> Vec<Scanned> {
     let track = |hash: u128, title: &str, mbid: u128, n: u16| Scanned {
         audio: audio(hash),
@@ -325,7 +325,7 @@ fn two_instances_ingesting_the_same_real_files() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    // Two tracks, one tagged by Picard and one not — the 91% case and the 9%.
+    // Two tracks, one tagged by Picard and one not — the 92.7% case and the 7.3%.
     let mut paths = Vec::new();
     for (n, (title, mbid)) in [
         ("Callisto", Some("183105b5-0000-4000-8000-000000000000")),

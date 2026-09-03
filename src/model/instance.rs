@@ -31,7 +31,7 @@ pub struct Scanned {
     pub audio: AudioId,
     pub title: String,
     pub artist: String,
-    /// A MusicBrainz recording id, where the tags carry one — 91% of this
+    /// A MusicBrainz recording id, where the tags carry one — 92.7% of this
     /// library. Its presence is what lets two devices converge without
     /// meeting.
     pub mb_recording: Option<uuid::Uuid>,
@@ -121,7 +121,7 @@ impl Instance {
                 //
                 // The cost is honest and small: a re-encode of an unbound file
                 // mints a new recording, where a MusicBrainz id would have held
-                // it together. That is the 8% with nothing to hold it by.
+                // it together. That is the 7.3% with nothing to hold it by.
                 None => known
                     .encodings
                     .get(&encoding)

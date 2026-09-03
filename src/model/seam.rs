@@ -164,7 +164,7 @@ impl Librarian {
     /// got there.
     ///
     /// Deliberately total. A encoding bound to a recording that no record
-    /// catalogued still lands — that is the unidentified 16%, and it must not
+    /// catalogued still lands — that is the unidentified 7.3%, and it must not
     /// be second class.
     pub fn from_catalogue(cat: &Catalogue) -> Self {
         use crate::model::encoding::Encoding;
