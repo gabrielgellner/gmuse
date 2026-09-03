@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::audio_id::AudioId;
 use crate::model::clock::{Drift, HybridClock, Stamp};
+use crate::model::encoding::Format;
 use crate::model::entity::{Artist, Device, Distribution, Recording, ReleaseGroup};
 use crate::model::id::Id;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
@@ -46,6 +47,14 @@ pub struct Scanned {
     /// The release group id, where the tags carry one — what makes two devices
     /// agree on an *album* without meeting.
     pub mb_release_group: Option<uuid::Uuid>,
+    /// How the audio is coded, and at what rate.
+    ///
+    /// Facts about the bytes, read while the file is already open. A verdict
+    /// needs both — a cutoff means nothing without the bitrate that claims to
+    /// justify it, and a lossless file's cutoff is a fact about the source
+    /// rather than the encoder.
+    pub format: Option<Format>,
+    pub bitrate: u32,
 }
 
 pub struct Instance {
@@ -180,6 +189,8 @@ impl Instance {
                 Fact::DistributionCatalogued {
                     distribution,
                     audio: s.audio,
+                    format: s.format,
+                    bitrate: s.bitrate,
                 },
             );
             self.append(
@@ -229,6 +240,28 @@ impl Instance {
             Fact::GenreAssigned {
                 recording,
                 genre: genre.to_string(),
+            },
+        );
+    }
+
+    /// Record what an analyser found.
+    ///
+    /// Deliberately not part of `ingest`: measuring is minutes where hashing
+    /// is seconds, and the answer only changes when the bytes or the analyser
+    /// do.
+    pub fn measured(
+        &mut self,
+        now: i64,
+        distribution: Id<Distribution>,
+        cutoff_hz: u32,
+        analyser: u16,
+    ) {
+        self.append(
+            now,
+            Fact::Measured {
+                distribution,
+                cutoff_hz,
+                analyser,
             },
         );
     }

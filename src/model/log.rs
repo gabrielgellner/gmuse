@@ -54,6 +54,10 @@ pub enum Fact {
     DistributionCatalogued {
         distribution: Id<Distribution>,
         audio: AudioId,
+        /// `None` when the prober could not say — an unreadable header, not a
+        /// missing format.
+        format: Option<crate::model::encoding::Format>,
+        bitrate: u32,
     },
 
     /// Which recording an encoding holds. **Structural** — §4 Type 2, so it
@@ -109,6 +113,23 @@ pub enum Fact {
         track: u16,
     },
 
+    /// What an analyser measured about an encoding.
+    ///
+    /// A **separate pass**, not part of a scan. An FFT over every file is
+    /// minutes rather than the seconds hashing costs, and the answer does not
+    /// change until either the bytes or the analyser do — so it is recorded
+    /// once and carries the analyser that produced it, which is what lets a
+    /// re-measure target stale rows instead of the library.
+    ///
+    /// This is what makes a verdict possible, and without it every encoding is
+    /// `Unmeasured` and "is this a transcode" cannot be asked at all.
+    Measured {
+        distribution: Id<Distribution>,
+        /// Where the spectrum stops, in Hz.
+        cutoff_hz: u32,
+        analyser: u16,
+    },
+
     /// A rating, or its removal with `None`.
     ///
     /// **The latest by causal order wins**, and none is discarded — a rating
@@ -140,6 +161,8 @@ pub struct Catalogue {
     pub plays: BTreeMap<Id<Recording>, u32>,
     /// The latest rating per recording. A fold, never a stored number.
     pub ratings: BTreeMap<Id<Recording>, u8>,
+    /// Cutoff and the analyser that found it, per encoding.
+    pub measurements: BTreeMap<Id<Distribution>, (u32, u16)>,
     pub groups: BTreeMap<Id<ReleaseGroup>, Grouped>,
     /// Where each recording sits: which album, which disc, which track.
     pub placements: BTreeMap<Id<Recording>, (Id<ReleaseGroup>, u16, u16)>,
@@ -177,6 +200,8 @@ pub struct Recorded {
 pub struct Distributed {
     pub audio: AudioId,
     pub recording: Option<Id<Recording>>,
+    pub format: Option<crate::model::encoding::Format>,
+    pub bitrate: u32,
 }
 
 /// Two devices bound one encoding to different recordings, from the same base.
@@ -248,12 +273,16 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             Fact::DistributionCatalogued {
                 distribution,
                 audio,
+                format,
+                bitrate,
             } => {
                 cat.distributions
                     .entry(*distribution)
                     .or_insert(Distributed {
                         audio: *audio,
                         recording: None,
+                        format: *format,
+                        bitrate: *bitrate,
                     });
             }
             Fact::DistributionBound {
@@ -299,6 +328,15 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 track,
             } => {
                 cat.placements.insert(*recording, (*group, *disc, *track));
+            }
+            Fact::Measured {
+                distribution,
+                cutoff_hz,
+                analyser,
+            } => {
+                // Last measurement wins, which is what a re-measure means.
+                cat.measurements
+                    .insert(*distribution, (*cutoff_hz, *analyser));
             }
             Fact::Rated { recording, stars } => {
                 // Records arrive in stamp order, so the last simply wins.

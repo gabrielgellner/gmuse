@@ -42,6 +42,8 @@ fn album() -> Vec<Scanned> {
         mb_release_group: Some(uuid::Uuid::from_u128(
             0x9e11_0000_0000_4000_8000_0000_0000_00aa,
         )),
+        format: Some(crate::model::encoding::Format::Mp3),
+        bitrate: 320,
     };
     vec![
         track(

@@ -34,7 +34,7 @@
 use std::path::Path;
 
 use lofty::config::ParseOptions;
-use lofty::file::TaggedFileExt;
+use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
 use lofty::probe::Probe;
 
@@ -131,6 +131,35 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         disc: number(&get(ItemKey::DiscNumber)),
         track: number(&get(ItemKey::TrackNumber)),
         mb_release_group: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzReleaseGroupId)).ok(),
+        format: format_of(&tagged),
+        // The audio bitrate where the container reports one, else the overall
+        // rate. A verdict compares a cutoff against what the file *claims*, so
+        // the claim has to come from the file rather than from a guess.
+        bitrate: tagged
+            .properties()
+            .audio_bitrate()
+            .or_else(|| tagged.properties().overall_bitrate())
+            .unwrap_or(0),
+    })
+}
+
+/// What the prober says the audio is coded as.
+///
+/// `None` when it says something this model has no name for — an unreadable
+/// header, not a missing format, and a distinction worth keeping because one
+/// is a file to look at and the other is a gap in the enum.
+fn format_of(tagged: &lofty::file::TaggedFile) -> Option<crate::model::encoding::Format> {
+    use crate::model::encoding::Format as F;
+    use lofty::file::FileType;
+    Some(match tagged.file_type() {
+        FileType::Flac => F::Flac,
+        FileType::Mpeg => F::Mp3,
+        FileType::Wav => F::Wav,
+        FileType::Vorbis => F::Vorbis,
+        FileType::Opus => F::Opus,
+        FileType::Aac => F::Aac,
+        FileType::Mp4 => F::Alac,
+        _ => return None,
     })
 }
 

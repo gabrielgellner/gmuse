@@ -302,9 +302,14 @@ impl Librarian {
                     id: *id,
                     audio: d.audio,
                     recording: d.recording.map(crate::model::id::Ref::to),
-                    format: Format::Mp3,
-                    bitrate: 0,
-                    cutoff_hz: None,
+                    format: d.format.unwrap_or(Format::Mp3),
+                    bitrate: d.bitrate,
+                    cutoff_hz: cat.measurements.get(id).map(|(hz, analyser)| {
+                        crate::model::encoding::Measured {
+                            value: *hz,
+                            analyser: *analyser,
+                        }
+                    }),
                     gain: None,
                     encoder_delay: None,
                 },
@@ -605,6 +610,119 @@ mod tests {
             row.file_under, UNKNOWN_ARTIST,
             "nothing named the artist, and that is an ordinary row"
         );
+    }
+
+    /// **A bad copy is a row with a verdict, not a folder** — issue #87.
+    ///
+    /// 726 files sit in `~/LowQualityMusic` because the library had one grade
+    /// of membership: "this needs replacing" could only be said by taking it
+    /// out. A folder cannot express *I have this, it is not good enough, and I
+    /// want a better one* — only *I have this* or *I do not*.
+    ///
+    /// With the measurement in the model it is a filter, and the track is
+    /// still there to play in the meantime.
+    #[test]
+    fn a_transcode_is_a_row_with_a_verdict() {
+        use crate::model::encoding::{Format, Verdict};
+        use crate::model::entity::Device;
+        use crate::model::instance::{Instance, Scanned};
+
+        let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
+        let lying = crate::audio_id::AudioId {
+            scheme: 1,
+            hash: 0xbad,
+        };
+        let honest = crate::audio_id::AudioId {
+            scheme: 1,
+            hash: 0x600d,
+        };
+        i.ingest(
+            100,
+            &[
+                Scanned {
+                    audio: lying,
+                    title: "Isn't Love".into(),
+                    artist: "Someone".into(),
+                    format: Some(Format::Mp3),
+                    bitrate: 320,
+                    ..Default::default()
+                },
+                Scanned {
+                    audio: honest,
+                    title: "Fine".into(),
+                    artist: "Someone".into(),
+                    format: Some(Format::Mp3),
+                    bitrate: 320,
+                    ..Default::default()
+                },
+            ],
+        );
+
+        // Before anything is measured, nothing can be said.
+        let before = Librarian::from_catalogue(&i.catalogue());
+        assert!(
+            before
+                .encodings
+                .encodings
+                .values()
+                .all(|e| e.verdict() == Verdict::Unmeasured),
+            "a verdict without a measurement would be a guess"
+        );
+
+        // A quality pass runs — separately, because an FFT over a library is
+        // minutes where hashing is seconds.
+        let (bad, good) = (Id::of_audio(&lying), Id::of_audio(&honest));
+        i.measured(200, bad, 15_700, crate::model::encoding::ANALYSER);
+        i.measured(200, good, 19_800, crate::model::encoding::ANALYSER);
+
+        let l = Librarian::from_catalogue(&i.catalogue());
+        assert_eq!(
+            l.encodings.encodings[&bad].verdict(),
+            Verdict::Suspect,
+            "320k claimed, 15.7 kHz measured — a lossy source re-encoded upward"
+        );
+        assert_eq!(l.encodings.encodings[&good].verdict(), Verdict::Good);
+
+        // The re-buy list is a filter over rows that are still there, not a
+        // directory listing of things that are not.
+        let rebuy: Vec<_> = l
+            .recordings()
+            .filter_map(|r| l.row(r))
+            .filter(|row| row.verdict == Some(Verdict::Suspect))
+            .collect();
+        assert_eq!(rebuy.len(), 1);
+        assert_eq!(rebuy[0].title, "Isn't Love");
+        assert!(
+            rebuy[0].available,
+            "and it still plays while you decide what to do about it"
+        );
+    }
+
+    /// A re-measure targets what the old analyser touched, so a changed FFT
+    /// does not mean redoing the library.
+    #[test]
+    fn an_older_measurement_is_findable() {
+        use crate::model::encoding::{ANALYSER, Format};
+        use crate::model::entity::Device;
+        use crate::model::instance::{Instance, Scanned};
+
+        let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
+        let a = crate::audio_id::AudioId { scheme: 1, hash: 1 };
+        i.ingest(
+            100,
+            &[Scanned {
+                audio: a,
+                title: "x".into(),
+                artist: "y".into(),
+                format: Some(Format::Mp3),
+                bitrate: 320,
+                ..Default::default()
+            }],
+        );
+        i.measured(200, Id::of_audio(&a), 19_000, ANALYSER - 1);
+
+        let l = Librarian::from_catalogue(&i.catalogue());
+        assert_eq!(l.encodings.stale_measurements(), vec![Id::of_audio(&a)]);
     }
 
     /// A recording nothing holds is still a row — decided about, not owned.
