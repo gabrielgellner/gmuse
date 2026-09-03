@@ -311,6 +311,24 @@ impl Store {
     }
 }
 
+/// The read contract `ui/list.rs` names, answered from the arena.
+///
+/// A temporary home: it moves to the librarian with #86, and the renderer does
+/// not change when it does — which is the point of the trait existing at all.
+impl crate::model::rows::Listing for Store {
+    fn listed(&self, id: TrackId) -> Option<crate::model::rows::Listed<'_>> {
+        let t = self.get(id)?;
+        Some(crate::model::rows::Listed {
+            file_under: t.file_under(),
+            album: t.album_or_unknown(),
+            disc: t.discnumber,
+            track: t.tracknumber,
+            title: t.display_title(),
+            duration: t.duration,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// A track with no album is *filed* under a label, but its tag stays

@@ -471,16 +471,18 @@ mod tests {
     ///
     /// **Lower these as the migration lands. Never raise them.**
     ///
-    /// Most of what is left is test fixtures rather than the player: of the 42
-    /// `Store` mentions, only **12 are outside `#[cfg(test)]`**, and they are
-    /// in `list.rs`, `fold.rs` and a handful in `mod.rs`. The tree renderer
-    /// stopped needing one when the projection started carrying its own
-    /// display names (#84), which is the shape the rest of the migration
-    /// follows: a caller reaches for the store because the projection cannot
-    /// answer, not because it wants a store.
+    /// Most of what is left is test fixtures rather than the player: of the 36
+    /// `Store` mentions, only **five are outside `#[cfg(test)]`** — one of them
+    /// the word "Stored" in a comment, and the rest the `Context` that hands a
+    /// store to whoever still wants one.
+    ///
+    /// Both renderers stopped needing a store for the same reason: they were
+    /// reaching for it because the projection could not answer, never because
+    /// they wanted a store. The tree got display names beside its sort keys
+    /// (#84); the list got a trait saying what a row files under.
     #[test]
     fn the_leak_from_the_player_only_narrows() {
-        const STORE: usize = 42;
+        const STORE: usize = 36;
         const PATHS: usize = 28;
 
         let (mut store, mut paths) = (0, 0);

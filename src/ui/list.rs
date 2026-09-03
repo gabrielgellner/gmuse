@@ -10,7 +10,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
 use super::theme::{Role, Theme};
-use crate::store::{Store, Track, TrackId};
+use crate::model::rows::Listing;
+use crate::store::TrackId;
 
 /// One drawn line.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,27 +28,23 @@ pub enum Row {
 /// Derived from the same key [`rows`] uses, rather than recomputed, so that
 /// `{` and `}` land exactly on the boundaries the eye can see. A list with no
 /// dividers still has boundaries; `rows` only suppresses drawing them.
-pub fn album_starts(store: &Store, ids: &[TrackId]) -> Vec<usize> {
-    boundaries(store, ids, false)
+pub fn album_starts(lib: &dyn Listing, ids: &[TrackId]) -> Vec<usize> {
+    boundaries(lib, ids, false)
 }
 
 /// The same for artists, which is what `[[` and `]]` step by.
-pub fn artist_starts(store: &Store, ids: &[TrackId]) -> Vec<usize> {
-    boundaries(store, ids, true)
+pub fn artist_starts(lib: &dyn Listing, ids: &[TrackId]) -> Vec<usize> {
+    boundaries(lib, ids, true)
 }
 
-fn boundaries(store: &Store, ids: &[TrackId], artist_only: bool) -> Vec<usize> {
+fn boundaries(lib: &dyn Listing, ids: &[TrackId], artist_only: bool) -> Vec<usize> {
     let mut out = Vec::new();
     let mut last: Option<(&str, &str, Option<u32>)> = None;
     for (at, id) in ids.iter().enumerate() {
-        let Some(track) = store.get(*id) else {
+        let Some(listed) = lib.listed(*id) else {
             continue;
         };
-        let key = (
-            track.file_under(),
-            track.album_or_unknown(),
-            track.discnumber,
-        );
+        let key = (listed.file_under, listed.album, listed.disc);
         let changed = match last {
             Some((artist, _, _)) if artist_only => artist != key.0,
             Some((artist, album, disc)) => {
@@ -69,8 +66,8 @@ fn boundaries(store: &Store, ids: &[TrackId], artist_only: bool) -> Vec<usize> {
 /// A list that is all one album gets no header — the pane title or the tree
 /// selection already says which album it is, and a lone divider at the top is
 /// just a wasted line.
-pub fn rows(store: &Store, ids: &[TrackId]) -> Vec<Row> {
-    let (albums, artists) = distinct(store, ids);
+pub fn rows(lib: &dyn Listing, ids: &[TrackId]) -> Vec<Row> {
+    let (albums, artists) = lib.spread(ids);
     if albums < 2 {
         return ids.iter().copied().map(Row::Track).collect();
     }
@@ -83,15 +80,11 @@ pub fn rows(store: &Store, ids: &[TrackId]) -> Vec<Row> {
     let mut last: Option<(&str, &str, Option<u32>)> = None;
 
     for id in ids {
-        let Some(track) = store.get(*id) else {
+        let Some(listed) = lib.listed(*id) else {
             out.push(Row::Track(*id));
             continue;
         };
-        let key = (
-            track.file_under(),
-            track.album_or_unknown(),
-            track.discnumber,
-        );
+        let key = (listed.file_under, listed.album, listed.disc);
         let changed = match last {
             // A new disc of the same album is also a boundary worth seeing —
             // it is exactly where a multi-disc album wants dividing.
@@ -103,7 +96,7 @@ pub fn rows(store: &Store, ids: &[TrackId]) -> Vec<Row> {
         if changed {
             let artist_changed = last.map(|(a, _, _)| a != key.0).unwrap_or(true);
             out.push(Row::Header(header_text(
-                track,
+                listed,
                 multi_artist && artist_changed,
             )));
         }
@@ -115,36 +108,18 @@ pub fn rows(store: &Store, ids: &[TrackId]) -> Vec<Row> {
 
 /// The artist is only worth repeating when it changes — in a tree's track pane
 /// it is fixed, and printing it on every divider is noise.
-fn header_text(track: &Track, include_artist: bool) -> String {
+fn header_text(listed: crate::model::rows::Listed<'_>, include_artist: bool) -> String {
     let mut text = if include_artist {
-        format!("{} — {}", track.file_under(), track.album_or_unknown())
+        format!("{} — {}", listed.file_under, listed.album)
     } else {
-        track.album_or_unknown().to_string()
+        listed.album.to_string()
     };
-    if let Some(disc) = track.discnumber
+    if let Some(disc) = listed.disc
         && disc > 1
     {
         text.push_str(&format!(" (disc {disc})"));
     }
     text
-}
-
-/// How many distinct albums and artists a list covers.
-fn distinct(store: &Store, ids: &[TrackId]) -> (usize, usize) {
-    let mut albums: Vec<(&str, &str)> = Vec::new();
-    let mut artists: Vec<&str> = Vec::new();
-    for id in ids {
-        if let Some(t) = store.get(*id) {
-            let album = (t.file_under(), t.album_or_unknown());
-            if !albums.contains(&album) {
-                albums.push(album);
-            }
-            if !artists.contains(&t.file_under()) {
-                artists.push(t.file_under());
-            }
-        }
-    }
-    (albums.len(), artists.len())
 }
 
 /// Which screen row holds the `n`th track.
@@ -197,7 +172,12 @@ pub fn gutter(n: usize, selected: usize) -> String {
 pub const GUTTER_BLANK: &str = "    ";
 
 /// Render rows as `NN  Title            m:ss`, with dividers styled apart.
-pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], style: RowStyle) -> Vec<ListItem<'a>> {
+pub fn items<'a>(
+    theme: &Theme,
+    lib: &dyn Listing,
+    rows: &[Row],
+    style: RowStyle,
+) -> Vec<ListItem<'a>> {
     let mut track_index = 0usize;
     rows.iter()
         .map(|row| {
@@ -220,11 +200,11 @@ pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], style: RowStyle) ->
                 Span::styled(format!("── {text} "), theme.get(Role::AlbumHeader)),
             ])),
             Row::Track(id) => {
-                let Some(track) = store.get(*id) else {
+                let Some(listed) = lib.listed(*id) else {
                     return ListItem::new(Line::from("<missing>"));
                 };
-                let num = track
-                    .tracknumber
+                let num = listed
+                    .track
                     .map(|n| format!("{n:>2}"))
                     .unwrap_or_else(|| "  ".into());
                 // The playing track is marked in every list it appears in, so
@@ -238,14 +218,9 @@ pub fn items<'a>(theme: &Theme, store: &Store, rows: &[Row], style: RowStyle) ->
                     Span::styled(lead, theme.get(Role::Gutter)),
                     Span::styled(format!("{num}  "), body),
                 ];
-                spans.extend(highlighted(
-                    track.display_title(),
-                    body,
-                    style.needle,
-                    theme,
-                ));
+                spans.extend(highlighted(listed.title, body, style.needle, theme));
                 spans.push(Span::styled("  ", body));
-                spans.push(Span::styled(fmt_duration(track.duration), body));
+                spans.push(Span::styled(fmt_duration(listed.duration), body));
                 ListItem::new(Line::from(spans))
             }
         })
@@ -297,6 +272,7 @@ pub fn fmt_duration(d: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{Store, Track};
     use std::path::PathBuf;
     use std::time::Duration;
 

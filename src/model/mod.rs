@@ -25,6 +25,7 @@ pub mod populate;
 pub mod provenance;
 pub mod reference;
 pub mod round_trip;
+pub mod rows;
 pub mod seam;
 pub mod sortkey;
 pub mod spine;
