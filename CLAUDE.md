@@ -12,6 +12,9 @@ project brief and it is authoritative. Sections marked **INVARIANT** are not to 
 decision in its Decision Log (§13). Anything in the §1 "out of scope" list stays out, even when a crate makes it trivial
 — scope creep is the named failure mode for this project.
 
+[`docs/design/layers.md`](docs/design/layers.md) says which system may talk to which — the librarian, the player, the
+scanner and the `tools/` scripts. Read it before adding a caller in either direction.
+
 [`docs/design/domain-model.md`](docs/design/domain-model.md) is a **proposal**, not built: what a library entry is
 versus what a file is. Read it before touching `Store`, `scan.rs` or anything keyed by a path.
 
