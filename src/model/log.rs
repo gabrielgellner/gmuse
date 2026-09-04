@@ -673,3 +673,132 @@ mod history_tests {
         assert!(cat.last_played.is_empty());
     }
 }
+
+#[cfg(test)]
+mod reachability {
+    use super::*;
+    use crate::model::entity::{
+        Artist, Collection, CollectionEntry, Credit, Device, Encoding, Entity, Genre,
+        GenreAssignment, Hierarchy, Holding, Label, Medium, MixEntry, Recording, Release,
+        ReleaseGroup, Role, Track, Work,
+    };
+
+    /// Which fact brings a kind into existence, if any.
+    ///
+    /// Hand-maintained on purpose: the point is not that it is derived, but
+    /// that adding an entity without a fact to create it turns this red.
+    ///
+    /// **Reachable means every field of the row comes from a fact.** A
+    /// `Holding` qualifies even though no fact is named for it: the fold reads
+    /// `HoldingsAsserted { device, held }` and a row's encoding and locator are
+    /// the map entry, its device is the fact's. Nothing is invented. A
+    /// `Release` does not qualify — `from_catalogue` mints its id from a
+    /// literal and copies its title off the group, so its *identity* is an
+    /// invention that no device authored and no other device can agree with.
+    const CREATED_BY: &[(&str, Option<&str>)] = &[
+        ("artist", Some("ArtistNamed")),
+        ("recording", Some("RecordingCatalogued")),
+        ("encoding", Some("EncodingDescribed")),
+        ("release-group", Some("ReleaseGroupCatalogued")),
+        ("device", Some("HoldingsAsserted")),
+        ("holding", Some("HoldingsAsserted")),
+        // ── the gap. This list may only shrink. ────────────────────────────
+        //
+        // Every kind below is built by `Librarian::from_catalogue` out of thin
+        // air: with no stamp, no basis, no author, no way to correct it and no
+        // way to sync it. The catalogue is supposed to be a fold of the log,
+        // and today it is a fold *plus* a projection that invents structure.
+        //
+        // Each of these needs a fact before anything else names it, or there
+        // will be two producers for one row.
+        ("work", None),
+        ("release", None),
+        ("medium", None),
+        ("track", None),
+        ("label", None),
+        ("genre", None),
+        ("hierarchy", None),
+        ("role", None),
+        ("collection", None),
+        ("credit", None),
+        ("mix-entry", None),
+        ("collection-entry", None),
+        ("genre-assignment", None),
+    ];
+
+    /// **The allowlist only shrinks.**
+    ///
+    /// A kind with no fact cannot be created by folding the log, so whatever
+    /// produces it is producing something the library cannot record, correct,
+    /// attribute or sync. Filling one in is progress; adding one is a
+    /// regression, and this is where it is caught.
+    #[test]
+    fn every_entity_is_reachable_from_a_fact_or_named_as_a_gap() {
+        const UNREACHABLE: usize = 13;
+
+        let kinds = [
+            Work::KIND,
+            Recording::KIND,
+            ReleaseGroup::KIND,
+            Release::KIND,
+            Medium::KIND,
+            Track::KIND,
+            Encoding::KIND,
+            Holding::KIND,
+            Device::KIND,
+            Artist::KIND,
+            Label::KIND,
+            Genre::KIND,
+            Hierarchy::KIND,
+            Role::KIND,
+            Collection::KIND,
+            Credit::KIND,
+            MixEntry::KIND,
+            CollectionEntry::KIND,
+            GenreAssignment::KIND,
+        ];
+
+        let listed: BTreeSet<&str> = CREATED_BY.iter().map(|(k, _)| *k).collect();
+        let all: BTreeSet<&str> = kinds.iter().copied().collect();
+        assert_eq!(
+            all.difference(&listed).collect::<Vec<_>>(),
+            Vec::<&&str>::new(),
+            "a kind exists that this table does not mention — add it, with or without a fact"
+        );
+        assert_eq!(
+            listed.difference(&all).collect::<Vec<_>>(),
+            Vec::<&&str>::new(),
+            "the table mentions a kind that no longer exists"
+        );
+
+        let gaps: Vec<&str> = CREATED_BY
+            .iter()
+            .filter(|(_, fact)| fact.is_none())
+            .map(|(k, _)| *k)
+            .collect();
+        assert!(
+            gaps.len() <= UNREACHABLE,
+            "the gap widened: {} kinds have no fact (was {UNREACHABLE}) — {gaps:?}",
+            gaps.len()
+        );
+        if gaps.len() < UNREACHABLE {
+            eprintln!("gap narrowed to {} — lower UNREACHABLE", gaps.len());
+        }
+    }
+
+    /// The named facts are real. Without this the table could drift into
+    /// naming variants that no longer exist and still pass.
+    #[test]
+    fn the_facts_the_table_names_all_exist() {
+        let source = include_str!("log.rs");
+        let start = source.find("pub enum Fact {").expect("the Fact enum");
+        let body = &source[start..start + source[start..].find("\n}\n").expect("its close")];
+        for (kind, fact) in CREATED_BY {
+            let Some(name) = fact else { continue };
+            assert!(
+                body.contains(&format!("\n    {name} {{")),
+                "{kind} claims to be created by {name}, which is not a Fact variant"
+            );
+        }
+    }
+}
