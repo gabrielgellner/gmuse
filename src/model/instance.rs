@@ -323,10 +323,22 @@ impl Instance {
                         format: None,
                     },
                 );
+                let slot = Id::<Track>::of_track(medium, recording);
+                // **Which copy sits in that slot.** The scan is the only thing
+                // that ever knows: it is holding the file whose tags name the
+                // album, and by the time anything else asks, a recording has
+                // several placements and no way to say which one this copy is.
+                self.append(
+                    now,
+                    Fact::EncodingPlaced {
+                        encoding,
+                        track: slot,
+                    },
+                );
                 self.append(
                     now,
                     Fact::TrackPlaced {
-                        track: Id::<Track>::of_track(medium, recording),
+                        track: slot,
                         medium,
                         recording,
                         position: s.track.unwrap_or(0),

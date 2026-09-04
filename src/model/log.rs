@@ -280,6 +280,23 @@ pub enum Fact {
         join_phrase: Option<String>,
     },
 
+    /// **Which slot this copy sits in** — issue #78.
+    ///
+    /// `TrackPlaced` says a slot exists on a medium and which recording fills
+    /// it. This says which *file* is the copy you hold of that slot, and it
+    /// exists because a row on screen is a copy rather than a performance.
+    ///
+    /// Without it, asking a recording which album it is on has several right
+    /// answers and no way to choose. A recording appears on every release
+    /// that holds it, so `Hells Bells` is on `Back in Black` and on the
+    /// compilation `Who Made Who`; the file in the `Back in Black` folder is
+    /// on one of them and the model could not say which. Taking the first
+    /// placement moved tracks between 60 albums on this library (#84).
+    EncodingPlaced {
+        encoding: Id<Encoding>,
+        track: Id<Track>,
+    },
+
     /// One pressing of an album.
     ///
     /// The level between the group and the disc, and the one this model spent
@@ -616,6 +633,9 @@ pub struct Catalogue {
     pub media: BTreeMap<Id<Medium>, Pressed>,
     /// Every slot: which medium, which recording, which number.
     pub tracks: BTreeMap<Id<Track>, Placed>,
+    /// Which slot each copy sits in. Row existence — a file is in one place,
+    /// and two devices holding the same file agree about where.
+    pub placed: BTreeMap<Id<Encoding>, Id<Track>>,
     /// What each device last said it holds, and when it said so.
     ///
     /// The stamp is not decoration. You cannot stat another machine's disk, so
@@ -914,6 +934,9 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         join_phrase: join_phrase.clone(),
                     },
                 );
+            }
+            Fact::EncodingPlaced { encoding, track } => {
+                cat.placed.insert(*encoding, *track);
             }
             Fact::ReleaseCatalogued {
                 release,

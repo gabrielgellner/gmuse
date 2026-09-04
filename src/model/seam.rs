@@ -23,7 +23,7 @@
 //! migration into something with a number on it that can only go down.
 
 use crate::model::encoding::{Encoding, Encodings, Format, Verdict};
-use crate::model::entity::{Device, Recording, ReleaseGroup};
+use crate::model::entity::{Device, Recording, ReleaseGroup, Track};
 use crate::model::id::Id;
 use crate::model::log::Catalogue;
 use crate::model::provenance::Provenance;
@@ -47,6 +47,12 @@ pub struct Librarian {
     /// rating; a play is counted.
     pub ratings: std::collections::BTreeMap<Id<Recording>, u8>,
     pub plays: std::collections::BTreeMap<Id<Recording>, u32>,
+    /// Which slot each copy sits in — issue #78.
+    ///
+    /// The field that makes a row's album a fact rather than a choice. Without
+    /// it, `album_of` asked a *recording* which album it was on, and a
+    /// recording is on every release that holds it.
+    pub placed: std::collections::BTreeMap<Id<Encoding>, Id<Track>>,
 }
 
 impl Default for Librarian {
@@ -65,6 +71,7 @@ impl Librarian {
             provenance: Provenance::default(),
             ratings: Default::default(),
             plays: Default::default(),
+            placed: Default::default(),
         }
     }
 
@@ -74,13 +81,31 @@ impl Librarian {
     /// to know are separate — and carrying no path, because there is no path
     /// that is true of the library rather than of one machine.
     pub fn row(&self, recording: Id<Recording>) -> Option<Row> {
+        let canonical = self.encodings.canonical(recording).map(|e| e.id);
+        self.row_of(recording, canonical)
+    }
+
+    /// The row for **one copy** — issue #78, and the question it settles.
+    ///
+    /// Measured on the real library: asked of a recording, 163 files showed an
+    /// album that was not the one their own tags name. Asked of the copy, 15
+    /// do, and every one of those is a title the model has settled the case of
+    /// — `Strange Time To Be Alive` against `Strange Time to Be Alive` — which
+    /// is one album having one name rather than a placement being wrong.
+    ///
+    /// A recording is on every release that holds it; a file is on one. Where
+    /// the row is about a file, say which, and the album stops being a choice.
+    /// `row` is this with the canonical copy filled in, which makes the
+    /// answer a *rule* rather than whichever placement sorted first.
+    pub fn row_of(&self, recording: Id<Recording>, copy: Option<Id<Encoding>>) -> Option<Row> {
         let rec = self.spine.recordings.get(&recording)?;
-        let canonical = self.encodings.canonical(recording);
+        let canonical = copy.and_then(|id| self.encodings.encodings.get(&id));
+        let slot = copy.and_then(|id| self.placed.get(&id).copied());
         Some(Row {
             recording,
             title: rec.title.clone(),
-            file_under: self.files_under(recording),
-            album: self.album_of(recording),
+            file_under: self.files_under(recording, slot),
+            album: self.album_of(slot),
             // **The length of the copy this would open**, not of the
             // recording — a recording has no single length. An edit, a radio
             // cut and a truncated rip are one recording and three durations,
@@ -99,16 +124,20 @@ impl Librarian {
         })
     }
 
-    /// Who a recording files under.
+    /// Who a copy files under.
     ///
     /// The album-level credit first, then the recording's own — which is the
     /// modelled version of `Track::file_under`'s "album artist, else artist".
     /// The heuristic was guessing at a fact; this asks for it.
-    fn files_under(&self, recording: Id<Recording>) -> String {
-        let on_release = self
-            .spine
-            .tracks_of_recording(recording)
-            .first()
+    ///
+    /// **Asked of a slot, not of a recording.** It used to take the first of
+    /// `tracks_of_recording`, and a recording is on every release that holds
+    /// it — so a song on a compilation and its original album filed under
+    /// whichever sorted first. On this library that split `Luna` across two
+    /// artists with every tag on the album identical (#84).
+    fn files_under(&self, recording: Id<Recording>, slot: Option<Id<Track>>) -> String {
+        let on_release = slot
+            .and_then(|s| self.spine.tracks.get(&s))
             .and_then(|t| self.spine.media.get(&t.medium.id()))
             .and_then(|m| self.spine.releases.get(&m.release.id()))
             .map(|r| CreditOn::ReleaseGroup(r.group.id()));
@@ -123,9 +152,11 @@ impl Librarian {
             .unwrap_or_else(|| UNKNOWN_ARTIST.to_string())
     }
 
-    /// The album a recording files under, by way of the release it sits on.
-    fn album_of(&self, recording: Id<Recording>) -> Option<String> {
-        let track = self.spine.tracks_of_recording(recording).first().copied()?;
+    /// The album a **copy** files under, by way of the release its slot is on.
+    ///
+    /// See [`Librarian::files_under`] for why this is asked of a slot.
+    fn album_of(&self, slot: Option<Id<Track>>) -> Option<String> {
+        let track = self.spine.tracks.get(&slot?)?;
         let medium = self.spine.media.get(&track.medium.id())?;
         let release = self.spine.releases.get(&medium.release.id())?;
         self.spine
@@ -312,6 +343,8 @@ impl Librarian {
                 },
             );
         }
+
+        l.placed = cat.placed.clone();
 
         // Names are a register: whatever the fold settled on is the label.
         for (id, name) in &cat.artist_names {

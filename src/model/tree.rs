@@ -85,6 +85,9 @@ impl Tree {
         let mut by_artist: BTreeMap<SortKey, BTreeMap<SortKey, Album>> = BTreeMap::new();
         let mut artist_names: BTreeMap<SortKey, String> = BTreeMap::new();
 
+        // **One node per copy, not per recording** — issue #78. A recording is
+        // on every release that holds it; the file you have is on one, and the
+        // tree is a list of what you have.
         for recording in l.recordings() {
             let Some(row) = l.row(recording) else {
                 continue;
@@ -241,36 +244,54 @@ mod tests {
         assert_eq!(tree.artist_name(key), "The Band", "the label reads");
     }
 
-    /// **A recording held by two albums lands under one of them, and which
-    /// one is arbitrary.** The reason nothing browses this tree yet.
+    /// **A recording held by two albums: each copy files under its own.**
     ///
     /// One song, two copies on disk — the original album and a compilation —
-    /// which the model correctly reads as one recording. `files_under` and
-    /// `album_of` then ask `tracks_of_recording(..).first()`, so both files
-    /// are shown wherever that lands, and the copy sitting in the original
-    /// album's folder is filed under the compilation.
+    /// which the model correctly reads as one recording. Asked of the
+    /// recording, `files_under` and `album_of` took
+    /// `tracks_of_recording(..).first()`, so the copy sitting in the original
+    /// album's folder was filed under the compilation. On the real library
+    /// that moved tracks between 60 albums (#84).
     ///
-    /// On the real library this moved tracks between 60 albums. It is pinned
-    /// rather than fixed because fixing it means deciding what a displayed row
-    /// names — a recording, or a file's placement — which is #78.
+    /// Asked of the **copy**, each has one slot and one answer. That is what
+    /// #78 settles: a displayed row names a file, not a performance.
     #[test]
-    fn a_recording_on_two_albums_is_filed_under_only_one() {
+    fn each_copy_of_a_recording_files_under_its_own_album() {
         let mut original = scanned("Hells Bells", "AC/DC", Some("AC/DC"), 2);
         original.album = Some("Back in Black".into());
+        original.identity = Some(crate::model::basis::Basis::MusicBrainz(
+            uuid::Uuid::from_u128(0xbe11),
+        ));
         let mut compilation = original.clone();
         compilation.album = Some("Who Made Who".into());
+        // **Two files, so two encodings.** A rip from the compilation is not
+        // byte-identical to the one from the album; giving them one hash would
+        // make them one copy and test nothing.
+        compilation.audio.hash += 1;
+        // And both name the same performance, which is the whole premise.
+        compilation.identity = original.identity.clone();
 
-        let (_, tree) = tree_of(&[original, compilation]);
+        let (l, _) = tree_of(&[original.clone(), compilation.clone()]);
 
-        let albums: Vec<&str> = tree
-            .artists()
-            .flat_map(|(_, a)| a.values().map(|al| al.title.as_str()))
-            .collect();
+        // Each copy knows its own slot, so each answers with its own album.
+        let mut seen: Vec<String> = Vec::new();
+        for s in [&original, &compilation] {
+            let encoding = Id::<crate::model::entity::Encoding>::of_audio(&s.audio);
+            let recording = l
+                .encodings
+                .encodings
+                .get(&encoding)
+                .and_then(|e| e.recording)
+                .expect("the copy holds a recording")
+                .id();
+            let row = l.row_of(recording, Some(encoding)).expect("a row");
+            seen.push(row.album.clone().unwrap_or_default());
+        }
+        seen.sort();
         assert_eq!(
-            albums.len(),
-            1,
-            "two albums hold this song and the tree shows it under {albums:?} \
-             — whichever placement sorted first"
+            seen,
+            vec!["Back in Black".to_string(), "Who Made Who".to_string()],
+            "a copy was filed under the other copy's album"
         );
     }
 
