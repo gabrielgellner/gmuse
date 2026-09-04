@@ -95,6 +95,20 @@ def searchable_title(title: str) -> str:
     return NOT_A_REMIX.sub("", title).strip()
 
 
+def flatten(value: object) -> str:
+    """One string, whatever the container handed back.
+
+    **Vorbis comments are multi-valued**, so mutagen returns a list — and
+    `str()` on a list is its *repr*. Five Opus files were queried as
+    `recording:"[The Mountain]"`, which matched nothing and read as
+    MusicBrainz not having them. ID3 frames stringify to their text, so this
+    only bites the containers where a field legitimately has several values.
+    """
+    if isinstance(value, list):
+        return "; ".join(str(v) for v in value)
+    return str(value)
+
+
 def read(path: Path) -> tuple[dict[str, str], float | None]:
     """A file's tags and its playing time.
 
@@ -118,7 +132,7 @@ def read(path: Path) -> tuple[dict[str, str], float | None]:
         return {}, None
     if handle is None:
         return {}, None
-    raw = {str(key).lower(): str(value) for key, value in dict(handle.tags or {}).items()}
+    raw = {str(key).lower(): flatten(value) for key, value in dict(handle.tags or {}).items()}
     length = getattr(handle.info, "length", None)
     return normalise(raw), (float(length) if isinstance(length, (int, float)) else None)
 
@@ -212,6 +226,103 @@ def credit_of(recording: dict[str, Any]) -> str:
     """A candidate's full artist credit, joined the way the tags would write it."""
     names = [a["name"] for a in recording.get("artist-credit") or [] if isinstance(a, dict) and "name" in a]
     return ", ".join(names)
+
+
+def best(candidates: list[dict[str, Any]], ours: float | None) -> dict[str, Any] | None:
+    """The candidate to believe, which is not always the first one.
+
+    **MusicBrainz ranks by name, and several candidates routinely tie at 100.**
+    "All Night Long" is a dozen recordings of one title; the search cannot tell
+    which is the four-minute edit and which is the nine-minute club mix,
+    because nothing in the query said. Taking `recordings[0]` therefore picked
+    arbitrarily among equals, and a mismatch was reported as *uncertain* — as
+    though MusicBrainz did not have the track, when it had it in second place.
+
+    Measured on the two roots before this existed: **108 of 191 uncertain rows
+    had a lower-ranked candidate whose length agreed**, and every one of those
+    was already in the cache. Not one uncertain row was a weak name match.
+
+    So duration **selects** rather than merely grades: among the candidates
+    MusicBrainz considers strong, take the one closest in length. With no
+    duration to compare, the ranking is all there is and the first stands.
+    """
+    strong = [c for c in candidates if isinstance(c.get("score"), int) and c["score"] >= STRONG]
+    if not strong or ours is None:
+        return candidates[0] if candidates else None
+    timed = [c for c in strong if isinstance(c.get("length"), int)]
+    if not timed:
+        return strong[0]
+
+    def drift(candidate: dict[str, Any]) -> float:
+        length = candidate["length"]
+        return abs(float(length) / 1000.0 - ours)
+
+    return min(timed, key=drift)
+
+
+#: Dashes and quotes that two catalogues spell differently and mean
+#: identically. Normalised away before any title is compared.
+CONFUSABLES: Final = str.maketrans(
+    {
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+    }
+)
+
+#: Any bracketed group. What is *inside* it decides whether it matters.
+BRACKETED: Final = re.compile(r"[([][^)\]]*[)\]]")
+
+#: Words that name a **different version** of a song, as against the name of
+#: whoever made it. "Original mix" is absent on purpose: it is Beatport for
+#: "not a remix", and is stripped from the query already.
+VERSION_WORDS: Final = re.compile(
+    r"\b(?:instrumental|clean|acapella|a cappella|karaoke|live|demo|radio\s*edit|extended)\b"
+)
+
+
+def plain(text: str) -> str:
+    """A title with the spellings that carry no meaning taken out."""
+    return re.sub(r"\s+", " ", text.translate(CONFUSABLES).lower()).strip()
+
+
+def unasked_qualifier(ours: str, theirs: str) -> str | None:
+    """A version qualifier on their title that ours never mentions.
+
+    **A qualifier nobody asked for is evidence against the match**, and
+    duration cannot see it: *212* and *212 (Instrumental)* are the same length
+    by construction, so the vocal and the instrumental are indistinguishable to
+    every check above this one. That match was made, and it was wrong.
+
+    It is not a ranking problem either — the plain vocal was not among the
+    three candidates MusicBrainz returned at all. Raising the limit is a
+    different question with a real cost; refusing to be confident is free.
+
+    **Compared by meaning, not by bytes.** A first version compared the
+    bracketed text literally and downgraded nine good matches out of eleven:
+    `Pan-Pot` against `Pan-Pot` differs only by U+2010, `Format:B` against
+    `Format: B` by a space, and `Alors on danse Radio Edit` carries its
+    qualifier with no brackets at all. So what is compared is the qualifying
+    *word*, against the whole of our title, however either side spells it.
+
+    A remixer's name is not a qualifier. `(Pan-Pot remix)` names who, not what,
+    and the title already had to match for the candidate to get this far.
+
+    This downgrades rather than rejects: the row still carries the candidate,
+    marked `uncertain`, which is the honest direction to fail in.
+    """
+    mine = plain(ours)
+    for group in BRACKETED.finditer(plain(theirs)):
+        unasked = [w for w in VERSION_WORDS.findall(group.group(0)) if w not in mine]
+        if unasked:
+            return group.group(0)
+    return None
 
 
 def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:
@@ -315,18 +426,24 @@ def propose(root: Path, out: Path, *, limit: int | None) -> None:
             if not candidates:
                 counts["nothing"] += 1
                 continue
-            best = candidates[0]
-            confidence, why = verdict(best, seconds)
+            chosen = best(candidates, seconds)
+            if chosen is None:
+                counts["nothing"] += 1
+                continue
+            confidence, why = verdict(chosen, seconds)
+            extra = unasked_qualifier(tags.get("title", ""), str(chosen.get("title") or ""))
+            if confidence == "matched" and extra:
+                confidence, why = "uncertain", f"{why}, but theirs is {extra}"
             counts[confidence] += 1
             sink.write(
                 json.dumps(
                     {
                         "locator": str(path),
-                        "mb_recording": best.get("id"),
+                        "mb_recording": chosen.get("id"),
                         "confidence": confidence,
                         "why": why,
                         "queried": {"artist": artist, "title": title},
-                        "theirs": {"title": best.get("title"), "artist": credit_of(best)},
+                        "theirs": {"title": chosen.get("title"), "artist": credit_of(chosen)},
                         "ours": {"title": tags.get("title", ""), "artist": tags.get("artist", "")},
                     }
                 )
