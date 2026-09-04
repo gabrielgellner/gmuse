@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 pub mod arena;
+pub mod basis;
 pub mod clock;
 pub mod durable;
 pub mod encoding;
