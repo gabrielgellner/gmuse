@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
-"""Find the MusicBrainz recording id for files that do not carry one.
+"""Find the MusicBrainz recording id for recordings that rest on their bytes.
+
+## The contract, and why this pass no longer walks a disk
+
+```sh
+gmuse library query --unidentified > work.jsonl   # gmuse says what needs it
+gmuse-tools identify fetch   work.jsonl           # ask MusicBrainz
+gmuse-tools identify propose work.jsonl           # write proposals
+gmuse library apply out/identify-work.jsonl       # dry run
+gmuse library apply out/identify-work.jsonl --write
+```
+
+**A tool is handed an id and a locator, opens the locator, and proposes
+against the id.** This pass used to walk the library itself and emit
+`{"locator": "/Users/.../01 The Fugitive.mp3"}`, which is why 712 confident
+matches sat in `tools/out/` that `gmuse library apply` could not read: a path
+is a property of one machine's copy, stale the moment anything moves, and it
+names nothing the library knows about.
+
+Reading the work list also means *which* recordings need looking up is the
+library's answer rather than this pass's guess, so the two cannot disagree —
+and a recording an authority has already named never costs a rate limit.
 
 **The highest-leverage pass there is, and the reason is a census.** Of 6500
 files in `~/MusicLibrary`, 6023 carry a MusicBrainz recording id and 477 do
@@ -46,6 +67,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -53,7 +75,7 @@ import mutagen
 import typer
 
 from gmuse_tools import bronze
-from gmuse_tools.genre.common import out_path, walk
+from gmuse_tools.genre.common import out_path
 
 if TYPE_CHECKING:
     import sqlite3
@@ -75,6 +97,13 @@ PLAUSIBLE: Final = 70
 #: Seconds of disagreement still counted as **the same recording**. Encoder
 #: padding and a trimmed lead-in account for one or two; five is generous and
 #: still rules out the live take.
+# Which verdicts write an applying line rather than a commented-out one.
+#
+# `probable` is in because it means the name is strong and nothing contradicts
+# it — the duration is simply unknown, which is a gap in the evidence rather
+# than evidence against. `uncertain` is out by definition.
+APPLIES: Final = frozenset({"matched", "probable"})
+
 SAME_RECORDING: Final = 5.0
 
 #: Seconds within which two titles differing only by a version qualifier are
@@ -418,6 +447,53 @@ def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:
     return "uncertain", f"name score {score} but duration off by {drift:.0f}s"
 
 
+@dataclass(frozen=True)
+class Work:
+    """One row of `gmuse library query --unidentified`.
+
+    **The id is what a proposal names; the locator is what a pass opens.** They
+    have deliberately different lifetimes — the locator is good until the file
+    moves, the id is good forever — and keeping them apart is what stops a tool
+    from naming its findings by path.
+
+    This pass used to walk the disk and emit `{"locator": ...}`, which is why
+    712 confident matches sat in `tools/out/` that `apply` could not read: a
+    path is a property of one machine's copy and names nothing the library
+    knows.
+    """
+
+    recording: str
+    encoding: str | None
+    locator: str | None
+    title: str
+    artist: str
+
+
+def work_list(path: Path, *, limit: int | None = None) -> list[Work]:
+    """Read what gmuse handed us, keeping only rows this machine can open.
+
+    A row with no locator is an ordinary row — something the library knows
+    about and this disk does not hold — and there is nothing for a pass that
+    reads audio to do with one.
+    """
+    rows = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        raw = json.loads(line)
+        row = Work(
+            recording=raw["recording"],
+            encoding=raw.get("encoding"),
+            locator=raw.get("locator"),
+            title=raw.get("title", ""),
+            artist=raw.get("artist", ""),
+        )
+        if row.locator and row.encoding:
+            rows.append(row)
+    return rows[:limit] if limit is not None else rows
+
+
 def unreadable(todo: list[tuple[Path, dict[str, str]]]) -> str | None:
     """Why this batch should not be sent, or None if it is fine.
 
@@ -440,19 +516,18 @@ def unreadable(todo: list[tuple[Path, dict[str, str]]]) -> str | None:
     return None
 
 
-def fetch(root: Path, *, limit: int | None) -> None:
-    """Look up every file under `root` that does not already name its recording."""
-    con = bronze.open_cache()
-    files = walk(root)
-    todo = []
-    for path in files:
-        tags, _ = read(path)
-        if not has_recording_id(tags):
-            todo.append((path, tags))
-    if limit is not None:
-        todo = todo[:limit]
+def fetch(work: Path, *, limit: int | None) -> None:
+    """Look up every recording in the work list that no authority has named.
 
-    print(f"{len(files)} files under {root}, {len(todo)} without a recording id")
+    The list comes from `gmuse library query --unidentified`, so which files
+    need looking up is the library's answer rather than this pass's guess —
+    and the two cannot disagree about it.
+    """
+    con = bronze.open_cache()
+    rows = work_list(work, limit=limit)
+    todo = [(Path(row.locator or ""), read(Path(row.locator or ""))[0]) for row in rows]
+
+    print(f"{len(rows)} recordings to look up, from {work}")
     if problem := unreadable(todo):
         print(f"refusing to ask MusicBrainz: {problem}")
         return
@@ -473,25 +548,29 @@ def fetch(root: Path, *, limit: int | None) -> None:
     print(f"done: {asked} asked, {cached} already cached")
 
 
-def propose(root: Path, out: Path, *, limit: int | None) -> None:
-    """Turn the cache into a reviewable file of identifications.
+def propose(work: Path, out: Path, *, limit: int | None) -> None:
+    """Turn the cache into a file `gmuse library apply` can read.
 
-    JSONL rather than a review table because the rows are heterogeneous — a
-    confident match carries different evidence from an uncertain one — and
-    because this feeds a strict `import`, which wants a machine to read it.
+    **One file, two readers.** Every line carries the proposal fields gmuse
+    parses *and* the evidence a person needs to judge it — the parser ignores
+    fields it does not know, so the review copy and the machine copy are the
+    same file rather than two that drift apart.
+
+    A row this pass is not confident about is written **commented out**. The
+    parser skips `#` lines, so an uncertain match cannot apply by accident, and
+    accepting one is deleting a `#`. That is the review step, and it is an edit
+    a person can make in the file they are already reading.
     """
     con = bronze.open_cache()
     todo = []
-    for path in walk(root):
+    for row in work_list(work, limit=limit):
+        path = Path(row.locator or "")
         tags, seconds = read(path)
-        if not has_recording_id(tags):
-            todo.append((path, tags, seconds))
-    if limit is not None:
-        todo = todo[:limit]
+        todo.append((row, path, tags, seconds))
 
     counts = {"matched": 0, "probable": 0, "uncertain": 0, "nothing": 0}
     with out.open("w", encoding="utf-8") as sink:
-        for path, tags, seconds in todo:
+        for row, path, tags, seconds in todo:
             artist = first_artist(tags.get("artist", ""))
             title = searchable_title(tags.get("title", "") or path.stem)
             body = search(con, artist, title) if title else None
@@ -510,11 +589,20 @@ def propose(root: Path, out: Path, *, limit: int | None) -> None:
                 confidence, why = "uncertain", f"{why}, but theirs is {extra}"
                 kind = variance(seconds, chosen.get("length"))
             counts[confidence] += 1
+            # Confident rows apply; the rest are commented out, so accepting
+            # one is deleting a `#` in the file being reviewed.
+            prefix = "" if confidence in APPLIES else "# "
             sink.write(
-                json.dumps(
+                prefix
+                + json.dumps(
                     {
+                        "fact": "identified",
+                        "encoding": row.encoding,
+                        "basis": {"musicbrainz": chosen.get("id")},
+                        # Everything below is for the person reading. The
+                        # parser ignores fields it does not know, which is what
+                        # lets one file be both.
                         "locator": str(path),
-                        "mb_recording": chosen.get("id"),
                         "confidence": confidence,
                         "why": why,
                         # What kind of difference this is, when the guard
@@ -531,21 +619,25 @@ def propose(root: Path, out: Path, *, limit: int | None) -> None:
             )
 
     total = sum(counts.values())
-    print(f"{total} files without a recording id -> {out}")
+    applies = sum(counts[level] for level in APPLIES)
+    print(f"{total} recordings looked up -> {out}")
+    print(f"  {applies} would apply; the rest are commented out")
     for level in ("matched", "probable", "uncertain", "nothing"):
         share = f"{100 * counts[level] / total:.1f}%" if total else "-"
         print(f"  {level:9s} {counts[level]:5d}  {share}")
-    print("\nreview the uncertain ones before anything applies them:")
-    print(f"  jq -r 'select(.confidence==\"uncertain\")' {out}")
+    print("\nreview the commented-out ones; delete the `#` to accept one:")
+    print(f"  grep '^# ' {out} | head")
+    print(f"\nthen: gmuse library apply {out}       # dry run")
+    print(f"      gmuse library apply {out} --write")
 
 
-ROOT = typer.Argument(help="the directory to walk")
-LIMIT = typer.Option(None, help="stop after this many files")
+WORK = typer.Argument(help="the work list from `gmuse library query --unidentified`")
+LIMIT = typer.Option(None, help="stop after this many rows")
 OUT = typer.Option(None, help="where to write the proposals")
 
 
 def existing(root: Path) -> Path:
-    """A root that is there, or a clean exit saying which is not."""
+    """A path that is there, or a clean exit saying which is not."""
     root = root.expanduser()
     if not root.exists():
         typer.echo(f"no such root: {root}")
@@ -557,17 +649,17 @@ def register(app: typer.Typer) -> None:
     """Attach this pass's commands to the tool."""
 
     @app.command("fetch")
-    def fetch_cmd(root: Path = ROOT, limit: int | None = LIMIT) -> None:
-        """Ask MusicBrainz about files with no recording id."""
-        fetch(existing(root), limit=limit)
+    def fetch_cmd(work: Path = WORK, limit: int | None = LIMIT) -> None:
+        """Ask MusicBrainz about the recordings gmuse says are unidentified."""
+        fetch(existing(work), limit=limit)
 
     @app.command("propose")
     def propose_cmd(
-        root: Path = ROOT,
+        work: Path = WORK,
         out: Path | None = OUT,
         limit: int | None = LIMIT,
     ) -> None:
-        """Turn the cache into a reviewable jsonl. Writes no tags."""
-        root = existing(root)
-        default = out_path(f"identify-{root.name.lower()}.jsonl")
-        propose(root, out.expanduser() if out else default, limit=limit)
+        """Turn the cache into a file `gmuse library apply` can read."""
+        work = existing(work)
+        default = out_path(f"identify-{work.stem.lower()}.jsonl")
+        propose(work, out.expanduser() if out else default, limit=limit)

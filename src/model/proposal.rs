@@ -37,6 +37,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::model::basis::Basis;
 use crate::model::clock::HybridClock;
 use crate::model::entity::{Device, Encoding, Genre, Qualifier, Recording};
 use crate::model::id::Id;
@@ -68,6 +69,28 @@ pub enum Proposal {
         genre: String,
         basis: Source,
         confidence: Confidence,
+    },
+    /// **This file holds that performance** — the proposal 712 confident
+    /// matches have been waiting for.
+    ///
+    /// The subject is the **encoding**, not the recording, and that is the
+    /// whole shape of it. A recording that nothing has named was minted from
+    /// its bytes, so its id *is* the claim being corrected; naming the
+    /// recording would mean naming the thing this replaces. The file is what
+    /// stays put.
+    ///
+    /// Applying one is therefore a **relink**, not an append: the encoding's
+    /// binding moves from the id the bytes minted to the id the authority
+    /// names. The old recording is left rather than swept — §1 is explicit
+    /// that a row nothing holds is ordinary, and deleting it would take its
+    /// ratings and plays with it.
+    ///
+    /// Nothing about the recording's *description* crosses. An identification
+    /// says which performance this is, and a title from MusicBrainz is a
+    /// separate claim somebody else can propose.
+    Identified {
+        encoding: Id<Encoding>,
+        basis: Basis,
     },
     /// Which version of a song a recording is — issue #101.
     ///
@@ -119,6 +142,21 @@ pub struct Queried {
     pub artist: String,
 }
 
+/// What `parse` needs to know about the library it is proposing against.
+///
+/// It was a single `holds` closure, and that was enough while every proposal
+/// was a function of its own line. An identification is not: it moves an
+/// encoding's binding, and where it moves *from* is a fact about the library
+/// now. A tool cannot supply that — it would be naming the thing its proposal
+/// replaces — so the caller answers instead.
+pub trait Holdings {
+    /// Whether the library has this at all. A proposal against a library that
+    /// has since changed is stale rather than wrong.
+    fn holds(&self, subject: Subject) -> bool;
+    /// Which recording an encoding currently holds.
+    fn bound(&self, encoding: Id<Encoding>) -> Option<Id<Recording>>;
+}
+
 /// What a proposal is about — one of the two things a tool may name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subject {
@@ -129,7 +167,9 @@ pub enum Subject {
 impl Proposal {
     pub fn subject(&self) -> Subject {
         match self {
-            Proposal::Measured { encoding, .. } => Subject::Encoding(*encoding),
+            Proposal::Measured { encoding, .. } | Proposal::Identified { encoding, .. } => {
+                Subject::Encoding(*encoding)
+            }
             Proposal::GenreAssigned { recording, .. }
             | Proposal::QualifierAssigned { recording, .. }
             | Proposal::Rated { recording, .. } => Subject::Recording(*recording),
@@ -198,7 +238,7 @@ pub fn parse(
     text: &str,
     device: Id<Device>,
     now: i64,
-    holds: impl Fn(Subject) -> bool,
+    library: &impl Holdings,
 ) -> (BTreeSet<Record>, Report) {
     let mut clock = HybridClock::new(device);
     let mut out = BTreeSet::new();
@@ -216,11 +256,11 @@ pub fn parse(
                 continue;
             }
         };
-        if !holds(proposal.subject()) {
+        if !library.holds(proposal.subject()) {
             report.unknown.push(proposal.subject());
             continue;
         }
-        let facts = match into_facts(proposal) {
+        let facts = match into_facts(proposal, library) {
             Ok(facts) => facts,
             Err(why) => {
                 report.refused.push((n + 1, why));
@@ -245,7 +285,7 @@ pub fn parse(
 /// proposal for a term the vocabulary had never seen wrote an assignment whose
 /// id nothing named — an id no fact resolves is an id nobody can render.
 /// `Instance::assign_genre` got this right; the apply path bypassed it.
-fn into_facts(proposal: Proposal) -> Result<Vec<Fact>, String> {
+fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, String> {
     Ok(match proposal {
         Proposal::Measured {
             encoding,
@@ -313,6 +353,23 @@ fn into_facts(proposal: Proposal) -> Result<Vec<Fact>, String> {
                 },
             ]
         }
+        // **A relink, and the one proposal that is not a function of its own
+        // line.** Where the binding moves *from* is a fact about the library
+        // now, not about what the tool found, so `parse` has to be able to ask.
+        Proposal::Identified { encoding, basis } => {
+            let to = Id::<Recording>::of_basis(&basis);
+            let from = library.bound(encoding);
+            if from == Some(to) {
+                return Err("already holds that performance".into());
+            }
+            vec![
+                Fact::RecordingIdentified {
+                    recording: to,
+                    basis,
+                },
+                Fact::EncodingBound { encoding, from, to },
+            ]
+        }
         Proposal::Rated { recording, stars } => {
             vec![Fact::RecordingRated { recording, stars }]
         }
@@ -335,13 +392,35 @@ mod tests {
         Id::from_uuid(uuid::Uuid::from_u128(n))
     }
 
-    /// A library that holds encodings 1 and 2 and recordings 1 and 2.
-    fn held(s: Subject) -> bool {
-        match s {
-            Subject::Encoding(e) => e == enc(1) || e == enc(2),
-            Subject::Recording(r) => r == rec(1) || r == rec(2),
+    /// The MusicBrainz id encoding 3 has already been identified as, so that
+    /// "propose what is already true" is reachable rather than hypothetical.
+    fn settled() -> uuid::Uuid {
+        uuid::Uuid::from_u128(0xaaaa)
+    }
+
+    /// A library holding encodings 1–3 and recordings 1 and 2. Encoding 1 is
+    /// bound to a recording minted from its bytes, encoding 2 is unbound, and
+    /// encoding 3 already holds the performance `settled()` names.
+    struct Held;
+
+    impl Holdings for Held {
+        fn holds(&self, s: Subject) -> bool {
+            match s {
+                Subject::Encoding(e) => e == enc(1) || e == enc(2) || e == enc(3),
+                Subject::Recording(r) => r == rec(1) || r == rec(2),
+            }
+        }
+
+        fn bound(&self, encoding: Id<Encoding>) -> Option<Id<Recording>> {
+            match encoding {
+                e if e == enc(1) => Some(rec(1)),
+                e if e == enc(3) => Some(Id::of_basis(&Basis::MusicBrainz(settled()))),
+                _ => None,
+            }
         }
     }
+
+    const HELD: &Held = &Held;
 
     fn measured(e: u128, hz: u32) -> String {
         format!(
@@ -354,7 +433,7 @@ mod tests {
     /// because a cutoff is a fact about particular bytes.
     #[test]
     fn a_measurement_becomes_a_fact() {
-        let (records, report) = parse(&measured(1, 15_700), dev(), 100, held);
+        let (records, report) = parse(&measured(1, 15_700), dev(), 100, HELD);
 
         assert_eq!(report.applied, 1, "{report}");
         assert_eq!(
@@ -377,14 +456,14 @@ mod tests {
             r#"{{"fact":"genre_assigned","recording":"{}","genre":"Techno","basis":"discogs","confidence":"matched"}}"#,
             rec(1)
         );
-        let (_, report) = parse(&good, dev(), 100, held);
+        let (_, report) = parse(&good, dev(), 100, HELD);
         assert_eq!(report.applied, 1, "{report}");
 
         let bare = format!(
             r#"{{"fact":"genre_assigned","recording":"{}","genre":"Techno"}}"#,
             rec(1)
         );
-        let (_, report) = parse(&bare, dev(), 100, held);
+        let (_, report) = parse(&bare, dev(), 100, HELD);
         assert_eq!(
             report.malformed.len(),
             1,
@@ -400,7 +479,7 @@ mod tests {
     #[test]
     fn an_unknown_subject_is_named_not_invented() {
         let text = format!("{}\n{}", measured(1, 100), measured(99, 200));
-        let (records, report) = parse(&text, dev(), 100, held);
+        let (records, report) = parse(&text, dev(), 100, HELD);
 
         assert_eq!(records.len(), 1);
         assert_eq!(report.unknown, vec![Subject::Encoding(enc(99))]);
@@ -415,7 +494,7 @@ mod tests {
     #[test]
     fn a_proposal_naming_a_path_is_refused() {
         let text = r#"{"fact":"measured","path":"/m/a.mp3","cutoff_hz":15700,"analyser":1}"#;
-        let (records, report) = parse(text, dev(), 100, held);
+        let (records, report) = parse(text, dev(), 100, HELD);
 
         assert!(records.is_empty());
         assert_eq!(report.malformed.len(), 1);
@@ -426,7 +505,7 @@ mod tests {
     #[test]
     fn a_bad_line_is_reported_with_its_number_and_the_rest_still_apply() {
         let text = format!("{}\n{{not json at all\n{}", measured(1, 1), measured(2, 2));
-        let (records, report) = parse(&text, dev(), 100, held);
+        let (records, report) = parse(&text, dev(), 100, HELD);
 
         assert_eq!(report.applied, 2);
         assert_eq!(report.malformed.len(), 1);
@@ -439,7 +518,7 @@ mod tests {
     #[test]
     fn blank_lines_and_comments_are_not_errors() {
         let text = format!("# measured 2026-09-02\n\n{}\n\n", measured(1, 1));
-        let (records, report) = parse(&text, dev(), 100, held);
+        let (records, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.applied, 1);
         assert!(report.malformed.is_empty());
         assert_eq!(records.len(), 1);
@@ -449,7 +528,7 @@ mod tests {
     #[test]
     fn proposals_in_one_file_do_not_collide() {
         let text = format!("{}\n{}", measured(1, 1), measured(2, 2));
-        let (records, _) = parse(&text, dev(), 100, held);
+        let (records, _) = parse(&text, dev(), 100, HELD);
         assert_eq!(records.len(), 2);
     }
 
@@ -466,7 +545,7 @@ mod tests {
             r#"{{"fact":"genre_assigned","recording":"{}","genre":"Dub Techno","basis":"discogs","confidence":"matched"}}"#,
             rec(1)
         );
-        let (records, report) = parse(&text, dev(), 100, held);
+        let (records, report) = parse(&text, dev(), 100, HELD);
 
         assert_eq!(report.applied, 1, "one line, however many facts");
         assert!(
@@ -496,7 +575,7 @@ mod tests {
                 r#"{{"fact":"genre_assigned","recording":"{}","genre":"Techno","basis":"{wire}","confidence":"matched"}}"#,
                 rec(1)
             );
-            let (records, report) = parse(&text, dev(), 100, held);
+            let (records, report) = parse(&text, dev(), 100, HELD);
             assert!(report.malformed.is_empty(), "{wire}: {report}");
             assert!(records.iter().any(|r| matches!(
                 &r.fact,
@@ -514,7 +593,7 @@ mod tests {
             r#"{{"fact":"qualifier_assigned","recording":"{}","qualifier":"Instrumental","basis":"musicbrainz","confidence":"matched"}}"#,
             rec(1)
         );
-        let (records, report) = parse(&text, dev(), 100, held);
+        let (records, report) = parse(&text, dev(), 100, HELD);
 
         assert_eq!(report.applied, 1, "{report}");
         assert!(report.refused.is_empty(), "{report}");
@@ -537,13 +616,97 @@ mod tests {
             r#"{{"fact":"qualifier_assigned","recording":"{}","qualifier":"mix-variant","basis":"manual","confidence":"confirmed"}}"#,
             rec(1)
         );
-        let (records, report) = parse(&text, dev(), 100, held);
+        let (records, report) = parse(&text, dev(), 100, HELD);
 
         assert!(records.is_empty());
         assert!(report.malformed.is_empty(), "a refusal is not a typo");
         assert_eq!(report.refused.len(), 1);
         assert_eq!(report.refused[0].0, 1, "the line a person would jump to");
         assert!(report.balances(1), "{report}");
+    }
+
+    /// **An identification is a relink**, and the binding says what it moved
+    /// from.
+    ///
+    /// The encoding is the subject because the recording's id *is* the claim
+    /// being corrected — a recording nothing had named was minted from these
+    /// bytes, so naming it would mean naming the thing this replaces.
+    #[test]
+    fn an_identification_moves_the_binding() {
+        let mbid = uuid::Uuid::from_u128(0xca11_1500);
+        let text = format!(
+            r#"{{"fact":"identified","encoding":"{}","basis":{{"musicbrainz":"{mbid}"}}}}"#,
+            enc(1)
+        );
+        let (records, report) = parse(&text, dev(), 100, HELD);
+
+        assert_eq!(report.applied, 1, "{report}");
+        let named = Id::<Recording>::of_basis(&Basis::MusicBrainz(mbid));
+        assert!(
+            records.iter().any(|r| matches!(
+                &r.fact,
+                Fact::EncodingBound { encoding, from, to }
+                    if *encoding == enc(1) && *from == Some(rec(1)) && *to == named
+            )),
+            "the binding did not move, or lost what it replaced"
+        );
+        assert!(records.iter().any(|r| matches!(
+            &r.fact,
+            Fact::RecordingIdentified { basis: Basis::MusicBrainz(u), .. } if *u == mbid
+        )));
+    }
+
+    /// **A description does not ride along.** An identification says which
+    /// performance this is; what it is called is a separate claim somebody
+    /// else can propose, and inventing one here would be the projection's old
+    /// habit in a new place.
+    #[test]
+    fn an_identification_does_not_rename_anything() {
+        let text = format!(
+            r#"{{"fact":"identified","encoding":"{}","basis":{{"musicbrainz":"{}"}}}}"#,
+            enc(1),
+            uuid::Uuid::from_u128(7)
+        );
+        let (records, _) = parse(&text, dev(), 100, HELD);
+        assert!(
+            !records
+                .iter()
+                .any(|r| matches!(&r.fact, Fact::RecordingCatalogued { .. })),
+            "a title arrived from somewhere nobody proposed one"
+        );
+    }
+
+    /// **Re-running a reviewed file relinks nothing.**
+    ///
+    /// Refused rather than applied and then deduplicated: the second run has
+    /// nothing to say, and an `EncodingBound { from: X, to: X }` in the log
+    /// would read as a decision somebody made.
+    #[test]
+    fn identifying_what_is_already_identified_is_refused() {
+        let text = format!(
+            r#"{{"fact":"identified","encoding":"{}","basis":{{"musicbrainz":"{}"}}}}"#,
+            enc(3),
+            settled()
+        );
+        let (records, report) = parse(&text, dev(), 100, HELD);
+
+        assert!(records.is_empty());
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
+        assert!(report.balances(1), "{report}");
+    }
+
+    /// The old spelling still reads, because it is already in the live log.
+    #[test]
+    fn a_basis_written_the_old_way_still_parses() {
+        let mbid = uuid::Uuid::from_u128(9);
+        let text = format!(
+            r#"{{"fact":"identified","encoding":"{}","basis":{{"MusicBrainz":"{mbid}"}}}}"#,
+            enc(2)
+        );
+        let (_, report) = parse(&text, dev(), 100, HELD);
+        assert!(report.malformed.is_empty(), "{report}");
+        assert_eq!(report.applied, 1);
     }
 
     /// **The round trip.** A tool is handed an id and a locator, opens the
@@ -567,7 +730,7 @@ mod tests {
             r#"{{"fact":"measured","encoding":"{}","cutoff_hz":19800,"analyser":1}}"#,
             back.encoding.unwrap()
         );
-        let (records, report) = parse(&proposal, dev(), 100, held);
+        let (records, report) = parse(&proposal, dev(), 100, HELD);
         assert_eq!(report.applied, 1, "{report}");
         assert_eq!(
             records.iter().next().unwrap().fact,
@@ -598,7 +761,7 @@ mod tests {
     /// nothing to say should not read as a pass that broke.
     #[test]
     fn nothing_to_say_is_not_an_error() {
-        let (records, report) = parse("", dev(), 100, held);
+        let (records, report) = parse("", dev(), 100, HELD);
         assert!(records.is_empty() && report.applied == 0);
         assert!(report.malformed.is_empty() && report.unknown.is_empty());
     }

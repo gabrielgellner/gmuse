@@ -29,6 +29,7 @@ mod m3u;
 mod model;
 mod next;
 mod playlist;
+mod query;
 mod remote;
 mod scan;
 mod session;
@@ -290,6 +291,21 @@ fn run_library(
     let machine = crate::events::machine_id(&config::default_state_dir());
     let device = crate::model::id::Id::derived(machine.as_bytes());
     match op {
+        cli::Library::Query { unidentified } => {
+            let (log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let only = if *unidentified {
+                query::Only::Unidentified
+            } else {
+                query::Only::Everything
+            };
+            for row in query::rows(roots, log.records(), device, crate::history::now_ms(), only) {
+                println!("{}", serde_json::to_string(&row)?);
+            }
+        }
         cli::Library::Apply { file, write } => {
             let outcome = apply::run(
                 file,

@@ -12,6 +12,8 @@ artist of a joined credit — are tested in `src/model/ingest.rs`.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from gmuse_tools.identify import (
@@ -26,6 +28,7 @@ from gmuse_tools.identify import (
     unasked_qualifier,
     variance,
     verdict,
+    work_list,
 )
 
 
@@ -195,3 +198,55 @@ class TestTagReading:
     def test_a_plain_name_already_present_is_not_overwritten(self) -> None:
         """Vorbis and ID3 names can both appear; the plain one is already right."""
         assert normalise({"artist": "Vorbis", "tpe1": "ID3"})["artist"] == "Vorbis"
+
+
+class TestWorkList:
+    """Reading what gmuse hands over, rather than walking a disk.
+
+    This pass emitted `{"locator": ...}` for 712 confident matches and none of
+    them could be applied: a path names nothing the library knows about.
+    """
+
+    def write(self, tmp_path: Path, *lines: str) -> Path:
+        """A work list on disk, as `gmuse library query` would leave one."""
+        p = tmp_path / "work.jsonl"
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return p
+
+    def test_a_row_keeps_both_the_id_and_the_path(self, tmp_path: Path) -> None:
+        """The two have different lifetimes and both are needed."""
+        rows = work_list(
+            self.write(
+                tmp_path,
+                '{"recording":"r1","encoding":"e1","locator":"/m/a.mp3","title":"A","artist":"B"}',
+            )
+        )
+        assert len(rows) == 1
+        assert rows[0].encoding == "e1"
+        assert rows[0].locator == "/m/a.mp3"
+
+    def test_a_row_this_machine_cannot_open_is_left_out(self, tmp_path: Path) -> None:
+        """An ordinary row, and nothing this pass can act on.
+
+        The library knows about it and this disk does not hold it, so there is
+        no audio to read and no locator to open.
+        """
+        rows = work_list(
+            self.write(
+                tmp_path,
+                '{"recording":"r1","encoding":null,"locator":null,"title":"On the NAS","artist":"B"}',
+            )
+        )
+        assert rows == []
+
+    def test_blank_lines_and_comments_are_skipped(self, tmp_path: Path) -> None:
+        """A work list is a file somebody may have been editing."""
+        rows = work_list(
+            self.write(
+                tmp_path,
+                "# a note",
+                "",
+                '{"recording":"r1","encoding":"e1","locator":"/m/a.mp3","title":"A","artist":"B"}',
+            )
+        )
+        assert len(rows) == 1

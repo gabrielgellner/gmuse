@@ -43,16 +43,29 @@ use crate::model::id::Id;
 
 /// What a recording's id was derived from.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+// **Lowercase on the wire, because this is now something a person types.** A
+// `Basis` rides on `Proposal::Identified`, and a proposal file is hand-edited
+// and hand-reviewed — the same reason `Source` is lowercase, and it should
+// have been the same answer.
+//
+// The `alias` is not decoration: the variant names are already written into
+// every `RecordingIdentified` in the live log. Renaming without it would make
+// those lines unreadable, and a log that cannot be read is a log that has been
+// thrown away.
+#[serde(rename_all = "snake_case")]
 pub enum Basis {
     /// A MusicBrainz recording id. The top rung, and most of this library.
+    #[serde(rename = "musicbrainz", alias = "MusicBrainz")]
     MusicBrainz(Uuid),
     /// Some other authority that names this performance — a Beatport track id,
     /// a video id. **The key is opaque here**: what makes it useful is that two
     /// devices reading the same tag derive the same recording, not that gmuse
     /// understands the authority.
+    #[serde(alias = "External")]
     External { authority: String, key: String },
     /// The bytes. Convergent for identical bytes and nothing more, which is
     /// why a recording resting on this is the one a re-encode strands.
+    #[serde(alias = "Audio")]
     Audio(AudioId),
 }
 

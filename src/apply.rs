@@ -24,6 +24,7 @@ use crate::model::entity::Device;
 use crate::model::id::Id;
 use crate::model::instance::Instance;
 use crate::model::proposal::{self, Report, Subject};
+use crate::model::spine::Recording;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
@@ -34,6 +35,37 @@ pub enum ApplyError {
     },
     #[error("writing the log: {0}")]
     Write(#[from] durable::LogError),
+}
+
+/// The two things a proposal is checked against, and they are not one thing.
+///
+/// **What exists** comes from the disk: a measurement proposed against a file
+/// that has since been deleted is stale rather than wrong, and saying which
+/// ones lets a tool re-query instead of re-measure.
+///
+/// **What a file currently holds** comes from the log, because a relink is a
+/// decision somebody recorded and a scan cannot see one. Reading the binding
+/// off the disk instead would let an identification quietly undo the last one.
+struct Library {
+    disk: crate::model::log::Catalogue,
+    log: crate::model::log::Catalogue,
+}
+
+impl proposal::Holdings for Library {
+    fn holds(&self, subject: Subject) -> bool {
+        match subject {
+            Subject::Encoding(id) => self.disk.encodings.contains_key(&id),
+            Subject::Recording(id) => self.disk.recordings.contains_key(&id),
+        }
+    }
+
+    fn bound(&self, encoding: Id<crate::model::entity::Encoding>) -> Option<Id<Recording>> {
+        self.log
+            .encodings
+            .get(&encoding)
+            .and_then(|e| e.recording)
+            .or_else(|| self.disk.encodings.get(&encoding).and_then(|e| e.recording))
+    }
 }
 
 /// What a run did, and what it declined to do.
@@ -80,16 +112,19 @@ pub fn run(
         source,
     })?;
 
-    // What the disk says exists, which is what "holds" is asking about.
-    let (scanned, _) = crate::model::populate::read_library("apply", roots, now);
-    let held = scanned.catalogue();
-    let holds = |subject: Subject| match subject {
-        Subject::Encoding(id) => held.encodings.contains_key(&id),
-        Subject::Recording(id) => held.recordings.contains_key(&id),
-    };
-
     let (mut log, _) = Instance::open(data_dir, device, now);
-    let (proposed, report) = proposal::parse(&text, device, now, holds);
+    let library = Library {
+        // What the disk says exists, which is what "holds" asks about:
+        // encodings are established by looking, and a proposal against a file
+        // that has since gone is stale rather than wrong.
+        disk: crate::model::populate::read_library("apply", roots, now)
+            .0
+            .catalogue(),
+        // Where a binding currently points is a fact about the *log*, not the
+        // disk — a relink somebody made lives there and a scan cannot see it.
+        log: log.catalogue(),
+    };
+    let (proposed, report) = proposal::parse(&text, device, now, &library);
 
     // **Facts already in the log are not applied again.** A play is *counted*,
     // so replaying a file would inflate a play count — the one fact here where

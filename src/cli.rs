@@ -150,6 +150,18 @@ pub enum Library {
         #[arg(long)]
         write: bool,
     },
+    /// Hand a tool the work list: an id and a locator per row.
+    ///
+    /// The other half of the contract `apply` completes. A tool opens the
+    /// **locator** and proposes against the **id**, so it never computes an
+    /// identity and never keys anything by a path.
+    Query {
+        /// Only recordings resting on their bytes — the ones no authority has
+        /// named, and the only ones an identification pass should spend a rate
+        /// limit on.
+        #[arg(long)]
+        unidentified: bool,
+    },
 }
 
 impl Cli {
