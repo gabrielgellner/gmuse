@@ -511,6 +511,13 @@ pub struct Catalogue {
     pub artist_names: BTreeMap<Id<Artist>, String>,
     pub recordings: BTreeMap<Id<Recording>, Recorded>,
     pub encodings: BTreeMap<Id<Encoding>, Encoded>,
+    /// Which recording each encoding holds, **independent of whether anything
+    /// has described it**.
+    ///
+    /// `Encoded::recording` carries the same answer for encodings a scan has
+    /// seen, and is what the projection reads. This is the one that survives a
+    /// log with no scan beside it — the case a relink lives in.
+    pub bound: BTreeMap<Id<Encoding>, Id<Recording>>,
     /// Every genre assignment, **one row per asserter**.
     ///
     /// The key is the claim's identity and it includes *who says so*, because
@@ -972,6 +979,19 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
         let distinct: BTreeSet<_> = asserted.iter().map(|(_, r)| *r).collect();
         let winner = asserted.last().expect("non-empty by construction").1;
 
+        // **Recorded whether or not anyone has described these bytes.**
+        //
+        // This used to write the binding onto the `Encoded` row and drop it
+        // when there was none, which made a relink invisible to anything that
+        // had not also scanned. `ingest` checks exactly this before minting —
+        // "a binding someone made wins over the one we would mint" — so
+        // dropping it defeated the one guard stopping a scan from silently
+        // undoing an identification. Applying 377 of them left the work list
+        // where it was, and that is how it was found.
+        //
+        // A binding is a fact about an encoding *id*. Whether its bytes have
+        // been described is a different fact and a different question.
+        cat.bound.insert(encoding, winner);
         if let Some(d) = cat.encodings.get_mut(&encoding) {
             d.recording = Some(winner);
         }

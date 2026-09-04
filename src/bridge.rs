@@ -112,9 +112,11 @@ pub fn librarian(
     device: Id<Device>,
     now: i64,
 ) -> Librarian {
+    // The log first: `ingest` will not mint over a binding it can see, and a
+    // scan into an empty instance can see none. See `query::rows`.
     let mut scratch = Instance::new(device);
-    scratch.ingest(now, &scanned(store));
     scratch.merge(now, records);
+    scratch.ingest(now, &scanned(store));
     Librarian::from_catalogue(&scratch.catalogue())
 }
 

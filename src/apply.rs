@@ -61,9 +61,9 @@ impl proposal::Holdings for Library {
 
     fn bound(&self, encoding: Id<crate::model::entity::Encoding>) -> Option<Id<Recording>> {
         self.log
-            .encodings
+            .bound
             .get(&encoding)
-            .and_then(|e| e.recording)
+            .copied()
             .or_else(|| self.disk.encodings.get(&encoding).and_then(|e| e.recording))
     }
 }

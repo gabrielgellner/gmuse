@@ -165,7 +165,7 @@ impl Instance {
             // time. What it does now is narrower and more important: if a
             // relink pointed this encoding at a different recording, a scan
             // must not quietly mint over the decision (#88).
-            let bound = known.encodings.get(&encoding).and_then(|d| d.recording);
+            let bound = known.bound.get(&encoding).copied();
             let recording = bound.unwrap_or(minted);
 
             // Only what we actually minted carries a basis. Claiming that a

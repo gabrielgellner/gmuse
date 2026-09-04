@@ -42,9 +42,14 @@ pub fn rows(
     now: i64,
     only: Only,
 ) -> Vec<Queried> {
+    // **The log first, then the disk.** `ingest` refuses to mint over a
+    // binding somebody made — but only over one it can see, and a scan into an
+    // empty instance sees nothing. Scanning first re-minted every relinked
+    // recording from its bytes, so 377 identifications applied cleanly and the
+    // work list did not move.
     let mut scratch = Instance::new(device);
-    crate::model::populate::populate(&mut scratch, roots, now);
     scratch.merge(now, records);
+    crate::model::populate::populate(&mut scratch, roots, now);
     let catalogue = scratch.catalogue();
     let library = Librarian::from_catalogue(&catalogue);
 
@@ -208,6 +213,70 @@ mod tests {
         assert!(
             !after.iter().any(|r| r.recording == named),
             "a recording an authority has named is not work"
+        );
+    }
+
+    /// **A scan must not mint over an identification, and this is the shape
+    /// that let it.**
+    ///
+    /// The log holds `EncodingBound` and nothing else — encodings are
+    /// described by scanning, so a log carrying a relink and no scan beside it
+    /// is the ordinary case, not an odd one. The fold wrote the binding onto
+    /// the `Encoded` row and dropped it when there was none, so `ingest` asked
+    /// "is this encoding already bound?", was told no, and minted from the
+    /// bytes again.
+    ///
+    /// Nothing failed. 377 identifications applied cleanly, the log was
+    /// correct, and the work list did not move — which is the only way it
+    /// showed up.
+    #[test]
+    fn a_scan_does_not_mint_over_an_identification() {
+        let root = dir("relink");
+        wav(&root.join("a.wav"), 1000);
+
+        // What the file mints on its own.
+        let before = rows(
+            std::slice::from_ref(&root),
+            &BTreeSet::new(),
+            device(),
+            100,
+            Only::Everything,
+        );
+        let encoding = before[0].encoding.expect("an encoding");
+        let minted = before[0].recording;
+
+        // Somebody identifies it, exactly as `apply` writes one.
+        let named = Id::<Recording>::of_basis(&Basis::MusicBrainz(uuid::Uuid::from_u128(1)));
+        let log = records(
+            200,
+            [
+                Fact::RecordingIdentified {
+                    recording: named,
+                    basis: Basis::MusicBrainz(uuid::Uuid::from_u128(1)),
+                },
+                Fact::EncodingBound {
+                    encoding,
+                    from: Some(minted),
+                    to: named,
+                },
+            ],
+        );
+
+        let after = rows(
+            std::slice::from_ref(&root),
+            &log,
+            device(),
+            300,
+            Only::Everything,
+        );
+        assert_eq!(after.len(), 1, "the file became two recordings");
+        assert_eq!(
+            after[0].recording, named,
+            "the scan minted over a decision somebody made"
+        );
+        assert!(
+            rows(&[root], &log, device(), 300, Only::Unidentified).is_empty(),
+            "an identified file is still on the work list"
         );
     }
 
