@@ -66,6 +66,12 @@ CANDIDATES: Final = 3
 #: A Lucene score at or above this is a name match worth considering. Below it
 #: MusicBrainz is guessing from a partial term.
 STRONG: Final = 95
+#: A name that is plausible but not top-ranked. **On its own this decides
+#: nothing** — it exists so a candidate whose *length* matches to the second is
+#: not thrown away for scoring 80 on its title, which is what happened to
+#: `Triton` (ours 463.9s, MB's 465.0s at score 80, discarded in favour of a
+#: 222-second edit scoring 100).
+PLAUSIBLE: Final = 70
 #: Seconds of disagreement still counted as the same recording. Encoder padding
 #: and a trimmed lead-in account for one or two; five is generous and still
 #: rules out the live take.
@@ -245,12 +251,25 @@ def best(candidates: list[dict[str, Any]], ours: float | None) -> dict[str, Any]
     MusicBrainz considers strong, take the one closest in length. With no
     duration to compare, the ranking is all there is and the first stands.
     """
-    strong = [c for c in candidates if isinstance(c.get("score"), int) and c["score"] >= STRONG]
-    if not strong or ours is None:
+    if not candidates or ours is None:
         return candidates[0] if candidates else None
-    timed = [c for c in strong if isinstance(c.get("length"), int)]
+
+    # **Length outranks the name ranking**, within reason. MusicBrainz scores by
+    # title similarity, which cannot tell an album version from its radio edit —
+    # both are the same title by the same artist. A candidate whose length
+    # agrees to the second is the better answer even at a lower score, and
+    # `PLAUSIBLE` is only there to stop that reasoning reaching a candidate
+    # whose name is not really a match at all.
+    #
+    # A length of **zero means MusicBrainz has none recorded**, not a
+    # zero-second recording. Seven candidate lists here contain one, and
+    # comparing against it made a real recording look wrong by its whole
+    # duration.
+    plausible = [c for c in candidates if isinstance(c.get("score"), int) and c["score"] >= PLAUSIBLE]
+    timed = [c for c in plausible if isinstance(c.get("length"), int) and c["length"] > 0]
     if not timed:
-        return strong[0]
+        strong = [c for c in candidates if isinstance(c.get("score"), int) and c["score"] >= STRONG]
+        return strong[0] if strong else candidates[0]
 
     def drift(candidate: dict[str, Any]) -> float:
         length = candidate["length"]
@@ -332,14 +351,25 @@ def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:
     agrees, and collapsing them is how a live take gets filed as the album cut.
     """
     score = recording.get("score", 0)
-    if not isinstance(score, int) or score < STRONG:
+    if not isinstance(score, int) or score < PLAUSIBLE:
         return "uncertain", f"name score {score}"
+
     length = recording.get("length")
-    if ours is None or not isinstance(length, int):
+    # Zero is "MusicBrainz records no length", not a zero-second recording.
+    known = isinstance(length, int) and length > 0
+    if ours is None or not known:
+        if score < STRONG:
+            return "uncertain", f"name score {score}, and no duration to check it with"
         return "probable", f"name score {score}, no duration to check"
+
     drift = abs(length / 1000.0 - ours)
     if drift <= DURATION_SLACK:
+        # **A length that agrees is the stronger evidence.** Two recordings of
+        # one title by one artist are indistinguishable by name; agreeing to the
+        # second is what separates the album version from its radio edit.
         return "matched", f"name score {score}, duration within {drift:.1f}s"
+    if score < STRONG:
+        return "uncertain", f"name score {score} and duration off by {drift:.0f}s"
     return "uncertain", f"name score {score} but duration off by {drift:.0f}s"
 
 
