@@ -36,6 +36,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::model::basis::Basis;
 use crate::model::encoding::Format;
 use crate::model::entity::Device;
 use crate::model::id::Id;
@@ -58,7 +59,7 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                 audio: t.audio_id?,
                 title: t.display_title().to_string(),
                 artist: t.artist.clone().unwrap_or_default(),
-                mb_recording: t.mb_recording,
+                identity: t.mb_recording.map(Basis::MusicBrainz),
                 album: t.album.clone(),
                 album_artist: t.albumartist.clone(),
                 disc: t.discnumber.map(|d| d as u16),

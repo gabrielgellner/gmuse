@@ -33,6 +33,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::audio_id::AudioId;
+use crate::model::basis::Basis;
 use crate::model::entity::Recording;
 use crate::model::id::Id;
 
@@ -74,15 +75,20 @@ pub fn recording_id_for(
     mb_recording: Option<uuid::Uuid>,
     audio: Option<AudioId>,
 ) -> Option<Id<Recording>> {
-    let id = match (mb_recording, audio) {
-        (Some(mbid), _) => Id::<Recording>::of_musicbrainz(mbid),
-        (None, Some(a)) => Id::<Recording>::derived(a.to_string().as_bytes()),
-        // Neither: nothing stable to hang history on, so it stays under its
-        // path rather than being given an identity that would change on the
-        // next scan.
+    // **Through `of_basis`, and that is the point of #89.** This function used
+    // to mint on its own, so there were two ladders — this one and `ingest`'s
+    // — that agreed only for as long as nobody edited either. Changing the
+    // model's derivation and not this one made nine UI tests fail with a
+    // rating attached to an id the librarian had never heard of, which is
+    // exactly the failure two ladders produce.
+    let basis = match (mb_recording, audio) {
+        (Some(mbid), _) => Basis::MusicBrainz(mbid),
+        (None, Some(a)) => Basis::Audio(a),
+        // Neither: nothing stable to hang history on, and inventing one would
+        // give an identity that changes on the next scan.
         (None, None) => return None,
     };
-    Some(id)
+    Some(Id::<Recording>::of_basis(&basis))
 }
 
 #[cfg(test)]
@@ -125,23 +131,21 @@ mod key_tests {
         );
     }
 
-    /// **The same id the model mints**, which is what keeps this to one
-    /// migration rather than two.
+    /// **The same id the model mints**, and this test earned its keep: when
+    /// the model moved to `of_basis` and this file did not, it failed
+    /// alongside nine UI tests whose ratings had attached to ids the librarian
+    /// had never heard of. That is what two ladders do.
     #[test]
     fn the_key_agrees_with_what_ingest_would_mint() {
         let mbid = uuid::Uuid::from_u128(0x1831_05b5);
         assert_eq!(
             key_for(Some(mbid), None).unwrap(),
-            crate::model::id::Id::<crate::model::entity::Recording>::of_musicbrainz(mbid)
-                .to_string()
+            Id::<Recording>::of_basis(&Basis::MusicBrainz(mbid)).to_string()
         );
         let a = audio(0xdead_beef);
         assert_eq!(
             key_for(None, Some(a)).unwrap(),
-            crate::model::id::Id::<crate::model::entity::Recording>::derived(
-                a.to_string().as_bytes()
-            )
-            .to_string()
+            Id::<Recording>::of_basis(&Basis::Audio(a)).to_string()
         );
     }
 

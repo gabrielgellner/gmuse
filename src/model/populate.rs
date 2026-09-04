@@ -129,7 +129,7 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
     for path in paths {
         match ingest::read(&path) {
             Ok(s) => {
-                if s.mb_recording.is_some() {
+                if s.identity.is_some() {
                     report.confirmed += 1;
                 } else {
                     report.provisional += 1;

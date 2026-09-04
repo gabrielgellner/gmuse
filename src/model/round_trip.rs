@@ -14,6 +14,7 @@
 use std::collections::BTreeSet;
 
 use crate::audio_id::AudioId;
+use crate::model::basis::Basis;
 use crate::model::entity::{Artist, Device, Encoding, Recording};
 use crate::model::id::Id;
 use crate::model::instance::{Instance, Scanned};
@@ -34,7 +35,7 @@ fn album() -> Vec<Scanned> {
         audio: audio(hash),
         title: title.into(),
         artist: "Stephan Bodzin & Marc Romboy".into(),
-        mb_recording: Some(uuid::Uuid::from_u128(mbid)),
+        identity: Some(Basis::MusicBrainz(uuid::Uuid::from_u128(mbid))),
         album: Some("Luna".into()),
         album_artist: Some("Stephan Bodzin & Marc Romboy".into()),
         disc: Some(1),
@@ -68,7 +69,7 @@ fn album_unbound() -> Vec<Scanned> {
     album()
         .into_iter()
         .map(|s| Scanned {
-            mb_recording: None,
+            identity: None,
             ..s
         })
         .collect()
@@ -78,7 +79,7 @@ fn ids(scan: &[Scanned]) -> (Id<Artist>, Id<Recording>, Id<Encoding>) {
     let s = &scan[0];
     (
         Id::<Artist>::derived(s.artist.as_bytes()),
-        Id::<Recording>::of_musicbrainz(s.mb_recording.expect("bound fixture")),
+        Id::<Recording>::of_basis(s.identity.as_ref().expect("bound fixture")),
         Id::<Encoding>::of_audio(&s.audio),
     )
 }
@@ -346,7 +347,7 @@ fn two_instances_ingesting_the_same_real_files() {
         .map(|p| ingest::read(p).expect("reads"))
         .collect();
     assert_eq!(scan[0].title, "Callisto");
-    assert!(scan[0].mb_recording.is_some() && scan[1].mb_recording.is_none());
+    assert!(scan[0].identity.is_some() && scan[1].identity.is_none());
 
     let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
     m1.ingest(100, &scan);

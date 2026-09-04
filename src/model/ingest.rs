@@ -42,6 +42,7 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
 use lofty::probe::Probe;
 
+use crate::model::basis::Basis;
 use crate::model::instance::Scanned;
 
 /// How much the catalogue trusts an identification.
@@ -103,7 +104,7 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
             audio,
             title: stem(),
             artist: String::new(),
-            mb_recording: None,
+            identity: None,
             ..Default::default()
         });
     };
@@ -129,8 +130,11 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
             _ => String::new(),
         },
         // One key, every format: lofty maps ID3's UFID and Vorbis's
-        // `musicbrainz_trackid` onto it, and both mean the recording.
-        mb_recording: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzRecordingId)).ok(),
+        // `musicbrainz_trackid` onto it, and both mean the recording. The top
+        // rung of #89's ladder; a harvest pass fills the middle one.
+        identity: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzRecordingId))
+            .ok()
+            .map(Basis::MusicBrainz),
         album: some(tag.and_then(|t| t.album()).map(|s| s.trim().to_string())),
         // Album artist first, because a guest credit on one track must not
         // split the album off from the artist it files under.
@@ -189,7 +193,7 @@ fn number(s: &str) -> Option<u16> {
 /// mistagged file with no MusicBrainz id falls straight to a name comparison
 /// rather than to the thing that would actually recognise it.
 pub fn confidence_of(scan: &Scanned, matches_known_name: bool) -> Confidence {
-    if scan.mb_recording.is_some() {
+    if matches!(scan.identity, Some(Basis::MusicBrainz(_))) {
         Confidence::Confirmed
     } else if matches_known_name {
         Confidence::Matched
@@ -280,7 +284,10 @@ mod tests {
         let s = read(&p).expect("reads");
         assert_eq!(s.title, "Callisto");
         assert_eq!(s.artist, "Stephan Bodzin & Marc Romboy");
-        assert_eq!(s.mb_recording, uuid::Uuid::parse_str(mbid).ok());
+        assert_eq!(
+            s.identity,
+            uuid::Uuid::parse_str(mbid).ok().map(Basis::MusicBrainz)
+        );
         assert_eq!(confidence_of(&s, false), Confidence::Confirmed);
     }
 
@@ -297,7 +304,7 @@ mod tests {
             s.title, "04 Unknown Thing",
             "the name is better than a hole"
         );
-        assert!(s.artist.is_empty() && s.mb_recording.is_none());
+        assert!(s.artist.is_empty() && s.identity.is_none());
         assert_eq!(
             confidence_of(&s, false),
             Confidence::Provisional,

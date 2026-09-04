@@ -205,3 +205,104 @@ mod tests {
         );
     }
 }
+
+/// What a library rests on, and where it is thin.
+///
+/// The report `--migrate-log` and a scan can both print, and the thing that
+/// was impossible before a basis was recorded: **which** recordings are held
+/// together by nothing but their bytes.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Census {
+    pub musicbrainz: usize,
+    pub external: usize,
+    /// Recordings a re-encode would strand. The work list for #57.
+    pub bytes_only: Vec<Id<Recording>>,
+}
+
+impl Census {
+    pub fn of<'a>(identified: impl IntoIterator<Item = (&'a Id<Recording>, &'a Basis)>) -> Self {
+        let mut c = Census::default();
+        for (id, basis) in identified {
+            match basis {
+                Basis::MusicBrainz(_) => c.musicbrainz += 1,
+                Basis::External { .. } => c.external += 1,
+                Basis::Audio(_) => c.bytes_only.push(*id),
+            }
+        }
+        c
+    }
+
+    pub fn total(&self) -> usize {
+        self.musicbrainz + self.external + self.bytes_only.len()
+    }
+}
+
+impl std::fmt::Display for Census {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.total();
+        let share = |k: usize| {
+            if n == 0 {
+                0.0
+            } else {
+                100.0 * k as f64 / n as f64
+            }
+        };
+        write!(
+            f,
+            "{n} recordings — {} by MusicBrainz ({:.1}%), {} by another authority, \
+             {} by their bytes alone ({:.1}%)",
+            self.musicbrainz,
+            share(self.musicbrainz),
+            self.external,
+            self.bytes_only.len(),
+            share(self.bytes_only.len()),
+        )
+    }
+}
+
+#[cfg(test)]
+mod census_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn rec(n: u128) -> Id<Recording> {
+        Id::from_uuid(Uuid::from_u128(n))
+    }
+
+    /// **The question that could not be asked before.** Not "how many rest on
+    /// their bytes" — a count was always derivable by subtraction — but *which
+    /// ones*, because that is the list a fingerprint pass runs over.
+    #[test]
+    fn the_residue_is_named_and_not_merely_counted() {
+        let held: BTreeMap<Id<Recording>, Basis> = [
+            (rec(1), Basis::MusicBrainz(Uuid::from_u128(10))),
+            (rec(2), Basis::Audio(AudioId { scheme: 1, hash: 7 })),
+            (
+                rec(3),
+                Basis::External {
+                    authority: "beatport".into(),
+                    key: "9728882".into(),
+                },
+            ),
+            (rec(4), Basis::Audio(AudioId { scheme: 1, hash: 9 })),
+        ]
+        .into();
+
+        let c = Census::of(held.iter());
+        assert_eq!((c.musicbrainz, c.external), (1, 2 - 1));
+        assert_eq!(
+            c.bytes_only,
+            vec![rec(2), rec(4)],
+            "the residue has to come back as identities, not a number"
+        );
+        assert_eq!(c.total(), 4);
+    }
+
+    /// An empty library reports nothing rather than dividing by zero.
+    #[test]
+    fn an_empty_library_has_no_shares() {
+        let c = Census::of(std::iter::empty());
+        assert_eq!(c.total(), 0);
+        assert!(c.to_string().contains("0 recordings"));
+    }
+}

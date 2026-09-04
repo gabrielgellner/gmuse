@@ -33,7 +33,7 @@
 use uuid::Uuid;
 
 use crate::audio_id::AudioId;
-use crate::model::entity::{Artist, Encoding, Recording, Release, ReleaseGroup, Work};
+use crate::model::entity::{Artist, Encoding, Release, ReleaseGroup, Work};
 use crate::model::id::Id;
 
 impl Id<Encoding> {
@@ -70,7 +70,13 @@ macro_rules! from_musicbrainz {
     };
 }
 
-from_musicbrainz!(Recording, Work, Release, ReleaseGroup, Artist);
+// **`Recording` is deliberately absent.** Its id comes from `Basis`, which is
+// the whole of #89: a recording can be named by MusicBrainz, by some other
+// authority, or by nothing but its bytes, and which of those it was has to be
+// recorded rather than inferred. Leaving `of_musicbrainz` reachable here would
+// leave a second door into the same identity — and two ladders that agree only
+// until someone edits one is exactly the bug this replaced.
+from_musicbrainz!(Work, Release, ReleaseGroup, Artist);
 
 #[cfg(test)]
 mod tests {
@@ -99,16 +105,13 @@ mod tests {
     }
 
     /// Derived, not adopted: the upstream id is a binding, so an upstream
-    /// merge cannot rename anything of ours.
+    /// merge cannot rename anything of ours. Shown on a release, because a
+    /// recording's id goes through `Basis` and is tested there (#89).
     #[test]
-    fn a_recording_id_is_not_its_musicbrainz_id() {
+    fn an_entity_id_is_not_its_musicbrainz_id() {
         let mbid = Uuid::parse_str("183105b5-0000-4000-8000-000000000000").unwrap();
-        let id = Id::<Recording>::of_musicbrainz(mbid);
-        assert_eq!(
-            id,
-            Id::<Recording>::of_musicbrainz(mbid),
-            "still convergent"
-        );
+        let id = Id::<Release>::of_musicbrainz(mbid);
+        assert_eq!(id, Id::<Release>::of_musicbrainz(mbid), "still convergent");
         assert_ne!(id.as_uuid(), mbid, "ours, derived from theirs");
     }
 
@@ -119,7 +122,7 @@ mod tests {
     fn one_mbid_under_two_kinds_stays_two_entities() {
         let mbid = Uuid::parse_str("859d0860-0000-4000-8000-000000000000").unwrap();
         assert_ne!(
-            Id::<Recording>::of_musicbrainz(mbid).as_uuid(),
+            Id::<Work>::of_musicbrainz(mbid).as_uuid(),
             Id::<Release>::of_musicbrainz(mbid).as_uuid()
         );
     }
@@ -141,9 +144,9 @@ mod tests {
         );
         let mbid = Uuid::parse_str("183105b5-0000-4000-8000-000000000000").unwrap();
         assert_eq!(
-            Id::<Recording>::of_musicbrainz(mbid).to_string(),
-            "93cac4ff-b447-5009-bbc2-d294605568a2",
-            "recording minting changed: every stored id is now wrong"
+            Id::<Release>::of_musicbrainz(mbid).to_string(),
+            "1f4e63fd-2605-557d-ba5b-05ae0c641352",
+            "release minting changed: every stored id is now wrong"
         );
     }
 }

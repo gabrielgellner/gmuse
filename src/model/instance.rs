@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::audio_id::AudioId;
+use crate::model::basis::Basis;
 use crate::model::clock::{Drift, HybridClock, Stamp};
 use crate::model::durable::{self, Damage, LogError};
 use crate::model::encoding::Format;
@@ -33,10 +34,14 @@ pub struct Scanned {
     pub audio: AudioId,
     pub title: String,
     pub artist: String,
-    /// A MusicBrainz recording id, where the tags carry one — 92.7% of this
-    /// library. Its presence is what lets two devices converge without
-    /// meeting.
-    pub mb_recording: Option<uuid::Uuid>,
+    /// **What names this performance**, if anything does — the identity half
+    /// of a scan, kept apart from the descriptive half below.
+    ///
+    /// A `Basis` rather than a MusicBrainz id, so a pass that harvests a
+    /// Beatport track id or a video id can fill this in without `ingest`
+    /// learning what either of those is. `None` falls to the bytes, which is
+    /// the rung that a re-encode strands (#89).
+    pub identity: Option<crate::model::basis::Basis>,
     /// The album this sits on, as the tags name it.
     pub album: Option<String>,
     /// Who the *album* is credited to, which is not always who the track is.
@@ -124,23 +129,39 @@ impl Instance {
         for s in scan {
             let artist = Id::<Artist>::derived(s.artist.as_bytes());
             let encoding = Id::<Encoding>::of_audio(&s.audio);
-            let recording = match s.mb_recording {
-                Some(mbid) => Id::<Recording>::of_musicbrainz(mbid),
-                // No external id to converge on, so converge on the bytes
-                // instead. Random minting would make two devices reading one
-                // disk disagree about a song neither has any doubt about, and
-                // would make the *same* device disagree with itself across a
-                // rescan — which is what rung zero below was patching over.
-                //
-                // The cost is honest and small: a re-encode of an unbound file
-                // mints a new recording, where a MusicBrainz id would have held
-                // it together. That is the 7.3% with nothing to hold it by.
-                None => known
-                    .encodings
-                    .get(&encoding)
-                    .and_then(|d| d.recording)
-                    .unwrap_or_else(|| Id::<Recording>::derived(s.audio.to_string().as_bytes())),
-            };
+            // The best rung this file reaches. Nothing names the performance,
+            // so it falls to the bytes — which is convergent, and is the case
+            // a re-encode strands. Random minting is not the alternative: two
+            // devices reading one disk would disagree about a song neither has
+            // any doubt about, and the same device would disagree with itself
+            // across a rescan.
+            let basis = s.identity.clone().unwrap_or(Basis::Audio(s.audio));
+            let minted = Id::<Recording>::of_basis(&basis);
+
+            // **A binding someone made wins over the one we would mint.**
+            //
+            // This used to be described as stopping a rescan from doubling the
+            // library, and it is not that any more — `of_basis` is
+            // deterministic, so a rescan mints the same id it minted last
+            // time. What it does now is narrower and more important: if a
+            // relink pointed this encoding at a different recording, a scan
+            // must not quietly mint over the decision (#88).
+            let bound = known.encodings.get(&encoding).and_then(|d| d.recording);
+            let recording = bound.unwrap_or(minted);
+
+            // Only what we actually minted carries a basis. Claiming that a
+            // relinked recording was derived from these bytes would be false,
+            // and it is the sort of false that a later fingerprint pass would
+            // act on.
+            if bound.is_none() {
+                self.append(
+                    now,
+                    Fact::RecordingIdentified {
+                        recording,
+                        basis: basis.clone(),
+                    },
+                );
+            }
 
             self.append(
                 now,

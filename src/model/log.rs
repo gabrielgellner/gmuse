@@ -53,6 +53,22 @@ pub enum Fact {
     /// there is nothing to surface.
     ArtistNamed { artist: Id<Artist>, name: String },
 
+    /// What a recording's id was derived from.
+    ///
+    /// **Immutable given the id**, because the id is a function of it — which
+    /// is why it is not a field on `RecordingCatalogued`. That fact is
+    /// descriptive and last-writer-wins, so a retitle would drag the basis
+    /// along with it, and a basis is not the sort of thing a retitle revises.
+    ///
+    /// Recorded because its absence was the problem: a library where 7.3% of
+    /// recordings rest on nothing but their bytes could not say *which* 7.3%,
+    /// so the files a re-encode would strand were invisible and the work list
+    /// for a fingerprint pass could not be produced.
+    RecordingIdentified {
+        recording: Id<Recording>,
+        basis: crate::model::basis::Basis,
+    },
+
     /// A recording exists, and what it is called.
     RecordingCatalogued {
         recording: Id<Recording>,
@@ -200,6 +216,8 @@ pub struct Catalogue {
     pub encodings: BTreeMap<Id<Encoding>, Encoded>,
     pub genres: BTreeSet<(Id<Recording>, String)>,
     pub plays: BTreeMap<Id<Recording>, u32>,
+    /// What each recording's identity was derived from.
+    pub identified: BTreeMap<Id<Recording>, crate::model::basis::Basis>,
     /// When each recording entered the library, as the earliest anyone says.
     pub acquired: BTreeMap<Id<Recording>, i64>,
     /// The most recent play, in **seconds** since the epoch — the same unit
@@ -405,6 +423,23 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 let seconds = stamp.wall / 1_000;
                 let latest = cat.last_played.entry(*recording).or_insert(seconds);
                 *latest = (*latest).max(seconds);
+            }
+            Fact::RecordingIdentified { recording, basis } => {
+                // **No conflict rule, because there cannot be a conflict.**
+                //
+                // The id is `of_basis(basis)`, so two different bases reaching
+                // one recording would be a UUIDv5 collision. Every fact naming
+                // this id carries the same basis, and the only thing two
+                // devices can disagree about is whether they have said it yet.
+                //
+                // A "best rung wins" comparison was written here first and is
+                // gone: a mutation that reversed it failed no test, which is
+                // the signature of a branch that cannot run. A file that later
+                // gains a MusicBrainz id does not update this row — it mints a
+                // *different* recording, and the two are joined by a merge.
+                cat.identified
+                    .entry(*recording)
+                    .or_insert_with(|| basis.clone());
             }
             Fact::RecordingAcquired { recording, at } => {
                 let first = cat.acquired.entry(*recording).or_insert(*at);

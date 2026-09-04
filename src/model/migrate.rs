@@ -420,9 +420,12 @@ mod tests {
 
         let mut by_path = std::collections::HashMap::new();
         for file in populate::audio_files(&roots) {
-            if let Ok(s) = crate::model::ingest::read(&file)
-                && let Some(id) = crate::history::recording_id_for(s.mb_recording, Some(s.audio))
-            {
+            if let Ok(s) = crate::model::ingest::read(&file) {
+                let id = Id::<Recording>::of_basis(
+                    &s.identity
+                        .clone()
+                        .unwrap_or(crate::model::basis::Basis::Audio(s.audio)),
+                );
                 by_path.insert(file, id);
             }
         }
@@ -469,6 +472,8 @@ pub struct Outcome {
     pub acquired: usize,
     /// Paths the base still names that no file answers to any more.
     pub orphaned: Vec<String>,
+    /// What the library's identities rest on, and where it is thin (#89).
+    pub census: crate::model::basis::Census,
     /// Records written. Fewer than `report.converted` on a second run, because
     /// what is already on disk is not written again.
     pub written: usize,
@@ -508,7 +513,8 @@ pub fn run(
 ) -> Result<Outcome, crate::model::durable::LogError> {
     let device = Id::<Device>::derived(device_name.as_bytes());
     let events = crate::events::events_in(data_dir);
-    let (_, scan) = crate::model::populate::read_library(device_name, roots, now);
+    let (scanned_instance, scan) = crate::model::populate::read_library(device_name, roots, now);
+    let census = crate::model::basis::Census::of(scanned_instance.catalogue().identified.iter());
 
     let (mut records, report) =
         to_records(&events, device, |path| scan.identified.get(path).copied());
@@ -557,6 +563,7 @@ pub fn run(
         report,
         acquired,
         orphaned,
+        census,
         written,
     })
 }
