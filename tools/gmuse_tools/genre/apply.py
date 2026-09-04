@@ -10,15 +10,15 @@ second time.
 
 from __future__ import annotations
 
-import argparse
 import csv
 from pathlib import Path
 
+import typer
 from mutagen import File as MutagenFile
 from mutagen.id3 import TCON
 from mutagen.mp4 import MP4Tags
 
-from genre.common import album_key, out_path, tags_of, walk
+from gmuse_tools.genre.common import album_key, out_path, tags_of, walk
 
 TRUTHY = frozenset({"y", "yes", "1"})
 
@@ -80,14 +80,9 @@ def set_genre(path: Path, value: str) -> bool:
     return True
 
 
-def main() -> None:
+def apply_all(root: Path, *, write: bool) -> None:
     """Apply the review file, or show what it would do."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", nargs="?", default="~/MusicLibrary", help="library root to edit")
-    parser.add_argument("--write", action="store_true", help="actually change the files")
-    args = parser.parse_args()
-
-    root = Path(args.root).expanduser()
+    root = root.expanduser()
     wanted = wanted_from(out_path("genre-review.tsv"))
     if not wanted:
         print("nothing marked to apply")
@@ -102,7 +97,7 @@ def main() -> None:
         if (tags.get("genre") or "").strip() == target:
             skipped += 1  # already right: idempotent by construction
             continue
-        if not args.write:
+        if not write:
             print(f"  would set {path.relative_to(root)}\n      {tags.get('genre', '')!r} -> {target!r}")
             changed += 1
         elif set_genre(path, target):
@@ -110,9 +105,9 @@ def main() -> None:
         else:
             unreadable += 1
 
-    verb = "changed" if args.write else "would change"
+    verb = "changed" if write else "would change"
     print(f"\n{verb} {changed} files, {skipped} already correct, {unreadable} unreadable")
-    if not args.write:
+    if not write:
         print("dry run — pass --write to actually edit")
     else:
         print(
@@ -121,5 +116,17 @@ def main() -> None:
         )
 
 
-if __name__ == "__main__":
-    main()
+LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
+
+
+def register(app: typer.Typer) -> None:
+    """Attach the genre apply."""
+
+    @app.command("apply")
+    def apply_cmd(
+        root: Path = LIB,
+        *,
+        write: bool = typer.Option(default=False, help="actually change the files"),
+    ) -> None:
+        """Write the reviewed genres. A dry run without `--write`."""
+        apply_all(root, write=write)

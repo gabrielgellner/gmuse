@@ -16,6 +16,16 @@ use crate::audio::{PlayerConfig, resample::Quality};
 #[derive(Debug, Parser)]
 #[command(name = "gmuse", version, about, long_about = None)]
 pub struct Cli {
+    /// A library operation, instead of launching the player.
+    ///
+    /// **A subcommand rather than another flag**, and the difference is
+    /// lifetime. `--rescan` and `--migrate-log` modify a launch; these do not
+    /// launch anything. `library-api.md` §2 names five of them, and they share
+    /// a shape — read a file or a spec, say what would happen, and do it only
+    /// when told.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Output device, matched by substring against the device id.
     #[arg(short, long, env = "GMUSE_DEVICE")]
     pub device: Option<String>,
@@ -115,6 +125,31 @@ pub struct Cli {
     /// default, not a rule.
     #[arg(long)]
     pub no_lock: bool,
+}
+
+/// What gmuse can be asked to do instead of playing music.
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    /// Operations on the library itself.
+    #[command(subcommand)]
+    Library(Library),
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum Library {
+    /// Apply a file of proposed facts.
+    ///
+    /// **A dry run unless given `--write`.** The genre pipeline already
+    /// learned this one: a pass that writes by default is a pass nobody reads
+    /// the output of first, and these files are produced by tools that are
+    /// wrong often enough to be worth reviewing.
+    Apply {
+        /// The `.jsonl` file to read.
+        file: PathBuf,
+        /// Append the facts. Without this, nothing is written.
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 impl Cli {

@@ -35,18 +35,18 @@ The exception is lyrics, which is why this pass migrates before it deletes.
 
 from __future__ import annotations
 
-import argparse
 import collections
 import csv
 import json
 from pathlib import Path
 from typing import Final
 
+import typer
 from mutagen import MutagenError
 from mutagen.apev2 import APENoHeaderError, APEv2
 from mutagen.id3 import ID3, USLT, ID3NoHeaderError
 
-from genre.common import out_path, walk, write_tsv
+from gmuse_tools.genre.common import out_path, walk, write_tsv
 
 #: APE keys that are mp3gain's own bookkeeping. All superseded by rsgain's ID3
 #: frames, and `MP3GAIN_UNDO` is the record of an audio change made years ago
@@ -274,31 +274,28 @@ def restore(snap: Path, *, write: bool) -> None:
         print("dry run — pass --write to actually restore")
 
 
-def main() -> None:
-    """Parse the command line and run the requested phase."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="phase", required=True)
-    for name, helptext in (
-        ("survey", "look and write the plan; changes nothing"),
-        ("apply", "normalise the rows marked y"),
-        ("restore", "put the APE tags back from the snapshot"),
-    ):
-        s = sub.add_parser(name, help=helptext)
-        s.add_argument("root", nargs="?", default="~/MusicLibrary")
-        if name != "survey":
-            s.add_argument("--write", action="store_true", help="actually edit files")
-    args = parser.parse_args()
-
-    root = Path(args.root).expanduser()
-    review = out_path("tags-review.tsv")
-    snap = out_path("tags-snapshot.tsv")
-    if args.phase == "survey":
-        survey(root, review)
-    elif args.phase == "apply":
-        apply(review, snap, write=args.write)
-    else:
-        restore(snap, write=args.write)
+LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
+WRITE = typer.Option(default=False, help="actually edit files; without this, a dry run")
 
 
-if __name__ == "__main__":
-    main()
+def register(app: typer.Typer) -> None:
+    """Attach the tag normaliser."""
+    tags_app = typer.Typer(no_args_is_help=True, help=__doc__)
+    app.add_typer(tags_app, name="tags")
+
+    @tags_app.command("survey")
+    def survey_cmd(root: Path = LIB) -> None:
+        """Report what would be normalised. Writes nothing."""
+        survey(root.expanduser(), out_path("tags-review.tsv"))
+
+    @tags_app.command("apply")
+    def apply_cmd(root: Path = LIB, *, write: bool = WRITE) -> None:
+        """Normalise the rows marked `y`, taking a snapshot first."""
+        _ = root
+        apply(out_path("tags-review.tsv"), out_path("tags-snapshot.tsv"), write=write)
+
+    @tags_app.command("restore")
+    def restore_cmd(root: Path = LIB, *, write: bool = WRITE) -> None:
+        """Put the tags back from the snapshot."""
+        _ = root
+        restore(out_path("tags-snapshot.tsv"), write=write)

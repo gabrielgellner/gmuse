@@ -12,7 +12,6 @@ Discogs' Genre/Style split *is* this library's broad-first convention.
 
 from __future__ import annotations
 
-import argparse
 import datetime as dt
 import json
 import sqlite3
@@ -22,9 +21,10 @@ from pathlib import Path
 from typing import Any, Final
 
 import requests
+import typer
 
-import bronze
-from genre.common import album_key, out_path, secret, tags_of, tracklist_match, walk
+from gmuse_tools import bronze
+from gmuse_tools.genre.common import album_key, out_path, secret, tags_of, tracklist_match, walk
 
 USER_AGENT: Final = {"User-Agent": "gmuse-genre-tool/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
 MB_RELEASE: Final = "https://musicbrainz.org/ws/2/release/{}"
@@ -249,16 +249,12 @@ def has_genres(payload: dict[str, Any] | None) -> bool:
     return bool(payload.get("discogs_genres") or payload.get("discogs_styles") or payload.get("mb_genres"))
 
 
-def main() -> None:
+def fetch_all(root: Path) -> None:
     """Fetch what the cache is missing, and report what each release yielded."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", nargs="?", default="~/MusicLibrary", help="library root to scan")
-    args = parser.parse_args()
-
     con = open_cache(out_path("genre-cache.sqlite"))
     token = secret("DISCOGS_TOKEN")
 
-    albums = albums_in(Path(args.root).expanduser())
+    albums = albums_in(root.expanduser())
     cached = {row[0] for row in con.execute("SELECT mbid FROM lookup")}
     wanted = {a.mbid for a in albums.values() if a.mbid}
     todo = sorted(wanted - cached)
@@ -320,5 +316,13 @@ def main() -> None:
         )
 
 
-if __name__ == "__main__":
-    main()
+LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
+
+
+def register(app: typer.Typer) -> None:
+    """Attach the genre fetch."""
+
+    @app.command("fetch")
+    def fetch_cmd(root: Path = LIB) -> None:
+        """MusicBrainz release to its Discogs link, cached. Writes no tags."""
+        fetch_all(root)

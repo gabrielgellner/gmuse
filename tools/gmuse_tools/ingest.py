@@ -31,7 +31,6 @@ ingest, then genre, then rsgain, and `--next` prints it.
 
 from __future__ import annotations
 
-import argparse
 import collections
 import re
 import shutil
@@ -41,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+import typer
 from mutagen.id3 import (
     ID3,
     TALB,
@@ -60,8 +60,8 @@ from mutagen.id3 import (
     UFID,
 )
 
-from genre.common import tracklist_match
-from genre.fetch import get_json
+from gmuse_tools.genre.common import tracklist_match
+from gmuse_tools.genre.fetch import get_json
 
 MB: Final = "https://musicbrainz.org/ws/2"
 #: Everything needed in one request. Each `inc` is a round trip saved against a
@@ -288,29 +288,25 @@ def apply(folder: Path, artist: str, album: str, dest: Path | None, *, write: bo
     print("  and `tags survey` to confirm nothing reintroduced an ID3v1 block.")
 
 
-def main() -> None:
-    """Parse the command line and run the requested phase."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="phase", required=True)
-    for name in ("identify", "apply"):
-        s = sub.add_parser(name)
-        s.add_argument("folder")
-        s.add_argument("--artist", required=True)
-        s.add_argument("--album", default="", help="defaults to the folder name")
-        if name == "apply":
-            s.add_argument("--dest", help="album folder in the library to move into")
-            s.add_argument("--write", action="store_true")
-    args = parser.parse_args()
+def register(app: typer.Typer) -> None:
+    """Attach the importer."""
+    ingest_app = typer.Typer(no_args_is_help=True, help=__doc__)
+    app.add_typer(ingest_app, name="ingest")
 
-    folder = Path(args.folder).expanduser()
-    apply(
-        folder,
-        args.artist,
-        args.album,
-        Path(args.dest).expanduser() if getattr(args, "dest", None) else None,
-        write=getattr(args, "write", False),
-    )
-
-
-if __name__ == "__main__":
-    main()
+    @ingest_app.command("apply")
+    def apply_cmd(
+        folder: Path = typer.Argument(..., help="the download to bring in"),
+        artist: str = typer.Option(..., help="who it is by"),
+        album: str = typer.Option("", help="defaults to the folder name"),
+        dest: Path | None = typer.Option(None, help="album folder in the library to move into"),
+        *,
+        write: bool = typer.Option(default=False, help="actually move and tag"),
+    ) -> None:
+        """Identify a download against MusicBrainz and bring it in."""
+        apply(
+            folder.expanduser(),
+            artist,
+            album,
+            dest.expanduser() if dest else None,
+            write=write,
+        )

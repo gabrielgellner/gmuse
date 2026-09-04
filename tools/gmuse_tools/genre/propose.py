@@ -13,14 +13,15 @@ length is a *rendering* problem the format language already solves with
 
 from __future__ import annotations
 
-import argparse
 import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from genre.common import album_key, fix_case, out_path, tags_of, walk, write_tsv
+import typer
+
+from gmuse_tools.genre.common import album_key, fix_case, out_path, tags_of, walk, write_tsv
 
 #: The terms this library treats as broad — Discogs' 15 Genres, **after**
 #: `RENAME`. Both spellings are in here on purpose: a source says
@@ -391,13 +392,8 @@ def row_for(
     }
 
 
-def main() -> None:
+def propose_all(root: Path, *, show_all: bool) -> None:
     """Write the review file and summarise what it proposes."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", nargs="?", default="~/MusicLibrary", help="library root to scan")
-    parser.add_argument("--all", action="store_true", help="include albums that need no change")
-    args = parser.parse_args()
-
     con = sqlite3.connect(out_path("genre-cache.sqlite"))
     lookup = {mbid: json.loads(payload) for mbid, payload in con.execute("SELECT mbid, payload FROM lookup")}
     # A `null` payload is a recorded "Discogs has never heard of this" (#58),
@@ -405,14 +401,14 @@ def main() -> None:
     # cost from being spent again on every run.
     searched = {(a, b): json.loads(p) for a, b, p in con.execute("SELECT artist, album, payload FROM search")}
 
-    surveyed = survey(Path(args.root).expanduser())
+    surveyed = survey(root.expanduser())
     rows = [row_for(artist, name, album, lookup, searched) for (artist, name), album in sorted(surveyed.items())]
 
     review = out_path("genre-review.tsv")
     # Only rows that propose something. The survey covers every album, but a row
     # whose `proposed` already equals `current` asks nothing of a reader, and 396
     # of them buried the 108 that do. `--all` puts the full survey back.
-    shown = rows if args.all else [r for r in rows if r["apply"] == "y"]
+    shown = rows if show_all else [r for r in rows if r["apply"] == "y"]
     write_tsv(review, shown)
 
     uncertain_path = out_path("genre-uncertain.tsv")
@@ -432,5 +428,17 @@ def main() -> None:
     print("\nEdit the `proposed` column, clear `apply` to skip a row, then run apply.py.")
 
 
-if __name__ == "__main__":
-    main()
+LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
+
+
+def register(app: typer.Typer) -> None:
+    """Attach the genre proposal."""
+
+    @app.command("propose")
+    def propose_cmd(
+        root: Path = LIB,
+        *,
+        show_all: bool = typer.Option(default=False, help="include albums that need no change"),
+    ) -> None:
+        """Cache plus current tags becomes a review table. Writes no tags."""
+        propose_all(root, show_all=show_all)

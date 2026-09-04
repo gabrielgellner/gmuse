@@ -44,17 +44,16 @@ at one request per second, the two roots together are about twenty minutes.
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 import mutagen
+import typer
 
-import bronze
-from genre.common import out_path, walk
+from gmuse_tools import bronze
+from gmuse_tools.genre.common import out_path, walk
 
 if TYPE_CHECKING:
     import sqlite3
@@ -459,32 +458,35 @@ def propose(root: Path, out: Path, *, limit: int | None) -> None:
     print(f"  jq -r 'select(.confidence==\"uncertain\")' {out}")
 
 
-def main() -> None:
-    """Parse the command line and run the requested pass."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
+ROOT = typer.Argument(help="the directory to walk")
+LIMIT = typer.Option(None, help="stop after this many files")
+OUT = typer.Option(None, help="where to write the proposals")
 
-    fe = sub.add_parser("fetch", help="ask MusicBrainz about files with no recording id")
-    fe.add_argument("root")
-    fe.add_argument("--limit", type=int, default=None, help="stop after this many files")
 
-    pr = sub.add_parser("propose", help="turn the cache into a reviewable jsonl")
-    pr.add_argument("root")
-    pr.add_argument("--out", default=None)
-    pr.add_argument("--limit", type=int, default=None)
-
-    args = parser.parse_args()
-    root = Path(args.root).expanduser()
+def existing(root: Path) -> Path:
+    """A root that is there, or a clean exit saying which is not."""
+    root = root.expanduser()
     if not root.exists():
-        print(f"no such root: {root}")
-        sys.exit(1)
+        typer.echo(f"no such root: {root}")
+        raise typer.Exit(1)
+    return root
 
-    if args.command == "fetch":
-        fetch(root, limit=args.limit)
-    else:
+
+def register(app: typer.Typer) -> None:
+    """Attach this pass's commands to the tool."""
+
+    @app.command("fetch")
+    def fetch_cmd(root: Path = ROOT, limit: int | None = LIMIT) -> None:
+        """Ask MusicBrainz about files with no recording id."""
+        fetch(existing(root), limit=limit)
+
+    @app.command("propose")
+    def propose_cmd(
+        root: Path = ROOT,
+        out: Path | None = OUT,
+        limit: int | None = LIMIT,
+    ) -> None:
+        """Turn the cache into a reviewable jsonl. Writes no tags."""
+        root = existing(root)
         default = out_path(f"identify-{root.name.lower()}.jsonl")
-        propose(root, Path(args.out).expanduser() if args.out else default, limit=args.limit)
-
-
-if __name__ == "__main__":
-    main()
+        propose(root, out.expanduser() if out else default, limit=limit)

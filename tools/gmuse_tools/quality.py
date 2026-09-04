@@ -34,7 +34,6 @@ version does not work.
 
 from __future__ import annotations
 
-import argparse
 import collections
 import csv
 import json
@@ -46,10 +45,11 @@ from pathlib import Path
 from typing import Final
 
 import numpy as np
+import typer
 from mutagen import File as MutagenFile
 from mutagen import MutagenError
 
-from genre.common import AUDIO, out_path, walk, write_tsv
+from gmuse_tools.genre.common import AUDIO, out_path, walk, write_tsv
 
 #: Analysis rate. Everything is resampled here so one FFT size means one
 #: frequency resolution across formats.
@@ -571,70 +571,71 @@ def propose(rows: Path, out: Path, analyser: int) -> None:
     print(f"\nreview it, then: gmuse library apply {out}")
 
 
-def main() -> None:
-    """Parse the command line and run the survey."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="phase", required=True)
-    s = sub.add_parser("survey", help="measure every file; writes no tags")
-    s.add_argument("root", nargs="?", default="~/MusicLibrary")
-    s.add_argument("--tier", type=int, help="only files declaring this bitrate")
-    s.add_argument("--workers", type=int, default=8)
-    a = sub.add_parser("albums", help="roll the findings up to albums worth re-acquiring")
-    a.add_argument("--limit", type=int, default=100)
-    q = sub.add_parser("quarantine", help="move the listed album folders out of the library")
-    q.add_argument("root", nargs="?", default="~/MusicLibrary")
-    q.add_argument("--dest", default="~/LowQualityMusic")
-    q.add_argument("--write", action="store_true", help="actually move")
-    pr = sub.add_parser("propose", help="measure what a query listed, and say so")
-    pr.add_argument("rows", help="jsonl from `gmuse library query --format jsonl`")
-    pr.add_argument("--out", default="quality-proposals.jsonl")
-    pr.add_argument(
-        "--analyser",
-        type=int,
-        default=1,
-        help="must match model::encoding::ANALYSER, so a re-measure can find stale rows",
-    )
-    u = sub.add_parser("unquarantine", help="put them back")
-    u.add_argument("--write", action="store_true", help="actually restore")
-    a.add_argument(
-        "--min-share",
-        type=float,
-        default=0.0,
-        help="only albums where at least this %% of tracks are flagged",
-    )
-    a.add_argument(
-        "--under",
-        type=int,
-        help="only albums whose audio sounds like it came from under this bitrate",
-    )
-    args = parser.parse_args()
+LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
+WRITE = typer.Option(default=False, help="actually do it; without this, a dry run")
 
-    review = out_path("quality-review.tsv")
-    manifest = out_path("quarantine-manifest.tsv")
-    if args.phase == "quarantine":
+
+def register(app: typer.Typer) -> None:
+    """Attach this pass's commands to the tool."""
+
+    @app.command("survey")
+    def survey_cmd(
+        root: Path = LIB,
+        tier: int | None = typer.Option(None, help="only files declaring this bitrate"),
+        workers: int = typer.Option(8, help="parallel decoders"),
+    ) -> None:
+        """Measure every file's spectrum. Writes no tags."""
+        survey(root.expanduser(), out_path("quality-review.tsv"), tier, workers)
+
+    @app.command("albums")
+    def albums_cmd(
+        limit: int = typer.Option(100),
+        under: int | None = typer.Option(None, help="only albums that sound under this bitrate"),
+        min_share: float = typer.Option(0.0, help="only albums with at least this share flagged"),
+    ) -> None:
+        """Roll the findings up to albums worth re-acquiring."""
+        albums(
+            out_path("quality-review.tsv"),
+            out_path("quality-albums.tsv"),
+            limit,
+            under,
+            min_share,
+        )
+
+    @app.command("propose")
+    def propose_cmd(
+        rows: Path = typer.Argument(..., help="jsonl from `gmuse library query --format jsonl`"),
+        out: Path = typer.Option(Path("quality-proposals.jsonl")),
+        analyser: int = typer.Option(
+            1,
+            help="must match model::encoding::ANALYSER, so a re-measure can find stale rows",
+        ),
+    ) -> None:
+        """Measure what a query listed, and say so as proposed facts.
+
+        The output is **not** under `out_path`: a proposal is a work product
+        rather than this tool's state, so it goes where the caller says and
+        defaults to the working directory — `library-api.md` §7.
+        """
+        propose(rows.expanduser(), out.expanduser(), analyser)
+
+    @app.command("quarantine")
+    def quarantine_cmd(
+        root: Path = LIB,
+        dest: Path = typer.Option(Path("~/LowQualityMusic")),
+        *,
+        write: bool = WRITE,
+    ) -> None:
+        """Move the listed album folders out of the library."""
         quarantine(
             out_path("quality-albums.tsv"),
-            Path(args.root).expanduser(),
-            Path(args.dest).expanduser(),
-            manifest,
-            write=args.write,
+            root.expanduser(),
+            dest.expanduser(),
+            out_path("quarantine-manifest.tsv"),
+            write=write,
         )
-    elif args.phase == "unquarantine":
-        unquarantine(manifest, write=args.write)
-    elif args.phase == "survey":
-        survey(Path(args.root).expanduser(), review, args.tier, args.workers)
-    elif args.phase == "propose":
-        # Not under `out_path`: a proposal is a work product rather than this
-        # tool's state, so it goes where the caller says and defaults to the
-        # working directory — see `docs/design/library-api.md` §7.
-        propose(
-            Path(args.rows).expanduser(),
-            Path(args.out).expanduser(),
-            args.analyser,
-        )
-    else:
-        albums(review, out_path("quality-albums.tsv"), args.limit, args.under, args.min_share)
 
-
-if __name__ == "__main__":
-    main()
+    @app.command("unquarantine")
+    def unquarantine_cmd(*, write: bool = WRITE) -> None:
+        """Put them back, from the manifest the move wrote."""
+        unquarantine(out_path("quarantine-manifest.tsv"), write=write)

@@ -7,6 +7,7 @@
 //! Verification target from DESIGN §9: seek is sample-accurate and the
 //! position display does not jump on seek.
 
+mod apply;
 mod audio;
 mod audio_id;
 mod audit;
@@ -119,6 +120,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+
+    // **A library operation is not a launch**, so it happens before anything a
+    // launch needs: no audio device, no cache, no store scan. `apply` does its
+    // own scan of exactly the roots it was given, and opening a device for a
+    // command that plays nothing was eighteen seconds and a hardware claim for
+    // no reason.
+    if let Some(cli::Command::Library(op)) = &args.command {
+        let loaded = if args.no_config {
+            config::Loaded::default()
+        } else {
+            config::load(&args.config.clone().unwrap_or_else(config::default_path))
+        };
+        let roots = if args.library.is_empty() {
+            loaded.catalogs.all_roots()
+        } else {
+            args.library_roots()
+        };
+        return run_library(op, &loaded, &roots);
+    }
 
     let player = PlayerHandle::new(args.player_config())?;
     println!("gmuse — device at {} Hz", player.device_rate());
@@ -259,6 +279,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         !args.no_resume,
         args.migrate_data,
     )
+}
+
+/// One library operation, and then exit.
+fn run_library(
+    op: &cli::Library,
+    loaded: &config::Loaded,
+    roots: &[std::path::PathBuf],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let machine = crate::events::machine_id(&config::default_state_dir());
+    let device = crate::model::id::Id::derived(machine.as_bytes());
+    match op {
+        cli::Library::Apply { file, write } => {
+            let outcome = apply::run(
+                file,
+                &loaded.data_dir,
+                roots,
+                device,
+                crate::history::now_ms(),
+                *write,
+            )?;
+            println!("{outcome}");
+            for (line, text) in &outcome.report.malformed {
+                println!(
+                    "  line {line}: {}",
+                    text.chars().take(72).collect::<String>()
+                );
+            }
+            // Named rather than counted: a stale proposal wants re-querying,
+            // and a tool cannot re-query what it has not been told about.
+            for subject in outcome.report.unknown.iter().take(20) {
+                println!("  not held: {subject:?}");
+            }
+            if outcome.report.unknown.len() > 20 {
+                println!("  … and {} more", outcome.report.unknown.len() - 20);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Draw the views until the user quits.

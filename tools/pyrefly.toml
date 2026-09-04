@@ -20,8 +20,8 @@ implicit-bool = false
 # Third-party call sites we do not control: requests, mutagen, sqlite3, csv.
 unknown-argument-type = false
 unknown-variable-type = false
-# Overwhelmingly `parser.add_argument(...)`, whose returned `Action` nobody
-# wants. The same shape as sdmxlib's `conn.execute(...)`.
+# Was `parser.add_argument(...)`, whose returned `Action` nobody wants; now
+# `app.command()` decorators and `con.execute(...)`. Same shape either way.
 unused-call-result = false
 # Flags every literal `Any` token, including the deliberate `dict[str, object]`
 # boundary where decoded JSON arrives. The check actually wanted is

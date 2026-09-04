@@ -43,7 +43,19 @@ ignore = [
 # S603/S607 — every subprocess call here is a fixed argv to a known binary
 #   (`ffprobe`, `security`) with no shell and no user-controlled program name.
 #   The rules cannot see that, and the alternative is a suppression per site.
-"*.py" = ["T201", "INP001", "S603", "S607"]
+# TC003 — Typer builds the CLI by **reading annotations at runtime**, so a type
+#   moved into a checking block is a type Typer cannot see. The rule would take
+#   `Path` out of reach of the one thing that needs it most.
+"*.py" = ["T201", "INP001", "S603", "S607", "TC003"]
 
 [lint.pydocstyle]
 convention = "google"
+
+
+[lint.flake8-bugbear]
+# `typer.Argument(...)` in a parameter default **is** Typer's interface: it is
+# how a parameter's help text, default and validation are declared, and Typer
+# reads it at import. B008 exists to catch a mutable default built by accident,
+# which these are not — they are immutable descriptors, and ruff provides this
+# setting for precisely this case rather than a suppression per parameter.
+extend-immutable-calls = ["typer.Argument", "typer.Option"]

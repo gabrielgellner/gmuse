@@ -12,14 +12,15 @@ everything else.
 
 from __future__ import annotations
 
-import argparse
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from genre.common import tags_of, walk
+import typer
+
+from gmuse_tools.genre.common import tags_of, walk
 
 #: `BPM - KEY - rest`, where KEY is classical notation.
 PREFIX: Final = re.compile(r"^(\d+)\s*-\s*([A-G][#b]?m?)\s*-\s*(.*)$")
@@ -94,18 +95,14 @@ def report(root: Path, out: Findings) -> None:
             print(f"    {item}")
 
 
-def main() -> None:
-    """Audit the crate named on the command line."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", help="crate directory to audit")
-    args = parser.parse_args()
+def register(app: typer.Typer) -> None:
+    """Attach the crate audit."""
 
-    root = Path(args.root).expanduser()
-    out = Findings()
-    for path in walk(root):
-        compare(path, out)
-    report(root, out)
-
-
-if __name__ == "__main__":
-    main()
+    @app.command("dj")
+    def dj_cmd(root: Path = typer.Argument(..., help="crate directory to audit")) -> None:
+        """Do the filenames agree with the tags? Changes nothing."""
+        here = root.expanduser()
+        out = Findings()
+        for path in walk(here):
+            compare(path, out)
+        report(here, out)

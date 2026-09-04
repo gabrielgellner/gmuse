@@ -48,7 +48,11 @@ KEYCHAIN: Final[dict[str, str]] = {"DISCOGS_TOKEN": "gmuse-discogs"}
 #: Beside the code they were indistinguishable from it — six .tsv files mixed
 #: in with the modules that write them. One folder, and every name prefixed by
 #: the pass that owns it, so `ls out/` reads as a list of results.
-OUT: Final = Path(__file__).resolve().parent.parent / "out"
+#: **Three parents, not two**, and the count is load-bearing: this file moved
+#: down a level when the scripts became a package, which silently pointed `out`
+#: at `gmuse_tools/out` and orphaned every result already written. Anchored to
+#: the package's own parent so it cannot drift again with the next move.
+OUT: Final = Path(__file__).resolve().parents[2] / "out"
 
 
 def out_path(name: str) -> Path:

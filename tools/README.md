@@ -7,18 +7,69 @@ gmuse reads. Reading new files into the library is likewise a CLI job rather tha
 these are I/O-bound, edited between runs, and reviewed by a human — and because keeping them out of `Cargo.toml` is what
 keeps the boundary real.
 
-Checked the same way sdmxlib is: `ruff` on `select = ["ALL"]` and `pyrefly` on `preset = "all"`, subtract with a written
-reason, **no suppressions**. Both are at zero findings. The full-preset pyrefly run found five defects here and every
-one was real — a `str | None` leaking `Any` out of a `.get()` chain, two `list()` calls on unchecked JSON, an empty
-container with no inferable type, and three imports that resolved only because Python puts a script's own directory on
-`sys.path`. All fixed in code.
+## One command
+
+A `uv` project with a Typer CLI, because twelve scripts each with their own `argparse` and its own idea of how to be
+invoked — `python -m genre.propose ~/MusicLibrary` beside `python quality.py survey` — is not a thing anyone remembers.
 
 ```sh
 cd tools
-./.venv/bin/python -m genre.propose ~/MusicLibrary   # genre/ is a package
-./.venv/bin/python audit_library.py ~/MusicLibrary
-ruff check . && ruff format --check . && pyrefly check
+uv sync                                    # once, from uv.lock
+uv run gmuse-tools --help
+
+uv run gmuse-tools identify fetch ~/MusicLibrary
+uv run gmuse-tools identify propose ~/MusicLibrary
+uv run gmuse-tools quality survey
+uv run gmuse-tools genre fetch
+uv run gmuse-tools cache stats
+uv run gmuse-tools audit library
 ```
+
+| group      | commands                                                | subject                 |
+| ---------- | ------------------------------------------------------- | ----------------------- |
+| `identify` | `fetch` `propose`                                       | what a **recording** is |
+| `quality`  | `survey` `albums` `propose` `quarantine` `unquarantine` | what the **bytes** are  |
+| `genre`    | `fetch` `propose` `apply` `snapshot`                    | the vocabulary          |
+| `cache`    | `stats` `prune`                                         | what an authority said  |
+| `audit`    | `library` `dj`                                          | what is wrong           |
+| `credits`  | `scan` `apply` `restore`                                | who did what            |
+| `tags`     | `survey` `apply` `restore`                              | the serialization       |
+| `ingest`   | `apply`                                                 | bringing one in         |
+
+**Every pass shares a shape: read something, say what would happen, and do it only when told.** That is
+`gmuse library apply`'s shape too, and not by accident — these produce the files it consumes. Anything that writes takes
+`--write`; without it you get a dry run and a count.
+
+The groups are nouns on purpose. `identify` and `quality` are the two halves of "what is this file" and they answer
+about _different subjects_ — a recording and an encoding. Keeping them apart where someone types is where that
+distinction is most often forgotten.
+
+## Checks
+
+`uv` is the cargo of this subproject: `pyproject.toml` declares the dependencies and `uv.lock` pins them, so `uv sync`
+reproduces the environment rather than approximating it.
+
+Checked the same way sdmxlib is: `ruff` on `select = ["ALL"]` and `pyrefly` on `preset = "all"`, subtract with a written
+reason, **no suppressions**. Both are at zero findings.
+
+```sh
+uv run ruff check . && uv run ruff format --check . && uv run pyrefly check
+```
+
+Two subtractions were added for Typer, and both are the framework's interface rather than a smell the rule was written
+for:
+
+- **`B008`** — `typer.Argument(...)` in a parameter default _is_ how a parameter is declared. `extend-immutable-calls`
+  exists for this.
+- **`TC003`** — Typer builds the CLI by reading annotations **at runtime**, so a type moved into a checking block is one
+  Typer cannot see.
+
+`FBT001` was not subtracted. Its complaint is about _positional_ booleans, and making the flags keyword-only satisfies
+it honestly — Typer is happy either way.
+
+The full-preset pyrefly run found five defects here and every one was real: a `str | None` leaking `Any` out of a
+`.get()` chain, two `list()` calls on unchecked JSON, an empty container with no inferable type, and three imports that
+resolved only because Python puts a script's own directory on `sys.path`. That last one is why this is a package now.
 
 ## bronze.py — a request cache, not library state (#58)
 

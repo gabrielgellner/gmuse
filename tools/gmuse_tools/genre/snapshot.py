@@ -8,12 +8,13 @@ with ``--restore``.
 
 from __future__ import annotations
 
-import argparse
 import csv
 from pathlib import Path
 
-from genre.apply import set_genre
-from genre.common import out_path, tags_of, walk
+import typer
+
+from gmuse_tools.genre.apply import set_genre
+from gmuse_tools.genre.common import out_path, tags_of, walk
 
 
 def take(root: Path, path: Path) -> None:
@@ -42,22 +43,29 @@ def restore(root: Path, path: Path, *, write: bool) -> None:
         print("dry run — pass --write to actually restore")
 
 
-def main() -> None:
+def snapshot_all(root: Path, out: str, *, restore_it: bool, write: bool) -> None:
     """Write a snapshot of the library's genres, or restore one."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", nargs="?", default="~/MusicLibrary", help="library root")
-    parser.add_argument("--out", default="genre-snapshot.tsv", help="snapshot file, inside tools/out/")
-    parser.add_argument("--restore", action="store_true", help="put the snapshot's genres back")
-    parser.add_argument("--write", action="store_true", help="with --restore, actually change the files")
-    args = parser.parse_args()
-
-    root = Path(args.root).expanduser()
-    path = out_path(args.out)
-    if args.restore:
-        restore(root, path, write=args.write)
+    root = root.expanduser()
+    path = out_path(out)
+    if restore_it:
+        restore(root, path, write=write)
     else:
         take(root, path)
 
 
-if __name__ == "__main__":
-    main()
+LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
+
+
+def register(app: typer.Typer) -> None:
+    """Attach the genre snapshot."""
+
+    @app.command("snapshot")
+    def snapshot_cmd(
+        root: Path = LIB,
+        out: str = typer.Option("genre-snapshot.tsv", help="snapshot file, inside tools/out/"),
+        *,
+        restore: bool = typer.Option(default=False, help="put the snapshot's genres back"),
+        write: bool = typer.Option(default=False, help="with --restore, actually change files"),
+    ) -> None:
+        """Every album's genres before a change, so an apply can be undone."""
+        snapshot_all(root, out, restore_it=restore, write=write)

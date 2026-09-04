@@ -26,11 +26,12 @@ Phases, and `scan` writes no tags:
 
 from __future__ import annotations
 
-import argparse
 import collections
 import csv
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
+
+import typer
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -40,7 +41,7 @@ from mutagen import FileType, MutagenError
 from mutagen.id3 import ID3, TXXX
 from mutagen.mp4 import MP4, MP4FreeForm
 
-from genre.common import out_path, walk, write_tsv
+from gmuse_tools.genre.common import out_path, walk, write_tsv
 
 
 class TagDict(Protocol):
@@ -413,30 +414,36 @@ def apply(root: Path, review: Path, *, write: bool, upgrade_id3: bool) -> None:
         print("dry run — pass --write to actually edit")
 
 
-def main() -> None:
-    """Parse the command line and run the requested phase."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="phase", required=True)
-    s = sub.add_parser("scan", help="survey and propose; writes no tags")
-    s.add_argument("root", nargs="?", default="~/MusicLibrary")
-    a = sub.add_parser("apply", help="write the rows marked y")
-    a.add_argument("root", nargs="?", default="~/MusicLibrary")
-    a.add_argument("--write", action="store_true", help="actually edit files")
-    a.add_argument("--upgrade-id3", action="store_true", help="rewrite ID3v2.3 tags as v2.4")
-    r = sub.add_parser("restore", help="undo an apply from the snapshot")
-    r.add_argument("root", nargs="?", default="~/MusicLibrary")
-    r.add_argument("--write", action="store_true", help="actually restore")
-    args = parser.parse_args()
-
-    root = Path(args.root).expanduser()
-    review = out_path("credits-review.tsv")
-    if args.phase == "scan":
-        scan(root, review)
-    elif args.phase == "restore":
-        restore(root, out_path("credits-snapshot.tsv"), write=args.write)
-    else:
-        apply(root, review, write=args.write, upgrade_id3=args.upgrade_id3)
+LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
+WRITE = typer.Option(default=False, help="actually edit files; without this, a dry run")
 
 
-if __name__ == "__main__":
-    main()
+def register(app: typer.Typer) -> None:
+    """Attach the credits pass. A group of three, because it is three phases."""
+    credits_app = typer.Typer(no_args_is_help=True, help=__doc__)
+    app.add_typer(credits_app, name="credits")
+
+    @credits_app.command("scan")
+    def scan_cmd(root: Path = LIB) -> None:
+        """Survey and propose. Writes no tags."""
+        scan(root.expanduser(), out_path("credits-review.tsv"))
+
+    @credits_app.command("apply")
+    def apply_cmd(
+        root: Path = LIB,
+        *,
+        write: bool = WRITE,
+        upgrade_id3: bool = typer.Option(default=False, help="rewrite ID3v2.3 tags as v2.4"),
+    ) -> None:
+        """Write the rows marked `y` in the review."""
+        apply(
+            root.expanduser(),
+            out_path("credits-review.tsv"),
+            write=write,
+            upgrade_id3=upgrade_id3,
+        )
+
+    @credits_app.command("restore")
+    def restore_cmd(root: Path = LIB, *, write: bool = WRITE) -> None:
+        """Undo an apply, from the snapshot it took."""
+        restore(root.expanduser(), out_path("credits-snapshot.tsv"), write=write)

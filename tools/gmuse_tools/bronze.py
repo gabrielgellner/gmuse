@@ -51,7 +51,6 @@ report without leaking a credential.
 
 from __future__ import annotations
 
-import argparse
 import datetime as dt
 import json
 import os
@@ -63,6 +62,7 @@ from pathlib import Path
 from typing import Final
 
 import requests
+import typer
 
 #: Parameters that authenticate rather than describe. Stripped from the cache
 #: key so that rotating a token does not invalidate every entry, and from the
@@ -253,25 +253,22 @@ def prune(con: sqlite3.Connection, older_than: float) -> int:
     return len(doomed)
 
 
-def main() -> None:
-    """Report what is cached, or prune it. The tools use `get` directly."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("stats", help="what is cached, and how big")
-    pr = sub.add_parser("prune", help="drop entries older than N days")
-    pr.add_argument("--older-than", type=float, required=True)
-    args = parser.parse_args()
+def register(app: typer.Typer) -> None:
+    """Attach the cache's commands to the tool."""
 
-    con = open_cache()
-    if args.command == "stats":
+    @app.command("stats")
+    def stats_cmd() -> None:
+        """What is cached, how big, and that it is safe to delete."""
+        con = open_cache()
         s = stats(con)
-        print(f"{cache_dir() / 'bronze.sqlite'}")
-        print(f"  {s['entries']} responses, {s['bytes'] / 1_048_576:.1f} MiB")
-        print(f"  {s['answered']} answered, {s['empty']} asked and got nothing")
-        print("\nSafe to delete. It costs time to rebuild, never a fact.")
-    else:
-        print(f"dropped {prune(con, args.older_than)} entries")
+        typer.echo(f"{cache_dir() / 'bronze.sqlite'}")
+        typer.echo(f"  {s['entries']} responses, {s['bytes'] / 1_048_576:.1f} MiB")
+        typer.echo(f"  {s['answered']} answered, {s['empty']} asked and got nothing")
+        typer.echo("\nSafe to delete. It costs time to rebuild, never a fact.")
 
-
-if __name__ == "__main__":
-    main()
+    @app.command("prune")
+    def prune_cmd(
+        older_than: float = typer.Option(..., help="drop entries older than this many days"),
+    ) -> None:
+        """Drop old entries. Nothing expires on its own; this is the only way."""
+        typer.echo(f"dropped {prune(open_cache(), older_than)} entries")

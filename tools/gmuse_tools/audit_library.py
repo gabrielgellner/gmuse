@@ -8,7 +8,6 @@ out of scope.
 
 from __future__ import annotations
 
-import argparse
 import re
 import unicodedata
 from collections import Counter
@@ -16,7 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from genre.common import tags_of, walk
+import typer
+
+from gmuse_tools.genre.common import tags_of, walk
 
 CORE: Final = ("artist", "album", "album_artist", "title", "track", "date", "genre")
 #: Illegal on Windows, FAT and SMB — the library's cross-platform rule.
@@ -120,18 +121,16 @@ def report(root: Path, out: Findings) -> None:
     print(f"\nBPM tagged: {out.has_bpm}   key tagged: {out.has_key}")
 
 
-def main() -> None:
-    """Audit the library named on the command line."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", nargs="?", default="~/MusicLibrary", help="library root to audit")
-    args = parser.parse_args()
+def register(app: typer.Typer) -> None:
+    """Attach the library audit."""
 
-    root = Path(args.root).expanduser()
-    out = Findings()
-    for path in walk(root):
-        inspect(path, root, out)
-    report(root, out)
-
-
-if __name__ == "__main__":
-    main()
+    @app.command("library")
+    def library_cmd(
+        root: Path = typer.Argument(Path("~/MusicLibrary"), help="library root to audit"),
+    ) -> None:
+        """Tags, naming, ReplayGain and NFC. Changes nothing."""
+        here = root.expanduser()
+        out = Findings()
+        for path in walk(here):
+            inspect(path, here, out)
+        report(here, out)
