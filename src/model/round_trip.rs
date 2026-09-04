@@ -15,10 +15,13 @@ use std::collections::BTreeSet;
 
 use crate::audio_id::AudioId;
 use crate::model::basis::Basis;
-use crate::model::entity::{Artist, Device, Encoding, Recording};
+use crate::model::entity::{Artist, Device, Encoding, Genre, Recording};
 use crate::model::id::Id;
+use crate::model::ingest::Confidence;
 use crate::model::instance::{Instance, Scanned};
 use crate::model::log::Record;
+use crate::model::reference::Source;
+use crate::model::vocabulary::GenreOn;
 
 fn device(n: u128) -> Id<Device> {
     Id::from_uuid(uuid::Uuid::from_u128(n))
@@ -107,7 +110,13 @@ fn two_instances_one_album_and_a_full_round_trip() {
 
     // 2. One renames an artist; the other assigns a genre.
     m1.rename_artist(200, artist, "Bodzin & Romboy");
-    m2.assign_genre(240, callisto, "Techno");
+    m2.assign_genre(
+        240,
+        GenreOn::Recording(callisto),
+        "Techno",
+        Source::TagVariant,
+        Confidence::Confirmed,
+    );
 
     // 3. Each plays a track.
     m1.play(300, callisto, callisto_file);
@@ -141,7 +150,25 @@ fn two_instances_one_album_and_a_full_round_trip() {
 
     // The rename is an LWW register; the assignment is row existence.
     assert_eq!(one.artist_names[&artist], "Bodzin & Romboy");
-    assert!(one.genres.contains(&(callisto, "Techno".to_string())));
+    let techno = Id::<Genre>::of_name("Techno");
+    assert!(
+        one.genres
+            .contains_key(&(GenreOn::Recording(callisto), techno))
+    );
+    assert_eq!(
+        one.genre_names[&techno], "Techno",
+        "the concept has to be resolvable, or the id renders as nothing"
+    );
+    // **Both halves, and the basis is the one that used to be dropped.** The
+    // conversion from a proposal read `{ recording, genre, .. }`, so a Discogs
+    // guess and a typed answer arrived in the log as the same fact.
+    let assigned = one.genres[&(GenreOn::Recording(callisto), techno)];
+    assert_eq!(assigned.confidence, Confidence::Confirmed);
+    assert_eq!(
+        assigned.basis,
+        Source::TagVariant,
+        "the basis crossed the merge with the assignment"
+    );
 
     // Plays are counted, so two devices' listening adds up.
     assert_eq!(one.plays[&callisto], 2, "neither play replaced the other");
@@ -247,7 +274,13 @@ fn the_result_does_not_depend_on_which_way_the_sync_ran() {
         );
         a.ingest(100, &scan);
         b.ingest(140, &scan);
-        b.assign_genre(200, ids(&scan).1, "Techno");
+        b.assign_genre(
+            200,
+            GenreOn::Recording(ids(&scan).1),
+            "Techno",
+            Source::TagVariant,
+            Confidence::Confirmed,
+        );
         if forward {
             let from_b = b.records().clone();
             a.merge(300, &from_b);

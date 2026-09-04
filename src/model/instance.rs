@@ -20,9 +20,12 @@ use crate::model::basis::Basis;
 use crate::model::clock::{Drift, HybridClock, Stamp};
 use crate::model::durable::{self, Damage, LogError};
 use crate::model::encoding::Format;
-use crate::model::entity::{Artist, Device, Encoding, Recording, ReleaseGroup};
+use crate::model::entity::{Artist, Device, Encoding, Genre, Hierarchy, Recording, ReleaseGroup};
 use crate::model::id::Id;
+use crate::model::ingest::Confidence;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
+use crate::model::reference::Source;
+use crate::model::vocabulary::GenreOn;
 
 /// What a scan says about one file.
 ///
@@ -280,12 +283,45 @@ impl Instance {
         );
     }
 
-    pub fn assign_genre(&mut self, now: i64, recording: Id<Recording>, genre: &str) {
+    pub fn assign_genre(
+        &mut self,
+        now: i64,
+        subject: GenreOn,
+        name: &str,
+        basis: Source,
+        confidence: Confidence,
+    ) {
+        // **The concept before the assignment.** An id that no fact resolves
+        // is an id nobody can render, so the vocabulary entry is asserted
+        // alongside — idempotently, since both ids derive from the name and a
+        // repeat is the same record.
+        let genre = Id::<Genre>::of_name(name);
+        self.append(
+            now,
+            Fact::GenreCatalogued {
+                genre,
+                name: name.trim().to_string(),
+            },
+        );
         self.append(
             now,
             Fact::GenreAssigned {
-                recording,
-                genre: genre.to_string(),
+                subject,
+                genre,
+                basis,
+                confidence,
+            },
+        );
+    }
+
+    /// Say that one concept is narrower than another, inside one hierarchy.
+    pub fn narrows(&mut self, now: i64, hierarchy: Id<Hierarchy>, parent: &str, child: &str) {
+        self.append(
+            now,
+            Fact::HierarchyNarrowed {
+                hierarchy,
+                parent: Id::<Genre>::of_name(parent),
+                child: Id::<Genre>::of_name(child),
             },
         );
     }

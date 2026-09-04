@@ -28,6 +28,28 @@ use crate::model::entity::{Genre, Hierarchy};
 use crate::model::id::{Id, Ref};
 use crate::model::reference::Source;
 
+impl Id<Genre> {
+    /// The id a genre name always mints, on any machine.
+    ///
+    /// **Convergent, because two devices tagging "Techno" must agree without
+    /// meeting** — and there is no external authority for a genre the way
+    /// MusicBrainz is one for a recording, so the name is what there is.
+    ///
+    /// Folded to lowercase and trimmed, so `Techno`, `techno` and ` Techno `
+    /// are one concept. Nothing else is normalised: `Deep House` and
+    /// `deep-house` stay apart, because collapsing them is a judgement about
+    /// the vocabulary rather than about whitespace, and a wrong collapse is a
+    /// merge — the error this model cannot repair.
+    ///
+    /// The consequence is honest and named in the docs above: **the id is
+    /// derived from the label, so renaming a concept mints a new one.** That
+    /// is what `Merges<Genre>` is for, and it is the same trade `Basis::Audio`
+    /// makes for a recording — convergence now, a repairable split later.
+    pub fn of_name(name: &str) -> Self {
+        Id::derived(name.trim().to_lowercase().as_bytes())
+    }
+}
+
 /// A concept in the vocabulary. The id is meaningless; the label is mutable.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GenreRecord {

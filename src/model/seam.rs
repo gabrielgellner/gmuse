@@ -547,6 +547,7 @@ mod tests {
             "Device",
             "Encoding",
             "Genre",
+            "Hierarchy",
             "Holdings",
             "Label",
             "Release",

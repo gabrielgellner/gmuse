@@ -38,11 +38,12 @@
 use std::collections::BTreeSet;
 
 use crate::model::clock::HybridClock;
-use crate::model::entity::{Device, Encoding, Recording};
+use crate::model::entity::{Device, Encoding, Genre, Recording};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Fact, Record};
 use crate::model::reference::Source;
+use crate::model::vocabulary::GenreOn;
 
 /// One assertion, as a tool writes it.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -213,9 +214,22 @@ fn into_fact(proposal: Proposal) -> Fact {
         // The genre is named rather than identified, because a tool has no way
         // to mint a concept id and should not: the vocabulary is ours (§2), so
         // the name is resolved against it here.
+        // **All four fields cross now.** This line used to read
+        // `{ recording, genre, .. } => Fact::GenreAssigned { recording, genre }`,
+        // and that `..` threw away the basis and the confidence the tool had
+        // gone to the trouble of establishing — so a Discogs guess and a typed
+        // answer landed in the log as the same fact.
         Proposal::GenreAssigned {
-            recording, genre, ..
-        } => Fact::GenreAssigned { recording, genre },
+            recording,
+            genre,
+            basis,
+            confidence,
+        } => Fact::GenreAssigned {
+            subject: GenreOn::Recording(recording),
+            genre: Id::<Genre>::of_name(&genre),
+            basis,
+            confidence,
+        },
         Proposal::Rated { recording, stars } => Fact::RecordingRated { recording, stars },
     }
 }

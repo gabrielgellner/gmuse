@@ -24,8 +24,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
-use crate::model::entity::{Artist, Device, Encoding, Recording, ReleaseGroup};
+use crate::model::entity::{Artist, Device, Encoding, Genre, Hierarchy, Recording, ReleaseGroup};
 use crate::model::id::Id;
+use crate::model::ingest::Confidence;
+use crate::model::reference::Source;
+use crate::model::vocabulary::GenreOn;
 
 /// One thing a device wrote down.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -104,9 +107,50 @@ pub enum Fact {
     },
 
     /// A genre on a recording. Membership is row existence, so this unions.
+    /// A concept exists in the vocabulary, and what it is called.
+    ///
+    /// Needed before an assignment can name one by id — a device folding a
+    /// log has to be able to resolve `Id<Genre>` to something a person reads.
+    GenreCatalogued { genre: Id<Genre>, name: String },
+
+    /// One grouping of the concepts exists. A vocabulary may carry several —
+    /// a browse hierarchy and a filter hierarchy over one list, as in SDMX.
+    HierarchyDefined {
+        hierarchy: Id<Hierarchy>,
+        name: String,
+    },
+
+    /// One narrower-of edge, in one hierarchy.
+    ///
+    /// Row existence, so it unions across devices and there is no
+    /// `Genre.children` for two curators to collide over.
+    HierarchyNarrowed {
+        hierarchy: Id<Hierarchy>,
+        parent: Id<Genre>,
+        child: Id<Genre>,
+    },
+
+    /// One genre on one subject, with why it was assigned and how confidently.
+    ///
+    /// **All four fields, and the previous shape had two.** It was
+    /// `{ recording, genre: String }`, which threw away three things the rest
+    /// of the model already had:
+    ///
+    /// - the **subject** could only be a recording, where `vocabulary.rs`'s
+    ///   own census says the release group is the right default: genres were
+    ///   found for 130 of 429 groups against 3 of 49 releases
+    /// - the **genre** was a string, so it could not reach the hierarchy and
+    ///   `Vocabulary::under` had nothing folded to close over
+    /// - **basis and confidence** were dropped on the floor. `proposal.rs`
+    ///   carried both on the wire and the conversion read
+    ///   `{ recording, genre, .. } => Fact::GenreAssigned { recording, genre }`
+    ///   — a Discogs guess and a typed answer became the same fact, which is
+    ///   precisely what `genre-uncertain.tsv` exists to prevent
     GenreAssigned {
-        recording: Id<Recording>,
-        genre: String,
+        subject: GenreOn,
+        genre: Id<Genre>,
+        basis: Source,
+        confidence: Confidence,
     },
 
     /// **Everything this device holds, as of now.**
@@ -214,7 +258,17 @@ pub struct Catalogue {
     pub artist_names: BTreeMap<Id<Artist>, String>,
     pub recordings: BTreeMap<Id<Recording>, Recorded>,
     pub encodings: BTreeMap<Id<Encoding>, Encoded>,
-    pub genres: BTreeSet<(Id<Recording>, String)>,
+    /// Every genre assignment, **with why and how confidently**. Keyed by
+    /// subject and concept so it unions by row existence across devices; the
+    /// value is §4 Type 1 — descriptive, last writer wins — because two people
+    /// disagreeing about confidence is not a structural conflict.
+    pub genres: BTreeMap<(GenreOn, Id<Genre>), Assigned>,
+    /// What each concept is called.
+    pub genre_names: BTreeMap<Id<Genre>, String>,
+    /// What each hierarchy is called.
+    pub hierarchies: BTreeMap<Id<Hierarchy>, String>,
+    /// Every narrower-of edge. Row existence, so curation unions.
+    pub narrows: BTreeSet<(Id<Hierarchy>, Id<Genre>, Id<Genre>)>,
     pub plays: BTreeMap<Id<Recording>, u32>,
     /// What each recording's identity was derived from.
     pub identified: BTreeMap<Id<Recording>, crate::model::basis::Basis>,
@@ -252,6 +306,13 @@ pub struct Asserted {
 pub struct Grouped {
     pub title: String,
     pub artist: Id<Artist>,
+}
+
+/// Why a genre was assigned, and how confidently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Assigned {
+    pub basis: Source,
+    pub confidence: Confidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -357,8 +418,32 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     .or_default()
                     .push((*stamp, *to));
             }
-            Fact::GenreAssigned { recording, genre } => {
-                cat.genres.insert((*recording, genre.clone()));
+            Fact::GenreCatalogued { genre, name } => {
+                cat.genre_names.insert(*genre, name.clone());
+            }
+            Fact::HierarchyDefined { hierarchy, name } => {
+                cat.hierarchies.insert(*hierarchy, name.clone());
+            }
+            Fact::HierarchyNarrowed {
+                hierarchy,
+                parent,
+                child,
+            } => {
+                cat.narrows.insert((*hierarchy, *parent, *child));
+            }
+            Fact::GenreAssigned {
+                subject,
+                genre,
+                basis,
+                confidence,
+            } => {
+                cat.genres.insert(
+                    (*subject, *genre),
+                    Assigned {
+                        basis: *basis,
+                        confidence: *confidence,
+                    },
+                );
             }
             Fact::HoldingsAsserted { device, held } => {
                 // Records arrive in stamp order, so the last one simply wins.
@@ -704,6 +789,9 @@ mod reachability {
         ("holding", Some("HoldingsAsserted")),
         // ── the gap. This list may only shrink. ────────────────────────────
         //
+        // Genre, hierarchy and genre-assignment left it when the vocabulary
+        // facts landed; the spine is what remains.
+        //
         // Every kind below is built by `Librarian::from_catalogue` out of thin
         // air: with no stamp, no basis, no author, no way to correct it and no
         // way to sync it. The catalogue is supposed to be a fold of the log,
@@ -716,14 +804,14 @@ mod reachability {
         ("medium", None),
         ("track", None),
         ("label", None),
-        ("genre", None),
-        ("hierarchy", None),
+        ("genre", Some("GenreCatalogued")),
+        ("hierarchy", Some("HierarchyDefined")),
         ("role", None),
         ("collection", None),
         ("credit", None),
         ("mix-entry", None),
         ("collection-entry", None),
-        ("genre-assignment", None),
+        ("genre-assignment", Some("GenreAssigned")),
     ];
 
     /// **The allowlist only shrinks.**
@@ -734,7 +822,7 @@ mod reachability {
     /// regression, and this is where it is caught.
     #[test]
     fn every_entity_is_reachable_from_a_fact_or_named_as_a_gap() {
-        const UNREACHABLE: usize = 13;
+        const UNREACHABLE: usize = 10;
 
         let kinds = [
             Work::KIND,
