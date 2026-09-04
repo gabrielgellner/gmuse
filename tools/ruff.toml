@@ -48,6 +48,20 @@ ignore = [
 #   `Path` out of reach of the one thing that needs it most.
 "*.py" = ["T201", "INP001", "S603", "S607", "TC003"]
 
+# A test file is a different kind of code and two rules say so.
+#
+# S101 — `assert` is what a test *is*. The rule exists because an assert
+#   vanishes under `-O`; a test run never uses it.
+# D101 — a test class is a grouping, not an interface. The methods carry the
+#   documentation, and every one that describes a real failure says so.
+# RUF001 — the ambiguous characters are the *subject*. `Pan-Pot` against
+#   `Pan‐Pot` differs by one U+2010 and that difference downgraded nine good
+#   matches; a test proving they compare equal has to contain both.
+# PLR2004 — a literal in a test is the case. `465_000` is the length
+#   MusicBrainz returned for `Triton`; naming it would hide which run it came
+#   from, which is the one thing the test is recording.
+"tests/*.py" = ["S101", "D101", "RUF001", "PLR2004"]
+
 [lint.pydocstyle]
 convention = "google"
 

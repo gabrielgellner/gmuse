@@ -14,7 +14,7 @@ dependencies = [
 gmuse-tools = "gmuse_tools.cli:app"
 
 [dependency-groups]
-dev = ["ruff>=0.14", "pyrefly>=0.40"]
+dev = ["ruff>=0.14", "pyrefly>=0.40", "pytest>=8.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -22,3 +22,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["gmuse_tools"]
+
+[tool.pytest.ini_options]
+# Tests live beside nothing else: they are the only thing in `tests/`, and the
+# package is importable because `uv sync` installs it.
+testpaths = ["tests"]

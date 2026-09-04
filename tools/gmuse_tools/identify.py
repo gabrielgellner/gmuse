@@ -72,10 +72,31 @@ STRONG: Final = 95
 #: `Triton` (ours 463.9s, MB's 465.0s at score 80, discarded in favour of a
 #: 222-second edit scoring 100).
 PLAUSIBLE: Final = 70
-#: Seconds of disagreement still counted as the same recording. Encoder padding
-#: and a trimmed lead-in account for one or two; five is generous and still
-#: rules out the live take.
-DURATION_SLACK: Final = 5.0
+#: Seconds of disagreement still counted as **the same recording**. Encoder
+#: padding and a trimmed lead-in account for one or two; five is generous and
+#: still rules out the live take.
+SAME_RECORDING: Final = 5.0
+
+#: Seconds within which two titles differing only by a version qualifier are
+#: **the same mix**.
+#:
+#: **Tighter than `SAME_RECORDING`, and it must stay tighter.** Muting a channel
+#: does not change a length: an instrumental and its vocal are the same
+#: duration *by construction*, which is exactly why duration cannot separate
+#: them and why the title qualifier has to. Widen this and a radio edit starts
+#: reading as an instrumental.
+SAME_MIX: Final = 2.0
+
+#: How far apart two recordings may be and still be plausibly **versions of one
+#: song**.
+#:
+#: A ratio rather than a window, because the question is a different one. A
+#: radio edit and an extended mix are the same song at 3:30 and 7:00, and no
+#: number of seconds expresses that; what it excludes is a DJ mix that happens
+#: to contain the track. The two constants above ask *is this the same thing*;
+#: this one asks *is this a relative of it*, and unifying them would be
+#: answering one question with the other's answer.
+SIBLING_SPAN: Final = 3.0
 
 #: What separates the artists inside one credit string.
 CREDIT_SPLIT: Final = re.compile(r"\s*(?:,|&|;|\bfeat\.?\b|\bft\.?\b|\bvs\.?\b|\bx\b|/)\s*", re.IGNORECASE)
@@ -310,6 +331,30 @@ def plain(text: str) -> str:
     return re.sub(r"\s+", " ", text.translate(CONFUSABLES).lower()).strip()
 
 
+def variance(ours: float | None, theirs: object) -> str:
+    """What kind of not-a-match this is, when a qualifier says it is not one.
+
+    **The guard stops producing doubt and starts producing evidence.** A
+    version qualifier at the same length is mix-level variance — a channel
+    muted, the song otherwise untouched — and belongs on the recording as a
+    qualifier. A qualifier with a materially different length is a *derivation*:
+    the recording was cut or rebuilt, which is a different fact with a different
+    home (`RecordingDerivation`).
+
+    Syntactically the two are identical — `(Instrumental)` and `(Radio Edit)`
+    are one shape — so the length is the only thing that separates them, and
+    that is why the two tolerances above must not be one.
+    """
+    if ours is None or not isinstance(theirs, int) or theirs <= 0:
+        return "unknown"
+    drift = abs(theirs / 1000.0 - ours)
+    if drift <= SAME_MIX:
+        return "qualifier"
+    if max(ours, theirs / 1000.0) <= min(ours, theirs / 1000.0) * SIBLING_SPAN:
+        return "derivation"
+    return "unrelated"
+
+
 def unasked_qualifier(ours: str, theirs: str) -> str | None:
     """A version qualifier on their title that ours never mentions.
 
@@ -363,7 +408,7 @@ def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:
         return "probable", f"name score {score}, no duration to check"
 
     drift = abs(length / 1000.0 - ours)
-    if drift <= DURATION_SLACK:
+    if drift <= SAME_RECORDING:
         # **A length that agrees is the stronger evidence.** Two recordings of
         # one title by one artist are indistinguishable by name; agreeing to the
         # second is what separates the album version from its radio edit.
@@ -459,9 +504,11 @@ def propose(root: Path, out: Path, *, limit: int | None) -> None:
                 counts["nothing"] += 1
                 continue
             confidence, why = verdict(chosen, seconds)
+            kind: str | None = None
             extra = unasked_qualifier(tags.get("title", ""), str(chosen.get("title") or ""))
             if confidence == "matched" and extra:
                 confidence, why = "uncertain", f"{why}, but theirs is {extra}"
+                kind = variance(seconds, chosen.get("length"))
             counts[confidence] += 1
             sink.write(
                 json.dumps(
@@ -470,6 +517,11 @@ def propose(root: Path, out: Path, *, limit: int | None) -> None:
                         "mb_recording": chosen.get("id"),
                         "confidence": confidence,
                         "why": why,
+                        # What kind of difference this is, when the guard
+                        # refused. `qualifier` and `derivation` have different
+                        # homes in the model (#101), and only the length can
+                        # tell them apart.
+                        **({"variance": kind} if kind else {}),
                         "queried": {"artist": artist, "title": title},
                         "theirs": {"title": chosen.get("title"), "artist": credit_of(chosen)},
                         "ours": {"title": tags.get("title", ""), "artist": tags.get("artist", "")},
