@@ -58,10 +58,10 @@ There is no "update the library" call. There is only **appending a fact**.
 
 ```rust
 Fact::RecordingCatalogued { recording, title, artist }
-Fact::GenreAssigned { recording, genre }        // and its basis and confidence
-Fact::Measured { encoding, cutoff_hz, analyser }
-Fact::Rated { recording, stars }
-Fact::Played { recording, encoding }
+Fact::GenreAssigned { subject, genre, basis, confidence }
+Fact::EncodingMeasured { encoding, cutoff_hz, analyser }
+Fact::RecordingRated { recording, stars }
+Fact::RecordingPlayed { recording, encoding }
 ```
 
 Three things follow, and they are the reason for the shape:
@@ -69,6 +69,22 @@ Three things follow, and they are the reason for the shape:
 **A fact carries who said so.** `basis` distinguishes a Discogs genre from a hand-typed one; `confidence` distinguishes
 a MusicBrainz match from a guess. A tag write throws both away — which is why the current genre pipeline's careful
 `genre-uncertain.tsv` is discarded at the end of every pass.
+
+On an assignment those two fields are not the same kind of field, and the fold treats them differently. **`basis` is
+part of the claim's identity; `confidence` is an attribute riding on it.** So `(subject, concept, basis)` is what makes
+a row exist — Discogs saying Techno and a person saying Techno are two rows, because they are two independent pieces of
+evidence and their agreeing is the most useful thing the pair says. `confidence` is last-writer-wins within one row, so
+re-scoring an import updates in place while a human's disagreement lands beside it. Nothing ever edits another
+asserter's claim.
+
+A retraction is keyed one field shorter — `(subject, concept)`, no basis — because it answers the question rather than
+arguing with one asserter. Otherwise retracting would mean retracting once per source that ever said it, and the next
+import would put it back.
+
+The assignment itself has no id, and must not grow one. A third identity beside the subject's and the concept's could
+only be random, which breaks convergent minting outright — two devices importing the same Discogs page have to emit the
+same row — or content-derived, which buys nothing because the content is already the key. `src/model/seam.rs` asserts
+this.
 
 **Merging is union.** Two devices, two tools, two passes — all append, nothing is overwritten, and the fold decides what
 shows. That is what makes a second machine free and a second _tool_ free with it.

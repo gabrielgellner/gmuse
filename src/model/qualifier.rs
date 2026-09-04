@@ -125,26 +125,40 @@ mod tests {
 }
 
 #[cfg(test)]
-mod fold_tests {
+pub(crate) mod fold_tests {
     use crate::model::entity::{Device, Qualifier, Recording};
     use crate::model::id::Id;
     use crate::model::ingest::Confidence;
     use crate::model::instance::Instance;
     use crate::model::reference::Source;
 
-    fn device(n: u128) -> Id<Device> {
+    pub(crate) fn device(n: u128) -> Id<Device> {
         Id::from_uuid(uuid::Uuid::from_u128(n))
     }
 
-    fn rec() -> Id<Recording> {
+    pub(crate) fn rec() -> Id<Recording> {
         Id::from_uuid(uuid::Uuid::from_u128(212))
     }
 
-    fn live(i: &Instance, label: &str) -> bool {
+    /// Does anybody say so — the question the player asks, which does not
+    /// care who. The review queue asks the other one, by reading the rows.
+    pub(crate) fn live(i: &Instance, label: &str) -> bool {
+        let concept = Id::<Qualifier>::of_label(label);
         i.catalogue()
             .qualifiers
-            .get(&(rec(), Id::<Qualifier>::of_label(label)))
-            .is_some_and(Option::is_some)
+            .keys()
+            .any(|(r, c, _)| *r == rec() && *c == concept)
+    }
+
+    /// Every asserter of one claim, with what each of them settled on.
+    pub(crate) fn claims(i: &Instance, label: &str) -> Vec<(Source, Confidence)> {
+        let concept = Id::<Qualifier>::of_label(label);
+        i.catalogue()
+            .qualifiers
+            .iter()
+            .filter(|((r, c, _), _)| *r == rec() && *c == concept)
+            .map(|((_, _, basis), conf)| (*basis, *conf))
+            .collect()
     }
 
     /// A recording can be two things at once, which a field could not say.
@@ -211,19 +225,15 @@ mod fold_tests {
         i.retract_qualifier(200, rec(), "live");
 
         let cat = i.catalogue();
-        let decided = cat
-            .qualifiers
-            .get(&(rec(), Id::<Qualifier>::of_label("live")));
-        assert_eq!(
-            decided,
-            Some(&None),
-            "a retraction has to leave the pair present and empty — removing it \
-             makes a decision indistinguishable from a silence"
+        assert!(
+            cat.qualifiers_retracted
+                .contains(&(rec(), Id::<Qualifier>::of_label("live"))),
+            "a retraction has to leave a row saying it was decided — dropping \
+             it makes a decision indistinguishable from a silence"
         );
-        assert_eq!(
-            cat.qualifiers
-                .get(&(rec(), Id::<Qualifier>::of_label("instrumental"))),
-            None,
+        assert!(
+            !cat.qualifiers_retracted
+                .contains(&(rec(), Id::<Qualifier>::of_label("instrumental"))),
             "and something nobody has ruled on has no row at all"
         );
     }
@@ -285,5 +295,114 @@ mod fold_tests {
         i.seed_qualifiers(200);
         assert_eq!(i.catalogue().qualifier_labels.len(), after_one);
         assert!(i.catalogue().qualifier_narrows.len() >= 6);
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    //! **Claim identity versus claim attribute**, the two tiers an assignment
+    //! folds by: `(subject, concept, basis)` is what makes a row exist and it
+    //! unions; `confidence` rides on it and the latest stamp wins.
+    //!
+    //! The rule exists because the alternative loses the most useful thing two
+    //! sources can say, which is that they agree. Genre folds identically and
+    //! is tested through the round trip.
+
+    use super::fold_tests::{claims, device, live, rec};
+    use crate::model::entity::Qualifier;
+    use crate::model::id::Id;
+    use crate::model::ingest::Confidence;
+    use crate::model::instance::Instance;
+    use crate::model::reference::Source;
+
+    fn assign(i: &mut Instance, at: i64, basis: Source, confidence: Confidence) {
+        i.assign_qualifier(at, rec(), "instrumental", basis, confidence);
+    }
+
+    /// **Case 1 — the same source, re-imported.** Idempotent by construction,
+    /// which is what lets a pass be re-run without reviewing its output twice.
+    #[test]
+    fn re_importing_a_source_does_not_make_a_second_claim() {
+        let mut i = Instance::new(device(1));
+        assign(&mut i, 100, Source::Discogs, Confidence::Matched);
+        assign(&mut i, 200, Source::Discogs, Confidence::Matched);
+        assert_eq!(claims(&i, "instrumental").len(), 1);
+    }
+
+    /// **Case 2 — the same source, re-scored.** The attribute moves, and the
+    /// log keeps both records: the fold is a view, never the history.
+    #[test]
+    fn a_source_that_changes_its_mind_updates_in_place() {
+        let mut i = Instance::new(device(1));
+        assign(&mut i, 100, Source::Discogs, Confidence::Provisional);
+        assign(&mut i, 200, Source::Discogs, Confidence::Matched);
+        assert_eq!(
+            claims(&i, "instrumental"),
+            vec![(Source::Discogs, Confidence::Matched)]
+        );
+        assert_eq!(
+            i.records().len(),
+            4,
+            "the earlier score was dropped from the log rather than shadowed"
+        );
+    }
+
+    /// **Case 3 — two sources, one concept, and the reason for the whole
+    /// rule.** Under the old key the human's claim overwrote Discogs's and the
+    /// agreement vanished, leaving nothing to say a guess had been confirmed.
+    #[test]
+    fn two_asserters_of_one_concept_both_stay() {
+        let mut i = Instance::new(device(1));
+        assign(&mut i, 100, Source::Discogs, Confidence::Matched);
+        assign(&mut i, 200, Source::Manual, Confidence::Confirmed);
+        assert_eq!(
+            claims(&i, "instrumental"),
+            // Ordered by basis, which `Source` declares weakest-first — so a
+            // review surface reading this map gets the least authoritative
+            // claim first without sorting.
+            vec![
+                (Source::Discogs, Confidence::Matched),
+                (Source::Manual, Confidence::Confirmed),
+            ],
+            "one asserter overwrote the other, and the agreement was the answer"
+        );
+    }
+
+    /// **Case 4 — nothing edits somebody else's claim.** A person promoting an
+    /// import is making their own, which is why case 3's row count is two: the
+    /// import still says only what the import said.
+    #[test]
+    fn a_person_agreeing_does_not_rewrite_the_import() {
+        let mut i = Instance::new(device(1));
+        assign(&mut i, 100, Source::Discogs, Confidence::Provisional);
+        assign(&mut i, 200, Source::Manual, Confidence::Confirmed);
+        assert!(
+            claims(&i, "instrumental").contains(&(Source::Discogs, Confidence::Provisional)),
+            "the human's confidence was written onto the import's row"
+        );
+    }
+
+    /// **Case 5 — a retraction is keyed one field shorter.** It answers the
+    /// question rather than arguing with an asserter, so it silences every
+    /// basis; otherwise a person would have to retract once per source that
+    /// ever said it, and the next import would put it back.
+    #[test]
+    fn one_retraction_silences_every_asserter() {
+        let mut i = Instance::new(device(1));
+        assign(&mut i, 100, Source::Discogs, Confidence::Matched);
+        assign(&mut i, 200, Source::TagVariant, Confidence::Provisional);
+        i.retract_qualifier(300, rec(), "instrumental");
+        assert!(claims(&i, "instrumental").is_empty());
+
+        // And any basis revives it, because a retraction is a decision and not
+        // a tombstone — the same reason it is a fact rather than a delete.
+        assign(&mut i, 400, Source::Manual, Confidence::Confirmed);
+        assert!(live(&i, "instrumental"));
+        assert!(
+            !i.catalogue()
+                .qualifiers_retracted
+                .contains(&(rec(), Id::<Qualifier>::of_label("instrumental"))),
+            "the pair still reads as ruled against while a claim stands"
+        );
     }
 }

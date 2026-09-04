@@ -301,17 +301,36 @@ pub struct Catalogue {
     pub artist_names: BTreeMap<Id<Artist>, String>,
     pub recordings: BTreeMap<Id<Recording>, Recorded>,
     pub encodings: BTreeMap<Id<Encoding>, Encoded>,
-    /// Every genre assignment, **with why and how confidently**. Keyed by
-    /// subject and concept so it unions by row existence across devices; the
-    /// value is §4 Type 1 — descriptive, last writer wins — because two people
-    /// disagreeing about confidence is not a structural conflict.
-    pub genres: BTreeMap<(GenreOn, Id<Genre>), Assigned>,
+    /// Every genre assignment, **one row per asserter**.
+    ///
+    /// The key is the claim's identity and it includes *who says so*, because
+    /// Discogs saying Techno and a person saying Techno are two independent
+    /// pieces of evidence rather than one claim written twice. Folding them to
+    /// one row would make the second silently overwrite the first and lose the
+    /// agreement, which is the most useful thing the pair says.
+    ///
+    /// The value is the claim's one **attribute**: last writer wins per
+    /// identity, so re-scoring an import (Discogs moving provisional to matched)
+    /// updates in place, while a human's disagreement lands beside it.
+    pub genres: BTreeMap<(GenreOn, Id<Genre>, Source), Confidence>,
     /// What each concept is called.
     pub genre_names: BTreeMap<Id<Genre>, String>,
-    /// Which version each recording is. `None` is a retraction that outlived
-    /// its assignment — kept, not dropped, so a stale replica re-delivering
-    /// the assignment cannot resurrect it.
-    pub qualifiers: BTreeMap<(Id<Recording>, Id<Qualifier>), Option<Assigned>>,
+    /// Which version each recording is, **one row per asserter**, keyed and
+    /// folded exactly as [`Catalogue::genres`] is.
+    pub qualifiers: BTreeMap<(Id<Recording>, Id<Qualifier>, Source), Confidence>,
+    /// Pairs somebody has ruled out.
+    ///
+    /// **Keyed without a basis, unlike the assignments it shadows.** A person
+    /// saying "this is not live" is answering the question, not arguing with
+    /// one asserter, so a retraction silences every basis at once — otherwise
+    /// retracting would mean retracting once per source that ever said it, and
+    /// the next import would put it back.
+    ///
+    /// Kept rather than dropped, because *decided against* and *nobody has
+    /// said* are different answers and only a row can tell them apart. A later
+    /// assignment clears the entry, or a retraction would be a delete wearing
+    /// another name.
+    pub qualifiers_retracted: BTreeSet<(Id<Recording>, Id<Qualifier>)>,
     pub qualifier_labels: BTreeMap<Id<Qualifier>, String>,
     pub qualifier_narrows: BTreeSet<(Id<Qualifier>, Id<Qualifier>)>,
     /// What each hierarchy is called.
@@ -355,13 +374,6 @@ pub struct Asserted {
 pub struct Grouped {
     pub title: String,
     pub artist: Id<Artist>,
-}
-
-/// Why a genre was assigned, and how confidently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Assigned {
-    pub basis: Source,
-    pub confidence: Confidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -473,26 +485,30 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             Fact::QualifierNarrowed { parent, child } => {
                 cat.qualifier_narrows.insert((*parent, *child));
             }
-            // Assign and retract share one arm because they are one decision
-            // seen twice. Records arrive in stamp order, so the later simply
-            // overwrites — the same shape as `HoldingsAsserted`'s supersede,
-            // per pair rather than per device.
+            // **The two tiers.** The insert is keyed by the claim's identity,
+            // so re-importing is idempotent and a second asserter lands beside
+            // the first rather than on top of it; only the confidence is
+            // overwritten, and only for the same asserter.
+            //
+            // Clearing the retraction is the other half: records arrive in
+            // stamp order, so an assignment seen after one revives the pair,
+            // and a stale replica replaying an older assignment never does.
             Fact::QualifierAssigned {
                 recording,
                 concept,
                 basis,
                 confidence,
             } => {
-                cat.qualifiers.insert(
-                    (*recording, *concept),
-                    Some(Assigned {
-                        basis: *basis,
-                        confidence: *confidence,
-                    }),
-                );
+                cat.qualifiers
+                    .insert((*recording, *concept, *basis), *confidence);
+                cat.qualifiers_retracted.remove(&(*recording, *concept));
             }
+            // A retraction answers the question, so it silences every asserter
+            // — see the field's note on why it is keyed one field shorter.
             Fact::QualifierRetracted { recording, concept } => {
-                cat.qualifiers.insert((*recording, *concept), None);
+                cat.qualifiers
+                    .retain(|(r, c, _), _| (r, c) != (recording, concept));
+                cat.qualifiers_retracted.insert((*recording, *concept));
             }
             Fact::GenreCatalogued { genre, name } => {
                 cat.genre_names.insert(*genre, name.clone());
@@ -513,13 +529,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 basis,
                 confidence,
             } => {
-                cat.genres.insert(
-                    (*subject, *genre),
-                    Assigned {
-                        basis: *basis,
-                        confidence: *confidence,
-                    },
-                );
+                cat.genres.insert((*subject, *genre, *basis), *confidence);
             }
             Fact::HoldingsAsserted { device, held } => {
                 // Records arrive in stamp order, so the last one simply wins.

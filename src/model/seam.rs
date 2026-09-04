@@ -528,6 +528,40 @@ mod tests {
         }
     }
 
+    /// **An assignment is identified by what it says, never by an id.**
+    ///
+    /// `entity.rs` lists `GenreAssignment` as a kind, and it stays one so
+    /// anything derived from an assignment can be seeded by `KIND`. But
+    /// minting `Id<GenreAssignment>` would put a *third* identity in the model
+    /// — beside the subject's and the concept's — and it could only be one of
+    /// two things. Random breaks convergent minting outright: two devices
+    /// importing the same Discogs page have to emit the same row, and random
+    /// ids guarantee they cannot. Content-derived buys nothing, because the
+    /// content is already the key.
+    ///
+    /// The cost is not theoretical. An assignment with its own id is two rows
+    /// that must cross the airgap together, and a fold that has to join across
+    /// fact families before it can decide whether a claim is live.
+    ///
+    /// Asserted rather than remembered, because the reflex when a relationship
+    /// grows a field is to reify it into a node, and here the field belongs on
+    /// the row.
+    #[test]
+    fn no_assignment_carries_an_id() {
+        let minted: Vec<_> = read("src")
+            .into_iter()
+            .filter(|(_, text)| {
+                let live = production(text);
+                live.contains("Id<GenreAssignment>") || live.contains("Id<QualifierAssignment>")
+            })
+            .map(|(path, _)| path)
+            .collect();
+        assert!(
+            minted.is_empty(),
+            "an assignment grew an identity of its own: {minted:#?}"
+        );
+    }
+
     /// **Every fact names its subject.**
     ///
     /// `[Subject][PastTenseVerb]` is the event-sourcing convention, and four

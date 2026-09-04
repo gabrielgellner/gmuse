@@ -151,10 +151,6 @@ fn two_instances_one_album_and_a_full_round_trip() {
     // The rename is an LWW register; the assignment is row existence.
     assert_eq!(one.artist_names[&artist], "Bodzin & Romboy");
     let techno = Id::<Genre>::of_name("Techno");
-    assert!(
-        one.genres
-            .contains_key(&(GenreOn::Recording(callisto), techno))
-    );
     assert_eq!(
         one.genre_names[&techno], "Techno",
         "the concept has to be resolvable, or the id renders as nothing"
@@ -162,11 +158,12 @@ fn two_instances_one_album_and_a_full_round_trip() {
     // **Both halves, and the basis is the one that used to be dropped.** The
     // conversion from a proposal read `{ recording, genre, .. }`, so a Discogs
     // guess and a typed answer arrived in the log as the same fact.
-    let assigned = one.genres[&(GenreOn::Recording(callisto), techno)];
-    assert_eq!(assigned.confidence, Confidence::Confirmed);
+    //
+    // The basis is in the *key*, so it crosses the merge or the row is not
+    // found at all — a claim without an asserter does not exist here.
     assert_eq!(
-        assigned.basis,
-        Source::TagVariant,
+        one.genres[&(GenreOn::Recording(callisto), techno, Source::TagVariant)],
+        Confidence::Confirmed,
         "the basis crossed the merge with the assignment"
     );
 
