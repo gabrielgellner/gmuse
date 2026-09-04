@@ -132,9 +132,13 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // One key, every format: lofty maps ID3's UFID and Vorbis's
         // `musicbrainz_trackid` onto it, and both mean the recording. The top
         // rung of #89's ladder; a harvest pass fills the middle one.
+        // The ladder, best rung first (#89): MusicBrainz where the tags carry
+        // it, otherwise whatever authority does name this performance. `None`
+        // falls to the bytes, which is the rung a re-encode strands.
         identity: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzRecordingId))
             .ok()
-            .map(Basis::MusicBrainz),
+            .map(Basis::MusicBrainz)
+            .or_else(|| external(tag)),
         album: some(tag.and_then(|t| t.album()).map(|s| s.trim().to_string())),
         // Album artist first, because a guest credit on one track must not
         // split the album off from the artist it files under.
@@ -192,6 +196,105 @@ fn number(s: &str) -> Option<u16> {
 /// the external id and the name match, and is #57. Its absence is why a
 /// mistagged file with no MusicBrainz id falls straight to a name comparison
 /// rather than to the thing that would actually recognise it.
+/// Tags that can carry a link to where a file came from.
+///
+/// Tried in this order so two devices reading one file agree: a track with
+/// both a shop link and a video link must not identify differently depending
+/// on which tag happened to be read first.
+const CARRIERS: &[ItemKey] = &[
+    ItemKey::AudioFileUrl,
+    ItemKey::AudioSourceUrl,
+    ItemKey::Comment,
+    ItemKey::Description,
+];
+
+/// The Beatport track id in a URL, if there is one.
+///
+/// `beatport.com/track/modulo-tierra-nolah-remix/9728882` — the slug is
+/// decoration and the trailing number is the id. Matched by hand rather than
+/// by a pattern language: two shapes do not earn a dependency, and §12 asks
+/// for explicit over abstract.
+fn beatport(text: &str) -> Option<String> {
+    let rest = text.split_once("beatport.com/track/")?.1;
+    let id: String = rest
+        .rsplit('/')
+        .next()?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// The YouTube video id in a URL, if there is one.
+///
+/// Eleven characters of the base64url alphabet, which is what makes it
+/// findable in free text — the live-session rips carry theirs inside a comment
+/// like `Western AF — https://youtu.be/1lYigC2Jn20`.
+fn youtube(text: &str) -> Option<String> {
+    const MARKERS: [&str; 2] = ["youtube.com/watch?v=", "youtu.be/"];
+    const LEN: usize = 11;
+    for marker in MARKERS {
+        if let Some(rest) = text.split_once(marker).map(|(_, r)| r) {
+            let id: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .take(LEN)
+                .collect();
+            if id.len() == LEN {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// The first external id any carrier tag holds.
+///
+/// **Only what is already in the files.** Measured on this library: 113 of 592
+/// DJ-crate tracks carry a Beatport track id in `WOAF`, and the live-session
+/// rips carry a video id in a comment. Neither was reachable before, because
+/// the identity field could hold nothing but a MusicBrainz id — and both name
+/// the performance as well as an MBID does, for music MusicBrainz has never
+/// heard of.
+fn external(tag: Option<&lofty::tag::Tag>) -> Option<Basis> {
+    // **`get_string` cannot see a URL frame.** lofty stores `WOAF` and friends
+    // as `ItemValue::Locator`, and `get_string` returns only `Text` — so every
+    // link came back empty and the harvest reported that the files carried no
+    // external id. That is the fourth reader this session to silently not see
+    // a value shape, after ffprobe's blindness to `UFID`, mutagen's raw ID3
+    // frame names, and its list-valued Vorbis comments.
+    let read = |key: ItemKey| -> String {
+        tag.and_then(|t| t.get(key))
+            .map(lofty::tag::TagItem::value)
+            .and_then(|v| match v {
+                lofty::tag::ItemValue::Text(s) | lofty::tag::ItemValue::Locator(s) => {
+                    Some(s.clone())
+                }
+                lofty::tag::ItemValue::Binary(_) => None,
+            })
+            .unwrap_or_default()
+    };
+    for key in CARRIERS {
+        let text = read(*key);
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(key) = beatport(&text) {
+            return Some(Basis::External {
+                authority: "beatport".to_string(),
+                key,
+            });
+        }
+        if let Some(key) = youtube(&text) {
+            return Some(Basis::External {
+                authority: "youtube".to_string(),
+                key,
+            });
+        }
+    }
+    None
+}
+
 pub fn confidence_of(scan: &Scanned, matches_known_name: bool) -> Confidence {
     if matches!(scan.identity, Some(Basis::MusicBrainz(_))) {
         Confidence::Confirmed
@@ -362,5 +465,70 @@ mod tests {
         let p = d.join("t.wav");
         std::fs::write(&p, b"not a wav").unwrap();
         assert!(read(&p).is_err());
+    }
+}
+
+#[cfg(test)]
+mod external_tests {
+    use super::*;
+
+    /// The real shape, from a file in the DJ crate.
+    #[test]
+    fn a_beatport_url_yields_its_track_id() {
+        assert_eq!(
+            beatport("http://www.beatport.com/track/modulo-tierra-nolah-remix/9728882"),
+            Some("9728882".into())
+        );
+    }
+
+    /// The slug is decoration and may contain anything, including digits — the
+    /// id is the *last* segment, not the first number in the string.
+    #[test]
+    fn the_slug_is_not_mistaken_for_the_id() {
+        assert_eq!(
+            beatport("beatport.com/track/808-nirvana-2016-remix/1234"),
+            Some("1234".into())
+        );
+    }
+
+    /// A link to the label or the artist is not a track id, and must not be
+    /// read as one — `WPUB` carries a label URL on 127 crate files.
+    #[test]
+    fn a_label_url_is_not_a_track() {
+        assert_eq!(
+            beatport("http://www.beatport.com/label/submarine-vibes/38674"),
+            None
+        );
+        assert_eq!(beatport("https://minimalfreaks.pw/whatever"), None);
+    }
+
+    /// Found inside free text, because that is where it lives: the rips carry
+    /// theirs in a comment beside the session name.
+    #[test]
+    fn a_video_id_is_found_in_a_comment() {
+        assert_eq!(
+            youtube("Western AF — https://youtu.be/1lYigC2Jn20"),
+            Some("1lYigC2Jn20".into())
+        );
+        assert_eq!(
+            youtube("https://www.youtube.com/watch?v=DKFlBd9jJ2I&t=30s"),
+            Some("DKFlBd9jJ2I".into())
+        );
+    }
+
+    /// Eleven characters exactly. A truncated link is not an id, and half of
+    /// one would be a *different* recording that two devices could disagree
+    /// about — which is the one thing a basis may never do.
+    #[test]
+    fn a_truncated_video_link_is_not_an_id() {
+        assert_eq!(youtube("https://youtu.be/1lYigC2"), None);
+        assert_eq!(youtube("youtu.be/"), None);
+    }
+
+    /// A channel or playlist link has no video id in it.
+    #[test]
+    fn a_link_that_is_not_a_video_yields_nothing() {
+        assert_eq!(youtube("https://www.youtube.com/@WesternAF"), None);
+        assert_eq!(beatport("nothing here"), None);
     }
 }
