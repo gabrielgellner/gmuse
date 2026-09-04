@@ -207,6 +207,24 @@ pub enum Fact {
         artist: Id<Artist>,
     },
 
+    /// Two recordings are one, and this is the name it keeps.
+    ///
+    /// **The repair for a false split**, and the model's answer to the error
+    /// it deliberately prefers: a split is one merge from repaired, a false
+    /// merge is permanent. Nothing is deleted — the loser's facts are still in
+    /// the log and `undo` puts it back.
+    ///
+    /// The case that made it necessary is an identification. Naming a file's
+    /// performance mints a new recording id, and the byte-minted one it
+    /// replaces keeps every rating and play anyone gave it. Applying 377
+    /// identifications to this library stranded **7 of 11 ratings and 118 of
+    /// 255 played recordings** exactly that way — the facts were all still
+    /// there and hung off an id nothing pointed at any more.
+    RecordingMerged {
+        loser: Id<Recording>,
+        winner: Id<Recording>,
+    },
+
     /// A composition, as distinct from any performance of it.
     ///
     /// **Nothing in this library's tags produces one.** `MUSICBRAINZ_WORKID`
@@ -577,6 +595,12 @@ pub struct Catalogue {
     /// Cutoff and the analyser that found it, per encoding.
     pub measurements: BTreeMap<Id<Encoding>, (u32, u16)>,
     pub groups: BTreeMap<Id<ReleaseGroup>, Grouped>,
+    /// Which recordings have been folded into which.
+    ///
+    /// Applied to **history** — ratings, plays, acquisition — and to anything
+    /// else keyed by a recording, so a merge moves what was said about the
+    /// loser rather than stranding it.
+    pub merges: crate::model::merge::Merges<Recording>,
     /// Every composition anyone has named.
     pub works: BTreeMap<Id<Work>, String>,
     /// Which recordings perform which works. Row existence: a recording can
@@ -708,6 +732,24 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     let mut cat = Catalogue::default();
     let mut bindings: Bindings = BTreeMap::new();
 
+    // **Merges first, in their own pass.** A merge recorded on Tuesday has to
+    // move a rating given on Monday, so it cannot be applied as it is reached
+    // — every recording named below is resolved through the finished set.
+    for Record { fact, .. } in records {
+        if let Fact::RecordingMerged { loser, winner } = fact {
+            let _ = cat.merges.merge(*loser, *winner);
+        }
+    }
+    let of = |r: &Id<Recording>| cat.merges.resolve(*r);
+    let genre_on = |s: &GenreOn| match s {
+        GenreOn::Recording(r) => GenreOn::Recording(cat.merges.resolve(*r)),
+        other => *other,
+    };
+    let credit_on = |s: &CreditOn| match s {
+        CreditOn::Recording(r) => CreditOn::Recording(cat.merges.resolve(*r)),
+        other => *other,
+    };
+
     for Record { stamp, fact } in records {
         match fact {
             Fact::ArtistNamed { artist, name } => {
@@ -720,7 +762,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 artist,
             } => {
                 cat.recordings.insert(
-                    *recording,
+                    of(recording),
                     Recorded {
                         title: title.clone(),
                         artist: *artist,
@@ -744,9 +786,9 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             }
             Fact::EncodingBound { encoding, from, to } => {
                 bindings
-                    .entry((*encoding, *from))
+                    .entry((*encoding, from.map(|f| of(&f))))
                     .or_default()
-                    .push((*stamp, *to));
+                    .push((*stamp, of(to)));
             }
             Fact::QualifierCatalogued { concept, label } => {
                 cat.qualifier_labels.insert(*concept, label.clone());
@@ -762,7 +804,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             } => assign(
                 &mut cat.qualifiers,
                 &mut cat.qualifiers_retracted,
-                *recording,
+                of(recording),
                 *concept,
                 *basis,
                 *confidence,
@@ -770,7 +812,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             Fact::QualifierRetracted { recording, concept } => retract(
                 &mut cat.qualifiers,
                 &mut cat.qualifiers_retracted,
-                *recording,
+                of(recording),
                 *concept,
             ),
             Fact::GenreCatalogued { genre, name } => {
@@ -805,7 +847,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             } => assign(
                 &mut cat.genres,
                 &mut cat.genres_retracted,
-                *subject,
+                genre_on(subject),
                 *genre,
                 *basis,
                 *confidence,
@@ -817,9 +859,12 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             } => {
                 cat.aliases.insert((*subject, value.clone(), *kind));
             }
-            Fact::GenreRetracted { subject, genre } => {
-                retract(&mut cat.genres, &mut cat.genres_retracted, *subject, *genre)
-            }
+            Fact::GenreRetracted { subject, genre } => retract(
+                &mut cat.genres,
+                &mut cat.genres_retracted,
+                genre_on(subject),
+                *genre,
+            ),
             Fact::HoldingsAsserted { device, held } => {
                 // Records arrive in stamp order, so the last one simply wins.
                 cat.holdings.insert(
@@ -847,7 +892,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 cat.works.insert(*work, title.clone());
             }
             Fact::WorkPerformed { recording, work } => {
-                cat.performances.insert((*recording, *work));
+                cat.performances.insert((of(recording), *work));
             }
             Fact::RoleDefined { role, name, class } => {
                 cat.roles.insert(*role, (name.clone(), *class));
@@ -862,7 +907,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 join_phrase,
             } => {
                 cat.credits.insert(
-                    (*subject, *artist, *role, *basis),
+                    (credit_on(subject), *artist, *role, *basis),
                     Credited {
                         position: *position,
                         as_credited: as_credited.clone(),
@@ -911,7 +956,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     *track,
                     Placed {
                         medium: *medium,
-                        recording: *recording,
+                        recording: of(recording),
                         position: *position,
                         title_on_release: title_on_release.clone(),
                     },
@@ -929,15 +974,15 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 // Records arrive in stamp order, so the last simply wins.
                 match stars {
                     Some(n) => {
-                        cat.ratings.insert(*recording, *n);
+                        cat.ratings.insert(of(recording), *n);
                     }
                     None => {
-                        cat.ratings.remove(recording);
+                        cat.ratings.remove(&of(recording));
                     }
                 }
             }
             Fact::RecordingPlayed { recording, .. } => {
-                *cat.plays.entry(*recording).or_insert(0) += 1;
+                *cat.plays.entry(of(recording)).or_insert(0) += 1;
                 // The latest play, by the wall time the play happened, which
                 // is what "days since played" is asking about. The stamp
                 // orders the log; this answers the question.
@@ -947,7 +992,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 // that straight out made "played a minute ago" read as fifty
                 // years from now.
                 let seconds = stamp.wall / 1_000;
-                let latest = cat.last_played.entry(*recording).or_insert(seconds);
+                let latest = cat.last_played.entry(of(recording)).or_insert(seconds);
                 *latest = (*latest).max(seconds);
             }
             Fact::RecordingIdentified { recording, basis } => {
@@ -967,8 +1012,11 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     .entry(*recording)
                     .or_insert_with(|| basis.clone());
             }
+            // Applied in the pass above, because a merge has to move what was
+            // said before it.
+            Fact::RecordingMerged { .. } => {}
             Fact::RecordingAcquired { recording, at } => {
-                let first = cat.acquired.entry(*recording).or_insert(*at);
+                let first = cat.acquired.entry(of(recording)).or_insert(*at);
                 *first = (*first).min(*at);
             }
         }
@@ -1237,6 +1285,124 @@ mod history_tests {
         let cat = fold(&BTreeSet::new());
         assert!(cat.acquired.is_empty());
         assert!(cat.last_played.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    //! **A merge moves what was said, or it is a delete with extra steps.**
+
+    use super::*;
+    use crate::model::basis::Basis;
+    use crate::model::clock::HybridClock;
+
+    fn rec(n: u128) -> Id<Recording> {
+        Id::from_uuid(uuid::Uuid::from_u128(n))
+    }
+
+    fn log(facts: impl IntoIterator<Item = Fact>) -> BTreeSet<Record> {
+        let mut clock = HybridClock::new(Id::derived(b"laptop"));
+        facts
+            .into_iter()
+            .map(|fact| Record {
+                stamp: clock.stamp(1_000),
+                fact,
+            })
+            .collect()
+    }
+
+    /// **The case that actually happened**, in miniature: a rating and two
+    /// plays given before anyone knew what the recording was.
+    #[test]
+    fn history_given_to_the_loser_lands_on_the_winner() {
+        let (old, new) = (rec(1), rec(2));
+        let cat = fold(&log([
+            Fact::RecordingRated {
+                recording: old,
+                stars: Some(5),
+            },
+            Fact::RecordingPlayed {
+                recording: old,
+                encoding: Some(Id::derived(b"e")),
+            },
+            Fact::RecordingPlayed {
+                recording: new,
+                encoding: Some(Id::derived(b"e")),
+            },
+            Fact::RecordingMerged {
+                loser: old,
+                winner: new,
+            },
+        ]));
+
+        assert_eq!(cat.ratings.get(&new), Some(&5), "the rating was stranded");
+        assert_eq!(cat.plays.get(&new), Some(&2), "the plays did not add up");
+        assert!(!cat.ratings.contains_key(&old) && !cat.plays.contains_key(&old));
+    }
+
+    /// **A merge recorded on Tuesday moves a rating given on Monday**, which
+    /// is why merges are folded in a pass of their own. Applied as they are
+    /// reached, everything earlier stays where it was.
+    #[test]
+    fn a_merge_reaches_backwards() {
+        let (old, new) = (rec(1), rec(2));
+        let cat = fold(&log([
+            Fact::RecordingRated {
+                recording: old,
+                stars: Some(4),
+            },
+            Fact::RecordingMerged {
+                loser: old,
+                winner: new,
+            },
+        ]));
+        assert_eq!(cat.ratings.get(&new), Some(&4));
+    }
+
+    /// The row goes too, or the library shows the song twice.
+    #[test]
+    fn a_merged_recording_keeps_no_row_of_its_own() {
+        let (old, new) = (rec(1), rec(2));
+        let cat = fold(&log([
+            Fact::RecordingCatalogued {
+                recording: old,
+                title: "0011".into(),
+                artist: Id::derived(b"brinkmann"),
+            },
+            Fact::RecordingIdentified {
+                recording: new,
+                basis: Basis::MusicBrainz(uuid::Uuid::from_u128(9)),
+            },
+            Fact::RecordingMerged {
+                loser: old,
+                winner: new,
+            },
+        ]));
+        assert!(
+            !cat.recordings.contains_key(&old),
+            "the song is listed twice"
+        );
+        assert_eq!(cat.recordings[&new].title, "0011");
+    }
+
+    /// Nothing is destroyed. The loser's facts are all still in the log, which
+    /// is what makes a merge undoable and a false one repairable.
+    #[test]
+    fn a_merge_destroys_nothing() {
+        let records = log([
+            Fact::RecordingRated {
+                recording: rec(1),
+                stars: Some(5),
+            },
+            Fact::RecordingMerged {
+                loser: rec(1),
+                winner: rec(2),
+            },
+        ]);
+        assert!(records.iter().any(|r| matches!(
+            &r.fact,
+            Fact::RecordingRated { recording, .. } if *recording == rec(1)
+        )));
     }
 }
 

@@ -59,7 +59,7 @@ pub enum MergeError {
 }
 
 /// The merge decisions taken about one kind of entity.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(bound = "")]
 pub struct Merges<T> {
     /// loser → winner. May chain; [`Merges::resolve`] follows it.

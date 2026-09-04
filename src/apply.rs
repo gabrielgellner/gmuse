@@ -59,6 +59,14 @@ impl proposal::Holdings for Library {
         }
     }
 
+    fn identified(&self, recording: Id<Recording>) -> Option<crate::model::basis::Basis> {
+        self.log
+            .identified
+            .get(&recording)
+            .or_else(|| self.disk.identified.get(&recording))
+            .cloned()
+    }
+
     fn bound(&self, encoding: Id<crate::model::entity::Encoding>) -> Option<Id<Recording>> {
         self.log
             .bound

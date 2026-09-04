@@ -155,6 +155,13 @@ pub trait Holdings {
     fn holds(&self, subject: Subject) -> bool;
     /// Which recording an encoding currently holds.
     fn bound(&self, encoding: Id<Encoding>) -> Option<Id<Recording>>;
+    /// What a recording's id was derived from.
+    ///
+    /// The rung is what separates a repair from a claim: a recording resting
+    /// on its bytes is one nothing had named, so identifying it merges. One an
+    /// authority already named is a different performance, and a file pointed
+    /// at it is a relink with no merge in it.
+    fn identified(&self, recording: Id<Recording>) -> Option<Basis>;
 }
 
 /// What a proposal is about — one of the two things a tool may name.
@@ -362,13 +369,36 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             if from == Some(to) {
                 return Err("already holds that performance".into());
             }
-            vec![
+            let mut facts = vec![
                 Fact::RecordingIdentified {
                     recording: to,
                     basis,
                 },
                 Fact::EncodingBound { encoding, from, to },
-            ]
+            ];
+            // **The history has to come too.**
+            //
+            // Naming a performance mints a new id, and every rating and play
+            // anyone gave the old one hangs off the id nothing points at now.
+            // Applying 377 identifications stranded 7 of 11 ratings and 118 of
+            // 255 played recordings exactly that way — nothing failed, the
+            // facts were all still in the log, and they were unreachable.
+            //
+            // **Only when the old recording was minted from the bytes.** That
+            // rung means "nothing had named this", so the two are one
+            // performance badly named rather than two performances — and
+            // merging is a repair rather than a claim. A recording an
+            // authority had already named is a different performance, and
+            // pointing a file at it is a relink with no merge in it.
+            if let Some(old) = from
+                && matches!(library.identified(old), Some(Basis::Audio(_)))
+            {
+                facts.push(Fact::RecordingMerged {
+                    loser: old,
+                    winner: to,
+                });
+            }
+            facts
         }
         Proposal::Rated { recording, stars } => {
             vec![Fact::RecordingRated { recording, stars }]
@@ -416,6 +446,19 @@ mod tests {
                 e if e == enc(1) => Some(rec(1)),
                 e if e == enc(3) => Some(Id::of_basis(&Basis::MusicBrainz(settled()))),
                 _ => None,
+            }
+        }
+
+        /// `rec(1)` rests on its bytes — nothing had named it — and the
+        /// recording encoding 3 holds was named by MusicBrainz.
+        fn identified(&self, recording: Id<Recording>) -> Option<Basis> {
+            if recording == rec(1) {
+                Some(Basis::Audio(crate::audio_id::AudioId {
+                    scheme: 1,
+                    hash: 1,
+                }))
+            } else {
+                Some(Basis::MusicBrainz(settled()))
             }
         }
     }
@@ -694,6 +737,56 @@ mod tests {
         assert_eq!(report.applied, 0);
         assert_eq!(report.refused.len(), 1, "{report}");
         assert!(report.balances(1), "{report}");
+    }
+
+    /// **The history comes with it**, which is the whole point of merging.
+    ///
+    /// Naming a performance mints a new id. Without this, every rating and
+    /// play given to the byte-minted one hangs off an id nothing points at:
+    /// 7 of 11 ratings and 118 of 255 played recordings, on the first real
+    /// run, all still in the log and none of them reachable.
+    #[test]
+    fn identifying_a_byte_minted_recording_merges_it() {
+        let mbid = uuid::Uuid::from_u128(0xca11_1500);
+        let text = format!(
+            r#"{{"fact":"identified","encoding":"{}","basis":{{"musicbrainz":"{mbid}"}}}}"#,
+            enc(1)
+        );
+        let (records, _) = parse(&text, dev(), 100, HELD);
+
+        let named = Id::<Recording>::of_basis(&Basis::MusicBrainz(mbid));
+        assert!(
+            records.iter().any(|r| matches!(
+                &r.fact,
+                Fact::RecordingMerged { loser, winner } if *loser == rec(1) && *winner == named
+            )),
+            "the ratings and plays were left on the id nothing points at"
+        );
+    }
+
+    /// **A recording an authority already named is not merged away.**
+    ///
+    /// Then the two are different performances and pointing a file at one of
+    /// them is an ordinary relink. Merging would be a claim rather than a
+    /// repair, and a false merge is the error this model refuses to make —
+    /// a split is one merge from repaired and a merge is permanent.
+    #[test]
+    fn relinking_away_from_a_named_recording_does_not_merge() {
+        // Encoding 3 holds a recording MusicBrainz named; point it elsewhere.
+        let text = format!(
+            r#"{{"fact":"identified","encoding":"{}","basis":{{"musicbrainz":"{}"}}}}"#,
+            enc(3),
+            uuid::Uuid::from_u128(0xbbbb)
+        );
+        let (records, report) = parse(&text, dev(), 100, HELD);
+
+        assert_eq!(report.applied, 1, "{report}");
+        assert!(
+            !records
+                .iter()
+                .any(|r| matches!(&r.fact, Fact::RecordingMerged { .. })),
+            "a relink between two named performances merged them"
+        );
     }
 
     /// The old spelling still reads, because it is already in the live log.
