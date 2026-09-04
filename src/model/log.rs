@@ -144,6 +144,20 @@ pub enum Fact {
         child: Id<Genre>,
     },
 
+    /// Withdraw a narrower-of edge.
+    ///
+    /// Without it an edge is permanent, and a wrong one — `Techno` under
+    /// `Rock` — cannot be taken back: `genre+ = Rock` keeps returning techno
+    /// for good, and the only repair is to stop using the hierarchy.
+    ///
+    /// Shadows rather than deletes, for the reason every retraction here does:
+    /// a stale replica re-delivering the edge would otherwise resurrect it.
+    HierarchyNarrowRetracted {
+        hierarchy: Id<Hierarchy>,
+        parent: Id<Genre>,
+        child: Id<Genre>,
+    },
+
     /// One genre on one subject, with why it was assigned and how confidently.
     ///
     /// **All four fields, and the previous shape had two.** It was
@@ -456,6 +470,33 @@ fn retract<S, C>(
     retracted.insert((subject, concept));
 }
 
+/// Fold one claim that has no attribute to carry.
+///
+/// The row-existence form of [`assign`]: where an assignment splits into an
+/// identity and an attribute, an edge is identity all the way down — there is
+/// nothing to say about `Techno narrows Electronic` beyond that somebody said
+/// it. So the key is the whole claim, and the fold is a set union.
+fn assert_edge<K: Ord + Copy>(live: &mut BTreeSet<K>, retracted: &mut BTreeSet<K>, edge: K) {
+    live.insert(edge);
+    retracted.remove(&edge);
+}
+
+/// Fold one retraction of such a claim — the same rule as [`retract`].
+///
+/// The live row goes, a row saying it was **decided against** stays, and a
+/// later assertion revives. Keeping the row is what separates "somebody ruled
+/// this out" from "nobody has said", which an absence cannot express and a
+/// review queue needs.
+///
+/// It differs from [`retract`] in exactly one place, and only because the
+/// claims differ: an assignment's live key carries the basis that made it, so
+/// retracting one has to sweep every asserter. An edge has no asserter in its
+/// key, so there is one row to remove.
+fn retract_edge<K: Ord + Copy>(live: &mut BTreeSet<K>, retracted: &mut BTreeSet<K>, edge: K) {
+    live.remove(&edge);
+    retracted.insert(edge);
+}
+
 /// What the catalogue looks like after folding a set of records.
 ///
 /// Every collection is ordered, because "both devices fold to the same result"
@@ -508,6 +549,10 @@ pub struct Catalogue {
     pub hierarchies: BTreeMap<Id<Hierarchy>, String>,
     /// Every narrower-of edge. Row existence, so curation unions.
     pub narrows: BTreeSet<(Id<Hierarchy>, Id<Genre>, Id<Genre>)>,
+    /// Edges somebody has ruled out. Kept for the reason
+    /// [`Catalogue::qualifiers_retracted`] is: a decision and a silence are
+    /// different answers, and only a row can tell them apart.
+    pub narrows_retracted: BTreeSet<(Id<Hierarchy>, Id<Genre>, Id<Genre>)>,
     pub plays: BTreeMap<Id<Recording>, u32>,
     /// What each recording's identity was derived from.
     pub identified: BTreeMap<Id<Recording>, crate::model::basis::Basis>,
@@ -727,9 +772,20 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 hierarchy,
                 parent,
                 child,
-            } => {
-                cat.narrows.insert((*hierarchy, *parent, *child));
-            }
+            } => assert_edge(
+                &mut cat.narrows,
+                &mut cat.narrows_retracted,
+                (*hierarchy, *parent, *child),
+            ),
+            Fact::HierarchyNarrowRetracted {
+                hierarchy,
+                parent,
+                child,
+            } => retract_edge(
+                &mut cat.narrows,
+                &mut cat.narrows_retracted,
+                (*hierarchy, *parent, *child),
+            ),
             Fact::GenreAssigned {
                 subject,
                 genre,

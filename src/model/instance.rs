@@ -550,6 +550,25 @@ impl Instance {
         }
     }
 
+    /// Withdraw a narrower-of edge. Shadows rather than deletes, so a stale
+    /// replica re-delivering the edge cannot resurrect it.
+    pub fn retract_narrowing(
+        &mut self,
+        now: i64,
+        hierarchy: Id<Hierarchy>,
+        parent: &str,
+        child: &str,
+    ) {
+        self.append(
+            now,
+            Fact::HierarchyNarrowRetracted {
+                hierarchy,
+                parent: Id::<Genre>::of_name(parent),
+                child: Id::<Genre>::of_name(child),
+            },
+        );
+    }
+
     /// Say that one concept is narrower than another, inside one hierarchy.
     pub fn narrows(&mut self, now: i64, hierarchy: Id<Hierarchy>, parent: &str, child: &str) {
         self.append(

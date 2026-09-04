@@ -121,6 +121,11 @@ rename emits the label change and a `Retired` alias, so the old name stays finda
 (`merge.rs::Merges`) resolves both ids to one for good. Do not re-mint on rename, and do not switch concepts to random
 ids to dodge this: the first rewrites every assignment, the second gives up convergent definition entirely.
 
+A wrong edge can be withdrawn. `HierarchyNarrowRetracted` shadows rather than deletes, for the reason every retraction
+here does — a stale replica re-delivering the edge would otherwise restore it — and filing the edge again revives it.
+That makes three callers for one rule: genre assignments, qualifier assignments and hierarchy edges. The first two carry
+a basis in their live key and so retract by sweeping every asserter; an edge names no asserter and is one row.
+
 A concept with no place in the browse hierarchy is an ordinary row. Assignment does not wait for placement — the moment
 you know the answer would otherwise be the moment you cannot record it. What it costs is that closure queries (`genre+`)
 do not reach it, so `Catalogue::unplaced_genres` is a standing review query, alongside `not qualifier?`.

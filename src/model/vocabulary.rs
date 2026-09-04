@@ -721,3 +721,129 @@ mod genre_retraction_tests {
         assert!(i.catalogue().genres_retracted.is_empty());
     }
 }
+
+#[cfg(test)]
+mod hierarchy_retraction_tests {
+    //! **A wrong edge has to be withdrawable.**
+    //!
+    //! Without this the browse tree was append-only: `Techno` filed under
+    //! `Rock` stayed there, `genre+ = Rock` kept returning techno for good,
+    //! and the only repair was to stop using the hierarchy.
+    //!
+    //! The rule is the one every retraction here uses — shadow, do not delete
+    //! — and the third caller for it. The other two are genre and qualifier
+    //! assignments; those carry a basis in their live key and so retract by
+    //! sweeping, where an edge names no asserter and is one row.
+
+    use crate::model::entity::{Genre, Hierarchy};
+    use crate::model::id::Id;
+    use crate::model::ingest::Confidence;
+    use crate::model::instance::Instance;
+    use crate::model::reference::Source;
+    use crate::model::vocabulary::GenreOn;
+    use crate::model::{basis::Basis, spine::Recording};
+
+    fn browse() -> Id<Hierarchy> {
+        Id::derived(b"browse")
+    }
+
+    fn edge(parent: &str, child: &str) -> (Id<Hierarchy>, Id<Genre>, Id<Genre>) {
+        (
+            browse(),
+            Id::<Genre>::of_name(parent),
+            Id::<Genre>::of_name(child),
+        )
+    }
+
+    fn instance(n: u128) -> Instance {
+        Instance::new(Id::from_uuid(uuid::Uuid::from_u128(n)))
+    }
+
+    /// The edge goes, and a row stays saying somebody decided it should.
+    #[test]
+    fn a_withdrawn_edge_leaves_a_decision_behind() {
+        let mut i = instance(1);
+        i.narrows(100, browse(), "Rock", "Techno");
+        assert!(i.catalogue().narrows.contains(&edge("Rock", "Techno")));
+
+        i.retract_narrowing(200, browse(), "Rock", "Techno");
+        let cat = i.catalogue();
+        assert!(!cat.narrows.contains(&edge("Rock", "Techno")));
+        assert!(
+            cat.narrows_retracted.contains(&edge("Rock", "Techno")),
+            "the decision left no row, so it reads as though nobody had filed it"
+        );
+        assert!(
+            !cat.narrows_retracted
+                .contains(&edge("Electronic", "Techno")),
+            "an edge nobody has ruled on has no row at all"
+        );
+    }
+
+    /// **The correction survives the sync**, which is the whole reason a
+    /// retraction is a fact rather than a delete. A curator withdraws an edge,
+    /// and a replica that still holds the original sends it back.
+    #[test]
+    fn a_retracted_edge_is_not_restored_by_a_replica() {
+        let mut mine = instance(1);
+        mine.narrows(100, browse(), "Rock", "Techno");
+        let stale = mine.records().clone();
+
+        mine.retract_narrowing(200, browse(), "Rock", "Techno");
+        mine.merge(300, &stale);
+        assert!(
+            !mine.catalogue().narrows.contains(&edge("Rock", "Techno")),
+            "a stale replica restored a withdrawn edge"
+        );
+    }
+
+    /// And filing it again works, or a retraction is permanent — which is a
+    /// delete wearing another name, and would make one mis-click final.
+    #[test]
+    fn filing_an_edge_again_revives_it() {
+        let mut i = instance(1);
+        i.narrows(100, browse(), "Electronic", "Techno");
+        i.retract_narrowing(200, browse(), "Electronic", "Techno");
+        i.narrows(300, browse(), "Electronic", "Techno");
+
+        let cat = i.catalogue();
+        assert!(cat.narrows.contains(&edge("Electronic", "Techno")));
+        assert!(
+            cat.narrows_retracted.is_empty(),
+            "the pair still reads as ruled against while the edge stands"
+        );
+    }
+
+    /// **Withdrawing the only edge puts the concept back in the backlog.**
+    ///
+    /// The two halves have to agree: `unplaced_genres` reads the live edges,
+    /// so a retraction that left the edge in place would quietly keep a
+    /// concept out of the review queue that nothing can reach any more.
+    #[test]
+    fn withdrawing_the_last_edge_returns_a_concept_to_the_backlog() {
+        let rec = Id::<Recording>::of_basis(&Basis::External {
+            authority: "test".into(),
+            key: "callisto".into(),
+        });
+        let mut i = instance(1);
+        i.narrows(100, browse(), "Electronic", "Techno");
+        i.assign_genre(
+            200,
+            GenreOn::Recording(rec),
+            "Techno",
+            Source::Discogs,
+            Confidence::Matched,
+        );
+        assert!(
+            i.catalogue().unplaced_genres(browse()).is_empty(),
+            "a placed concept is not a backlog item"
+        );
+
+        i.retract_narrowing(300, browse(), "Electronic", "Techno");
+        assert_eq!(
+            i.catalogue().unplaced_genres(browse()),
+            [Id::<Genre>::of_name("Techno")].into_iter().collect(),
+            "the concept is unreachable by closure and nothing said so"
+        );
+    }
+}
