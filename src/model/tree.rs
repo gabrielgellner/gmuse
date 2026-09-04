@@ -16,6 +16,31 @@
 //! **The album level is a release group.** So the reissue trap stops
 //! mattering: a 2015 pressing of a 1982 album files under the album, and
 //! ordering by date reads the group's `first_released` and gets 1982 (#59).
+//!
+//! ## Why nothing browses this yet
+//!
+//! **Both of those ask a recording a question only a file can answer**, and
+//! that is not a gap in the wiring — it is the thing #78 exists to settle.
+//!
+//! A recording appears on every release that holds it; a file sits on exactly
+//! one. `Librarian::files_under` and `album_of` reach for
+//! `tracks_of_recording(..).first()`, so for anything held by a compilation
+//! *and* its original album, the answer is whichever placement sorts first.
+//!
+//! Measured against the real library, replacing `library.rs`'s tag-derived
+//! tree with this one moved tracks between **60 albums**: `Who Made Who` is an
+//! AC/DC compilation, so the file at `Back in Black/02 Hells Bells.mp3` was
+//! filed under `Who Made Who` — correct about the recording and wrong about
+//! the copy on disk.
+//!
+//! Declining instead of guessing is not the fix either. Falling back to the
+//! recording's own credit files `Islands in the Stream` under *Dolly Parton
+//! Duet with Kenny Rogers*, which is precisely the split `file_under`'s
+//! album-artist preference exists to prevent: **197 artists became 207.**
+//!
+//! So a browsable row has to name the *placement* it means, and that is #78.
+//! Until then `library.rs` keeps grouping by the file's own tags, which are
+//! the ones actually true of the copy in hand.
 
 use std::collections::BTreeMap;
 
@@ -40,6 +65,14 @@ pub struct Album {
 #[derive(Debug, Default)]
 pub struct Tree {
     artists: BTreeMap<SortKey, BTreeMap<SortKey, Album>>,
+    /// What to **show** for each artist key.
+    ///
+    /// The tree is keyed by a sort key — case folded, marks flattened, article
+    /// moved — which is right for ordering and unreadable on screen. Without
+    /// this a renderer has to reach back for a recording under the node just
+    /// to recover the string, which is how a projection that exists to answer
+    /// questions ends up unable to answer the simplest one.
+    artist_names: BTreeMap<SortKey, String>,
     flat: Vec<Id<Recording>>,
 }
 
@@ -50,12 +83,16 @@ impl Tree {
     /// Build the tree a library describes.
     pub fn of(l: &Librarian, smart_artist_sort: bool) -> Self {
         let mut by_artist: BTreeMap<SortKey, BTreeMap<SortKey, Album>> = BTreeMap::new();
+        let mut artist_names: BTreeMap<SortKey, String> = BTreeMap::new();
 
         for recording in l.recordings() {
             let Some(row) = l.row(recording) else {
                 continue;
             };
             let artist = sort_key(&row.file_under, smart_artist_sort);
+            artist_names
+                .entry(artist.clone())
+                .or_insert_with(|| row.file_under.clone());
             // Albums keep their article: "The Wall" belongs under T.
             let title = row.album.clone().unwrap_or_else(|| NO_ALBUM.to_string());
             let album_key = sort_key(&title, false);
@@ -89,6 +126,7 @@ impl Tree {
 
         Tree {
             artists: by_artist,
+            artist_names,
             flat,
         }
     }
@@ -100,6 +138,15 @@ impl Tree {
     /// The whole tree flattened — artist, then album, then disc and track.
     pub fn flat(&self) -> &[Id<Recording>] {
         &self.flat
+    }
+
+    /// What to show for an artist node. Falls back to the sort key, which is
+    /// wrong-looking rather than absent — a node with no label cannot be
+    /// clicked on.
+    pub fn artist_name<'a>(&'a self, artist: &'a SortKey) -> &'a str {
+        self.artist_names
+            .get(artist)
+            .map_or_else(|| artist.as_str(), String::as_str)
     }
 
     pub fn artist_count(&self) -> usize {
@@ -177,6 +224,54 @@ mod tests {
         let l = Librarian::from_catalogue(&i.catalogue());
         let t = Tree::of(&l, false);
         (l, t)
+    }
+
+    /// **A node has to be able to say its own name.**
+    ///
+    /// The tree is keyed by a sort key — case folded, marks flattened, and
+    /// with the article moved when that is switched on — which is right for
+    /// ordering and unreadable on screen. Without a label kept beside it every
+    /// renderer has to reach back for a recording under the node just to
+    /// recover the string.
+    #[test]
+    fn an_artist_node_shows_its_name_and_not_its_sort_key() {
+        let (_, tree) = tree_of(&[scanned("Chest Fever", "The Band", Some("The Band"), 1)]);
+        let (key, _) = tree.artists().next().expect("an artist");
+        assert_eq!(key.as_str(), "the band", "the key orders");
+        assert_eq!(tree.artist_name(key), "The Band", "the label reads");
+    }
+
+    /// **A recording held by two albums lands under one of them, and which
+    /// one is arbitrary.** The reason nothing browses this tree yet.
+    ///
+    /// One song, two copies on disk — the original album and a compilation —
+    /// which the model correctly reads as one recording. `files_under` and
+    /// `album_of` then ask `tracks_of_recording(..).first()`, so both files
+    /// are shown wherever that lands, and the copy sitting in the original
+    /// album's folder is filed under the compilation.
+    ///
+    /// On the real library this moved tracks between 60 albums. It is pinned
+    /// rather than fixed because fixing it means deciding what a displayed row
+    /// names — a recording, or a file's placement — which is #78.
+    #[test]
+    fn a_recording_on_two_albums_is_filed_under_only_one() {
+        let mut original = scanned("Hells Bells", "AC/DC", Some("AC/DC"), 2);
+        original.album = Some("Back in Black".into());
+        let mut compilation = original.clone();
+        compilation.album = Some("Who Made Who".into());
+
+        let (_, tree) = tree_of(&[original, compilation]);
+
+        let albums: Vec<&str> = tree
+            .artists()
+            .flat_map(|(_, a)| a.values().map(|al| al.title.as_str()))
+            .collect();
+        assert_eq!(
+            albums.len(),
+            1,
+            "two albums hold this song and the tree shows it under {albums:?} \
+             — whichever placement sorted first"
+        );
     }
 
     /// **The guest-credit case.** `file_under`'s heuristic reads the album
