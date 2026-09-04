@@ -188,7 +188,20 @@ impl Librarian {
                 Rec {
                     id: *id,
                     title: r.title.clone(),
-                    work: None,
+                    // A fold, not a field. A medley performs several works and
+                    // the spine holds one, so an ambiguous answer is no answer
+                    // — the second row is still in the catalogue for anything
+                    // that can read a set.
+                    work: match cat
+                        .performances
+                        .iter()
+                        .filter(|(rec, _)| rec == id)
+                        .collect::<Vec<_>>()
+                        .as_slice()
+                    {
+                        [(_, w)] => Some(crate::model::id::Ref::to(*w)),
+                        _ => None,
+                    },
                     recorded: None,
                     bpm: None,
                     // Not filled: a recording has no length of its own.
@@ -205,28 +218,40 @@ impl Librarian {
                 }
             });
         }
-        // A log says "this recording is by this artist"; the model says that
-        // with a credit, so the projection mints one. Seeding the role here
-        // rather than assuming one keeps the role list a codelist (#74) —
-        // performer is where an unqualified credit belongs.
-        let performer = crate::model::id::Id::<crate::model::entity::Role>::derived(b"performer");
-        l.reference
-            .roles
-            .entry(performer)
-            .or_insert_with(|| crate::model::reference::RoleRecord {
-                id: performer,
-                name: "performer".into(),
-                class: crate::model::reference::RoleClass::Performer,
-            });
-        for (id, r) in &cat.recordings {
+        // The role codelist and the credits, read.
+        //
+        // Both used to be made up here: one role minted from `b"performer"`,
+        // and a credit pushed for every recording naming it. Every artist in
+        // the library was a performer because one line said so, and a row that
+        // could only say one thing said nothing.
+        for (id, (name, class)) in &cat.roles {
+            l.reference.roles.insert(
+                *id,
+                crate::model::reference::RoleRecord {
+                    id: *id,
+                    name: name.clone(),
+                    class: *class,
+                },
+            );
+        }
+        for ((subject, artist, role), c) in &cat.credits {
             l.reference.credits.push(crate::model::reference::Credit {
-                subject: CreditOn::Recording(*id),
-                artist: crate::model::id::Ref::to(r.artist),
-                role: crate::model::id::Ref::to(performer),
-                position: 0,
-                as_credited: None,
-                join_phrase: None,
+                subject: *subject,
+                artist: crate::model::id::Ref::to(*artist),
+                role: crate::model::id::Ref::to(*role),
+                position: c.position,
+                as_credited: c.as_credited.clone(),
+                join_phrase: c.join_phrase.clone(),
             });
+        }
+        for (id, title) in &cat.works {
+            l.spine.works.insert(
+                *id,
+                crate::model::spine::Work {
+                    id: *id,
+                    title: title.clone(),
+                },
+            );
         }
 
         // The album spine.
@@ -246,15 +271,6 @@ impl Librarian {
                     name: cat.artist_names.get(&g.artist).cloned().unwrap_or_default(),
                     sort_name: cat.artist_names.get(&g.artist).cloned().unwrap_or_default(),
                 }
-            });
-            // Album-level credit, which is what `file_under` asks for first.
-            l.reference.credits.push(crate::model::reference::Credit {
-                subject: CreditOn::ReleaseGroup(*group),
-                artist: crate::model::id::Ref::to(g.artist),
-                role: crate::model::id::Ref::to(performer),
-                position: 0,
-                as_credited: None,
-                join_phrase: None,
             });
         }
 
@@ -582,11 +598,31 @@ mod tests {
             },
         );
 
+        // And a recording, so the credit side has something to invent *for*.
+        let rec = Id::<Recording>::derived(b"callisto");
+        cat.recordings.insert(
+            rec,
+            crate::model::log::Recorded {
+                title: "Callisto".into(),
+                artist: Id::derived(b"bodzin"),
+            },
+        );
+
         let l = Librarian::from_catalogue(&cat);
         assert_eq!(l.spine.groups.len(), 1, "the album was read");
+        assert_eq!(l.spine.recordings.len(), 1, "the recording was read");
         assert!(l.spine.releases.is_empty(), "a pressing nobody asserted");
         assert!(l.spine.media.is_empty(), "a disc nobody asserted");
         assert!(l.spine.tracks.is_empty(), "a slot nobody asserted");
+        assert!(l.spine.works.is_empty(), "a composition nobody asserted");
+        assert!(
+            l.reference.credits.is_empty(),
+            "every artist was a performer because one line said so"
+        );
+        assert!(
+            l.reference.roles.is_empty(),
+            "a codelist entry nobody defined"
+        );
     }
 
     /// **No tool authors a fact that looks reviewed.**
@@ -657,6 +693,7 @@ mod tests {
             "Medium",
             "Release",
             "ReleaseGroup",
+            "Role",
             "Qualifier",
             "Recording",
             "Track",

@@ -22,12 +22,12 @@ use crate::model::durable::{self, Damage, LogError};
 use crate::model::encoding::Format;
 use crate::model::entity::{
     Artist, Device, Encoding, Genre, Hierarchy, Medium, Qualifier, Recording, Release,
-    ReleaseGroup, Track,
+    ReleaseGroup, Role, Track, Work,
 };
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
-use crate::model::reference::{AliasKind, Cataloguable, Source};
+use crate::model::reference::{AliasKind, Cataloguable, CreditOn, RoleClass, Source};
 use crate::model::vocabulary::GenreOn;
 
 /// What a scan says about one file.
@@ -197,6 +197,13 @@ impl Instance {
                     artist,
                 },
             );
+            // **The credit the projection used to invent.** It minted one role
+            // from `b"performer"` and handed it to every artist in the
+            // library, so a row that said "performer" said nothing — it was
+            // the only thing it could say. An unqualified tag really is a
+            // performer credit; the difference is that this one was asserted,
+            // by a scan, at a stamp, and can be corrected.
+            self.credit(now, CreditOn::Recording(recording), artist, "performer", 0);
             // An album, where the tags name one. Its id derives from the
             // release group MBID when there is one, so two devices agree on
             // the *album* as well as the track; otherwise from the album
@@ -228,6 +235,16 @@ impl Instance {
                         title: album.clone(),
                         artist: group_artist,
                     },
+                );
+                // The album-level credit, which is what `file_under` asks for
+                // first and what keeps a guest credit from splitting an album
+                // off from its artist.
+                self.credit(
+                    now,
+                    CreditOn::ReleaseGroup(group),
+                    group_artist,
+                    "performer",
+                    0,
                 );
                 // **The three levels a file actually sits in.** A scan sees
                 // one pressing — the one on disk — so the release falls back
@@ -383,6 +400,71 @@ impl Instance {
             },
         );
         true
+    }
+
+    /// Credit an artist on something, in a role.
+    ///
+    /// The role is defined alongside, idempotently — the concept before the
+    /// claim, as `assign_genre` does. Both ids derive from their names, so a
+    /// repeat is the same record.
+    pub fn credit(
+        &mut self,
+        now: i64,
+        subject: CreditOn,
+        artist: Id<Artist>,
+        role: &str,
+        position: u8,
+    ) {
+        let id = Id::<Role>::of_name(role);
+        let class = crate::model::reference::ROLES
+            .iter()
+            .find(|(n, _)| *n == role)
+            .map_or(RoleClass::Performer, |(_, c)| *c);
+        self.append(
+            now,
+            Fact::RoleDefined {
+                role: id,
+                name: role.trim().to_string(),
+                class,
+            },
+        );
+        self.append(
+            now,
+            Fact::CreditAsserted {
+                subject,
+                artist,
+                role: id,
+                position,
+                as_credited: None,
+                join_phrase: None,
+            },
+        );
+    }
+
+    /// Write the role codelist into the log, so its ids resolve.
+    pub fn seed_roles(&mut self, now: i64) {
+        for (name, class) in crate::model::reference::ROLES {
+            self.append(
+                now,
+                Fact::RoleDefined {
+                    role: Id::<Role>::of_name(name),
+                    name: (*name).to_string(),
+                    class: *class,
+                },
+            );
+        }
+    }
+
+    /// Say a recording performs a work, cataloguing the work alongside.
+    pub fn performs(&mut self, now: i64, recording: Id<Recording>, work: Id<Work>, title: &str) {
+        self.append(
+            now,
+            Fact::WorkCatalogued {
+                work,
+                title: title.trim().to_string(),
+            },
+        );
+        self.append(now, Fact::WorkPerformed { recording, work });
     }
 
     /// Rename a concept, keeping the name it had.
@@ -926,5 +1008,163 @@ mod containment_tests {
         assert_eq!(x.releases, y.releases);
         assert_eq!(x.media, y.media);
         assert_eq!(x.tracks, y.tracks);
+    }
+}
+
+#[cfg(test)]
+mod credit_tests {
+    //! **What an artist did, said by somebody rather than assumed.**
+    //!
+    //! The projection used to mint one role from `b"performer"` and push a
+    //! credit naming it for every recording in the library. Those rows had no
+    //! stamp, no author and no way to be corrected, and a role that was the
+    //! only role said nothing at all.
+
+    use super::*;
+    use crate::model::reference::{CreditOn, RoleClass};
+
+    fn scan(title: &str, artist: &str) -> Scanned {
+        Scanned {
+            audio: crate::audio_id::AudioId {
+                scheme: 1,
+                hash: title.len() as u128,
+            },
+            title: title.into(),
+            artist: artist.into(),
+            artist_mbid: None,
+            identity: Some(crate::model::basis::Basis::MusicBrainz(
+                uuid::Uuid::from_u128(title.len() as u128),
+            )),
+            album: Some("Luna".into()),
+            album_artist: Some("Bodzin".into()),
+            album_artist_mbid: None,
+            disc: Some(1),
+            track: Some(1),
+            mb_release_group: Some(uuid::Uuid::from_u128(0x9e11)),
+            mb_release: None,
+            length_ms: 200_000,
+            format: Some(crate::model::encoding::Format::Mp3),
+            bitrate: 320,
+        }
+    }
+
+    /// A scan credits the track artist and the album artist, and the role it
+    /// names resolves to something a person can read.
+    #[test]
+    fn a_scan_asserts_the_credits_it_can_see() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan("Callisto", "Bodzin")]);
+        let cat = i.catalogue();
+
+        let performer = Id::<Role>::of_name("performer");
+        assert_eq!(
+            cat.roles.get(&performer),
+            Some(&("performer".to_string(), RoleClass::Performer)),
+            "a credit named a role no fact defines, so nothing can render it"
+        );
+        assert_eq!(cat.credits.len(), 2, "the track's credit and the album's");
+        assert!(cat.credits.keys().all(|(_, _, role)| *role == performer));
+        assert!(
+            cat.credits
+                .keys()
+                .any(|(on, _, _)| matches!(on, CreditOn::ReleaseGroup(_))),
+            "the album-level credit is what `file_under` asks for first"
+        );
+    }
+
+    /// **One artist, two roles, two rows.** The role is part of the claim's
+    /// identity, so producing and performing do not overwrite each other.
+    #[test]
+    fn an_artist_in_two_roles_is_two_credits() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        let rec = Id::<Recording>::derived(b"callisto");
+        let artist = Id::<Artist>::of_artist(None, "Bodzin");
+        i.credit(100, CreditOn::Recording(rec), artist, "performer", 0);
+        i.credit(200, CreditOn::Recording(rec), artist, "producer", 0);
+        assert_eq!(i.catalogue().credits.len(), 2);
+    }
+
+    /// **Re-crediting moves the position rather than adding a credit.** How a
+    /// sleeve orders a credit is correctable, and correcting it must not mint
+    /// a second one.
+    #[test]
+    fn correcting_a_position_does_not_mint_a_second_credit() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        let rec = Id::<Recording>::derived(b"callisto");
+        let artist = Id::<Artist>::of_artist(None, "Bodzin");
+        i.credit(100, CreditOn::Recording(rec), artist, "performer", 0);
+        i.credit(200, CreditOn::Recording(rec), artist, "performer", 2);
+        let cat = i.catalogue();
+        assert_eq!(cat.credits.len(), 1);
+        assert_eq!(cat.credits.values().next().unwrap().position, 2);
+    }
+
+    /// The role id comes from its name, so two devices define the codelist
+    /// without meeting — and it is **not** the byte string the projection used
+    /// to hash.
+    #[test]
+    fn a_role_id_is_minted_from_its_name() {
+        assert_eq!(
+            Id::<Role>::of_name("Performer"),
+            Id::<Role>::of_name(" performer ")
+        );
+        assert_ne!(
+            Id::<Role>::of_name("performer"),
+            Id::<Role>::of_name("producer")
+        );
+        // **And it agrees with the id the projection used to mint inline**,
+        // because `performer` normalises to itself. That is luck rather than
+        // design, and it is worth writing down: it means the credits already
+        // on disk need no migration, where any role with a capital in it
+        // would have.
+        assert_eq!(
+            Id::<Role>::of_name("performer"),
+            Id::<Role>::derived(b"performer")
+        );
+    }
+
+    /// **A medley performs two works and the spine holds one**, so the folded
+    /// answer is none — and both rows stay in the catalogue for anything that
+    /// can read a set. An arbitrary winner would be the projection inventing
+    /// again, in a smaller way.
+    #[test]
+    fn a_recording_that_performs_two_works_folds_to_neither() {
+        use crate::model::seam::Librarian;
+
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        let rec = Id::<Recording>::derived(b"medley");
+        i.append(
+            50,
+            Fact::RecordingCatalogued {
+                recording: rec,
+                title: "Medley".into(),
+                artist: Id::<Artist>::of_artist(None, "Casals"),
+            },
+        );
+        let one = Id::<Work>::of_musicbrainz(uuid::Uuid::from_u128(1));
+        i.performs(100, rec, one, "Prelude");
+        assert_eq!(
+            Librarian::from_catalogue(&i.catalogue()).spine.recordings[&rec]
+                .work
+                .map(|w| w.id()),
+            Some(one),
+            "one performance is an answer"
+        );
+
+        i.performs(
+            200,
+            rec,
+            Id::<Work>::of_musicbrainz(uuid::Uuid::from_u128(2)),
+            "Allemande",
+        );
+        let cat = i.catalogue();
+        assert_eq!(cat.performances.len(), 2, "the second was dropped");
+        assert_eq!(cat.works.len(), 2);
+        assert!(
+            Librarian::from_catalogue(&cat).spine.recordings[&rec]
+                .work
+                .is_none(),
+            "the projection picked a winner where the data names two"
+        );
     }
 }

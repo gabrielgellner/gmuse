@@ -58,6 +58,8 @@ There is no "update the library" call. There is only **appending a fact**.
 
 ```rust
 Fact::RecordingCatalogued { recording, title, artist }
+Fact::CreditAsserted { subject, artist, role, position, as_credited, join_phrase }
+Fact::TrackPlaced { track, medium, recording, position, title_on_release }
 Fact::GenreAssigned { subject, genre, basis, confidence }
 Fact::EncodingMeasured { encoding, cutoff_hz, analyser }
 Fact::RecordingRated { recording, stars }

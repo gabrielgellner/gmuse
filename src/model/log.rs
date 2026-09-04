@@ -26,11 +26,11 @@ use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
 use crate::model::entity::{
     Artist, Device, Encoding, Genre, Hierarchy, Medium, Qualifier, Recording, Release,
-    ReleaseGroup, Track,
+    ReleaseGroup, Role, Track, Work,
 };
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
-use crate::model::reference::{AliasKind, Cataloguable, Source};
+use crate::model::reference::{AliasKind, Cataloguable, CreditOn, RoleClass, Source};
 use crate::model::spine::PartialDate;
 use crate::model::vocabulary::GenreOn;
 
@@ -80,6 +80,16 @@ pub enum Fact {
     RecordingCatalogued {
         recording: Id<Recording>,
         title: String,
+        /// **The flattened form, and now a duplication with real notice on
+        /// it.** `CreditAsserted` is the statement that survives — it can say
+        /// which role, in what order, credited how, and there can be several
+        /// of them. This field can say one artist and nothing about them.
+        ///
+        /// It stays until #78 dissolves `Track`, because the tree projection
+        /// and `Row` still read it. When they ask for a credit instead, this
+        /// goes, and until then **the credit is authoritative**: anything that
+        /// needs to be right reads `credits`, and this is the fast path for
+        /// the two callers that predate it.
         artist: Id<Artist>,
     },
 
@@ -181,6 +191,57 @@ pub enum Fact {
         title: String,
         /// Who the album is credited to, which is not always who a track is.
         artist: Id<Artist>,
+    },
+
+    /// A composition, as distinct from any performance of it.
+    ///
+    /// **Nothing in this library's tags produces one.** `MUSICBRAINZ_WORKID`
+    /// is a real key and 0 of 6500 files carry it, so the producer here is a
+    /// lookup pass through `apply`, never a scan — which is why the fact
+    /// exists separately from the ingest ladder rather than beside it.
+    WorkCatalogued { work: Id<Work>, title: String },
+
+    /// This recording is a performance of that work.
+    ///
+    /// Bare, and deliberately so. Which *kind* of performance — instrumental,
+    /// live, acappella — is a qualifier on the recording, because 7.3% of this
+    /// library has no work at all and a fact hung on the work link could not
+    /// mark an instrumental white label. See `model/qualifier.rs`.
+    WorkPerformed {
+        recording: Id<Recording>,
+        work: Id<Work>,
+    },
+
+    /// A role exists in the codelist.
+    ///
+    /// The concept before the credit, exactly as `GenreCatalogued` comes
+    /// before `GenreAssigned`: an id no fact resolves is an id nobody can
+    /// render.
+    RoleDefined {
+        role: Id<Role>,
+        name: String,
+        class: RoleClass,
+    },
+
+    /// An artist did something to something, in a role.
+    ///
+    /// **Row existence**, keyed by subject, artist and role — so an artist who
+    /// both performed and produced is two rows, and re-importing either is
+    /// idempotent. Position and the credited spelling are attributes on it:
+    /// how a sleeve orders and spells a credit is correctable, and correcting
+    /// it must not mint a second credit.
+    ///
+    /// No basis yet. When one is wanted it goes in the key beside the role,
+    /// under the same two-tier rule assignments use.
+    CreditAsserted {
+        subject: CreditOn,
+        artist: Id<Artist>,
+        role: Id<Role>,
+        position: u8,
+        /// What the sleeve printed, when it differs from the artist's name.
+        as_credited: Option<String>,
+        /// What joins this credit to the next — `" & "`, `" feat. "`.
+        join_phrase: Option<String>,
     },
 
     /// One pressing of an album.
@@ -460,6 +521,15 @@ pub struct Catalogue {
     /// Cutoff and the analyser that found it, per encoding.
     pub measurements: BTreeMap<Id<Encoding>, (u32, u16)>,
     pub groups: BTreeMap<Id<ReleaseGroup>, Grouped>,
+    /// Every composition anyone has named.
+    pub works: BTreeMap<Id<Work>, String>,
+    /// Which recordings perform which works. Row existence: a recording can
+    /// perform two, which is what a medley is.
+    pub performances: BTreeSet<(Id<Recording>, Id<Work>)>,
+    /// The role codelist.
+    pub roles: BTreeMap<Id<Role>, (String, RoleClass)>,
+    /// Every credit. Keyed by the claim, valued by how it was printed.
+    pub credits: BTreeMap<(CreditOn, Id<Artist>, Id<Role>), Credited>,
     /// Every pressing, by id.
     pub releases: BTreeMap<Id<Release>, Released>,
     /// Every disc, by id.
@@ -482,6 +552,13 @@ pub struct Catalogue {
 pub struct Asserted {
     pub at: Stamp,
     pub held: BTreeMap<Id<Encoding>, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Credited {
+    pub position: u8,
+    pub as_credited: Option<String>,
+    pub join_phrase: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -696,6 +773,32 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     Grouped {
                         title: title.clone(),
                         artist: *artist,
+                    },
+                );
+            }
+            Fact::WorkCatalogued { work, title } => {
+                cat.works.insert(*work, title.clone());
+            }
+            Fact::WorkPerformed { recording, work } => {
+                cat.performances.insert((*recording, *work));
+            }
+            Fact::RoleDefined { role, name, class } => {
+                cat.roles.insert(*role, (name.clone(), *class));
+            }
+            Fact::CreditAsserted {
+                subject,
+                artist,
+                role,
+                position,
+                as_credited,
+                join_phrase,
+            } => {
+                cat.credits.insert(
+                    (*subject, *artist, *role),
+                    Credited {
+                        position: *position,
+                        as_credited: as_credited.clone(),
+                        join_phrase: join_phrase.clone(),
                     },
                 );
             }
@@ -1091,7 +1194,7 @@ mod reachability {
         //
         // Each of these needs a fact before anything else names it, or there
         // will be two producers for one row.
-        ("work", None),
+        ("work", Some("WorkCatalogued")),
         ("release", Some("ReleaseCatalogued")),
         ("medium", Some("MediumCatalogued")),
         ("track", Some("TrackPlaced")),
@@ -1099,9 +1202,9 @@ mod reachability {
         ("genre", Some("GenreCatalogued")),
         ("qualifier", Some("QualifierCatalogued")),
         ("hierarchy", Some("HierarchyDefined")),
-        ("role", None),
+        ("role", Some("RoleDefined")),
         ("collection", None),
-        ("credit", None),
+        ("credit", Some("CreditAsserted")),
         ("mix-entry", None),
         ("collection-entry", None),
         ("genre-assignment", Some("GenreAssigned")),
@@ -1115,7 +1218,7 @@ mod reachability {
     /// regression, and this is where it is caught.
     #[test]
     fn every_entity_is_reachable_from_a_fact_or_named_as_a_gap() {
-        const UNREACHABLE: usize = 7;
+        const UNREACHABLE: usize = 4;
 
         let kinds = crate::model::entity::ALL_KINDS;
 

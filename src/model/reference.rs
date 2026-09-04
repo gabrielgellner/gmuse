@@ -62,6 +62,36 @@ pub enum RoleClass {
     Production,
 }
 
+/// The roles this codelist seeds with.
+///
+/// Small on purpose. A codelist grows by fact — `RoleDefined` will take any
+/// name — so what belongs here is the set an *ingest* can produce without
+/// guessing, plus the two a title parse already recognises.
+///
+/// `featured` is separate from `performer` because a guest credit is the
+/// thing that used to split an artist: `2Pac feat. Nate Dogg` minted a
+/// fifteenth 2Pac, and the fix was to take the primary id — which leaves the
+/// guest with nowhere to be recorded unless the role exists.
+pub const ROLES: &[(&str, RoleClass)] = &[
+    ("performer", RoleClass::Performer),
+    ("featured", RoleClass::Performer),
+    ("remixer", RoleClass::Production),
+    ("producer", RoleClass::Production),
+    ("composer", RoleClass::Composer),
+];
+
+impl Id<Role> {
+    /// The id a role name always mints.
+    ///
+    /// Through [`crate::model::ingest::normalise`], for the reason concept ids
+    /// are: the codelist has to be definable on two machines that never meet.
+    /// It replaces `Id::derived(b"performer")` written inline in the
+    /// projection, which was one role, minted once, handed to everybody.
+    pub fn of_name(name: &str) -> Self {
+        Id::derived(crate::model::ingest::normalise(name).as_bytes())
+    }
+}
+
 /// What an artist did, as a codelist entry.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RoleRecord {
