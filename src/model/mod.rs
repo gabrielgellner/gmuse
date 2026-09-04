@@ -27,6 +27,7 @@ pub mod mint;
 pub mod populate;
 pub mod proposal;
 pub mod provenance;
+pub mod qualifier;
 pub mod reference;
 pub mod round_trip;
 pub mod rows;

@@ -20,7 +20,9 @@ use crate::model::basis::Basis;
 use crate::model::clock::{Drift, HybridClock, Stamp};
 use crate::model::durable::{self, Damage, LogError};
 use crate::model::encoding::Format;
-use crate::model::entity::{Artist, Device, Encoding, Genre, Hierarchy, Recording, ReleaseGroup};
+use crate::model::entity::{
+    Artist, Device, Encoding, Genre, Hierarchy, Qualifier, Recording, ReleaseGroup,
+};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
@@ -312,6 +314,79 @@ impl Instance {
                 confidence,
             },
         );
+    }
+
+    /// Say which version of a song a recording is.
+    ///
+    /// Refuses a grouping concept: `mix-variant` is a place in the tree, not a
+    /// claim about a song, and accepting it would fold to an assignment nobody
+    /// can see — indistinguishable from one nobody made.
+    pub fn assign_qualifier(
+        &mut self,
+        now: i64,
+        recording: Id<Recording>,
+        label: &str,
+        basis: Source,
+        confidence: Confidence,
+    ) -> bool {
+        if !crate::model::qualifier::assignable(label) {
+            return false;
+        }
+        let concept = Id::<Qualifier>::of_label(label);
+        self.append(
+            now,
+            Fact::QualifierCatalogued {
+                concept,
+                label: label.trim().to_string(),
+            },
+        );
+        self.append(
+            now,
+            Fact::QualifierAssigned {
+                recording,
+                concept,
+                basis,
+                confidence,
+            },
+        );
+        true
+    }
+
+    /// Decide a qualifier does not apply. Shadows rather than deletes.
+    pub fn retract_qualifier(&mut self, now: i64, recording: Id<Recording>, label: &str) {
+        self.append(
+            now,
+            Fact::QualifierRetracted {
+                recording,
+                concept: Id::<Qualifier>::of_label(label),
+            },
+        );
+    }
+
+    /// Write the version vocabulary into the log, so its ids resolve.
+    ///
+    /// Idempotent: every id derives from its label, so a second call appends
+    /// records the set already holds.
+    pub fn seed_qualifiers(&mut self, now: i64) {
+        for (label, parent, _) in crate::model::qualifier::SEED {
+            let concept = Id::<Qualifier>::of_label(label);
+            self.append(
+                now,
+                Fact::QualifierCatalogued {
+                    concept,
+                    label: (*label).to_string(),
+                },
+            );
+            if let Some(p) = parent {
+                self.append(
+                    now,
+                    Fact::QualifierNarrowed {
+                        parent: Id::<Qualifier>::of_label(p),
+                        child: concept,
+                    },
+                );
+            }
+        }
     }
 
     /// Say that one concept is narrower than another, inside one hierarchy.

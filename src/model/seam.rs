@@ -552,6 +552,7 @@ mod tests {
             "Label",
             "Release",
             "ReleaseGroup",
+            "Qualifier",
             "Recording",
             "Track",
             "Work",

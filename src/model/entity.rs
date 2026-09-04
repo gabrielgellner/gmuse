@@ -33,6 +33,16 @@ macro_rules! kinds {
                 const KIND: &'static str = $kind;
             }
         )*
+
+        /// Every kind, from the one place they are declared.
+        ///
+        /// **Emitted by the macro rather than typed out again.** Two tests ask
+        /// questions about the whole set — that the names are distinct, and
+        /// that each is reachable from a fact — and a hand-copied second list
+        /// silently stops asking about anything added after it was written.
+        /// Adding `Qualifier` proved that: the reachability ratchet held its
+        /// own copy and passed a kind it had never heard of.
+        pub const ALL_KINDS: &[&str] = &[$($kind),*];
     };
 }
 
@@ -62,6 +72,14 @@ tags! {
     Label,
     /// A concept in the genre vocabulary. Fields with #74.
     Genre,
+    /// A concept in the **version** vocabulary — instrumental, live, acappella.
+    ///
+    /// A separate scheme from `Genre` rather than a corner of it, because the
+    /// two answer different questions and are curated by different evidence: a
+    /// genre says what kind of music this is, a qualifier says which version of
+    /// it you are holding. Sharing a list would make `genre = instrumental`
+    /// expressible, and it is not a genre.
+    Qualifier,
     /// One grouping of genre concepts. Fields with #74.
     Hierarchy,
     /// What an artist did on something. Fields with #73.
@@ -89,6 +107,7 @@ kinds! {
     Artist => "artist",
     Label => "label",
     Genre => "genre",
+    Qualifier => "qualifier",
     Hierarchy => "hierarchy",
     Role => "role",
     Collection => "collection",
@@ -110,27 +129,7 @@ mod tests {
     /// the failure this test exists to make loud.
     #[test]
     fn every_kind_name_is_distinct() {
-        let kinds = [
-            Work::KIND,
-            Recording::KIND,
-            ReleaseGroup::KIND,
-            Release::KIND,
-            Medium::KIND,
-            Track::KIND,
-            Encoding::KIND,
-            Holding::KIND,
-            Device::KIND,
-            Artist::KIND,
-            Label::KIND,
-            Genre::KIND,
-            Hierarchy::KIND,
-            Role::KIND,
-            Collection::KIND,
-            Credit::KIND,
-            MixEntry::KIND,
-            CollectionEntry::KIND,
-            GenreAssignment::KIND,
-        ];
+        let kinds = ALL_KINDS;
         let unique: HashSet<_> = kinds.iter().collect();
         assert_eq!(unique.len(), kinds.len(), "two kinds share a name");
         assert!(

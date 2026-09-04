@@ -24,7 +24,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
-use crate::model::entity::{Artist, Device, Encoding, Genre, Hierarchy, Recording, ReleaseGroup};
+use crate::model::entity::{
+    Artist, Device, Encoding, Genre, Hierarchy, Qualifier, Recording, ReleaseGroup,
+};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::reference::Source;
@@ -209,6 +211,47 @@ pub enum Fact {
         analyser: u16,
     },
 
+    /// A concept exists in the version vocabulary.
+    QualifierCatalogued {
+        concept: Id<Qualifier>,
+        label: String,
+    },
+
+    /// One narrower-of edge in the version vocabulary. Row existence, as the
+    /// genre hierarchy is.
+    QualifierNarrowed {
+        parent: Id<Qualifier>,
+        child: Id<Qualifier>,
+    },
+
+    /// Which version of a song a recording is.
+    ///
+    /// On the **recording**, not on its link to a work — 7.3% of this library
+    /// has no work and some never will, and a fact on the work link could not
+    /// mark an instrumental white label at all.
+    QualifierAssigned {
+        recording: Id<Recording>,
+        concept: Id<Qualifier>,
+        basis: Source,
+        confidence: Confidence,
+    },
+
+    /// Someone has decided a qualifier does not apply.
+    ///
+    /// **Not a delete, because there are none.** The log is append-only and
+    /// merges by union, so removing an imported assignment would destroy the
+    /// provenance that says where it came from, and a stale replica would
+    /// deliver it again on the next sync. This shadows instead: the pair is
+    /// live or not according to whichever of assign and retract carries the
+    /// later stamp, which the hybrid clock already makes total.
+    ///
+    /// Deliberately *not* "assertions outnumber retractions" — that counting
+    /// rule turns a disagreement into a war nobody can end.
+    QualifierRetracted {
+        recording: Id<Recording>,
+        concept: Id<Qualifier>,
+    },
+
     /// A rating, or its removal with `None`.
     ///
     /// **The latest by causal order wins**, and none is discarded — a rating
@@ -265,6 +308,12 @@ pub struct Catalogue {
     pub genres: BTreeMap<(GenreOn, Id<Genre>), Assigned>,
     /// What each concept is called.
     pub genre_names: BTreeMap<Id<Genre>, String>,
+    /// Which version each recording is. `None` is a retraction that outlived
+    /// its assignment — kept, not dropped, so a stale replica re-delivering
+    /// the assignment cannot resurrect it.
+    pub qualifiers: BTreeMap<(Id<Recording>, Id<Qualifier>), Option<Assigned>>,
+    pub qualifier_labels: BTreeMap<Id<Qualifier>, String>,
+    pub qualifier_narrows: BTreeSet<(Id<Qualifier>, Id<Qualifier>)>,
     /// What each hierarchy is called.
     pub hierarchies: BTreeMap<Id<Hierarchy>, String>,
     /// Every narrower-of edge. Row existence, so curation unions.
@@ -417,6 +466,33 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     .entry((*encoding, *from))
                     .or_default()
                     .push((*stamp, *to));
+            }
+            Fact::QualifierCatalogued { concept, label } => {
+                cat.qualifier_labels.insert(*concept, label.clone());
+            }
+            Fact::QualifierNarrowed { parent, child } => {
+                cat.qualifier_narrows.insert((*parent, *child));
+            }
+            // Assign and retract share one arm because they are one decision
+            // seen twice. Records arrive in stamp order, so the later simply
+            // overwrites — the same shape as `HoldingsAsserted`'s supersede,
+            // per pair rather than per device.
+            Fact::QualifierAssigned {
+                recording,
+                concept,
+                basis,
+                confidence,
+            } => {
+                cat.qualifiers.insert(
+                    (*recording, *concept),
+                    Some(Assigned {
+                        basis: *basis,
+                        confidence: *confidence,
+                    }),
+                );
+            }
+            Fact::QualifierRetracted { recording, concept } => {
+                cat.qualifiers.insert((*recording, *concept), None);
             }
             Fact::GenreCatalogued { genre, name } => {
                 cat.genre_names.insert(*genre, name.clone());
@@ -762,11 +838,6 @@ mod history_tests {
 #[cfg(test)]
 mod reachability {
     use super::*;
-    use crate::model::entity::{
-        Artist, Collection, CollectionEntry, Credit, Device, Encoding, Entity, Genre,
-        GenreAssignment, Hierarchy, Holding, Label, Medium, MixEntry, Recording, Release,
-        ReleaseGroup, Role, Track, Work,
-    };
 
     /// Which fact brings a kind into existence, if any.
     ///
@@ -805,6 +876,7 @@ mod reachability {
         ("track", None),
         ("label", None),
         ("genre", Some("GenreCatalogued")),
+        ("qualifier", Some("QualifierCatalogued")),
         ("hierarchy", Some("HierarchyDefined")),
         ("role", None),
         ("collection", None),
@@ -824,27 +896,7 @@ mod reachability {
     fn every_entity_is_reachable_from_a_fact_or_named_as_a_gap() {
         const UNREACHABLE: usize = 10;
 
-        let kinds = [
-            Work::KIND,
-            Recording::KIND,
-            ReleaseGroup::KIND,
-            Release::KIND,
-            Medium::KIND,
-            Track::KIND,
-            Encoding::KIND,
-            Holding::KIND,
-            Device::KIND,
-            Artist::KIND,
-            Label::KIND,
-            Genre::KIND,
-            Hierarchy::KIND,
-            Role::KIND,
-            Collection::KIND,
-            Credit::KIND,
-            MixEntry::KIND,
-            CollectionEntry::KIND,
-            GenreAssignment::KIND,
-        ];
+        let kinds = crate::model::entity::ALL_KINDS;
 
         let listed: BTreeSet<&str> = CREATED_BY.iter().map(|(k, _)| *k).collect();
         let all: BTreeSet<&str> = kinds.iter().copied().collect();
