@@ -229,9 +229,7 @@ impl Librarian {
             });
         }
 
-        // The album spine. A scan sees one release per album, so the release
-        // and the medium are minted from the group rather than read — a
-        // pressing this library does not hold is not a thing to invent.
+        // The album spine.
         for (group, g) in &cat.groups {
             l.spine.groups.insert(
                 *group,
@@ -240,18 +238,6 @@ impl Librarian {
                     title: g.title.clone(),
                     first_released: None,
                     kind: crate::model::spine::ReleaseType::Album,
-                },
-            );
-            let release =
-                Id::<crate::model::entity::Release>::derived(group.to_string().as_bytes());
-            l.spine.releases.insert(
-                release,
-                crate::model::spine::Release {
-                    id: release,
-                    group: crate::model::id::Ref::to(*group),
-                    title: g.title.clone(),
-                    released: None,
-                    catalogue_number: None,
                 },
             );
             l.reference.artists.entry(g.artist).or_insert_with(|| {
@@ -272,31 +258,41 @@ impl Librarian {
             });
         }
 
-        for (recording, (group, disc, track)) in &cat.placements {
-            let release =
-                Id::<crate::model::entity::Release>::derived(group.to_string().as_bytes());
-            let medium =
-                Id::<crate::model::entity::Medium>::derived(format!("{release}/{disc}").as_bytes());
-            l.spine
-                .media
-                .entry(medium)
-                .or_insert(crate::model::spine::Medium {
-                    id: medium,
-                    release: crate::model::id::Ref::to(release),
-                    position: *disc,
-                    format: None,
-                });
-            let id = Id::<crate::model::entity::Track>::derived(
-                format!("{medium}/{recording}").as_bytes(),
+        // Read, not invented. Each of these three used to be constructed here
+        // from whatever was to hand — with no stamp, no author and no way to
+        // correct one — and looked exactly like a folded fact downstream.
+        for (id, r) in &cat.releases {
+            l.spine.releases.insert(
+                *id,
+                crate::model::spine::Release {
+                    id: *id,
+                    group: crate::model::id::Ref::to(r.group),
+                    title: r.title.clone(),
+                    released: r.released,
+                    catalogue_number: None,
+                },
             );
+        }
+        for (id, m) in &cat.media {
+            l.spine.media.insert(
+                *id,
+                crate::model::spine::Medium {
+                    id: *id,
+                    release: crate::model::id::Ref::to(m.release),
+                    position: m.position,
+                    format: m.format.clone(),
+                },
+            );
+        }
+        for (id, p) in &cat.tracks {
             l.spine.tracks.insert(
-                id,
+                *id,
                 crate::model::spine::Track {
-                    id,
-                    medium: crate::model::id::Ref::to(medium),
-                    recording: crate::model::id::Ref::to(*recording),
-                    position: *track,
-                    title_on_release: None,
+                    id: *id,
+                    medium: crate::model::id::Ref::to(p.medium),
+                    recording: crate::model::id::Ref::to(p.recording),
+                    position: p.position,
+                    title_on_release: p.title_on_release.clone(),
                 },
             );
         }
@@ -562,6 +558,37 @@ mod tests {
         );
     }
 
+    /// **A group with no pressing fact yields no pressing.**
+    ///
+    /// `from_catalogue` used to mint a `Release` for every group and a
+    /// `Medium` for every distinct disc number it saw, so those rows existed
+    /// whether or not anyone had said so — with no stamp, no author and no way
+    /// to correct one, and indistinguishable downstream from a folded fact.
+    ///
+    /// Asserted from the empty side because that is the side that cannot lie:
+    /// a projection that invents will produce a row here, and one that reads
+    /// cannot.
+    #[test]
+    fn the_projection_reads_the_spine_and_does_not_invent_it() {
+        use crate::model::log::{Catalogue, Grouped};
+
+        let mut cat = Catalogue::default();
+        let group = Id::<crate::model::entity::ReleaseGroup>::derived(b"luna");
+        cat.groups.insert(
+            group,
+            Grouped {
+                title: "Luna".into(),
+                artist: Id::derived(b"bodzin"),
+            },
+        );
+
+        let l = Librarian::from_catalogue(&cat);
+        assert_eq!(l.spine.groups.len(), 1, "the album was read");
+        assert!(l.spine.releases.is_empty(), "a pressing nobody asserted");
+        assert!(l.spine.media.is_empty(), "a disc nobody asserted");
+        assert!(l.spine.tracks.is_empty(), "a slot nobody asserted");
+    }
+
     /// **No tool authors a fact that looks reviewed.**
     ///
     /// Two routes write to the library and they are not equals. A person
@@ -627,6 +654,7 @@ mod tests {
             "Hierarchy",
             "Holdings",
             "Label",
+            "Medium",
             "Release",
             "ReleaseGroup",
             "Qualifier",

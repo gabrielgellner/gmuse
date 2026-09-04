@@ -33,8 +33,9 @@
 use uuid::Uuid;
 
 use crate::audio_id::AudioId;
-use crate::model::entity::{Artist, Encoding, Release, ReleaseGroup, Work};
+use crate::model::entity::{Artist, Encoding, Medium, Release, ReleaseGroup, Track, Work};
 use crate::model::id::Id;
+use crate::model::spine::Recording;
 
 impl Id<Encoding> {
     /// The id these exact bytes always mint.
@@ -77,6 +78,64 @@ macro_rules! from_musicbrainz {
 // leave a second door into the same identity — and two ladders that agree only
 // until someone edits one is exactly the bug this replaced.
 from_musicbrainz!(Work, Release, ReleaseGroup, Artist);
+
+impl Id<Release> {
+    /// A pressing, by MusicBrainz id where the tags carry one.
+    ///
+    /// **The fallback is the group itself**, not a second invented pressing.
+    /// A scan sees one release per album — the one on disk — and the honest
+    /// thing to say about an album whose tags name no release is "this is the
+    /// pressing we hold", not "here is a release we know nothing about".
+    /// Deriving from the group makes two devices holding the same untagged
+    /// album agree, and the day either one learns the MusicBrainz id it mints
+    /// the real one and the two reconcile by merge.
+    pub fn of_release(mbid: Option<Uuid>, group: Id<ReleaseGroup>) -> Self {
+        match mbid {
+            Some(id) => Id::<Release>::of_musicbrainz(id),
+            None => {
+                let mut seed = b"group\x1f".to_vec();
+                seed.extend_from_slice(group.as_uuid().as_bytes());
+                Id::derived(&seed)
+            }
+        }
+    }
+}
+
+impl Id<Medium> {
+    /// A disc or a side, identified by **where it sits in its release**.
+    ///
+    /// There is nothing else to identify it by: media carry no ids of their
+    /// own anywhere, and "disc 2 of this release" is what every tag, sleeve
+    /// and catalogue actually says.
+    pub fn of_medium(release: Id<Release>, position: u16) -> Self {
+        let mut seed = release.as_uuid().as_bytes().to_vec();
+        seed.push(0x1f);
+        seed.extend_from_slice(&position.to_be_bytes());
+        Id::derived(&seed)
+    }
+}
+
+impl Id<Track> {
+    /// A slot on a medium, identified by **which recording fills it** rather
+    /// than by its number.
+    ///
+    /// The choice is between two errors and one of them is repairable. Keyed
+    /// by recording, two devices that disagree about a track number still
+    /// agree the slot is the same slot, and the number is an attribute a
+    /// correction can move. Keyed by position, correcting a tracklist mints a
+    /// new track for every row that shifted and strands whatever hung off the
+    /// old ones — a false split with nothing to merge it back.
+    ///
+    /// What it costs is the album that plays one recording twice. That folds
+    /// to one slot, and it is rare enough to be worth a merge later rather
+    /// than making every renumbering destructive now.
+    pub fn of_track(medium: Id<Medium>, recording: Id<Recording>) -> Self {
+        let mut seed = medium.as_uuid().as_bytes().to_vec();
+        seed.push(0x1f);
+        seed.extend_from_slice(recording.as_uuid().as_bytes());
+        Id::derived(&seed)
+    }
+}
 
 #[cfg(test)]
 mod tests {

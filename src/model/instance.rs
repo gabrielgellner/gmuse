@@ -21,7 +21,8 @@ use crate::model::clock::{Drift, HybridClock, Stamp};
 use crate::model::durable::{self, Damage, LogError};
 use crate::model::encoding::Format;
 use crate::model::entity::{
-    Artist, Device, Encoding, Genre, Hierarchy, Qualifier, Recording, ReleaseGroup,
+    Artist, Device, Encoding, Genre, Hierarchy, Medium, Qualifier, Recording, Release,
+    ReleaseGroup, Track,
 };
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
@@ -67,6 +68,11 @@ pub struct Scanned {
     /// The release group id, where the tags carry one — what makes two devices
     /// agree on an *album* without meeting.
     pub mb_release_group: Option<uuid::Uuid>,
+    /// The **release** id, which Picard writes beside the group's and which
+    /// names the pressing rather than the album. Distinct on purpose: two
+    /// files can share a group and be different pressings, and that is the
+    /// whole reason the release level exists.
+    pub mb_release: Option<uuid::Uuid>,
     /// How long it plays, in milliseconds.
     ///
     /// A fact about the **bytes**, not about the performance: an edit and its
@@ -223,13 +229,40 @@ impl Instance {
                         artist: group_artist,
                     },
                 );
+                // **The three levels a file actually sits in.** A scan sees
+                // one pressing — the one on disk — so the release falls back
+                // to the group rather than inventing a second; the disc
+                // number, which used to ride on the placement, is now the
+                // medium it was standing in for.
+                let release = Id::<Release>::of_release(s.mb_release, group);
+                self.append(
+                    now,
+                    Fact::ReleaseCatalogued {
+                        release,
+                        group,
+                        title: album.clone(),
+                        released: None,
+                    },
+                );
+                let disc = s.disc.unwrap_or(1);
+                let medium = Id::<Medium>::of_medium(release, disc);
+                self.append(
+                    now,
+                    Fact::MediumCatalogued {
+                        medium,
+                        release,
+                        position: disc,
+                        format: None,
+                    },
+                );
                 self.append(
                     now,
                     Fact::TrackPlaced {
+                        track: Id::<Track>::of_track(medium, recording),
+                        medium,
                         recording,
-                        group,
-                        disc: s.disc.unwrap_or(1),
-                        track: s.track.unwrap_or(0),
+                        position: s.track.unwrap_or(0),
+                        title_on_release: None,
                     },
                 );
             }
@@ -717,5 +750,181 @@ mod tests {
 
         let (back, _) = crate::model::durable::read_all(&dir);
         assert_eq!(back.len(), 1, "one record, written once");
+    }
+}
+
+#[cfg(test)]
+mod containment_tests {
+    //! **The three levels a file actually sits in.**
+    //!
+    //! A recording does not sit on an album. It sits on a disc, of a pressing,
+    //! of an album — and the model spent its first year with the middle two
+    //! missing, `TrackPlaced` naming a release *group* and carrying a disc
+    //! number that was standing in for the medium nobody had modelled.
+
+    use super::*;
+    use crate::model::entity::{Release, Track};
+
+    fn scan(disc: u16, track: u16, mb_release: Option<u128>) -> Scanned {
+        Scanned {
+            audio: crate::audio_id::AudioId {
+                scheme: 1,
+                hash: u128::from(disc) << 64 | u128::from(track),
+            },
+            title: format!("Track {track}"),
+            artist: "Bodzin".into(),
+            artist_mbid: None,
+            identity: Some(crate::model::basis::Basis::MusicBrainz(
+                uuid::Uuid::from_u128(u128::from(disc) << 32 | u128::from(track)),
+            )),
+            album: Some("Luna".into()),
+            album_artist: Some("Bodzin".into()),
+            album_artist_mbid: None,
+            disc: Some(disc),
+            track: Some(track),
+            mb_release_group: Some(uuid::Uuid::from_u128(0x9e11)),
+            mb_release: mb_release.map(uuid::Uuid::from_u128),
+            length_ms: 200_000,
+            format: Some(crate::model::encoding::Format::Mp3),
+            bitrate: 320,
+        }
+    }
+
+    /// One file, three rows, and each names the one above it.
+    ///
+    /// Before this the placement named a group directly, so "which pressing
+    /// did this come from" had no row that could answer and the disc number
+    /// was the only trace of the medium.
+    #[test]
+    fn a_scan_places_a_recording_on_a_medium_of_a_release() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan(1, 3, Some(0x5e1e))]);
+        let cat = i.catalogue();
+
+        let (release, r) = cat.releases.iter().next().expect("a pressing");
+        assert_eq!(cat.groups.len(), 1);
+        assert!(
+            cat.groups.contains_key(&r.group),
+            "the release lost its album"
+        );
+
+        let (medium, m) = cat.media.iter().next().expect("a disc");
+        assert_eq!(m.release, *release);
+        assert_eq!(m.position, 1, "the disc number is the medium's position");
+
+        let (_, placed) = cat.tracks.iter().next().expect("a slot");
+        assert_eq!(placed.medium, *medium);
+        assert_eq!(placed.position, 3, "the track number is the slot's");
+    }
+
+    /// **A two-disc album is two media, not one.** The shape the old fact
+    /// could not hold: both discs collapsed onto the group, and the only thing
+    /// telling them apart was a number on the placement.
+    #[test]
+    fn each_disc_of_a_release_is_its_own_medium() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan(1, 1, Some(0x5e1e)), scan(2, 1, Some(0x5e1e))]);
+        let cat = i.catalogue();
+
+        assert_eq!(cat.releases.len(), 1, "one pressing, two discs");
+        assert_eq!(cat.media.len(), 2);
+        assert_eq!(
+            cat.media.values().map(|m| m.position).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(cat.tracks.len(), 2, "two slots, one on each disc");
+    }
+
+    /// **A release the tags name and one they do not are different rows**, and
+    /// the fallback is the group rather than an invented second pressing.
+    ///
+    /// The old projection minted a release for every group unconditionally, so
+    /// a library with MusicBrainz release ids in its tags threw them away and
+    /// used a hash of the group instead.
+    #[test]
+    fn a_tagged_pressing_is_not_the_untagged_fallback() {
+        let group = Id::<ReleaseGroup>::of_musicbrainz(uuid::Uuid::from_u128(0x9e11));
+        let mbid = uuid::Uuid::from_u128(0x5e1e);
+        let tagged = Id::<Release>::of_release(Some(mbid), group);
+        let fallback = Id::<Release>::of_release(None, group);
+        assert_ne!(tagged, fallback);
+
+        // On the MusicBrainz rung the group is not part of the identity: the
+        // release id names the pressing outright, and two files that disagree
+        // about which album it belongs to still hold the same pressing.
+        let elsewhere = Id::<ReleaseGroup>::of_musicbrainz(uuid::Uuid::from_u128(0xffff));
+        assert_eq!(tagged, Id::<Release>::of_release(Some(mbid), elsewhere));
+        assert_eq!(tagged, Id::<Release>::of_musicbrainz(mbid));
+
+        // And each is convergent: the point is that two devices agree without
+        // meeting, whichever rung they are on.
+        assert_eq!(
+            fallback,
+            Id::<Release>::of_release(None, group),
+            "the fallback has to be derived, or two untagged copies split"
+        );
+
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan(1, 1, None)]);
+        assert!(i.catalogue().releases.contains_key(&fallback));
+    }
+
+    /// **A corrected track number does not mint a new slot.**
+    ///
+    /// The reason `of_track` keys on the recording. Keyed on position, fixing
+    /// a tracklist would mint a track for every row that shifted and strand
+    /// whatever hung off the old ones — a false split with nothing to merge it
+    /// back, where this way the number is just an attribute that moved.
+    #[test]
+    fn renumbering_a_track_moves_it_rather_than_replacing_it() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan(1, 3, Some(0x5e1e))]);
+        let before: Vec<Id<Track>> = i.catalogue().tracks.keys().copied().collect();
+
+        // The same file, rescanned after somebody fixed the tag.
+        let mut fixed = scan(1, 3, Some(0x5e1e));
+        fixed.track = Some(4);
+        i.ingest(200, &[fixed]);
+
+        let cat = i.catalogue();
+        assert_eq!(cat.tracks.keys().copied().collect::<Vec<_>>(), before);
+        assert_eq!(cat.tracks.values().next().unwrap().position, 4);
+    }
+
+    /// **Two recordings on one disc are two slots.** Obvious, and the thing a
+    /// track id keyed on the medium alone would silently get wrong — every
+    /// album folding to a single track that the last file scanned won.
+    #[test]
+    fn each_recording_on_a_medium_is_its_own_slot() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan(1, 1, Some(0x5e1e)), scan(1, 2, Some(0x5e1e))]);
+        let cat = i.catalogue();
+        assert_eq!(cat.media.len(), 1, "one disc");
+        assert_eq!(cat.tracks.len(), 2, "two slots on it");
+        assert_eq!(
+            cat.tracks
+                .values()
+                .map(|p| p.recording)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            2,
+            "both slots name the same recording"
+        );
+    }
+
+    /// Two devices reading the same tags agree on all three levels, with no
+    /// conversation — the bet the whole identity scheme makes, at the level
+    /// this issue added.
+    #[test]
+    fn two_devices_agree_on_the_pressing_and_the_disc() {
+        let files = [scan(1, 1, Some(0x5e1e)), scan(2, 4, Some(0x5e1e))];
+        let mut a = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        let mut b = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(2)));
+        a.ingest(100, &files);
+        b.ingest(999, &files);
+        let (x, y) = (a.catalogue(), b.catalogue());
+        assert_eq!(x.releases, y.releases);
+        assert_eq!(x.media, y.media);
+        assert_eq!(x.tracks, y.tracks);
     }
 }

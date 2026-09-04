@@ -148,6 +148,7 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         disc: number(&get(ItemKey::DiscNumber)),
         track: number(&get(ItemKey::TrackNumber)),
         mb_release_group: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzReleaseGroupId)).ok(),
+        mb_release: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzReleaseId)).ok(),
         format: format_of(&tagged),
         // The audio bitrate where the container reports one, else the overall
         // rate. A verdict compares a cutoff against what the file *claims*, so

@@ -71,6 +71,7 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                 disc: t.discnumber.map(|d| d as u16),
                 track: t.tracknumber.map(|n| n as u16),
                 mb_release_group: None,
+                mb_release: None,
                 length_ms: t.duration.as_millis() as u32,
                 format: format_of(t),
                 bitrate: t.bitrate.unwrap_or(0),

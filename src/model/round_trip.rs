@@ -49,6 +49,11 @@ fn album() -> Vec<Scanned> {
         mb_release_group: Some(uuid::Uuid::from_u128(
             0x9e11_0000_0000_4000_8000_0000_0000_00aa,
         )),
+        // A *different* id from the group's, because they name different
+        // things: the album and the pressing of it that this file came from.
+        mb_release: Some(uuid::Uuid::from_u128(
+            0x5e1e_0000_0000_4000_8000_0000_0000_00bb,
+        )),
         format: Some(crate::model::encoding::Format::Mp3),
         bitrate: 320,
     };

@@ -25,11 +25,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
 use crate::model::entity::{
-    Artist, Device, Encoding, Genre, Hierarchy, Qualifier, Recording, ReleaseGroup,
+    Artist, Device, Encoding, Genre, Hierarchy, Medium, Qualifier, Recording, Release,
+    ReleaseGroup, Track,
 };
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::reference::{AliasKind, Cataloguable, Source};
+use crate::model::spine::PartialDate;
 use crate::model::vocabulary::GenreOn;
 
 /// One thing a device wrote down.
@@ -181,17 +183,55 @@ pub enum Fact {
         artist: Id<Artist>,
     },
 
-    /// Where a recording sits on an album.
+    /// One pressing of an album.
     ///
-    /// Disc and track are what the **tags claim**, not where the row happens
-    /// to fall. A claim can be checked against its neighbours; a position
-    /// derived from ordering cannot disagree with itself and so can never say
-    /// the source was wrong.
-    TrackPlaced {
-        recording: Id<Recording>,
+    /// The level between the group and the disc, and the one this model spent
+    /// its first year without: "the 2015 reissue has a bonus disc" is a claim
+    /// about a *release*, and with only a group to hang it on there was
+    /// nowhere to put it. The group is the work-shaped thing — *Kid A* — and
+    /// the release is the object you own.
+    ReleaseCatalogued {
+        release: Id<Release>,
         group: Id<ReleaseGroup>,
-        disc: u16,
-        track: u16,
+        title: String,
+        /// When this pressing came out, which is **not** when the album did.
+        /// #59's reissue trap is exactly this distinction: a 2015 pressing of
+        /// a 1982 album sorts by 1982, and only the group knows that.
+        released: Option<PartialDate>,
+    },
+
+    /// A disc or a side of a release.
+    MediumCatalogued {
+        medium: Id<Medium>,
+        release: Id<Release>,
+        /// Which disc, as the tags claim.
+        position: u16,
+        /// `CD`, `12" Vinyl`, `Digital Media`. Nothing reads it yet; it is
+        /// here because a medium without one is a disc nobody can describe,
+        /// and adding the field later means a migration.
+        format: Option<String>,
+    },
+
+    /// Where a recording sits **on a medium**.
+    ///
+    /// The position is what the **tags claim**, not where the row happens to
+    /// fall. A claim can be checked against its neighbours; a position derived
+    /// from ordering cannot disagree with itself and so can never say the
+    /// source was wrong.
+    ///
+    /// It used to name a release *group* and carry a disc number, which
+    /// flattened two levels into one: a recording does not sit on an album, it
+    /// sits on a disc of a pressing of one, and the disc number was standing
+    /// in for the medium that was missing.
+    TrackPlaced {
+        track: Id<Track>,
+        medium: Id<Medium>,
+        recording: Id<Recording>,
+        position: u16,
+        /// What the sleeve printed here, when it differs from the recording's
+        /// own title. A compilation renaming a track is a fact about the
+        /// compilation, and belongs on the slot rather than on the song.
+        title_on_release: Option<String>,
     },
 
     /// What an analyser measured about an encoding.
@@ -420,8 +460,12 @@ pub struct Catalogue {
     /// Cutoff and the analyser that found it, per encoding.
     pub measurements: BTreeMap<Id<Encoding>, (u32, u16)>,
     pub groups: BTreeMap<Id<ReleaseGroup>, Grouped>,
-    /// Where each recording sits: which album, which disc, which track.
-    pub placements: BTreeMap<Id<Recording>, (Id<ReleaseGroup>, u16, u16)>,
+    /// Every pressing, by id.
+    pub releases: BTreeMap<Id<Release>, Released>,
+    /// Every disc, by id.
+    pub media: BTreeMap<Id<Medium>, Pressed>,
+    /// Every slot: which medium, which recording, which number.
+    pub tracks: BTreeMap<Id<Track>, Placed>,
     /// What each device last said it holds, and when it said so.
     ///
     /// The stamp is not decoration. You cannot stat another machine's disk, so
@@ -438,6 +482,28 @@ pub struct Catalogue {
 pub struct Asserted {
     pub at: Stamp,
     pub held: BTreeMap<Id<Encoding>, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Released {
+    pub group: Id<ReleaseGroup>,
+    pub title: String,
+    pub released: Option<PartialDate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Pressed {
+    pub release: Id<Release>,
+    pub position: u16,
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Placed {
+    pub medium: Id<Medium>,
+    pub recording: Id<Recording>,
+    pub position: u16,
+    pub title_on_release: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -633,13 +699,52 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     },
                 );
             }
-            Fact::TrackPlaced {
-                recording,
+            Fact::ReleaseCatalogued {
+                release,
                 group,
-                disc,
-                track,
+                title,
+                released,
             } => {
-                cat.placements.insert(*recording, (*group, *disc, *track));
+                cat.releases.insert(
+                    *release,
+                    Released {
+                        group: *group,
+                        title: title.clone(),
+                        released: *released,
+                    },
+                );
+            }
+            Fact::MediumCatalogued {
+                medium,
+                release,
+                position,
+                format,
+            } => {
+                cat.media.insert(
+                    *medium,
+                    Pressed {
+                        release: *release,
+                        position: *position,
+                        format: format.clone(),
+                    },
+                );
+            }
+            Fact::TrackPlaced {
+                track,
+                medium,
+                recording,
+                position,
+                title_on_release,
+            } => {
+                cat.tracks.insert(
+                    *track,
+                    Placed {
+                        medium: *medium,
+                        recording: *recording,
+                        position: *position,
+                        title_on_release: title_on_release.clone(),
+                    },
+                );
             }
             Fact::EncodingMeasured {
                 encoding,
@@ -987,9 +1092,9 @@ mod reachability {
         // Each of these needs a fact before anything else names it, or there
         // will be two producers for one row.
         ("work", None),
-        ("release", None),
-        ("medium", None),
-        ("track", None),
+        ("release", Some("ReleaseCatalogued")),
+        ("medium", Some("MediumCatalogued")),
+        ("track", Some("TrackPlaced")),
         ("label", None),
         ("genre", Some("GenreCatalogued")),
         ("qualifier", Some("QualifierCatalogued")),
@@ -1010,7 +1115,7 @@ mod reachability {
     /// regression, and this is where it is caught.
     #[test]
     fn every_entity_is_reachable_from_a_fact_or_named_as_a_gap() {
-        const UNREACHABLE: usize = 10;
+        const UNREACHABLE: usize = 7;
 
         let kinds = crate::model::entity::ALL_KINDS;
 
