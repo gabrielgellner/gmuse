@@ -149,6 +149,10 @@ pub enum Source {
     /// Read off a file. The weakest thing a name can be.
     TagVariant,
     Inferred,
+    // Snake case makes this `music_brainz`, which nobody has ever typed. The
+    // point of the lowercase wire form is that a proposal file is something a
+    // person edits by hand, and a form they have to look up defeats it.
+    #[serde(rename = "musicbrainz")]
     MusicBrainz,
     Discogs,
     /// Someone typed it on purpose.

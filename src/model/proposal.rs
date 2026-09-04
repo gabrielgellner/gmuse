@@ -38,7 +38,7 @@
 use std::collections::BTreeSet;
 
 use crate::model::clock::HybridClock;
-use crate::model::entity::{Device, Encoding, Genre, Recording};
+use crate::model::entity::{Device, Encoding, Genre, Qualifier, Recording};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Fact, Record};
@@ -66,6 +66,26 @@ pub enum Proposal {
     GenreAssigned {
         recording: Id<Recording>,
         genre: String,
+        basis: Source,
+        confidence: Confidence,
+    },
+    /// Which version of a song a recording is — issue #101.
+    ///
+    /// The route that replaces a stopgap. `identify.py` currently *downgrades*
+    /// a match whose title carries a version qualifier ours does not mention,
+    /// because there was nowhere to record what it had noticed: an
+    /// instrumental and its vocal are the same length by construction and
+    /// score 100 on the name, so both checks the matcher has say "same". Three
+    /// of 607 confident matches were exactly this.
+    ///
+    /// Downgrading throws the observation away. Proposing keeps it, and a
+    /// person reviewing the file decides.
+    QualifierAssigned {
+        recording: Id<Recording>,
+        /// The concept's label, not its id. A tool should not have to mint —
+        /// `Id::of_label` is the model's job, and a label is what a person
+        /// reviewing the file can read.
+        qualifier: String,
         basis: Source,
         confidence: Confidence,
     },
@@ -110,9 +130,9 @@ impl Proposal {
     pub fn subject(&self) -> Subject {
         match self {
             Proposal::Measured { encoding, .. } => Subject::Encoding(*encoding),
-            Proposal::GenreAssigned { recording, .. } | Proposal::Rated { recording, .. } => {
-                Subject::Recording(*recording)
-            }
+            Proposal::GenreAssigned { recording, .. }
+            | Proposal::QualifierAssigned { recording, .. }
+            | Proposal::Rated { recording, .. } => Subject::Recording(*recording),
         }
     }
 }
@@ -129,11 +149,19 @@ pub struct Report {
     /// library that has since changed is stale, not wrong, and saying which
     /// ones is what lets a tool re-query rather than re-measure.
     pub unknown: Vec<Subject>,
+    /// Lines the vocabulary refused, with why.
+    ///
+    /// Distinct from `malformed`, because the line parsed and the subject is
+    /// held — what is wrong is the claim. `qualifier = mix-variant` asserts a
+    /// grouping concept, which says nothing about a recording and would fold
+    /// to an assignment nobody can see; refusing is better than accepting,
+    /// because an assignment nobody can see reads as one nobody made.
+    pub refused: Vec<(usize, String)>,
 }
 
 impl Report {
     pub fn balances(&self, lines: usize) -> bool {
-        lines == self.applied + self.malformed.len() + self.unknown.len()
+        lines == self.applied + self.malformed.len() + self.unknown.len() + self.refused.len()
     }
 }
 
@@ -141,9 +169,10 @@ impl std::fmt::Display for Report {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} applied, {} unknown, {} malformed",
+            "{} applied, {} unknown, {} refused, {} malformed",
             self.applied,
             self.unknown.len(),
+            self.refused.len(),
             self.malformed.len()
         )
     }
@@ -191,26 +220,42 @@ pub fn parse(
             report.unknown.push(proposal.subject());
             continue;
         }
-        out.insert(Record {
-            stamp: clock.stamp(now),
-            fact: into_fact(proposal),
-        });
+        let facts = match into_facts(proposal) {
+            Ok(facts) => facts,
+            Err(why) => {
+                report.refused.push((n + 1, why));
+                continue;
+            }
+        };
+        for fact in facts {
+            out.insert(Record {
+                stamp: clock.stamp(now),
+                fact,
+            });
+        }
         report.applied += 1;
     }
     (out, report)
 }
 
-fn into_fact(proposal: Proposal) -> Fact {
-    match proposal {
+/// One proposal becomes the facts it implies, or says why it cannot.
+///
+/// **More than one, because a concept has to exist before it can be
+/// assigned.** This used to return a single fact, and an applied genre
+/// proposal for a term the vocabulary had never seen wrote an assignment whose
+/// id nothing named — an id no fact resolves is an id nobody can render.
+/// `Instance::assign_genre` got this right; the apply path bypassed it.
+fn into_facts(proposal: Proposal) -> Result<Vec<Fact>, String> {
+    Ok(match proposal {
         Proposal::Measured {
             encoding,
             cutoff_hz,
             analyser,
-        } => Fact::EncodingMeasured {
+        } => vec![Fact::EncodingMeasured {
             encoding,
             cutoff_hz,
             analyser,
-        },
+        }],
         // The genre is named rather than identified, because a tool has no way
         // to mint a concept id and should not: the vocabulary is ours (§2), so
         // the name is resolved against it here.
@@ -224,14 +269,54 @@ fn into_fact(proposal: Proposal) -> Fact {
             genre,
             basis,
             confidence,
-        } => Fact::GenreAssigned {
-            subject: GenreOn::Recording(recording),
-            genre: Id::<Genre>::of_name(&genre),
+        } => {
+            let id = Id::<Genre>::of_name(&genre);
+            vec![
+                Fact::GenreCatalogued {
+                    genre: id,
+                    name: genre.trim().to_string(),
+                },
+                Fact::GenreAssigned {
+                    subject: GenreOn::Recording(recording),
+                    genre: id,
+                    basis,
+                    confidence,
+                },
+            ]
+        }
+        // Refused at the door rather than folded to nothing, for the reason
+        // `Instance::assign_qualifier` refuses it: a grouping concept is a
+        // place in the tree, not a claim about a song, and an assignment
+        // nobody can see is indistinguishable from one nobody made.
+        Proposal::QualifierAssigned {
+            recording,
+            qualifier,
             basis,
             confidence,
-        },
-        Proposal::Rated { recording, stars } => Fact::RecordingRated { recording, stars },
-    }
+        } => {
+            if !crate::model::qualifier::assignable(&qualifier) {
+                return Err(format!(
+                    "{qualifier:?} is a grouping concept and says nothing about a recording"
+                ));
+            }
+            let concept = Id::<Qualifier>::of_label(&qualifier);
+            vec![
+                Fact::QualifierCatalogued {
+                    concept,
+                    label: qualifier.trim().to_string(),
+                },
+                Fact::QualifierAssigned {
+                    recording,
+                    concept,
+                    basis,
+                    confidence,
+                },
+            ]
+        }
+        Proposal::Rated { recording, stars } => {
+            vec![Fact::RecordingRated { recording, stars }]
+        }
+    })
 }
 
 #[cfg(test)]
@@ -366,6 +451,99 @@ mod tests {
         let text = format!("{}\n{}", measured(1, 1), measured(2, 2));
         let (records, _) = parse(&text, dev(), 100, held);
         assert_eq!(records.len(), 2);
+    }
+
+    /// **A concept has to exist before it can be assigned.**
+    ///
+    /// The apply path used to emit the assignment alone, so a genre the
+    /// vocabulary had never seen arrived as an id no fact resolved — an id
+    /// nobody can render, and a row that looks like a bug in the renderer
+    /// rather than a gap in the log. `Instance::assign_genre` always got this
+    /// right; this path bypassed it.
+    #[test]
+    fn an_assignment_brings_its_concept_with_it() {
+        let text = format!(
+            r#"{{"fact":"genre_assigned","recording":"{}","genre":"Dub Techno","basis":"discogs","confidence":"matched"}}"#,
+            rec(1)
+        );
+        let (records, report) = parse(&text, dev(), 100, held);
+
+        assert_eq!(report.applied, 1, "one line, however many facts");
+        assert!(
+            records.iter().any(
+                |r| matches!(&r.fact, Fact::GenreCatalogued { name, .. } if name == "Dub Techno")
+            ),
+            "the assignment names a concept nothing defines"
+        );
+        assert_eq!(records.len(), 2);
+    }
+
+    /// **The wire form is what a person would type.**
+    ///
+    /// Snake case turned `MusicBrainz` into `music_brainz`, which nobody has
+    /// ever written down. Found by writing a test against the format the way a
+    /// person would use it, which is the only way this kind of defect shows
+    /// up — every round trip through serde agreed with itself.
+    #[test]
+    fn a_basis_is_spelled_the_way_it_is_said() {
+        for (wire, basis) in [
+            ("musicbrainz", Source::MusicBrainz),
+            ("discogs", Source::Discogs),
+            ("manual", Source::Manual),
+            ("tag_variant", Source::TagVariant),
+        ] {
+            let text = format!(
+                r#"{{"fact":"genre_assigned","recording":"{}","genre":"Techno","basis":"{wire}","confidence":"matched"}}"#,
+                rec(1)
+            );
+            let (records, report) = parse(&text, dev(), 100, held);
+            assert!(report.malformed.is_empty(), "{wire}: {report}");
+            assert!(records.iter().any(|r| matches!(
+                &r.fact,
+                Fact::GenreAssigned { basis: b, .. } if *b == basis
+            )));
+        }
+    }
+
+    /// A qualifier proposal is the route that replaces a stopgap: the matcher
+    /// used to *downgrade* a match whose title carried a version it had not
+    /// asked for, because there was nowhere to record what it had noticed.
+    #[test]
+    fn a_qualifier_can_be_proposed() {
+        let text = format!(
+            r#"{{"fact":"qualifier_assigned","recording":"{}","qualifier":"Instrumental","basis":"musicbrainz","confidence":"matched"}}"#,
+            rec(1)
+        );
+        let (records, report) = parse(&text, dev(), 100, held);
+
+        assert_eq!(report.applied, 1, "{report}");
+        assert!(report.refused.is_empty(), "{report}");
+        assert!(records.iter().any(|r| matches!(
+            &r.fact,
+            Fact::QualifierAssigned { concept, .. }
+                if *concept == Id::<Qualifier>::of_label("instrumental")
+        )));
+    }
+
+    /// **A grouping concept is refused, and refusal is its own outcome.**
+    ///
+    /// The line parsed and the library holds the recording — what is wrong is
+    /// the claim, so calling it malformed would send a person looking for a
+    /// typo. `mix-variant` is a place in the tree rather than a statement
+    /// about a song, and folding it would make an assignment nobody can see.
+    #[test]
+    fn a_grouping_concept_is_refused_with_its_reason() {
+        let text = format!(
+            r#"{{"fact":"qualifier_assigned","recording":"{}","qualifier":"mix-variant","basis":"manual","confidence":"confirmed"}}"#,
+            rec(1)
+        );
+        let (records, report) = parse(&text, dev(), 100, held);
+
+        assert!(records.is_empty());
+        assert!(report.malformed.is_empty(), "a refusal is not a typo");
+        assert_eq!(report.refused.len(), 1);
+        assert_eq!(report.refused[0].0, 1, "the line a person would jump to");
+        assert!(report.balances(1), "{report}");
     }
 
     /// **The round trip.** A tool is handed an id and a locator, opens the

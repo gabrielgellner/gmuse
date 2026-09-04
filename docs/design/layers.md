@@ -58,7 +58,7 @@ There is no "update the library" call. There is only **appending a fact**.
 
 ```rust
 Fact::RecordingCatalogued { recording, title, artist }
-Fact::CreditAsserted { subject, artist, role, position, as_credited, join_phrase }
+Fact::CreditAsserted { subject, artist, role, basis, position, as_credited, join_phrase }
 Fact::TrackPlaced { track, medium, recording, position, title_on_release }
 Fact::GenreAssigned { subject, genre, basis, confidence }
 Fact::EncodingMeasured { encoding, cutoff_hz, analyser }
@@ -99,6 +99,21 @@ into the one basis nothing downstream second-guesses. `src/model/seam.rs` assert
 
 (`Manual` is the existing name for what the addendum calls `Human`. It is on the wire in every proposal file, and the
 two say the same thing.)
+
+### What a title is evidence of
+
+A filename says more than a title. `Modulo Tierra (Nolah Remix)` names **who**; `Alors on danse (Radio Edit)` says
+**which version**; `Initiation (Orbital remix) (radio edit)` says both, and each goes to its own fact. Reading them is
+what turns a bracketed string from something the matcher has to be suspicious of into evidence it can corroborate.
+
+Both readers match against a **vocabulary**, never against "anything in brackets" — `(Nolah Remix)` names a person and
+`(Original Mix)` is Beatport for _not a remix_, so a parser that took every parenthesis would mint a concept per
+remixer. Which role words are safe was measured against this library rather than guessed: `remix` introduces a real name
+65 times out of 65, while `mix` (71) and `edit` (13) are mostly remaster annotations and version words —
+`1969 Glyn Johns`, `2021`, `Album`, `radio`. So `mix`, `edit` and `dub` credit nobody.
+
+A name read out of a title is a **guess**, and it is asserted as one: `Source::TagVariant`, so an authority naming the
+same remixer lands beside it and the agreement is visible. That is the reason the basis is in a credit's key.
 
 ### What a gesture assigns to
 

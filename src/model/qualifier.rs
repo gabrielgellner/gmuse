@@ -51,6 +51,23 @@ pub const SEED: &[(&str, Option<&str>, bool)] = &[
     ("performance-variant", None, false),
     ("live", Some("performance-variant"), true),
     ("demo", Some("performance-variant"), true),
+    // **A length variant is a version too**, and leaving it out made "no radio
+    // edits in this playlist" unaskable.
+    //
+    // It was left out on the grounds that a radio edit is a *derivation* — a
+    // different length — rather than a version of this recording. That
+    // conflated two jobs. The duration tolerances decide whether two things
+    // are the same recording; this vocabulary describes what you are holding,
+    // and a radio edit is a perfectly good description of it.
+    //
+    // The real objection is `RecordingDerivation { kind: Edit }` saying the
+    // same thing, and it resolves the way `instrumental` already did: a
+    // derivation names **both** ends, a qualifier names one. "This is a
+    // shortened version of something" is always available; "of *that*" only
+    // when you hold both.
+    ("length-variant", None, false),
+    ("radio-edit", Some("length-variant"), true),
+    ("extended-mix", Some("length-variant"), true),
     ("partial", None, true),
 ];
 
@@ -75,6 +92,203 @@ pub fn assignable(label: &str) -> bool {
         .is_none_or(|(_, _, ok)| *ok)
 }
 
+/// Spellings the world uses for a seeded concept.
+///
+/// Only where the variant is a *spelling* rather than a different claim.
+/// `a cappella` and `acapella` are the same word badly typed; `radio edit` is
+/// not a misspelling of anything here.
+const SPELLINGS: &[(&str, &str)] = &[
+    ("a cappella", "acappella"),
+    ("acapella", "acappella"),
+    ("dub plate", "dub-plate"),
+    ("dubplate", "dub-plate"),
+    // `radio edit` and `radio mix` are one claim; `radio` alone is not, and a
+    // segment like `Marcelo trance radio mix` still says it.
+    ("radio edit", "radio-edit"),
+    ("radio mix", "radio-edit"),
+    ("radio version", "radio-edit"),
+    ("extended mix", "extended-mix"),
+    ("extended version", "extended-mix"),
+];
+
+/// Which version qualifiers a title claims, read from its bracketed parts.
+///
+/// **Matched against the vocabulary, never against "anything in brackets".**
+/// That distinction is the whole rule: `(Nolah Remix)` names *who*, not
+/// *what*, and a parser that treated every parenthesis as a qualifier would
+/// mint a concept per remixer. The Python side learned this the expensive way
+/// — its first guard compared bracketed text literally and downgraded nine
+/// good matches out of eleven.
+///
+/// **`(Radio Edit)` is deliberately not here.** A radio edit is a different
+/// length, which makes it a derivation rather than a version of the same
+/// recording — the same line the two duration tolerances draw in
+/// `gmuse_tools/identify.py`, and it must be drawn the same way on both sides.
+///
+/// Only the bracketed part is read. A title is free to contain `live` as a
+/// word — `Live and Let Die` is not a live recording.
+pub fn qualifiers_in(title: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    for segment in bracketed(title) {
+        let text = normalise_dashes(&segment);
+        for (variant, canonical) in SPELLINGS {
+            if text.contains(variant) && !found.contains(canonical) {
+                found.push(*canonical);
+            }
+        }
+        // The whole segment first, because a seeded label can be hyphenated —
+        // `dub-plate` is one concept and splitting on the hyphen would look
+        // for two that do not exist. Then each word, so `Live at Wembley`
+        // still says live.
+        let candidates = std::iter::once(text.as_str()).chain(text.split([' ', '-']));
+        for candidate in candidates {
+            if let Some((label, _, true)) = SEED.iter().find(|(n, _, _)| *n == candidate)
+                && !found.contains(label)
+            {
+                found.push(*label);
+            }
+        }
+    }
+    found
+}
+
+/// Role words that reliably introduce a **person** in a bracketed segment.
+///
+/// Measured against this library rather than guessed, and the measurement is
+/// why the obvious ones are absent. Across 6,500 files:
+///
+/// | word | uses | what the names look like |
+/// | --- | --- | --- |
+/// | `remix` | 65 | Boards of Canada, Joris Voorn, Benny Benassi — all real |
+/// | `mix` | 71 | `1969 Glyn Johns`, `2021`, `Boy Wunder radio` — remaster notes |
+/// | `edit` | 13 | `Album`, `radio`, `remix - radio` — version words, not people |
+/// | `dub` | 1 | `Uptown` |
+///
+/// So `mix`, `edit` and `dub` are excluded. They are the words that describe
+/// the *version*, which is what `qualifiers_in` reads.
+const REMIXER_WORDS: &[&str] = &["remix", "rework", "bootleg", "refix", "vip"];
+
+/// Words that describe a version rather than name a person, so a segment made
+/// only of them credits nobody.
+const NOT_A_NAME: &[&str] = &[
+    "original",
+    "radio",
+    "extended",
+    "club",
+    "album",
+    "single",
+    "vocal",
+    "instrumental",
+    "dub",
+    "main",
+    "short",
+    "long",
+    "remix",
+];
+
+/// Who a title says remixed this, where it says so plainly.
+///
+/// **A guess, and asserted as one.** The name is minted into an artist, which
+/// is why the credit carries `Source::TagVariant`: of 76 distinct names this
+/// library's titles yield, only 5 are already artists here. The other 71 are
+/// real remixers nobody owns an album by — worth having, and worth being able
+/// to tell apart from a name MusicBrainz confirmed.
+///
+/// Conservative on purpose. A segment whose name is only version words
+/// (`Original Mix`) or starts with a year (`1969 Glyn Johns Mix`) credits
+/// nobody, because those are the shapes that produced every false positive in
+/// the measurement above.
+pub fn credits_in(title: &str) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    for segment in bracketed(title) {
+        let text = normalise_dashes(&segment);
+        let Some(rest) = REMIXER_WORDS.iter().find_map(|w| text.strip_suffix(w)) else {
+            continue;
+        };
+        // Trailing version words are not part of a name: `Hi-Bias Signature
+        // radio remix` credits `Hi-Bias Signature`, and keeping the `radio`
+        // would mint an artist nobody is called.
+        let words: Vec<&str> = rest
+            .split_whitespace()
+            .rev()
+            .skip_while(|w| NOT_A_NAME.contains(w))
+            .collect();
+        if words.is_empty() || !plausible_name(&words) {
+            continue;
+        }
+        // **Counted in words, never sliced by byte.** `text` has been
+        // lowercased, had its dashes folded and its whitespace collapsed, so
+        // its byte offsets do not address the title — indexing the original
+        // with them lands mid-character on any name carrying a U+2010.
+        let as_written = segment
+            .split_whitespace()
+            .take(words.len())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !out.iter().any(|(_, n)| n.eq_ignore_ascii_case(&as_written)) {
+            out.push(("remixer", as_written));
+        }
+    }
+    out
+}
+
+/// Whether a bracketed fragment reads as somebody's name.
+/// `words` arrives reversed, so its last element is the name's first word.
+fn plausible_name(words: &[&str]) -> bool {
+    // `1969 Glyn Johns Mix` and `2021 Mix` are remaster annotations. Fourteen
+    // and twelve uses respectively in this library, and the single largest
+    // source of false positives in the measurement.
+    if words
+        .last()
+        .is_some_and(|w| w.len() == 4 && w.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    words.iter().any(|w| !NOT_A_NAME.contains(w))
+}
+
+/// The parenthesised and bracketed parts of a title, in order.
+fn bracketed(title: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for c in title.chars() {
+        match c {
+            '(' | '[' => {
+                depth += 1;
+                if depth == 1 {
+                    current.clear();
+                }
+            }
+            ')' | ']' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 && !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            _ if depth > 0 => current.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Lowercased, with every dash the world uses folded to an ASCII hyphen and
+/// runs of space collapsed.
+///
+/// `Pan-Pot` and `Pan‐Pot` differ by one U+2010, and that single character
+/// downgraded nine good matches on the Python side before anybody noticed.
+fn normalise_dashes(text: &str) -> String {
+    let folded: String = text
+        .chars()
+        .map(|c| match c {
+            '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{ff0d}' => '-',
+            c => c,
+        })
+        .collect();
+    crate::model::ingest::normalise(&folded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +308,170 @@ mod tests {
     #[test]
     fn an_unseeded_concept_is_assignable() {
         assert!(assignable("karaoke"));
+    }
+
+    /// The claim a title makes, when it makes one.
+    #[test]
+    fn a_bracketed_version_word_is_read() {
+        assert_eq!(qualifiers_in("212 (Instrumental)"), ["instrumental"]);
+        assert_eq!(qualifiers_in("Years [Live]"), ["live"], "brackets too");
+        assert_eq!(
+            qualifiers_in("Rebellion (Live at Wembley)"),
+            ["live"],
+            "the qualifier is a word in the segment, not the whole of it"
+        );
+        assert_eq!(
+            qualifiers_in("Halcyon (Live) (Instrumental)"),
+            ["live", "instrumental"],
+            "a recording can be two things at once"
+        );
+    }
+
+    /// **A remixer's name is not a qualifier.** The rule the whole parser is
+    /// built around: matched against the vocabulary, never against "anything
+    /// in brackets". A parser that took every parenthesis would mint a
+    /// concept per remixer, and the Python side's first attempt at this
+    /// downgraded nine good matches out of eleven.
+    #[test]
+    fn a_remixers_name_is_not_read_as_a_version() {
+        assert!(qualifiers_in("Phobos (Pan-Pot Remix)").is_empty());
+        assert!(qualifiers_in("Modulo Tierra (Nolah Remix)").is_empty());
+        assert!(qualifiers_in("Distant Trip (Original Mix)").is_empty());
+    }
+
+    /// **A length variant is a version too.**
+    ///
+    /// This test asserted the opposite, on the grounds that a radio edit is a
+    /// derivation rather than a version. That conflated two jobs: the duration
+    /// tolerances decide whether two things are the *same recording*, and this
+    /// vocabulary describes *what you are holding*. Excluding it made "no
+    /// radio edits in this playlist" unaskable about files that plainly say
+    /// they are radio edits.
+    #[test]
+    fn a_length_variant_is_a_version() {
+        assert_eq!(qualifiers_in("Alors on danse (Radio Edit)"), ["radio-edit"]);
+        assert_eq!(qualifiers_in("Sandstorm (Extended Mix)"), ["extended-mix"]);
+        assert_eq!(
+            qualifiers_in("Blue Monday (Radio Version)"),
+            ["radio-edit"],
+            "one claim, however it is worded"
+        );
+        assert_eq!(
+            qualifiers_in("Distant Trip (Original Mix)"),
+            Vec::<&str>::new(),
+            "Beatport for `not a remix` — an absence of a claim, not one"
+        );
+    }
+
+    /// **The name in a title is evidence, and it says who.**
+    ///
+    /// It used to be discarded: `qualifiers_in` correctly refused to treat
+    /// `(Nolah Remix)` as a version, and nothing else looked at it, so the
+    /// file was telling us a credit nobody wrote down.
+    #[test]
+    fn a_title_names_the_person_who_remixed_it() {
+        assert_eq!(
+            credits_in("Modulo Tierra (Nolah Remix)"),
+            [("remixer", "Nolah".to_string())]
+        );
+        assert_eq!(
+            credits_in("Phobos (Pan-Pot Remix)"),
+            [("remixer", "Pan-Pot".to_string())],
+            "the credited spelling comes from the title, not from the fold"
+        );
+        assert_eq!(
+            credits_in("Sunrise (Boards of Canada Rework)"),
+            [("remixer", "Boards of Canada".to_string())]
+        );
+    }
+
+    /// A trailing version word is not part of a name, and a multi-byte one is
+    /// not a place to slice.
+    ///
+    /// The credited spelling used to be cut out of the title by byte offset,
+    /// taken from a string that had already been lowercased, dash-folded and
+    /// whitespace-collapsed. Any name carrying a U+2010 would have landed
+    /// mid-character. It is counted in words now.
+    #[test]
+    fn the_credited_spelling_survives_the_normalisation() {
+        assert_eq!(
+            credits_in("Someday (Hi-Bias Signature radio remix)"),
+            [("remixer", "Hi-Bias Signature".to_string())]
+        );
+        assert_eq!(
+            credits_in("The Alchemist (Roman Flügel Remix)"),
+            [("remixer", "Roman Flügel".to_string())],
+            "the name keeps its accents and its case"
+        );
+        assert_eq!(
+            credits_in("Phobos (Pan‐Pot Remix)"),
+            [("remixer", "Pan‐Pot".to_string())],
+            "a U+2010 matches, and is not sliced through"
+        );
+    }
+
+    /// One title can say two different things, and each goes to its own fact.
+    /// `Initiation (Orbital remix) (radio edit)` is a real row here.
+    #[test]
+    fn a_title_can_name_who_and_say_which_version() {
+        let title = "Initiation (Orbital remix) (radio edit)";
+        assert_eq!(credits_in(title), [("remixer", "Orbital".to_string())]);
+        assert_eq!(qualifiers_in(title), ["radio-edit"]);
+    }
+
+    /// **The false positives the measurement found, each one refused.**
+    ///
+    /// Across this library's 6,500 files, `mix` matched 71 segments and `edit`
+    /// 13, and almost none of them named a person: `1969 Glyn Johns Mix` and
+    /// `2021 Mix` are remaster annotations, `Album Edit` and `radio edit`
+    /// describe the version. Those two words are why the role list is five
+    /// entries rather than the eight that first looked obvious.
+    #[test]
+    fn a_version_word_is_not_a_persons_name() {
+        for title in [
+            "Get Back (1969 Glyn Johns Mix)",
+            "Something (2021 Mix)",
+            // Through `remix`, so the year guard is what refuses these rather
+            // than the role-word list. Without one they credit an artist
+            // called `2021`.
+            "Something (2021 Remix)",
+            "Get Back (1969 Glyn Johns Remix)",
+            "Blue Monday (Album Edit)",
+            "Alors on danse (radio edit)",
+            "Distant Trip (Original Mix)",
+            "Uptown (Uptown Dub)",
+        ] {
+            assert!(credits_in(title).is_empty(), "{title} credited somebody");
+        }
+    }
+
+    /// Only the bracketed part is read, or every song with `live` in its name
+    /// becomes a live recording.
+    #[test]
+    fn an_unbracketed_word_claims_nothing() {
+        assert!(qualifiers_in("Live and Let Die").is_empty());
+        assert!(qualifiers_in("Alive").is_empty());
+        assert!(qualifiers_in("Demolition").is_empty(), "not `demo`");
+    }
+
+    /// The spellings the world actually uses, and the dash it uses to write
+    /// them — `Pan-Pot` against `Pan‐Pot` differs by one U+2010, and that one
+    /// character cost nine matches before anybody saw it.
+    #[test]
+    fn a_badly_typed_spelling_is_still_the_word() {
+        for title in ["S (A Cappella)", "S (Acapella)", "S (acappella)"] {
+            assert_eq!(qualifiers_in(title), ["acappella"], "{title}");
+        }
+        for title in ["S (Dub Plate)", "S (Dub‐Plate)", "S (dubplate)"] {
+            assert_eq!(qualifiers_in(title), ["dub-plate"], "{title}");
+        }
+    }
+
+    /// A grouping concept cannot be claimed by a title either — it is not
+    /// assignable, so the parser must not offer it.
+    #[test]
+    fn a_title_cannot_claim_a_grouping_concept() {
+        assert!(qualifiers_in("Whatever (Mix Variant)").is_empty());
     }
 
     /// Convergent, and case-folded, exactly as genre is.

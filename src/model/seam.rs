@@ -234,7 +234,7 @@ impl Librarian {
                 },
             );
         }
-        for ((subject, artist, role), c) in &cat.credits {
+        for ((subject, artist, role, _), c) in &cat.credits {
             l.reference.credits.push(crate::model::reference::Credit {
                 subject: *subject,
                 artist: crate::model::id::Ref::to(*artist),

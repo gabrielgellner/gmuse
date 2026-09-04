@@ -245,12 +245,16 @@ pub enum Fact {
     /// how a sleeve orders and spells a credit is correctable, and correcting
     /// it must not mint a second credit.
     ///
-    /// No basis yet. When one is wanted it goes in the key beside the role,
-    /// under the same two-tier rule assignments use.
+    /// **The basis is in the key**, for the reason it is on an assignment: a
+    /// remixer read out of a title is a guess, and MusicBrainz naming the same
+    /// remixer is not. Folded to one row the guess and the confirmation are
+    /// indistinguishable, and their agreeing — the most useful thing the pair
+    /// says — is lost.
     CreditAsserted {
         subject: CreditOn,
         artist: Id<Artist>,
         role: Id<Role>,
+        basis: Source,
         position: u8,
         /// What the sleeve printed, when it differs from the artist's name.
         as_credited: Option<String>,
@@ -574,7 +578,7 @@ pub struct Catalogue {
     /// The role codelist.
     pub roles: BTreeMap<Id<Role>, (String, RoleClass)>,
     /// Every credit. Keyed by the claim, valued by how it was printed.
-    pub credits: BTreeMap<(CreditOn, Id<Artist>, Id<Role>), Credited>,
+    pub credits: BTreeMap<(CreditOn, Id<Artist>, Id<Role>, Source), Credited>,
     /// Every pressing, by id.
     pub releases: BTreeMap<Id<Release>, Released>,
     /// Every disc, by id.
@@ -845,12 +849,13 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 subject,
                 artist,
                 role,
+                basis,
                 position,
                 as_credited,
                 join_phrase,
             } => {
                 cat.credits.insert(
-                    (*subject, *artist, *role),
+                    (*subject, *artist, *role, *basis),
                     Credited {
                         position: *position,
                         as_credited: as_credited.clone(),

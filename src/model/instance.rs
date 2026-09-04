@@ -197,13 +197,63 @@ impl Instance {
                     artist,
                 },
             );
+            // **A version qualifier the title claims.** Matched against the
+            // vocabulary rather than against "anything in brackets", so a
+            // remixer's name does not become a concept — see `qualifiers_in`.
+            //
+            // `Matched` rather than `Provisional`: the parse did match a
+            // term, and `Provisional` means nothing did. `TagVariant` because
+            // a title is the weakest thing a claim can be read off, and a
+            // human disagreeing lands beside this rather than on it.
+            for label in crate::model::qualifier::qualifiers_in(&s.title) {
+                self.assign_qualifier(
+                    now,
+                    recording,
+                    label,
+                    Source::TagVariant,
+                    Confidence::Matched,
+                );
+            }
+
+            // **What the title says about who.** `(Nolah Remix)` names a
+            // person, and throwing it away lost a credit the file was telling
+            // us. Read conservatively — see `credits_in` for the measurement
+            // that decided which role words are safe — and asserted as the
+            // guess it is, so MusicBrainz confirming the same remixer lands
+            // beside it rather than on it.
+            for (role, name) in crate::model::qualifier::credits_in(&s.title) {
+                let who = Id::<Artist>::of_artist(None, &name);
+                self.append(
+                    now,
+                    Fact::ArtistNamed {
+                        artist: who,
+                        name: name.clone(),
+                    },
+                );
+                self.credit(
+                    now,
+                    CreditOn::Recording(recording),
+                    who,
+                    role,
+                    Source::TagVariant,
+                    1,
+                );
+            }
+
             // **The credit the projection used to invent.** It minted one role
             // from `b"performer"` and handed it to every artist in the
             // library, so a row that said "performer" said nothing — it was
             // the only thing it could say. An unqualified tag really is a
             // performer credit; the difference is that this one was asserted,
             // by a scan, at a stamp, and can be corrected.
-            self.credit(now, CreditOn::Recording(recording), artist, "performer", 0);
+            self.credit(
+                now,
+                CreditOn::Recording(recording),
+                artist,
+                "performer",
+                Source::TagVariant,
+                0,
+            );
             // An album, where the tags name one. Its id derives from the
             // release group MBID when there is one, so two devices agree on
             // the *album* as well as the track; otherwise from the album
@@ -244,6 +294,7 @@ impl Instance {
                     CreditOn::ReleaseGroup(group),
                     group_artist,
                     "performer",
+                    Source::TagVariant,
                     0,
                 );
                 // **The three levels a file actually sits in.** A scan sees
@@ -413,6 +464,7 @@ impl Instance {
         subject: CreditOn,
         artist: Id<Artist>,
         role: &str,
+        basis: Source,
         position: u8,
     ) {
         let id = Id::<Role>::of_name(role);
@@ -434,6 +486,7 @@ impl Instance {
                 subject,
                 artist,
                 role: id,
+                basis,
                 position,
                 as_credited: None,
                 join_phrase: None,
@@ -1040,6 +1093,7 @@ mod credit_tests {
     //! only role said nothing at all.
 
     use super::*;
+    use crate::model::entity::Qualifier;
     use crate::model::reference::{CreditOn, RoleClass};
 
     fn scan(title: &str, artist: &str) -> Scanned {
@@ -1082,12 +1136,112 @@ mod credit_tests {
             "a credit named a role no fact defines, so nothing can render it"
         );
         assert_eq!(cat.credits.len(), 2, "the track's credit and the album's");
-        assert!(cat.credits.keys().all(|(_, _, role)| *role == performer));
+        assert!(cat.credits.keys().all(|(_, _, role, _)| *role == performer));
         assert!(
             cat.credits
                 .keys()
-                .any(|(on, _, _)| matches!(on, CreditOn::ReleaseGroup(_))),
+                .any(|(on, _, _, _)| matches!(on, CreditOn::ReleaseGroup(_))),
             "the album-level credit is what `file_under` asks for first"
+        );
+    }
+
+    /// **A title that says what version this is, routed to a fact.**
+    ///
+    /// The claim was there in every filename all along and had nowhere to go,
+    /// so the matcher's only move was to *downgrade* a match it was suspicious
+    /// of. This records the suspicion instead.
+    #[test]
+    fn a_version_in_the_title_becomes_a_qualifier() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan("212 (Instrumental)", "Azealia Banks")]);
+
+        let cat = i.catalogue();
+        let (_, concept, basis) = cat.qualifiers.keys().next().expect("no qualifier");
+        assert_eq!(*concept, Id::<Qualifier>::of_label("instrumental"));
+        assert_eq!(
+            *basis,
+            Source::TagVariant,
+            "a title is the weakest thing a claim can be read off, and a \
+             person disagreeing has to land beside this rather than on it"
+        );
+        assert_eq!(
+            cat.qualifier_labels.get(concept).map(String::as_str),
+            Some("instrumental"),
+            "the concept was assigned before anything named it"
+        );
+    }
+
+    /// A remixer's name is not a version — but it is not nothing either.
+    /// One title, two different claims, each to its own fact.
+    #[test]
+    fn a_remix_in_the_title_is_a_credit_and_not_a_qualifier() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan("Phobos (Pan-Pot Remix)", "Pig&Dan")]);
+        let cat = i.catalogue();
+
+        assert!(cat.qualifiers.is_empty(), "a person is not a version");
+
+        let remixer = Id::<Role>::of_name("remixer");
+        let (_, artist, _, basis) = cat
+            .credits
+            .keys()
+            .find(|(_, _, role, _)| *role == remixer)
+            .expect("the title named who and nothing wrote it down");
+        assert_eq!(*artist, Id::<Artist>::of_artist(None, "Pan-Pot"));
+        assert_eq!(
+            cat.artist_names.get(artist).map(String::as_str),
+            Some("Pan-Pot"),
+            "an artist the credit names but nothing else does"
+        );
+        assert_eq!(
+            *basis,
+            Source::TagVariant,
+            "read out of a title, and a MusicBrainz credit has to land beside \
+             this rather than on top of it"
+        );
+    }
+
+    /// **A guess and a confirmation are two rows.** The reason the basis is in
+    /// the credit's key: folded to one, the agreement between a title parse
+    /// and an authority — the most useful thing the pair says — is lost.
+    #[test]
+    fn a_confirmed_remixer_does_not_overwrite_the_guessed_one() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan("Phobos (Pan-Pot Remix)", "Pig&Dan")]);
+        let rec = *i.catalogue().recordings.keys().next().unwrap();
+
+        i.credit(
+            200,
+            CreditOn::Recording(rec),
+            Id::<Artist>::of_artist(None, "Pan-Pot"),
+            "remixer",
+            Source::MusicBrainz,
+            1,
+        );
+
+        let remixer = Id::<Role>::of_name("remixer");
+        let bases: Vec<Source> = i
+            .catalogue()
+            .credits
+            .keys()
+            .filter(|(_, _, role, _)| *role == remixer)
+            .map(|(_, _, _, basis)| *basis)
+            .collect();
+        assert_eq!(bases, vec![Source::TagVariant, Source::MusicBrainz]);
+    }
+
+    /// A length variant is a version, and the title says which.
+    #[test]
+    fn a_radio_edit_in_the_title_becomes_a_qualifier() {
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan("Alors on danse (Radio Edit)", "Stromae")]);
+        assert_eq!(
+            i.catalogue()
+                .qualifiers
+                .keys()
+                .map(|(_, c, _)| *c)
+                .collect::<Vec<_>>(),
+            vec![Id::<Qualifier>::of_label("radio-edit")]
         );
     }
 
@@ -1098,8 +1252,22 @@ mod credit_tests {
         let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
         let rec = Id::<Recording>::derived(b"callisto");
         let artist = Id::<Artist>::of_artist(None, "Bodzin");
-        i.credit(100, CreditOn::Recording(rec), artist, "performer", 0);
-        i.credit(200, CreditOn::Recording(rec), artist, "producer", 0);
+        i.credit(
+            100,
+            CreditOn::Recording(rec),
+            artist,
+            "performer",
+            Source::TagVariant,
+            0,
+        );
+        i.credit(
+            200,
+            CreditOn::Recording(rec),
+            artist,
+            "producer",
+            Source::TagVariant,
+            0,
+        );
         assert_eq!(i.catalogue().credits.len(), 2);
     }
 
@@ -1111,8 +1279,22 @@ mod credit_tests {
         let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
         let rec = Id::<Recording>::derived(b"callisto");
         let artist = Id::<Artist>::of_artist(None, "Bodzin");
-        i.credit(100, CreditOn::Recording(rec), artist, "performer", 0);
-        i.credit(200, CreditOn::Recording(rec), artist, "performer", 2);
+        i.credit(
+            100,
+            CreditOn::Recording(rec),
+            artist,
+            "performer",
+            Source::TagVariant,
+            0,
+        );
+        i.credit(
+            200,
+            CreditOn::Recording(rec),
+            artist,
+            "performer",
+            Source::TagVariant,
+            2,
+        );
         let cat = i.catalogue();
         assert_eq!(cat.credits.len(), 1);
         assert_eq!(cat.credits.values().next().unwrap().position, 2);
