@@ -125,7 +125,9 @@ pub enum Source {
     Manual,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum AliasKind {
     /// Another way the world spells it.
     SearchHint,

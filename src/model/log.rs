@@ -29,7 +29,7 @@ use crate::model::entity::{
 };
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
-use crate::model::reference::Source;
+use crate::model::reference::{AliasKind, Cataloguable, Source};
 use crate::model::vocabulary::GenreOn;
 
 /// One thing a device wrote down.
@@ -247,6 +247,23 @@ pub enum Fact {
     ///
     /// Deliberately *not* "assertions outnumber retractions" — that counting
     /// rule turns a disagreement into a war nobody can end.
+    /// Another name for something, so a name that was once right stays
+    /// findable.
+    ///
+    /// **Row existence, and never superseded.** An alias is additive by
+    /// nature: two devices each recording one union to both, and a name the
+    /// world used does not stop having been used. Nothing here has a
+    /// last-writer rule because nothing here can disagree.
+    AliasAsserted {
+        subject: Cataloguable,
+        value: String,
+        kind: AliasKind,
+    },
+    /// Decide a genre does not apply. Shadows rather than deletes, and folds
+    /// exactly as [`Fact::QualifierRetracted`] does — same rule, one
+    /// implementation, because "somebody ruled this out" is one idea and the
+    /// vocabulary it is about does not change it.
+    GenreRetracted { subject: GenreOn, genre: Id<Genre> },
     QualifierRetracted {
         recording: Id<Recording>,
         concept: Id<Qualifier>,
@@ -291,6 +308,53 @@ pub enum Fact {
     },
 }
 
+/// Fold one assignment, by the two tiers an assignment has.
+///
+/// The key is the claim's **identity** and it names who says so, so a second
+/// asserter lands beside the first rather than on top of it and re-importing
+/// one source is idempotent. The value is the claim's one **attribute**, and
+/// only the same asserter can move it.
+///
+/// Clearing the retraction is the other half. Records arrive in stamp order,
+/// so an assignment seen after one revives the pair — and a stale replica
+/// replaying an older assignment never does.
+fn assign<S, C>(
+    live: &mut BTreeMap<(S, C, Source), Confidence>,
+    retracted: &mut BTreeSet<(S, C)>,
+    subject: S,
+    concept: C,
+    basis: Source,
+    confidence: Confidence,
+) where
+    S: Ord + Copy,
+    C: Ord + Copy,
+{
+    live.insert((subject, concept, basis), confidence);
+    retracted.remove(&(subject, concept));
+}
+
+/// Fold one retraction, **keyed one field shorter than what it shadows**.
+///
+/// A retraction answers the question rather than arguing with one asserter, so
+/// it silences every basis at once. Keyed by basis instead, a person would have
+/// to retract once per source that ever said it and the next import would put
+/// it back.
+///
+/// The row is kept rather than dropped, because *decided against* and *nobody
+/// has said* are different answers and only a row can tell them apart.
+fn retract<S, C>(
+    live: &mut BTreeMap<(S, C, Source), Confidence>,
+    retracted: &mut BTreeSet<(S, C)>,
+    subject: S,
+    concept: C,
+) where
+    S: Ord + Copy,
+    C: Ord + Copy,
+{
+    live.retain(|(s, c, _), _| (*s, *c) != (subject, concept));
+    retracted.insert((subject, concept));
+}
+
 /// What the catalogue looks like after folding a set of records.
 ///
 /// Every collection is ordered, because "both devices fold to the same result"
@@ -313,6 +377,12 @@ pub struct Catalogue {
     /// identity, so re-scoring an import (Discogs moving provisional to matched)
     /// updates in place, while a human's disagreement lands beside it.
     pub genres: BTreeMap<(GenreOn, Id<Genre>, Source), Confidence>,
+    /// Every other name anything is known by. Row existence, so curation
+    /// unions across devices the way `narrows` does.
+    pub aliases: BTreeSet<(Cataloguable, String, AliasKind)>,
+    /// Subjects somebody has ruled a genre out for. Keyed and folded exactly
+    /// as [`Catalogue::qualifiers_retracted`] is.
+    pub genres_retracted: BTreeSet<(GenreOn, Id<Genre>)>,
     /// What each concept is called.
     pub genre_names: BTreeMap<Id<Genre>, String>,
     /// Which version each recording is, **one row per asserter**, keyed and
@@ -485,31 +555,25 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             Fact::QualifierNarrowed { parent, child } => {
                 cat.qualifier_narrows.insert((*parent, *child));
             }
-            // **The two tiers.** The insert is keyed by the claim's identity,
-            // so re-importing is idempotent and a second asserter lands beside
-            // the first rather than on top of it; only the confidence is
-            // overwritten, and only for the same asserter.
-            //
-            // Clearing the retraction is the other half: records arrive in
-            // stamp order, so an assignment seen after one revives the pair,
-            // and a stale replica replaying an older assignment never does.
             Fact::QualifierAssigned {
                 recording,
                 concept,
                 basis,
                 confidence,
-            } => {
-                cat.qualifiers
-                    .insert((*recording, *concept, *basis), *confidence);
-                cat.qualifiers_retracted.remove(&(*recording, *concept));
-            }
-            // A retraction answers the question, so it silences every asserter
-            // — see the field's note on why it is keyed one field shorter.
-            Fact::QualifierRetracted { recording, concept } => {
-                cat.qualifiers
-                    .retain(|(r, c, _), _| (r, c) != (recording, concept));
-                cat.qualifiers_retracted.insert((*recording, *concept));
-            }
+            } => assign(
+                &mut cat.qualifiers,
+                &mut cat.qualifiers_retracted,
+                *recording,
+                *concept,
+                *basis,
+                *confidence,
+            ),
+            Fact::QualifierRetracted { recording, concept } => retract(
+                &mut cat.qualifiers,
+                &mut cat.qualifiers_retracted,
+                *recording,
+                *concept,
+            ),
             Fact::GenreCatalogued { genre, name } => {
                 cat.genre_names.insert(*genre, name.clone());
             }
@@ -528,8 +592,23 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 genre,
                 basis,
                 confidence,
+            } => assign(
+                &mut cat.genres,
+                &mut cat.genres_retracted,
+                *subject,
+                *genre,
+                *basis,
+                *confidence,
+            ),
+            Fact::AliasAsserted {
+                subject,
+                value,
+                kind,
             } => {
-                cat.genres.insert((*subject, *genre, *basis), *confidence);
+                cat.aliases.insert((*subject, value.clone(), *kind));
+            }
+            Fact::GenreRetracted { subject, genre } => {
+                retract(&mut cat.genres, &mut cat.genres_retracted, *subject, *genre)
             }
             Fact::HoldingsAsserted { device, held } => {
                 // Records arrive in stamp order, so the last one simply wins.
@@ -640,6 +719,33 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
 }
 
 impl Catalogue {
+    /// Concepts this hierarchy does not place — a standing review query.
+    ///
+    /// **An orphan concept is legitimate, not an error.** A genre defined at
+    /// listen time, on the track that prompted it, has no reason to wait for
+    /// somebody to decide where it sits: assignment does not wait for
+    /// placement, and refusing the assignment until it does would mean the
+    /// moment you know the answer is the moment you cannot record it.
+    ///
+    /// What it costs is reachability. `genre+ = Electronic` walks edges, so an
+    /// unplaced concept is invisible to every closure query until an edge
+    /// exists — found only by naming it exactly. That is why this is a query
+    /// rather than a rule: the concepts are fine, and the list of them is the
+    /// curation backlog.
+    pub fn unplaced_genres(&self, hierarchy: Id<Hierarchy>) -> BTreeSet<Id<Genre>> {
+        let placed: BTreeSet<Id<Genre>> = self
+            .narrows
+            .iter()
+            .filter(|(h, _, _)| *h == hierarchy)
+            .flat_map(|(_, parent, child)| [*parent, *child])
+            .collect();
+        self.genre_names
+            .keys()
+            .filter(|g| !placed.contains(g))
+            .copied()
+            .collect()
+    }
+
     /// The merges the collisions are asking for.
     ///
     /// **Why an orphan is left rather than swept.** A recording that nothing

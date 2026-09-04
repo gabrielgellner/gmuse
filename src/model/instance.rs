@@ -26,7 +26,7 @@ use crate::model::entity::{
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
-use crate::model::reference::Source;
+use crate::model::reference::{AliasKind, Cataloguable, Source};
 use crate::model::vocabulary::GenreOn;
 
 /// What a scan says about one file.
@@ -350,6 +350,52 @@ impl Instance {
             },
         );
         true
+    }
+
+    /// Rename a concept, keeping the name it had.
+    ///
+    /// **A rename does not re-mint.** The id came from the old label, and
+    /// every assignment points at it; re-minting on rename would rewrite every
+    /// one of them, and the whole reason ids are derived is that two devices
+    /// can define a concept independently and land on the same row.
+    ///
+    /// The cost is a *false split*: a device that meets the new label fresh
+    /// mints a different id, and now one concept has two. That is accepted
+    /// rather than solved, because it is the repairable error — a split is one
+    /// merge from repaired, and a false merge is permanent. The alias is what
+    /// makes the repair findable: the merge review sees two concepts sharing a
+    /// name and proposes, and a redirect resolves both ids to one for good.
+    ///
+    /// `Retired` rather than `SearchHint`, because the name did not stop being
+    /// this concept's — it stopped being the one it is called by.
+    pub fn rename_genre(&mut self, now: i64, genre: Id<Genre>, was: &str, now_called: &str) {
+        self.append(
+            now,
+            Fact::GenreCatalogued {
+                genre,
+                name: now_called.trim().to_string(),
+            },
+        );
+        self.append(
+            now,
+            Fact::AliasAsserted {
+                subject: Cataloguable::Genre(genre),
+                value: was.trim().to_string(),
+                kind: AliasKind::Retired,
+            },
+        );
+    }
+
+    /// Decide a genre does not apply. Shadows rather than deletes, and
+    /// silences every asserter — see [`Instance::retract_qualifier`].
+    pub fn retract_genre(&mut self, now: i64, subject: GenreOn, name: &str) {
+        self.append(
+            now,
+            Fact::GenreRetracted {
+                subject,
+                genre: Id::<Genre>::of_name(name),
+            },
+        );
     }
 
     /// Decide a qualifier does not apply. Shadows rather than deletes.

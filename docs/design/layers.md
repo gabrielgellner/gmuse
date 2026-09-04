@@ -81,6 +81,48 @@ A retraction is keyed one field shorter — `(subject, concept)`, no basis — b
 arguing with one asserter. Otherwise retracting would mean retracting once per source that ever said it, and the next
 import would put it back.
 
+### Who appends, and who proposes
+
+Two routes write to the library and they are not equals.
+
+| author                                  | route                                             | basis                                                             | gate                              |
+| --------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------- | --------------------------------- |
+| a person in the UI, acting on one thing | direct append to this device's log                | `Manual`, confidence `Confirmed`                                  | none — the person _is_ the review |
+| any tool, matcher or import             | `proposal.rs` JSONL → a person reads it → `apply` | the tool's own source (`Discogs`, `MusicBrainz`, `TagVariant`, …) | mandatory                         |
+
+No tool writes `Source::Manual`, and no tool appends to a log directly. **Volume is the whole reason.** A person
+mis-tags one recording; a matching pass mis-tags six hundred in a minute, and the three of 607 that the identification
+pass got wrong were found only by reading the file. A tool that could write `Manual` would be laundering its guesses
+into the one basis nothing downstream second-guesses. `src/model/seam.rs` asserts it.
+
+(`Manual` is the existing name for what the addendum calls `Human`. It is on the wire in every proposal file, and the
+two say the same thing.)
+
+### What a gesture assigns to
+
+Listen-time tagging — acting on what is playing — targets the **`Recording`**. The claim is about this version, and must
+not leak onto its siblings or the rest of the album. Album-level actions, acting on a group in the tree, target the
+**`ReleaseGroup`**, matching the import default and the census.
+
+The UI never targets a `Track` (a slot on a medium) or an `Encoding` (bytes). A gesture that seems to want either is
+mis-designed.
+
+### Concepts, renames, and orphans
+
+A concept id is minted from its **normalised label**, through `ingest::normalise` and nothing else — which is what lets
+two devices define "Dub Techno" independently and union into one row with no registry. The same bet recording ids make.
+
+A rename therefore does **not** re-mint: the id came from the old label and every assignment points at it. A device that
+meets the new label fresh mints a different id, and one concept becomes two. **That split is accepted rather than
+prevented**, because it is the repairable error — a split is one merge from repaired, a false merge is permanent. A
+rename emits the label change and a `Retired` alias, so the old name stays findable, and the ordinary redirect
+(`merge.rs::Merges`) resolves both ids to one for good. Do not re-mint on rename, and do not switch concepts to random
+ids to dodge this: the first rewrites every assignment, the second gives up convergent definition entirely.
+
+A concept with no place in the browse hierarchy is an ordinary row. Assignment does not wait for placement — the moment
+you know the answer would otherwise be the moment you cannot record it. What it costs is that closure queries (`genre+`)
+do not reach it, so `Catalogue::unplaced_genres` is a standing review query, alongside `not qualifier?`.
+
 The assignment itself has no id, and must not grow one. A third identity beside the subject's and the concept's could
 only be random, which breaks convergent minting outright — two devices importing the same Discogs page have to emit the
 same row — or content-derived, which buys nothing because the content is already the key. `src/model/seam.rs` asserts

@@ -325,13 +325,21 @@ pub fn confidence_of(scan: &Scanned, matches_known_name: bool) -> Confidence {
 
 /// A name reduced to what a match should ignore.
 ///
-/// Deliberately shallow — case and surrounding space, nothing more. A matcher
-/// that folds accents would merge `Christian Löffler` with an ASCII-folded
+/// Deliberately shallow — case and whitespace, nothing more. A matcher that
+/// folds accents would merge `Christian Löffler` with an ASCII-folded
 /// duplicate, and this library has three folded names that are **wanted back**
 /// as their real spellings, so folding here would defeat the repair rather than
 /// help it.
+///
+/// Runs of internal whitespace collapse, because two spaces between two words
+/// is a typo and never a distinction — and this is the function concept ids are
+/// minted through, so a distinction it draws is a concept nobody meant to
+/// create.
 pub fn normalise(name: &str) -> String {
-    name.trim().to_lowercase()
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 #[cfg(test)]

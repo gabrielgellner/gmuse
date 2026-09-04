@@ -56,9 +56,10 @@ pub const SEED: &[(&str, Option<&str>, bool)] = &[
 
 impl Id<Qualifier> {
     /// The id a concept label always mints. Convergent for the reason
-    /// `Id::<Genre>::of_name` is, and by the same rule.
+    /// `Id::<Genre>::of_name` is, and through the same function — one
+    /// normalisation, so the two vocabularies cannot drift apart.
     pub fn of_label(label: &str) -> Self {
-        Id::derived(label.trim().to_lowercase().as_bytes())
+        Id::derived(crate::model::ingest::normalise(label).as_bytes())
     }
 }
 

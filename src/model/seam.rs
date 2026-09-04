@@ -562,6 +562,43 @@ mod tests {
         );
     }
 
+    /// **No tool authors a fact that looks reviewed.**
+    ///
+    /// Two routes write to the library and they are not equals. A person
+    /// acting on one thing in the UI appends directly, with `Source::Manual`
+    /// and `Confidence::Confirmed`, because the person *is* the review. A
+    /// tool — a matcher, an import, any pass in `tools/` — writes a proposal
+    /// file, and `apply` turns it into records only after somebody has read
+    /// it.
+    ///
+    /// Volume is the whole reason. A human mis-tags one recording; a matching
+    /// pass mis-tags six hundred in a minute, and the three of 607 that this
+    /// library's identification pass got wrong were all found by reading the
+    /// file. A tool that could write `Manual` would be laundering its guesses
+    /// into the one basis nothing downstream second-guesses.
+    ///
+    /// Checked at the boundary rather than in the type system: `Source` has to
+    /// stay one enum so that provenance is one mechanism, so what stops the
+    /// wrong variant is this test.
+    #[test]
+    fn no_tool_facing_surface_claims_a_person_said_so() {
+        // `apply.rs` is the crossing point and is allowed to name it: a
+        // proposal file a person edited by hand may say `manual`, which is
+        // that person asserting, not the tool.
+        let culprits: Vec<_> = read("src")
+            .into_iter()
+            .filter(|(path, _)| {
+                path.contains("ingest.rs") || path.contains("scan.rs") || path.contains("tools")
+            })
+            .filter(|(_, text)| production(text).contains("Source::Manual"))
+            .map(|(path, _)| path)
+            .collect();
+        assert!(
+            culprits.is_empty(),
+            "a tool wrote the basis reserved for a person: {culprits:#?}"
+        );
+    }
+
     /// **Every fact names its subject.**
     ///
     /// `[Subject][PastTenseVerb]` is the event-sourcing convention, and four
@@ -575,6 +612,12 @@ mod tests {
     #[test]
     fn every_fact_names_its_subject() {
         const SUBJECTS: &[&str] = &[
+            // Not one of the eight kinds an alias can hang off, and that is
+            // the point: like `Holdings`, the subject is the thing being
+            // recorded rather than the entity it attaches to. `ArtistAliased`
+            // would need seven siblings saying nothing the `Cataloguable`
+            // does not already say.
+            "Alias",
             "Artist",
             "Collection",
             "Credit",
