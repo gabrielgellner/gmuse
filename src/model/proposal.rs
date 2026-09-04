@@ -151,7 +151,15 @@ impl std::fmt::Display for Report {
 /// Turn a proposal file into records.
 ///
 /// Blank lines and `#` comments are skipped, because a reviewed file is one a
-/// person has been editing and both are what people write while editing.
+/// person has been editing — and a note beside a row they were unsure about is
+/// the point of reviewing it.
+///
+/// **Tolerated on the way in, never written on the way out.** A comment is not
+/// part of JSON Lines, so a file carrying one is refused by `fx`, by `jq`
+/// without `-R`, and by every other reader that takes the format at its word.
+/// The tools used to write a provenance header and it cost exactly that: the
+/// files they produced could not be opened by the things one opens JSONL with.
+/// Liberal in what is accepted, strict in what is emitted.
 ///
 /// **Nothing is partially applied.** A malformed line does not stop the others
 /// — that would make a typo cost a whole pass — but it is reported, and a

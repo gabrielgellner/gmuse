@@ -536,7 +536,6 @@ def propose(rows: Path, out: Path, analyser: int) -> None:
 
     written = skipped = 0
     with rows.open(encoding="utf-8") as handle, out.open("w", encoding="utf-8") as sink:
-        sink.write(f"# measured by quality.py, analyser {analyser}\n")
         for raw in handle:
             line = raw.strip()
             if not line or line.startswith("#"):

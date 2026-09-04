@@ -416,7 +416,6 @@ def propose(root: Path, out: Path, *, limit: int | None) -> None:
 
     counts = {"matched": 0, "probable": 0, "uncertain": 0, "nothing": 0}
     with out.open("w", encoding="utf-8") as sink:
-        sink.write(f"# identified by identify.py against {root}\n")
         for path, tags, seconds in todo:
             artist = first_artist(tags.get("artist", ""))
             title = searchable_title(tags.get("title", "") or path.stem)
