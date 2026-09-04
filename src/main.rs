@@ -238,6 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  unresolved {what}: {path}");
                 }
                 println!("{}", outcome.census);
+                println!("{} distinct artists", outcome.artists);
                 for path in &outcome.orphaned {
                     println!("  orphaned acquisition date: {path}");
                 }

@@ -34,6 +34,11 @@ pub struct Scanned {
     pub audio: AudioId,
     pub title: String,
     pub artist: String,
+    /// The artist's MusicBrainz id, where the tags carry one — 92.7% of this
+    /// library. Without it the artist is minted from the credit *string*, and
+    /// a guest credit makes a new artist: `2Pac feat. Nate Dogg` is not `2Pac`
+    /// to a hash (#89 §5).
+    pub artist_mbid: Option<uuid::Uuid>,
     /// **What names this performance**, if anything does — the identity half
     /// of a scan, kept apart from the descriptive half below.
     ///
@@ -44,6 +49,9 @@ pub struct Scanned {
     pub identity: Option<crate::model::basis::Basis>,
     /// The album this sits on, as the tags name it.
     pub album: Option<String>,
+    /// The album artist's MusicBrainz id. Distinct from `artist_mbid`: on a
+    /// compilation the track artist and the album artist are different people.
+    pub album_artist_mbid: Option<uuid::Uuid>,
     /// Who the *album* is credited to, which is not always who the track is.
     /// A guest credit must not split an album off from its artist.
     pub album_artist: Option<String>,
@@ -127,7 +135,7 @@ impl Instance {
         let known = self.catalogue();
 
         for s in scan {
-            let artist = Id::<Artist>::derived(s.artist.as_bytes());
+            let artist = Id::<Artist>::of_artist(s.artist_mbid, &s.artist);
             let encoding = Id::<Encoding>::of_audio(&s.audio);
             // The best rung this file reaches. Nothing names the performance,
             // so it falls to the bytes — which is convergent, and is the case
@@ -191,7 +199,10 @@ impl Instance {
                         Id::<ReleaseGroup>::derived(format!("{credited}\u{1f}{album}").as_bytes())
                     }
                 };
-                let group_artist = Id::<Artist>::derived(credited.as_bytes());
+                // The album's credit, by the same ladder. Its MusicBrainz id
+                // is the *album artist's*, which is why it is not
+                // `artist_mbid` — on a compilation those are different people.
+                let group_artist = Id::<Artist>::of_artist(s.album_artist_mbid, credited);
                 self.append(
                     now,
                     Fact::ArtistNamed {

@@ -474,6 +474,9 @@ pub struct Outcome {
     pub orphaned: Vec<String>,
     /// What the library's identities rest on, and where it is thin (#89).
     pub census: crate::model::basis::Census,
+    /// Distinct artists after the fold. Worth printing beside the census
+    /// because minting an artist from its credit *string* silently doubled it.
+    pub artists: usize,
     /// Records written. Fewer than `report.converted` on a second run, because
     /// what is already on disk is not written again.
     pub written: usize,
@@ -514,7 +517,9 @@ pub fn run(
     let device = Id::<Device>::derived(device_name.as_bytes());
     let events = crate::events::events_in(data_dir);
     let (scanned_instance, scan) = crate::model::populate::read_library(device_name, roots, now);
-    let census = crate::model::basis::Census::of(scanned_instance.catalogue().identified.iter());
+    let folded = scanned_instance.catalogue();
+    let census = crate::model::basis::Census::of(folded.identified.iter());
+    let artists = folded.artist_names.len();
 
     let (mut records, report) =
         to_records(&events, device, |path| scan.identified.get(path).copied());
@@ -564,6 +569,7 @@ pub fn run(
         acquired,
         orphaned,
         census,
+        artists,
         written,
     })
 }

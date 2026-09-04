@@ -106,6 +106,51 @@ impl Id<Recording> {
     }
 }
 
+impl Id<crate::model::entity::Artist> {
+    /// An artist's identity: the MusicBrainz id where the tags carry one, and
+    /// the name otherwise.
+    ///
+    /// **Minting from the name alone doubles the artists**, and not in theory.
+    /// Measured on this library: 387 distinct artist *name strings* against
+    /// 190 MusicBrainz artists, because a guest credit changes the string.
+    /// `2Pac` appears fourteen ways — `2Pac feat. Danny Boy`, `2Pac feat.
+    /// Nate Dogg`, and so on — and every one of them minted its own artist.
+    /// Ane Brun made eleven, Bran Van 3000 ten. Fifteen percent of artists
+    /// were shattered this way.
+    ///
+    /// `Track::file_under` has always hidden this in the *view* by preferring
+    /// the album artist. The model had no such fallback, so the library really
+    /// did hold fourteen 2Pacs; the tree simply did not draw them.
+    ///
+    /// The name remains the fallback because there is nothing better, and it
+    /// is the honest one: unlike a recording, an artist has no bytes to fall
+    /// back to. Where it splits, a merge repairs it (#88).
+    pub fn of_artist(mbid: Option<uuid::Uuid>, name: &str) -> Self {
+        match mbid {
+            // Domain-separated from the name path, so an artist named like a
+            // UUID cannot land on one minted from that UUID.
+            Some(id) => {
+                let mut seed = b"musicbrainz\x1f".to_vec();
+                seed.extend_from_slice(id.as_bytes());
+                Id::derived(&seed)
+            }
+            None => {
+                // The prefix is **defensive, not load-bearing**, and it has no
+                // test because nothing can currently collide with it: the id
+                // path seeds from sixteen raw UUID bytes and this one from a
+                // name, so the two never meet whatever the prefix says. A test
+                // asserting otherwise was written and deleted — it passed for
+                // the wrong reason, which is worse than not existing. The
+                // prefix stays so that adding a third rung later cannot
+                // silently create the collision this cannot yet have.
+                let mut seed = b"name\x1f".to_vec();
+                seed.extend_from_slice(name.as_bytes());
+                Id::derived(&seed)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +232,47 @@ mod tests {
             }
             .rung()
                 < Basis::Audio(audio(1)).rung()
+        );
+    }
+
+    /// **The shattering this exists to stop.** A guest credit changes the
+    /// credit string and nothing else, and under name-minting that was a
+    /// different artist — fourteen of them for 2Pac in this library alone.
+    #[test]
+    fn a_guest_credit_does_not_make_a_second_artist() {
+        use crate::model::entity::Artist;
+        let tupac = Uuid::from_u128(0x2_9ac);
+        assert_eq!(
+            Id::<Artist>::of_artist(Some(tupac), "2Pac"),
+            Id::<Artist>::of_artist(Some(tupac), "2Pac feat. Nate Dogg"),
+            "the same artist under two credit strings became two artists"
+        );
+    }
+
+    /// Two artists who share a name are two artists, which a name alone cannot
+    /// say — John Williams the composer is not John Williams the guitarist,
+    /// and merging them is not repairable.
+    #[test]
+    fn two_artists_sharing_a_name_stay_apart() {
+        use crate::model::entity::Artist;
+        assert_ne!(
+            Id::<Artist>::of_artist(Some(Uuid::from_u128(1)), "John Williams"),
+            Id::<Artist>::of_artist(Some(Uuid::from_u128(2)), "John Williams")
+        );
+    }
+
+    /// With no id there is nothing better than the name, and it is at least
+    /// convergent: two devices reading one tag agree.
+    #[test]
+    fn without_an_id_the_name_is_the_identity() {
+        use crate::model::entity::Artist;
+        assert_eq!(
+            Id::<Artist>::of_artist(None, "Burial"),
+            Id::<Artist>::of_artist(None, "Burial")
+        );
+        assert_ne!(
+            Id::<Artist>::of_artist(None, "Burial"),
+            Id::<Artist>::of_artist(None, "Blawan")
         );
     }
 

@@ -60,6 +60,12 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                 title: t.display_title().to_string(),
                 artist: t.artist.clone().unwrap_or_default(),
                 identity: t.mb_recording.map(Basis::MusicBrainz),
+                // `Track` carries no artist id, so an artist crossing this
+                // plank is minted from its name and a guest credit still
+                // splits it. `populate` reads the tag properly; this goes away
+                // with `Store` (#86).
+                artist_mbid: None,
+                album_artist_mbid: None,
                 album: t.album.clone(),
                 album_artist: t.albumartist.clone(),
                 disc: t.discnumber.map(|d| d as u16),

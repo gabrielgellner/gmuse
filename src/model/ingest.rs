@@ -132,6 +132,8 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // One key, every format: lofty maps ID3's UFID and Vorbis's
         // `musicbrainz_trackid` onto it, and both mean the recording. The top
         // rung of #89's ladder; a harvest pass fills the middle one.
+        artist_mbid: primary_artist(&get(ItemKey::MusicBrainzArtistId)),
+        album_artist_mbid: primary_artist(&get(ItemKey::MusicBrainzReleaseArtistId)),
         // The ladder, best rung first (#89): MusicBrainz where the tags carry
         // it, otherwise whatever authority does name this performance. `None`
         // falls to the bytes, which is the rung a re-encode strands.
@@ -196,6 +198,22 @@ fn number(s: &str) -> Option<u16> {
 /// the external id and the name match, and is #57. Its absence is why a
 /// mistagged file with no MusicBrainz id falls straight to a name comparison
 /// rather than to the thing that would actually recognise it.
+/// The **primary** artist's MusicBrainz id, out of a credit that may list
+/// several.
+///
+/// Picard writes every credited artist's id, `/`-joined, in the order the
+/// credit names them — so `2Pac feat. Nate Dogg` carries two. Taking only a
+/// lone id and falling back to the name otherwise is what shatters an artist:
+/// measured here, **every one of the fourteen `2Pac feat. …` files has a
+/// joined id**, so every one of them fell to its credit string and minted its
+/// own 2Pac.
+///
+/// The first is the primary artist, which is what "feat." means. That is
+/// MusicBrainz's own ordering rather than a guess about this library.
+fn primary_artist(field: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(field.split('/').next()?.trim()).ok()
+}
+
 /// Tags that can carry a link to where a file came from.
 ///
 /// Tried in this order so two devices reading one file agree: a track with
@@ -471,6 +489,28 @@ mod tests {
 #[cfg(test)]
 mod external_tests {
     use super::*;
+
+    /// **The shattering, in the shape it actually takes.** Every `2Pac feat. …`
+    /// file carries a joined id; taking only a lone one made fourteen 2Pacs.
+    #[test]
+    fn a_joined_credit_yields_its_primary_artist() {
+        let tupac = "17e4a1a4-3f7b-4dbb-8e1f-1b8b13b1c3a1";
+        let nate = "6a1f1f6e-2a6a-4b5b-9e8a-1f3c5d7e9b0c";
+        assert_eq!(
+            primary_artist(&format!("{tupac}/{nate}")),
+            uuid::Uuid::parse_str(tupac).ok(),
+            "the primary artist is the first one credited"
+        );
+        assert_eq!(primary_artist(tupac), uuid::Uuid::parse_str(tupac).ok());
+    }
+
+    /// A field that is not an id at all yields nothing, rather than a guess.
+    #[test]
+    fn a_field_that_is_not_an_id_yields_nothing() {
+        assert_eq!(primary_artist(""), None);
+        assert_eq!(primary_artist("Various Artists"), None);
+        assert_eq!(primary_artist("/"), None);
+    }
 
     /// The real shape, from a file in the DJ crate.
     #[test]
