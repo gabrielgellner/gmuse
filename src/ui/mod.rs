@@ -411,6 +411,12 @@ pub struct Ui {
     pub catalogs: crate::catalog::Catalogs,
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// Why the loop should hand control back, if it should.
+    ///
+    /// Taken by [`run`] at the top of each pass rather than acted on where it
+    /// is set, so a command finishes — notifications, audit lines, the redraw
+    /// it asked for — before the librarian is rebuilt underneath it.
+    pub stop: Option<Stop>,
     /// What view 3 is showing, if anything.
     ///
     /// The *name*, not the tracks — those live in `playlist` like any other
@@ -455,6 +461,7 @@ impl Ui {
 
     fn bare(library: Shelf) -> Self {
         Self {
+            stop: None,
             view: View::Tree,
             tree: TreeState::default(),
             tree_scroll: Scroll::default(),
@@ -708,11 +715,40 @@ fn which_key_due(since: Option<Instant>, now: Instant, delay: Duration) -> bool 
 }
 
 /// Run the event loop until the user quits.
-pub fn run<B>(terminal: &mut Terminal<B>, ui: &mut Ui, ctx: &Context<'_>) -> io::Result<()>
+/// Why the loop stopped.
+///
+/// **The loop returns a reason rather than only ever stopping** (#120). The
+/// librarian is owned by `main` and lent to the loop for its whole life, so
+/// nothing inside could refold it — the borrow outlives every command. Two
+/// things were stuck behind that: `Command::Rescan` was a stub, and a fact the
+/// UI wrote was invisible to any reader that goes through `Listing`, because
+/// the librarian's fold was as old as startup.
+///
+/// Handing back a reason is the whole mechanism. `main` drops the borrow,
+/// rebuilds, and calls again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// The user asked to leave.
+    Quit,
+    /// The librarian is out of date and the loop wants it rebuilt.
+    ///
+    /// **Not the same as a rescan.** This refolds the *log* — what has been
+    /// decided — and leaves the disk alone, which is the common case and the
+    /// cheap one: `:collect` writes facts, and everything reading through the
+    /// seam has to see them.
+    Refold,
+    /// The disk is out of date: walk the roots again, then refold.
+    Rescan,
+}
+
+pub fn run<B>(terminal: &mut Terminal<B>, ui: &mut Ui, ctx: &Context<'_>) -> io::Result<Stop>
 where
     B: ratatui::backend::Backend<Error = io::Error>,
 {
     while !ui.quit {
+        if let Some(why) = ui.stop.take() {
+            return Ok(why);
+        }
         terminal.draw(|frame| draw(frame, ui, ctx))?;
         // Poll rather than block: the position display has to tick even when
         // nobody is pressing anything.
@@ -734,7 +770,7 @@ where
         audit_underruns(ui, ctx);
         ui.expire_status();
     }
-    Ok(())
+    Ok(Stop::Quit)
 }
 
 /// Apply what the socket received, and publish what it should answer with.
@@ -1995,7 +2031,14 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // `D` is delete-to-end. There is no "inside a line" here, so the list
         // is what has an end.
         Command::RemoveToEnd => remove_rows(ui, ctx, len.saturating_sub(cursor)),
-        Command::Rescan => ui.notify("rescan lands with :rescan in the app"),
+        Command::Rescan => {
+            // **No longer a stub** (#120). The loop hands control back, `main`
+            // walks the roots and refolds, and the loop resumes — the state
+            // this `Ui` holds is untouched, only what it reads through is
+            // replaced.
+            ui.notify("rescanning…");
+            ui.stop = Some(Stop::Rescan);
+        }
         Command::Playlist(spec) => match spec {
             crate::cmd::PlaylistSpec::Open(name) => open_playlist(ui, ctx, &name),
             crate::cmd::PlaylistSpec::Save(name) => save_playlist(ui, ctx, &name),
@@ -3158,8 +3201,24 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let said = format!("collected {} into {name} ({shape})", members.len());
     ui.audit.line("collect", &said);
     ui.notify(said);
-    // A catalog defined by this collection now selects differently.
+    // **A catalog defined by this collection now selects differently**, and
+    // that answer comes through `Listing` (#94) — which is the librarian's
+    // fold, not the log this just wrote to. So the fold is redone rather than
+    // overlaid: `view::Fresh` was the patch for exactly this and is gone.
+    let _ = ctx;
+    ui.stop = Some(Stop::Refold);
+}
+
+/// Redraw everything that is a projection of the librarian, after `main` has
+/// rebuilt one (#120).
+///
+/// Through the same door a `:view` change uses, so a refold cannot file things
+/// a second way (#84). The playlist rows go too: what a playlist holds is a
+/// fold of the log, and the whole point of a refold is that the fold changed.
+pub fn refresh_library(ui: &mut Ui, ctx: &Context<'_>) {
     rebuild_library(ui, ctx);
+    refresh_playlist_rows(ui);
+    refresh_smart(ui, ctx);
 }
 
 fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
@@ -3178,19 +3237,12 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         // **One fold over one stack** (#94). This used to union the active
         // catalogs and then intersect the filter, with both operators baked
         // into their nouns — so `-` had nowhere to live.
-        // **Through the log for the one answer the fold cannot give yet.**
-        // A collection filed with `:collect` is a fact this session wrote, and
-        // the librarian was folded at startup — see `view::Fresh`.
-        let fresh = crate::view::Fresh {
-            under: ctx.library,
-            log: &ui.listened,
-        };
-        let resolved = ui.composed.resolve(&fresh, &ui.catalogs, env);
+        let resolved = ui.composed.resolve(ctx.library, &ui.catalogs, env);
         // §2: `+` on a hand-made list has no defensible order, so it gives
         // the order up — and says which term did it rather than leaving
         // somebody to notice.
         let lost = resolved.demoted_at.clone();
-        (resolved.copies(&fresh), lost)
+        (resolved.copies(ctx.library), lost)
     };
     // The same projection the startup path uses (#84), so refiltering cannot
     // quietly file things a second way.
@@ -4961,6 +5013,24 @@ mod tests {
             crate::model::id::Id::derived(b"test"),
             0,
         )))
+    }
+
+    /// A context whose librarian has folded the facts this UI has written —
+    /// which is what `main` does on [`Stop::Refold`] (#120).
+    ///
+    /// Leaked, like `lib_of`: a test's librarian outlives the borrow checker's
+    /// patience and nothing here is long-lived enough for it to matter.
+    fn refolded(store: &Scan, ui: &Ui) -> Context<'static> {
+        Context {
+            library: Box::leak(Box::new(crate::bridge::librarian(
+                store,
+                ui.log.records(),
+                crate::model::id::Id::derived(b"test"),
+                0,
+            ))),
+            player: None,
+            remote: None,
+        }
     }
 
     fn ctx_of(store: &Scan) -> Context<'_> {
@@ -8654,6 +8724,53 @@ mod tests {
         );
     }
 
+    /// **The loop hands back a reason, and that is the whole mechanism** —
+    /// #120.
+    ///
+    /// The librarian is owned by `main` and lent to the loop for its life, so
+    /// nothing inside could rebuild it. Two things were stuck behind that:
+    /// `:rescan` was a stub that notified and did nothing, and a fact the UI
+    /// wrote was invisible to any reader going through `Listing`.
+    ///
+    /// `view::Fresh` patched the second by overlaying the fold. This asserts
+    /// the thing that replaced it: a command that changes what the librarian
+    /// would say **asks to be refolded**, rather than the reader being taught
+    /// where else to look.
+    #[test]
+    fn a_command_that_changes_the_fold_asks_for_one() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+
+        // Writing facts a `Listing` reader answers from.
+        let mut ui = ui_with_history(&store, "refold-collect");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "collect Paak");
+        assert_eq!(ui.stop, Some(Stop::Refold));
+
+        // And the disk, which is the older half of the same problem.
+        let mut ui = ui_with_history(&store, "refold-rescan");
+        execute(&mut ui, &ctx, Command::Rescan);
+        assert_eq!(
+            ui.stop,
+            Some(Stop::Rescan),
+            "`:rescan` is a stub again — it notified and did nothing for a \
+             whole milestone because the loop could only ever stop"
+        );
+
+        // **Rating does not.** It is read from `Env::listened`, which is the
+        // live log, so nothing about the librarian's fold changes — and a
+        // refold on every keystroke-ish edit would be a whole-library rebuild
+        // for an answer that was already right.
+        let mut ui = ui_with_history(&store, "refold-rate");
+        let id = Listing::rows(lib_of(&store))[0];
+        ui.playback.current = Some(id);
+        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(4)));
+        assert_eq!(
+            ui.stop, None,
+            "a rating asked for a refold it does not need"
+        );
+    }
+
     /// **A collection is reachable as a catalog the moment it exists**, which
     /// is the loop #90 and #94 left open: the Dance catalog was a collection
     /// the player could read and could not write.
@@ -8670,6 +8787,12 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "collect Paak");
 
+        // **The refold, which is what `main` does on `Stop::Refold`** (#120).
+        // A catalog resolves membership through `Listing`, and the fixture's
+        // librarian was folded before any of this was written.
+        assert_eq!(ui.stop, Some(Stop::Refold), "nothing asked for a refold");
+        let ctx = refolded(&store, &ui);
+
         // Back to everything — a bare `:view` is the clear — then select the
         // collection by name.
         press(&mut ui, &ctx, ":");
@@ -8680,7 +8803,7 @@ mod tests {
         ui.catalogs
             .apply(crate::catalog::Spec::Only(vec!["paak".into()]))
             .unwrap();
-        rebuild_library(&mut ui, &ctx);
+        refresh_library(&mut ui, &ctx);
         assert_eq!(
             ui.library.len(),
             wanted,

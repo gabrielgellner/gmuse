@@ -397,7 +397,12 @@ mod tests {
 
     /// The recording a test path is, so a fact can name it.
     fn rec_of(l: &crate::model::seam::Librarian, path: &str) -> Id<Recording> {
-        let id = Listing::at(l, path).expect("a known track");
+        // **The seam takes no locator any more** (#120), so a test naming a
+        // path finds the row that reports it rather than asking by location.
+        let id = Listing::rows(l)
+            .into_iter()
+            .find(|id| Listing::playable(l, *id).is_some_and(|p| p.locator == path))
+            .expect("a known track");
         Listing::recording_of(l, id).expect("with an identity")
     }
 

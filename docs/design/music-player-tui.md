@@ -3271,6 +3271,39 @@ Append here as decisions are made. Format: date, decision, rationale.
   above is still overlaying the fold, and every fact the UI writes that a reader takes through the seam will want the
   same patch until the librarian can be refolded in place. Filed as its own issue.
 
+- **2026-09-05** **The loop returns a reason, and `Command::Rescan` stops being a stub (#120).** The librarian was owned
+  by `main` and lent to the event loop for its whole life, so nothing inside could rebuild it — the borrow outlives
+  every command. Two symptoms, one cause, and the second only arrived with `:collect`:
+
+  1. `Command::Rescan` notified "rescan lands with `:rescan` in the app" and did nothing, so the only way to take in a
+     change on disk was to quit and run `gmuse --rescan`. The launch-does-not-scan entry above named this as the gap it
+     was opening, and it stayed open for a milestone.
+  2. A fact the UI wrote was invisible to any reader going through `Listing`. `:collect Dance` filed its facts correctly
+     and `:catalog dance` showed nothing, because the librarian's fold was as old as startup.
+
+  `ui::run` returns `Stop::{Quit, Refold, Rescan}`. `main` wraps it in a loop: the borrow ends, the fold is redone, and
+  the loop resumes. **The state the `Ui` holds is untouched** — only what it reads _through_ is replaced — which is why
+  this is a handful of lines rather than a rewrite.
+
+  `Refold` and `Rescan` are separate on purpose. A refold redoes the log and leaves the disk alone, which is the common
+  case and the cheap one; a rescan walks the roots first and then refolds. Conflating them would make `:collect` cost a
+  filesystem walk.
+
+  **What asks for one is the interesting part.** `:collect` does, because a catalog resolves membership through
+  `Listing`. `:rate` does **not**, because a rating is read from `Env::listened` — the live log — so nothing the
+  librarian would say has changed, and refolding on every rating would be a whole-library rebuild for an answer that was
+  already right. That distinction is asserted rather than left to be rediscovered.
+
+  **`view::Fresh` is deleted.** It overlaid the one stale answer and was a knowing patch: the next fact the UI wrote
+  that a reader took through the seam would have wanted a second one, and then there are two producers for one row
+  again. What survives from it is the better part — `Rows::of_collection` and `Stack::resolve` take `&dyn Listing`
+  rather than `&Librarian`, which is what the seam was for.
+
+  **And `Listing::at` is gone with it.** It turned a locator into a row — the one question on the seam that started from
+  a path — and existed for exactly one caller: reading an `.m3u` back. Nothing reads one now (#118), so **nothing on
+  this seam takes a location as an argument**. That is the rule `library-api.md` states, and #94 could only half enforce
+  it while `at` was there.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

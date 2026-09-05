@@ -151,7 +151,12 @@ mod tests {
         path: &str,
         at: i64,
     ) {
-        let id = Listing::at(l, path).expect("a known track");
+        // **The seam takes no locator any more** (#120), so a test naming a
+        // path finds the row that reports it rather than asking by location.
+        let id = Listing::rows(l)
+            .into_iter()
+            .find(|id| Listing::playable(l, *id).is_some_and(|p| p.locator == path))
+            .expect("a known track");
         let recording = Listing::recording_of(l, id).expect("with an identity");
         *cat.plays.entry(recording).or_insert(0) += 1;
         cat.last_played.insert(recording, at);

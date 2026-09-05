@@ -786,10 +786,6 @@ impl crate::model::rows::Listing for Librarian {
         self.rows.keys().copied().collect()
     }
 
-    fn at(&self, locator: &str) -> Option<Id<Encoding>> {
-        self.held_at.get(locator).copied()
-    }
-
     /// **The binding the library holds**, which is what a relink changes.
     fn recording_of(&self, id: Id<Encoding>) -> Option<Id<Recording>> {
         Some(self.encodings.encodings.get(&id)?.recording?.id())

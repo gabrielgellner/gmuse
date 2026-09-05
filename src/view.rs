@@ -105,57 +105,18 @@ impl Resolved {
     }
 }
 
-/// The librarian, with the facts written since it was folded.
-///
-/// **The librarian is a fold, and the player writes facts into it** (#118). A
-/// rating dodges this because a filter reads it from `Env::listened`, which is
-/// the live log; a collection does not, because a catalog resolves membership
-/// through `Listing` (#94) and the librarian's copy is as old as startup. So
-/// `:collect Dance` filed the facts correctly and `:catalog dance` showed
-/// nothing until the next launch.
-///
-/// This overlays the one answer that goes stale. It is not a general fix —
-/// the real one is the librarian being refoldable while the UI holds it, which
-/// is the same obstacle `Command::Rescan` is a stub for, recorded in §13. What
-/// it is, is honest about which answer the fold cannot give yet: **entries
-/// come from the log, everything else from the librarian.**
-pub struct Fresh<'a> {
-    pub under: &'a dyn Listing,
-    pub log: &'a crate::model::log::Catalogue,
-}
-
-impl Listing for Fresh<'_> {
-    fn listed(&self, id: CopyId) -> Option<crate::model::rows::Listed<'_>> {
-        self.under.listed(id)
-    }
-    fn rows(&self) -> Vec<CopyId> {
-        self.under.rows()
-    }
-    fn at(&self, locator: &str) -> Option<CopyId> {
-        self.under.at(locator)
-    }
-    fn recording_of(&self, id: CopyId) -> Option<Id<crate::model::entity::Recording>> {
-        self.under.recording_of(id)
-    }
-    fn playable(&self, id: CopyId) -> Option<crate::model::rows::Playable<'_>> {
-        self.under.playable(id)
-    }
-
-    /// **From the log, not the fold.** Already in order: the catalogue keys
-    /// entries by position before recording, so walking them is walking the
-    /// list.
-    fn entries_of(
-        &self,
-        collection: Id<crate::model::entity::Collection>,
-    ) -> Vec<Id<crate::model::entity::Recording>> {
-        self.log
-            .entries
-            .iter()
-            .filter(|(c, _, _)| *c == collection)
-            .map(|(_, _, recording)| *recording)
-            .collect()
-    }
-}
+// **`Fresh` lived here and is gone** (#120).
+//
+// It overlaid one answer the librarian could not give: a collection written
+// this session, because the fold was as old as startup and a catalog resolves
+// membership through `Listing` (#94). It worked, and it was a patch — the next
+// fact the UI wrote that a reader takes through the seam would have wanted a
+// second one, and then there are two producers for one row again.
+//
+// The loop returns a reason now, `main` refolds, and the fold is simply
+// current. What survives from that patch is the better part: `Rows::of_collection`
+// and `Stack::resolve` take `&dyn Listing` rather than `&Librarian`, which is
+// what the seam was for.
 
 impl Stack {
     /// Replace the stack with one term — `:view dance`.

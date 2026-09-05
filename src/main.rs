@@ -284,7 +284,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     run_tui(
-        &app,
+        &mut app,
         args.smart_artist_sort,
         loaded,
         args.log_path(),
@@ -351,7 +351,7 @@ fn run_library(
 /// The terminal is restored by the panic hook `ratatui::init` installs, so a
 /// panic mid-render leaves a usable terminal rather than a wedged one.
 fn run_tui(
-    app: &App,
+    app: &mut App,
     smart_artist_sort: bool,
     loaded: config::Loaded,
     log_path: Option<PathBuf>,
@@ -496,6 +496,7 @@ fn run_tui(
     // than beside the membership it is built from.
     let library = Shelf::project(&library_view, members, smart_artist_sort);
 
+    let mut library_view = library_view;
     let ctx = ui::Context {
         library: &library_view,
         player: Some(&app.player),
@@ -638,10 +639,67 @@ fn run_tui(
         ),
     );
 
+    // **The loop hands back a reason, and this is what acts on it** (#120).
+    //
+    // The librarian is owned here and lent to the loop, so nothing inside
+    // could ever rebuild it — the borrow outlives every command. Now the loop
+    // returns, the borrow ends, the fold is redone, and it runs again. The
+    // state the UI holds is untouched: only what it *reads through* is
+    // replaced.
     let mut terminal = ratatui::init();
-    let result = ui::run(&mut terminal, &mut state, &ctx);
+    let result = loop {
+        let stop = {
+            let ctx = ui::Context {
+                library: &library_view,
+                player: Some(&app.player),
+                remote: server.as_ref(),
+            };
+            match ui::run(&mut terminal, &mut state, &ctx) {
+                Ok(stop) => stop,
+                Err(e) => break Err(e),
+            }
+        };
+        // Every borrow of `library_view` has ended here, which is the whole
+        // reason the loop returns rather than acting in place.
+        match stop {
+            ui::Stop::Quit => break Ok(()),
+            ui::Stop::Rescan => {
+                // The disk first, then the log — a scan reconciles holdings
+                // and reads no tags it has not been asked for, and the refold
+                // below is what turns that into rows.
+                let roots = app.roots.clone();
+                let report = scan::scan(&mut app.store, &roots);
+                state.audit.line("rescan", &report.to_string());
+                state.notify(format!("rescan: {report}"));
+                app.unreadable = report.errors.iter().map(|(p, _)| p.clone()).collect();
+                save_cache(app);
+                library_view =
+                    crate::bridge::librarian(&app.store, state.log.records(), device, now_ms);
+            }
+            ui::Stop::Refold => {
+                library_view =
+                    crate::bridge::librarian(&app.store, state.log.records(), device, now_ms);
+            }
+        }
+        // The shelf is a projection of the librarian, so it goes too — through
+        // the same door a `:view` change uses, or refiltering would file
+        // things a second way (#84).
+        let ctx = ui::Context {
+            library: &library_view,
+            player: Some(&app.player),
+            remote: server.as_ref(),
+        };
+        ui::refresh_library(&mut state, &ctx);
+    };
     ratatui::restore();
     // Written after the terminal is restored, so a failure is visible.
+    // A fresh borrow of whatever the last refold produced, not the one the
+    // setup above took: that one is long gone, and it named an older fold.
+    let ctx = ui::Context {
+        library: &library_view,
+        player: Some(&app.player),
+        remote: server.as_ref(),
+    };
     ui::save_session(&mut state, &ctx);
     // Written after the terminal is restored, so the summary is visible.
     if state.audit.is_enabled() {

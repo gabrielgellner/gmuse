@@ -273,17 +273,17 @@ pub trait Listing {
     /// stop knowing where rows come from (#86).
     fn rows(&self) -> Vec<CopyId>;
 
-    /// The row a locator names, if this device holds one there.
-    ///
-    /// The inverse of [`Listing::playable`], and the one question that has to
-    /// start from a path: an `.m3u` is a path format, so reading one back
-    /// means turning a location into a row. **Asked at the moment of loading
-    /// and not kept** — what the playlist holds afterwards is row ids.
-    ///
-    /// `None` for a path this device does not hold. A playlist can name music
-    /// that has gone, or predate the scan that would have found it, and saying
-    /// so is what stops it quietly coming up short.
-    fn at(&self, locator: &str) -> Option<CopyId>;
+    // **`at` lived here and is gone** (#118, #120).
+    //
+    // It turned a locator into a row — the one question on this seam that
+    // started from a path — and existed for exactly one caller: reading an
+    // `.m3u` back, because an m3u names locations. A playlist is an ordered
+    // collection of recordings now and nothing reads an m3u at all, so the
+    // last path-shaped question the player could ask has no asker.
+    //
+    // **Nothing on this seam now takes a location as an argument.** That is
+    // the rule `library-api.md` states and the thing #94 could only half
+    // enforce while this was here.
 
     /// What a collection holds, in order.
     ///
