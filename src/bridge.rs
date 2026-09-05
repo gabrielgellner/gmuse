@@ -142,6 +142,245 @@ pub fn librarian(
 }
 
 #[cfg(test)]
+mod forget_and_relink {
+    //! **What happens when a file stops being the file** — issue #88.
+    //!
+    //! `library-api.md` names `forget` and `relink` as operations that must be
+    //! explicit and declines to say what they do. Worked here as the cases the
+    //! issue asks for rather than decided in the abstract, and the cases give
+    //! a shorter answer than the question expects:
+    //!
+    //! **`relink` already exists**, as `Proposal::Identified` folding to
+    //! `EncodingBound { encoding, from, to }`. "This file is that recording"
+    //! is exactly what an identification asserts, and 377 of them have been
+    //! applied to this library. There is nothing left to design.
+    //!
+    //! **`forget` is not about the holding.** Holdings are published whole and
+    //! supersede, so a file that goes away stops being held at the next scan
+    //! with nothing said — and it cannot be otherwise, because a command that
+    //! removed one holding would be overwritten by the next scan anyway.
+    //!
+    //! Which leaves what `forget` could still mean: *this is not part of my
+    //! library*, said about a recording rather than about a file. That is a
+    //! **collection** decision, and it is #28's exclusion and #87's
+    //! quarantine, not a third mechanism.
+
+    use super::*;
+    use crate::audio_id::AudioId;
+    use crate::model::clock::HybridClock;
+    use crate::model::encoding::Format;
+    use crate::model::log::Fact;
+    use crate::model::spine::Recording;
+    use crate::store::Track;
+
+    fn file(path: &str, hash: u128) -> Track {
+        Track {
+            path: std::path::PathBuf::from(path),
+            title: Some("Callisto".into()),
+            artist: Some("Bodzin".into()),
+            album: Some("Luna".into()),
+            albumartist: Some("Bodzin".into()),
+            audio_id: Some(AudioId { scheme: 1, hash }),
+            ..Default::default()
+        }
+    }
+
+    fn store_of(tracks: &[Track]) -> Store {
+        let mut s = Store::default();
+        for t in tracks {
+            s.upsert(t.clone());
+        }
+        s
+    }
+
+    fn device() -> Id<Device> {
+        Id::derived(b"laptop")
+    }
+
+    /// **Case 4 — a file that simply vanished, and `forget` has nothing to
+    /// do.**
+    ///
+    /// Holdings supersede rather than accumulate, so the next scan publishes a
+    /// set without it and the holding is gone. What survives is everything the
+    /// split exists to protect: the recording, its rating and its plays, which
+    /// hang off the performance and never off the file.
+    #[test]
+    fn a_file_that_goes_away_needs_no_command() {
+        let gone = file("/m/callisto.mp3", 7);
+        let before = librarian(
+            &store_of(std::slice::from_ref(&gone)),
+            &BTreeSet::new(),
+            device(),
+            100,
+        );
+        let recording = before.recordings().next().expect("a recording");
+        assert!(before.open(recording, &[device()], &[]).is_some());
+
+        // Somebody deleted it. The next scan simply does not see it.
+        let mut clock = HybridClock::new(device());
+        let history: BTreeSet<Record> = [
+            Fact::RecordingRated {
+                recording,
+                stars: Some(5),
+            },
+            Fact::RecordingPlayed {
+                recording,
+                encoding: None,
+            },
+        ]
+        .into_iter()
+        .map(|fact| Record {
+            stamp: clock.stamp(100),
+            fact,
+        })
+        .collect();
+        let after = librarian(&store_of(&[]), &history, device(), 200);
+
+        assert!(
+            after.open(recording, &[device()], &[]).is_none(),
+            "a file nobody holds is still openable"
+        );
+        assert_eq!(
+            after.ratings.get(&recording),
+            Some(&5),
+            "the rating went with the file"
+        );
+        assert_eq!(
+            after.plays.get(&recording),
+            Some(&1),
+            "the play went with the file"
+        );
+    }
+
+    /// **Case 1 — a re-buy, when something names the performance.**
+    ///
+    /// A better copy arrives and the old one is still on disk. Both files
+    /// carry the same recording id, so both are encodings of one recording,
+    /// both are held, and the canonical rule picks which represents it.
+    /// Nothing is forgotten and nothing is pinned against — the question the
+    /// issue asks turns out to have no operation in it.
+    #[test]
+    fn a_re_buy_of_a_named_recording_is_a_second_encoding() {
+        let mbid = uuid::Uuid::from_u128(0xca11);
+        let mut mp3 = file("/m/callisto.mp3", 7);
+        mp3.mb_recording = Some(mbid);
+        let mut flac = file("/m/callisto.flac", 8);
+        flac.mb_recording = Some(mbid);
+
+        let l = librarian(&store_of(&[mp3, flac]), &BTreeSet::new(), device(), 100);
+        assert_eq!(l.recordings().count(), 1, "a re-buy split the recording");
+        let recording = l.recordings().next().unwrap();
+        assert_eq!(l.encodings.of(recording).len(), 2, "one copy was dropped");
+    }
+
+    /// **And when nothing names it, a re-buy splits — which is the answer
+    /// rather than a bug.**
+    ///
+    /// An unnamed recording rests on its bytes, so a better rip of it is a
+    /// different recording: the only evidence available says they are two
+    /// things. That is the error this model prefers, because a split is one
+    /// merge from repaired and a false merge is permanent.
+    ///
+    /// The repair is `RecordingMerged` and it already exists. What `forget`
+    /// would have to be, to help here, is a destructive answer to a question a
+    /// merge answers safely.
+    #[test]
+    fn a_re_buy_of_an_unnamed_recording_splits_and_a_merge_repairs_it() {
+        let store = store_of(&[file("/m/callisto.mp3", 7), file("/m/callisto.flac", 8)]);
+        let split = librarian(&store, &BTreeSet::new(), device(), 100);
+        assert_eq!(split.recordings().count(), 2, "the bytes are all there is");
+
+        let mut ids = split.recordings();
+        let (a, b) = (ids.next().unwrap(), ids.next().unwrap());
+        let mut clock = HybridClock::new(device());
+        let repair: BTreeSet<Record> = std::iter::once(Record {
+            stamp: clock.stamp(200),
+            fact: Fact::RecordingMerged {
+                loser: a,
+                winner: b,
+            },
+        })
+        .collect();
+
+        let l = librarian(&store, &repair, device(), 300);
+        assert_eq!(l.recordings().count(), 1, "the merge did not join them");
+        assert_eq!(
+            l.encodings.of(b).len(),
+            2,
+            "both copies belong to the surviving recording"
+        );
+    }
+
+    /// **Case 2 — a re-rip in place, where the path is the same and the audio
+    /// is not.**
+    ///
+    /// The old encoding stops being held, because those bytes are gone. Where
+    /// something names the performance, the song is unchanged and the new file
+    /// is simply its copy — so a path changing hand to hand is invisible to
+    /// the library, which is the whole point of not keying by one.
+    #[test]
+    fn a_re_rip_in_place_replaces_the_copy_and_keeps_the_song() {
+        let mbid = uuid::Uuid::from_u128(0xca11);
+        let mut first = file("/m/callisto.mp3", 7);
+        first.mb_recording = Some(mbid);
+        let before = librarian(&store_of(&[first]), &BTreeSet::new(), device(), 100);
+        let recording = before.recordings().next().expect("a recording");
+        let old = before.encodings.of(recording)[0].id;
+
+        let mut better = file("/m/callisto.mp3", 9);
+        better.mb_recording = Some(mbid);
+        let after = librarian(&store_of(&[better]), &BTreeSet::new(), device(), 200);
+
+        assert_eq!(
+            after.recordings().next(),
+            Some(recording),
+            "re-ripping a file changed which song it is"
+        );
+        assert!(
+            after.encodings.holders(old).is_empty(),
+            "the bytes that are gone are still held"
+        );
+    }
+
+    /// **Case 5 — two files that turn out to be one recording is `merge`, not
+    /// a third thing.**
+    ///
+    /// Confirmed rather than assumed, because the issue asks. `RecordingMerged`
+    /// carries the history across, which is precisely what neither `forget`
+    /// nor `relink` is allowed to touch.
+    #[test]
+    fn two_files_turning_out_to_be_one_song_is_a_merge() {
+        let a = Id::<Recording>::derived(b"a");
+        let b = Id::<Recording>::derived(b"b");
+        let mut clock = HybridClock::new(device());
+        let records: BTreeSet<Record> = [
+            Fact::RecordingRated {
+                recording: a,
+                stars: Some(4),
+            },
+            Fact::RecordingMerged {
+                loser: a,
+                winner: b,
+            },
+        ]
+        .into_iter()
+        .map(|fact| Record {
+            stamp: clock.stamp(100),
+            fact,
+        })
+        .collect();
+
+        let l = librarian(&store_of(&[]), &records, device(), 200);
+        assert_eq!(
+            l.ratings.get(&b),
+            Some(&4),
+            "the rating stayed on the row nothing points at"
+        );
+        let _ = Format::Mp3;
+    }
+}
+
+#[cfg(test)]
 mod opening {
     //! **What this device can open** — issue #85.
 

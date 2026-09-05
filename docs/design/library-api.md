@@ -37,11 +37,41 @@ So the operations that change what the library _is_ are named and invoked:
 
 ```
 gmuse library import <paths…>        this audio is new, catalogue it
-gmuse library relink <path> <id>     this file is that recording
-gmuse library forget <id>            I no longer have this, keep the entry
 gmuse library apply <file.jsonl>     assert these facts
 gmuse library query <spec>           ask
 ```
+
+### 2.1 `relink` and `forget`, after working the cases
+
+Both were listed here as commands to build. Working #88's cases showed that one of them exists already and the other is
+not the operation it looked like.
+
+**`relink` is `apply`.** "This file is that recording" is what an identification asserts, and it folds to
+`EncodingBound { encoding, from, to }`, carrying what it replaced. 377 of them have been applied to this library. There
+is no second operation to design and no second way to say it — which is the outcome this model prefers everywhere else.
+
+**`forget` is not about the holding.** Holdings are published **whole** and supersede per device, so a file that goes
+away stops being held at the next scan with nothing said. A command that removed one holding could not work anyway: the
+next scan would republish the set and overwrite it. Case 4 in #88 asks what distinguishes a deleted file from an
+unmounted drive, and the answer is that neither is a holdings question — it is the device's reachability, which is #38.
+
+That leaves the meaning `forget` still wants: **this is not part of my library**, said about a recording rather than
+about a file. The recording stays a row, because "decided about, not owned" is ordinary and always was; what changes is
+whether it appears. That is an exclusion — #28's missing cell and #87's quarantine — and it is not a third mechanism.
+
+The cases that looked like they needed an operation:
+
+| case                          | what actually happens                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------------------------ |
+| a re-buy, performance named   | one recording, two encodings; the canonical rule picks which represents it                       |
+| a re-buy, performance unnamed | **splits**, and the repair is a merge — a split is one merge from repaired                       |
+| a re-rip in place             | the old encoding stops being held; the song is unchanged                                         |
+| a file vanishes               | the holding goes at the next scan; rating and plays survive, because they hang off the recording |
+| two files, one recording      | `RecordingMerged`, which carries the history across                                              |
+
+Each is a test in `src/bridge.rs`. The one that surprised: a re-buy of an **unnamed** recording splits, because the
+bytes are the only evidence and they say two things. That is not a bug to route around with `forget` — it is the error
+this model prefers, and `RecordingMerged` repairs it without destroying anything.
 
 ---
 
@@ -189,8 +219,7 @@ Three reasons not to hide it:
 
 ## 8. Open
 
-- **`forget` and `relink`** — whether they are one operation or two, and what each does to holdings, history and the
-  encoding that replaced the old one. Wants concrete cases before it wants a design. #88.
+_Nothing here at present. `forget` and `relink` moved to §2.1 once the cases were worked (#88)._
 
 ---
 
