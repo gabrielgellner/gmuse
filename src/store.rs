@@ -12,7 +12,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::model::entity::Recording;
-use crate::model::id::{Handle, Id};
+use crate::model::id::Handle;
+#[cfg(test)]
+use crate::model::id::Id;
 
 /// A handle to a track. Stable for the life of the store.
 ///
@@ -263,6 +265,19 @@ impl Store {
     /// `None` for a file with neither a MusicBrainz id nor readable audio.
     /// That is a real answer: there is nothing durable to record against, and
     /// recording against the path instead is the bug #81 closes.
+    /// **Tests only, and it must stay that way.**
+    ///
+    /// It mints from the tags, so it cannot see a relink: a file pointed at
+    /// another recording still reports the id its tags imply. Nothing noticed
+    /// for a long time because the two agree for every file nobody has
+    /// relinked. Where they differ, a rating would go to the song a file used
+    /// to be — not seen in this library, because every relink applied so far
+    /// also carried a merge and the fold redirects through those.
+    ///
+    /// The library's binding is the answer (`ui::recording_of`). This is left
+    /// reachable only where a fixture wants the id a scan would mint, and the
+    /// `cfg` is what stops it being reached for again.
+    #[cfg(test)]
     pub fn recording_of(&self, id: TrackId) -> Option<Id<Recording>> {
         let t = self.get(id)?;
         crate::history::recording_id_for(t.mb_recording, t.audio_id)

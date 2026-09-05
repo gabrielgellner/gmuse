@@ -854,7 +854,10 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
     // about a recording at both ends now: the row that says what is being
     // rated comes from the same place the rating goes, so the two cannot
     // describe different things.
-    let Some(recording) = ctx.store.recording_of(id) else {
+    // Through the model's binding: the scanner's own answer is minted from
+    // the tags and does not know about a relink, so rating a file that had
+    // been pointed at another recording rated the one it used to be.
+    let Some(recording) = recording_of(ctx, id) else {
         ui.notify("this file has no identity to rate — it cannot be read as audio");
         return;
     };
@@ -936,8 +939,9 @@ fn audit_underruns(ui: &mut Ui, ctx: &Context<'_>) {
     let track = ui
         .playback
         .current
-        .and_then(|id| ctx.store.get(id))
-        .map(|t| format!("{} — {}", t.file_under(), t.display_title()))
+        .and_then(|id| recording_of(ctx, id))
+        .and_then(|r| ctx.library.row(r))
+        .map(|row| format!("{} — {}", row.file_under, row.title))
         .unwrap_or_else(|| "nothing playing".into());
 
     ui.audit.line(
@@ -1995,11 +1999,13 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // vim's `50%`, and the count is read the same way `12G` reads it.
         Command::SeekPercent => {
             let want = count.unwrap_or(50).min(100) as f64 / 100.0;
+            // **How long it is comes from the library**, which takes it from
+            // the copy that would play rather than from whichever file is in
+            // front of us — the same reason `record_play_if_earned` asks.
             if let (Some(player), Some(id)) = (ctx.player, ui.playback.current)
-                && let Some(track) = ctx.store.get(id)
+                && let Some(row) = recording_of(ctx, id).and_then(|r| ctx.library.row(r))
             {
-                let to = track.duration.mul_f64(want);
-                player.seek(crate::audio::SeekTo::Absolute(to));
+                player.seek(crate::audio::SeekTo::Absolute(row.length.mul_f64(want)));
             }
         }
         Command::Pause => {
@@ -8160,6 +8166,77 @@ mod tests {
             None,
             "the later `rate none` did not win"
         );
+    }
+
+    /// **A rating follows the relink**, which the scanner's own answer cannot.
+    ///
+    /// The scanner's answer mints from the tags, so a file pointed at another
+    /// recording still reports the id its tags imply, and a rating would go to
+    /// the song it used to be. Reachable only where a relink carries no merge
+    /// — a correction between two already-named recordings — because the fold
+    /// redirects a rating through a merge where there is one.
+    #[test]
+    fn rating_a_relinked_file_rates_what_it_is_now() {
+        use crate::model::basis::Basis;
+        use crate::model::log::{Fact, Record};
+
+        let store = fixture();
+        let id = store.iter().next().unwrap().0;
+        let audio = store.get(id).unwrap().audio_id.unwrap();
+        let encoding = crate::model::id::Id::<Encoding>::of_audio(&audio);
+        let was = crate::model::id::Id::<Recording>::of_basis(&Basis::Audio(audio));
+        let now = crate::model::id::Id::<Recording>::of_basis(&Basis::MusicBrainz(
+            uuid::Uuid::from_u128(0xca11),
+        ));
+
+        // Somebody identified it: the file holds a different recording now.
+        let mut clock = crate::model::clock::HybridClock::new(crate::model::id::Id::derived(b"t"));
+        let relink: std::collections::BTreeSet<Record> = [
+            Fact::RecordingIdentified {
+                recording: now,
+                basis: Basis::MusicBrainz(uuid::Uuid::from_u128(0xca11)),
+            },
+            Fact::EncodingBound {
+                encoding,
+                from: Some(was),
+                to: now,
+            },
+        ]
+        .into_iter()
+        .map(|fact| Record {
+            stamp: clock.stamp(100),
+            fact,
+        })
+        .collect();
+
+        let library: &'static _ = Box::leak(Box::new(crate::bridge::librarian(
+            &store,
+            &relink,
+            crate::model::id::Id::derived(b"test"),
+            200,
+        )));
+        let ctx = Context {
+            library,
+            store: &store,
+            player: None,
+            remote: None,
+        };
+        let mut ui = ui_with_history(&store, "rate-relinked");
+        let dir = ui.data_dir.clone().unwrap();
+        ui.playback.current = Some(id);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 4");
+
+        let (back, _) =
+            crate::model::instance::Instance::open(&dir, crate::model::id::Id::derived(b"test"), 0);
+        let cat = back.catalogue();
+        assert_eq!(
+            cat.ratings.get(&now),
+            Some(&4),
+            "the rating went to the old song"
+        );
+        assert_eq!(cat.ratings.get(&was), None);
     }
 
     /// `:rate none` clears, and `:rate 0` is refused rather than doing it

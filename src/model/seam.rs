@@ -595,7 +595,23 @@ mod tests {
         /// (#85): the locator and the recording behind it are asked of the
         /// library now, and what remains of the store on that path is reached
         /// through `rows::Listing` rather than by name.
-        const REACHES: usize = 14;
+        ///
+        /// Three more went with #77's first pass — a rating's recording, the
+        /// underrun label, and seeking by percentage. **What the last eleven
+        /// are waiting on is not effort but three other decisions**, and they
+        /// are listed here so the next person does not re-derive them:
+        ///
+        /// - **five** render through `format::Template`, which takes a
+        ///   `&Track` and reads sixteen fields of it — path, file name, genre,
+        ///   channels. A `Row` carries six. Deciding what a displayed row
+        ///   needs is #78, and this is the rest of it.
+        /// - **three** are `id_for_path`, restoring a session or a playlist.
+        ///   A session stores paths, which is exactly what #37 says has to
+        ///   stop.
+        /// - **two** write `.m3u`, which is a path format by definition. That
+        ///   one is an export and may never move.
+        /// - **one** is the filter closure, which matches on a `&Track`.
+        const REACHES: usize = 11;
 
         let (mut store, mut paths, mut reaches) = (0, 0, 0);
         for (_, text) in read("src/ui") {
