@@ -114,7 +114,7 @@ rtrb              = "0.3"    # lock-free SPSC ring buffer, decoder -> callback
 
 lofty             = "0.22"   # tag reading, uniform across ID3v2/Vorbis/MP4/APE
 walkdir           = "2"      # library scan (swap for jwalk if scan is slow)
-nucleo-matcher    = "0.3"    # fuzzy search
+nucleo-matcher    = "0.3"    # fuzzy search — in the tree since 2026-09-05, for the picker (#54)
 
 serde             = { version = "1", features = ["derive"] }
 postcard          = "1"      # library cache serialization
@@ -3375,6 +3375,44 @@ Append here as decisions are made. Format: date, decision, rationale.
   **An old config says where its keys went** rather than doing nothing. `[catalogs.*]` and `active_catalogs` are still
   parsed, for the sole purpose of producing a migration message that names the replacement — silently ignoring them
   would leave somebody with an empty view 6 and no idea why.
+
+- **2026-09-05** **The picker, and one input holding two languages (#54, #119).** `<leader>ff` over the library,
+  `<leader>fg` over the groups you have made. `nucleo-matcher 0.3` joins the tree — budgeted in §2 since the start and
+  sanctioned by the 2026-08-28 entry, so this spends a decision already taken rather than making a new one.
+
+  **The design question was the input.** §7 says the filter language has no bare words — `ferrell` alone is an error —
+  and a picker inverts that, because bare text _is_ the interface. Both live in one line: whatever parses as a predicate
+  narrows the candidates, and what trails it is the needle.
+
+  The split is found by **longest parsing prefix**, not by scanning from the left: predicates are written left to right
+  and a single forward pass would stop at the first word that parses on its own, leaving the rest of an expression in
+  the needle. `year>=2015 & genre="techno" burial` keeps its whole predicate.
+
+  **What makes the implicit split honest is that the title says which half is which** — `tracks · filter: … · fuzzy: …`.
+  That is this project's existing habit rather than a new licence: an inferred state is fine when it is _visible_, which
+  is what the pending-key indicator, the mode line and which-key already do. A silent guess is what §7 refuses. And a
+  half-typed filter — `genre=` — is **named** rather than ranked as text, because a needle matching nothing looks
+  exactly like a filter matching nothing.
+
+  Three smaller decisions, each of which had an alternative:
+
+  1. **Ranked over the rendered row**, not the raw fields — what you see is what you match, the rule the completion menu
+     already follows. So the format template decides it.
+  2. **`Enter` goes, it does not play.** `gp` and `x` are already different keys; a picker that played would be a third
+     answer to a question the keymap has settled.
+  3. **A tie is broken by the order the candidates arrived in**, so equally-good matches stay in library order rather
+     than shuffling under the cursor between keystrokes.
+
+  **Groups are a second picker rather than a merged list** (#119). "Is this a list somebody made, or a rule that
+  recomputes" is the thing you most need to know before choosing one, and one ranked list would hide it — so a
+  collection and a saved view are both there, each saying which it is.
+
+  `/` is untouched. It is vim's in-list search and moves the cursor inside what you are looking at; the picker searches
+  everything and takes you there. Vim has both, for the same reason.
+
+  One thing the verb-table audit caught: `find` parsed its argument in a nested match inside `command`, and the audit
+  scans that function's source for match arms — so `tracks` and `groups` read as two more verbs. It is a helper function
+  now, below `split_word` and out of the scanned range, which is the shape `playlist_spec` already had.
 
 ## 14. Prior art worth reading
 

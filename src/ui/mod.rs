@@ -5,6 +5,7 @@
 
 pub mod fold;
 pub mod list;
+pub mod picker;
 pub mod statusline;
 pub mod theme;
 pub mod tree;
@@ -412,6 +413,8 @@ pub struct Ui {
     // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// The fuzzy picker, while it is open (#54).
+    pub picker: Option<crate::ui::picker::Picker>,
     /// What went wrong resolving the composed view, if anything.
     ///
     /// Set by every fold, so a caller that has something better to say than
@@ -469,6 +472,7 @@ impl Ui {
     fn bare(library: Shelf) -> Self {
         Self {
             stop: None,
+            picker: None,
             view_problem: None,
             view: View::Tree,
             tree: TreeState::default(),
@@ -1536,6 +1540,13 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
         ui.help_scroll = 0;
         return;
     }
+    // The picker owns the keyboard while it is up: it is a mode with its own
+    // grammar (bare text means something here that §7 refuses on the `:` line),
+    // so nothing falls through to a binding.
+    if ui.picker.is_some() {
+        handle_picker_key(key, ui, ctx);
+        return;
+    }
     if ui.prompt.is_some() {
         handle_prompt_key(key, ui, ctx);
         return;
@@ -1663,6 +1674,173 @@ fn refilter(ui: &mut Ui) {
         // the top is less surprising than landing somewhere arbitrary.
         prompt.selected = 0;
         prompt.menu = Some(matches);
+    }
+}
+
+/// Open the picker over one source, and fill it.
+fn open_picker(ui: &mut Ui, ctx: &Context<'_>, source: crate::ui::picker::Source) {
+    ui.picker = Some(crate::ui::picker::Picker::new(source));
+    refresh_picker(ui, ctx);
+}
+
+/// Re-split the input, re-narrow, re-rank.
+///
+/// Whole-library on every keystroke, which is free: a filter pass is 0.92 ms
+/// at 20k rows and this library is a third of that. Measured before it was
+/// built rather than after it felt slow.
+fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
+    use crate::ui::picker::{Candidate, Chosen, Source};
+
+    let Some(picker) = ui.picker.as_mut() else {
+        return;
+    };
+    let (predicate, needle, bad) = crate::ui::picker::split(&picker.input);
+    picker.predicate = predicate.clone();
+    picker.needle = needle.clone();
+    picker.bad_predicate = bad;
+
+    let source = picker.source;
+    let candidates: Vec<Candidate> = match source {
+        Source::Tracks => {
+            let rows: &dyn Listing = ctx.library;
+            // **The predicate narrows before the needle ranks**, which is what
+            // makes the two halves compose rather than compete.
+            let matches = predicate
+                .as_deref()
+                .and_then(|src| crate::filter::Filter::parse(src).ok())
+                .map(|f| {
+                    let env = crate::filter::Env {
+                        listened: Some(&ui.listened),
+                        now: crate::history::now(),
+                    };
+                    let compiled = f.compile(env);
+                    Listing::rows(rows)
+                        .into_iter()
+                        .filter(|id| Listing::subject(rows, *id).is_some_and(|s| compiled(&s)))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| Listing::rows(rows));
+            matches
+                .into_iter()
+                .filter_map(|id| {
+                    let row = Listing::listed(rows, id)?;
+                    // **The rendered row, not the raw fields** — what you see
+                    // is what you match, the rule the completion menu follows.
+                    Some(Candidate {
+                        label: ui.track_line.render(&row),
+                        detail: String::new(),
+                        chosen: Chosen::Track(id),
+                    })
+                })
+                .collect()
+        }
+        // **Two kinds, kept apart rather than merged** (#119). "Is this a list
+        // somebody made or a rule that recomputes" is what you most need to
+        // know before choosing one.
+        Source::Groups => {
+            let mut out: Vec<Candidate> = ui
+                .listened
+                .collections
+                .values()
+                .map(|c| Candidate {
+                    label: c.name.clone(),
+                    detail: if c.ordered {
+                        "collection · ordered".into()
+                    } else {
+                        "collection".into()
+                    },
+                    chosen: Chosen::Collection(c.name.clone()),
+                })
+                .collect();
+            out.extend(ui.listened.views.values().map(|v| Candidate {
+                label: v.name.clone(),
+                detail: format!("saved view · {}", v.source),
+                chosen: Chosen::Saved(v.name.clone()),
+            }));
+            out.sort_by(|a, b| a.label.cmp(&b.label));
+            out
+        }
+    };
+
+    let shown = crate::ui::picker::rank(candidates, &needle);
+    if let Some(picker) = ui.picker.as_mut() {
+        picker.selected = picker.selected.min(shown.len().saturating_sub(1));
+        picker.shown = shown;
+    }
+}
+
+/// The picker's own keymap, which is small on purpose.
+fn handle_picker_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => ui.picker = None,
+        KeyCode::Enter => choose_from_picker(ui, ctx),
+        KeyCode::Down | KeyCode::Char('n') if !ctrl || key.code == KeyCode::Down => {
+            if let Some(p) = ui.picker.as_mut() {
+                p.move_by(1);
+            }
+        }
+        KeyCode::Up => {
+            if let Some(p) = ui.picker.as_mut() {
+                p.move_by(-1);
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(p) = ui.picker.as_mut() {
+                p.input.pop();
+            }
+            refresh_picker(ui, ctx);
+        }
+        KeyCode::Char(c) => {
+            if let Some(p) = ui.picker.as_mut() {
+                match (c, ctrl) {
+                    ('n', true) => p.move_by(1),
+                    ('p', true) => p.move_by(-1),
+                    _ => {
+                        p.input.push(c);
+                        refresh_picker(ui, ctx);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `Enter`: **go there, do not play it.**
+///
+/// `gp` and `x` already separate "go there" from "play it", so the picker
+/// keeps the distinction rather than inventing a third answer — and the
+/// transport keys still work once you have arrived.
+fn choose_from_picker(ui: &mut Ui, ctx: &Context<'_>) {
+    use crate::ui::picker::Chosen;
+
+    let Some(chosen) = ui
+        .picker
+        .as_ref()
+        .and_then(|p| p.under_cursor())
+        .map(|c| c.chosen.clone())
+    else {
+        return;
+    };
+    ui.picker = None;
+    match chosen {
+        Chosen::Track(id) => {
+            switch_view(ui, View::Sorted);
+            if let Some(at) = ui.library.sorted().iter().position(|r| *r == id) {
+                ui.sorted = at;
+            }
+        }
+        Chosen::Collection(name) => {
+            ui.composed.set(crate::view::What::Collection(name));
+            rebuild_library(ui, ctx);
+            say_view(ui);
+        }
+        Chosen::Saved(name) => {
+            ui.composed.set(crate::view::What::Saved(name));
+            rebuild_library(ui, ctx);
+            say_view(ui);
+        }
     }
 }
 
@@ -2051,6 +2229,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             crate::cmd::PlaylistSpec::List => list_playlists(ui),
         },
         Command::Collect(name) => collect(ui, ctx, &name),
+        Command::Find(source) => open_picker(ui, ctx, source),
         Command::Export(path) => export(ui, ctx, &path),
         Command::Freeze => match ui.open.take() {
             Some(Open::Rule(name)) => ui.notify(format!(
@@ -4096,6 +4275,75 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     if ui.mode == crate::cmd::Mode::Transport {
         draw_transport(frame, body, ui, ctx);
     }
+
+    // **Over everything, including transport.** The picker is a mode with the
+    // whole keyboard, so it is drawn where your attention is.
+    if let Some(picker) = &ui.picker {
+        draw_picker(frame, body, ui, picker);
+    }
+}
+
+/// How tall the picker floats, and how wide. Wide enough for the rendered row
+/// the title format produces, which is what it ranks over.
+const PICKER_WIDTH: u16 = 78;
+const PICKER_HEIGHT: u16 = 18;
+
+/// Cut a label to fit, by characters rather than bytes.
+///
+/// A row is a rendered template and may hold anything a tag does; slicing on a
+/// byte boundary would panic on the first accented artist.
+fn clip(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    s.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
+}
+
+fn draw_picker(frame: &mut Frame, body: Rect, ui: &Ui, picker: &crate::ui::picker::Picker) {
+    let Some(area) = centred(body, PICKER_WIDTH, PICKER_HEIGHT) else {
+        return;
+    };
+    let theme = &ui.theme;
+    frame.render_widget(ratatui::widgets::Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    // The line you are typing, with a block cursor — the same shape the `:`
+    // line uses, so the two read as one idea.
+    lines.push(Line::from(vec![
+        Span::styled("  > ", theme.get(theme::Role::StatusNotice)),
+        Span::styled(picker.input.clone(), theme.get(theme::Role::StatusText)),
+        Span::styled("█", theme.get(theme::Role::StatusNotice)),
+    ]));
+    lines.push(Line::from(""));
+
+    if picker.shown.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  nothing matches",
+            theme.get(theme::Role::StatusDim),
+        )));
+    }
+    // Two rows of chrome above, one border below.
+    let room = usize::from(PICKER_HEIGHT).saturating_sub(5);
+    let first = picker.selected.saturating_sub(room.saturating_sub(1));
+    for (at, c) in picker.shown.iter().enumerate().skip(first).take(room) {
+        let selected = at == picker.selected;
+        let body_style = if selected {
+            theme.get(theme::Role::SelectionFocused)
+        } else {
+            theme.get(theme::Role::StatusText)
+        };
+        let width = usize::from(PICKER_WIDTH).saturating_sub(28);
+        lines.push(Line::from(vec![
+            Span::styled(if selected { "  > " } else { "    " }, body_style),
+            Span::styled(format!("{:<width$}", clip(&c.label, width)), body_style),
+            Span::styled(c.detail.clone(), theme.get(theme::Role::StatusDim)),
+        ]));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).block(pane_block(theme, &picker.title(), true)),
+        area,
+    );
 }
 
 /// Rows the completion menu needs, borders included. Zero when there is
@@ -8676,6 +8924,126 @@ mod tests {
         ui.data_dir = Some(scratch(name));
         ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         ui
+    }
+
+    /// **The picker: bare text is a needle, and it goes rather than plays.**
+    ///
+    /// #54. `/` is vim's in-list search and moves the cursor inside what you
+    /// are looking at; this searches everything and takes you there, which is
+    /// a different act — vim has both.
+    #[test]
+    fn the_picker_finds_a_track_and_goes_to_it() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "space f f");
+        assert!(
+            ui.picker.is_some(),
+            "the picker did not open: {}",
+            ui.status
+        );
+        let all = ui.picker.as_ref().unwrap().shown.len();
+        assert!(all > 1, "an empty needle should list everything");
+
+        // A bare word is a needle — the thing §7 refuses on the `:` line and
+        // this surface exists to allow.
+        for c in "waters".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        let p = ui.picker.as_ref().unwrap();
+        assert!(
+            p.shown.len() < all,
+            "the needle did not narrow: {}",
+            p.input
+        );
+        assert!(
+            p.shown[0].label.to_lowercase().contains("waters"),
+            "{:?}",
+            p.shown[0].label
+        );
+        assert_eq!(p.title(), "tracks · fuzzy: waters");
+
+        // **Enter goes, it does not play.** `gp` and `x` are already different
+        // keys, so the picker keeps the distinction.
+        press(&mut ui, &ctx, "enter");
+        assert!(ui.picker.is_none(), "the picker stayed open");
+        assert_eq!(ui.view, View::Sorted);
+        assert!(
+            ui.playback.current.is_none(),
+            "enter played something it was only asked to go to"
+        );
+    }
+
+    /// A predicate narrows, and the title says so — which is the whole licence
+    /// for splitting one input into two languages without a separator.
+    #[test]
+    fn the_picker_takes_a_filter_and_a_needle_together() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "space f f");
+        // Typed a key at a time, through the real keymap — `press` has no name
+        // for a literal space, so the predicate here carries none.
+        for c in r#"album="Malibu""#.chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        let p = ui.picker.as_ref().unwrap();
+        assert_eq!(p.predicate.as_deref(), Some(r#"album="Malibu""#));
+        assert!(p.needle.is_empty());
+        assert!(p.title().contains("filter:"), "{}", p.title());
+        assert!(!p.shown.is_empty() && p.shown.len() < ui.library.len());
+
+        // And the two halves compose: the filter narrows, the needle ranks.
+        press(&mut ui, &ctx, "space");
+        for c in "bird".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        let p = ui.picker.as_ref().unwrap();
+        assert_eq!(p.needle, "bird");
+        assert!(p.title().contains("fuzzy: bird"), "{}", p.title());
+    }
+
+    /// **Groups are a second picker, not a merged list** (#119). "Is this a
+    /// list somebody made or a rule that recomputes" is what you most need to
+    /// know before choosing one, and merging would hide it.
+    #[test]
+    fn the_picker_browses_collections_and_saved_views() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "picker-groups");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view artist="Anderson .Paak""#);
+        let narrowed = ui.library.len();
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "collect Paak");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view save paak");
+
+        // The refold `main` does on `Stop::Refold` (#120) — a collection
+        // written this session is not in the librarian's fold until then.
+        let ctx = refolded(&store, &ui);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+        press(&mut ui, &ctx, "space f g");
+
+        let p = ui.picker.as_ref().expect("no picker");
+        let kinds: Vec<&str> = p.shown.iter().map(|c| c.detail.as_str()).collect();
+        assert!(
+            kinds.iter().any(|d| d.starts_with("collection")),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|d| d.starts_with("saved view")),
+            "{kinds:?}"
+        );
+
+        // Choosing one sets the view to it.
+        press(&mut ui, &ctx, "enter");
+        assert!(ui.picker.is_none());
+        assert_eq!(ui.library.len(), narrowed, "{}", ui.status);
     }
 
     /// **A saved view is a fact, and it is recalled by name** — #119.

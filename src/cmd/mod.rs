@@ -723,6 +723,8 @@ pub enum Command {
     /// which made a path authoritative for what a list contained; a playlist
     /// is an ordered collection now, and m3u is how one leaves the building.
     Export(String),
+    /// `:find` / `:find groups` — the fuzzy picker (#54).
+    Find(crate::ui::picker::Source),
     Freeze,
     Rate(RateSpec),
     /// Narrow the library to what matches. `None` clears it.

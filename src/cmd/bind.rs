@@ -123,6 +123,11 @@ pub const DEFAULTS: &[&str] = &[
     "bind common u undo",
     "bind common ^r redo",
     "bind common \"<leader> u\" rescan",
+    // snacks binds its pickers under `<leader>f`, and the second letter says
+    // which. `ff` is the library, `fg` the groups you have made — collections
+    // and saved views (#54, #119).
+    "bind common \"<leader> f f\" find",
+    "bind common \"<leader> f g\" find groups",
     // `Z` was snacks' close-all, and `M-e` its opposite. Both are gone: `zM`
     // and `zR` say the same thing in the vocabulary the rest of the keymap
     // already speaks, and `zm`/`zr` add the graduated version neither had.

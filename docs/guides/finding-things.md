@@ -10,6 +10,29 @@ why he files under Lo rather than after every artist beginning Lz.
 
 Typing a capital still asks for case to matter. It never asks for the mark back — those are different questions.
 
+## The picker — find anything, go there
+
+    <leader>ff   the whole library
+    <leader>fg   the groups you have made
+    escape       back to where you were
+    enter        go to it
+
+One input, two languages. Anything that parses as a filter **narrows** the candidates; whatever is left over is a
+**fuzzy needle**, ranked over the row as it is drawn:
+
+    genre="*electron*" burial
+    └──── narrows ─────┘ └───┘ ranks
+
+So `burial` alone is a fuzzy search, `year>=2015` alone is a plain filter, and the two together narrow before they rank.
+**The title says which half is which** — that is why it is safe to split them without a separator, and if a half-typed
+filter cannot parse the title says that instead of quietly ranking it as text.
+
+`enter` **goes** to the row rather than playing it, the same way `gp` and `x` are different keys. `<leader>fg` picks a
+collection or a saved view instead, and shows which kind each is.
+
+This is not what `/` is for. `/` moves the cursor inside the list you are looking at; the picker searches everything and
+takes you there.
+
 ## `/` — search as you type
 
     /            search forwards

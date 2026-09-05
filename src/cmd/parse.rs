@@ -49,6 +49,7 @@ pub const VERBS: &[&str] = &[
     "collect",
     "down",
     "export",
+    "find",
     "filter",
     "fold",
     "go",
@@ -300,6 +301,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "search-prev" => Command::SearchPrev,
         "rate" => Command::Rate(rate_spec(rest)?),
         "playlist" => Command::Playlist(playlist_spec(rest)?),
+        "find" => Command::Find(picker_source(rest)?),
         "export" => {
             if rest.is_empty() {
                 return Err(ParseError::Missing {
@@ -503,6 +505,22 @@ fn seek_spec(rest: &str) -> Result<SeekSpec, ParseError> {
     } else {
         SeekSpec::Absolute(seconds)
     })
+}
+
+/// Which picker: the library, or the groups you have made.
+///
+/// **A function rather than a nested match**, like `playlist_spec` — the verb
+/// table's audit scans this file for match arms, and a sub-match inside the
+/// dispatch reads as two more verbs.
+fn picker_source(rest: &str) -> Result<crate::ui::picker::Source, ParseError> {
+    match rest.trim() {
+        "" | "tracks" => Ok(crate::ui::picker::Source::Tracks),
+        "groups" => Ok(crate::ui::picker::Source::Groups),
+        other => Err(ParseError::Bad(
+            other.into(),
+            "picker source — `tracks` or `groups`",
+        )),
+    }
 }
 
 /// `90`, `1:30`, `1:02:03`.
@@ -728,6 +746,10 @@ pub fn format(cmd: &Command) -> String {
         },
         Command::Collect(name) => format!("collect {name}"),
         Command::Export(path) => format!("export {path}"),
+        Command::Find(source) => match source {
+            crate::ui::picker::Source::Tracks => "find".into(),
+            crate::ui::picker::Source::Groups => "find groups".into(),
+        },
         Command::Freeze => "freeze".into(),
         // Round-trips through `command`, which is what `:bind` shown in the
         // settings view depends on.
@@ -1103,6 +1125,7 @@ mod tests {
                 "unbind" => "unbind common x".to_string(),
                 "view" => "view 1".to_string(),
                 "collect" => "collect Dance".to_string(),
+                "find" => "find groups".to_string(),
                 "export" => "export /tmp/x.m3u8".to_string(),
                 "playlist" => "playlist open fresh".to_string(),
                 "filter" => "filter year>2000".to_string(),
