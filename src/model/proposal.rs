@@ -39,10 +39,11 @@ use std::collections::BTreeSet;
 
 use crate::model::basis::Basis;
 use crate::model::clock::HybridClock;
-use crate::model::entity::{Device, Encoding, Genre, Qualifier, Recording};
+use crate::model::entity::{Collection, Device, Encoding, Genre, Qualifier, Recording};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Fact, Record};
+use crate::model::ord::OrdKey;
 use crate::model::reference::Source;
 use crate::model::vocabulary::GenreOn;
 
@@ -112,6 +113,31 @@ pub enum Proposal {
         basis: Source,
         confidence: Confidence,
     },
+    /// **This recording belongs to that collection** — #94.
+    ///
+    /// The route a path-based catalog takes to become a curated set. Measured
+    /// on this library, no genre rule reproduces `~/MusicLibrary/Dance`: every
+    /// one of its 790 files carries an `Electronic` term, and so do 876 files
+    /// in `General` — Laurie Anderson, Beck, Enya, DEVO. Those are correctly
+    /// tagged and are simply not what the folder means.
+    ///
+    /// What the folder records is not a genre but a judgement: *this is dance
+    /// music and I listen to it as dance music*. Enya is `Electronic` and is
+    /// not in it. That belongs in a collection, whose membership is facts
+    /// (#92) — and once it is, the path stops mattering, which is what #90
+    /// asks for and what #94's second requirement is waiting on.
+    ///
+    /// The collection is named rather than identified, for the same reason a
+    /// genre is: a tool has no way to mint an id and should not, and a name is
+    /// what a person reviewing the file can read.
+    CollectedInto {
+        recording: Id<Recording>,
+        collection: String,
+        /// Whether the collection's order means anything. A catalog seeded
+        /// from a folder is a set somebody curated, not a running order.
+        #[serde(default)]
+        ordered: bool,
+    },
     /// A rating. Included because it is the simplest possible proposal and
     /// therefore the one worth testing the format against.
     Rated {
@@ -179,7 +205,8 @@ impl Proposal {
             }
             Proposal::GenreAssigned { recording, .. }
             | Proposal::QualifierAssigned { recording, .. }
-            | Proposal::Rated { recording, .. } => Subject::Recording(*recording),
+            | Proposal::Rated { recording, .. }
+            | Proposal::CollectedInto { recording, .. } => Subject::Recording(*recording),
         }
     }
 }
@@ -335,6 +362,41 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 },
             ]
         }
+        // The collection is named rather than identified, for the reason a
+        // genre is: a tool has no way to mint an id and should not.
+        Proposal::CollectedInto {
+            recording,
+            collection,
+            ordered,
+        } => {
+            let name = collection.trim();
+            if name.is_empty() {
+                return Err("a collection needs a name".to_string());
+            }
+            let id = Id::<Collection>::of_name(name);
+            vec![
+                Fact::CollectionNamed {
+                    collection: id,
+                    name: name.to_string(),
+                    ordered,
+                },
+                Fact::CollectionEntryAdded {
+                    collection: id,
+                    recording,
+                    // **Every seeded entry shares a position, and that is the
+                    // honest encoding.** A folder has no running order, so
+                    // giving each entry a distinct key would invent one — and
+                    // an arbitrary order that looks meaningful is worse than
+                    // none. Entries stay distinct because the fold keys them
+                    // by `(collection, position, recording)`, and applying the
+                    // same proposal twice is the same row.
+                    //
+                    // A collection later made *ordered* wants its keys spread
+                    // first, which is the compaction `domain-model.md` names.
+                    ord: OrdKey::first(),
+                },
+            ]
+        }
         // Refused at the door rather than folded to nothing, for the reason
         // `Instance::assign_qualifier` refuses it: a grouping concept is a
         // place in the tree, not a claim about a song, and an assignment
@@ -411,10 +473,10 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn dev() -> Id<Device> {
+    pub(crate) fn dev() -> Id<Device> {
         Id::derived(b"laptop")
     }
 
@@ -422,7 +484,7 @@ mod tests {
         Id::from_uuid(uuid::Uuid::from_u128(n))
     }
 
-    fn rec(n: u128) -> Id<Recording> {
+    pub(crate) fn rec(n: u128) -> Id<Recording> {
         Id::from_uuid(uuid::Uuid::from_u128(n))
     }
 
@@ -435,7 +497,7 @@ mod tests {
     /// A library holding encodings 1–3 and recordings 1 and 2. Encoding 1 is
     /// bound to a recording minted from its bytes, encoding 2 is unbound, and
     /// encoding 3 already holds the performance `settled()` names.
-    struct Held;
+    pub(crate) struct Held;
 
     impl Holdings for Held {
         fn holds(&self, s: Subject) -> bool {
@@ -467,7 +529,7 @@ mod tests {
         }
     }
 
-    const HELD: &Held = &Held;
+    pub(crate) const HELD: &Held = &Held;
 
     fn measured(e: u128, hz: u32) -> String {
         format!(
@@ -861,5 +923,112 @@ mod tests {
         let (records, report) = parse("", dev(), 100, HELD);
         assert!(records.is_empty() && report.applied == 0);
         assert!(report.malformed.is_empty() && report.unknown.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod collecting {
+    //! **A path-based catalog becoming a curated set** — #94.
+    //!
+    //! Measured on the real library: no genre rule reproduces
+    //! `~/MusicLibrary/Dance`. Every one of its 790 files carries an
+    //! `Electronic` term and so do 876 files in `General` — Laurie Anderson,
+    //! Beck, Enya, DEVO, Britney Spears — which are correctly tagged and are
+    //! simply not what the folder means. The best rule tried still misplaces
+    //! 139 files; the obvious one more than doubles the catalog.
+    //!
+    //! What the folder records is a judgement rather than a genre, and a
+    //! collection is where a judgement lives.
+
+    use super::tests::*;
+    use super::*;
+
+    fn line(r: u128, into: &str) -> String {
+        format!(
+            r#"{{"fact":"collected_into","recording":"{}","collection":"{into}"}}"#,
+            rec(r)
+        )
+    }
+
+    /// The concept before the membership, for the reason a genre needs one: an
+    /// id no fact resolves is an id nobody can render.
+    #[test]
+    fn a_collection_is_named_before_anything_is_put_in_it() {
+        let (records, report) = parse(&line(1, "Dance"), dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+
+        let facts: Vec<&Fact> = records.iter().map(|r| &r.fact).collect();
+        assert!(
+            facts
+                .iter()
+                .any(|f| matches!(f, Fact::CollectionNamed { name, .. } if name == "Dance")),
+            "the collection was never named: {facts:?}"
+        );
+        assert!(
+            facts
+                .iter()
+                .any(|f| matches!(f, Fact::CollectionEntryAdded { .. })),
+            "nothing was put in it: {facts:?}"
+        );
+    }
+
+    /// **Applying the same file twice changes nothing**, which is what makes a
+    /// seeding pass safe to re-run against a live log.
+    #[test]
+    fn seeding_twice_is_seeding_once() {
+        let file = format!("{}\n{}", line(1, "Dance"), line(2, "Dance"));
+        let (first, _) = parse(&file, dev(), 100, HELD);
+        let (again, _) = parse(&file, dev(), 200, HELD);
+
+        // Compared as rendered facts, since a `Fact` is not `Ord` — and the
+        // stamps deliberately differ, so it is the facts that must not.
+        let facts = |rs: &BTreeSet<Record>| {
+            rs.iter()
+                .map(|r| format!("{:?}", r.fact))
+                .collect::<BTreeSet<String>>()
+        };
+        assert_eq!(
+            facts(&first),
+            facts(&again),
+            "a second pass proposed different facts"
+        );
+    }
+
+    /// Two spellings are one collection, because the id is the normalised name
+    /// — the same rule every other named concept follows.
+    #[test]
+    fn two_spellings_name_one_collection() {
+        let (records, _) = parse(
+            &format!("{}\n{}", line(1, "Dance"), line(2, "  dance  ")),
+            dev(),
+            100,
+            HELD,
+        );
+        let ids: BTreeSet<_> = records
+            .iter()
+            .filter_map(|r| match &r.fact {
+                Fact::CollectionEntryAdded { collection, .. } => Some(*collection),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 1, "one collection became two");
+    }
+
+    /// A nameless collection is refused rather than folded into one nobody can
+    /// find, which is the same call `QualifierAssigned` makes.
+    #[test]
+    fn a_collection_with_no_name_is_refused() {
+        let (_, report) = parse(&line(1, "   "), dev(), 100, HELD);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    /// And a recording the library does not hold is named, not invented — the
+    /// rule every proposal follows.
+    #[test]
+    fn a_recording_the_library_does_not_hold_is_refused() {
+        let (_, report) = parse(&line(99, "Dance"), dev(), 100, HELD);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.unknown.len(), 1, "{report}");
     }
 }

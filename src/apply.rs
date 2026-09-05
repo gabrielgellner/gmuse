@@ -55,6 +55,13 @@ impl proposal::Holdings for Shelf {
     fn holds(&self, subject: Subject) -> bool {
         match subject {
             Subject::Encoding(id) => self.disk.encodings.contains_key(&id),
+            // **One place, because `disk` is folded log-first.** Adding the
+            // log as a second source here was my first fix and it changed
+            // nothing: the recording was missing from *both*, because a scan
+            // into an empty instance re-mints a relinked recording from its
+            // bytes. Fixing the fold made this arm right again, and leaving
+            // the `||` would have been two ways to answer one question with
+            // only one of them load-bearing.
             Subject::Recording(id) => self.disk.recordings.contains_key(&id),
         }
     }
@@ -106,6 +113,26 @@ impl std::fmt::Display for Outcome {
     }
 }
 
+/// The library a proposal is checked against.
+///
+/// **Extracted so a test can exercise the real thing.** The first version of
+/// the test below built this by hand and passed while `run` still had the bug
+/// — which is a test of a copy of the code, not of the code.
+fn shelf(log: &Instance, roots: &[std::path::PathBuf], device: Id<Device>, now: i64) -> Shelf {
+    let mut scanned = Instance::new(device);
+    scanned.merge(now, log.records());
+    crate::model::populate::populate(&mut scanned, roots, now);
+    Shelf {
+        // What the disk says exists, which is what "holds" asks about:
+        // encodings are established by looking, and a proposal against a file
+        // that has since gone is stale rather than wrong.
+        disk: scanned.catalogue(),
+        // Where a binding currently points is a fact about the *log*, not the
+        // disk — a relink somebody made lives there and a scan cannot see it.
+        log: log.catalogue(),
+    }
+}
+
 /// Read a proposal file and, if told to, append what it proposes.
 pub fn run(
     file: &Path,
@@ -121,17 +148,17 @@ pub fn run(
     })?;
 
     let (mut log, _) = Instance::open(data_dir, device, now);
-    let library = Shelf {
-        // What the disk says exists, which is what "holds" asks about:
-        // encodings are established by looking, and a proposal against a file
-        // that has since gone is stale rather than wrong.
-        disk: crate::model::populate::read_library("apply", roots, now)
-            .0
-            .catalogue(),
-        // Where a binding currently points is a fact about the *log*, not the
-        // disk — a relink somebody made lives there and a scan cannot see it.
-        log: log.catalogue(),
-    };
+    // **The log first, then the disk** — the same order `query` takes, and for
+    // the same reason it had to learn: `ingest` refuses to mint over a binding
+    // somebody made, but only over one it can see, and a scan into an empty
+    // instance sees none. Scanning first re-minted every relinked recording
+    // from its bytes, so a proposal naming one was refused as unknown to the
+    // library — 141 of 761 here, and silently, because `unknown` reads as
+    // "stale, re-query" rather than "this is a bug".
+    //
+    // It is the same failure that let 377 identifications apply cleanly and
+    // leave the work list where it was, in a second place.
+    let library = shelf(&log, roots, device, now);
     let (proposed, report) = proposal::parse(&text, device, now, &library);
 
     // **Facts already in the log are not applied again.** A play is *counted*,
@@ -167,4 +194,97 @@ pub fn run(
         written,
         dry_run: !write,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! **A proposal about a relinked recording is not "unknown"** — #94.
+    //!
+    //! `holds` decides whether the library has heard of a proposal's subject,
+    //! and a subject it has not heard of lands in `unknown`, which reads as
+    //! "stale, re-query" rather than "this is a bug". So getting it wrong is
+    //! silent, and it was: `apply` scanned into an empty instance, so `ingest`
+    //! re-minted every relinked recording from its bytes and no proposal
+    //! naming one could be recognised. 141 of 761 on the real library.
+    //!
+    //! It is the same failure that let 377 identifications apply cleanly and
+    //! leave the work list exactly where it was — `query` carries the fix and
+    //! the note, and this is the second place that needed both.
+
+    use crate::model::basis::Basis;
+    use crate::model::entity::Device;
+    use crate::model::id::Id;
+    use crate::model::instance::Instance;
+    use crate::model::proposal::{Holdings, Subject};
+
+    use super::Shelf;
+
+    /// A file on disk, and a log that has since identified it as something
+    /// else — which is what a relink is.
+    #[test]
+    fn a_relinked_recording_is_held() {
+        let dir = std::env::temp_dir().join("gmuse-apply-relink");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01 Callisto.wav");
+        crate::model::round_trip::write_wav(&file, 4410);
+        crate::model::round_trip::write_tags(&file, "Callisto", "Bodzin", None);
+
+        let device = Id::<Device>::derived(b"laptop");
+        let scan = vec![crate::model::ingest::read(&file).expect("reads")];
+
+        // Scanned once, then identified — so the recording the log names is
+        // not the one this file's bytes would mint.
+        let mut log = Instance::new(device);
+        log.ingest(100, &scan);
+        let encoding = *log.catalogue().encodings.keys().next().expect("a copy");
+        let named = Basis::MusicBrainz(uuid::Uuid::from_u128(0xca11));
+        let relinked = Id::of_basis(&named);
+        // Built as records and merged, because `append` is the instance's own
+        // and a relink arriving from elsewhere is exactly what this is about.
+        let mut clock = crate::model::clock::HybridClock::new(device);
+        let relink: std::collections::BTreeSet<crate::model::log::Record> = [
+            crate::model::log::Fact::RecordingIdentified {
+                recording: relinked,
+                basis: named.clone(),
+            },
+            crate::model::log::Fact::EncodingBound {
+                encoding,
+                from: None,
+                to: relinked,
+            },
+        ]
+        .into_iter()
+        .map(|fact| crate::model::log::Record {
+            stamp: clock.stamp(200),
+            fact,
+        })
+        .collect();
+        log.merge(200, &relink);
+
+        // **Through the function `run` uses**, so this tests the code and
+        // not a copy of it. The first draft built the `Shelf` by hand and
+        // passed while `run` still scanned first.
+        let library = super::shelf(&log, std::slice::from_ref(&dir), device, 300);
+        assert!(
+            library.holds(Subject::Recording(relinked)),
+            "a proposal about the relinked recording would be refused as unknown"
+        );
+
+        // And scanning first is the bug, which is what makes this a test: the
+        // bytes re-mint a different id and the log's is nowhere.
+        let mut wrong = Instance::new(device);
+        crate::model::populate::populate(&mut wrong, std::slice::from_ref(&dir), 300);
+        let scanned_only = Shelf {
+            disk: wrong.catalogue(),
+            log: log.catalogue(),
+        };
+        assert!(
+            !scanned_only.holds(Subject::Recording(relinked)),
+            "scanning first should re-mint from the bytes; if it no longer \
+             does, this test has stopped saying anything"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

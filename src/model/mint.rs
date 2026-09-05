@@ -54,6 +54,20 @@ impl Id<Encoding> {
     }
 }
 
+impl Id<crate::model::entity::Collection> {
+    /// The id a collection's name always mints.
+    ///
+    /// Through [`crate::model::ingest::normalise`], like every other named
+    /// concept — so two devices creating "Dance" independently union into one
+    /// collection rather than two, with no registry between them.
+    ///
+    /// The same trade it makes everywhere else: renaming mints a new id, which
+    /// is a repairable split rather than an unrepairable merge.
+    pub fn of_name(name: &str) -> Self {
+        Id::derived(crate::model::ingest::normalise(name).as_bytes())
+    }
+}
+
 /// Derive an id from a MusicBrainz id, for the kinds that carry one.
 macro_rules! from_musicbrainz {
     ($($ty:ty),* $(,)?) => {
