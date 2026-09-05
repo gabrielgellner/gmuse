@@ -29,6 +29,18 @@ pub fn device() -> Id<Device> {
 /// hand, and every one of these literals was already written — so this is the
 /// old shape crossing into the new one, in one place, rather than a hundred
 /// rewrites that would each be a chance to change what a test asserts.
+///
+/// **It is wider than anything needs** (#116). Ten modules use it and six
+/// fields carry them: `path`, `album`, `artist`, `title`, `duration` and
+/// `tracknumber`, between 15 and 27 uses each. The other thirteen are used
+/// nought to five times, and exist because mirroring the whole of `Track` made
+/// the migration one edit.
+///
+/// Not a fake, though: `held` goes through `ingest` and the real fold, so a
+/// fixture cannot assert a row the library could not produce. What it is is
+/// tag-shaped, and every module using it is asking a *row* question — which is
+/// a small mismatch repeated a hundred times. Worth narrowing to a builder
+/// over the six, a module at a time, when a module is being touched anyway.
 #[derive(Debug, Clone, Default)]
 pub struct Tagged {
     pub path: std::path::PathBuf,
