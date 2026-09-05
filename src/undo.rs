@@ -6,13 +6,13 @@
 //! at, which is exactly the surprise `u` must not spring.
 //!
 //! A whole snapshot rather than an inverse operation. A playlist is tens or
-//! hundreds of `TrackId`s — four bytes each — so storing the *state* costs
+//! hundreds of `CopyId`s — four bytes each — so storing the *state* costs
 //! almost nothing and cannot get the inverse wrong, which a hand-written
 //! "undo an insert by deleting at index n" eventually does.
 
 use std::collections::HashMap;
 
-use crate::store::TrackId;
+use crate::model::rows::CopyId;
 
 /// How many steps a list remembers. vim's `undolevels` defaults to 1000; a
 /// playlist is edited by hand at human speed, so far fewer is plenty and it
@@ -31,7 +31,7 @@ pub enum Key {
 /// A list as it was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    pub entries: Vec<TrackId>,
+    pub entries: Vec<CopyId>,
     /// Restored with the entries, so undo puts the cursor back where the edit
     /// happened rather than wherever it drifted to.
     pub selected: usize,
@@ -96,7 +96,10 @@ mod tests {
 
     fn snap(ids: &[u32], selected: usize) -> Snapshot {
         Snapshot {
-            entries: ids.iter().map(|n| crate::store::row_of_test(*n)).collect(),
+            entries: ids
+                .iter()
+                .map(|n| crate::model::rows::row_of_test(*n))
+                .collect(),
             selected,
         }
     }

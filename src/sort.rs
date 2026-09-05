@@ -25,9 +25,9 @@ use crate::filter::Env;
 use crate::format::{Field, Kind};
 use crate::model::entity::Recording;
 use crate::model::id::Id;
+use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
 use crate::shelf::sort_key;
-use crate::store::TrackId;
 
 /// What one sort key looks at.
 ///
@@ -188,10 +188,10 @@ impl Sort {
     /// Ties are broken by path, so the result is a total order and does not
     /// wobble between runs — `sort = "artist"` over an album has to give the
     /// same list twice.
-    pub fn apply(&self, ids: &mut [TrackId], rows: &dyn Listing, env: SortEnv<'_>) {
+    pub fn apply(&self, ids: &mut [CopyId], rows: &dyn Listing, env: SortEnv<'_>) {
         // Decorate-sort-undecorate: the comparator runs O(n log n) times and
         // building a lowercase key inside it would allocate on every one.
-        let mut decorated: Vec<(Vec<Cell>, String, TrackId)> = ids
+        let mut decorated: Vec<(Vec<Cell>, String, CopyId)> = ids
             .iter()
             .map(|id| {
                 let subject = rows.subject(*id);
@@ -278,7 +278,7 @@ fn listened_of<'a>(
     Some((listened, recording))
 }
 
-fn cell(key: Key, id: TrackId, t: &crate::model::rows::Subject<'_>, env: &SortEnv<'_>) -> Cell {
+fn cell(key: Key, id: CopyId, t: &crate::model::rows::Subject<'_>, env: &SortEnv<'_>) -> Cell {
     match key {
         Key::Field(f) => match f.kind() {
             // Case-folded, and with a leading article moved aside for the
@@ -343,12 +343,13 @@ fn mix(id: u64, seed: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixture::Tagged as Track;
     use crate::model::log::Catalogue;
-    use crate::store::{Scan, Track};
+    use crate::scan::Holdings as Scan;
     use std::path::PathBuf;
     use std::time::Duration;
 
-    fn store() -> Scan {
+    fn store() -> crate::model::seam::Librarian {
         let mut s = Scan::new();
         // Track numbers either side of ten: the case foobar2000's
         // format-pattern sorting gets wrong without `$num()` padding.
@@ -363,6 +364,12 @@ mod tests {
             s.upsert(Track {
                 path: PathBuf::from(path),
                 artist: Some(artist.into()),
+                // **An album, because a track number is a position on one.**
+                // The model attaches a position to a medium of a release, so a
+                // file with no album has no track number to sort by — which is
+                // right, and which these fixtures used to hide by reading the
+                // tag straight off a `Track` (#86).
+                album: Some("An Album".into()),
                 title: Some(title.into()),
                 tracknumber: Some(track),
                 duration: Duration::from_secs(100),
@@ -376,35 +383,35 @@ mod tests {
             });
         }
         // Untagged, so every key is missing for it.
-        s.upsert(crate::store::heard(Track {
+        s.upsert(Track {
             path: PathBuf::from("/m/z_orphan.mp3"),
             duration: Duration::from_secs(100),
             ..Default::default()
-        }));
-        s
+        });
+        crate::fixture::from_holdings(&s)
     }
 
-    fn ids(s: &Scan) -> Vec<TrackId> {
-        s.iter().map(|(id, _)| id).collect()
+    fn ids(l: &crate::model::seam::Librarian) -> Vec<CopyId> {
+        Listing::rows(l)
     }
 
     /// The recording a test path is, so a fact can name it.
-    fn rec_of(s: &Scan, path: &str) -> Id<Recording> {
-        let id = s.id_for_path(&PathBuf::from(path)).expect("a known track");
-        s.recording_of(id).expect("with an identity")
+    fn rec_of(l: &crate::model::seam::Librarian, path: &str) -> Id<Recording> {
+        let id = Listing::at(l, path).expect("a known track");
+        Listing::recording_of(l, id).expect("with an identity")
     }
 
-    fn acquired(cat: &mut Catalogue, s: &Scan, path: &str, at: i64) {
+    fn acquired(cat: &mut Catalogue, s: &crate::model::seam::Librarian, path: &str, at: i64) {
         cat.acquired.insert(rec_of(s, path), at);
     }
 
-    fn played(cat: &mut Catalogue, s: &Scan, path: &str, at: i64) {
+    fn played(cat: &mut Catalogue, s: &crate::model::seam::Librarian, path: &str, at: i64) {
         let r = rec_of(s, path);
         *cat.plays.entry(r).or_insert(0) += 1;
         cat.last_played.insert(r, at);
     }
 
-    fn rated(cat: &mut Catalogue, s: &Scan, path: &str, stars: u8) {
+    fn rated(cat: &mut Catalogue, s: &crate::model::seam::Librarian, path: &str, stars: u8) {
         cat.ratings.insert(rec_of(s, path), stars);
     }
 
@@ -420,14 +427,13 @@ mod tests {
     }
 
     /// The order as file names, which is short enough to assert on directly.
-    fn order(sort: &str, s: &Scan, e: SortEnv<'_>) -> Vec<String> {
+    /// The order as file names, which is short enough to assert on directly.
+    fn order(sort: &str, s: &crate::model::seam::Librarian, e: SortEnv<'_>) -> Vec<String> {
         let mut v = ids(s);
         Sort::parse(sort).expect("parses").apply(&mut v, s, e);
         v.iter()
             .map(|id| {
-                s.get(*id)
-                    .unwrap()
-                    .path
+                std::path::Path::new(Listing::playable(s, *id).expect("held here").locator)
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
@@ -534,12 +540,13 @@ mod tests {
         // puts it either side of "Yes".
         let mut s = Scan::new();
         for (path, artist) in [("/m/z.mp3", "The Zombies"), ("/m/y.mp3", "Yes")] {
-            s.upsert(crate::store::heard(Track {
+            s.upsert(Track {
                 path: PathBuf::from(path),
                 artist: Some(artist.into()),
                 ..Default::default()
-            }));
+            });
         }
+        let s = crate::fixture::from_holdings(&s);
         let h = Catalogue::default();
 
         let mut e = env(&h);
@@ -556,12 +563,13 @@ mod tests {
     fn smart_artist_sort_does_not_touch_album_titles() {
         let mut s = Scan::new();
         for (path, album) in [("/m/w.mp3", "The Wall"), ("/m/u.mp3", "Ummagumma")] {
-            s.upsert(crate::store::heard(Track {
+            s.upsert(Track {
                 path: PathBuf::from(path),
                 album: Some(album.into()),
                 ..Default::default()
-            }));
+            });
         }
+        let s = crate::fixture::from_holdings(&s);
         let h = Catalogue::default();
         let mut e = env(&h);
         e.smart_artist_sort = true;
@@ -608,13 +616,14 @@ mod tests {
             ("/m/2.mp3", "A", 9),
             ("/m/3.mp3", "B", 1),
         ] {
-            s.upsert(crate::store::heard(Track {
+            s.upsert(Track {
                 path: PathBuf::from(path),
                 album: Some(album.into()),
                 tracknumber: Some(track),
                 ..Default::default()
-            }));
+            });
         }
+        let s = crate::fixture::from_holdings(&s);
         let h = Catalogue::default();
         assert_eq!(
             order("album, track", &s, env(&h)),
@@ -628,12 +637,13 @@ mod tests {
     fn a_total_tie_is_still_deterministic() {
         let mut s = Scan::new();
         for path in ["/m/c.mp3", "/m/a.mp3", "/m/b.mp3"] {
-            s.upsert(crate::store::heard(Track {
+            s.upsert(Track {
                 path: PathBuf::from(path),
                 album: Some("One".into()),
                 ..Default::default()
-            }));
+            });
         }
+        let s = crate::fixture::from_holdings(&s);
         let h = Catalogue::default();
         assert_eq!(order("album", &s, env(&h)), ["a.mp3", "b.mp3", "c.mp3"]);
     }

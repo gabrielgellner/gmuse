@@ -29,12 +29,12 @@ use crate::cmd::{
 };
 use crate::model::entity::Encoding;
 use crate::model::id::Id;
+use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
 use crate::model::spine::Recording;
 use crate::next::{self, ActiveSource, Playback, Source};
 use crate::playlist::{Playlist, Queue};
 use crate::shelf::Shelf;
-use crate::store::TrackId;
 use tree::{Pane, TreeState};
 
 /// The five views M4 covers. cmus numbers them, and so do we — the digits are
@@ -265,7 +265,7 @@ pub struct Ui {
     /// One register, unnamed. vim has named and numbered ones too; whether
     /// they earn their surface when the "text" is tracks is a question best
     /// answered by missing them.
-    pub register: Vec<TrackId>,
+    pub register: Vec<CopyId>,
     /// The last search, for `n` and `N`.
     pub last_search: Option<(String, SearchDir)>,
     /// What is highlighted: the pattern in force, from `/` or the last search.
@@ -340,7 +340,7 @@ pub struct Ui {
     /// playhead reaches it. It is not `playback.current` yet — the listener is
     /// still hearing the track before it — but the pool has already moved on,
     /// so this is where the answer lives in between.
-    pending_next: Option<TrackId>,
+    pending_next: Option<CopyId>,
     /// Cursor in view 6, the catalog list.
     pub catalog_sel: usize,
     /// Which guide is open, and how far down it we are.
@@ -396,7 +396,7 @@ pub struct Ui {
     /// Which track the remote snapshot last carried a clone of.
     ///
     /// So the clone happens when the track changes rather than on every tick.
-    remote_track: Option<crate::store::TrackId>,
+    remote_track: Option<crate::model::rows::CopyId>,
     /// The transport panel's headline (#34).
     pub transport_line: crate::format::Template,
     /// How a track row is written in the library tree.
@@ -655,7 +655,7 @@ impl Ui {
     }
 
     /// The track the cursor is on in the current view, if any.
-    pub fn selected_track(&self, _ctx: &Context<'_>) -> Option<TrackId> {
+    pub fn selected_track(&self, _ctx: &Context<'_>) -> Option<CopyId> {
         match self.view {
             // The row itself when it is a track, and otherwise the first
             // track underneath — so `x` on a closed album plays it from the
@@ -1116,11 +1116,11 @@ pub fn save_session(ui: &mut Ui, ctx: &Context<'_>) {
 
 /// Capture where we are, for [`crate::session`].
 ///
-/// Paths rather than `TrackId`s — see the note on `Session::queue`.
+/// Paths rather than `CopyId`s — see the note on `Session::queue`.
 pub fn capture_session(ui: &Ui, ctx: &Context<'_>) -> crate::session::Session {
     // **Identities, not paths** (#112). A recording id survives a rename, a
     // move, and being carried to another machine; a path survives none of
-    // those, and it was only ever here because a `TrackId` is an arena index
+    // those, and it was only ever here because a `CopyId` is an arena index
     // that does not outlive its cache.
     crate::session::Session {
         version: 0, // stamped by `save`
@@ -1306,7 +1306,7 @@ fn db_label(gain: f32) -> String {
 fn source_for(
     ui: &Ui,
     ctx: &Context<'_>,
-    id: TrackId,
+    id: CopyId,
 ) -> Option<(crate::audio::TrackSource, Option<Id<Encoding>>)> {
     let files: &dyn Listing = ctx.library;
 
@@ -1353,7 +1353,7 @@ fn source_for(
 /// Built once rather than asked per row: it is a walk of the store either way,
 /// and a session naming a hundred queued recordings would otherwise walk it a
 /// hundred times.
-fn holdings_here(ctx: &Context<'_>) -> std::collections::HashMap<Id<Recording>, TrackId> {
+fn holdings_here(ctx: &Context<'_>) -> std::collections::HashMap<Id<Recording>, CopyId> {
     let rows: &dyn Listing = ctx.library;
     rows.rows()
         .into_iter()
@@ -1363,10 +1363,10 @@ fn holdings_here(ctx: &Context<'_>) -> std::collections::HashMap<Id<Recording>, 
 
 /// Which recording a file holds, **as the model has it**.
 ///
-/// Deliberately not the scanner's own `recording_of`, which mints from the
-/// tags and knows nothing of a relink — after identifying 377 files it returns
-/// the id they used to have.
-fn recording_of(ctx: &Context<'_>, id: TrackId) -> Option<Id<Recording>> {
+/// There used to be a second answer — the scanner's, minted from the tags,
+/// which knows nothing of a relink and after identifying 377 files returns the
+/// id they used to have. There is one now (#86), and this is a name for it.
+fn recording_of(ctx: &Context<'_>, id: CopyId) -> Option<Id<Recording>> {
     let rows: &dyn Listing = ctx.library;
     rows.recording_of(id)
 }
@@ -1418,7 +1418,7 @@ fn next_input(ui: &Ui) -> next::NextInput<'_> {
     }
 }
 
-fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
+fn play(ui: &mut Ui, ctx: &Context<'_>, id: CopyId) {
     // The locator is produced here and used immediately. Nothing above this
     // line holds one, which is what stops anything being keyed by a path.
     let Some((source, encoding)) = source_for(ui, ctx, id) else {
@@ -2260,7 +2260,7 @@ const UP_NEXT: usize = 200;
 /// Costs nothing new: shuffle is a seeded permutation, so `next()` already
 /// materialises the whole play order on every call and keeps one element. This
 /// reads the rest of it.
-fn up_next(ui: &Ui, ctx: &Context<'_>) -> Vec<(crate::store::TrackId, crate::next::Upcoming)> {
+fn up_next(ui: &Ui, ctx: &Context<'_>) -> Vec<(crate::model::rows::CopyId, crate::next::Upcoming)> {
     let _ = ctx;
     crate::next::upcoming(&next_input(ui), UP_NEXT)
 }
@@ -2558,7 +2558,7 @@ fn step_history(ui: &mut Ui, ctx: &Context<'_>, back: bool) {
 }
 
 /// The rows `n` from the cursor covers, in whichever list is focused.
-fn rows_at_cursor(ui: &Ui, n: usize) -> Vec<TrackId> {
+fn rows_at_cursor(ui: &Ui, n: usize) -> Vec<CopyId> {
     let (entries, at) = match ui.view {
         View::Playlist if ui.playlist_pane == Pane::Tracks => {
             (ui.playlist.entries().to_vec(), ui.playlist_sel)
@@ -2601,7 +2601,7 @@ fn put_rows(ui: &mut Ui, ctx: &Context<'_>, before: bool, times: usize) {
         ui.notify("the register is empty — `yy` or `dd` fills it");
         return;
     }
-    let rows: Vec<TrackId> = ui
+    let rows: Vec<CopyId> = ui
         .register
         .iter()
         .cycle()
@@ -2827,7 +2827,7 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
 /// caller's to supply — which is what lets them stop knowing where rows come
 /// from (#86). Built here rather than taken as an iterator so a smart
 /// playlist and a catalog see the same list.
-fn all_rows(ctx: &Context<'_>) -> Vec<TrackId> {
+fn all_rows(ctx: &Context<'_>) -> Vec<CopyId> {
     let rows: &dyn Listing = ctx.library;
     rows.rows()
 }
@@ -2968,7 +2968,7 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
 
 /// `a`/`y`/`e`: put the selection somewhere.
 fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
-    let ids: Vec<crate::store::TrackId> = match ui.view {
+    let ids: Vec<crate::model::rows::CopyId> = match ui.view {
         // From the tree, add everything the cursor covers — an album or an
         // artist — which is the whole point of adding from a tree.
         View::Tree => ui.tree.tracks_for(&ui.library),
@@ -3027,7 +3027,7 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
 /// Returns a **track** index, which is what every flat view's cursor counts.
 fn flat_step(ui: &Ui, ctx: &Context<'_>, motion: Motion, count: usize) -> Option<usize> {
     let owned;
-    let ids: &[crate::store::TrackId] = match ui.view {
+    let ids: &[crate::model::rows::CopyId] = match ui.view {
         View::Sorted => ui.library.sorted(),
         View::Playlist if ui.playlist_pane == Pane::Tracks => ui.playlist.entries(),
         View::Queue => {
@@ -3252,7 +3252,7 @@ fn run_search(ui: &mut Ui, ctx: &Context<'_>, pattern: &str, dir: SearchDir) {
 /// per row instead of once per row per keystroke.
 fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
     let rows: &dyn Listing = ctx.library;
-    let describe = |id: &crate::store::TrackId| {
+    let describe = |id: &crate::model::rows::CopyId| {
         rows.listed(*id)
             .map(|r| {
                 crate::text::Haystack::of(&format!("{} {} {}", r.file_under, r.album, r.title))
@@ -4260,7 +4260,7 @@ struct TrackList<'a> {
     /// than looked up, because one function draws view 2, view 3's right pane
     /// and the queue, and they scroll independently.
     scroll: &'a Scroll,
-    ids: &'a [crate::store::TrackId],
+    ids: &'a [crate::model::rows::CopyId],
     /// A **track** index, not a screen row.
     selected: usize,
     title: &'a str,
@@ -4390,7 +4390,8 @@ fn highlight(theme: &theme::Theme, focused: bool) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Scan, Track};
+    use crate::fixture::Tagged as Track;
+    use crate::scan::Holdings as Scan;
     use ratatui::backend::TestBackend;
     use std::time::{Duration, Instant};
 
@@ -4685,7 +4686,7 @@ mod tests {
 
     /// A `Ui` over the whole fixture library.
     fn ui_of(store: &Scan, smart: bool) -> Ui {
-        Ui::new(Shelf::rebuild(store, smart))
+        Ui::new(Shelf::rebuild(lib_of(store), smart))
     }
 
     #[test]
@@ -5004,7 +5005,7 @@ mod tests {
             .playlist
             .entries()
             .iter()
-            .map(|id| store.get(*id).unwrap().title.as_deref().unwrap())
+            .map(|id| Listing::listed(lib_of(&store), *id).unwrap().title)
             .collect();
         assert_eq!(titles, ["Antelope", "Zebra"], "sorted by title");
     }
@@ -5261,7 +5262,7 @@ mod tests {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, dir) = ui_with_saved(&store, "save-open");
-        let ids: Vec<_> = store.iter().map(|(id, _)| id).collect();
+        let ids: Vec<_> = Listing::rows(lib_of(&store));
         ui.playlist.push(ids[2]);
         ui.playlist.push(ids[0]);
 
@@ -5316,7 +5317,7 @@ mod tests {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, dir) = ui_with_saved(&store, "missing");
-        let known = store.iter().next().unwrap().1.path.display().to_string();
+        let known = store.iter().next().unwrap().at.display().to_string();
         std::fs::create_dir_all(dir.join("playlists")).unwrap();
         std::fs::write(
             dir.join("playlists/partial.m3u8"),
@@ -5632,7 +5633,7 @@ mod tests {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "view8-refresh");
-        ui.playlist.push(store.iter().next().unwrap().0);
+        ui.playlist.push(Listing::rows(lib_of(&store))[0]);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 3");
@@ -5690,7 +5691,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "dd");
         new_playlist(&mut ui, &ctx, "mix");
-        for (id, _) in store.iter() {
+        for id in Listing::rows(lib_of(&store)) {
             ui.playlist.push(id);
         }
         let all = ui.playlist.len();
@@ -5713,7 +5714,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, dir) = ui_with_saved(&store, "capital-d");
         new_playlist(&mut ui, &ctx, "mix");
-        for (id, _) in store.iter() {
+        for id in Listing::rows(lib_of(&store)) {
             ui.playlist.push(id);
         }
         assert!(ui.playlist.len() >= 3, "the fixture needs three tracks");
@@ -5737,7 +5738,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "dd-overrun");
         new_playlist(&mut ui, &ctx, "mix");
-        ui.playlist.push(store.iter().next().unwrap().0);
+        ui.playlist.push(Listing::rows(lib_of(&store))[0]);
 
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
@@ -5891,7 +5892,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "swap");
         new_playlist(&mut ui, &ctx, "mix");
-        for (id, _) in store.iter() {
+        for id in Listing::rows(lib_of(&store)) {
             ui.playlist.push(id);
         }
         let before = ui.playlist.entries().to_vec();
@@ -5916,7 +5917,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "put-before");
         new_playlist(&mut ui, &ctx, "mix");
-        let ids: Vec<_> = store.iter().map(|(id, _)| id).collect();
+        let ids: Vec<_> = Listing::rows(lib_of(&store));
         ui.playlist.push(ids[0]);
         ui.playlist.push(ids[1]);
 
@@ -5936,7 +5937,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "counts");
         new_playlist(&mut ui, &ctx, "mix");
-        for (id, _) in store.iter() {
+        for id in Listing::rows(lib_of(&store)) {
             ui.playlist.push(id);
         }
         let all = ui.playlist.len();
@@ -5957,7 +5958,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, dir) = ui_with_saved(&store, "put-write");
         new_playlist(&mut ui, &ctx, "mix");
-        ui.register = vec![store.iter().next().unwrap().0];
+        ui.register = vec![Listing::rows(lib_of(&store))[0]];
 
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
@@ -5987,7 +5988,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "put-rule");
         open_playlist(&mut ui, &ctx, "electronic");
-        ui.register = vec![store.iter().next().unwrap().0];
+        ui.register = vec![Listing::rows(lib_of(&store))[0]];
 
         press(&mut ui, &ctx, "p");
         assert!(ui.status.contains(":freeze"), "{}", ui.status);
@@ -6000,7 +6001,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, dir) = ui_with_saved(&store, "undo-basic");
         new_playlist(&mut ui, &ctx, "mix");
-        for (id, _) in store.iter() {
+        for id in Listing::rows(lib_of(&store)) {
             ui.playlist.push(id);
         }
         let original = ui.playlist.entries().to_vec();
@@ -6030,7 +6031,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "undo-redo");
         new_playlist(&mut ui, &ctx, "mix");
-        ui.playlist.push(store.iter().next().unwrap().0);
+        ui.playlist.push(Listing::rows(lib_of(&store))[0]);
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
 
@@ -6049,7 +6050,7 @@ mod tests {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "undo-per-list");
-        let ids: Vec<_> = store.iter().map(|(id, _)| id).collect();
+        let ids: Vec<_> = Listing::rows(lib_of(&store));
 
         new_playlist(&mut ui, &ctx, "one");
         ui.view = View::Sorted;
@@ -6653,7 +6654,10 @@ mod tests {
         type_line(&mut ui, &ctx, "years");
         let first = ui.sorted;
         let track = ui.library.sorted()[first];
-        assert_eq!(store.get(track).unwrap().display_title(), "Years");
+        assert_eq!(
+            Listing::listed(lib_of(&store), track).unwrap().title,
+            "Years"
+        );
 
         // `n` with a single match wraps back to it rather than losing it.
         press(&mut ui, &ctx, "n");
@@ -6791,9 +6795,10 @@ mod tests {
         let mut catalogs = Catalogs::default();
         catalogs.define("paak", vec![PathBuf::from("/m/paak")], None);
         catalogs.define("va", vec![PathBuf::from("/m/va")], None);
+        let l = lib_of(store);
         let mut ui = Ui::new(Shelf::from_members(
-            store,
-            catalogs.members(store, &Listing::rows(store), crate::filter::Env::default()),
+            l,
+            catalogs.members(l, &Listing::rows(l), crate::filter::Env::default()),
             true,
         ));
         ui.catalogs = catalogs;
@@ -6813,17 +6818,13 @@ mod tests {
             Command::Catalog(Spec::Only(vec!["paak".into()])),
         );
         assert!(ui.library.len() < everything, "library did not narrow");
-        for (_, track) in ui
+        for at in ui
             .library
             .sorted()
             .iter()
-            .filter_map(|id| store.get(*id).map(|t| (id, t)))
+            .filter_map(|id| Listing::playable(lib_of(&store), *id).map(|p| p.locator))
         {
-            assert!(
-                track.path.starts_with("/m/paak"),
-                "{:?} leaked in",
-                track.path
-            );
+            assert!(at.starts_with("/m/paak"), "{at:?} leaked in");
         }
     }
 
@@ -6848,7 +6849,7 @@ mod tests {
         for _ in 0..40 {
             advance(&mut ui, &ctx, true);
             let Some(id) = ui.playback.current else { break };
-            let path = &store.get(id).unwrap().path;
+            let path = Listing::playable(lib_of(&store), id).unwrap().locator;
             assert!(
                 path.starts_with("/m/paak"),
                 "shuffle escaped the catalog to {path:?}"
@@ -6864,10 +6865,10 @@ mod tests {
         let mut ui = catalog_ui(&store);
 
         // Queue something from the "va" catalog while "paak" is active.
-        let va = store
-            .iter()
-            .find(|(_, t)| t.path.starts_with("/m/va"))
-            .map(|(id, _)| id)
+        let l = lib_of(&store);
+        let va = Listing::rows(l)
+            .into_iter()
+            .find(|id| Listing::playable(l, *id).is_some_and(|p| p.locator.starts_with("/m/va")))
             .unwrap();
         ui.playlist.push(va);
         execute(
@@ -6892,10 +6893,10 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = catalog_ui(&store);
-        let va = store
-            .iter()
-            .find(|(_, t)| t.path.starts_with("/m/va"))
-            .map(|(id, _)| id)
+        let l = lib_of(&store);
+        let va = Listing::rows(l)
+            .into_iter()
+            .find(|id| Listing::playable(l, *id).is_some_and(|p| p.locator.starts_with("/m/va")))
             .unwrap();
         ui.queue.push_back(va);
         execute(
@@ -7371,7 +7372,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "in-count");
         new_playlist(&mut ui, &ctx, "mix");
-        for (id, _) in store.iter() {
+        for id in Listing::rows(lib_of(&store)) {
             ui.playlist.push(id);
         }
         ui.playlist_pane = Pane::Tree;
@@ -7392,7 +7393,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "in-wrapper");
         new_playlist(&mut ui, &ctx, "mix");
-        for (id, _) in store.iter() {
+        for id in Listing::rows(lib_of(&store)) {
             ui.playlist.push(id);
         }
         ui.playlist_pane = Pane::Tree;
@@ -7678,7 +7679,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        let ids: Vec<TrackId> = store.iter().map(|(id, _)| id).take(3).collect();
+        let ids: Vec<CopyId> = Listing::rows(lib_of(&store)).into_iter().take(3).collect();
         for id in &ids {
             ui.queue.push_back(*id);
         }
@@ -7713,7 +7714,7 @@ mod tests {
         let path = dir.join("session.toml");
         ui.session_path = Some(path.clone());
 
-        let id = store.iter().next().unwrap().0;
+        let id = Listing::rows(lib_of(&store))[0];
         let mut saved = saved_with(false, "all", 0);
         saved.current = Some(crate::session::Playing {
             recording: recording_of(&ctx, id).unwrap(),
@@ -7739,7 +7740,7 @@ mod tests {
     /// **A session names what it was playing, and which copy** — #112.
     ///
     /// It stored paths, which was the only durable thing to hand when a
-    /// `TrackId` was the alternative. A recording id survives a rename, a
+    /// `CopyId` was the alternative. A recording id survives a rename, a
     /// move, and being carried to another machine; a path survives none of
     /// them.
     #[test]
@@ -7747,11 +7748,10 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        let id = store.iter().next().unwrap().0;
+        let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
-        ui.playback.playing = Some(Id::<Encoding>::of_audio(
-            &store.get(id).unwrap().audio_id.unwrap(),
-        ));
+        // A row id **is** the encoding id now, so there is nothing to derive.
+        ui.playback.playing = Some(id);
         ui.queue.push_back(id);
 
         let saved = capture_session(&ui, &ctx);
@@ -7809,17 +7809,13 @@ mod tests {
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
         ui.now_playing = loaded.now_playing;
 
-        let id = store.iter().next().unwrap().0;
+        let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
-        let track = store.get(id).unwrap();
+        let row = Listing::listed(lib_of(&store), id).expect("a row");
 
         let out = render(&ui, &ctx, 120, 20);
         assert!(
-            out.contains(&format!(
-                "{} :: {}",
-                track.display_title(),
-                track.file_under()
-            )),
+            out.contains(&format!("{} :: {}", row.title, row.file_under)),
             "the configured template was not used:\n{out}"
         );
     }
@@ -7851,7 +7847,11 @@ mod tests {
         let all = ui.library.len();
         assert!(all > 2);
 
-        let first = store.iter().next().unwrap().1.artist.clone().unwrap();
+        let l = lib_of(&store);
+        let first = Listing::listed(l, Listing::rows(l)[0])
+            .and_then(|r| r.artist)
+            .expect("a credited row")
+            .to_string();
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, &format!("filter artist=\"{first}\""));
         let narrowed = ui.library.len();
@@ -7888,7 +7888,7 @@ mod tests {
         assert_eq!(ui.library.len(), 0);
     }
 
-    /// Playlists and the queue hold `TrackId`s straight into the `Scan` and
+    /// Playlists and the queue hold `CopyId`s straight into the `Scan` and
     /// must survive a filter — crossing boundaries is the point of them.
     #[test]
     fn a_filter_leaves_the_playlist_and_queue_alone() {
@@ -7896,7 +7896,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        let ids: Vec<TrackId> = store.iter().map(|(id, _)| id).take(3).collect();
+        let ids: Vec<CopyId> = Listing::rows(lib_of(&store)).into_iter().take(3).collect();
         for id in &ids {
             ui.queue.push_back(*id);
             ui.playlist.push(*id);
@@ -8055,22 +8055,31 @@ mod tests {
 
         ui.data_dir = Some(scratch("history-ui"));
 
-        let (id, track) = store.iter().next().unwrap();
-        let half = track.duration / 2;
-        let full = track.duration;
+        let l = lib_of(&store);
+        let id = Listing::rows(l)[0];
+        let row = Listing::listed(l, id).expect("a row");
+        let half = row.duration / 2;
+        let full = row.duration;
         ui.playback.current = Some(id);
 
         // Too early: a skip is not a play.
         record_play_if_earned(&mut ui, &ctx, Duration::from_secs(1));
-        assert_eq!(play_count(&ui, store.recording_of(id)), 0, "counted a skip");
+        assert_eq!(
+            play_count(&ui, Listing::recording_of(lib_of(&store), id)),
+            0,
+            "counted a skip"
+        );
 
         record_play_if_earned(&mut ui, &ctx, half);
-        assert_eq!(play_count(&ui, store.recording_of(id)), 1);
+        assert_eq!(
+            play_count(&ui, Listing::recording_of(lib_of(&store), id)),
+            1
+        );
 
         // Still playing, later in the same track: it must not count again.
         record_play_if_earned(&mut ui, &ctx, full);
         assert_eq!(
-            play_count(&ui, store.recording_of(id)),
+            play_count(&ui, Listing::recording_of(lib_of(&store), id)),
             1,
             "the same track was counted twice"
         );
@@ -8079,7 +8088,10 @@ mod tests {
         // can earn its own play.
         ui.counted_current = false;
         record_play_if_earned(&mut ui, &ctx, full);
-        assert_eq!(play_count(&ui, store.recording_of(id)), 2);
+        assert_eq!(
+            play_count(&ui, Listing::recording_of(lib_of(&store), id)),
+            2
+        );
     }
 
     /// A change is durable because a record was appended, and reading the log
@@ -8090,9 +8102,11 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "history-append");
         let dir = ui.data_dir.clone().unwrap();
-        let (id, track) = store.iter().next().unwrap();
+        let l = lib_of(&store);
+        let id = Listing::rows(l)[0];
+        let row = Listing::listed(l, id).expect("a row");
         ui.playback.current = Some(id);
-        record_play_if_earned(&mut ui, &ctx, track.duration);
+        record_play_if_earned(&mut ui, &ctx, row.duration);
 
         // The old base is never written. Nothing rewrites a whole file, which
         // is what lets two machines share a directory.
@@ -8104,7 +8118,7 @@ mod tests {
         let device = crate::model::id::Id::derived(b"test");
         let (back, damage) = crate::model::instance::Instance::open(&dir, device, 0);
         assert!(damage.is_empty());
-        let recording = store.recording_of(id).unwrap();
+        let recording = Listing::recording_of(lib_of(&store), id).unwrap();
         assert_eq!(
             back.catalogue().plays.get(&recording).copied(),
             Some(1),
@@ -8119,7 +8133,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        let (id, _) = store.iter().next().unwrap();
+        let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
         record_play_if_earned(&mut ui, &ctx, Duration::from_secs(9999));
         assert!(ui.listened.plays.is_empty());
@@ -8134,25 +8148,29 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "rename");
-        let (id, track) = store.iter().next().unwrap();
-        let moved_from = track.path.clone();
+        let l = lib_of(&store);
+        let id = Listing::rows(l)[0];
+        let moved_from =
+            std::path::PathBuf::from(Listing::playable(l, id).expect("held here").locator);
         ui.playback.current = Some(id);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 4");
-        assert_eq!(stars(&ui, store.recording_of(id)), Some(4));
+        assert_eq!(
+            stars(&ui, Listing::recording_of(lib_of(&store), id)),
+            Some(4)
+        );
 
         // The same audio, renumbered on disk — which is exactly what stranded
         // a four-star rating when history was keyed by path.
-        let mut renamed = crate::store::Scan::new();
-        let mut track = store.get(id).unwrap().clone();
-        track.path = moved_from.with_file_name("99 renumbered.mp3");
-        let after = renamed.upsert(track);
+        let mut renamed = crate::scan::Holdings::new();
+        let mut moved = store.get(&moved_from).expect("the file").clone();
+        moved.at = moved_from.with_file_name("99 renumbered.mp3");
+        renamed.insert(moved);
 
+        // **Same audio, same row.** The id is derived from the bytes, so the
+        // rename does not even produce a different one to follow.
         assert_eq!(
-            stars(
-                &ui,
-                renamed.recording_of(after.expect("the moved file has bytes"))
-            ),
+            stars(&ui, Listing::recording_of(lib_of(&renamed), id)),
             Some(4),
             "the rating did not follow the audio across a rename"
         );
@@ -8201,7 +8219,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "playing");
 
-        let ids: Vec<TrackId> = store.iter().map(|(id, _)| id).collect();
+        let ids: Vec<CopyId> = Listing::rows(lib_of(&store));
         let (playing, selected) = (ids[0], ids[1]);
         ui.playback.current = Some(playing);
         ui.view = View::Sorted;
@@ -8215,9 +8233,12 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 5");
 
-        assert_eq!(stars(&ui, store.recording_of(playing)), Some(5));
+        assert_eq!(
+            stars(&ui, Listing::recording_of(lib_of(&store), playing)),
+            Some(5)
+        );
         assert!(
-            stars(&ui, store.recording_of(selected)).is_none(),
+            stars(&ui, Listing::recording_of(lib_of(&store), selected)).is_none(),
             "it rated the selection instead of what was playing"
         );
     }
@@ -8236,7 +8257,10 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 3");
-        assert_eq!(stars(&ui, store.recording_of(under_cursor)), Some(3));
+        assert_eq!(
+            stars(&ui, Listing::recording_of(lib_of(&store), under_cursor)),
+            Some(3)
+        );
     }
 
     /// A rating is written straight away — it is a judgement, and losing it to
@@ -8247,7 +8271,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "rating-saved");
         let dir = ui.data_dir.clone().unwrap();
-        let id = store.iter().next().unwrap().0;
+        let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
 
         press(&mut ui, &ctx, ":");
@@ -8255,7 +8279,7 @@ mod tests {
 
         let device = crate::model::id::Id::derived(b"test");
         let (back, _) = crate::model::instance::Instance::open(&dir, device, 0);
-        let recording = store.recording_of(id).unwrap();
+        let recording = Listing::recording_of(lib_of(&store), id).unwrap();
         assert_eq!(back.catalogue().ratings.get(&recording).copied(), Some(4));
     }
 
@@ -8267,7 +8291,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "rating-cleared");
         let dir = ui.data_dir.clone().unwrap();
-        let id = store.iter().next().unwrap().0;
+        let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
 
         press(&mut ui, &ctx, ":");
@@ -8277,7 +8301,7 @@ mod tests {
 
         let device = crate::model::id::Id::derived(b"test");
         let (back, _) = crate::model::instance::Instance::open(&dir, device, 0);
-        let recording = store.recording_of(id).unwrap();
+        let recording = Listing::recording_of(lib_of(&store), id).unwrap();
         assert_eq!(
             back.catalogue().ratings.get(&recording).copied(),
             None,
@@ -8298,9 +8322,11 @@ mod tests {
         use crate::model::log::{Fact, Record};
 
         let store = fixture();
-        let id = store.iter().next().unwrap().0;
-        let audio = store.get(id).unwrap().audio_id.unwrap();
-        let encoding = crate::model::id::Id::<Encoding>::of_audio(&audio);
+        let l = lib_of(&store);
+        let id = Listing::rows(l)[0];
+        let audio = l.encodings.encodings[&id].audio;
+        // A row id **is** the encoding id (#86).
+        let encoding = id;
         let was = crate::model::id::Id::<Recording>::of_basis(&Basis::Audio(audio));
         let now = crate::model::id::Id::<Recording>::of_basis(&Basis::MusicBrainz(
             uuid::Uuid::from_u128(0xca11),
@@ -8362,17 +8388,20 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "clear");
-        let id = store.iter().next().unwrap().0;
+        let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 4");
-        assert_eq!(stars(&ui, store.recording_of(id)), Some(4));
+        assert_eq!(
+            stars(&ui, Listing::recording_of(lib_of(&store), id)),
+            Some(4)
+        );
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate 0");
         assert_eq!(
-            stars(&ui, store.recording_of(id)),
+            stars(&ui, Listing::recording_of(lib_of(&store), id)),
             Some(4),
             "`rate 0` should have been refused, not silently cleared"
         );
@@ -8380,7 +8409,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "rate none");
-        assert_eq!(stars(&ui, store.recording_of(id)), None);
+        assert_eq!(stars(&ui, Listing::recording_of(lib_of(&store), id)), None);
     }
 
     /// A bare `:rate` reports rather than changing anything.
@@ -8389,7 +8418,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "report");
-        let id = store.iter().next().unwrap().0;
+        let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
 
         press(&mut ui, &ctx, ":");
@@ -8402,7 +8431,7 @@ mod tests {
         type_line(&mut ui, &ctx, "rate");
         assert!(ui.status.contains("2/5"), "{:?}", ui.status);
         assert_eq!(
-            stars(&ui, store.recording_of(id)),
+            stars(&ui, Listing::recording_of(lib_of(&store), id)),
             Some(2),
             "reporting changed the rating"
         );
@@ -8999,7 +9028,10 @@ mod tests {
         // Cursor elsewhere, so the mark cannot be the selection highlight.
         ui.sorted = 0;
 
-        let title = store.get(playing).unwrap().display_title().to_string();
+        let title = Listing::listed(lib_of(&store), playing)
+            .unwrap()
+            .title
+            .to_string();
         let rows = rows_with_bold(&ui, &ctx, 90, 20);
         let row = rows
             .iter()
@@ -9054,7 +9086,10 @@ mod tests {
         ui.playback.current = Some(playing);
         ui.view = View::Playlist;
 
-        let title = store.get(playing).unwrap().display_title().to_string();
+        let title = Listing::listed(lib_of(&store), playing)
+            .unwrap()
+            .title
+            .to_string();
         let rows = rows_with_bold(&ui, &ctx, 90, 12);
         let row = rows
             .iter()
@@ -9098,15 +9133,17 @@ mod tests {
         ui.view = View::Sorted;
 
         let playing = ui.library.sorted()[1];
-        let title = store.get(playing).unwrap().display_title().to_string();
+        let title = Listing::listed(lib_of(&store), playing)
+            .unwrap()
+            .title
+            .to_string();
         ui.playback.current = Some(playing);
 
         // Cursor elsewhere: ordinary selection colour on that other row.
         ui.sorted = 0;
-        let other = store
-            .get(ui.library.sorted()[0])
-            .unwrap()
-            .display_title()
+        let other = Listing::listed(lib_of(&store), ui.library.sorted()[0])
+            .expect("a row")
+            .title
             .to_string();
         let (fg, bg) = cursor_row_colours(&ui, &ctx, &other);
         assert_eq!(fg, Color::Magenta, "the normal selection changed");
@@ -9127,16 +9164,15 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "dim-pane");
         new_playlist(&mut ui, &ctx, "mix");
-        for (id, _) in store.iter() {
+        for id in Listing::rows(lib_of(&store)) {
             ui.playlist.push(id);
         }
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tree;
 
-        let title = store
-            .get(ui.playlist.entries()[0])
-            .unwrap()
-            .display_title()
+        let title = Listing::listed(lib_of(&store), ui.playlist.entries()[0])
+            .expect("a row")
+            .title
             .to_string();
         let (fg, _) = cursor_row_colours(&ui, &ctx, &title);
         assert_ne!(fg, Color::Green, "an unfocused pane looked focused");
@@ -9147,7 +9183,7 @@ mod tests {
     fn tall_fixture(n: usize) -> Scan {
         let mut store = Scan::new();
         for i in 0..n {
-            store.upsert(crate::store::heard(Track {
+            store.upsert(Track {
                 path: PathBuf::from(format!("/m/tall/{i:03}.mp3")),
                 artist: Some("Tall".into()),
                 album: Some("Album".into()),
@@ -9155,7 +9191,7 @@ mod tests {
                 tracknumber: Some(i as u32 + 1),
                 duration: Duration::from_secs(100),
                 ..Default::default()
-            }));
+            });
         }
         store
     }
@@ -9253,7 +9289,7 @@ mod tests {
     /// two tracks to say what it means.
     fn marked_fixture() -> Scan {
         let mut store = Scan::new();
-        store.upsert(crate::store::heard(Track {
+        store.upsert(Track {
             path: PathBuf::from("/m/loffler/01.mp3"),
             artist: Some("Christian Löffler".into()),
             album: Some("A Life ⧸ Young Alaska".into()),
@@ -9261,8 +9297,8 @@ mod tests {
             tracknumber: Some(1),
             duration: Duration::from_secs(267),
             ..Default::default()
-        }));
-        store.upsert(crate::store::heard(Track {
+        });
+        store.upsert(Track {
             path: PathBuf::from("/m/aaa/01.mp3"),
             artist: Some("Aaa Ordinary".into()),
             album: Some("Plain".into()),
@@ -9270,7 +9306,7 @@ mod tests {
             tracknumber: Some(1),
             duration: Duration::from_secs(100),
             ..Default::default()
-        }));
+        });
         store
     }
 
@@ -9289,7 +9325,7 @@ mod tests {
             type_line(&mut ui, &ctx, typed);
 
             let landed = ui.library.sorted()[ui.sorted];
-            let artist = store.get(landed).map(|t| t.file_under().to_string());
+            let artist = Listing::listed(lib_of(&store), landed).map(|r| r.file_under.to_string());
             assert_eq!(
                 artist.as_deref(),
                 Some("Christian Löffler"),
@@ -9313,7 +9349,7 @@ mod tests {
 
         let landed = ui.library.sorted()[ui.sorted];
         assert_eq!(
-            store.get(landed).and_then(|t| t.album.clone()).as_deref(),
+            Listing::listed(lib_of(&store), landed).and_then(|r| r.tagged_album),
             Some("A Life ⧸ Young Alaska")
         );
     }
@@ -9338,7 +9374,7 @@ mod tests {
         let mut store = Scan::new();
         for i in 0..n {
             for t in 1..=2u32 {
-                store.upsert(crate::store::heard(Track {
+                store.upsert(Track {
                     path: PathBuf::from(format!("/m/{i:03}/{t}.mp3")),
                     artist: Some(format!("Artist {i:03}")),
                     album: Some(format!("Album {i:03}")),
@@ -9346,7 +9382,7 @@ mod tests {
                     tracknumber: Some(t),
                     duration: Duration::from_secs(100),
                     ..Default::default()
-                }));
+                });
             }
         }
         store
@@ -10665,10 +10701,9 @@ mod tests {
         ui.view = View::Sorted;
         ui.sorted = 0;
 
+        let l = lib_of(&store);
         let album_of = |ui: &Ui| {
-            store
-                .get(ui.library.sorted()[ui.sorted])
-                .and_then(|t| t.album.clone())
+            Listing::listed(l, ui.library.sorted()[ui.sorted]).map(|r| r.album.to_string())
         };
         let first = album_of(&ui);
 
@@ -10691,9 +10726,8 @@ mod tests {
         ui.sorted = 0;
 
         let artist_of = |ui: &Ui| {
-            store
-                .get(ui.library.sorted()[ui.sorted])
-                .map(|t| t.file_under().to_string())
+            Listing::listed(lib_of(&store), ui.library.sorted()[ui.sorted])
+                .map(|r| r.file_under.to_string())
         };
         let first = artist_of(&ui);
         press(&mut ui, &ctx, "] ]");
@@ -10741,9 +10775,8 @@ mod tests {
         ui.sorted = 0;
 
         let album_of = |ui: &Ui| {
-            store
-                .get(ui.library.sorted()[ui.sorted])
-                .and_then(|t| t.album.clone())
+            Listing::listed(lib_of(&store), ui.library.sorted()[ui.sorted])
+                .map(|r| r.album.to_string())
         };
 
         press(&mut ui, &ctx, "] z");
@@ -10789,7 +10822,7 @@ mod tests {
             ("/m/a4.mp3", "Anna", "Second", "four", 2),
             ("/m/b1.mp3", "Bruno", "Third", "five", 1),
         ] {
-            store.upsert(crate::store::heard(Track {
+            store.upsert(Track {
                 path: PathBuf::from(path),
                 artist: Some(artist.into()),
                 album: Some(album.into()),
@@ -10797,7 +10830,7 @@ mod tests {
                 tracknumber: Some(n),
                 duration: Duration::from_secs(100),
                 ..Default::default()
-            }));
+            });
         }
         store
     }
@@ -10812,9 +10845,8 @@ mod tests {
         ui.view = View::Sorted;
 
         let artist_of = |ui: &Ui| {
-            store
-                .get(ui.library.sorted()[ui.sorted])
-                .map(|t| t.file_under().to_string())
+            Listing::listed(lib_of(&store), ui.library.sorted()[ui.sorted])
+                .map(|r| r.file_under.to_string())
         };
 
         ui.sorted = 0;

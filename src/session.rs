@@ -75,7 +75,7 @@ pub struct Session {
     pub version: u32,
     /// **Identities.**
     ///
-    /// It held paths, for a good reason that has been overtaken: a `TrackId`
+    /// It held paths, for a good reason that has been overtaken: a `CopyId`
     /// is an arena index, only meaningful while the cache that produced it
     /// survives, so a queue keyed by one would silently restore *other
     /// tracks*. A path was the only durable thing to hand.

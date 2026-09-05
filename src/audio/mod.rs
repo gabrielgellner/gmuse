@@ -87,7 +87,7 @@ impl TrackSource {
     /// state that `--repl` and a bare file argument created is gone with them.
     ///
     /// The decoder's own tests still want it, and may have it: this layer sits
-    /// *below* the store and is deliberately ignorant of `TrackId`. A path and
+    /// *below* the store and is deliberately ignorant of `CopyId`. A path and
     /// a gain is the whole of what it needs, which is why testing it does not
     /// require a library.
     #[cfg(test)]

@@ -12,8 +12,8 @@
 //! `G` and the relative gutter all work over it uniformly, which is the point.
 
 use crate::cmd::Motion;
+use crate::model::rows::CopyId;
 use crate::shelf::{Shelf, SortKey};
-use crate::store::TrackId;
 use crate::ui::fold::Expansion;
 
 /// One visible line.
@@ -35,7 +35,7 @@ pub enum Row {
     Track {
         artist: SortKey,
         album: SortKey,
-        id: TrackId,
+        id: CopyId,
     },
 }
 
@@ -157,7 +157,7 @@ impl TreeState {
 
     /// Every track under the selected row: one track, one album, or everything
     /// by an artist. What `a` and `e` add, and what `x` plays the first of.
-    pub fn tracks_for(&self, lib: &Shelf) -> Vec<TrackId> {
+    pub fn tracks_for(&self, lib: &Shelf) -> Vec<CopyId> {
         let rows = self.rows(lib);
         let Some(row) = rows.get(self.selected) else {
             return Vec::new();
@@ -179,7 +179,7 @@ impl TreeState {
     }
 
     /// The track on the selected row, if it is one.
-    pub fn selected_track(&self, lib: &Shelf) -> Option<TrackId> {
+    pub fn selected_track(&self, lib: &Shelf) -> Option<CopyId> {
         match self.rows(lib).get(self.selected) {
             Some(Row::Track { id, .. }) => Some(*id),
             _ => None,
@@ -439,7 +439,7 @@ impl TreeState {
     ///
     /// Nothing else is disturbed — the point is to find the playing track
     /// without losing the shape you had built up looking for it.
-    pub fn reveal(&mut self, lib: &Shelf, id: TrackId) -> bool {
+    pub fn reveal(&mut self, lib: &Shelf, id: CopyId) -> bool {
         let Some((artist, album)) = lib.artists().find_map(|(artist, albums)| {
             albums
                 .iter()
@@ -466,7 +466,7 @@ impl TreeState {
     /// What identifies a row across a fold change: a track by its id, a
     /// container by its path. Not the `Row` itself — that carries whether it is
     /// expanded, which is precisely what a fold change alters.
-    fn mark_of(row: &Row) -> (Vec<SortKey>, Option<TrackId>) {
+    fn mark_of(row: &Row) -> (Vec<SortKey>, Option<CopyId>) {
         match row {
             Row::Track { id, .. } => (Self::seat_of(row), Some(*id)),
             _ => (Self::seat_of(row), None),
@@ -556,20 +556,20 @@ impl TreeState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Scan;
-    use crate::store::Track;
+    use crate::fixture::Tagged as Track;
+    use crate::scan::Holdings as Scan;
     use std::path::PathBuf;
 
     fn store_with(rows: &[(&str, &str, &str, &str)]) -> Scan {
         let mut s = Scan::new();
         for (path, artist, album, title) in rows {
-            s.upsert(crate::store::heard(Track {
+            s.upsert(Track {
                 path: PathBuf::from(path),
                 artist: Some((*artist).into()),
                 album: Some((*album).into()),
                 title: Some((*title).into()),
                 ..Default::default()
-            }));
+            });
         }
         s
     }
@@ -581,7 +581,7 @@ mod tests {
             ("/m/b3.mp3", "Burial", "Burial", "Night Bus"),
             ("/m/o1.mp3", "Mr. Oizo", "The Church", "Ham"),
         ]);
-        let lib = Shelf::rebuild(&store, true);
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&store), true);
         (store, lib)
     }
 
@@ -1078,7 +1078,7 @@ mod tests {
             ("/m/b/1.mp3", "Bruno", "Third", "six"),
             ("/m/c/1.mp3", "Cleo", "Fourth", "seven"),
         ]);
-        let lib = Shelf::rebuild(&store, true);
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&store), true);
         (store, lib)
     }
 

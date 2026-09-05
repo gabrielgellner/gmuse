@@ -20,6 +20,8 @@ mod config;
 mod datadir;
 mod events;
 mod filter;
+#[cfg(test)]
+mod fixture;
 mod format;
 mod guides;
 mod history;
@@ -35,7 +37,6 @@ mod session;
 mod shelf;
 mod smart;
 mod sort;
-mod store;
 mod text;
 mod ui;
 mod undo;
@@ -46,13 +47,13 @@ use clap::Parser;
 
 use audio::PlayerHandle;
 use cli::Cli;
+use scan::Holdings;
 use shelf::Shelf;
-use store::Scan;
 
 /// Everything the prompt operates on.
 struct App {
     player: PlayerHandle,
-    store: Scan,
+    store: Holdings,
     roots: Vec<PathBuf>,
     cache_path: Option<PathBuf>,
     catalogs: catalog::Catalogs,
@@ -166,13 +167,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Costs a rescan, so say so. Silently starting from nothing is how
             // a library appears to vanish.
             eprintln!("cache: discarded (wrong version or corrupt); rescanning");
-            (Scan::new(), Vec::new(), None)
+            (Holdings::new(), Vec::new(), None)
         }
         Some(Err(e)) => {
             eprintln!("cache: {e}");
-            (Scan::new(), Vec::new(), None)
+            (Holdings::new(), Vec::new(), None)
         }
-        _ => (Scan::new(), Vec::new(), None),
+        _ => (Holdings::new(), Vec::new(), None),
     };
     // Catalogs come from the config; `--library` roots join an implicit
     // "default" catalog so a user who configures none sees no change.
@@ -223,7 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !app.roots.is_empty() && (args.rescan || first_run) {
         if args.rescan {
             // Forget mtimes so every file is re-read.
-            app.store = Scan::new();
+            app.store = Holdings::new();
         }
         let roots = app.roots.clone();
         let report = scan::scan(&mut app.store, &roots);

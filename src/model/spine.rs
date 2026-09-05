@@ -54,6 +54,25 @@ pub struct PartialDate {
     pub day: Option<u8>,
 }
 
+/// The first four-digit run in a messy date, if there is one.
+fn four_digit_year(text: &str) -> Option<i16> {
+    let bytes = text.as_bytes();
+    let mut run = 0usize;
+    for (at, b) in bytes.iter().enumerate() {
+        if b.is_ascii_digit() {
+            run += 1;
+        } else {
+            if run == 4 {
+                return text[at - 4..at].parse().ok();
+            }
+            run = 0;
+        }
+    }
+    (run == 4)
+        .then(|| text[text.len() - 4..].parse().ok())
+        .flatten()
+}
+
 impl PartialDate {
     /// Read a date as tags write it: `1995`, `1996-03`, `1996-03-16`.
     ///
@@ -63,9 +82,22 @@ impl PartialDate {
     /// asserted. Anything after the year that will not parse is dropped rather
     /// than failing the whole date — a malformed month is worth less than the
     /// year beside it.
+    /// **And a messy date still gives up its year** (#86). Sleeves carry
+    /// `(1997)` and `recorded 2016 live`, and the store's own reader took the
+    /// first four-digit run out of both. That reader is gone and this is the
+    /// only one left, so it has to be at least as forgiving or those files
+    /// silently lose their year.
     pub fn parse(text: &str) -> Option<Self> {
         let mut parts = text.trim().split(['-', '/', '.']);
-        let year = parts.next()?.trim().parse::<i16>().ok()?;
+        let head = parts.next()?.trim();
+        let year = match head.parse::<i16>() {
+            // **Four digits, or it is not a year.** `97` parses perfectly well
+            // as ninety-seven and means nothing anybody can place.
+            Ok(y) if head.len() == 4 => y,
+            // Otherwise the first run of exactly four digits, if there is
+            // one — which is what pulls a year out of `(1997)`.
+            _ => four_digit_year(text)?,
+        };
         let month = parts
             .next()
             .and_then(|m| m.trim().parse::<u8>().ok())
@@ -77,6 +109,10 @@ impl PartialDate {
         Some(PartialDate { year, month, day })
     }
 
+    #[allow(
+        dead_code,
+        reason = "the store's own date reader was its caller (#86); fixtures use it, and it is the honest constructor for a sleeve that names only a year"
+    )]
     pub const fn year(year: i16) -> Self {
         PartialDate {
             year,
@@ -690,5 +726,56 @@ mod tests {
         let back: Spine = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(back.recordings, s.recordings);
         assert_eq!(back.tracks, s.tracks);
+    }
+}
+
+#[cfg(test)]
+mod dates {
+    use super::*;
+
+    /// A date as tags write it, which is three shapes and not one.
+    #[test]
+    fn a_partial_date_keeps_what_it_was_given() {
+        assert_eq!(PartialDate::parse("1995"), Some(PartialDate::year(1995)));
+        assert_eq!(
+            PartialDate::parse("1996-03"),
+            Some(PartialDate {
+                year: 1996,
+                month: Some(3),
+                day: None
+            })
+        );
+        assert_eq!(
+            PartialDate::parse("1996-03-16"),
+            Some(PartialDate {
+                year: 1996,
+                month: Some(3),
+                day: Some(16)
+            })
+        );
+    }
+
+    /// **A messy date still gives up its year** (#86).
+    ///
+    /// The store had its own reader and it was the lenient one; sleeves carry
+    /// these. Deleting it without carrying the leniency across would have made
+    /// those files silently lose their year, which is the kind of loss nobody
+    /// reports because there is nothing to see.
+    #[test]
+    fn a_year_is_found_inside_a_messy_date() {
+        assert_eq!(PartialDate::parse("(1997)").map(|d| d.year), Some(1997));
+        assert_eq!(
+            PartialDate::parse("recorded 2016 live").map(|d| d.year),
+            Some(2016)
+        );
+        assert_eq!(PartialDate::parse("1997/03/21").map(|d| d.year), Some(1997));
+    }
+
+    /// And what is not a year is absent rather than guessed.
+    #[test]
+    fn two_digits_is_not_a_year_anyone_can_place() {
+        assert_eq!(PartialDate::parse("97"), None);
+        assert_eq!(PartialDate::parse(""), None);
+        assert_eq!(PartialDate::parse("unknown"), None);
     }
 }

@@ -23,9 +23,9 @@
 //! inherits that rather than being a special case.
 
 use crate::filter::Filter;
+use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
 use crate::sort::{Sort, SortEnv};
-use crate::store::TrackId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SmartPlaylist {
@@ -43,9 +43,9 @@ impl SmartPlaylist {
     /// with the history behind it — a rule mentioning `play_count` has to
     /// answer differently after you play something, and a materialised list
     /// would need invalidating from every corner of the app instead.
-    pub fn members(&self, rows: &dyn Listing, all: &[TrackId], env: SortEnv<'_>) -> Vec<TrackId> {
+    pub fn members(&self, rows: &dyn Listing, all: &[CopyId], env: SortEnv<'_>) -> Vec<CopyId> {
         let matches = self.filter.compile(env.env);
-        let mut ids: Vec<TrackId> = all
+        let mut ids: Vec<CopyId> = all
             .iter()
             .copied()
             .filter(|id| rows.subject(*id).is_some_and(|s| matches(&s)))
@@ -97,13 +97,15 @@ impl SmartPlaylists {
 mod tests {
     use super::*;
     use crate::filter::Env;
+    use crate::fixture::Tagged as Track;
     use crate::model::rows::Listing;
+    use crate::scan::Holdings as Scan;
     use crate::sort::Sort;
-    use crate::store::{Scan, Track};
     use std::path::PathBuf;
     use std::time::Duration;
 
-    fn store() -> Scan {
+    /// A library of three files, folded the way a launch would.
+    fn store() -> crate::model::seam::Librarian {
         let mut s = Scan::new();
         for (n, (path, artist, genre, year)) in [
             ("/m/General/a.mp3", "Abba", "pop", 1976),
@@ -116,6 +118,9 @@ mod tests {
             s.upsert(Track {
                 path: PathBuf::from(path),
                 artist: Some(artist.into()),
+                // A year is a fact about a *pressing*, so a file needs an
+                // album for one to have anywhere to live (#86).
+                album: Some(format!("{artist} Album")),
                 title: Some(artist.into()),
                 genres: vec![genre.into()],
                 date: Some(year),
@@ -128,7 +133,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        s
+        crate::fixture::from_holdings(&s)
     }
 
     /// The library's answers about listening, built by hand.
@@ -140,9 +145,14 @@ mod tests {
     }
 
     /// Note a play against whatever recording `path` is, the way the log would.
-    fn played(cat: &mut crate::model::log::Catalogue, s: &Scan, path: &str, at: i64) {
-        let id = s.id_for_path(&PathBuf::from(path)).expect("a known track");
-        let recording = s.recording_of(id).expect("with an identity");
+    fn played(
+        cat: &mut crate::model::log::Catalogue,
+        l: &crate::model::seam::Librarian,
+        path: &str,
+        at: i64,
+    ) {
+        let id = Listing::at(l, path).expect("a known track");
+        let recording = Listing::recording_of(l, id).expect("with an identity");
         *cat.plays.entry(recording).or_insert(0) += 1;
         cat.last_played.insert(recording, at);
     }
@@ -168,10 +178,16 @@ mod tests {
         set.get("p").unwrap().clone()
     }
 
-    fn names(p: &SmartPlaylist, s: &Scan, e: SortEnv<'_>) -> Vec<String> {
-        p.members(s, &Listing::rows(s), e)
+    fn names(p: &SmartPlaylist, l: &crate::model::seam::Librarian, e: SortEnv<'_>) -> Vec<String> {
+        p.members(l, &Listing::rows(l), e)
             .iter()
-            .map(|id| s.get(*id).unwrap().artist.clone().unwrap())
+            .map(|id| {
+                Listing::listed(l, *id)
+                    .expect("a row")
+                    .artist
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect()
     }
 
@@ -202,7 +218,12 @@ mod tests {
         let paths: Vec<String> = p
             .members(&s, &Listing::rows(&s), env(&h))
             .iter()
-            .map(|id| s.get(*id).unwrap().path.display().to_string())
+            .map(|id| {
+                Listing::playable(&s, *id)
+                    .expect("held here")
+                    .locator
+                    .to_string()
+            })
             .collect();
         assert_eq!(paths, ["/m/General/b.mp3", "/m/Dance/c.mp3"]);
     }

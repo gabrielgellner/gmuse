@@ -1,4 +1,4 @@
-//! Persisting the `Scan` between runs.
+//! Persisting what a scan found, between runs.
 //!
 //! postcard, because the cache is a private format read only by the version of
 //! gmuse that wrote it. There is no compatibility story: a format change bumps
@@ -11,17 +11,17 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store::Scan;
+use crate::scan::Holdings;
 
-/// Bump on any change to `Track`, `Scan`, or this envelope.
-const FORMAT_VERSION: u32 = 7;
+/// Bump on any change to `Held`, `Holdings`, `Scanned`, or this envelope.
+const FORMAT_VERSION: u32 = 8;
 const MAGIC: &[u8; 5] = b"gmuse";
 
 #[derive(Serialize, Deserialize)]
 struct Envelope {
     version: u32,
     roots: Vec<PathBuf>,
-    store: Scan,
+    store: Holdings,
     /// Which catalogs were active. Persisted so a choice survives a restart;
     /// the *definitions* come from the config, not from here.
     #[serde(default)]
@@ -58,7 +58,7 @@ pub enum Outcome {
     /// they should be told, rather than silently starting from nothing.
     Discarded,
     Loaded {
-        store: Scan,
+        store: Holdings,
         roots: Vec<PathBuf>,
         active: crate::catalog::Active,
     },
@@ -79,14 +79,12 @@ pub fn load(path: &Path) -> Result<Outcome, CacheError> {
 
     match postcard::from_bytes::<Envelope>(&bytes[MAGIC.len()..]) {
         Ok(env) if env.version == FORMAT_VERSION => Ok(Outcome::Loaded {
-            store: {
-                // The path index is derived and deliberately not stored, so
-                // that a `TrackId` cannot be serialised at all. Rebuilding it
-                // here is the price, and it is one pass.
-                let mut store = env.store;
-                store.reindex();
-                store
-            },
+            // **Nothing to rebuild.** There were two derived indices to
+            // restore here — a path index and an id index — and neither was
+            // stored, so that an arena handle could not be serialised at all.
+            // A holding is keyed by its path and a row by its bytes, so what
+            // comes off disk is already what is wanted (#86).
+            store: env.store,
             roots: env.roots,
             active: env.active,
         }),
@@ -101,7 +99,7 @@ pub fn load(path: &Path) -> Result<Outcome, CacheError> {
 /// previous cache intact rather than a truncated one.
 pub fn save(
     path: &Path,
-    store: &Scan,
+    store: &Holdings,
     roots: &[PathBuf],
     active: &crate::catalog::Active,
 ) -> Result<(), CacheError> {
@@ -112,7 +110,7 @@ pub fn save(
     let envelope = Envelope {
         version: FORMAT_VERSION,
         roots: roots.to_vec(),
-        store: Scan::clone_for_save(store),
+        store: store.clone(),
         active: active.clone(),
     };
 
@@ -130,27 +128,31 @@ pub fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Track;
-    use std::time::Duration;
+    use crate::model::instance::Scanned;
+    use crate::scan::Held;
 
-    fn sample_store() -> Scan {
-        let mut s = Scan::new();
-        s.upsert(crate::store::heard(Track {
-            path: PathBuf::from("/m/a.mp3"),
-            artist: Some("Burial".into()),
-            album: Some("Burial (S-T)".into()),
-            title: Some("Night Bus".into()),
-            tracknumber: Some(5),
-            duration: Duration::from_secs(154),
-            mtime: 42,
-            ..Default::default()
-        }));
-        s.upsert(crate::store::heard(Track {
-            path: PathBuf::from("/m/b.opus"),
-            title: Some("Years".into()),
-            mtime: 43,
-            ..Default::default()
-        }));
+    fn held(at: &str, title: &str, artist: &str, mtime: i64, audio: u128) -> Held {
+        Held {
+            at: PathBuf::from(at),
+            mtime,
+            size: 4_000_000,
+            seen: Scanned {
+                audio: crate::audio_id::AudioId {
+                    scheme: 1,
+                    hash: audio,
+                },
+                title: title.into(),
+                artist: artist.into(),
+                length_ms: 154_000,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn sample_store() -> Holdings {
+        let mut s = Holdings::new();
+        s.insert(held("/m/a.mp3", "Night Bus", "Burial", 42, 1));
+        s.insert(held("/m/b.opus", "Years", "", 43, 2));
         s
     }
 
@@ -174,60 +176,59 @@ mod tests {
         };
         assert_eq!(loaded_roots, roots);
         assert_eq!(loaded.len(), 2);
-        let id = loaded.id_for_path(Path::new("/m/a.mp3")).unwrap();
-        let t = loaded.get(id).unwrap();
-        assert_eq!(t.artist.as_deref(), Some("Burial"));
-        assert_eq!(t.duration, Duration::from_secs(154));
-        assert_eq!(t.mtime, 42);
+        let back = loaded
+            .get(Path::new("/m/a.mp3"))
+            .expect("the file came back");
+        assert_eq!(back.seen.artist, "Burial");
+        assert_eq!(back.seen.title, "Night Bus");
+        assert_eq!(back.mtime, 42, "and what a rescan needs to skip it");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **A file that is not a row of its own still has to come back.**
+    /// **Two paths holding identical bytes both have to come back.**
     ///
-    /// Two paths holding identical bytes are one row (#86), so a save that
-    /// walks *rows* writes one of them and silently drops the other. The next
-    /// scan then reports the dropped path as an arrival and — if it is the
-    /// one the id happens to point at — the other as gone.
-    ///
-    /// The real library has one such pair, which is exactly the number that
-    /// makes this the kind of bug nobody notices.
+    /// They are one encoding and therefore one row, and a cache that wrote
+    /// rows rather than files would keep one of them — so the next scan would
+    /// report the other as an arrival. Holdings are keyed by path for exactly
+    /// this reason (#86).
     #[test]
     fn both_copies_of_a_duplicated_file_survive_a_restart() {
         let dir = std::env::temp_dir().join("gmuse-cache-test-dupe");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("library.postcard");
 
-        let same = crate::audio_id::AudioId { scheme: 1, hash: 7 };
-        let mut store = Scan::new();
-        for at in [
+        let mut store = Holdings::new();
+        store.insert(held(
             "/m/13 This Is How It Goes Down.mp3",
+            "It Goes Down",
+            "P!nk",
+            1,
+            7,
+        ));
+        store.insert(held(
             "/m/13 This Is How It Goes Down (1).mp3",
-        ] {
-            store.upsert(Track {
-                path: PathBuf::from(at),
-                title: Some("This Is How It Goes Down".into()),
-                audio_id: Some(same),
-                ..Default::default()
-            });
-        }
-        assert_eq!(store.len(), 1, "one encoding, one row");
+            "It Goes Down",
+            "P!nk",
+            1,
+            7,
+        ));
+        assert_eq!(store.len(), 2, "two files");
 
         save(&path, &store, &[], &crate::catalog::Active::All).unwrap();
         let Outcome::Loaded { store: back, .. } = load(&path).unwrap() else {
             panic!("should have loaded")
         };
 
-        assert_eq!(back.len(), 1, "still one row");
+        assert_eq!(back.len(), 2, "and two files back");
         assert!(
-            back.id_for_path(Path::new("/m/13 This Is How It Goes Down.mp3"))
-                .is_some(),
-            "the first copy came back"
+            back.get(Path::new("/m/13 This Is How It Goes Down.mp3"))
+                .is_some()
         );
         assert!(
-            back.id_for_path(Path::new("/m/13 This Is How It Goes Down (1).mp3"))
+            back.get(Path::new("/m/13 This Is How It Goes Down (1).mp3"))
                 .is_some(),
-            "and so did the second, which is the half a row-walk loses"
+            "the second copy is the half a row-keyed cache loses"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -285,25 +286,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A removed file is gone, and there is nothing to compact.**
+    ///
+    /// This used to assert that tombstones did not survive a save. Tombstones
+    /// existed to keep an arena index valid within a session; holdings are a
+    /// map keyed by path, so removing one removes it (#86).
     #[test]
-    fn tombstones_do_not_survive_a_save() {
-        let dir = std::env::temp_dir().join("gmuse-cache-test-tomb");
+    fn a_removed_file_does_not_come_back() {
+        let dir = std::env::temp_dir().join("gmuse-cache-test-gone");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("library.postcard");
 
         let mut store = sample_store();
-        store.remove_path(Path::new("/m/a.mp3"));
+        store.remove(Path::new("/m/a.mp3"));
         save(&path, &store, &[], &crate::catalog::Active::All).unwrap();
 
         let Outcome::Loaded { store: loaded, .. } = load(&path).unwrap() else {
             panic!("should have loaded")
         };
         assert_eq!(loaded.len(), 1);
-        assert_eq!(
-            loaded.tombstones(),
-            0,
-            "tombstones should be compacted away"
-        );
+        assert!(loaded.get(Path::new("/m/a.mp3")).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

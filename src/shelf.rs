@@ -7,18 +7,18 @@
 //!
 //! Named for the vocabulary the rest of the model speaks — catalogue, spine,
 //! holdings, imprint — and deliberately not `view`, which #92 is about to
-//! give a precise meaning over the model rather than over `TrackId`s.
+//! give a precise meaning over the model rather than over `CopyId`s.
 //!
 //! Views 1 and 2 share membership and differ only in shape: view 1 is an
 //! artist → album → tracks tree, view 2 the same tracks as one sorted list.
 //! Both are rebuilt from the `Scan`, never mutated in place, which is what
-//! makes `TrackId` indices worth having.
+//! makes `CopyId` indices worth having.
 
 use std::collections::{BTreeMap, HashSet};
 
+use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
 use crate::model::seam::Librarian;
-use crate::store::TrackId;
 
 /// Re-exported so callers keep saying `shelf::SortKey`. It lives in the
 /// model now, because how a library orders its own names is a librarian
@@ -28,8 +28,8 @@ pub use crate::model::sortkey::{SortKey, sort_key};
 /// Views 1 and 2. Same membership, two shapes.
 #[derive(Debug, Default)]
 pub struct Shelf {
-    members: HashSet<TrackId>,
-    tree: BTreeMap<SortKey, BTreeMap<SortKey, Vec<TrackId>>>,
+    members: HashSet<CopyId>,
+    tree: BTreeMap<SortKey, BTreeMap<SortKey, Vec<CopyId>>>,
     /// What to *show* for each sort key.
     ///
     /// The tree is keyed by a normalised sort key — case folded, marks
@@ -40,7 +40,7 @@ pub struct Shelf {
     /// answer the simplest one.
     artist_names: BTreeMap<SortKey, String>,
     album_names: BTreeMap<(SortKey, SortKey), String>,
-    sorted: Vec<TrackId>,
+    sorted: Vec<CopyId>,
     smart_artist_sort: bool,
 }
 
@@ -60,7 +60,7 @@ impl Shelf {
     /// shuffle and `aaa_mode` without `next()` knowing catalogs exist.
     pub fn from_members(
         rows: &dyn Listing,
-        members: HashSet<TrackId>,
+        members: HashSet<CopyId>,
         smart_artist_sort: bool,
     ) -> Self {
         let mut lib = Shelf {
@@ -75,7 +75,7 @@ impl Shelf {
     /// Rebuild from what the **model** says — issue #84.
     ///
     /// The shape and every caller are unchanged: this still answers in
-    /// `TrackId`, because the player holds handles and dissolving that is a
+    /// `CopyId`, because the player holds handles and dissolving that is a
     /// separate move. What changes is where the two grouping decisions come
     /// from.
     ///
@@ -94,7 +94,7 @@ impl Shelf {
     /// identified it yet would be the worst possible moment to lose it.
     pub fn project(
         librarian: &Librarian,
-        members: HashSet<TrackId>,
+        members: HashSet<CopyId>,
         smart_artist_sort: bool,
     ) -> Self {
         let mut lib = Shelf {
@@ -110,7 +110,7 @@ impl Shelf {
         // row rather than two rows to be grouped, and the lookup below is
         // "is this copy one of ours".
         let tree = crate::model::tree::Tree::of(librarian, smart_artist_sort);
-        let mut placed: HashSet<TrackId> = HashSet::new();
+        let mut placed: HashSet<CopyId> = HashSet::new();
         for (artist_key, albums) in tree.artists() {
             for (album_key, album) in albums {
                 for listing in &album.tracks {
@@ -202,7 +202,7 @@ impl Shelf {
     }
 
     /// View 2: every track, in tree order.
-    pub fn sorted(&self) -> &[TrackId] {
+    pub fn sorted(&self) -> &[CopyId] {
         &self.sorted
     }
 
@@ -223,7 +223,7 @@ impl Shelf {
             .unwrap_or_else(|| album.as_str())
     }
 
-    pub fn artists(&self) -> impl Iterator<Item = (&SortKey, &BTreeMap<SortKey, Vec<TrackId>>)> {
+    pub fn artists(&self) -> impl Iterator<Item = (&SortKey, &BTreeMap<SortKey, Vec<CopyId>>)> {
         self.tree.iter()
     }
 
@@ -235,7 +235,7 @@ impl Shelf {
         self.tree.values().map(|a| a.len()).sum()
     }
 
-    pub fn contains(&self, id: TrackId) -> bool {
+    pub fn contains(&self, id: CopyId) -> bool {
         self.members.contains(&id)
     }
 
@@ -244,7 +244,7 @@ impl Shelf {
     /// `aaa_mode` needs this to narrow the candidate pool, and getting it from
     /// the tree rather than the `Scan` keeps `next()`'s inputs to exactly what
     /// DESIGN §5 lists.
-    pub fn locate(&self, id: TrackId) -> Option<(&SortKey, &SortKey)> {
+    pub fn locate(&self, id: CopyId) -> Option<(&SortKey, &SortKey)> {
         self.tree.iter().find_map(|(artist, albums)| {
             albums
                 .iter()
@@ -254,7 +254,7 @@ impl Shelf {
     }
 
     /// Every track by one artist, in album then disc/track order.
-    pub fn artist_tracks(&self, artist: &SortKey) -> Vec<TrackId> {
+    pub fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId> {
         self.tree
             .get(artist)
             .map(|albums| albums.values().flatten().copied().collect())
@@ -262,7 +262,7 @@ impl Shelf {
     }
 
     /// One album's tracks, in disc/track order.
-    pub fn album_tracks(&self, artist: &SortKey, album: &SortKey) -> &[TrackId] {
+    pub fn album_tracks(&self, artist: &SortKey, album: &SortKey) -> &[CopyId] {
         self.tree
             .get(artist)
             .and_then(|albums| albums.get(album))
@@ -276,14 +276,14 @@ impl Shelf {
 /// Disc first is what makes a multi-disc album read as 1-01, 1-02, … 2-01
 /// rather than interleaving the two discs' track 1s. A missing disc number
 /// sorts as disc 1, since single-disc albums usually omit it entirely.
-fn track_order(rows: &dyn Listing, a: TrackId, b: TrackId) -> std::cmp::Ordering {
+fn track_order(rows: &dyn Listing, a: CopyId, b: CopyId) -> std::cmp::Ordering {
     let (Some(ra), Some(rb)) = (rows.listed(a), rows.listed(b)) else {
         return std::cmp::Ordering::Equal;
     };
     key_of(&ra, a).cmp(&key_of(&rb, b))
 }
 
-fn key_of(r: &crate::model::rows::Listed<'_>, id: TrackId) -> (u32, u32, String, TrackId) {
+fn key_of(r: &crate::model::rows::Listed<'_>, id: CopyId) -> (u32, u32, String, CopyId) {
     (
         r.disc.unwrap_or(1),
         // Untracked tracks sort after numbered ones rather than before.
@@ -299,19 +299,20 @@ fn key_of(r: &crate::model::rows::Listed<'_>, id: TrackId) -> (u32, u32, String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Scan, Track};
+    use crate::fixture::Tagged as Track;
+    use crate::scan::Holdings as Scan;
     use std::path::PathBuf;
     use std::time::Duration;
 
     fn t(path: &str, artist: Option<&str>, album: Option<&str>, title: Option<&str>) -> Track {
-        crate::store::heard(Track {
+        Track {
             path: PathBuf::from(path),
             artist: artist.map(String::from),
             album: album.map(String::from),
             title: title.map(String::from),
             duration: Duration::from_secs(1),
             ..Default::default()
-        })
+        }
     }
 
     #[test]
@@ -343,7 +344,8 @@ mod tests {
             store.upsert(track);
         }
 
-        let lib = Shelf::rebuild(&store, true);
+        let l = crate::fixture::from_holdings(&store);
+        let lib = Shelf::rebuild(&l, true);
         // One artist, not three: the whole point of the albumartist rule.
         assert_eq!(lib.artist_count(), 1);
         assert_eq!(lib.album_count(), 1);
@@ -373,11 +375,12 @@ mod tests {
             store.upsert(track);
         }
 
-        let lib = Shelf::rebuild(&store, true);
-        let titles: Vec<&str> = lib
+        let l = crate::fixture::from_holdings(&store);
+        let lib = Shelf::rebuild(&l, true);
+        let titles: Vec<String> = lib
             .sorted()
             .iter()
-            .map(|id| store.get(*id).unwrap().display_title())
+            .map(|id| Listing::listed(&l, *id).expect("a row").title.to_string())
             .collect();
         assert_eq!(
             titles,
@@ -402,7 +405,8 @@ mod tests {
             Some("Archangel"),
         ));
 
-        let lib = Shelf::rebuild(&store, true);
+        let l = crate::fixture::from_holdings(&store);
+        let lib = Shelf::rebuild(&l, true);
         assert_eq!(lib.artist_count(), 2);
 
         let unknown = lib
@@ -410,8 +414,8 @@ mod tests {
             .find(|(k, _)| k.as_str() == "unknown artist")
             .expect("untagged track should still appear");
         let album = unknown.1.values().next().unwrap();
-        let track = store.get(album[0]).unwrap();
-        assert_eq!(track.display_title(), "mystery.mp3");
+        let row = Listing::listed(&l, album[0]).expect("a row");
+        assert_eq!(row.title, "mystery.mp3");
     }
 
     #[test]
@@ -424,11 +428,12 @@ mod tests {
         store.upsert(a);
         store.upsert(b);
 
-        let lib = Shelf::rebuild(&store, true);
-        let titles: Vec<&str> = lib
+        let l = crate::fixture::from_holdings(&store);
+        let lib = Shelf::rebuild(&l, true);
+        let titles: Vec<String> = lib
             .sorted()
             .iter()
-            .map(|id| store.get(*id).unwrap().display_title())
+            .map(|id| Listing::listed(&l, *id).expect("a row").title.to_string())
             .collect();
         assert_eq!(titles, ["number 9", "no number"]);
     }
@@ -444,12 +449,13 @@ mod tests {
             Some("a"),
         ));
 
-        let lib = Shelf::rebuild(&store, true);
+        let l = crate::fixture::from_holdings(&store);
+        let lib = Shelf::rebuild(&l, true);
         let artists: Vec<&str> = lib.artists().map(|(k, _)| k.as_str()).collect();
         assert_eq!(artists, ["aardvarks", "zebra"]);
         // Same order in the flat view.
-        let first = store.get(lib.sorted()[0]).unwrap();
-        assert_eq!(first.artist.as_deref(), Some("The Aardvarks"));
+        let first = Listing::listed(&l, lib.sorted()[0]).expect("a row");
+        assert_eq!(first.artist, Some("The Aardvarks"));
         assert_eq!(lib.sorted().len(), 2);
     }
 
@@ -487,7 +493,6 @@ mod projection {
 
     use super::*;
     use crate::model::instance::{Instance, Scanned};
-    use crate::store::{Scan, Track};
 
     fn scan(title: &str, artist: &str, album_artist: Option<&str>, album: &str) -> Scanned {
         Scanned {
@@ -506,31 +511,32 @@ mod projection {
         }
     }
 
-    fn build(scan: &[Scanned]) -> (Scan, Shelf) {
-        let mut i = Instance::new(crate::model::id::Id::derived(b"laptop"));
+    /// A library holding these files, folded the way a launch would.
+    ///
+    /// **Ingested once.** This used to fold the scan, then rebuild the same
+    /// library a second way through a `Track`-shaped copy — which silently
+    /// dropped `mb_release_group`, so the fixture could not produce the
+    /// grouping the test was about (#86).
+    fn build(scan: &[Scanned]) -> (crate::model::seam::Librarian, Shelf) {
+        let mut i = Instance::new(crate::fixture::device());
         i.ingest(100, scan);
-        let l = Librarian::from_catalogue(&i.catalogue());
+        i.assert_holdings(
+            100,
+            scan.iter()
+                .map(|s| {
+                    (
+                        crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&s.audio),
+                        format!("/m/{}-{}.mp3", s.album.as_deref().unwrap_or(""), s.title),
+                    )
+                })
+                .collect(),
+        );
+        let mut l = Librarian::from_catalogue(&i.catalogue());
+        l.here(crate::fixture::device());
 
-        let mut store = Scan::default();
-        for s in scan {
-            let mut t = Track {
-                path: std::path::PathBuf::from(format!(
-                    "/m/{}-{}.mp3",
-                    s.album.as_deref().unwrap_or(""),
-                    s.title
-                )),
-                ..Default::default()
-            };
-            t.artist = Some(s.artist.clone());
-            t.albumartist = s.album_artist.clone();
-            t.album = s.album.clone();
-            t.title = Some(s.title.clone());
-            t.audio_id = Some(s.audio);
-            store.upsert(t);
-        }
-        let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
+        let members: HashSet<CopyId> = Listing::rows(&l).into_iter().collect();
         let lib = Shelf::project(&l, members, false);
-        (store, lib)
+        (l, lib)
     }
 
     /// **Two pressings of one album are one album**, which the tags cannot
@@ -552,11 +558,26 @@ mod projection {
 
         assert_eq!(lib.album_count(), 1, "two pressings, one album");
 
-        let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
+        // **Both rows show the group's title, and neither shows its own tag.**
+        //
+        // This used to prove the point by building the tag-grouped projection
+        // beside the model-grouped one and showing two albums against one.
+        // There is no tag-grouped projection any more (#86), and there is no
+        // per-copy tag album either: a row's album *is* the release group's
+        // title, which is what #84 decided. So what is asserted is that — one
+        // title over two pressings whose sleeves disagree.
+        let shown: std::collections::BTreeSet<String> = Listing::rows(&store)
+            .iter()
+            .filter_map(|id| Listing::listed(&store, *id).map(|r| r.album.to_string()))
+            .collect();
         assert_eq!(
-            Shelf::from_members(&store, members, false).album_count(),
-            2,
-            "the tag reading has to disagree, or this test proves nothing"
+            shown.len(),
+            1,
+            "two pressings showed two album names: {shown:?}"
+        );
+        assert!(
+            shown.contains("Luna") || shown.contains("Luna (Deluxe Edition)"),
+            "and the name is one of the two the sleeves carry: {shown:?}"
         );
     }
 
@@ -583,7 +604,7 @@ mod projection {
         );
         let l = Librarian::from_catalogue(&i.catalogue());
 
-        let members: HashSet<TrackId> = crate::model::rows::Listing::rows(&l).into_iter().collect();
+        let members: HashSet<CopyId> = crate::model::rows::Listing::rows(&l).into_iter().collect();
         assert_eq!(members.len(), 1, "the scan produced a row");
 
         let lib = Shelf::project(&l, members, false);

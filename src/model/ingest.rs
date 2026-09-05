@@ -159,7 +159,13 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // Two dates, because the tags carry two and they mean different
         // things: `DATE` is this pressing, `ORIGINALDATE` the album. They
         // disagree for 820 files in this library.
-        label: Some(get(ItemKey::Label)).filter(|s| !s.is_empty()),
+        // **`Label` then `Publisher`.** ID3 puts the imprint in `TPUB`, which
+        // lofty calls `Publisher`; Vorbis and MP4 use `LABEL`. Reading only
+        // the second missed it on every MP3 — 30 rows in this library — which
+        // the store's own reader had right and this one had not (#86).
+        label: Some(get(ItemKey::Label))
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some(get(ItemKey::Publisher)).filter(|s| !s.is_empty())),
         genres: crate::scan::split_genres(Some(&get(ItemKey::Genre))),
         levels: crate::model::encoding::Levels {
             track_cdb: cdb(&get(ItemKey::ReplayGainTrackGain)),
@@ -699,5 +705,42 @@ mod external_tests {
     fn a_link_that_is_not_a_video_yields_nothing() {
         assert_eq!(youtube("https://www.youtube.com/@WesternAF"), None);
         assert_eq!(beatport("nothing here"), None);
+    }
+}
+
+#[cfg(test)]
+mod cleaning {
+    //! **The two readers became one** (#86), and these tests came with the
+    //! helpers. They lived beside `scan::read_track`, which is gone: there is
+    //! one tag reader now rather than two that could disagree about what a
+    //! `-7.53 dB` or an embedded NUL means.
+
+    use super::*;
+
+    #[test]
+    fn replaygain_units_are_stripped() {
+        assert_eq!(cdb("-7.53 dB"), Some(-753));
+        assert_eq!(cdb("  +2.10dB "), Some(210));
+        assert_eq!(cdb("0.00"), Some(0));
+        assert_eq!(cdb("loud"), None, "unparseable is absent, not nought");
+    }
+
+    #[test]
+    fn a_peak_is_linear_and_never_negative() {
+        assert_eq!(peak_e4("0.9885"), Some(9885));
+        assert_eq!(peak_e4("1.0"), Some(10_000));
+        assert_eq!(peak_e4("-0.5"), None, "a negative peak is not a peak");
+    }
+
+    /// Embedded NULs are common in ID3v2 and render as blanks.
+    #[test]
+    fn a_blank_field_is_absent_rather_than_empty() {
+        assert_eq!(
+            some(Some("  Burial ".to_string())),
+            Some("Burial".to_string())
+        );
+        assert_eq!(some(Some(String::new())), None);
+        assert_eq!(some(Some("   ".to_string())), None);
+        assert_eq!(some(None), None);
     }
 }

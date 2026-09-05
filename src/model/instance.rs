@@ -36,7 +36,7 @@ use crate::model::vocabulary::GenreOn;
 /// The boundary between reading files and cataloguing them. #70 fills this
 /// from real tags; the round trip fills it directly, because tag parsing is not
 /// one of the risky decisions this slice exists to test.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Scanned {
     pub audio: AudioId,
     pub title: String,

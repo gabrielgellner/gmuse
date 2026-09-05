@@ -10,8 +10,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
 use super::theme::{Role, Theme};
+use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
-use crate::store::TrackId;
 
 /// One drawn line.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,7 +19,7 @@ pub enum Row {
     /// An album divider. Never addressable: motions skip it and numbering
     /// excludes it.
     Header(String),
-    Track(TrackId),
+    Track(CopyId),
 }
 
 /// The track indices a divider would be drawn above — where a new album
@@ -28,16 +28,16 @@ pub enum Row {
 /// Derived from the same key [`rows`] uses, rather than recomputed, so that
 /// `{` and `}` land exactly on the boundaries the eye can see. A list with no
 /// dividers still has boundaries; `rows` only suppresses drawing them.
-pub fn album_starts(lib: &dyn Listing, ids: &[TrackId]) -> Vec<usize> {
+pub fn album_starts(lib: &dyn Listing, ids: &[CopyId]) -> Vec<usize> {
     boundaries(lib, ids, false)
 }
 
 /// The same for artists, which is what `[[` and `]]` step by.
-pub fn artist_starts(lib: &dyn Listing, ids: &[TrackId]) -> Vec<usize> {
+pub fn artist_starts(lib: &dyn Listing, ids: &[CopyId]) -> Vec<usize> {
     boundaries(lib, ids, true)
 }
 
-fn boundaries(lib: &dyn Listing, ids: &[TrackId], artist_only: bool) -> Vec<usize> {
+fn boundaries(lib: &dyn Listing, ids: &[CopyId], artist_only: bool) -> Vec<usize> {
     let mut out = Vec::new();
     let mut last: Option<(&str, &str, Option<u32>)> = None;
     for (at, id) in ids.iter().enumerate() {
@@ -66,7 +66,7 @@ fn boundaries(lib: &dyn Listing, ids: &[TrackId], artist_only: bool) -> Vec<usiz
 /// A list that is all one album gets no header — the pane title or the tree
 /// selection already says which album it is, and a lone divider at the top is
 /// just a wasted line.
-pub fn rows(lib: &dyn Listing, ids: &[TrackId]) -> Vec<Row> {
+pub fn rows(lib: &dyn Listing, ids: &[CopyId]) -> Vec<Row> {
     let (albums, artists) = lib.spread(ids);
     if albums < 2 {
         return ids.iter().copied().map(Row::Track).collect();
@@ -145,7 +145,7 @@ pub struct RowStyle<'a> {
     /// The track currently playing, marked wherever it appears — which may be
     /// several lists at once, since a track can be in the library, a playlist
     /// and the queue.
-    pub playing: Option<TrackId>,
+    pub playing: Option<CopyId>,
     /// The search pattern in force, so a row can paint what it matched.
     /// `None` once `<Esc>` has cleared it, as vim's `nohlsearch` does.
     pub needle: Option<&'a crate::text::Needle>,
@@ -272,30 +272,29 @@ pub fn fmt_duration(d: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Scan, Track};
+    use crate::fixture::Tagged as Track;
+    use crate::scan::Holdings as Scan;
     use std::path::PathBuf;
     use std::time::Duration;
 
-    fn store_with(rows: &[(&str, &str, Option<u32>, &str)]) -> (Scan, Vec<TrackId>) {
+    fn store_with(
+        rows: &[(&str, &str, Option<u32>, &str)],
+    ) -> (crate::model::seam::Librarian, Vec<CopyId>) {
         let mut store = Scan::new();
         let mut ids = Vec::new();
         for (i, (artist, album, disc, title)) in rows.iter().enumerate() {
-            ids.push(
-                store
-                    .upsert(crate::store::heard(Track {
-                        path: PathBuf::from(format!("/m/{i}.mp3")),
-                        artist: Some((*artist).into()),
-                        album: Some((*album).into()),
-                        title: Some((*title).into()),
-                        discnumber: *disc,
-                        tracknumber: Some(i as u32 + 1),
-                        duration: Duration::from_secs(100),
-                        ..Default::default()
-                    }))
-                    .expect("a fixture has bytes"),
-            );
+            ids.push(store.upsert(Track {
+                path: PathBuf::from(format!("/m/{i}.mp3")),
+                artist: Some((*artist).into()),
+                album: Some((*album).into()),
+                title: Some((*title).into()),
+                discnumber: *disc,
+                tracknumber: Some(i as u32 + 1),
+                duration: Duration::from_secs(100),
+                ..Default::default()
+            }));
         }
-        (store, ids)
+        (crate::fixture::from_holdings(&store), ids)
     }
 
     fn headers(rows: &[Row]) -> Vec<&str> {

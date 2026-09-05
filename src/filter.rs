@@ -781,7 +781,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Track;
+    use crate::fixture::Tagged as Track;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -806,18 +806,30 @@ mod tests {
 
     /// A subject as the player assembles one: a row, where the file is, and
     /// what history hangs off.
-    fn subject_of(t: &Track) -> Subject<'_> {
-        Subject {
-            row: t.listed(),
-            locator: t.path.to_str(),
-            recording: crate::history::recording_id_for(t.mb_recording, t.audio_id),
-        }
+    ///
+    /// The row is *drawn* — folded through the model rather than assembled
+    /// here — so a fixture cannot match against a row the library could not
+    /// produce. The `Drawn` is returned alongside because a `Subject` borrows
+    /// it and it has to outlive the comparison.
+    fn subject_of(t: &Track) -> (crate::model::rows::Drawn, Option<Id<Recording>>) {
+        use crate::model::rows::Listing;
+        let mut h = crate::scan::Holdings::new();
+        h.insert(t.held());
+        let l = crate::fixture::from_holdings(&h);
+        let id = crate::model::id::Id::of_audio(&t.held().seen.audio);
+        (t.drawn(), l.recording_of(id))
     }
 
     fn matches(expr: &str, t: &Track) -> bool {
+        let (drawn, recording) = subject_of(t);
+        let subject = Subject {
+            row: drawn.listed(),
+            locator: t.path.to_str(),
+            recording,
+        };
         Expr::parse(expr)
             .expect("should parse")
-            .compile(Env::default())(&subject_of(t))
+            .compile(Env::default())(&subject)
     }
 
     /// The label joins one vocabulary, so it filters without the filter
@@ -1088,7 +1100,12 @@ mod tests {
             listened: Some(h),
             now,
         };
-        e.compile(env)(&subject_of(t))
+        let (drawn, recording) = subject_of(t);
+        e.compile(env)(&Subject {
+            row: drawn.listed(),
+            locator: t.path.to_str(),
+            recording,
+        })
     }
 
     /// Play counts, and the query that matters most: what have I never heard?
@@ -1160,7 +1177,13 @@ mod tests {
     #[test]
     fn without_a_history_the_fields_are_missing() {
         let t = track();
-        let expr = |s: &str| Expr::parse(s).unwrap().compile(Env::default())(&subject_of(&t));
+        let (drawn, recording) = subject_of(&t);
+        let subject = Subject {
+            row: drawn.listed(),
+            locator: t.path.to_str(),
+            recording,
+        };
+        let expr = |s: &str| Expr::parse(s).unwrap().compile(Env::default())(&subject);
         assert!(!expr("play_count=0"), "cannot say is not zero");
         assert!(!expr("play_count>0"));
         assert!(!expr("days_since_added?"));

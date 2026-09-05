@@ -6,7 +6,7 @@
 //! knowledge of catalogs at all.
 //!
 //! What catalogs deliberately do **not** touch: playlists and the queue hold
-//! `TrackId`s straight into the `Scan`, so they cross catalog boundaries
+//! `CopyId`s straight into the `Scan`, so they cross catalog boundaries
 //! freely. That is the point of a playlist.
 
 use std::collections::{BTreeSet, HashSet};
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store::TrackId;
+use crate::model::rows::CopyId;
 
 /// The name used when tracks are scanned without any catalog claiming them —
 /// `--library` on the command line, or a config with no `[catalogs]` at all.
@@ -265,9 +265,9 @@ impl Catalogs {
     pub fn members(
         &self,
         rows: &dyn crate::model::rows::Listing,
-        all: &[TrackId],
+        all: &[CopyId],
         env: crate::filter::Env<'_>,
-    ) -> HashSet<TrackId> {
+    ) -> HashSet<CopyId> {
         let active: Vec<&Catalog> = match &self.active {
             Active::All => self.defined.iter().collect(),
             Active::Only(names) => self
@@ -302,22 +302,23 @@ fn under(path: &Path, root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixture::Tagged as Track;
     use crate::model::rows::Listing;
-    use crate::store::{Scan, Track};
+    use crate::scan::Holdings as Scan;
 
     fn store_with(paths: &[&str]) -> Scan {
         let mut s = Scan::new();
         for p in paths {
-            s.upsert(crate::store::heard(Track {
+            s.upsert(Track {
                 path: PathBuf::from(p),
                 ..Default::default()
-            }));
+            });
         }
         s
     }
 
     fn fixture() -> (Scan, Catalogs) {
-        let store = store_with(&[
+        let held = store_with(&[
             "/m/general/a.mp3",
             "/m/general/b.mp3",
             "/m/electronic/c.mp3",
@@ -328,26 +329,29 @@ mod tests {
         catalogs.define("general", vec![PathBuf::from("/m/general")], None);
         catalogs.define("electronic", vec![PathBuf::from("/m/electronic")], None);
         catalogs.define("classical", vec![PathBuf::from("/m/classical")], None);
-        (store, catalogs)
+        (held, catalogs)
     }
 
-    fn paths(store: &Scan, ids: &HashSet<TrackId>) -> BTreeSet<String> {
+    /// Where each of these rows is held, for readable assertions.
+    fn paths(l: &crate::model::seam::Librarian, ids: &HashSet<CopyId>) -> BTreeSet<String> {
         ids.iter()
-            .map(|id| store.get(*id).unwrap().path.display().to_string())
+            .map(|id| {
+                Listing::playable(l, *id)
+                    .expect("held here")
+                    .locator
+                    .to_string()
+            })
             .collect()
     }
 
     #[test]
     fn no_catalogs_means_every_track() {
-        let store = store_with(&["/m/a.mp3", "/m/b.mp3"]);
+        let held = store_with(&["/m/a.mp3", "/m/b.mp3"]);
+        let l = crate::fixture::from_holdings(&held);
         let catalogs = Catalogs::default();
         assert_eq!(
             catalogs
-                .members(
-                    &store,
-                    &Listing::rows(&store),
-                    crate::filter::Env::default()
-                )
+                .members(&l, &Listing::rows(&l), crate::filter::Env::default())
                 .len(),
             2
         );
@@ -357,16 +361,13 @@ mod tests {
 
     #[test]
     fn all_includes_tracks_no_catalog_claims() {
-        let (store, catalogs) = fixture();
+        let (held, catalogs) = fixture();
+        let l = crate::fixture::from_holdings(&held);
         // "/m/loose.mp3" is under no catalog root, but `all` must still show
         // it, or scanning a stray folder would make music vanish.
         assert_eq!(
             catalogs
-                .members(
-                    &store,
-                    &Listing::rows(&store),
-                    crate::filter::Env::default()
-                )
+                .members(&l, &Listing::rows(&l), crate::filter::Env::default())
                 .len(),
             5
         );
@@ -374,16 +375,13 @@ mod tests {
 
     #[test]
     fn only_one_catalog_narrows_the_library() {
-        let (store, mut catalogs) = fixture();
+        let (held, mut catalogs) = fixture();
+        let l = crate::fixture::from_holdings(&held);
         catalogs.apply(Spec::Only(vec!["general".into()])).unwrap();
         assert_eq!(
             paths(
-                &store,
-                &catalogs.members(
-                    &store,
-                    &Listing::rows(&store),
-                    crate::filter::Env::default()
-                )
+                &l,
+                &catalogs.members(&l, &Listing::rows(&l), crate::filter::Env::default())
             ),
             BTreeSet::from([
                 "/m/general/a.mp3".to_string(),
@@ -395,15 +393,12 @@ mod tests {
 
     #[test]
     fn a_subset_is_the_union() {
-        let (store, mut catalogs) = fixture();
+        let (held, mut catalogs) = fixture();
+        let l = crate::fixture::from_holdings(&held);
         catalogs
             .apply(Spec::Only(vec!["general".into(), "classical".into()]))
             .unwrap();
-        let members = catalogs.members(
-            &store,
-            &Listing::rows(&store),
-            crate::filter::Env::default(),
-        );
+        let members = catalogs.members(&l, &Listing::rows(&l), crate::filter::Env::default());
         assert_eq!(members.len(), 3);
         // Definition order, not alphabetical: the label reads the way the
         // config was written.
@@ -412,34 +407,28 @@ mod tests {
 
     #[test]
     fn adjusting_from_all_starts_from_everything() {
-        let (store, mut catalogs) = fixture();
+        let (held, mut catalogs) = fixture();
+        let l = crate::fixture::from_holdings(&held);
         // `:catalog -classical` with everything active means "all but that".
         catalogs
             .apply(Spec::Adjust(vec![(false, "classical".into())]))
             .unwrap();
-        let members = catalogs.members(
-            &store,
-            &Listing::rows(&store),
-            crate::filter::Env::default(),
-        );
-        assert!(!paths(&store, &members).contains("/m/classical/d.mp3"));
+        let members = catalogs.members(&l, &Listing::rows(&l), crate::filter::Env::default());
+        assert!(!paths(&l, &members).contains("/m/classical/d.mp3"));
         assert_eq!(members.len(), 3, "general (2) + electronic (1)");
     }
 
     #[test]
     fn adjusting_adds_and_removes() {
-        let (store, mut catalogs) = fixture();
+        let (held, mut catalogs) = fixture();
+        let l = crate::fixture::from_holdings(&held);
         catalogs.apply(Spec::Only(vec!["general".into()])).unwrap();
         catalogs
             .apply(Spec::Adjust(vec![(true, "classical".into())]))
             .unwrap();
         assert_eq!(
             catalogs
-                .members(
-                    &store,
-                    &Listing::rows(&store),
-                    crate::filter::Env::default()
-                )
+                .members(&l, &Listing::rows(&l), crate::filter::Env::default())
                 .len(),
             3
         );
@@ -448,11 +437,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             catalogs
-                .members(
-                    &store,
-                    &Listing::rows(&store),
-                    crate::filter::Env::default()
-                )
+                .members(&l, &Listing::rows(&l), crate::filter::Env::default())
                 .len(),
             1
         );
@@ -460,14 +445,11 @@ mod tests {
 
     #[test]
     fn an_unknown_name_is_an_error_and_changes_nothing() {
-        let (store, mut catalogs) = fixture();
+        let (held, mut catalogs) = fixture();
+        let l = crate::fixture::from_holdings(&held);
         catalogs.apply(Spec::Only(vec!["general".into()])).unwrap();
         let before = catalogs
-            .members(
-                &store,
-                &Listing::rows(&store),
-                crate::filter::Env::default(),
-            )
+            .members(&l, &Listing::rows(&l), crate::filter::Env::default())
             .len();
 
         let err = catalogs
@@ -476,11 +458,7 @@ mod tests {
         assert!(err.contains("nosuch"), "{err}");
         assert_eq!(
             catalogs
-                .members(
-                    &store,
-                    &Listing::rows(&store),
-                    crate::filter::Env::default()
-                )
+                .members(&l, &Listing::rows(&l), crate::filter::Env::default())
                 .len(),
             before,
             "a bad name must not half-apply"
@@ -489,15 +467,12 @@ mod tests {
 
     #[test]
     fn none_active_is_allowed_and_says_so() {
-        let (store, mut catalogs) = fixture();
+        let (held, mut catalogs) = fixture();
+        let l = crate::fixture::from_holdings(&held);
         catalogs.apply(Spec::Only(vec![])).unwrap();
         assert!(
             catalogs
-                .members(
-                    &store,
-                    &Listing::rows(&store),
-                    crate::filter::Env::default()
-                )
+                .members(&l, &Listing::rows(&l), crate::filter::Env::default())
                 .is_empty()
         );
         assert_eq!(catalogs.label().as_deref(), Some("none"));
@@ -507,18 +482,15 @@ mod tests {
     /// swept in — the reason this compares path components, not strings.
     #[test]
     fn root_matching_is_by_component_not_prefix() {
-        let store = store_with(&["/m/rock/a.mp3", "/m/rockabilly/b.mp3"]);
+        let held = store_with(&["/m/rock/a.mp3", "/m/rockabilly/b.mp3"]);
+        let l = crate::fixture::from_holdings(&held);
         let mut catalogs = Catalogs::default();
         catalogs.define("rock", vec![PathBuf::from("/m/rock")], None);
         catalogs.apply(Spec::Only(vec!["rock".into()])).unwrap();
         assert_eq!(
             paths(
-                &store,
-                &catalogs.members(
-                    &store,
-                    &Listing::rows(&store),
-                    crate::filter::Env::default()
-                )
+                &l,
+                &catalogs.members(&l, &Listing::rows(&l), crate::filter::Env::default())
             ),
             BTreeSet::from(["/m/rock/a.mp3".to_string()])
         );
@@ -547,7 +519,8 @@ mod tests {
 
     #[test]
     fn a_track_in_two_catalogs_appears_once() {
-        let store = store_with(&["/m/both/a.mp3"]);
+        let held = store_with(&["/m/both/a.mp3"]);
+        let l = crate::fixture::from_holdings(&held);
         let mut catalogs = Catalogs::default();
         catalogs.define("one", vec![PathBuf::from("/m/both")], None);
         catalogs.define("two", vec![PathBuf::from("/m")], None);
@@ -556,11 +529,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             catalogs
-                .members(
-                    &store,
-                    &Listing::rows(&store),
-                    crate::filter::Env::default()
-                )
+                .members(&l, &Listing::rows(&l), crate::filter::Env::default())
                 .len(),
             1,
             "membership is a set"

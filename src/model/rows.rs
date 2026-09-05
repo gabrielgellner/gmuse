@@ -18,10 +18,12 @@
 use crate::model::entity::Encoding;
 use crate::model::id::Id;
 
-/// The same thing `store::TrackId` aliases, named from this side.
+/// What names a row: **the copy it draws**.
 ///
-/// Written out rather than imported from `store`, because the model must not
-/// reach into the player (#77).
+/// It was `store::CopyId`, and that name outlived what it named (#86). There
+/// is no `store::Track` any more, and `spine::Track` — a position on a medium
+/// — very much still exists, so `CopyId` would read as an id for the wrong
+/// thing entirely. A row is about a *copy*, and this is its id.
 ///
 /// **It is an `Id`, not a `Handle`** (#86). It was an index into the `Scan`'s
 /// arena, which the librarian does not own and which will not exist — so a
@@ -35,7 +37,18 @@ use crate::model::id::Id;
 ///
 /// What it buys is that a row id survives a restart, which is what lets a
 /// session, a playlist and the undo stack name rows rather than paths.
-type Row = Id<Encoding>;
+pub type CopyId = Id<Encoding>;
+
+/// A row id for a fixture, deterministic and distinct per number.
+///
+/// Tests used to write `TrackId::new(3)` — an arena index, which is exactly
+/// what a row id stopped being (#86). Derived from the number so the same
+/// fixture gets the same id every run, and so a test that asserts an ordering
+/// asserts a real one.
+#[cfg(test)]
+pub fn row_of_test(n: u32) -> CopyId {
+    CopyId::derived(&n.to_le_bytes())
+}
 
 /// Where a row files, and what it is called.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,14 +241,14 @@ pub struct Subject<'a> {
 }
 
 pub trait Listing {
-    fn listed(&self, id: Row) -> Option<Listed<'_>>;
+    fn listed(&self, id: CopyId) -> Option<Listed<'_>>;
 
     /// Every row there is.
     ///
     /// "What is in the library" is a library question, and a filter or a
     /// catalog narrows a set somebody else supplies — which is what lets them
     /// stop knowing where rows come from (#86).
-    fn rows(&self) -> Vec<Row>;
+    fn rows(&self) -> Vec<CopyId>;
 
     /// The row a locator names, if this device holds one there.
     ///
@@ -247,16 +260,16 @@ pub trait Listing {
     /// `None` for a path this device does not hold. A playlist can name music
     /// that has gone, or predate the scan that would have found it, and saying
     /// so is what stops it quietly coming up short.
-    fn at(&self, locator: &str) -> Option<Row>;
+    fn at(&self, locator: &str) -> Option<CopyId>;
 
     /// Which recording this row's audio holds.
     fn recording_of(
         &self,
-        id: Row,
+        id: CopyId,
     ) -> Option<crate::model::id::Id<crate::model::entity::Recording>>;
 
     /// The three answers together, for a filter or a sort.
-    fn subject(&self, id: Row) -> Option<Subject<'_>> {
+    fn subject(&self, id: CopyId) -> Option<Subject<'_>> {
         Some(Subject {
             row: self.listed(id)?,
             locator: self.playable(id).map(|p| p.locator),
@@ -269,14 +282,14 @@ pub trait Listing {
     /// Separate from [`Listing::listed`] because they are asked at different
     /// moments and one of them must not be kept: a row is drawn now and
     /// forgotten, a locator is used immediately and never written down.
-    fn playable(&self, id: Row) -> Option<Playable<'_>>;
+    fn playable(&self, id: CopyId) -> Option<Playable<'_>>;
 
     /// How many distinct albums and artists a slice covers.
     ///
     /// Here rather than at the call site because it is the same fold every
     /// caller writes, and because an implementation that already knows may
     /// answer without walking.
-    fn spread(&self, ids: &[Row]) -> (usize, usize) {
+    fn spread(&self, ids: &[CopyId]) -> (usize, usize) {
         let mut albums: Vec<(&str, &str)> = Vec::new();
         let mut artists: Vec<&str> = Vec::new();
         for id in ids {

@@ -436,7 +436,7 @@ fn render_atoms(atoms: &[Atom], row: &crate::model::rows::Listed<'_>, out: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Track;
+    use crate::fixture::Tagged as Track;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -458,7 +458,9 @@ mod tests {
     }
 
     fn render(source: &str, track: &Track) -> String {
-        Template::parse(source).unwrap().render(&track.listed())
+        Template::parse(source)
+            .unwrap()
+            .render(&track.drawn().listed())
     }
 
     #[test]
@@ -604,8 +606,8 @@ mod tests {
         assert_eq!(render("{display_title}", &empty), "whatever.mp3");
         assert!(!render("{file_under}", &empty).is_empty());
         assert_eq!(
-            Template::default().render(&empty.listed()),
-            format!("{} — whatever.mp3", empty.file_under())
+            Template::default().render(&empty.drawn().listed()),
+            format!("{} — whatever.mp3", empty.drawn().file_under)
         );
     }
 

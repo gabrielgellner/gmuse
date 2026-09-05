@@ -13,9 +13,9 @@
 
 use crate::model::entity::Encoding;
 use crate::model::id::Id;
+use crate::model::rows::CopyId;
 use crate::playlist::{Playlist, Queue};
 use crate::shelf::Shelf;
-use crate::store::TrackId;
 
 /// Which list the player is walking through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -82,7 +82,7 @@ pub struct NextInput<'a> {
     pub active: ActiveSource,
     pub library: &'a Shelf,
     pub playlist: &'a Playlist,
-    pub current: Option<TrackId>,
+    pub current: Option<CopyId>,
     pub aaa_mode: AaaMode,
     pub shuffle: bool,
     pub repeat: bool,
@@ -95,7 +95,7 @@ pub struct NextInput<'a> {
 /// This is the signature DESIGN §5 specifies. The player itself calls
 /// [`next_with_source`], because it needs to know whether to pop the queue.
 #[allow(dead_code)]
-pub fn next(input: NextInput<'_>) -> Option<TrackId> {
+pub fn next(input: NextInput<'_>) -> Option<CopyId> {
     next_with_source(input).map(|(id, _)| id)
 }
 
@@ -109,7 +109,7 @@ pub fn next(input: NextInput<'_>) -> Option<TrackId> {
 ///    library cursor, which is why `current` is left alone here.
 /// 3. Otherwise, the successor within the pool.
 /// 4. Pool exhausted: wrap if `repeat`, else stop.
-pub fn next_with_source(input: NextInput<'_>) -> Option<(TrackId, Source)> {
+pub fn next_with_source(input: NextInput<'_>) -> Option<(CopyId, Source)> {
     if input.repeat_current
         && let Some(current) = input.current
     {
@@ -149,7 +149,7 @@ pub enum Upcoming {
 /// rather than as a queue that has been promised.
 ///
 /// Stops at `limit`, because `repeat` makes the real answer infinite.
-pub fn upcoming(input: &NextInput<'_>, limit: usize) -> Vec<(TrackId, Upcoming)> {
+pub fn upcoming(input: &NextInput<'_>, limit: usize) -> Vec<(CopyId, Upcoming)> {
     let mut out = Vec::with_capacity(limit);
     if input.repeat_current {
         // Nothing else is coming: the current track holds until the setting
@@ -205,7 +205,7 @@ pub fn upcoming(input: &NextInput<'_>, limit: usize) -> Vec<(TrackId, Upcoming)>
 ///
 /// The queue is deliberately ignored: it is consumed as it plays, and there is
 /// nothing sensible to un-pop.
-pub fn prev(input: NextInput<'_>) -> Option<TrackId> {
+pub fn prev(input: NextInput<'_>) -> Option<CopyId> {
     if input.repeat_current
         && let Some(current) = input.current
     {
@@ -220,7 +220,7 @@ enum Direction {
     Backward,
 }
 
-fn step(input: &NextInput<'_>, dir: Direction) -> Option<(TrackId, Source)> {
+fn step(input: &NextInput<'_>, dir: Direction) -> Option<(CopyId, Source)> {
     let pool = pool(input);
     if pool.is_empty() {
         return None;
@@ -274,7 +274,7 @@ fn step(input: &NextInput<'_>, dir: Direction) -> Option<(TrackId, Source)> {
 
 /// The candidate pool: the active source, narrowed by `aaa_mode` when that
 /// source is the library.
-fn pool(input: &NextInput<'_>) -> Vec<TrackId> {
+fn pool(input: &NextInput<'_>) -> Vec<CopyId> {
     match input.active {
         ActiveSource::Playlist => input.playlist.entries().to_vec(),
         ActiveSource::Library => match input.aaa_mode {
@@ -309,7 +309,7 @@ fn pool(input: &NextInput<'_>) -> Vec<TrackId> {
 ///
 /// The cost is that repeating a shuffled pool replays the same order unless
 /// the caller advances `rng_state`, which is what [`Source::Wrapped`] is for.
-fn shuffled(pool: &[TrackId], seed: u64) -> Vec<TrackId> {
+fn shuffled(pool: &[CopyId], seed: u64) -> Vec<CopyId> {
     let mut order = pool.to_vec();
     let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
     // Fisher-Yates, so every permutation is equally likely and no track can
@@ -334,7 +334,7 @@ fn split_mix64(state: u64) -> u64 {
 /// Extra state the caller keeps for the shuffle order to stay stable.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Playback {
-    pub current: Option<TrackId>,
+    pub current: Option<CopyId>,
     /// **Which copy is being heard** — issue #85.
     ///
     /// Set when the library chooses one to open, so a play names the copy that
@@ -364,12 +364,13 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Scan, Track};
+    use crate::fixture::Tagged as Track;
+    use crate::scan::Holdings as Scan;
     use std::path::PathBuf;
 
     /// Three artists: A with two albums (2 + 1 tracks), B with one (2), C with
     /// one (1). Six tracks, so pools of several sizes are available.
-    fn fixture() -> (Scan, Shelf) {
+    fn fixture() -> (crate::model::seam::Librarian, Shelf) {
         let mut store = Scan::new();
         for (artist, album, n, title) in [
             ("A Artist", "First", 1u32, "a-first-1"),
@@ -379,33 +380,35 @@ mod tests {
             ("B Artist", "Only", 2, "b-only-2"),
             ("C Artist", "Solo", 1, "c-solo-1"),
         ] {
-            store.upsert(crate::store::heard(Track {
+            store.upsert(Track {
                 path: PathBuf::from(format!("/m/{title}.mp3")),
                 artist: Some(artist.into()),
                 album: Some(album.into()),
                 title: Some(title.into()),
                 tracknumber: Some(n),
                 ..Default::default()
-            }));
+            });
         }
-        let lib = Shelf::rebuild(&store, true);
-        (store, lib)
+        let l = crate::fixture::from_holdings(&store);
+        let lib = Shelf::rebuild(&l, true);
+        (l, lib)
     }
 
-    fn id_of(store: &Scan, title: &str) -> TrackId {
-        store
-            .iter()
-            .find(|(_, t)| t.title.as_deref() == Some(title))
-            .map(|(id, _)| id)
+    fn id_of(l: &crate::model::seam::Librarian, title: &str) -> CopyId {
+        use crate::model::rows::Listing;
+        l.rows()
+            .into_iter()
+            .find(|id| l.listed(*id).is_some_and(|r| r.title == title))
             .unwrap_or_else(|| panic!("no track titled {title}"))
     }
 
-    fn title_of(store: &Scan, id: TrackId) -> &str {
-        store.get(id).unwrap().title.as_deref().unwrap()
+    fn title_of(l: &crate::model::seam::Librarian, id: CopyId) -> String {
+        use crate::model::rows::Listing;
+        l.listed(id).expect("a row").title.to_string()
     }
 
     struct Ctx {
-        store: Scan,
+        store: crate::model::seam::Librarian,
         library: Shelf,
         playlist: Playlist,
         queue: Queue,
@@ -495,7 +498,7 @@ mod tests {
         ctx.queue.push_back(id_of(&ctx.store, "b-only-2"));
 
         let out = upcoming(&ctx.input(ctx.at("a-first-1")), 8);
-        let titles: Vec<&str> = out
+        let titles: Vec<String> = out
             .iter()
             .map(|(id, _)| title_of(&ctx.store, *id))
             .collect();
@@ -515,7 +518,7 @@ mod tests {
             rng_state: 7,
             ..ctx.at("a-first-1")
         };
-        let projected: Vec<TrackId> = upcoming(&ctx.input(p), 8)
+        let projected: Vec<CopyId> = upcoming(&ctx.input(p), 8)
             .iter()
             .map(|(id, _)| *id)
             .collect();
@@ -591,7 +594,7 @@ mod tests {
     #[test]
     fn empty_library_yields_nothing() {
         let store = Scan::new();
-        let library = Shelf::rebuild(&store, true);
+        let library = Shelf::rebuild(&crate::fixture::from_holdings(&store), true);
         let (playlist, queue) = (Playlist::new(), Queue::new());
         let p = Playback::default();
         let input = NextInput {
@@ -612,14 +615,15 @@ mod tests {
     #[test]
     fn single_track_stops_without_repeat_and_loops_with_it() {
         let mut store = Scan::new();
-        store.upsert(crate::store::heard(Track {
+        store.upsert(Track {
             path: PathBuf::from("/m/only.mp3"),
             title: Some("only".into()),
             ..Default::default()
-        }));
-        let library = Shelf::rebuild(&store, true);
+        });
+        let l = crate::fixture::from_holdings(&store);
+        let library = Shelf::rebuild(&l, true);
         let (playlist, queue) = (Playlist::new(), Queue::new());
-        let only = id_of(&store, "only");
+        let only = id_of(&l, "only");
 
         let make = |repeat| NextInput {
             queue: &queue,
@@ -1058,7 +1062,7 @@ mod tests {
 
     #[test]
     fn shuffled_is_a_permutation() {
-        let pool: Vec<TrackId> = (0..50).map(crate::store::row_of_test).collect();
+        let pool: Vec<CopyId> = (0..50).map(crate::model::rows::row_of_test).collect();
         // Sorted on both sides. A row id used to be an arena index, so a pool
         // built from `0..50` was already in order and only the result needed
         // sorting; a derived id has no such order (#86).

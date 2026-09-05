@@ -36,89 +36,24 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::model::basis::Basis;
-use crate::model::encoding::Format;
 use crate::model::entity::{Device, Encoding};
 use crate::model::id::Id;
 use crate::model::instance::{Instance, Scanned};
 use crate::model::log::Record;
 use crate::model::seam::Librarian;
-use crate::store::Scan;
 
-/// What the scanner found, in the shape the ingest ladder takes.
-///
-/// A file with no `audio_id` is left out: it has no identity, so there is
-/// nothing to catalogue it as. That is the same call `populate` makes, and it
-/// is a file gmuse could not read as audio at all rather than one with bad
-/// tags.
-fn scanned(store: &Scan) -> Vec<Scanned> {
-    store
-        .iter()
-        .filter_map(|(_, t)| {
-            Some(Scanned {
-                audio: t.audio_id?,
-                title: t.display_title().to_string(),
-                artist: t.artist.clone().unwrap_or_default(),
-                identity: t.mb_recording.map(Basis::MusicBrainz),
-                // `Track` carries no artist id, so an artist crossing this
-                // plank is minted from its name and a guest credit still
-                // splits it. `populate` reads the tag properly; this goes away
-                // with `Scan` (#86).
-                artist_mbid: None,
-                credit_is_joined: false,
-                album_artist_mbid: None,
-                album: t.album.clone(),
-                genres: t.genres.clone(),
-                album_artist: t.albumartist.clone(),
-                disc: t.discnumber.map(|d| d as u16),
-                track: t.tracknumber.map(|n| n as u16),
-                mb_release_group: None,
-                mb_release: None,
-                // The plank reads a `Track`, which keeps only a year.
-                released: t
-                    .date
-                    .map(|y| crate::model::spine::PartialDate::year(y as i16)),
-                first_released: None,
-                label: t.label.clone(),
-                // The plank reads a `Track`, which keeps the floats the tags
-                // carried; the model keeps integers, for the reason `Gain`
-                // does.
-                levels: t.replaygain.map_or_else(Default::default, |g| {
-                    crate::model::encoding::Levels {
-                        track_cdb: g.track_gain.map(|d| (d * 100.0).round() as i32),
-                        track_peak_e4: g.track_peak.map(|p| (p * 10_000.0).round() as u32),
-                        album_cdb: g.album_gain.map(|d| (d * 100.0).round() as i32),
-                        album_peak_e4: g.album_peak.map(|p| (p * 10_000.0).round() as u32),
-                    }
-                }),
-                length_ms: t.duration.as_millis() as u32,
-                format: format_of(t),
-                bitrate: t.bitrate.unwrap_or(0),
-                sample_rate: t.samplerate,
-                channels: t.channels,
-            })
-        })
-        .collect()
-}
-
-/// The container, from the file's extension.
-///
-/// The scanner does not record it, and the extension is what the decoder went
-/// by anyway. An unknown extension is `None` rather than a guess — a verdict
-/// on a format nobody identified would be a verdict on nothing.
-fn format_of(track: &crate::store::Track) -> Option<Format> {
-    let ext = track.path.extension()?.to_str()?.to_ascii_lowercase();
-    Some(match ext.as_str() {
-        "flac" => Format::Flac,
-        "m4a" | "alac" => Format::Alac,
-        "wav" | "aiff" | "aif" => Format::Wav,
-        "mp3" => Format::Mp3,
-        "aac" => Format::Aac,
-        "ogg" | "oga" => Format::Vorbis,
-        "opus" => Format::Opus,
-        _ => return None,
-    })
-}
+// **`scanned()` and `format_of()` lived here and are gone** (#86).
+//
+// They converted a `store::Track` into the `Scanned` the ingest ladder takes,
+// field by field, and guessed the container from the file extension because a
+// `Track` did not record one. A scan produces `Scanned` directly now, so there
+// is nothing to convert and nothing to guess.
+//
+// The conversion was lossy in a way its own comment admitted: a `Track`
+// carried no artist id, so every artist crossing this plank was minted from
+// its *name* — and `2Pac feat. Nate Dogg` is not `2Pac` to a hash, so a guest
+// credit made a new artist. 92.7% of this library carries the id and it was
+// thrown away here. It is not any more.
 
 /// The library the player reads, assembled from this disk and this log.
 ///
@@ -128,7 +63,7 @@ fn format_of(track: &crate::store::Track) -> Option<Format> {
 /// `Instance` the model uses everywhere else means the ladder that chooses a
 /// recording's identity lives in exactly one place.
 pub fn librarian(
-    store: &Scan,
+    held: &crate::scan::Holdings,
     records: &BTreeSet<Record>,
     device: Id<Device>,
     now: i64,
@@ -137,7 +72,8 @@ pub fn librarian(
     // scan into an empty instance can see none. See `query::rows`.
     let mut scratch = Instance::new(device);
     scratch.merge(now, records);
-    scratch.ingest(now, &scanned(store));
+    let seen: Vec<Scanned> = held.iter().map(|h| h.seen.clone()).collect();
+    scratch.ingest(now, &seen);
 
     // **What this device can actually open** — issue #85.
     //
@@ -146,17 +82,16 @@ pub fn librarian(
     // refuses everything. A scan is exactly the moment that answer is known,
     // and it is the only moment — by the time the player asks, all it has is
     // an id.
-    let held: BTreeMap<Id<Encoding>, String> = store
+    let holdings: BTreeMap<Id<Encoding>, String> = held
         .iter()
-        .filter_map(|(_, t)| {
-            let audio = t.audio_id?;
-            Some((
-                Id::<Encoding>::of_audio(&audio),
-                t.path.to_string_lossy().into_owned(),
-            ))
+        .map(|h| {
+            (
+                Id::<Encoding>::of_audio(&h.seen.audio),
+                h.at.to_string_lossy().into_owned(),
+            )
         })
         .collect();
-    scratch.assert_holdings(now, held);
+    scratch.assert_holdings(now, holdings);
 
     let mut l = Librarian::from_catalogue(&scratch.catalogue());
     // Which device this is, so a row knows where it can be opened. The
@@ -192,28 +127,33 @@ mod forget_and_relink {
 
     use super::*;
     use crate::audio_id::AudioId;
+    use crate::model::basis::Basis;
     use crate::model::clock::HybridClock;
     use crate::model::encoding::Format;
     use crate::model::log::Fact;
     use crate::model::spine::Recording;
-    use crate::store::Track;
+    use crate::scan::{Held, Holdings};
 
-    fn file(path: &str, hash: u128) -> Track {
-        Track {
-            path: std::path::PathBuf::from(path),
-            title: Some("Callisto".into()),
-            artist: Some("Bodzin".into()),
-            album: Some("Luna".into()),
-            albumartist: Some("Bodzin".into()),
-            audio_id: Some(AudioId { scheme: 1, hash }),
-            ..Default::default()
+    fn file(path: &str, hash: u128) -> Held {
+        Held {
+            at: std::path::PathBuf::from(path),
+            mtime: 100,
+            size: 4_000_000,
+            seen: Scanned {
+                audio: AudioId { scheme: 1, hash },
+                title: "Callisto".into(),
+                artist: "Bodzin".into(),
+                album: Some("Luna".into()),
+                album_artist: Some("Bodzin".into()),
+                ..Default::default()
+            },
         }
     }
 
-    fn store_of(tracks: &[Track]) -> Scan {
-        let mut s = Scan::default();
-        for t in tracks {
-            s.upsert(t.clone());
+    fn store_of(files: &[Held]) -> Holdings {
+        let mut s = Holdings::new();
+        for f in files {
+            s.insert(f.clone());
         }
         s
     }
@@ -288,9 +228,9 @@ mod forget_and_relink {
     fn a_re_buy_of_a_named_recording_is_a_second_encoding() {
         let mbid = uuid::Uuid::from_u128(0xca11);
         let mut mp3 = file("/m/callisto.mp3", 7);
-        mp3.mb_recording = Some(mbid);
+        mp3.seen.identity = Some(Basis::MusicBrainz(mbid));
         let mut flac = file("/m/callisto.flac", 8);
-        flac.mb_recording = Some(mbid);
+        flac.seen.identity = Some(Basis::MusicBrainz(mbid));
 
         let l = librarian(&store_of(&[mp3, flac]), &BTreeSet::new(), device(), 100);
         assert_eq!(l.recordings().count(), 1, "a re-buy split the recording");
@@ -347,13 +287,13 @@ mod forget_and_relink {
     fn a_re_rip_in_place_replaces_the_copy_and_keeps_the_song() {
         let mbid = uuid::Uuid::from_u128(0xca11);
         let mut first = file("/m/callisto.mp3", 7);
-        first.mb_recording = Some(mbid);
+        first.seen.identity = Some(Basis::MusicBrainz(mbid));
         let before = librarian(&store_of(&[first]), &BTreeSet::new(), device(), 100);
         let recording = before.recordings().next().expect("a recording");
         let old = before.encodings.of(recording)[0].id;
 
         let mut better = file("/m/callisto.mp3", 9);
-        better.mb_recording = Some(mbid);
+        better.seen.identity = Some(Basis::MusicBrainz(mbid));
         let after = librarian(&store_of(&[better]), &BTreeSet::new(), device(), 200);
 
         assert_eq!(
@@ -411,17 +351,23 @@ mod opening {
 
     use super::*;
     use crate::audio_id::AudioId;
+    use crate::model::basis::Basis;
+    use crate::model::encoding::Format;
     use crate::model::spine::Recording;
-    use crate::store::Track;
+    use crate::scan::{Held, Holdings};
 
-    fn store_with(path: &str, hash: u128) -> Scan {
-        let mut s = Scan::default();
-        s.upsert(Track {
-            path: std::path::PathBuf::from(path),
-            title: Some("Callisto".into()),
-            artist: Some("Bodzin".into()),
-            audio_id: Some(AudioId { scheme: 1, hash }),
-            ..Default::default()
+    fn store_with(path: &str, hash: u128) -> Holdings {
+        let mut s = Holdings::new();
+        s.insert(Held {
+            at: std::path::PathBuf::from(path),
+            mtime: 100,
+            size: 4_000_000,
+            seen: Scanned {
+                audio: AudioId { scheme: 1, hash },
+                title: "Callisto".into(),
+                artist: "Bodzin".into(),
+                ..Default::default()
+            },
         });
         s
     }
@@ -457,16 +403,20 @@ mod opening {
     #[test]
     fn a_pressing_names_the_imprint_that_issued_it() {
         let device = Id::<Device>::derived(b"laptop");
-        let mut store = Scan::default();
-        store.upsert(Track {
-            path: std::path::PathBuf::from("/m/callisto.mp3"),
-            title: Some("Callisto".into()),
-            artist: Some("Bodzin".into()),
-            album: Some("Luna".into()),
-            albumartist: Some("Bodzin".into()),
-            label: Some("Herzblut".into()),
-            audio_id: Some(AudioId { scheme: 1, hash: 7 }),
-            ..Default::default()
+        let mut store = Holdings::new();
+        store.insert(Held {
+            at: std::path::PathBuf::from("/m/callisto.mp3"),
+            mtime: 100,
+            size: 4_000_000,
+            seen: Scanned {
+                audio: AudioId { scheme: 1, hash: 7 },
+                title: "Callisto".into(),
+                artist: "Bodzin".into(),
+                album: Some("Luna".into()),
+                album_artist: Some("Bodzin".into()),
+                label: Some("Herzblut".into()),
+                ..Default::default()
+            },
         });
         let l = librarian(&store, &BTreeSet::new(), device, 100);
 
@@ -493,19 +443,23 @@ mod opening {
     #[test]
     fn a_copy_carries_the_loudness_its_tags_claim() {
         let device = Id::<Device>::derived(b"laptop");
-        let mut store = Scan::default();
-        store.upsert(Track {
-            path: std::path::PathBuf::from("/m/callisto.mp3"),
-            title: Some("Callisto".into()),
-            artist: Some("Bodzin".into()),
-            audio_id: Some(AudioId { scheme: 1, hash: 7 }),
-            replaygain: Some(crate::store::ReplayGain {
-                track_gain: Some(-7.28),
-                track_peak: Some(0.9885),
-                album_gain: Some(-8.10),
-                album_peak: Some(1.0),
-            }),
-            ..Default::default()
+        let mut store = Holdings::new();
+        store.insert(Held {
+            at: std::path::PathBuf::from("/m/callisto.mp3"),
+            mtime: 100,
+            size: 4_000_000,
+            seen: Scanned {
+                audio: AudioId { scheme: 1, hash: 7 },
+                title: "Callisto".into(),
+                artist: "Bodzin".into(),
+                levels: crate::model::encoding::Levels {
+                    track_cdb: Some(-728),
+                    track_peak_e4: Some(9885),
+                    album_cdb: Some(-810),
+                    album_peak_e4: Some(10_000),
+                },
+                ..Default::default()
+            },
         });
         let l = librarian(&store, &BTreeSet::new(), device, 100);
 
@@ -529,15 +483,19 @@ mod opening {
     #[test]
     fn a_copy_carries_its_sample_rate_and_channels() {
         let device = Id::<Device>::derived(b"laptop");
-        let mut store = Scan::default();
-        store.upsert(Track {
-            path: std::path::PathBuf::from("/m/callisto.mp3"),
-            title: Some("Callisto".into()),
-            artist: Some("Bodzin".into()),
-            audio_id: Some(AudioId { scheme: 1, hash: 7 }),
-            samplerate: Some(48_000),
-            channels: Some(2),
-            ..Default::default()
+        let mut store = Holdings::new();
+        store.insert(Held {
+            at: std::path::PathBuf::from("/m/callisto.mp3"),
+            mtime: 100,
+            size: 4_000_000,
+            seen: Scanned {
+                audio: AudioId { scheme: 1, hash: 7 },
+                title: "Callisto".into(),
+                artist: "Bodzin".into(),
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                ..Default::default()
+            },
         });
         let l = librarian(&store, &BTreeSet::new(), device, 100);
 
@@ -557,7 +515,6 @@ mod opening {
     #[test]
     fn the_copy_that_opens_is_not_always_the_canonical_one() {
         use crate::model::clock::HybridClock;
-        use crate::model::encoding::Format;
         use crate::model::log::Fact;
 
         let mine = Id::<Device>::derived(b"laptop");
@@ -632,23 +589,29 @@ mod opening {
 mod tests {
     use super::*;
     use crate::audio_id::AudioId;
+    use crate::model::basis::Basis;
+    use crate::model::encoding::Format;
     use crate::model::entity::Recording;
-    use crate::store::Track;
+    use crate::scan::{Held, Holdings};
     use std::path::PathBuf;
-    use std::time::Duration;
 
-    fn track(path: &str, title: &str, artist: &str, hash: u128) -> Track {
-        Track {
-            path: PathBuf::from(path),
-            artist: Some(artist.into()),
-            albumartist: Some(artist.into()),
-            album: Some("An Album".into()),
-            title: Some(title.into()),
-            tracknumber: Some(1),
-            duration: Duration::from_secs(200),
-            bitrate: Some(320),
-            audio_id: Some(AudioId { scheme: 1, hash }),
-            ..Default::default()
+    fn track(path: &str, title: &str, artist: &str, hash: u128) -> Held {
+        Held {
+            at: PathBuf::from(path),
+            mtime: 100,
+            size: 4_000_000,
+            seen: Scanned {
+                audio: AudioId { scheme: 1, hash },
+                artist: artist.into(),
+                album_artist: Some(artist.into()),
+                album: Some("An Album".into()),
+                title: title.into(),
+                track: Some(1),
+                length_ms: 200_000,
+                bitrate: 320,
+                format: Some(Format::Mp3),
+                ..Default::default()
+            },
         }
     }
 
@@ -659,8 +622,8 @@ mod tests {
     /// A file on disk becomes a row the player can draw.
     #[test]
     fn a_scanned_file_becomes_a_row() {
-        let mut store = Scan::new();
-        store.upsert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
+        let mut store = Holdings::new();
+        store.insert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
         let l = librarian(&store, &BTreeSet::new(), device(), 1_000);
 
         let recording = l.recordings().next().expect("one recording");
@@ -678,8 +641,8 @@ mod tests {
     /// carry both or the player still needs two places to look.
     #[test]
     fn the_log_supplies_what_the_disk_cannot() {
-        let mut store = Scan::new();
-        store.upsert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
+        let mut store = Holdings::new();
+        store.insert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
 
         // What the recording will be, derived the same way the ladder does.
         let scratch_l = librarian(&store, &BTreeSet::new(), device(), 1_000);
@@ -706,36 +669,47 @@ mod tests {
     /// four-minute sibling could never have earned a play at all.
     #[test]
     fn a_row_reports_the_length_of_the_copy_it_would_open() {
-        let mut store = Scan::new();
+        let mut store = Holdings::new();
         let mbid = uuid::Uuid::from_u128(0x1831_05b5);
 
         // One recording, one copy here, and it is the short one.
         let mut partial = track("/m/partial.mp3", "Callisto", "Stephan Bodzin", 2);
-        partial.mb_recording = Some(mbid);
-        partial.duration = Duration::from_secs(12);
-        store.upsert(partial);
+        partial.seen.identity = Some(Basis::MusicBrainz(mbid));
+        partial.seen.length_ms = 12_000;
+        store.insert(partial);
 
         let l = librarian(&store, &BTreeSet::new(), device(), 1_000);
         let recording = l.recordings().next().expect("one recording");
         assert_eq!(
             l.row(recording).unwrap().length,
-            Duration::from_secs(12),
+            std::time::Duration::from_secs(12),
             "the row reported something other than the copy it holds"
         );
     }
 
-    /// A file with no readable audio has no identity, so there is nothing to    /// A file with no readable audio has no identity, so there is nothing to
-    /// catalogue it as. Left out rather than invented.
+    /// **A file with no readable audio cannot be a holding at all** (#86).
+    ///
+    /// This used to build one with `audio_id: None` and assert the bridge left
+    /// it out. A `Held` has an audio id by construction — `ingest::read` fails
+    /// for a file whose audio will not read, so the scan reports it as an
+    /// error and it never reaches here. The case is a type error now rather
+    /// than a filter, which is why this asserts the *scan*'s half instead.
     #[test]
-    fn a_file_with_no_audio_id_is_left_out() {
-        let mut store = Scan::new();
-        let mut orphan = track("/m/orphan.mp3", "Unknown", "Nobody", 1);
-        orphan.audio_id = None;
-        store.upsert(orphan);
-        store.upsert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 2));
+    fn a_file_with_no_readable_audio_is_reported_rather_than_held() {
+        let dir = std::env::temp_dir().join("gmuse-bridge-unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("99 Broken.wav"), b"RIFF not really").unwrap();
+
+        let mut store = Holdings::new();
+        let report = crate::scan::scan(&mut store, std::slice::from_ref(&dir));
+
+        assert_eq!(store.len(), 0, "it is not a holding");
+        assert_eq!(report.errors.len(), 1, "and it is named, not dropped");
 
         let l = librarian(&store, &BTreeSet::new(), device(), 1_000);
-        assert_eq!(l.recordings().count(), 1);
+        assert_eq!(l.recordings().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two files, identical audio, one recording — and the row still draws.
@@ -743,9 +717,9 @@ mod tests {
     /// conventions, and it must not appear twice.
     #[test]
     fn one_recording_however_many_copies() {
-        let mut store = Scan::new();
-        store.upsert(track("/m/01 Callisto.mp3", "Callisto", "Stephan Bodzin", 1));
-        store.upsert(track(
+        let mut store = Holdings::new();
+        store.insert(track("/m/01 Callisto.mp3", "Callisto", "Stephan Bodzin", 1));
+        store.insert(track(
             "/m/1 - Callisto.mp3",
             "Callisto",
             "Stephan Bodzin",
@@ -761,167 +735,18 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod the_two_sides_agree {
-    //! **The store and the librarian must draw the same row** — issue #86.
-    //!
-    //! `rows::Listing` is the seam, and the migration is entirely a matter of
-    //! swapping which side of it answers. That is only safe if the two answers
-    //! are the same, and the only place with enough material to say so is a
-    //! real library: 6,300 files, 453 of them resting on their bytes alone,
-    //! and every awkward case somebody actually owns.
-    //!
-    //! ## Where they stand, measured 2026-09-05 over 6,485 rows
-    //!
-    //! | field | differ | what it is |
-    //! | --- | --- | --- |
-    //! | `genre` | 5445 | the same set, alphabetical rather than in tag order |
-    //! | `disc` | 324 | store `None`, library `Some(1)` — the medium's position, which a tag often omits |
-    //! | `album_artist` | 36 | store `None`, library knows the album-level credit |
-    //! | `label` | 30 | mostly case the model has settled; a few the library has not learnt |
-    //! | `artist` | 21 | two credited entities on one recording, from two files' tags |
-    //! | `year` | 21 | different pressings of one album |
-    //! | `title` | 14 | `Burma-Shave` against `Burma Shave` — titles the model settled |
-    //! | `album`, `file_under`, `track` | 1 each | `ANTIGONE` against `Antigone`, and one real disagreement |
-    //!
-    //! **Every one of these but `genre` is the library being right**, which is
-    //! the answer this test was written to get. Four were not, and were fixed
-    //! because it found them: a `u16::MAX` sentinel rendering as track 65535,
-    //! a credit whose artist had no name still emitting its join phrase
-    //! (`Emmylou Harris, `), the same artist credited twice (`Orbital,
-    //! Orbital`), and `year` reading only `OriginalReleaseDate` — which 98% of
-    //! this library does not carry, so 6,373 rows had no year at all.
-    //!
-    //! `genre` was 6,437 — the librarian had none, because a scan observed no
-    //! genres at all. It asserts each term now at `Source::TagVariant`, the
-    //! weakest rung, and what is left is ordering: the fold holds a *set*, so
-    //! `Rock; Blues Rock; Alternative Rock` comes back alphabetised. The
-    //! hierarchy is what should order it and none exists yet — the log has no
-    //! genre facts in it at all, which is what `gmuse-tools genre apply` is
-    //! for.
-
-    use super::*;
-    use crate::model::rows::Listing;
-
-    /// Run deliberately: `cargo test --release -- --ignored agree`.
-    #[test]
-    #[ignore = "needs the real library; run deliberately"]
-    fn every_row_reads_the_same_from_either_side() {
-        let root = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("MusicLibrary");
-        if !root.exists() {
-            eprintln!("no library at {}", root.display());
-            return;
-        }
-
-        let mut store = Scan::new();
-        let report = crate::scan::scan(&mut store, std::slice::from_ref(&root));
-        assert_eq!(report.errors.len(), 0, "the scan must read everything");
-
-        let device = Id::<Device>::derived(b"agree");
-        let library = librarian(
-            &store,
-            &std::collections::BTreeSet::new(),
-            device,
-            1_788_000_000_000,
-        );
-
-        let (mut checked, mut differ) = (0usize, Vec::new());
-        for (id, _) in store.iter() {
-            let (Some(theirs), Some(ours)) = (store.listed(id), library.listed(id)) else {
-                differ.push(format!("{id:?}: one side has no row"));
-                continue;
-            };
-            checked += 1;
-            // Compared field by field, so a failure names the field rather
-            // than printing two sixteen-field structs and leaving the reader
-            // to diff them.
-            for (what, a, b) in [
-                (
-                    "file_under",
-                    theirs.file_under.to_string(),
-                    ours.file_under.to_string(),
-                ),
-                ("album", theirs.album.to_string(), ours.album.to_string()),
-                ("title", theirs.title.to_string(), ours.title.to_string()),
-                (
-                    "disc",
-                    format!("{:?}", theirs.disc),
-                    format!("{:?}", ours.disc),
-                ),
-                (
-                    "track",
-                    format!("{:?}", theirs.track),
-                    format!("{:?}", ours.track),
-                ),
-                (
-                    "duration",
-                    format!("{:?}", theirs.duration),
-                    format!("{:?}", ours.duration),
-                ),
-                (
-                    "artist",
-                    format!("{:?}", theirs.artist),
-                    format!("{:?}", ours.artist),
-                ),
-                (
-                    "album_artist",
-                    format!("{:?}", theirs.album_artist),
-                    format!("{:?}", ours.album_artist),
-                ),
-                (
-                    "genre",
-                    format!("{:?}", theirs.genre),
-                    format!("{:?}", ours.genre),
-                ),
-                (
-                    "label",
-                    format!("{:?}", theirs.label),
-                    format!("{:?}", ours.label),
-                ),
-                (
-                    "year",
-                    format!("{:?}", theirs.year),
-                    format!("{:?}", ours.year),
-                ),
-                (
-                    "bitrate",
-                    format!("{:?}", theirs.bitrate),
-                    format!("{:?}", ours.bitrate),
-                ),
-                (
-                    "sample_rate",
-                    format!("{:?}", theirs.sample_rate),
-                    format!("{:?}", ours.sample_rate),
-                ),
-                (
-                    "channels",
-                    format!("{:?}", theirs.channels),
-                    format!("{:?}", ours.channels),
-                ),
-            ] {
-                if a != b {
-                    differ.push(format!("{what}: store {a:?} vs library {b:?}"));
-                }
-            }
-        }
-
-        eprintln!("checked  {checked} rows, {} differences", differ.len());
-        let mut by_field: std::collections::BTreeMap<&str, (usize, Vec<String>)> =
-            Default::default();
-        for line in &differ {
-            let e = by_field
-                .entry(line.split(':').next().unwrap_or("?"))
-                .or_default();
-            e.0 += 1;
-            if e.1.len() < 3 {
-                e.1.push(line.clone());
-            }
-        }
-        for (field, (n, samples)) in &by_field {
-            eprintln!("  {field}: {n}");
-            for s in samples {
-                eprintln!("      {s}");
-            }
-        }
-    }
-}
+// **`the_two_sides_agree` lived here and is gone** (#86).
+//
+// It compared `store.listed(id)` against `library.listed(id)` field by field
+// over 6,485 real rows, because `rows::Listing` is the seam and the migration
+// was a matter of swapping which side answered — which is only safe if the two
+// answers are the same.
+//
+// It earned its place: it found a `u16::MAX` sentinel rendering as track
+// 65535, a credit whose artist had no name still emitting its join phrase, one
+// artist credited twice, `year` reading a field 98% of the library does not
+// carry, and a librarian with no genres at all. All five were fixed because it
+// ran.
+//
+// There is one implementation now, so there is nothing left to compare. What
+// it was protecting is protected by the tests those findings became.

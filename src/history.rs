@@ -11,7 +11,7 @@
 //! state directory is exactly what a backup tool skips. The session and the
 //! audit log stay behind: losing where you were is not a loss.
 //!
-//! **Keyed by identity, not by path and not by `TrackId`.**
+//! **Keyed by identity, not by path and not by `CopyId`.**
 //!
 //! An arena index is meaningful only while the cache that produced it
 //! survives, so a history keyed by *that* would silently reattach to different
@@ -62,6 +62,10 @@ const LONG_ENOUGH: Duration = Duration::from_secs(240);
 /// For the 8% with no MusicBrainz id, the key derives from the bytes — so a
 /// re-encode still loses their history. That is the case with nothing to hold
 /// it by, and #57's fingerprints are what would close it.
+#[allow(
+    dead_code,
+    reason = "the store was its only caller and is gone (#86) — the library answers `recording_of` now. Kept because the once-only migration still keys history by it, and because deleting the string form would leave `Id::of_basis` spelled out wherever a key is needed"
+)]
 pub fn key_for(mb_recording: Option<uuid::Uuid>, audio: Option<AudioId>) -> Option<String> {
     recording_id_for(mb_recording, audio).map(|id| id.to_string())
 }
@@ -71,6 +75,10 @@ pub fn key_for(mb_recording: Option<uuid::Uuid>, audio: Option<AudioId>) -> Opti
 /// [`key_for`] is what a TOML map key has to be; this is what everything else
 /// should use, and having both means the string form exists in one place
 /// rather than being spelled out wherever a key is needed.
+#[allow(
+    dead_code,
+    reason = "the store was its only caller and is gone (#86) — the library answers `recording_of` now. Kept because the once-only migration still keys history by it, and because deleting the string form would leave `Id::of_basis` spelled out wherever a key is needed"
+)]
 pub fn recording_id_for(
     mb_recording: Option<uuid::Uuid>,
     audio: Option<AudioId>,

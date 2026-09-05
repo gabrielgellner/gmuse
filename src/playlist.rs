@@ -1,18 +1,18 @@
 //! Views 3 and 4: the playlist and the play queue — DESIGN §4.
 //!
-//! Both hold `TrackId`s, so the same track can sit in the library, a playlist
+//! Both hold `CopyId`s, so the same track can sit in the library, a playlist
 //! and the queue at once without being copied.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use crate::store::TrackId;
+use crate::model::rows::CopyId;
 
 /// View 3. Ordered, duplicates allowed — a playlist that silently refused a
 /// repeat would be wrong.
 #[derive(Debug, Default, Clone)]
 pub struct Playlist {
-    entries: Vec<TrackId>,
+    entries: Vec<CopyId>,
 }
 
 // Mutation arrives with the command layer in M6 (`:add`, `y`, `e`, `D`); the
@@ -23,7 +23,7 @@ impl Playlist {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn entries(&self) -> &[TrackId] {
+    pub fn entries(&self) -> &[CopyId] {
         &self.entries
     }
     pub fn len(&self) -> usize {
@@ -32,21 +32,21 @@ impl Playlist {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
-    pub fn push(&mut self, id: TrackId) {
+    pub fn push(&mut self, id: CopyId) {
         self.entries.push(id);
     }
     /// Insert at `index`, clamped to the end.
     ///
     /// Clamped rather than panicking: `p` on the last row puts after it, which
     /// is one past the end, and that is the ordinary case rather than an error.
-    pub fn insert(&mut self, index: usize, id: TrackId) {
+    pub fn insert(&mut self, index: usize, id: CopyId) {
         self.entries.insert(index.min(self.entries.len()), id);
     }
     /// Remove the entry at `index`, if there is one.
     ///
     /// Mirrors `VecDeque::remove`, which `Queue` gets for free. `Vec::remove`
     /// panics out of range, so the bounds check is ours to make.
-    pub fn remove(&mut self, index: usize) -> Option<TrackId> {
+    pub fn remove(&mut self, index: usize) -> Option<CopyId> {
         if index < self.entries.len() {
             Some(self.entries.remove(index))
         } else {
@@ -62,7 +62,7 @@ impl Playlist {
 /// over the active source, and popping is what makes that a one-shot.
 #[derive(Debug, Default, Clone)]
 pub struct Queue {
-    entries: VecDeque<TrackId>,
+    entries: VecDeque<CopyId>,
 }
 
 #[allow(dead_code)]
@@ -70,7 +70,7 @@ impl Queue {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn entries(&self) -> impl Iterator<Item = &TrackId> {
+    pub fn entries(&self) -> impl Iterator<Item = &CopyId> {
         self.entries.iter()
     }
     pub fn len(&self) -> usize {
@@ -79,26 +79,26 @@ impl Queue {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
-    pub fn push_back(&mut self, id: TrackId) {
+    pub fn push_back(&mut self, id: CopyId) {
         self.entries.push_back(id);
     }
     /// Insert at `index`, clamped to the end — see [`Playlist::insert`].
-    pub fn insert(&mut self, index: usize, id: TrackId) {
+    pub fn insert(&mut self, index: usize, id: CopyId) {
         self.entries.insert(index.min(self.entries.len()), id);
     }
     /// The next queued track, without consuming it.
     ///
     /// `next()` is pure, so it reports what the queue would give; popping is
     /// the caller's job once it commits to playing.
-    pub fn front(&self) -> Option<TrackId> {
+    pub fn front(&self) -> Option<CopyId> {
         self.entries.front().copied()
     }
 
-    pub fn pop_front(&mut self) -> Option<TrackId> {
+    pub fn pop_front(&mut self) -> Option<CopyId> {
         self.entries.pop_front()
     }
     /// Remove the entry at `index`, if there is one.
-    pub fn remove(&mut self, index: usize) -> Option<TrackId> {
+    pub fn remove(&mut self, index: usize) -> Option<CopyId> {
         self.entries.remove(index)
     }
     pub fn clear(&mut self) {
@@ -280,21 +280,24 @@ mod tests {
     #[test]
     fn playlist_allows_duplicates_and_keeps_order() {
         let mut p = Playlist::new();
-        p.push(crate::store::row_of_test(3));
-        p.push(crate::store::row_of_test(1));
-        p.push(crate::store::row_of_test(3));
+        p.push(crate::model::rows::row_of_test(3));
+        p.push(crate::model::rows::row_of_test(1));
+        p.push(crate::model::rows::row_of_test(3));
         assert_eq!(
             p.entries(),
             [
-                crate::store::row_of_test(3),
-                crate::store::row_of_test(1),
-                crate::store::row_of_test(3)
+                crate::model::rows::row_of_test(3),
+                crate::model::rows::row_of_test(1),
+                crate::model::rows::row_of_test(3)
             ]
         );
-        assert_eq!(p.remove(1), Some(crate::store::row_of_test(1)));
+        assert_eq!(p.remove(1), Some(crate::model::rows::row_of_test(1)));
         assert_eq!(
             p.entries(),
-            [crate::store::row_of_test(3), crate::store::row_of_test(3)]
+            [
+                crate::model::rows::row_of_test(3),
+                crate::model::rows::row_of_test(3)
+            ]
         );
         assert_eq!(p.remove(99), None);
     }
@@ -302,11 +305,11 @@ mod tests {
     #[test]
     fn queue_is_consumed_from_the_front() {
         let mut q = Queue::new();
-        q.push_back(crate::store::row_of_test(1));
-        q.push_back(crate::store::row_of_test(2));
-        assert_eq!(q.pop_front(), Some(crate::store::row_of_test(1)));
+        q.push_back(crate::model::rows::row_of_test(1));
+        q.push_back(crate::model::rows::row_of_test(2));
+        assert_eq!(q.pop_front(), Some(crate::model::rows::row_of_test(1)));
         assert_eq!(q.len(), 1);
-        assert_eq!(q.pop_front(), Some(crate::store::row_of_test(2)));
+        assert_eq!(q.pop_front(), Some(crate::model::rows::row_of_test(2)));
         assert_eq!(q.pop_front(), None);
         assert!(q.is_empty());
     }
