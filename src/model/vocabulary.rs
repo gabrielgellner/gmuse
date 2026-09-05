@@ -109,6 +109,10 @@ pub struct GenreAssignment {
     pub confidence: crate::model::ingest::Confidence,
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — cycle detection in the genre hierarchy, which no import path runs"
+)]
 /// A cycle someone's data acquired without anyone authoring it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cycle {
@@ -126,9 +130,17 @@ pub struct Vocabulary {
     pub assignments: Vec<GenreAssignment>,
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — cycle detection in the genre hierarchy, which no import path runs"
+)]
 /// How deep a hierarchy walk may go before it is called a cycle.
 const MAX_DEPTH: usize = 16;
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — cycle detection in the genre hierarchy, which no import path runs"
+)]
 impl Vocabulary {
     pub fn define(&mut self, name: &str) -> Id<Genre> {
         let id = Id::<Genre>::of_name(name);

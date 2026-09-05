@@ -261,6 +261,10 @@ impl Reference {
         line
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — alias resolution and credit repair, which no command drives"
+    )]
     /// Find an artist by any name it is known under, preferring the label and
     /// then the most trustworthy alias.
     ///
@@ -289,6 +293,10 @@ impl Reference {
             .map(|(_, id)| id)
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — alias resolution and credit repair, which no command drives"
+    )]
     /// Record that this name also means this artist.
     pub fn add_alias(&mut self, artist: Id<Artist>, value: &str, kind: AliasKind, basis: Source) {
         let alias = Alias {
@@ -302,6 +310,10 @@ impl Reference {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — alias resolution and credit repair, which no command drives"
+    )]
     /// Merge one artist into another, keeping the loser's name findable.
     ///
     /// The other half of #68: a redirect keeps every old *reference* resolving,
@@ -320,6 +332,10 @@ impl Reference {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — alias resolution and credit repair, which no command drives"
+    )]
     /// Credits placed where their role class says they cannot go.
     ///
     /// A composition is composed; a performance is performed. Behaviour

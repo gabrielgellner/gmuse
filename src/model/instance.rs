@@ -442,6 +442,10 @@ impl Instance {
         self.append(now, Fact::HoldingsAsserted { device, held });
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Drop this instance's superseded holdings assertions.
     ///
     /// Safe at any moment, because folding a compacted log gives exactly what
@@ -452,6 +456,10 @@ impl Instance {
         self.records = compact(&self.records);
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     pub fn rename_artist(&mut self, now: i64, artist: Id<Artist>, name: &str) {
         self.append(
             now,
@@ -462,6 +470,10 @@ impl Instance {
         );
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     pub fn assign_genre(
         &mut self,
         now: i64,
@@ -586,6 +598,10 @@ impl Instance {
         );
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Say a recording performs a work, cataloguing the work alongside.
     pub fn performs(&mut self, now: i64, recording: Id<Recording>, work: Id<Work>, title: &str) {
         self.append(
@@ -598,6 +614,10 @@ impl Instance {
         self.append(now, Fact::WorkPerformed { recording, work });
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Rename a concept, keeping the name it had.
     ///
     /// **A rename does not re-mint.** The id came from the old label, and
@@ -632,6 +652,10 @@ impl Instance {
         );
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Decide a genre does not apply. Shadows rather than deletes, and
     /// silences every asserter — see [`Instance::retract_qualifier`].
     pub fn retract_genre(&mut self, now: i64, subject: GenreOn, name: &str) {
@@ -644,6 +668,10 @@ impl Instance {
         );
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Decide a qualifier does not apply. Shadows rather than deletes.
     pub fn retract_qualifier(&mut self, now: i64, recording: Id<Recording>, label: &str) {
         self.append(
@@ -655,6 +683,10 @@ impl Instance {
         );
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Write the version vocabulary into the log, so its ids resolve.
     ///
     /// Idempotent: every id derives from its label, so a second call appends
@@ -681,6 +713,10 @@ impl Instance {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Withdraw a narrower-of edge. Shadows rather than deletes, so a stale
     /// replica re-delivering the edge cannot resurrect it.
     pub fn retract_narrowing(
@@ -700,6 +736,10 @@ impl Instance {
         );
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Say that one concept is narrower than another, inside one hierarchy.
     pub fn narrows(&mut self, now: i64, hierarchy: Id<Hierarchy>, parent: &str, child: &str) {
         self.append(
@@ -712,6 +752,10 @@ impl Instance {
         );
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Record what an analyser found.
     ///
     /// Deliberately not part of `ingest`: measuring is minutes where hashing
@@ -732,6 +776,10 @@ impl Instance {
         self.append(now, Fact::RecordingRated { recording, stars });
     }
 
+    #[expect(
+        dead_code,
+        reason = "RecordingAcquired is folded and the migration writes it; no command asserts one yet"
+    )]
     /// Record when a recording entered the library.
     ///
     /// Idempotent by construction: the fold takes the minimum, so saying it
@@ -760,6 +808,10 @@ impl Instance {
         );
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     pub fn play(&mut self, now: i64, recording: Id<Recording>, encoding: Id<Encoding>) {
         self.append(
             now,

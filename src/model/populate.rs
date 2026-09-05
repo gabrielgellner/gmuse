@@ -67,6 +67,10 @@ pub struct Report {
 }
 
 impl Report {
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — an invariant a test asserts, not an answer anything needs at runtime"
+    )]
     /// Whether every file found is accounted for.
     ///
     /// The one invariant worth asserting on a scan: nothing may be dropped
@@ -198,6 +202,10 @@ pub fn read_library(device_name: &str, roots: &[PathBuf], now: i64) -> (Instance
     (instance, report)
 }
 
+#[expect(
+    dead_code,
+    reason = "exposed so a caller can ask without walking, and no caller has"
+)]
 /// Whether a path is one this pass would look at. Exposed so a caller can ask
 /// without walking.
 pub fn is_audio(path: &Path) -> bool {

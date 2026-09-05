@@ -40,8 +40,16 @@ use crate::model::vocabulary::Vocabulary;
 pub struct Librarian {
     pub spine: Spine,
     pub reference: Reference,
+    #[expect(
+        dead_code,
+        reason = "held so the librarian owns the whole fold; nothing reads them back through the seam yet"
+    )]
     pub vocabulary: Vocabulary,
     pub encodings: Encodings,
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — held so the librarian owns the whole fold; nothing reads it back through the seam"
+    )]
     pub provenance: Provenance,
     /// Folded from the log, never stored as numbers. #67's rule decides a
     /// rating; a play is counted.
@@ -611,10 +619,14 @@ mod tests {
     /// renamed a file in. A fixture is not a leak. What leaks is the player.
     #[test]
     fn the_leak_from_the_player_only_narrows() {
-        /// The import, the `Context` field, and one comment about what
-        /// playlists hold. **This one reaches zero at #86 and not before** —
-        /// the player must name the type for as long as the type exists.
-        const STORE: usize = 3;
+        /// The import and the `Context` field — and now only those. The third
+        /// was a comment about what playlists hold, and it stopped counting
+        /// when the ratchet stopped reading prose (#113): both remaining
+        /// mentions are the player genuinely naming the type.
+        ///
+        /// **This one reaches zero at #86 and not before** — the player must
+        /// name the type for as long as the type exists.
+        const STORE: usize = 2;
         /// **What a `PathBuf` in the player is allowed to be.**
         ///
         /// Counting them was the wrong measure and it had reached its floor
@@ -682,8 +694,8 @@ mod tests {
         let (mut store, mut reaches) = (0, 0);
         let mut stray_paths: Vec<String> = Vec::new();
         for (name, text) in read("src/ui") {
-            let live = production(&text);
-            store += live.matches("Scan").count();
+            let live = code_only(production(&text));
+            store += identifiers(&live, "Scan");
             reaches += live.matches("ctx.store.").count();
             for line in live.lines().filter(|l| l.contains("PathBuf")) {
                 if !SANCTIONED_PATHS.iter().any(|ok| line.contains(ok)) {
@@ -904,6 +916,99 @@ mod tests {
             Some(at) => &text[..at],
             None => text,
         }
+    }
+
+    /// Production code with its comments removed.
+    ///
+    /// **The ratchet used to count prose (#113).** It matched substrings over
+    /// the whole file, so a doc comment explaining what the player must stop
+    /// doing counted as the player doing it — and the closer the explanation
+    /// got to naming the thing, the worse the number looked. Two of the
+    /// `Store` mentions and one `PathBuf` were sentences.
+    fn code_only(text: &str) -> String {
+        text.lines()
+            .map(|line| match line.find("//") {
+                // Not inside a string literal: `"//"` is a path separator, not
+                // a comment, and cutting there would silently drop real code.
+                Some(at) if line[..at].matches('"').count() % 2 == 0 => &line[..at],
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// How many times `name` appears as an identifier rather than as a
+    /// fragment of a longer one.
+    ///
+    /// `Scan` is inside `Scanned` and `Store` inside `Stored`, and counting
+    /// the substring meant the number could not reach zero however much moved
+    /// (#113).
+    fn identifiers(text: &str, name: &str) -> usize {
+        let bytes = text.as_bytes();
+        let part = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        text.match_indices(name)
+            .filter(|(at, _)| {
+                let before = *at == 0 || !part(bytes[at - 1]);
+                let after = at + name.len() >= bytes.len() || !part(bytes[at + name.len()]);
+                before && after
+            })
+            .count()
+    }
+
+    /// **The ratchet's own arithmetic, which the library does not exercise.**
+    ///
+    /// Both refinements survive mutation against `src/ui` — degrade
+    /// `identifiers` to a substring match, or let `code_only` cut inside a
+    /// string literal, and the count does not move, because no file happens
+    /// to contain the case. A guard the corpus does not reach is a guard
+    /// nobody is testing, so it is tested here instead.
+    #[test]
+    fn the_ratchet_counts_identifiers_and_not_prose() {
+        // The reason the count could not reach zero: `Scan` is inside
+        // `Scanned`, and `Store` was inside `Stored`.
+        assert_eq!(
+            identifiers("Scanned rescan SCAN", "Scan"),
+            0,
+            "a longer name that starts with it"
+        );
+        assert_eq!(
+            identifiers("PreScan pre_Scan", "Scan"),
+            0,
+            "and one that ends with it"
+        );
+        assert_eq!(identifiers("let s: Scan = Scan::new();", "Scan"), 2);
+        assert_eq!(
+            identifiers("model::Scan,", "Scan"),
+            1,
+            "punctuation is a boundary"
+        );
+        assert_eq!(
+            identifiers("Scan", "Scan"),
+            1,
+            "and so is the end of the text"
+        );
+
+        // A doc comment explaining what the player must stop doing is not the
+        // player doing it.
+        assert_eq!(
+            identifiers(&code_only("// a comment about Scan"), "Scan"),
+            0
+        );
+        assert_eq!(identifiers(&code_only("/// Scan, in prose"), "Scan"), 0);
+        assert_eq!(
+            identifiers(&code_only("let x: Scan = y; // and Scan again"), "Scan"),
+            1
+        );
+
+        // And `//` inside a string is a path separator. Cutting there would
+        // drop real code and quietly lower the number.
+        assert_eq!(
+            identifiers(
+                &code_only(r#"let u = "http://x"; let s: Scan = y;"#),
+                "Scan"
+            ),
+            1
+        );
     }
 
     /// A row is assembled by the library and carries no location, so the

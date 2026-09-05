@@ -59,6 +59,7 @@ macro_rules! from_musicbrainz {
     ($($ty:ty),* $(,)?) => {
         $(
             impl Id<$ty> {
+                #[allow(dead_code, reason = "expanded for several kinds and dead for only some of them, so `expect` would report itself unfulfilled on the ones that do have a caller — the one site where the self-retiring form does not work")]
                 /// Derive this entity's id from its MusicBrainz id.
                 ///
                 /// Derived rather than adopted, so an upstream merge cannot

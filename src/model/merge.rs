@@ -79,6 +79,10 @@ impl<T> Default for Merges<T> {
 }
 
 impl<T> Merges<T> {
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the redirect machinery is wired into the fold, not into a command"
+    )]
     pub fn new() -> Self {
         Self::default()
     }
@@ -124,16 +128,28 @@ impl<T> Merges<T> {
         current
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the redirect machinery is wired into the fold, not into a command"
+    )]
     /// Whether this id has been merged away.
     pub fn is_merged(&self, id: Id<T>) -> bool {
         self.redirect.contains_key(&id)
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the redirect machinery is wired into the fold, not into a command"
+    )]
     /// Undo one merge. The reason redirects are preferred to deletion.
     pub fn undo(&mut self, loser: Id<T>) -> bool {
         self.redirect.remove(&loser).is_some()
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the redirect machinery is wired into the fold, not into a command"
+    )]
     /// Record that two entities are **not** the same, so nothing proposes them
     /// again.
     pub fn bar(&mut self, a: Id<T>, b: Id<T>) -> Result<(), MergeError> {
@@ -151,11 +167,19 @@ impl<T> Merges<T> {
         self.barred.contains(&Self::pair(a, b))
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the redirect machinery is wired into the fold, not into a command"
+    )]
     /// Withdraw a rejection, so the pair can be proposed again.
     pub fn unbar(&mut self, a: Id<T>, b: Id<T>) -> bool {
         self.barred.remove(&Self::pair(a, b))
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the redirect machinery is wired into the fold, not into a command"
+    )]
     /// Every id that has been merged away, with what it now resolves to.
     pub fn redirects(&self) -> impl Iterator<Item = (Id<T>, Id<T>)> + '_ {
         self.redirect
@@ -163,6 +187,10 @@ impl<T> Merges<T> {
             .map(|(&from, _)| (from, self.resolve(from)))
     }
 
+    #[expect(
+        dead_code,
+        reason = "the companion to len, written with it; nothing asks"
+    )]
     pub fn is_empty(&self) -> bool {
         self.redirect.is_empty() && self.barred.is_empty()
     }

@@ -98,6 +98,10 @@ impl PartialDate {
 )]
 pub struct Bpm(pub u32);
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — BPM is modelled and tested; #50's harmonic nearness is where it gets a caller"
+)]
 impl Bpm {
     pub const fn from_hundredths(n: u32) -> Self {
         Bpm(n)
@@ -160,6 +164,10 @@ pub enum ReleaseType {
 }
 
 impl ReleaseType {
+    #[expect(
+        dead_code,
+        reason = "the #74 rule that a compilation's genre loses to an album's is not wired up"
+    )]
     /// Whether a genre assigned here should be inherited by its recordings.
     ///
     /// A rock song on _80s Hits_ is reached through two release groups, and the
@@ -205,6 +213,10 @@ pub struct Track {
     pub title_on_release: Option<String>,
 }
 
+#[expect(
+    dead_code,
+    reason = "the mix model, proposed in domain-model.md; nothing mints one"
+)]
 /// A recording's place in a mix, with when it enters.
 ///
 /// Not a derivation: a bag of derivation rows drops the two facts a tracklist
@@ -219,6 +231,10 @@ pub struct MixEntry {
     pub at: Option<Duration>,
 }
 
+#[expect(
+    dead_code,
+    reason = "the derivation model, proposed in domain-model.md; nothing mints one"
+)]
 /// Compositional acts — a new work made out of an old one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WorkDerivationKind {
@@ -227,6 +243,10 @@ pub enum WorkDerivationKind {
     Quotation,
 }
 
+#[expect(
+    dead_code,
+    reason = "the derivation model, proposed in domain-model.md; nothing mints one"
+)]
 /// A version of a version. **A cover is not here**: it realises the existing
 /// work, as a performance does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -238,6 +258,10 @@ pub enum RecordingDerivationKind {
     Sample,
 }
 
+#[expect(
+    dead_code,
+    reason = "the derivation model, proposed in domain-model.md; nothing mints one"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkDerivation {
     pub from: Ref<Work>,
@@ -245,6 +269,10 @@ pub struct WorkDerivation {
     pub kind: WorkDerivationKind,
 }
 
+#[expect(
+    dead_code,
+    reason = "the derivation model, proposed in domain-model.md; nothing mints one"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecordingDerivation {
     pub from: Ref<Recording>,
@@ -269,6 +297,10 @@ pub struct Spine {
     pub tracks: BTreeMap<Id<Track>, Track>,
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — catalogue traversal — where a recording appears, not which copies are held, which is what listings answers"
+)]
 impl Spine {
     /// The editions of an album, in first-released order.
     pub fn releases_of(&self, group: Id<ReleaseGroup>) -> Vec<&Release> {
@@ -359,6 +391,10 @@ impl Spine {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — reports a medium's numbering gaps, and no audit asks"
+)]
 /// Something wrong with a medium's track numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumberingProblem {

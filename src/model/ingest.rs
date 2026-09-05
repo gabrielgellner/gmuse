@@ -330,6 +330,10 @@ fn external(tag: Option<&lofty::tag::Tag>) -> Option<Basis> {
     None
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — ingest sets confidence inline; this is the same rule addressable on its own"
+)]
 pub fn confidence_of(scan: &Scanned, matches_known_name: bool) -> Confidence {
     if matches!(scan.identity, Some(Basis::MusicBrainz(_))) {
         Confidence::Confirmed

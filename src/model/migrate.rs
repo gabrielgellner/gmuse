@@ -47,6 +47,10 @@ pub struct Report {
 }
 
 impl Report {
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — an invariant a test asserts, not an answer anything needs at runtime"
+    )]
     /// Whether every event was either converted, deliberately dropped, or
     /// named as unresolvable.
     pub fn balances(&self, total: usize) -> bool {

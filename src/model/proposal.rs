@@ -207,6 +207,10 @@ pub struct Report {
 }
 
 impl Report {
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — an invariant a test asserts, not an answer anything needs at runtime"
+    )]
     pub fn balances(&self, lines: usize) -> bool {
         lines == self.applied + self.malformed.len() + self.unknown.len() + self.refused.len()
     }

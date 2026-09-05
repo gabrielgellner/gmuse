@@ -78,7 +78,6 @@ pub struct Tree {
     /// to recover the string, which is how a projection that exists to answer
     /// questions ends up unable to answer the simplest one.
     artist_names: BTreeMap<SortKey, String>,
-    flat: Vec<Listing>,
 }
 
 /// Shown for a recording that belongs to no album.
@@ -130,25 +129,14 @@ impl Tree {
                 album.tracks.sort_by_key(|c| l.place_of(l.slot_of(c.copy)));
             }
         }
-        let flat = by_artist
-            .values()
-            .flat_map(|albums| albums.values().flat_map(|a| a.tracks.iter().copied()))
-            .collect();
-
         Tree {
             artists: by_artist,
             artist_names,
-            flat,
         }
     }
 
     pub fn artists(&self) -> impl Iterator<Item = (&SortKey, &BTreeMap<SortKey, Album>)> {
         self.artists.iter()
-    }
-
-    /// The whole tree flattened — artist, then album, then disc and track.
-    pub fn flat(&self) -> &[Listing] {
-        &self.flat
     }
 
     /// What to show for an artist node. Falls back to the sort key, which is
@@ -160,14 +148,10 @@ impl Tree {
             .map_or_else(|| artist.as_str(), String::as_str)
     }
 
-    pub fn artist_count(&self) -> usize {
-        self.artists.len()
-    }
-
-    pub fn album_count(&self) -> usize {
-        self.artists.values().map(BTreeMap::len).sum()
-    }
-
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — #59's reissue ordering, written with its reasoning and pinned by a test"
+    )]
     /// An artist's albums, oldest first.
     ///
     /// **By the release group's date**, which is what #59 asked for: a 2015
@@ -207,6 +191,17 @@ mod tests {
     use super::*;
     use crate::model::instance::{Instance, Scanned};
     use crate::model::populate::read_library;
+
+    /// The tree flattened — artist, then album, then disc and track.
+    ///
+    /// A helper rather than a method on `Tree`. `Shelf` does its own
+    /// flattening for the rows it draws, and two ways to answer one question
+    /// is the shape this project removes everywhere else (#113).
+    fn flat(tree: &Tree) -> Vec<Listing> {
+        tree.artists()
+            .flat_map(|(_, albums)| albums.values().flat_map(|a| a.tracks.iter().copied()))
+            .collect()
+    }
     use crate::model::round_trip::{write_tags, write_wav};
     use std::path::PathBuf;
 
@@ -326,7 +321,7 @@ mod tests {
             vec!["Back in Black", "Who Made Who"],
             "the tree showed one album for a song held on two"
         );
-        assert_eq!(tree.flat().len(), 2, "two copies, two rows");
+        assert_eq!(flat(&tree).len(), 2, "two copies, two rows");
 
         // Each copy knows its own slot, so each answers with its own album.
         let mut seen: Vec<String> = Vec::new();
@@ -366,9 +361,9 @@ mod tests {
             ),
         ]);
 
-        assert_eq!(tree.artist_count(), 1, "one artist, not two");
-        assert_eq!(tree.album_count(), 1);
-        assert_eq!(tree.flat().len(), 2);
+        assert_eq!(tree.artists().count(), 1, "one artist, not two");
+        assert_eq!(tree.artists().map(|(_, a)| a.len()).sum::<usize>(), 1);
+        assert_eq!(flat(&tree).len(), 2);
     }
 
     /// Tracks come back in the order the tags claim, not the order they were
@@ -383,8 +378,7 @@ mod tests {
         scan.reverse();
         let (l, tree) = tree_of(&scan);
 
-        let titles: Vec<_> = tree
-            .flat()
+        let titles: Vec<_> = flat(&tree)
             .iter()
             .filter_map(|c| l.row_of(c.recording, c.copy))
             .map(|r| r.title)
@@ -521,8 +515,7 @@ mod tests {
             },
             scanned("Second", "Laurie Anderson", None, 2),
         ]);
-        let titles: Vec<_> = tree
-            .flat()
+        let titles: Vec<_> = flat(&tree)
             .iter()
             .filter_map(|c| l.row_of(c.recording, c.copy))
             .map(|r| r.title)
@@ -562,7 +555,7 @@ mod tests {
         let l = Librarian::from_catalogue(&instance.catalogue());
         let tree = Tree::of(&l, false);
 
-        assert_eq!(tree.artist_count(), 1);
-        assert_eq!(tree.flat().len(), 2);
+        assert_eq!(tree.artists().count(), 1);
+        assert_eq!(flat(&tree).len(), 2);
     }
 }

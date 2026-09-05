@@ -152,16 +152,28 @@ impl<T> Ref<T> {
         self.id
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — Ref resolution in an arena, which nothing in the player arena-resolves yet"
+    )]
     /// The handle, if this reference has been resolved in this process.
     pub const fn handle(&self) -> Option<Handle<T>> {
         self.resolved
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — Ref resolution in an arena, which nothing in the player arena-resolves yet"
+    )]
     /// Record where the target currently sits, for the life of this process.
     pub fn resolve(&mut self, handle: Handle<T>) {
         self.resolved = Some(handle);
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — Ref resolution in an arena, which nothing in the player arena-resolves yet"
+    )]
     /// Forget the resolution. What a rebuild does to every reference.
     pub fn unresolve(&mut self) {
         self.resolved = None;

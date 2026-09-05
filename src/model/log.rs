@@ -780,10 +780,18 @@ pub struct Conflict {
 }
 
 impl Conflict {
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — a conflict's winner and losers, which no command surfaces"
+    )]
     pub fn winner(&self) -> Id<Recording> {
         self.asserted.last().expect("a conflict has candidates").1
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — conflicts, the genre backlog and compaction, none of which a command surfaces"
+    )]
     /// The recordings this collision left behind.
     ///
     /// One encoding cannot be two performances, so every loser here is the
@@ -1156,6 +1164,10 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     cat
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the genre curation backlog, which no command asks for"
+)]
 impl Catalogue {
     /// Concepts this hierarchy does not place — a standing review query.
     ///
@@ -1226,6 +1238,10 @@ impl Catalogue {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+)]
 /// Drop the holdings assertions nothing reads any more.
 ///
 /// **The one event type that may be compacted.** A superseded assertion

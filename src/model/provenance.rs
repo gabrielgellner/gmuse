@@ -41,6 +41,10 @@ pub struct CatalogRecord {
 }
 
 impl CatalogRecord {
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the review queue has no UI"
+    )]
     /// Whether this still wants a human to look at it.
     ///
     /// Verification settles the question however it was reached: a provisional
@@ -57,6 +61,10 @@ pub struct Provenance {
     records: BTreeMap<Cataloguable, CatalogRecord>,
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the review queue has no UI"
+)]
 impl Provenance {
     /// Record how something came to be catalogued.
     ///
@@ -168,6 +176,10 @@ impl Provenance {
         self.records.len()
     }
 
+    #[expect(
+        dead_code,
+        reason = "the companion to len, written with it; nothing asks"
+    )]
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }

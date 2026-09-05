@@ -34,6 +34,7 @@ macro_rules! kinds {
             }
         )*
 
+        #[allow(dead_code, reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the kind list the reachability ratchet reads instead of holding its own copy")]
         /// Every kind, from the one place they are declared.
         ///
         /// **Emitted by the macro rather than typed out again.** Two tests ask
@@ -62,6 +63,7 @@ macro_rules! tags {
 }
 
 tags! {
+    #[expect(dead_code, reason = "a tag type for an entity the domain model proposes and nothing mints yet — fields with #75")]
     /// A copy of an encoding, on one device. Fields with #75.
     Holding,
     /// A machine that holds copies. Fields with #75.
@@ -84,12 +86,16 @@ tags! {
     Hierarchy,
     /// What an artist did on something. Fields with #73.
     Role,
+    #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #76")]
     /// A curated set, ordered or not. Fields with #76.
     Collection,
+    #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #73")]
     /// An artist on a work, recording, release group or release. Fields with #73.
     Credit,
+    #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #76")]
     /// One recording's membership of one collection. Fields with #76.
     CollectionEntry,
+    #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #74")]
     /// One genre assigned to one subject. Fields with #74.
     GenreAssignment,
 }

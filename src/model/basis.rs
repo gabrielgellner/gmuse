@@ -70,6 +70,10 @@ pub enum Basis {
 }
 
 impl Basis {
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — #89's census reports rungs; nothing sorts a work list by one"
+    )]
     /// Which rung this is, for reporting and for sorting a work list.
     pub const fn rung(&self) -> u8 {
         match self {
@@ -79,6 +83,10 @@ impl Basis {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — #89's census reports rungs; nothing sorts a work list by one"
+    )]
     /// Whether nothing but the bytes holds this together — the list a
     /// fingerprint pass exists to shorten.
     pub const fn is_only_bytes(&self) -> bool {

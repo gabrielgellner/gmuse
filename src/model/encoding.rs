@@ -31,6 +31,10 @@ use crate::audio_id::AudioId;
 use crate::model::entity::{Device, Recording};
 use crate::model::id::{Id, Ref};
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the analyser version a re-measure pass would compare against, and there is no pass"
+)]
 /// Which analyser produced a measurement.
 ///
 /// Bumped whenever the FFT parameters or the ReplayGain implementation change.
@@ -47,6 +51,10 @@ pub struct Measured<T> {
 }
 
 impl<T> Measured<T> {
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — Measured carries when a measurement was taken; nothing re-measures yet"
+    )]
     pub const fn now(value: T) -> Self {
         Measured {
             value,
@@ -249,6 +257,10 @@ pub struct DeviceRecord {
     pub kind: DeviceKind,
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the canonical-ordering policy version, read by the pin and by nothing else"
+)]
 /// Bumped when the ordering below changes.
 ///
 /// Canonical choices feed the re-buy list and the quality tables, so a changed
@@ -374,6 +386,10 @@ impl Encodings {
             .collect()
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — targets a re-measure pass at stale rows, and there is no pass"
+    )]
     /// Measurements taken by an older analyser, so a re-measure pass can target
     /// them instead of the whole library.
     pub fn stale_measurements(&self) -> Vec<Id<Encoding>> {

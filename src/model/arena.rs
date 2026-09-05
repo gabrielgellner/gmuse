@@ -28,7 +28,15 @@ use crate::model::id::{Handle, Id};
 /// `Id`/`Handle` split exists to make impossible.
 #[derive(Debug)]
 pub struct Arena<T> {
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the arena itself is built and exercised, and the player still reaches the store's"
+    )]
     items: Vec<(Id<T>, T)>,
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the arena itself is built and exercised, and the player still reaches the store's"
+    )]
     by_id: BTreeMap<Id<T>, u32>,
     generation: u32,
 }
@@ -43,11 +51,19 @@ impl<T> Default for Arena<T> {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the arena itself is built and exercised, and the player still reaches the store's"
+)]
 impl<T> Arena<T> {
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[expect(
+        dead_code,
+        reason = "arena bookkeeping written with the type; every caller reaches an arena through a handle and none has needed to ask"
+    )]
     /// Which generation the handles it is currently handing out belong to.
     pub fn generation(&self) -> u32 {
         self.generation
