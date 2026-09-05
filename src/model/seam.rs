@@ -78,6 +78,12 @@ pub struct Librarian {
     /// librarian knows every holding; which of them is reachable *now* is a
     /// fact about the machine it is running on.
     locators: std::collections::BTreeMap<Id<Encoding>, String>,
+    /// And the inverse, for reading a playlist back.
+    ///
+    /// **Many paths, one row.** Two files with identical bytes are one
+    /// encoding, so both locators name it — which is the right answer for an
+    /// `.m3u` that happens to list the copy you deleted.
+    held_at: std::collections::BTreeMap<String, Id<Encoding>>,
     /// Which slot each copy sits in — issue #78.
     ///
     /// The field that makes a row's album a fact rather than a choice. Without
@@ -105,6 +111,7 @@ impl Librarian {
             genres: Default::default(),
             rows: Default::default(),
             locators: Default::default(),
+            held_at: Default::default(),
             placed: Default::default(),
         }
     }
@@ -482,12 +489,17 @@ impl Librarian {
 
     /// Say which device this is, so rows know where they can be opened.
     pub fn here(&mut self, device: Id<Device>) {
-        self.locators = self
-            .encodings
-            .holdings
-            .iter()
-            .filter(|h| h.device.id() == device)
+        let mine = || {
+            self.encodings
+                .holdings
+                .iter()
+                .filter(|h| h.device.id() == device)
+        };
+        self.locators = mine()
             .map(|h| (h.encoding.id(), h.locator.clone()))
+            .collect();
+        self.held_at = mine()
+            .map(|h| (h.locator.clone(), h.encoding.id()))
             .collect();
     }
 
@@ -655,6 +667,10 @@ impl crate::model::rows::Listing for Librarian {
 
     fn rows(&self) -> Vec<Id<Encoding>> {
         self.rows.keys().copied().collect()
+    }
+
+    fn at(&self, locator: &str) -> Option<Id<Encoding>> {
+        self.held_at.get(locator).copied()
     }
 
     fn audio_of(&self, id: Id<Encoding>) -> Option<crate::audio_id::AudioId> {
@@ -890,27 +906,21 @@ mod tests {
         /// copy that was open, so resuming reopens the file that was open
         /// rather than whichever the canonical rule would pick now.
         ///
-        /// **The two left are two questions, and each needs a decision rather
-        /// than effort:**
+        /// **Zero** (#86), and this is no longer a ratchet but a floor.
         ///
-        /// - **one** reads `.m3u`: `id_for_path` turns a saved path back into
-        ///   a row id, which is a walk of the store's arena. What replaces it
-        ///   depends on what a row id *is* — see #86.
-        /// - **one** is the remote's owned snapshot. Another thread renders a
-        ///   caller's own template, and `rows::Listed` borrows, so nothing
-        ///   owned can be handed across.
+        /// The last two went together. The remote's snapshot is a
+        /// `rows::Drawn` — an owned row, which is the one thing a borrow could
+        /// not do and the whole reason it reached for the record itself. And
+        /// reading an `.m3u` asks `Listing::at`, the inverse of `playable`:
+        /// the one question that has to start from a path, because an `.m3u`
+        /// is a path format. What the playlist holds afterwards is row ids.
         ///
-        /// The filter's went with #86's second pass. It matches a
-        /// `rows::Subject` now — a row, the locator, and what history hangs
-        /// off — so `path=` and `file_name=` survive by being *passed* a
-        /// location rather than by the row carrying one. Sorting moved with
-        /// it, since both are "given a row, produce a value".
+        /// Before them, #86's second pass took the filter and the sort, and
+        /// its first pass took the two `.m3u` writes.
         ///
-        /// Two m3u *writes* left with #86's first pass: they ask
-        /// `Listing::listed` for what to say and `Listing::playable` for where
-        /// the file is, which is the sanctioned shape — an export naming paths
-        /// is not a leak, and neither answer is kept.
-        const REACHES: usize = 2;
+        /// It cannot fall further, so a rise is the only thing left to catch —
+        /// which is what this now does.
+        const REACHES: usize = 0;
 
         let (mut store, mut reaches) = (0, 0);
         let mut stray_paths: Vec<String> = Vec::new();
@@ -930,13 +940,20 @@ mod tests {
             "the player is holding a path that is not one of its own files, \
              and not one produced at the moment of opening: {stray_paths:#?}"
         );
-        assert!(
-            store <= STORE && reaches <= REACHES,
-            "the seam widened: Scan {store} (was {STORE}), \
-             reaches {reaches} (was {REACHES})"
+        // **An assertion, not a ratchet.** It reached zero, and a number that
+        // cannot fall further has nothing left to ratchet — what is worth
+        // catching is a new one appearing.
+        assert_eq!(
+            reaches, REACHES,
+            "the player reached past the seam again: {reaches} time(s)"
         );
-        if store < STORE || reaches < REACHES {
-            eprintln!("seam narrowed to Scan {store}, reaches {reaches} — lower the constants");
+
+        assert!(
+            store <= STORE,
+            "the seam widened: Scan {store} (was {STORE})"
+        );
+        if store < STORE {
+            eprintln!("seam narrowed to Scan {store} — lower the constant");
         }
     }
 

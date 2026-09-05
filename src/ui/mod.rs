@@ -759,17 +759,15 @@ fn serve_remote(ui: &mut Ui, ctx: &Context<'_>) {
     if let Some(player) = ctx.player {
         let files: &dyn Listing = ctx.store;
         let current = ui.playback.current.and_then(|id| files.listed(id));
-        // The remote holds an owned snapshot so another thread can render a
-        // caller's own template. That is the one thing a borrowed row cannot
-        // do, and the only reason this still reaches for the record itself.
-        let owned = ui.playback.current.and_then(|id| ctx.store.get(id));
-        // The `Track` is cloned so the listener can render a caller's own
-        // format without reaching into the store from another thread. Only when
-        // the track *changes*, not every tick: it is a handful of `String`s and
-        // this loop runs five times a second.
+        // **An owned row, so another thread can render a caller's own
+        // template.** A borrow cannot cross one, which is the whole reason
+        // this used to reach past the seam for the record itself (#86).
+        //
+        // Taken only when the track *changes*, not every tick: it is a handful
+        // of `String`s and this loop runs five times a second.
         let track = match (ui.playback.current, ui.remote_track) {
             (Some(id), Some(seen)) if id == seen => None,
-            _ => owned.cloned(),
+            _ => current.as_ref().map(crate::model::rows::Listed::owned),
         };
         let next = crate::remote::Status {
             state: Some(player.state()),
@@ -2419,8 +2417,9 @@ fn load_saved(ui: &mut Ui, ctx: &Context<'_>, found: &crate::playlist::Saved) {
     // how you stop trusting it.
     let mut missing = 0;
     ui.playlist.clear();
+    let rows: &dyn Listing = ctx.store;
     for path in &paths {
-        match ctx.store.id_for_path(path) {
+        match path.to_str().and_then(|at| rows.at(at)) {
             Some(id) => ui.playlist.push(id),
             None => missing += 1,
         }

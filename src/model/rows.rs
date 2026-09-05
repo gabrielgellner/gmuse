@@ -120,6 +120,35 @@ pub struct Drawn {
     pub channels: Option<u8>,
 }
 
+impl Listed<'_> {
+    /// A copy that owns its strings.
+    ///
+    /// **What crosses a thread** (#86). The remote hands a caller the current
+    /// row so it can render its own template, and a borrow cannot go with it.
+    /// Taken from whichever side of the seam answered, so the caller does not
+    /// have to know.
+    pub fn owned(&self) -> Drawn {
+        Drawn {
+            file_under: self.file_under.to_string(),
+            album: self.album.to_string(),
+            disc: self.disc,
+            track: self.track,
+            title: self.title.to_string(),
+            duration: self.duration,
+            artist: self.artist.map(str::to_string),
+            album_artist: self.album_artist.map(str::to_string),
+            tagged_title: self.tagged_title.map(str::to_string),
+            tagged_album: self.tagged_album.map(str::to_string),
+            genre: self.genre.to_vec(),
+            label: self.label.map(str::to_string),
+            year: self.year,
+            bitrate: self.bitrate,
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+        }
+    }
+}
+
 impl Drawn {
     /// The borrowed view a renderer takes.
     pub fn listed(&self) -> Listed<'_> {
@@ -208,6 +237,18 @@ pub trait Listing {
     /// stop knowing where rows come from (#86).
     fn rows(&self) -> Vec<Row>;
 
+    /// The row a locator names, if this device holds one there.
+    ///
+    /// The inverse of [`Listing::playable`], and the one question that has to
+    /// start from a path: an `.m3u` is a path format, so reading one back
+    /// means turning a location into a row. **Asked at the moment of loading
+    /// and not kept** — what the playlist holds afterwards is row ids.
+    ///
+    /// `None` for a path this device does not hold. A playlist can name music
+    /// that has gone, or predate the scan that would have found it, and saying
+    /// so is what stops it quietly coming up short.
+    fn at(&self, locator: &str) -> Option<Row>;
+
     /// Which recording this row's audio holds.
     fn recording_of(
         &self,
@@ -259,5 +300,48 @@ pub trait Listing {
             }
         }
         (albums.len(), artists.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Owning a row must not quietly drop a field.**
+    ///
+    /// The remote takes this copy across a thread and renders a caller's own
+    /// template from it, so anything left behind is a field that is simply
+    /// blank over the socket and correct on screen — which is the kind of
+    /// difference nobody reports as a bug. Sixteen fields copied by hand is
+    /// sixteen chances to miss one, and a mutation dropping `genre` passed
+    /// every other test in the suite.
+    #[test]
+    fn owning_a_row_keeps_every_field() {
+        let full = Drawn {
+            file_under: "Boards of Canada".into(),
+            album: "Music Has the Right to Children".into(),
+            disc: Some(1),
+            track: Some(4),
+            title: "Roygbiv".into(),
+            duration: std::time::Duration::from_secs(151),
+            artist: Some("Boards of Canada".into()),
+            album_artist: Some("Boards of Canada".into()),
+            tagged_title: Some("Roygbiv".into()),
+            tagged_album: Some("Music Has the Right to Children".into()),
+            genre: vec!["Electronic".into(), "IDM".into()],
+            label: Some("Warp".into()),
+            year: Some(1998),
+            bitrate: Some(320),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+        };
+        assert_eq!(full.listed().owned(), full, "a field was lost on the way");
+    }
+
+    /// And the empty case, so "everything is `None`" cannot pass by accident.
+    #[test]
+    fn owning_an_empty_row_keeps_it_empty() {
+        let bare = Drawn::default();
+        assert_eq!(bare.listed().owned(), bare);
     }
 }

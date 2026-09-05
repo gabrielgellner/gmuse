@@ -542,6 +542,10 @@ impl crate::model::rows::Listing for Scan {
         self.iter().map(|(id, _)| id).collect()
     }
 
+    fn at(&self, locator: &str) -> Option<TrackId> {
+        self.id_for_path(Path::new(locator))
+    }
+
     fn audio_of(&self, id: TrackId) -> Option<crate::audio_id::AudioId> {
         self.get(id)?.audio_id
     }

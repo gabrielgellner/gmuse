@@ -48,7 +48,7 @@ use thiserror::Error;
 
 use crate::audio::State;
 use crate::cmd::Command;
-use crate::store::Track;
+use crate::model::rows::Drawn;
 
 /// The socket's name inside the state directory.
 pub const NAME: &str = "socket";
@@ -76,7 +76,7 @@ pub struct Status {
     /// from a pre-rendered string, and truncating one is worse than useless
     /// here: this library's `now_playing` puts the title **last**, so cutting
     /// to fit a bar throws away the only field you were looking for.
-    pub track: Option<Track>,
+    pub track: Option<Drawn>,
     pub position: Duration,
 }
 
@@ -321,12 +321,18 @@ mod tests {
         Arc::new(Mutex::new(status))
     }
 
-    fn a_track() -> Track {
-        Track {
+    /// The row the remote holds, as the player hands it over: owned, because
+    /// it is read from another thread.
+    fn a_track() -> Drawn {
+        Drawn {
             artist: Some("Boards of Canada".into()),
-            album: Some("Music Has the Right to Children".into()),
-            title: Some("Roygbiv".into()),
-            ..Track::default()
+            album_artist: Some("Boards of Canada".into()),
+            file_under: "Boards of Canada".into(),
+            album: "Music Has the Right to Children".into(),
+            tagged_album: Some("Music Has the Right to Children".into()),
+            title: "Roygbiv".into(),
+            tagged_title: Some("Roygbiv".into()),
+            ..Drawn::default()
         }
     }
 
