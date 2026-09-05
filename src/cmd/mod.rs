@@ -592,6 +592,12 @@ pub enum ViewTerm {
     Compose(crate::model::view::Op, Box<crate::view::What>, bool),
     /// `:view save <name>` — name what is composed, as a fact.
     Save(String),
+    /// `:view levels <outer>,<inner>` — how the same set is drawn (#97).
+    ///
+    /// Presentation, not membership: the rows are the same either way, and
+    /// this says how they are grouped. `:view levels` with no argument is the
+    /// tree as it always was.
+    Levels(crate::shelf::Levels),
 }
 
 #[derive(Debug, Clone, PartialEq)]

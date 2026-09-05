@@ -3470,6 +3470,35 @@ Append here as decisions are made. Format: date, decision, rationale.
   Not a third kind of noun, as the issue insisted: a list that "reduces as you play it" is
   `in="keepers" & play_count=0`, and it is a question.
 
+- **2026-09-05** **`levels` is a value on the view, and the numbered views are cmus's shape (#97).** §9–§10 said two
+  axes were conflated: **views 1 and 2 are one set drawn two ways**, and the way was hardcoded. `ViewSpec.levels` was
+  already the switch in the design; it was not a switch in the code.
+
+  `Shelf::grouped(librarian, members, levels, smart)` takes the two fields to group by, and `Tree::of` is **gone** —
+  artist-then-album is what `grouped` does when nobody says otherwise, so the pair is a default rather than a shape.
+  `:view levels genre,album` is a grouping that could not be expressed at all before.
+
+  **Presentation, not membership.** Regrouping redraws and never refilters: the rows are the same either way, which is
+  the distinction §9 exists to draw and is asserted rather than assumed.
+
+  **Two fields ask the model rather than the tags, and the tree wants the model's answer.** `album=` in a filter
+  deliberately reads the _tag_ — `!album?` has to stay meaningful — but a tree grouping by album must put two pressings
+  of one record together, which only the release group can say (#84). Same for who a row files under. Caught by
+  `the_album_comes_from_the_release_group`, which would otherwise have split a reissue whose tag capitalises
+  differently.
+
+  **The multi-valued precondition, honoured** — `tree-view-design.md` §6 named it before it could happen. A row has one
+  artist and many genres, so grouping by genre files a copy under **each**, which is right: you want a techno track
+  under `techno` and under `electronic`. All three call sites §6 listed are wired — counting is distinct
+  (`Shelf::distinct`), enqueueing dedups (`artist_tracks`), and revealing finds every node (`Shelf::everywhere`) —
+  because without them "a subtree reports 42 tracks and enqueues 37". `Levels::outer_is_multi` is a **declared** answer,
+  not a guess.
+
+  **What is not done, and why it is separate.** The `View` enum stays, so the number keys are still built-in rather than
+  bindings, and there are no splits. Both need `ui/tree.rs`'s `Row::{Artist, Album, Track}` to stop naming the levels it
+  draws — about a hundred call sites across two files — and doing that badly would be worse than doing it next. The
+  value being a value is the part everything else builds on, and it is done.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

@@ -107,6 +107,38 @@ impl Field {
         })
     }
 
+    /// What this field is written as. The inverse of [`Field::parse`], so a
+    /// command that carries one round-trips through the line (#97).
+    pub fn name(self) -> String {
+        if let Field::Facet(id) = self {
+            for (key, _) in crate::model::facet::ALL {
+                if crate::model::id::Id::of_key(key) == id {
+                    return (*key).to_string();
+                }
+            }
+        }
+        match self {
+            Field::Artist => "artist",
+            Field::AlbumArtist => "albumartist",
+            Field::FileUnder => "file_under",
+            Field::Album => "album",
+            Field::Title => "title",
+            Field::DisplayTitle => "display_title",
+            Field::Track => "track",
+            Field::Disc => "disc",
+            Field::Year => "year",
+            Field::Label => "label",
+            Field::Duration => "duration",
+            Field::Bitrate => "bitrate",
+            Field::SampleRate => "samplerate",
+            Field::Channels => "channels",
+            Field::Path => "path",
+            Field::FileName => "filename",
+            Field::Facet(_) => "genre",
+        }
+        .to_string()
+    }
+
     /// Every name a field can be written as, sorted.
     ///
     /// **Built rather than typed out**, so a new axis in `facet::ALL` reaches

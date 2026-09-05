@@ -44,6 +44,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::format::Field;
 use crate::model::entity::ReleaseGroup;
 use crate::model::id::Id;
 use crate::model::seam::{Librarian, Listing};
@@ -80,51 +81,128 @@ pub struct Tree {
     artist_names: BTreeMap<SortKey, String>,
 }
 
+/// What a row says for one level, as strings.
+///
+/// **A set, because a level may be multi-valued** — a row has one artist and
+/// many genres. `Field::Facet` is the case that matters; everything else
+/// yields one value or none.
+///
+/// A missing value gets a stand-in rather than being dropped: a track with no
+/// genre is still a track you hold, and filing it nowhere is how a library
+/// grows holes nobody notices.
+fn values_of(field: Field, subject: &crate::model::rows::Subject<'_>) -> Vec<String> {
+    // **Two fields ask the model rather than the tags, and the tree wants the
+    // model's answer** (#84). `album=` in a filter deliberately asks what the
+    // *tag* says — `!album?` has to stay meaningful — but a tree grouping by
+    // album must group two pressings of one record together, which only the
+    // release group can say. Same for who it files under.
+    match field {
+        Field::Album => return vec![subject.row.album.to_string()],
+        Field::FileUnder => return vec![subject.row.file_under.to_string()],
+        _ => {}
+    }
+    let held = crate::filter::texts_of(field, subject);
+    if held.is_empty() {
+        return vec![stand_in(field)];
+    }
+    held
+}
+
+/// What to show where a level has no value.
+fn stand_in(field: Field) -> String {
+    match field {
+        Field::Album => NO_ALBUM.to_string(),
+        _ => "Nothing said".to_string(),
+    }
+}
+
 /// Shown for a recording that belongs to no album.
 pub const NO_ALBUM: &str = "No Album";
 
 impl Tree {
-    /// Build the tree a library describes.
-    pub fn of(l: &Librarian, smart_artist_sort: bool) -> Self {
-        let mut by_artist: BTreeMap<SortKey, BTreeMap<SortKey, Album>> = BTreeMap::new();
-        let mut artist_names: BTreeMap<SortKey, String> = BTreeMap::new();
+    /// Build the tree a library describes, grouped by two chosen fields.
+    ///
+    /// **`levels` is a value, not a shape somebody hardcoded** (#97). Views 1
+    /// and 2 were one set drawn two ways, and this is the switch that says
+    /// which — `[artist, album]` is the tree as it was, and `[genre, album]`
+    /// is a grouping that could not be expressed at all before.
+    ///
+    /// ## A level may be multi-valued, and that is the hazard
+    ///
+    /// A row has one artist and many genres. Grouping by genre therefore
+    /// places a copy under **each** of its genres, which is right — you want
+    /// a techno track under `techno` and under `electronic` — and it means a
+    /// copy appears more than once in the tree.
+    ///
+    /// `tree-view-design.md` §6 names the three call sites that must know:
+    /// counting has to be distinct, enqueueing has to dedup, and revealing
+    /// has to highlight every place it sits. Without that "a subtree reports
+    /// 42 tracks and enqueues 37".
+    pub fn grouped(l: &Librarian, levels: (Field, Field), smart_artist_sort: bool) -> Self {
+        let mut by_outer: BTreeMap<SortKey, BTreeMap<SortKey, Album>> = BTreeMap::new();
+        let mut outer_names: BTreeMap<SortKey, String> = BTreeMap::new();
 
-        // **One node per copy, not per recording** — issue #78. A recording is
-        // on every release that holds it; the file you have is on one, and the
-        // tree is a list of what you have.
         for recording in l.recordings() {
             for listing in l.listings(recording) {
-                let Some(row) = l.row_of(recording, listing.copy) else {
+                if l.row_of(recording, listing.copy).is_none() {
+                    continue;
+                }
+                let slot = l.slot_of(listing.copy);
+                let group = l.group_of(slot);
+                let Some(subject) = listing
+                    .copy
+                    .and_then(|c| crate::model::rows::Listing::subject(l, c))
+                else {
                     continue;
                 };
-                let slot = l.slot_of(listing.copy);
-                let artist = sort_key(&row.file_under, smart_artist_sort);
-                artist_names
-                    .entry(artist.clone())
-                    .or_insert_with(|| row.file_under.clone());
-                // Albums keep their article: "The Wall" belongs under T.
-                let title = row.album.clone().unwrap_or_else(|| NO_ALBUM.to_string());
-                let album_key = sort_key(&title, false);
-                let group = l.group_of(slot);
+                let inner_values = values_of(levels.1, &subject);
+                // The inner level takes the first value it has: a sub-node is
+                // a place *within* a group, and splitting one row across two
+                // sub-nodes of the same group would be a duplicate nobody
+                // asked for.
+                let inner = inner_values.first().cloned().unwrap_or_default();
+                let inner_key = sort_key(&inner, false);
 
-                by_artist
-                    .entry(artist)
-                    .or_default()
-                    .entry(album_key)
-                    .or_insert_with(|| Album {
-                        group,
-                        title,
-                        first_released: group
-                            .and_then(|g| l.spine.groups.get(&g))
-                            .and_then(|g| g.first_released),
-                        tracks: Vec::new(),
-                    })
-                    .tracks
-                    .push(listing);
+                // **Every value, at the outer level.** This is where the
+                // multi-valued case lives, and it is deliberate.
+                for value in values_of(levels.0, &subject) {
+                    let key = sort_key(&value, smart_artist_sort && levels.0 == Field::FileUnder);
+                    outer_names.entry(key.clone()).or_insert(value);
+                    by_outer
+                        .entry(key)
+                        .or_default()
+                        .entry(inner_key.clone())
+                        .or_insert_with(|| Album {
+                            group,
+                            title: inner.clone(),
+                            first_released: group
+                                .and_then(|g| l.spine.groups.get(&g))
+                                .and_then(|g| g.first_released),
+                            tracks: Vec::new(),
+                        })
+                        .tracks
+                        .push(listing);
+                }
             }
         }
+        sort_within(l, &mut by_outer);
+        Tree {
+            artists: by_outer,
+            artist_names: outer_names,
+        }
+    }
 
-        for albums in by_artist.values_mut() {
+    // **`Tree::of` lived here and is gone** (#97).
+    //
+    // It built artist-then-album, which is what `grouped` does when nobody
+    // says otherwise — so the pair is a *default* now rather than a shape
+    // somebody hardcoded, and that is the whole of what this issue is about.
+}
+
+/// Order the tracks inside every node, one rule for both groupings.
+fn sort_within(l: &Librarian, by_outer: &mut BTreeMap<SortKey, BTreeMap<SortKey, Album>>) {
+    {
+        for albums in by_outer.values_mut() {
             for album in albums.values_mut() {
                 // **Position first, then the title, then the id** (#116).
                 //
@@ -146,12 +224,10 @@ impl Tree {
                 });
             }
         }
-        Tree {
-            artists: by_artist,
-            artist_names,
-        }
     }
+}
 
+impl Tree {
     pub fn artists(&self) -> impl Iterator<Item = (&SortKey, &BTreeMap<SortKey, Album>)> {
         self.artists.iter()
     }
@@ -245,7 +321,7 @@ mod tests {
         let mut i = Instance::new(Id::derived(b"laptop"));
         i.ingest(100, scan);
         let l = Librarian::from_catalogue(&i.catalogue());
-        let t = Tree::of(&l, false);
+        let t = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
         (l, t)
     }
 
@@ -502,7 +578,7 @@ mod tests {
             }));
         }
 
-        let tree = Tree::of(&l, false);
+        let tree = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
         let artist = sort_key("Laurie Anderson", false);
         let by_date: Vec<_> = tree
             .albums_by_date(&artist)
@@ -542,7 +618,7 @@ mod tests {
             ],
         );
         let l = Librarian::from_catalogue(&i.catalogue());
-        let tree = Tree::of(&l, false);
+        let tree = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
 
         let titles: Vec<_> = tree
             .albums_by_date(&sort_key("Laurie Anderson", false))
@@ -577,7 +653,7 @@ mod tests {
                 g.first_released = Some(PartialDate::year(1970));
             }
         }
-        let tree = Tree::of(&l, false);
+        let tree = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
         let titles: Vec<_> = tree
             .albums_by_date(&sort_key("Laurie Anderson", false))
             .iter()
@@ -641,7 +717,7 @@ mod tests {
         let (instance, report) = read_library("laptop", &[PathBuf::from(&dir)], 100);
         assert_eq!(report.ingested, 2);
         let l = Librarian::from_catalogue(&instance.catalogue());
-        let tree = Tree::of(&l, false);
+        let tree = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
 
         assert_eq!(tree.artists().count(), 1);
         assert_eq!(flat(&tree).len(), 2);

@@ -413,6 +413,8 @@ pub struct Ui {
     // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// How the tree is grouped — **a field on the view** (#97).
+    pub levels: crate::shelf::Levels,
     /// The fuzzy picker, while it is open (#54).
     pub picker: Option<crate::ui::picker::Picker>,
     /// What went wrong resolving the composed view, if anything.
@@ -472,6 +474,7 @@ impl Ui {
     fn bare(library: Shelf) -> Self {
         Self {
             stop: None,
+            levels: crate::shelf::Levels::default(),
             picker: None,
             view_problem: None,
             view: View::Tree,
@@ -2422,6 +2425,27 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                     save_view(ui, &name);
                     return;
                 }
+                // **Presentation, not membership** (#97). The rows are the
+                // same either way, so this redraws rather than refiltering —
+                // and it is on the *view*, which is why `:view levels genre`
+                // is a thing to say at all.
+                ViewTerm::Levels(levels) => {
+                    ui.levels = levels;
+                    rebuild_library(ui, ctx);
+                    let said = format!(
+                        "levels: {},{} ({} {})",
+                        levels.outer.name(),
+                        levels.inner.name(),
+                        ui.library.artist_count(),
+                        if levels.outer_is_multi() {
+                            "groups, a track may be in several"
+                        } else {
+                            "groups"
+                        }
+                    );
+                    ui.notify(said);
+                    return;
+                }
             }
             rebuild_library(ui, ctx);
             // **A broken reference wins over the count.** "0 tracks" is the
@@ -3670,7 +3694,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         ui.audit.line("view", &p);
         ui.notify(p);
     }
-    ui.library = Shelf::project(ctx.library, members, ui.smart_artist_sort);
+    ui.library = Shelf::grouped(ctx.library, members, ui.levels, ui.smart_artist_sort);
     ui.tree.selected = 0;
     ui.sorted = 0;
     // Playlists and the queue are deliberately untouched: they hold TrackIds
@@ -9119,6 +9143,44 @@ mod tests {
         ui.data_dir = Some(scratch(name));
         ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         ui
+    }
+
+    /// **`levels` is a field on the view, settable in place** — #97.
+    ///
+    /// Views 1 and 2 were one set drawn two ways, and the way was hardcoded.
+    /// Saying it out loud is what makes `genre` a grouping at all.
+    #[test]
+    fn levels_regroup_the_same_set_in_place() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let tracks = ui.library.len();
+        let artists = ui.library.artist_count();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels genre,album");
+        assert_eq!(
+            ui.library.len(),
+            tracks,
+            "regrouping changed membership: {}",
+            ui.status
+        );
+        assert_ne!(
+            ui.library.artist_count(),
+            artists,
+            "the tree did not regroup"
+        );
+        assert!(
+            ui.status.contains("a track may be in several"),
+            "{}",
+            ui.status
+        );
+
+        // And back, because it is a value rather than a mode.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels");
+        assert_eq!(ui.library.artist_count(), artists);
+        assert_eq!(ui.library.len(), tracks);
     }
 
     /// **The picker: bare text is a needle, and it goes rather than plays.**

@@ -391,6 +391,12 @@ fn compose_term(rest: &str) -> Result<crate::cmd::ViewTerm, ParseError> {
     // **The space is load-bearing.** `saved="mornings"` starts with `save`,
     // so a bare prefix test read a term naming a view as the verb that saves
     // one — caught by the round-trip test, which is what it is for.
+    if let Some(spec) = rest
+        .strip_prefix("levels")
+        .filter(|r| r.is_empty() || r.starts_with(' '))
+    {
+        return Ok(ViewTerm::Levels(levels_spec(spec.trim())?));
+    }
     if let Some(name) = rest
         .strip_prefix("save ")
         .or_else(|| (rest.trim_end() == "save").then_some(""))
@@ -512,6 +518,27 @@ fn seek_spec(rest: &str) -> Result<SeekSpec, ParseError> {
         SeekSpec::Relative(seconds)
     } else {
         SeekSpec::Absolute(seconds)
+    })
+}
+
+/// `outer,inner` — the two fields a tree is grouped by.
+///
+/// Empty is the default pair, which is `artist,album`: `:view levels` puts the
+/// tree back rather than being an error, because that is what somebody means
+/// by it.
+fn levels_spec(rest: &str) -> Result<crate::shelf::Levels, ParseError> {
+    use crate::format::Field;
+
+    if rest.is_empty() {
+        return Ok(crate::shelf::Levels::default());
+    }
+    let (outer, inner) = rest.split_once(',').unwrap_or((rest, "album"));
+    let field = |name: &str| {
+        Field::parse(name.trim()).ok_or_else(|| ParseError::Bad(name.trim().into(), "field"))
+    };
+    Ok(crate::shelf::Levels {
+        outer: field(outer)?,
+        inner: field(inner)?,
     })
 }
 
@@ -776,6 +803,9 @@ pub fn format(cmd: &Command) -> String {
             format!("view {sign}{}", crate::view::written(f))
         }
         Command::Compose(crate::cmd::ViewTerm::Save(name)) => format!("view save {name}"),
+        Command::Compose(crate::cmd::ViewTerm::Levels(l)) => {
+            format!("view levels {},{}", l.outer.name(), l.inner.name())
+        }
         Command::Filter(None) => "filter".into(),
         Command::Filter(Some(f)) => format!("filter {}", f.source),
         Command::Search { pattern, dir } => match dir {

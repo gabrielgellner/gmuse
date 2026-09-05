@@ -41,6 +41,42 @@ pub struct Shelf {
     artist_names: BTreeMap<SortKey, String>,
     album_names: BTreeMap<(SortKey, SortKey), String>,
     sorted: Vec<CopyId>,
+    /// Which two fields this was grouped by (#97).
+    levels: Levels,
+}
+
+/// What a view is grouped by.
+///
+/// **Two fields, and the outer one may be multi-valued.** A row has one artist
+/// and many genres, so grouping by genre files a copy under each of them —
+/// which is what you want, and which means every count over the tree has to be
+/// distinct rather than a sum. `tree-view-design.md` §6 named this before it
+/// could happen; grouping by a chosen field is what made it possible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Levels {
+    pub outer: crate::format::Field,
+    pub inner: crate::format::Field,
+}
+
+impl Default for Levels {
+    /// Artist then album — the tree as it has always been, now said out loud.
+    fn default() -> Self {
+        Self {
+            outer: crate::format::Field::FileUnder,
+            inner: crate::format::Field::Album,
+        }
+    }
+}
+
+impl Levels {
+    /// Whether the outer level can put one row in more than one node.
+    ///
+    /// The **declared** answer, not a guess: a level is single-valued unless
+    /// it says otherwise, and this is the flag `tree-view-design.md` §6 said
+    /// must exist before a multi-valued grouping does.
+    pub fn outer_is_multi(self) -> bool {
+        matches!(self.outer, crate::format::Field::Facet(_))
+    }
 }
 
 // **`smart_artist_sort` was a field here and is not one any more** (#116). It
@@ -83,6 +119,20 @@ impl Shelf {
         members: HashSet<CopyId>,
         smart_artist_sort: bool,
     ) -> Self {
+        Self::grouped(librarian, members, Levels::default(), smart_artist_sort)
+    }
+
+    /// The same, grouped by two chosen fields — #97.
+    ///
+    /// **`levels` is a value, not a shape somebody hardcoded.** Views 1 and 2
+    /// were one set drawn two ways; `[artist, album]` is the tree as it was,
+    /// and `[genre, album]` is a grouping that could not be expressed at all.
+    pub fn grouped(
+        librarian: &Librarian,
+        members: HashSet<CopyId>,
+        levels: Levels,
+        smart_artist_sort: bool,
+    ) -> Self {
         let mut lib = Shelf {
             members,
             ..Default::default()
@@ -94,7 +144,12 @@ impl Shelf {
         // durable id of its bytes — so two files with identical audio are one
         // row rather than two rows to be grouped, and the lookup below is
         // "is this copy one of ours".
-        let tree = crate::model::tree::Tree::of(librarian, smart_artist_sort);
+        lib.levels = levels;
+        let tree = crate::model::tree::Tree::grouped(
+            librarian,
+            (levels.outer, levels.inner),
+            smart_artist_sort,
+        );
         let mut placed: HashSet<CopyId> = HashSet::new();
         for (artist_key, albums) in tree.artists() {
             for (album_key, album) in albums {
@@ -179,6 +234,24 @@ impl Shelf {
         self.tree.values().map(|a| a.len()).sum()
     }
 
+    /// How this was grouped.
+    pub fn levels(&self) -> Levels {
+        self.levels
+    }
+
+    /// **Distinct copies, not a sum over nodes** — `tree-view-design.md` §6.
+    ///
+    /// A multi-valued outer level files one copy under several nodes, so
+    /// adding up the nodes counts it twice. That is the difference between "a
+    /// subtree reports 42 tracks" and "it enqueues 37", and the two must not
+    /// be allowed to disagree.
+    pub fn distinct(&self, ids: &[CopyId]) -> usize {
+        if !self.levels.outer_is_multi() {
+            return ids.len();
+        }
+        ids.iter().collect::<HashSet<_>>().len()
+    }
+
     pub fn contains(&self, id: CopyId) -> bool {
         self.members.contains(&id)
     }
@@ -189,20 +262,42 @@ impl Shelf {
     /// the tree rather than the `Scan` keeps `next()`'s inputs to exactly what
     /// DESIGN §5 lists.
     pub fn locate(&self, id: CopyId) -> Option<(&SortKey, &SortKey)> {
-        self.tree.iter().find_map(|(artist, albums)| {
-            albums
-                .iter()
-                .find(|(_, tracks)| tracks.contains(&id))
-                .map(|(album, _)| (artist, album))
-        })
+        self.everywhere(id).into_iter().next()
     }
 
-    /// Every track by one artist, in album then disc/track order.
-    pub fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId> {
+    /// **Every node a copy sits under** — §6's third call site.
+    ///
+    /// Revealing a track grouped by genre has to highlight it under each of
+    /// its genres, or "go to what is playing" lands on one arbitrary node and
+    /// looks like the others do not hold it.
+    pub fn everywhere(&self, id: CopyId) -> Vec<(&SortKey, &SortKey)> {
         self.tree
+            .iter()
+            .flat_map(|(artist, albums)| {
+                albums
+                    .iter()
+                    .filter(move |(_, tracks)| tracks.contains(&id))
+                    .map(move |(album, _)| (artist, album))
+            })
+            .collect()
+    }
+
+    /// Every track under one node, in sub-node then disc/track order.
+    ///
+    /// **Deduplicated when the level is multi-valued** (§6): enqueueing a
+    /// genre must not queue a track twice because it carries two genres, and
+    /// the count beside the node has to be the same number.
+    pub fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId> {
+        let mut out: Vec<CopyId> = self
+            .tree
             .get(artist)
             .map(|albums| albums.values().flatten().copied().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.levels.outer_is_multi() {
+            let mut seen = HashSet::new();
+            out.retain(|id| seen.insert(*id));
+        }
+        out
     }
 
     /// One album's tracks, in disc/track order.
@@ -463,6 +558,107 @@ mod projection {
         let members: HashSet<CopyId> = Listing::rows(&l).into_iter().collect();
         let lib = Shelf::project(&l, members, false);
         (l, lib)
+    }
+
+    /// **The tree is grouped by chosen fields** — #97's headline, and the
+    /// thing that could not be expressed before: `levels: [genre]`.
+    #[test]
+    fn levels_choose_what_the_tree_groups_by() {
+        let mut techno = scan("Callisto", "Bodzin", Some("Bodzin"), "Luna");
+        techno.genres = vec!["Techno".into()];
+        let mut folk = scan("The Sea", "Ferrell", Some("Ferrell"), "Long Time Coming");
+        folk.genres = vec!["Folk".into()];
+
+        let mut i = Instance::new(crate::fixture::device());
+        i.ingest(100, &[techno.clone(), folk.clone()]);
+        i.assert_holdings(
+            100,
+            [&techno, &folk]
+                .iter()
+                .map(|s| {
+                    (
+                        crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&s.audio),
+                        format!("/m/{}.mp3", s.title),
+                    )
+                })
+                .collect(),
+        );
+        let mut l = Librarian::from_catalogue(&i.catalogue());
+        l.here(crate::fixture::device());
+        let members: HashSet<CopyId> = Listing::rows(&l).into_iter().collect();
+
+        let by_artist = Shelf::grouped(&l, members.clone(), Levels::default(), false);
+        assert_eq!(by_artist.artist_count(), 2, "two artists");
+
+        let genre = crate::format::Field::parse("genre").unwrap();
+        let by_genre = Shelf::grouped(
+            &l,
+            members,
+            Levels {
+                outer: genre,
+                inner: crate::format::Field::Album,
+            },
+            false,
+        );
+        let names: Vec<&str> = by_genre
+            .artists()
+            .map(|(k, _)| by_genre.artist_name(k))
+            .collect();
+        assert_eq!(names, ["Folk", "Techno"], "not grouped by genre");
+    }
+
+    /// **A multi-valued level files one copy under several nodes, and every
+    /// count over the tree has to know** — `tree-view-design.md` §6, named
+    /// before it could happen and true the moment grouping became a choice.
+    ///
+    /// Without this "a subtree reports 42 tracks and enqueues 37".
+    #[test]
+    fn a_track_with_two_genres_is_counted_once_and_enqueued_once() {
+        let mut both = scan("Callisto", "Bodzin", Some("Bodzin"), "Luna");
+        both.genres = vec!["Techno".into(), "Electronic".into()];
+
+        let mut i = Instance::new(crate::fixture::device());
+        i.ingest(100, std::slice::from_ref(&both));
+        i.assert_holdings(
+            100,
+            [(
+                crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&both.audio),
+                "/m/callisto.mp3".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut l = Librarian::from_catalogue(&i.catalogue());
+        l.here(crate::fixture::device());
+        let members: HashSet<CopyId> = Listing::rows(&l).into_iter().collect();
+        let id = *members.iter().next().unwrap();
+
+        let levels = Levels {
+            outer: crate::format::Field::parse("genre").unwrap(),
+            inner: crate::format::Field::Album,
+        };
+        assert!(levels.outer_is_multi(), "genre must declare itself multi");
+        let lib = Shelf::grouped(&l, members, levels, false);
+
+        // Under both, which is the point of grouping by a multi-valued field.
+        assert_eq!(lib.artist_count(), 2, "one track, two genres, two nodes");
+        assert_eq!(
+            lib.everywhere(id).len(),
+            2,
+            "revealing it must find both places it sits"
+        );
+
+        // **But counted once and enqueued once.** The two numbers may not
+        // disagree, which is exactly the failure §6 predicted.
+        let flat: Vec<CopyId> = lib
+            .artists()
+            .flat_map(|(_, albums)| albums.values().flatten().copied())
+            .collect();
+        assert_eq!(flat.len(), 2, "the tree really does hold it twice");
+        assert_eq!(lib.distinct(&flat), 1, "counted twice");
+
+        let queued = lib.artist_tracks(lib.artists().next().unwrap().0);
+        assert_eq!(queued.len(), 1, "enqueued twice");
     }
 
     /// **Two pressings of one album are one album**, which the tags cannot

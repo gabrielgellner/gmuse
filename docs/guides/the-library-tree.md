@@ -13,6 +13,22 @@ View 1 holds all three levels in one pane — artists, their albums, and the tra
 Several artists can be open at once, and several of _their_ albums. That is the point: you can put two albums from
 opposite ends of the library on screen together and move between them with `j` and `k`, without a pane or a filter.
 
+## What it groups by is yours
+
+Artist then album is a **default**, not the shape of the thing:
+
+    :view levels genre,album     by genre
+    :view levels year,album      by year
+    :view levels label,album     by imprint
+    :view levels                 back to artist,album
+
+The rows are the same either way — this is how the set is _drawn_, not which tracks are in it, so regrouping never
+changes what you are looking at.
+
+**A track can carry two genres, and grouping by one puts it under both.** That is what you want — a techno track belongs
+under `techno` and under `electronic` — and it means the numbers are careful about it: a node counts distinct tracks,
+enqueueing one queues each track once, and going to what is playing highlights every place it sits.
+
 ## Opening and closing
 
     l        open the row under the cursor
