@@ -58,6 +58,12 @@ pub trait Listened {
     fn acquired(&self, recording: Id<Recording>) -> Option<i64>;
     /// Stars. `None` is unrated, which is not the same as nought stars.
     fn rating(&self, recording: Id<Recording>) -> Option<u8>;
+    /// How many collections hold this — #119's "in no crate".
+    ///
+    /// A count rather than a yes/no, so `collected>1` finds the overlap the
+    /// filesystem used to forbid: a pop song is in Dance when you are DJing
+    /// with it and in General the rest of the time, and both are true.
+    fn collected(&self, recording: Id<Recording>) -> u32;
 }
 
 /// A glob pattern. `*` is the only metacharacter; `\*` is a literal asterisk.
@@ -202,6 +208,8 @@ impl Glob {
 /// the grammar, which is a whole syntax avoided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryField {
+    /// How many collections hold this. `!collected?` is "in no crate" (#119).
+    Collected,
     PlayCount,
     DaysSincePlayed,
     DaysSinceAdded,
@@ -210,6 +218,7 @@ pub enum HistoryField {
 
 impl HistoryField {
     pub const NAMES: &'static [&'static str] = &[
+        "collected",
         "days_since_added",
         "days_since_played",
         "play_count",
@@ -218,6 +227,7 @@ impl HistoryField {
 
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
+            "collected" => HistoryField::Collected,
             "play_count" => HistoryField::PlayCount,
             "days_since_played" => HistoryField::DaysSincePlayed,
             "days_since_added" => HistoryField::DaysSinceAdded,
@@ -404,6 +414,14 @@ fn history_number(f: HistoryField, s: &Subject<'_>, env: &Env) -> Option<i64> {
     Some(match f {
         // An unplayed track has played zero times, which is an answer;
         // `play_count=0` is how you ask for the ones you have never heard.
+        // **Zero collections is missing, not zero** — `!collected?` is "in no
+        // crate" (#119), and it is a question worth being able to ask: a file
+        // that has not been filed is one nobody has decided about, which is
+        // different from one decided to be in nothing.
+        HistoryField::Collected => match listened.collected(recording) {
+            0 => return None,
+            n => i64::from(n),
+        },
         HistoryField::PlayCount => i64::from(listened.plays(recording)),
         HistoryField::DaysSincePlayed => days_since(listened.last_played(recording)?, env.now),
         HistoryField::DaysSinceAdded => days_since(listened.acquired(recording)?, env.now),
@@ -1143,6 +1161,7 @@ mod tests {
         last_played: Option<i64>,
         acquired: Option<i64>,
         rating: Option<u8>,
+        collected: u32,
     }
 
     impl Listened for Fake {
@@ -1155,6 +1174,9 @@ mod tests {
         fn acquired(&self, _: Id<Recording>) -> Option<i64> {
             self.acquired
         }
+        fn collected(&self, _: Id<Recording>) -> u32 {
+            self.collected
+        }
         fn rating(&self, _: Id<Recording>) -> Option<u8> {
             self.rating
         }
@@ -1166,7 +1188,41 @@ mod tests {
             last_played,
             acquired: Some(added),
             rating: None,
+            collected: 0,
         }
+    }
+
+    /// **"In no crate" is a question somebody can ask** — #119.
+    ///
+    /// Zero collections is *missing*, not zero, so `!collected?` finds what
+    /// nobody has filed. Counting it as nought would make an unfiled track
+    /// look like one deliberately put in nothing, which is the same mistake
+    /// `rating` avoids: unrated is not nought stars.
+    #[test]
+    fn collected_says_how_many_crates_hold_it() {
+        let t = track();
+        let none = Fake::default();
+        let one = Fake {
+            collected: 1,
+            ..Fake::default()
+        };
+        let both = Fake {
+            collected: 2,
+            ..Fake::default()
+        };
+
+        assert!(
+            matches_env("!collected?", &t, &none, 0),
+            "unfiled not found"
+        );
+        assert!(!matches_env("!collected?", &t, &one, 0));
+        assert!(matches_env("collected?", &t, &one, 0));
+
+        // **The overlap the filesystem used to forbid.** A pop song is in
+        // Dance when you are DJing with it and in General the rest of the
+        // time, and both are true — so this is a count, not a flag.
+        assert!(matches_env("collected>1", &t, &both, 0));
+        assert!(!matches_env("collected>1", &t, &one, 0));
     }
 
     fn matches_env(expr: &str, t: &Track, h: &Fake, now: i64) -> bool {

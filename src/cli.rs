@@ -162,6 +162,15 @@ pub enum Shelf {
         #[arg(long)]
         unidentified: bool,
     },
+    /// Propose filing whatever is in no collection, by the folder it sits in.
+    ///
+    /// **A proposal, printed, and never applied.** The folder is evidence a
+    /// person left, and reading it once is the whole of what it is for: a
+    /// scan that filed by folder would make the filesystem authoritative
+    /// again, which is exactly what #90 and #94 took away.
+    ///
+    /// Review it, then `gmuse shelf apply --write`.
+    Unfiled,
 }
 
 impl Cli {

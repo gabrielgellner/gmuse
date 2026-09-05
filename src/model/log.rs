@@ -1525,6 +1525,18 @@ impl crate::filter::Listened for Catalogue {
     fn rating(&self, recording: Id<Recording>) -> Option<u8> {
         self.ratings.get(&recording).copied()
     }
+
+    /// **Distinct collections, not entries** — a playlist holding one track
+    /// twice is one collection that holds it, and counting entries would make
+    /// `collected>1` mean "repeated somewhere" instead of "in two crates".
+    fn collected(&self, recording: Id<Recording>) -> u32 {
+        self.entries
+            .iter()
+            .filter(|(_, _, r)| *r == recording)
+            .map(|(c, _, _)| *c)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u32
+    }
 }
 
 #[cfg(test)]

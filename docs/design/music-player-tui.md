@@ -3414,6 +3414,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   scans that function's source for match arms — so `tracks` and `groups` read as two more verbs. It is a helper function
   now, below `split_word` and out of the scanned range, which is the shape `playlist_spec` already had.
 
+- **2026-09-05** **"In no crate" is a question, and the folder proposes rather than files (#119).** The last two pieces,
+  and both turn on the same rule: a folder is evidence somebody left, read once and discarded.
+
+  **`collected` is a filter field**, so `!collected?` finds what nobody has filed. It follows `rating`'s rule rather
+  than `play_count`'s — in nothing is **missing**, not nought, because a track nobody has decided about is different
+  from one decided to belong to nothing. And it is a **count**, not a flag: collections overlap on purpose, so
+  `collected>1` finds the pop song that is in Dance when you are DJing with it and in General the rest of the time.
+  Counting _distinct collections_ rather than entries, because a playlist holding one track twice is one collection that
+  holds it.
+
+  The alternative was `-in="Dance" -in="General"`, which is expressible today and does not generalise: it needs every
+  crate named, so adding one silently breaks the query.
+
+  **A scan reports what landed in a folder and belongs to nothing**, and `gmuse shelf unfiled` turns that into a
+  proposal. It is the review queue, not a rule — a scan that filed by folder would make the filesystem authoritative
+  again, which is exactly what #90 and #94 took away, and moving a file would silently re-file it. The proposals go to
+  stdout and the summary to stderr, so a redirect gets only the facts.
+
+  Verified on the real library: **0 proposals**, because everything on this disk is already in `Dance` or `General`. The
+  14 rows in no collection are held on the NAS, so a scan of this disk cannot see them and correctly says nothing about
+  them.
+
+  A file sitting directly in a root gets no suggestion — there is no folder to suggest — which is asserted rather than
+  left to be discovered by somebody with a stray `.wav`.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

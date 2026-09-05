@@ -83,22 +83,33 @@ Catalogs are named and persistent, and they **union**: turn on jazz and blues an
 View 6 lists them, and `space` turns one on or off. That view is called _scope_ because it shows the whole answer — the
 catalogs and the filter together.
 
-## History and ratings
+## History, ratings, and what you have filed
 
-Four fields come from listening rather than from tags:
+Five fields come from what you have done rather than from tags:
 
     play_count           0 for never
     days_since_played    missing if never
     days_since_added
     rating               1–5, or missing
+    collected            how many collections hold it, or missing
 
     :filter play_count=0                 never heard
     :filter days_since_added<30          new this month
     :filter !rating?                     not judged yet
+    :filter !collected?                  in no crate
+    :filter collected>1                  in two, which is allowed
 
 Dates read as _days since_ so a question sounds like English and the language needs no date literals. Note that "never
 played" has **no** `days_since_played` at all — `!days_since_played?` finds exactly those — while `play_count` is `0`,
 because never is an answer.
+
+`collected` follows the same rule as `rating`: in nothing is **missing**, not nought, because a track nobody has filed
+is different from one decided to belong to nothing. And it is a count rather than a flag, because collections overlap on
+purpose — a pop song is in Dance when you are DJing with it and in General the rest of the time, and both are true.
+
+A scan says what has landed and belongs to nothing, by the folder it landed in, and `gmuse shelf unfiled` turns that
+into a proposal you read before applying. **The folder never files anything itself** — it is evidence somebody left, and
+reading it once is all it is for.
 
     :rate 4      rate what is playing, or the row under the cursor
     :rate none   clear it

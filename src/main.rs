@@ -287,6 +287,35 @@ fn run_library(
     let machine = crate::events::machine_id(&config::default_state_dir());
     let device = crate::model::id::Id::derived(machine.as_bytes());
     match op {
+        cli::Shelf::Unfiled => {
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let report =
+                crate::model::populate::populate(&mut log, roots, crate::history::now_ms());
+            let mut lines = 0usize;
+            for (folder, held) in &report.unfiled {
+                for recording in held {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({
+                            "fact": "collected_into",
+                            "recording": recording.to_string(),
+                            "collection": folder,
+                            "ordered": false,
+                        }))?
+                    );
+                    lines += 1;
+                }
+            }
+            // On stderr, so a redirect to a file gets only the proposals.
+            eprintln!(
+                "{lines} proposal(s) across {} folder(s) — review, then `gmuse shelf apply --write <file>`",
+                report.unfiled.len()
+            );
+        }
         cli::Shelf::Query { unidentified } => {
             let (log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,

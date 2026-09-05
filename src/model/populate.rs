@@ -64,6 +64,18 @@ pub struct Report {
     /// answer about itself — and re-deriving it here is how two answers to one
     /// question get into the codebase.
     pub identified: BTreeMap<PathBuf, Id<Recording>>,
+    /// Recordings in **no collection**, by the folder they were found under.
+    ///
+    /// **A suggestion, and never a write** (#119). The folder is evidence a
+    /// person left, read once and discarded — a scan that filed by folder
+    /// would make the filesystem authoritative again, which is exactly what
+    /// #90 and #94 took away, and moving a file would silently re-file it.
+    ///
+    /// So this is the review queue: drop a new album into `Classical/` and the
+    /// next scan says twelve things landed there and belong to nothing, and
+    /// `gmuse shelf unfiled` turns that into a proposal you read before
+    /// applying.
+    pub unfiled: BTreeMap<String, Vec<Id<Recording>>>,
 }
 
 impl Report {
@@ -95,6 +107,15 @@ impl std::fmt::Display for Report {
         )?;
         // Named, not counted. A count says "you have a problem somewhere in
         // 6,500 files"; the pair says which one to delete.
+        // Named by folder and counted: the folder is the suggestion, and the
+        // count is what makes it worth reading.
+        for (folder, held) in &self.unfiled {
+            write!(
+                f,
+                "\n  {} under {folder}/ are in no collection — `gmuse shelf unfiled` proposes filing them",
+                held.len()
+            )?;
+        }
         for (dropped, kept) in &self.duplicates {
             write!(
                 f,
@@ -191,8 +212,43 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
     }
 
     instance.assert_holdings(now, held);
+
+    // **After the ingest, so the collections are the ones this fold knows.**
+    // Asked of the catalogue rather than recomputed, for the reason
+    // `identified` is: two answers to one question is how they drift.
+    let cat = instance.catalogue();
+    let filed: std::collections::BTreeSet<Id<Recording>> =
+        cat.entries.iter().map(|(_, _, r)| *r).collect();
+    for (path, recording) in &report.identified {
+        if filed.contains(recording) {
+            continue;
+        }
+        if let Some(folder) = folder_of(path, roots) {
+            report.unfiled.entry(folder).or_default().push(*recording);
+        }
+    }
+
     report.elapsed = started.elapsed();
     report
+}
+
+/// The first folder below whichever root holds this path.
+///
+/// `~/MusicLibrary/Dance/Akufen/…` under root `~/MusicLibrary` is `Dance`. A
+/// file sitting directly in a root is under no folder and gets none — there is
+/// nothing to suggest.
+fn folder_of(path: &Path, roots: &[PathBuf]) -> Option<String> {
+    for root in roots {
+        if let Ok(rest) = path.strip_prefix(root) {
+            let mut parts = rest.components();
+            let first = parts.next()?;
+            // The last component is the file itself, so a path with only one
+            // component is a file in the root rather than a file in a folder.
+            parts.next()?;
+            return Some(first.as_os_str().to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 /// A convenience for the common case: one device, one set of roots.
@@ -219,6 +275,58 @@ mod tests {
 
     use crate::model::round_trip::{write_tags, write_wav};
     use crate::model::seam::Librarian;
+
+    /// **The folder proposes; nothing files by it** — #119.
+    ///
+    /// Drop an album into `Classical/` and the next scan says twelve things
+    /// landed there and belong to nothing. It is a review queue, not a rule:
+    /// a scan that filed by folder would make the filesystem authoritative
+    /// again, which is exactly what #90 and #94 took away, and moving a file
+    /// would silently re-file it.
+    #[test]
+    fn the_folder_a_file_landed_in_is_a_suggestion() {
+        let root = std::env::temp_dir().join("gmuse-populate-unfiled");
+        let _ = std::fs::remove_dir_all(&root);
+        for (folder, title) in [("Classical", "Nocturne"), ("Dance", "Kompressor")] {
+            let dir = root.join(folder).join("An Artist");
+            std::fs::create_dir_all(&dir).unwrap();
+            let at = dir.join(format!("01 {title}.wav"));
+            write_wav(&at, 4410 + title.len() * 7);
+            write_tags(&at, title, "An Artist", None);
+        }
+        // Directly in the root, so there is no folder to suggest.
+        write_wav(&root.join("loose.wav"), 5000);
+        write_tags(&root.join("loose.wav"), "Loose", "An Artist", None);
+
+        let mut i = Instance::new(Id::derived(b"test"));
+        let report = populate(&mut i, std::slice::from_ref(&root), 100);
+        assert_eq!(
+            report.unfiled.keys().collect::<Vec<_>>(),
+            ["Classical", "Dance"],
+            "a file in the root has no folder to suggest"
+        );
+        assert_eq!(report.unfiled["Classical"].len(), 1);
+        assert!(
+            format!("{report}").contains("under Classical/ are in no collection"),
+            "{report}"
+        );
+
+        // **File one, and it stops being suggested.** The suggestion is about
+        // what nobody has decided, not about where the bytes are.
+        let recording = report.unfiled["Classical"][0];
+        let list = Id::<crate::model::entity::Collection>::of_name("Classical");
+        i.name_collection(200, list, "Classical", false);
+        i.add_to_collection(200, list, recording, crate::model::ord::OrdKey::first());
+
+        let again = populate(&mut i, std::slice::from_ref(&root), 300);
+        assert_eq!(
+            again.unfiled.keys().collect::<Vec<_>>(),
+            ["Dance"],
+            "a filed recording is still being suggested"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn library(name: &str, files: &[(&str, Option<&str>)]) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gmuse-populate-{name}"));
