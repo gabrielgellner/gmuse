@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store::{Scan, TrackId};
+use crate::store::TrackId;
 
 /// The name used when tracks are scanned without any catalog claiming them —
 /// `--library` on the command line, or a config with no `[catalogs]` at all.
@@ -47,10 +47,21 @@ impl Catalog {
     /// Whether a track belongs. Both halves must hold, and an absent half is
     /// simply not a constraint — so `roots` alone, `where` alone, and both
     /// together all read the same way.
-    fn contains(&self, track: &crate::store::Track, env: crate::filter::Env<'_>) -> bool {
-        let by_path = self.roots.is_empty() || self.roots.iter().any(|r| under(&track.path, r));
+    fn contains(
+        &self,
+        subject: &crate::model::rows::Subject<'_>,
+        env: crate::filter::Env<'_>,
+    ) -> bool {
+        // A root is a **search path**, so it is matched against the file's
+        // whereabouts and not against anything the row carries (#90). Asked of
+        // the subject at the moment of matching, like every other location.
+        let by_path = self.roots.is_empty()
+            || subject.locator.is_some_and(|at| {
+                let at = std::path::Path::new(at);
+                self.roots.iter().any(|r| under(at, r))
+            });
         let by_rule = match &self.filter {
-            Some(f) => f.compile(env)(track),
+            Some(f) => f.compile(env)(subject),
             None => true,
         };
         by_path && by_rule
@@ -251,7 +262,12 @@ impl Catalogs {
     ///
     /// With nothing defined, or everything active, this is the whole store —
     /// so a user who never configures a catalog sees no change at all.
-    pub fn members(&self, store: &Scan, env: crate::filter::Env<'_>) -> HashSet<TrackId> {
+    pub fn members(
+        &self,
+        rows: &dyn crate::model::rows::Listing,
+        all: &[TrackId],
+        env: crate::filter::Env<'_>,
+    ) -> HashSet<TrackId> {
         let active: Vec<&Catalog> = match &self.active {
             Active::All => self.defined.iter().collect(),
             Active::Only(names) => self
@@ -262,13 +278,15 @@ impl Catalogs {
         };
 
         if self.defined.is_empty() || matches!(self.active, Active::All) {
-            return store.iter().map(|(id, _)| id).collect();
+            return all.iter().copied().collect();
         }
 
-        store
-            .iter()
-            .filter(|(_, track)| active.iter().any(|c| c.contains(track, env)))
-            .map(|(id, _)| id)
+        all.iter()
+            .copied()
+            .filter(|id| {
+                rows.subject(*id)
+                    .is_some_and(|s| active.iter().any(|c| c.contains(&s, env)))
+            })
             .collect()
     }
 }
@@ -284,7 +302,8 @@ fn under(path: &Path, root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Track;
+    use crate::model::rows::Listing;
+    use crate::store::{Scan, Track};
 
     fn store_with(paths: &[&str]) -> Scan {
         let mut s = Scan::new();
@@ -324,7 +343,11 @@ mod tests {
         let catalogs = Catalogs::default();
         assert_eq!(
             catalogs
-                .members(&store, crate::filter::Env::default())
+                .members(
+                    &store,
+                    &Listing::rows(&store),
+                    crate::filter::Env::default()
+                )
                 .len(),
             2
         );
@@ -339,7 +362,11 @@ mod tests {
         // it, or scanning a stray folder would make music vanish.
         assert_eq!(
             catalogs
-                .members(&store, crate::filter::Env::default())
+                .members(
+                    &store,
+                    &Listing::rows(&store),
+                    crate::filter::Env::default()
+                )
                 .len(),
             5
         );
@@ -352,7 +379,11 @@ mod tests {
         assert_eq!(
             paths(
                 &store,
-                &catalogs.members(&store, crate::filter::Env::default())
+                &catalogs.members(
+                    &store,
+                    &Listing::rows(&store),
+                    crate::filter::Env::default()
+                )
             ),
             BTreeSet::from([
                 "/m/general/a.mp3".to_string(),
@@ -368,7 +399,11 @@ mod tests {
         catalogs
             .apply(Spec::Only(vec!["general".into(), "classical".into()]))
             .unwrap();
-        let members = catalogs.members(&store, crate::filter::Env::default());
+        let members = catalogs.members(
+            &store,
+            &Listing::rows(&store),
+            crate::filter::Env::default(),
+        );
         assert_eq!(members.len(), 3);
         // Definition order, not alphabetical: the label reads the way the
         // config was written.
@@ -382,7 +417,11 @@ mod tests {
         catalogs
             .apply(Spec::Adjust(vec![(false, "classical".into())]))
             .unwrap();
-        let members = catalogs.members(&store, crate::filter::Env::default());
+        let members = catalogs.members(
+            &store,
+            &Listing::rows(&store),
+            crate::filter::Env::default(),
+        );
         assert!(!paths(&store, &members).contains("/m/classical/d.mp3"));
         assert_eq!(members.len(), 3, "general (2) + electronic (1)");
     }
@@ -396,7 +435,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             catalogs
-                .members(&store, crate::filter::Env::default())
+                .members(
+                    &store,
+                    &Listing::rows(&store),
+                    crate::filter::Env::default()
+                )
                 .len(),
             3
         );
@@ -405,7 +448,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             catalogs
-                .members(&store, crate::filter::Env::default())
+                .members(
+                    &store,
+                    &Listing::rows(&store),
+                    crate::filter::Env::default()
+                )
                 .len(),
             1
         );
@@ -416,7 +463,11 @@ mod tests {
         let (store, mut catalogs) = fixture();
         catalogs.apply(Spec::Only(vec!["general".into()])).unwrap();
         let before = catalogs
-            .members(&store, crate::filter::Env::default())
+            .members(
+                &store,
+                &Listing::rows(&store),
+                crate::filter::Env::default(),
+            )
             .len();
 
         let err = catalogs
@@ -425,7 +476,11 @@ mod tests {
         assert!(err.contains("nosuch"), "{err}");
         assert_eq!(
             catalogs
-                .members(&store, crate::filter::Env::default())
+                .members(
+                    &store,
+                    &Listing::rows(&store),
+                    crate::filter::Env::default()
+                )
                 .len(),
             before,
             "a bad name must not half-apply"
@@ -438,7 +493,11 @@ mod tests {
         catalogs.apply(Spec::Only(vec![])).unwrap();
         assert!(
             catalogs
-                .members(&store, crate::filter::Env::default())
+                .members(
+                    &store,
+                    &Listing::rows(&store),
+                    crate::filter::Env::default()
+                )
                 .is_empty()
         );
         assert_eq!(catalogs.label().as_deref(), Some("none"));
@@ -455,7 +514,11 @@ mod tests {
         assert_eq!(
             paths(
                 &store,
-                &catalogs.members(&store, crate::filter::Env::default())
+                &catalogs.members(
+                    &store,
+                    &Listing::rows(&store),
+                    crate::filter::Env::default()
+                )
             ),
             BTreeSet::from(["/m/rock/a.mp3".to_string()])
         );
@@ -493,7 +556,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             catalogs
-                .members(&store, crate::filter::Env::default())
+                .members(
+                    &store,
+                    &Listing::rows(&store),
+                    crate::filter::Env::default()
+                )
                 .len(),
             1,
             "membership is a set"

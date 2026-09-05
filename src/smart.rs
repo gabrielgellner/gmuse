@@ -23,8 +23,9 @@
 //! inherits that rather than being a special case.
 
 use crate::filter::Filter;
+use crate::model::rows::Listing;
 use crate::sort::{Sort, SortEnv};
-use crate::store::{Scan, TrackId};
+use crate::store::TrackId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SmartPlaylist {
@@ -42,14 +43,14 @@ impl SmartPlaylist {
     /// with the history behind it — a rule mentioning `play_count` has to
     /// answer differently after you play something, and a materialised list
     /// would need invalidating from every corner of the app instead.
-    pub fn members(&self, store: &Scan, env: SortEnv<'_>) -> Vec<TrackId> {
+    pub fn members(&self, rows: &dyn Listing, all: &[TrackId], env: SortEnv<'_>) -> Vec<TrackId> {
         let matches = self.filter.compile(env.env);
-        let mut ids: Vec<TrackId> = store
+        let mut ids: Vec<TrackId> = all
             .iter()
-            .filter(|(_, t)| matches(t))
-            .map(|(id, _)| id)
+            .copied()
+            .filter(|id| rows.subject(*id).is_some_and(|s| matches(&s)))
             .collect();
-        self.sort.apply(&mut ids, store, env);
+        self.sort.apply(&mut ids, rows, env);
         ids
     }
 
@@ -96,8 +97,9 @@ impl SmartPlaylists {
 mod tests {
     use super::*;
     use crate::filter::Env;
+    use crate::model::rows::Listing;
     use crate::sort::Sort;
-    use crate::store::Track;
+    use crate::store::{Scan, Track};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -167,7 +169,7 @@ mod tests {
     }
 
     fn names(p: &SmartPlaylist, s: &Scan, e: SortEnv<'_>) -> Vec<String> {
-        p.members(s, e)
+        p.members(s, &Listing::rows(s), e)
             .iter()
             .map(|id| s.get(*id).unwrap().artist.clone().unwrap())
             .collect()
@@ -198,7 +200,7 @@ mod tests {
         let p = playlist("genre=\"electronic\"", Some("artist"));
         // One lives under General and one under Dance; both are here.
         let paths: Vec<String> = p
-            .members(&s, env(&h))
+            .members(&s, &Listing::rows(&s), env(&h))
             .iter()
             .map(|id| s.get(*id).unwrap().path.display().to_string())
             .collect();
@@ -209,7 +211,7 @@ mod tests {
     fn a_rule_that_matches_nothing_is_empty_rather_than_everything() {
         let (s, h) = (store(), listening());
         let p = playlist("genre=\"polka\"", None);
-        assert!(p.members(&s, env(&h)).is_empty());
+        assert!(p.members(&s, &Listing::rows(&s), env(&h)).is_empty());
     }
 
     /// The rule is re-read on every call, so a play or a rating changes the
@@ -219,7 +221,7 @@ mod tests {
         let s = store();
         let mut h = listening();
         let p = playlist("play_count>0", None);
-        assert!(p.members(&s, env(&h)).is_empty());
+        assert!(p.members(&s, &Listing::rows(&s), env(&h)).is_empty());
 
         played(&mut h, &s, "/m/General/b.mp3", 900_000);
         assert_eq!(names(&p, &s, env(&h)), ["Burial"]);

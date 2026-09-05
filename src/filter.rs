@@ -10,7 +10,7 @@
 use crate::format::{Field, Kind};
 use crate::model::entity::Recording;
 use crate::model::id::Id;
-use crate::store::Track;
+use crate::model::rows::Subject;
 
 /// What a filter can see besides the track itself.
 ///
@@ -270,7 +270,7 @@ impl Filter {
         })
     }
 
-    pub fn compile<'a>(&'a self, env: Env<'a>) -> impl Fn(&Track) -> bool + 'a {
+    pub fn compile<'a>(&'a self, env: Env<'a>) -> impl Fn(&Subject<'_>) -> bool + 'a {
         self.expr.compile(env)
     }
 }
@@ -348,11 +348,11 @@ impl Expr {
 
     /// Build the predicate once. **Do not re-interpret the AST per track** —
     /// this runs over the whole library on every keystroke in view 6.
-    pub fn compile<'a>(&'a self, env: Env<'a>) -> impl Fn(&Track) -> bool + 'a {
-        move |track| self.eval(track, &env)
+    pub fn compile<'a>(&'a self, env: Env<'a>) -> impl Fn(&Subject<'_>) -> bool + 'a {
+        move |subject| self.eval(subject, &env)
     }
 
-    fn eval(&self, t: &Track, env: &Env) -> bool {
+    fn eval(&self, t: &Subject<'_>, env: &Env) -> bool {
         match self {
             Expr::And(a, b) => a.eval(t, env) && b.eval(t, env),
             Expr::Or(a, b) => a.eval(t, env) || b.eval(t, env),
@@ -384,13 +384,16 @@ const ANY_FIELDS: &[Field] = &[
 
 /// A history field's value. `None` is "cannot say" — no history, or never
 /// played — and a comparison against it is false, like any missing field.
-fn history_number(f: HistoryField, t: &Track, env: &Env) -> Option<i64> {
+fn history_number(f: HistoryField, s: &Subject<'_>, env: &Env) -> Option<i64> {
     let listened = env.listened?;
-    // The file's identity, not its path. A file with neither a MusicBrainz id
-    // nor readable audio has nothing to hang history on and answers nothing —
-    // which is honest, where filing it under a path was an answer that went
-    // wrong the moment anything moved.
-    let recording = crate::history::recording_id_for(t.mb_recording, t.audio_id)?;
+    // The row's identity, not its path — and **the library's binding rather
+    // than the tags'** (#86). A file with nothing durable to hang history on
+    // answers nothing, which is honest where filing it under a path was an
+    // answer that went wrong the moment anything moved. Minting it from the
+    // tags here was a subtler version of the same thing: it is the identity a
+    // relink changes, so a filter would have asked about the recording a file
+    // used to be.
+    let recording = s.recording?;
     Some(match f {
         // An unplayed track has played zero times, which is an answer;
         // `play_count=0` is how you ask for the ones you have never heard.
@@ -408,7 +411,7 @@ fn days_since(then: i64, now: i64) -> i64 {
     (now - then).max(0) / 86_400
 }
 
-fn compare(selector: Selector, op: Op, value: &Value, t: &Track, env: &Env) -> bool {
+fn compare(selector: Selector, op: Op, value: &Value, t: &Subject<'_>, env: &Env) -> bool {
     match (selector, value) {
         (Selector::History(h), Value::Number(n)) => match history_number(h, t, env) {
             Some(v) => match op {
@@ -465,7 +468,7 @@ fn compare(selector: Selector, op: Op, value: &Value, t: &Track, env: &Env) -> b
 /// An empty tag counts as missing: a `GENRE=""` frame is a tagging artefact,
 /// not an answer, and treating it as present would make `!genre?` miss exactly
 /// the files worth finding.
-fn present(f: Field, t: &Track) -> bool {
+fn present(f: Field, t: &Subject<'_>) -> bool {
     match f.kind() {
         Kind::Text => texts_of(f, t).iter().any(|v| !v.trim().is_empty()),
         Kind::Number => number_of(f, t).is_some(),
@@ -479,33 +482,43 @@ fn present(f: Field, t: &Track) -> bool {
 /// string meant `genre=Rock` could not match a file that was also tagged
 /// `Blues Rock`. Every other field returns nought or one, and the comparison
 /// is the same either way: does *any* value match.
-pub(crate) fn texts_of(f: Field, t: &Track) -> Vec<String> {
-    let one = |v: Option<String>| v.map(|v| vec![v]).unwrap_or_default();
+pub(crate) fn texts_of(f: Field, s: &Subject<'_>) -> Vec<String> {
+    let one = |v: Option<&str>| v.map(|v| vec![v.to_string()]).unwrap_or_default();
+    let r = &s.row;
     match f {
-        Field::Artist => one(t.artist.clone()),
-        Field::AlbumArtist => one(t.albumartist.clone()),
-        Field::FileUnder => vec![t.file_under().to_string()],
-        Field::Album => one(t.album.clone()),
-        Field::Title => one(t.title.clone()),
-        Field::DisplayTitle => vec![t.display_title().to_string()],
-        Field::Genre => t.genres.clone(),
-        Field::Label => one(t.label.clone()),
-        Field::Path => vec![t.path.display().to_string()],
-        Field::FileName => one(t.path.file_name().map(|n| n.to_string_lossy().into_owned())),
+        Field::Artist => one(r.artist),
+        Field::AlbumArtist => one(r.album_artist),
+        Field::FileUnder => vec![r.file_under.to_string()],
+        // The album and title **as tagged**. `r.album` stands a placeholder in
+        // so a tree node always has a label, and `!album?` has to stay
+        // meaningful — a filter must not find "No Album" as though somebody
+        // had named an album that.
+        Field::Album => one(r.tagged_album),
+        Field::Title => one(r.tagged_title),
+        Field::DisplayTitle => vec![r.title.to_string()],
+        Field::Genre => r.genre.to_vec(),
+        Field::Label => one(r.label),
+        // The two that need the file's whereabouts, asked at the moment of
+        // matching and not kept.
+        Field::Path => one(s.locator),
+        Field::FileName => one(s
+            .locator
+            .and_then(|l| std::path::Path::new(l).file_name().and_then(|n| n.to_str()))),
         _ => Vec::new(),
     }
 }
 
-pub(crate) fn number_of(f: Field, t: &Track) -> Option<i64> {
+pub(crate) fn number_of(f: Field, s: &Subject<'_>) -> Option<i64> {
+    let r = &s.row;
     Some(match f {
-        Field::Track => i64::from(t.tracknumber?),
-        Field::Disc => i64::from(t.discnumber?),
-        Field::Year => i64::from(t.date?),
+        Field::Track => i64::from(r.track?),
+        Field::Disc => i64::from(r.disc?),
+        Field::Year => i64::from(r.year?),
         // Seconds, not the `3:41` the format language renders.
-        Field::Duration => t.duration.as_secs() as i64,
-        Field::Bitrate => i64::from(t.bitrate?),
-        Field::SampleRate => i64::from(t.samplerate?),
-        Field::Channels => i64::from(t.channels?),
+        Field::Duration => r.duration.as_secs() as i64,
+        Field::Bitrate => i64::from(r.bitrate?),
+        Field::SampleRate => i64::from(r.sample_rate?),
+        Field::Channels => i64::from(r.channels?),
         _ => return None,
     })
 }
@@ -768,6 +781,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Track;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -790,10 +804,20 @@ mod tests {
         }
     }
 
+    /// A subject as the player assembles one: a row, where the file is, and
+    /// what history hangs off.
+    fn subject_of(t: &Track) -> Subject<'_> {
+        Subject {
+            row: t.listed(),
+            locator: t.path.to_str(),
+            recording: crate::history::recording_id_for(t.mb_recording, t.audio_id),
+        }
+    }
+
     fn matches(expr: &str, t: &Track) -> bool {
         Expr::parse(expr)
             .expect("should parse")
-            .compile(Env::default())(t)
+            .compile(Env::default())(&subject_of(t))
     }
 
     /// The label joins one vocabulary, so it filters without the filter
@@ -1064,7 +1088,7 @@ mod tests {
             listened: Some(h),
             now,
         };
-        e.compile(env)(t)
+        e.compile(env)(&subject_of(t))
     }
 
     /// Play counts, and the query that matters most: what have I never heard?
@@ -1136,7 +1160,7 @@ mod tests {
     #[test]
     fn without_a_history_the_fields_are_missing() {
         let t = track();
-        let expr = |s: &str| Expr::parse(s).unwrap().compile(Env::default())(&t);
+        let expr = |s: &str| Expr::parse(s).unwrap().compile(Env::default())(&subject_of(&t));
         assert!(!expr("play_count=0"), "cannot say is not zero");
         assert!(!expr("play_count>0"));
         assert!(!expr("days_since_added?"));

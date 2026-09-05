@@ -25,8 +25,9 @@ use crate::filter::Env;
 use crate::format::{Field, Kind};
 use crate::model::entity::Recording;
 use crate::model::id::Id;
+use crate::model::rows::Listing;
 use crate::shelf::sort_key;
-use crate::store::{Scan, Track, TrackId};
+use crate::store::TrackId;
 
 /// What one sort key looks at.
 ///
@@ -187,26 +188,30 @@ impl Sort {
     /// Ties are broken by path, so the result is a total order and does not
     /// wobble between runs — `sort = "artist"` over an album has to give the
     /// same list twice.
-    pub fn apply(&self, ids: &mut [TrackId], store: &Scan, env: SortEnv<'_>) {
+    pub fn apply(&self, ids: &mut [TrackId], rows: &dyn Listing, env: SortEnv<'_>) {
         // Decorate-sort-undecorate: the comparator runs O(n log n) times and
         // building a lowercase key inside it would allocate on every one.
-        let mut decorated: Vec<(Vec<Cell>, &std::path::Path, TrackId)> = ids
+        let mut decorated: Vec<(Vec<Cell>, String, TrackId)> = ids
             .iter()
             .map(|id| {
-                let track = store.get(*id);
+                let subject = rows.subject(*id);
                 let cells = self
                     .terms
                     .iter()
-                    .map(|t| match track {
-                        Some(tr) => cell(t.key, *id, tr, &env),
+                    .map(|t| match &subject {
+                        Some(s) => cell(t.key, *id, s, &env),
                         None => Cell::Missing,
                     })
                     .collect();
-                let path: &std::path::Path = match track {
-                    Some(tr) => &tr.path,
-                    None => std::path::Path::new(""),
-                };
-                (cells, path, *id)
+                // The tie-break, and the one place sorting wants a location:
+                // two rows that agree on every term still have to come out in
+                // the same order twice.
+                let at = subject
+                    .as_ref()
+                    .and_then(|s| s.locator)
+                    .unwrap_or_default()
+                    .to_string();
+                (cells, at, *id)
             })
             .collect();
 
@@ -217,7 +222,7 @@ impl Sort {
                     return ord;
                 }
             }
-            a.1.cmp(b.1)
+            a.1.cmp(&b.1)
         });
 
         for (slot, (_, _, id)) in ids.iter_mut().zip(decorated) {
@@ -263,15 +268,17 @@ fn flip(ord: Ordering, descending: bool) -> Ordering {
 /// Both or neither: without an identity there is no question to ask, which is
 /// what #81 replaces "look it up by path, and hope it has not moved" with.
 fn listened_of<'a>(
-    t: &Track,
+    t: &crate::model::rows::Subject<'_>,
     env: &SortEnv<'a>,
 ) -> Option<(&'a dyn crate::filter::Listened, Id<Recording>)> {
     let listened = env.env.listened?;
-    let recording = crate::history::recording_id_for(t.mb_recording, t.audio_id)?;
+    // The library's binding, not the one a file's tags imply — the same
+    // correction the filter took (#86).
+    let recording = t.recording?;
     Some((listened, recording))
 }
 
-fn cell(key: Key, id: TrackId, t: &Track, env: &SortEnv<'_>) -> Cell {
+fn cell(key: Key, id: TrackId, t: &crate::model::rows::Subject<'_>, env: &SortEnv<'_>) -> Cell {
     match key {
         Key::Field(f) => match f.kind() {
             // Case-folded, and with a leading article moved aside for the
@@ -337,6 +344,7 @@ fn mix(id: u64, seed: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::model::log::Catalogue;
+    use crate::store::{Scan, Track};
     use std::path::PathBuf;
     use std::time::Duration;
 

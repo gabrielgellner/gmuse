@@ -175,8 +175,53 @@ pub struct Loudness {
 /// Implemented by `Scan` today and by the librarian when it takes over (#86).
 /// The renderer names this rather than either, so the swap is a change of
 /// argument and nothing else.
+/// Everything a filter or a sort is given about one row.
+///
+/// Three answers to three different questions, and they are separate because
+/// they are asked of different things and kept for different lengths of time:
+/// what to *show* is a row, where the file *is* is a holding, and what history
+/// hangs off is an identity.
+///
+/// **The locator is passed in rather than held** (#86). A row carries no
+/// location — that omission is what stopped `history.toml` being keyed by one
+/// — but `path=` and `file_name=` are selectors a person can write, and
+/// answering them needs the file's whereabouts for exactly as long as the
+/// comparison takes. Same rule the `.m3u` export follows.
+pub struct Subject<'a> {
+    pub row: Listed<'a>,
+    pub locator: Option<&'a str>,
+    /// What history hangs off — **the library's binding, not the tags'.**
+    ///
+    /// The filter used to mint this from a file's own tags, which is the
+    /// identity a relink changes: after 377 files were identified it would
+    /// have filtered on the recording they used to be.
+    pub recording: Option<crate::model::id::Id<crate::model::entity::Recording>>,
+}
+
 pub trait Listing {
     fn listed(&self, id: Row) -> Option<Listed<'_>>;
+
+    /// Every row there is.
+    ///
+    /// "What is in the library" is a library question, and a filter or a
+    /// catalog narrows a set somebody else supplies — which is what lets them
+    /// stop knowing where rows come from (#86).
+    fn rows(&self) -> Vec<Row>;
+
+    /// Which recording this row's audio holds.
+    fn recording_of(
+        &self,
+        id: Row,
+    ) -> Option<crate::model::id::Id<crate::model::entity::Recording>>;
+
+    /// The three answers together, for a filter or a sort.
+    fn subject(&self, id: Row) -> Option<Subject<'_>> {
+        Some(Subject {
+            row: self.listed(id)?,
+            locator: self.playable(id).map(|p| p.locator),
+            recording: self.recording_of(id),
+        })
+    }
 
     /// Where to find it, and how loud the tags say it is.
     ///

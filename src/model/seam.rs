@@ -653,8 +653,17 @@ impl crate::model::rows::Listing for Librarian {
         Some(self.rows.get(&id)?.listed())
     }
 
+    fn rows(&self) -> Vec<Id<Encoding>> {
+        self.rows.keys().copied().collect()
+    }
+
     fn audio_of(&self, id: Id<Encoding>) -> Option<crate::audio_id::AudioId> {
         Some(self.encodings.encodings.get(&id)?.audio)
+    }
+
+    /// **The binding the library holds**, which is what a relink changes.
+    fn recording_of(&self, id: Id<Encoding>) -> Option<Id<Recording>> {
+        Some(self.encodings.encodings.get(&id)?.recording?.id())
     }
 
     fn playable(&self, id: Id<Encoding>) -> Option<crate::model::rows::Playable<'_>> {
@@ -881,8 +890,8 @@ mod tests {
         /// copy that was open, so resuming reopens the file that was open
         /// rather than whichever the canonical rule would pick now.
         ///
-        /// **The three left are three questions, and each needs a decision
-        /// rather than effort:**
+        /// **The two left are two questions, and each needs a decision rather
+        /// than effort:**
         ///
         /// - **one** reads `.m3u`: `id_for_path` turns a saved path back into
         ///   a row id, which is a walk of the store's arena. What replaces it
@@ -890,15 +899,18 @@ mod tests {
         /// - **one** is the remote's owned snapshot. Another thread renders a
         ///   caller's own template, and `rows::Listed` borrows, so nothing
         ///   owned can be handed across.
-        /// - **one** is the filter closure, which matches on a `&Track`
-        ///   because `path=` and `file_name=` are selectors a person can
-        ///   write, and a row carries no location.
+        ///
+        /// The filter's went with #86's second pass. It matches a
+        /// `rows::Subject` now — a row, the locator, and what history hangs
+        /// off — so `path=` and `file_name=` survive by being *passed* a
+        /// location rather than by the row carrying one. Sorting moved with
+        /// it, since both are "given a row, produce a value".
         ///
         /// Two m3u *writes* left with #86's first pass: they ask
         /// `Listing::listed` for what to say and `Listing::playable` for where
         /// the file is, which is the sanctioned shape — an export naming paths
         /// is not a leak, and neither answer is kept.
-        const REACHES: usize = 3;
+        const REACHES: usize = 2;
 
         let (mut store, mut reaches) = (0, 0);
         let mut stray_paths: Vec<String> = Vec::new();

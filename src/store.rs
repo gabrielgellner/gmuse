@@ -538,8 +538,23 @@ impl crate::model::rows::Listing for Scan {
         Some(self.get(id)?.listed())
     }
 
+    fn rows(&self) -> Vec<TrackId> {
+        self.iter().map(|(id, _)| id).collect()
+    }
+
     fn audio_of(&self, id: TrackId) -> Option<crate::audio_id::AudioId> {
         self.get(id)?.audio_id
+    }
+
+    /// **Minted from the tags, which is the wrong answer after a relink.**
+    ///
+    /// The store has no binding to consult — that lives in the library — so
+    /// this reports the recording a file's tags imply. It agrees with the
+    /// library for every file nobody has relinked, and this implementation
+    /// goes with the store (#86).
+    fn recording_of(&self, id: TrackId) -> Option<Id<crate::model::spine::Recording>> {
+        let t = self.get(id)?;
+        crate::history::recording_id_for(t.mb_recording, t.audio_id)
     }
 
     fn playable(&self, id: TrackId) -> Option<crate::model::rows::Playable<'_>> {

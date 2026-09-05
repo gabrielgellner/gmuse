@@ -2838,12 +2838,23 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     }
 }
 
+/// Every row the library holds, in one pass.
+///
+/// A filter and a catalog both narrow **a set of rows**, and the set is the
+/// caller's to supply — which is what lets them stop knowing where rows come
+/// from (#86). Built here rather than taken as an iterator so a smart
+/// playlist and a catalog see the same list.
+fn all_rows(ctx: &Context<'_>) -> Vec<TrackId> {
+    let rows: &dyn Listing = ctx.store;
+    rows.rows()
+}
+
 /// Fill view 3 from a named smart playlist.
 fn load_smart(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let Some(spec) = ui.playlists.get(name) else {
         return;
     };
-    let ids = spec.members(ctx.store, ui.sort_env());
+    let ids = spec.members(ctx.store, &all_rows(ctx), ui.sort_env());
     let count = ids.len();
     // An empty result is the confusing case, so it says what the rule was
     // rather than leaving you to go and read the config.
@@ -2879,7 +2890,7 @@ fn refresh_smart(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(spec) = ui.playlists.get(&name) else {
         return;
     };
-    let ids = spec.members(ctx.store, ui.sort_env());
+    let ids = spec.members(ctx.store, &all_rows(ctx), ui.sort_env());
     ui.playlist.clear();
     for id in ids {
         ui.playlist.push(id);
@@ -2898,10 +2909,11 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
             listened: Some(&ui.listened),
             now: crate::history::now(),
         };
-        let mut m = ui.catalogs.members(ctx.store, env);
+        let rows: &dyn Listing = ctx.store;
+        let mut m = ui.catalogs.members(rows, &all_rows(ctx), env);
         if let Some(f) = &ui.filter {
             let matches = f.compile(env);
-            m.retain(|id| ctx.store.get(*id).is_some_and(&matches));
+            m.retain(|id| rows.subject(*id).is_some_and(|s| matches(&s)));
         }
         m
     };
@@ -6810,7 +6822,7 @@ mod tests {
         catalogs.define("va", vec![PathBuf::from("/m/va")], None);
         let mut ui = Ui::new(Shelf::from_members(
             store,
-            catalogs.members(store, crate::filter::Env::default()),
+            catalogs.members(store, &Listing::rows(store), crate::filter::Env::default()),
             true,
         ));
         ui.catalogs = catalogs;

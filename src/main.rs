@@ -445,8 +445,10 @@ fn run_tui(
     }
     let first_run = log.records().is_empty();
 
+    let all: Vec<_> = app.store.iter().map(|(id, _)| id).collect();
     let members = app.catalogs.members(
         &app.store,
+        &all,
         crate::filter::Env {
             listened: Some(&listened),
             now,
