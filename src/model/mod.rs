@@ -48,6 +48,7 @@ pub mod log;
 pub mod merge;
 pub mod migrate;
 pub mod mint;
+pub mod ord;
 pub mod populate;
 pub mod proposal;
 pub mod provenance;
