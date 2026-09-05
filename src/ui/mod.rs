@@ -3804,6 +3804,13 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
         View::Tree if !ui.levels.is_flat() => ui.tree.tracks_for(&ui.library),
         _ => ui.selected_track(ctx).into_iter().collect(),
     };
+    // **Whether a view can be edited does not depend on the cursor** (#96).
+    // A view nobody authors offers no control at all, and saying "nothing
+    // selected" first would be a control that quietly does nothing.
+    if target == AddTarget::View {
+        add_to_view(ui, ctx, &ids);
+        return;
+    }
     if ids.is_empty() {
         ui.notify("nothing selected");
         return;
@@ -3844,6 +3851,259 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
         AddTarget::Library => {
             ui.notify("the library is what you are looking at; use :add <path> to scan more")
         }
+        // Handled above, before the cursor is consulted.
+        AddTarget::View => {}
+    }
+}
+
+/// **An edit to a view is an edit to the facts that made it true** — #96,
+/// `query-language.md` §4.
+///
+/// The idea no comparable player has. iTunes and Roon make a derived list
+/// strictly read-only; this can go further for one reason — membership is
+/// caused by *named* facts, so the translation is inspectable rather than
+/// magic. The price of going further is that the interface has to **name the
+/// fact before it writes it**, and refuse where naming it would be a lie.
+///
+/// Three refusals, and each says why rather than doing nothing:
+///
+/// - **nothing composed** — there is no fact to write, because there is no
+///   claim being made about what you are looking at
+/// - **`A or B`** — ambiguous, and choosing one silently is exactly the kind
+///   of guess this project refuses elsewhere
+/// - **an observed or correctable field** — the whole point of #96's
+///   classification. `year>=2015` translates perfectly well and must not
+///   rewrite a release date because somebody dragged a row.
+fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
+    use crate::format::Authorship;
+    use crate::model::entity::Collection;
+    use crate::model::view::Op;
+
+    let terms = ui.composed.terms();
+    if terms.is_empty() {
+        ui.notify("nothing composed — there is no fact to write");
+        return;
+    }
+    // **Only a narrowing has one answer.** `A or B` cannot say which to
+    // assert, so it is refused by name rather than resolved by guess.
+    if terms.iter().skip(1).any(|t| t.op == Op::Or) {
+        ui.notify(format!(
+            "ambiguous — {} says two things; add to one of them",
+            ui.composed.label()
+        ));
+        return;
+    }
+
+    // The last term is what "this view" means; the ones before it are the
+    // scope it narrows.
+    let Some(last) = terms.last() else { return };
+    let (what, clause, fact) = match &last.what {
+        crate::view::What::Collection(name) => (
+            Authorship::Authored,
+            name.clone(),
+            Some(Assert::Member(name.clone())),
+        ),
+        crate::view::What::Where(f) => match sole_authored_field(f) {
+            // The field is known and the value is not — `year>=2015` names no
+            // one year. Its authorship still decides the message, so a
+            // correctable field says so rather than reading as observed.
+            Some((what, name, write)) => (what, name, write),
+            None => {
+                ui.notify(format!(
+                    "{} names no single fact — add to one clause of it",
+                    ui.composed.label()
+                ));
+                return;
+            }
+        },
+        crate::view::What::Saved(name) => {
+            ui.notify(format!(
+                "{name} is a definition — edit what it names, not the name"
+            ));
+            return;
+        }
+        crate::view::What::Everything => {
+            ui.notify("everything is not a claim about anything");
+            return;
+        }
+    };
+
+    match what {
+        Authorship::Observed => {
+            ui.notify(format!("{clause} is observed — there is nothing to assert"));
+        }
+        Authorship::Correctable => {
+            ui.notify(format!(
+                "{clause} is read off the world — correct it deliberately, not by adding"
+            ));
+        }
+        Authorship::Authored => {
+            let Some(write) = fact else {
+                ui.notify(format!("{clause} names no single value to assert"));
+                return;
+            };
+            let songs: Vec<_> = ids
+                .iter()
+                .filter_map(|id| crate::model::rows::Listing::recording_of(ctx.library, *id))
+                .collect();
+            // **The fact is named even with nothing selected**, for the same
+            // reason the refusals are: what a view would write does not depend
+            // on where the cursor is, and "nothing selected" alone would hide
+            // the one thing worth knowing.
+            if songs.is_empty() {
+                ui.notify(format!("nothing selected — would {}", write.names()));
+                return;
+            }
+            let now = crate::history::now_ms();
+            record(ui, now, |log| match &write {
+                Assert::Member(name) => {
+                    let id = Id::<Collection>::of_name(name);
+                    for song in &songs {
+                        // **A membership claim, not a positioning one.** The
+                        // same reasoning `:collect` uses for a set: adding to
+                        // a view says this belongs in the crate and says
+                        // nothing about where, so spreading keys here would
+                        // invent a running order out of the selection's.
+                        log.add_to_collection(now, id, *song, crate::model::ord::OrdKey::first());
+                    }
+                }
+                Assert::Concept { facet, label } => {
+                    for song in &songs {
+                        log.assert_concept(
+                            now,
+                            crate::model::facet::Described::Recording(*song),
+                            facet,
+                            label,
+                            // **A person said so**, which is what outranks an
+                            // import on the next sync (#96's precedence).
+                            crate::model::reference::Source::Manual,
+                            crate::model::ingest::Confidence::Confirmed,
+                        );
+                    }
+                }
+                Assert::Rating(stars) => {
+                    for song in &songs {
+                        log.rate(now, *song, Some(*stars));
+                    }
+                }
+            });
+            // **The confirmation names the fact, not the list.** "Added to
+            // list" hides what was written; the point of going further than
+            // iTunes is that the translation can be shown.
+            ui.notify(format!("{} {}", write.names(), songs.len()));
+        }
+    }
+}
+
+/// What adding to a view would write — the fact, not the list.
+///
+/// Typed rather than a sentence, because the sentence in the status line and
+/// the fact appended to the log have to be the same thing. A string that only
+/// *described* a write is how a control ends up quietly doing nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Assert {
+    /// An entry in a collection — the same fact `:collect` writes.
+    Member(String),
+    /// A concept on a facet: the paradigm authored fact.
+    Concept {
+        facet: String,
+        label: String,
+    },
+    Rating(u8),
+}
+
+impl Assert {
+    /// What the status line says before the fact is written.
+    fn names(&self) -> String {
+        match self {
+            Assert::Member(name) => format!("put in the {name} collection"),
+            Assert::Concept { facet, label } => format!("assign {facet} {label} to"),
+            Assert::Rating(stars) => format!("rate {stars} star(s)"),
+        }
+    }
+}
+
+/// The one field a filter is about, when it is about exactly one — and what
+/// asserting it would write.
+///
+/// A conjunction of clauses over one field still names one fact; anything else
+/// does not, and `None` is what makes the caller refuse rather than guess.
+///
+/// The write comes back separately and may be absent: `year>=2015` names the
+/// field perfectly well — which is all the authorship check needs — while
+/// naming no single value to assert. Conflating the two is what an earlier
+/// draft of this did, and it made a year read as observed.
+fn sole_authored_field(
+    f: &crate::filter::Filter,
+) -> Option<(crate::format::Authorship, String, Option<Assert>)> {
+    use crate::filter::{Expr, Op, Quant, Reach, Selector, Value};
+
+    type Named = (crate::format::Authorship, String, Option<Assert>);
+
+    fn walk(e: &Expr, found: &mut Vec<Named>, bad: &mut bool) {
+        match e {
+            Expr::Cmp {
+                selector,
+                op,
+                value,
+            } => {
+                // **Only an equality names one value.** `rating>=4` says four,
+                // five *or* nothing in particular, and `year>=2015` names no
+                // one year — a comparison is a test, not a fact to write.
+                let literal = match (op, value) {
+                    (Op::Eq, Value::Text(glob)) => glob.literal(),
+                    (Op::Eq, Value::Number(n)) => Some(n.to_string()),
+                    _ => None,
+                };
+                match selector {
+                    Selector::Field(quant, reach, field) => {
+                        // **Only an exact, existential clause names the
+                        // concept to assert.** `genre*="electronic"` is
+                        // satisfied by anything under it, so writing the broad
+                        // one is a guess; `all(genre)="techno"` is not made
+                        // true by adding techno to a row that has others.
+                        let exact =
+                            *reach == Reach::Exact && matches!(quant, Quant::Unsaid | Quant::Any);
+                        found.push((
+                            field.authorship(),
+                            field.name(),
+                            literal.filter(|_| exact).map(|label| Assert::Concept {
+                                facet: field.name(),
+                                label,
+                            }),
+                        ));
+                    }
+                    // **A rating is authored too**, and it is the judgement
+                    // this player exists to collect — so the classification
+                    // has to reach the history fields, not only the row's.
+                    Selector::History(h) => {
+                        let write = literal
+                            .filter(|_| *h == crate::filter::HistoryField::Rating)
+                            .and_then(|v| v.parse::<u8>().ok())
+                            .filter(|stars| (1..=5).contains(stars))
+                            .map(Assert::Rating);
+                        found.push((h.authorship(), h.name().to_string(), write));
+                    }
+                    Selector::Any => *bad = true,
+                }
+            }
+            Expr::And(a, b) => {
+                walk(a, found, bad);
+                walk(b, found, bad);
+            }
+            // A disjunction, a negation, a presence test, a bracket: none of
+            // them names one fact to write.
+            _ => *bad = true,
+        }
+    }
+    let (mut found, mut bad) = (Vec::new(), false);
+    walk(&f.expr, &mut found, &mut bad);
+    if bad {
+        return None;
+    }
+    match found.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
     }
 }
 
@@ -9123,6 +9383,153 @@ mod tests {
         ui.data_dir = Some(scratch(name));
         ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         ui
+    }
+
+    /// **Authorship decides the affordance, and the refusal says why** —
+    /// #96.
+    ///
+    /// An earlier draft said a view is editable when the translation is
+    /// unambiguous. That is too permissive: `year>=2015` translates perfectly
+    /// well — assert a year — and adding a recording to it must absolutely not
+    /// rewrite a release date.
+    #[test]
+    fn only_an_authored_view_can_be_added_to() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "add-to-view");
+        ui.view = View::Tree;
+
+        let add = |ui: &mut Ui, ctx: &Context<'_>| {
+            execute(
+                ui,
+                ctx,
+                Command::Add {
+                    target: crate::cmd::AddTarget::View,
+                    path: None,
+                },
+            );
+        };
+
+        // Nothing composed: there is no claim to write.
+        add(&mut ui, &ctx);
+        assert!(ui.status.contains("no fact to write"), "{}", ui.status);
+
+        // **Observed.** Nothing anybody asserts about a duration.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view duration>60");
+        add(&mut ui, &ctx);
+        assert!(ui.status.contains("observed"), "{}", ui.status);
+
+        // **Correctable, and this is the case the draft got wrong.** A year
+        // translates to a fact and must not be written by adding.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view year>=2015");
+        add(&mut ui, &ctx);
+        assert!(ui.status.contains("read off the world"), "{}", ui.status);
+
+        // **Authored**, and the confirmation names the *fact*, not the list.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view genre="techno""#);
+        add(&mut ui, &ctx);
+        assert!(ui.status.contains("assign genre techno"), "{}", ui.status);
+        assert!(
+            !ui.status.contains("add to"),
+            "the confirmation hid what it would write: {}",
+            ui.status
+        );
+    }
+
+    /// **And an authored view is actually written to** — the affordance is
+    /// not a sentence about a write that never happens.
+    ///
+    /// #96 says a non-editable view offers no control at all; the corollary is
+    /// that an editable one offers a real one. A control that names a fact and
+    /// then does nothing is the failure this issue is against, worn as a
+    /// success.
+    #[test]
+    fn adding_to_an_authored_view_writes_the_fact() {
+        use crate::model::facet::Described;
+
+        let store = fixture();
+        let mut ui = ui_with_history(&store, "add-writes");
+
+        // Seed one row so `genre="techno"` is a view with something in it —
+        // otherwise narrowing to an authored view empties the very list the
+        // rows would be selected from.
+        let seeded = {
+            let ctx = ctx_of(&store);
+            crate::model::rows::Listing::recording_of(
+                ctx.library,
+                crate::model::rows::Listing::rows(ctx.library)[0],
+            )
+            .expect("a fixture row is a recording")
+        };
+        ui.log.assert_concept(
+            1,
+            Described::Recording(seeded),
+            "genre",
+            "techno",
+            crate::model::reference::Source::TagVariant,
+            crate::model::ingest::Confidence::Matched,
+        );
+        ui.listened = ui.log.catalogue();
+        // The librarian is what a facet comparison reads, so the seed has to
+        // go through a refold — which is what `main` does on `Stop::Refold`.
+        let ctx = refolded(&store, &ui);
+        flat_view(&mut ui);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view genre="techno""#);
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Add {
+                target: crate::cmd::AddTarget::View,
+                path: None,
+            },
+        );
+
+        assert!(ui.status.contains("assign genre techno"), "{}", ui.status);
+        let manual = ui.listened.assertions.keys().any(|(subject, _, basis)| {
+            *subject == Described::Recording(seeded)
+                && *basis == crate::model::reference::Source::Manual
+        });
+        assert!(
+            manual,
+            "the affordance named a fact and wrote nothing: {}",
+            ui.status
+        );
+    }
+
+    /// **`A or B` refuses rather than choosing** — #96.
+    ///
+    /// Adding to a union has no single answer, and picking one silently is
+    /// the kind of guess this project refuses everywhere else.
+    #[test]
+    fn adding_to_a_union_is_ambiguous_and_says_so() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "add-ambiguous");
+        ui.view = View::Tree;
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view genre="techno""#);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view +genre="house""#);
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Add {
+                target: crate::cmd::AddTarget::View,
+                path: None,
+            },
+        );
+        assert!(ui.status.contains("ambiguous"), "{}", ui.status);
+        assert!(
+            ui.status.contains("add to one of them"),
+            "the refusal did not say what to do instead: {}",
+            ui.status
+        );
     }
 
     /// **A split shows two lists at once, and the keys go to the focused

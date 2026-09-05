@@ -3616,6 +3616,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   ambiguous when repeated and that XPath's pitfall is made of, and every single-clause use of it is `genre[basis=…]`
   anyway — so refusing it is one rule instead of two, and the error names the bracket.
 
+- **An edit to a view is an edit to the facts that made it true — and authorship, not ambiguity, decides whether it is
+  offered** (#96). An earlier draft said a view is editable when the translation is unambiguous. That is too permissive:
+  `year >= 2015` translates perfectly well — assert a year — and adding a row to it must not rewrite a release date. So
+  every queryable field is classified once, in `Field::authorship` and `HistoryField::authorship`, into **observed**
+  (nothing a person asserts), **observed but correctable** (a correction, never a drag), and **authored** (yes, and it
+  names the fact). Only the last offers a control; the other two refuse by name in the status line, because a control
+  that quietly does nothing is the failure this is against.
+
+  **The confirmation names the fact, not the list**, and the typed `Assert` is what makes that honest: the sentence in
+  the status line and the fact appended to the log are one value, so the affordance cannot describe a write it does not
+  perform. An earlier pass of this said "not written yet" and would have shipped as a working feature.
+
+  **Only an equality names a value, and only an exact existential clause names a concept.** `rating>=4` says four, five
+  or nothing in particular; `genre*="electronic"` is satisfied by anything narrower, so writing the broad concept is a
+  guess; `all(genre)="techno"` is not made true by adding techno to a row that has others. Each of those keeps the
+  field's authorship — the refusal is about the value, not the field — which is what an earlier draft conflated, making
+  a year read as observed.
+
+  **Removal is an override, never a retraction.** The log is append-only and merges by union, so deleting a
+  `ConceptAsserted` brings it back on the next sync and destroys the provenance saying where it came from. So
+  `ConceptRetracted` carries a `basis` and the fold keeps `assertions_retracted` keyed to the strongest basis that ruled
+  the pair out. `Source` is ordered weakest-to-strongest — `TagVariant, Inferred, MusicBrainz, Discogs, Manual` — and an
+  assertion lifts a shadow only when it is at least as strong as the one that cast it. A re-import cannot undo a
+  person's correction, and a tag cannot undo what a person ruled out.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

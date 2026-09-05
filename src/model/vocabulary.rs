@@ -715,7 +715,7 @@ mod genre_retraction_tests {
         );
         assert_eq!(i.catalogue().assertions.len(), 2);
 
-        i.retract_concept(300, on(), facet::GENRE, "Techno");
+        i.retract_concept(300, on(), facet::GENRE, "Techno", Source::Manual);
         let cat = i.catalogue();
         assert!(
             cat.assertions.is_empty(),
@@ -723,7 +723,7 @@ mod genre_retraction_tests {
         );
         assert!(
             cat.assertions_retracted
-                .contains(&(on(), Id::<Concept>::in_facet(facet::GENRE, "Techno"))),
+                .contains_key(&(on(), Id::<Concept>::in_facet(facet::GENRE, "Techno"))),
             "the decision left no row, so it reads as though nobody had said"
         );
 

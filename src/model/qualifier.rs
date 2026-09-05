@@ -518,10 +518,17 @@ pub(crate) mod fold_tests {
     /// care who. The review queue asks the other one, by reading the rows.
     pub(crate) fn live(i: &Instance, label: &str) -> bool {
         let concept = Id::<Concept>::in_facet(facet::VERSION, label);
-        i.catalogue()
-            .assertions
-            .keys()
-            .any(|(r, c, _)| *r == Described::Recording(rec()) && *c == concept)
+        let cat = i.catalogue();
+        // **Not shadowed**, which is a different question from "was claimed".
+        // A retracted pair keeps its claims — dropping them would destroy the
+        // provenance saying where they came from (#96) — so the retraction
+        // has to be consulted rather than inferred from an empty map.
+        !cat.assertions_retracted
+            .contains_key(&(Described::Recording(rec()), concept))
+            && cat
+                .assertions
+                .keys()
+                .any(|(r, c, _)| *r == Described::Recording(rec()) && *c == concept)
     }
 
     /// Every asserter of one claim, with what each of them settled on.
@@ -572,7 +579,7 @@ pub(crate) mod fold_tests {
         );
         let import = mine.records().clone();
 
-        mine.retract_version(200, rec(), "instrumental");
+        mine.retract_version(200, rec(), "instrumental", Source::Manual);
         assert!(!live(&mine, "instrumental"), "the retraction did not take");
 
         // The other machine still holds only the import and sends it back.
@@ -581,6 +588,72 @@ pub(crate) mod fold_tests {
             !live(&mine, "instrumental"),
             "a stale replica resurrected a retracted qualifier"
         );
+    }
+
+    /// **A person's correction survives the next import** — #96.
+    ///
+    /// This is what "an override with precedence by basis" buys, and without
+    /// it the edit is worthless: retracting a wrong Discogs claim lasts
+    /// exactly until the next Discogs pass, and an edit that does not survive
+    /// a resync is not an edit.
+    ///
+    /// The import is still **recorded**. Dropping it would destroy the
+    /// provenance saying where it came from, which is the thing that makes an
+    /// override inspectable rather than magic — it is shadowed, not deleted.
+    #[test]
+    fn an_import_does_not_undo_a_persons_correction() {
+        let mut i = Instance::new(device(1));
+        i.assign_version(100, rec(), "live", Source::Discogs, Confidence::Matched);
+        assert!(live(&i, "live"));
+
+        // A person disagrees.
+        i.retract_version(200, rec(), "live", Source::Manual);
+        assert!(!live(&i, "live"), "the correction did not take");
+
+        // Discogs says it again, later and just as confidently.
+        i.assign_version(300, rec(), "live", Source::Discogs, Confidence::Matched);
+        assert!(
+            !live(&i, "live"),
+            "an import undid a person's correction — the edit did not survive a resync"
+        );
+
+        // And the import is on the record, so why it keeps being claimed is
+        // answerable rather than mysterious.
+        assert_eq!(
+            claims(&i, "live"),
+            [(Source::Discogs, Confidence::Matched)],
+            "the shadowed claim lost its provenance"
+        );
+
+        // The person may change their mind, because their own voice is not
+        // weaker than the one that ruled it out.
+        i.assign_version(400, rec(), "live", Source::Manual, Confidence::Confirmed);
+        assert!(
+            live(&i, "live"),
+            "a person could not undo their own retraction"
+        );
+    }
+
+    /// And the weaker voice cannot overrule the stronger, in either direction.
+    #[test]
+    fn a_tag_cannot_undo_what_a_person_ruled_out() {
+        let mut i = Instance::new(device(1));
+        i.retract_version(100, rec(), "live", Source::Manual);
+        i.assign_version(
+            200,
+            rec(),
+            "live",
+            Source::TagVariant,
+            Confidence::Provisional,
+        );
+        assert!(!live(&i, "live"), "a tag overruled a person");
+
+        // But a person's assertion beats a tag's retraction, which is the
+        // same rule read the other way.
+        let mut j = Instance::new(device(1));
+        j.retract_version(100, rec(), "live", Source::TagVariant);
+        j.assign_version(200, rec(), "live", Source::Manual, Confidence::Confirmed);
+        assert!(live(&j, "live"), "a person could not overrule a tag");
     }
 
     /// **"Decided not to apply" is not "nobody said", and the fold has to keep
@@ -596,11 +669,11 @@ pub(crate) mod fold_tests {
     fn a_retraction_is_a_decision_and_not_a_silence() {
         let mut i = Instance::new(device(1));
         i.assign_version(100, rec(), "live", Source::Discogs, Confidence::Matched);
-        i.retract_version(200, rec(), "live");
+        i.retract_version(200, rec(), "live", Source::Manual);
 
         let cat = i.catalogue();
         assert!(
-            cat.assertions_retracted.contains(&(
+            cat.assertions_retracted.contains_key(&(
                 Described::Recording(rec()),
                 Id::<Concept>::in_facet(facet::VERSION, "live")
             )),
@@ -608,7 +681,7 @@ pub(crate) mod fold_tests {
              it makes a decision indistinguishable from a silence"
         );
         assert!(
-            !cat.assertions_retracted.contains(&(
+            !cat.assertions_retracted.contains_key(&(
                 Described::Recording(rec()),
                 Id::<Concept>::in_facet(facet::VERSION, "instrumental")
             )),
@@ -622,7 +695,7 @@ pub(crate) mod fold_tests {
     fn a_later_assertion_undoes_a_retraction() {
         let mut i = Instance::new(device(1));
         i.assign_version(100, rec(), "live", Source::Discogs, Confidence::Matched);
-        i.retract_version(200, rec(), "live");
+        i.retract_version(200, rec(), "live", Source::Manual);
         i.assign_version(300, rec(), "live", Source::Manual, Confidence::Confirmed);
         assert!(live(&i, "live"));
     }
@@ -639,7 +712,7 @@ pub(crate) mod fold_tests {
             Source::Discogs,
             Confidence::Matched,
         );
-        i.retract_version(200, rec(), "instrumental");
+        i.retract_version(200, rec(), "instrumental", Source::Manual);
         let kinds: Vec<_> = i
             .records()
             .iter()
@@ -770,7 +843,7 @@ mod claim_tests {
         let mut i = Instance::new(device(1));
         assign(&mut i, 100, Source::Discogs, Confidence::Matched);
         assign(&mut i, 200, Source::TagVariant, Confidence::Provisional);
-        i.retract_version(300, rec(), "instrumental");
+        i.retract_version(300, rec(), "instrumental", Source::Manual);
         assert!(claims(&i, "instrumental").is_empty());
 
         // And any basis revives it, because a retraction is a decision and not
@@ -778,7 +851,7 @@ mod claim_tests {
         assign(&mut i, 400, Source::Manual, Confidence::Confirmed);
         assert!(live(&i, "instrumental"));
         assert!(
-            !i.catalogue().assertions_retracted.contains(&(
+            !i.catalogue().assertions_retracted.contains_key(&(
                 Described::Recording(rec()),
                 Id::<Concept>::in_facet(facet::VERSION, "instrumental")
             )),

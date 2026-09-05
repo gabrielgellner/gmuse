@@ -491,7 +491,7 @@ impl Librarian {
         let mut best: BTreeMap<(Described, Id<crate::model::entity::Facet>), Ranked<'_>> =
             BTreeMap::new();
         for ((subject, concept, _), confidence) in &cat.assertions {
-            if cat.assertions_retracted.contains(&(*subject, *concept)) {
+            if cat.assertions_retracted.contains_key(&(*subject, *concept)) {
                 continue;
             }
             let Some(record) = cat.concepts.get(concept).filter(|c| !c.node_label) else {

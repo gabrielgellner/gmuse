@@ -106,6 +106,17 @@ pub struct Glob {
 }
 
 impl Glob {
+    /// The pattern when it has no wildcard in it, so a caller can name the
+    /// value a fact would carry (#96).
+    ///
+    /// `None` for anything with a `*`: "assign genre `*tech*` to this" is not
+    /// a fact anybody can write, and the caller refuses rather than guessing
+    /// which concept was meant.
+    pub fn literal(&self) -> Option<String> {
+        (self.anchored_start && self.anchored_end && self.segments.len() == 1)
+            .then(|| self.segments[0].clone())
+    }
+
     pub fn new(pattern: &str) -> Self {
         let case_sensitive = pattern.chars().any(char::is_uppercase);
         let mut segments = Vec::new();
@@ -239,6 +250,21 @@ pub enum HistoryField {
 }
 
 impl HistoryField {
+    /// Which of #96's three categories this is.
+    pub fn authorship(self) -> crate::format::Authorship {
+        use crate::format::Authorship;
+        match self {
+            // A judgement, and the one this player exists to collect.
+            HistoryField::Rating => Authorship::Authored,
+            // What is in a crate is authored, and `:collect` is how.
+            HistoryField::Collected => Authorship::Authored,
+            // What happened. A play count is not an opinion.
+            HistoryField::PlayCount
+            | HistoryField::DaysSincePlayed
+            | HistoryField::DaysSinceAdded => Authorship::Observed,
+        }
+    }
+
     pub const NAMES: &'static [&'static str] = &[
         "collected",
         "days_since_added",
@@ -246,6 +272,17 @@ impl HistoryField {
         "play_count",
         "rating",
     ];
+
+    /// What it is spelled as, which is the inverse of [`Self::parse`].
+    pub fn name(self) -> &'static str {
+        match self {
+            HistoryField::Collected => "collected",
+            HistoryField::PlayCount => "play_count",
+            HistoryField::DaysSincePlayed => "days_since_played",
+            HistoryField::DaysSinceAdded => "days_since_added",
+            HistoryField::Rating => "rating",
+        }
+    }
 
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {

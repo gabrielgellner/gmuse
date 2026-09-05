@@ -170,6 +170,13 @@ pub enum AddTarget {
     Library,
     Playlist,
     Queue,
+    /// **Into the view itself** — assert whatever makes it true (#96).
+    ///
+    /// The idea no comparable player has: an edit to a view is an edit to the
+    /// facts that made it true. iTunes and Roon make a derived list read-only;
+    /// this can go further for one reason — membership is caused by *named*
+    /// facts, so the translation is inspectable rather than magic.
+    View,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

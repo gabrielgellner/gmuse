@@ -312,7 +312,7 @@ mod tests {
             Source::Manual,
             Confidence::Confirmed,
         );
-        i.retract_concept(300, subject, FUNCTION, "ambient");
+        i.retract_concept(300, subject, FUNCTION, "ambient", Source::Manual);
         let cat = i.catalogue();
         assert_eq!(
             cat.labels_on(subject, GENRE),

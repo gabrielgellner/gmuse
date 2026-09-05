@@ -42,6 +42,7 @@ pub enum ParseError {
 pub const VERBS: &[&str] = &[
     "activate",
     "add",
+    "add-view",
     "add-playlist",
     "add-queue",
     "bind",
@@ -224,6 +225,10 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         },
         "add-queue" => Command::Add {
             target: AddTarget::Queue,
+            path: optional_path(rest),
+        },
+        "add-view" => Command::Add {
+            target: AddTarget::View,
             path: optional_path(rest),
         },
         "rescan" => Command::Rescan,
@@ -749,6 +754,7 @@ pub fn format(cmd: &Command) -> String {
                 AddTarget::Library => "add",
                 AddTarget::Playlist => "add-playlist",
                 AddTarget::Queue => "add-queue",
+                AddTarget::View => "add-view",
             };
             match path {
                 Some(p) => format!("{verb} {}", p.display()),

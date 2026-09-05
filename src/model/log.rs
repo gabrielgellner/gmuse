@@ -571,6 +571,13 @@ pub enum Fact {
     ConceptRetracted {
         subject: Described,
         concept: Id<Concept>,
+        /// **Who ruled it out**, so precedence can be applied (#96).
+        ///
+        /// A retraction shadows every basis at once — somebody saying "this is
+        /// not live" is answering the question, not arguing with one source —
+        /// but *whose* answer it was still matters, because the next import
+        /// must not quietly undo a person's correction.
+        basis: Source,
     },
 
     /// A rating, or its removal with `None`.
@@ -624,7 +631,7 @@ pub enum Fact {
 /// replaying an older assignment never does.
 fn assign<S, C>(
     live: &mut BTreeMap<(S, C, Source), Confidence>,
-    retracted: &mut BTreeSet<(S, C)>,
+    retracted: &mut BTreeMap<(S, C), Source>,
     subject: S,
     concept: C,
     basis: Source,
@@ -633,8 +640,20 @@ fn assign<S, C>(
     S: Ord + Copy,
     C: Ord + Copy,
 {
+    // **Recorded whether or not it is shadowed.** Dropping it would destroy
+    // the provenance saying where it came from, which is the thing that makes
+    // an override inspectable rather than magic (#96).
     live.insert((subject, concept, basis), confidence);
-    retracted.remove(&(subject, concept));
+    // **Precedence by basis** (#96). An import does not undo a person's
+    // correction: without this, retracting a wrong Discogs genre lasts exactly
+    // until the next Discogs pass, and an edit that does not survive a resync
+    // is not an edit.
+    if retracted
+        .get(&(subject, concept))
+        .is_none_or(|by| basis >= *by)
+    {
+        retracted.remove(&(subject, concept));
+    }
 }
 
 /// Fold one retraction, **keyed one field shorter than what it shadows**.
@@ -648,15 +667,19 @@ fn assign<S, C>(
 /// has said* are different answers and only a row can tell them apart.
 fn retract<S, C>(
     live: &mut BTreeMap<(S, C, Source), Confidence>,
-    retracted: &mut BTreeSet<(S, C)>,
+    retracted: &mut BTreeMap<(S, C), Source>,
     subject: S,
     concept: C,
+    basis: Source,
 ) where
     S: Ord + Copy,
     C: Ord + Copy,
 {
     live.retain(|(s, c, _), _| (*s, *c) != (subject, concept));
-    retracted.insert((subject, concept));
+    // The strongest voice that ruled it out, so a weaker retraction arriving
+    // later cannot weaken a person's.
+    let at = retracted.entry((subject, concept)).or_insert(basis);
+    *at = (*at).max(basis);
 }
 
 /// Fold one claim that has no attribute to carry.
@@ -731,7 +754,7 @@ pub struct Catalogue {
     /// said* are different answers and only a row can tell them apart. A later
     /// assertion clears the entry, or a retraction would be a delete wearing
     /// another name.
-    pub assertions_retracted: BTreeSet<(Described, Id<Concept>)>,
+    pub assertions_retracted: BTreeMap<(Described, Id<Concept>), Source>,
     /// Every saved view, by the id its name mints.
     pub views: BTreeMap<Id<View>, SavedView>,
     /// Views somebody has dropped. Kept, because *deleted* and *never existed*
@@ -1150,11 +1173,16 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             } => {
                 cat.aliases.insert((*subject, value.clone(), *kind));
             }
-            Fact::ConceptRetracted { subject, concept } => retract(
+            Fact::ConceptRetracted {
+                subject,
+                concept,
+                basis,
+            } => retract(
                 &mut cat.assertions,
                 &mut cat.assertions_retracted,
                 described(subject),
                 *concept,
+                *basis,
             ),
             Fact::HoldingsAsserted { device, held } => {
                 // Records arrive in stamp order, so the last one simply wins.
@@ -1386,7 +1414,7 @@ impl Catalogue {
             .iter()
             .filter(|((s, c, _), _)| {
                 *s == subject
-                    && !self.assertions_retracted.contains(&(*s, *c))
+                    && !self.assertions_retracted.contains_key(&(*s, *c))
                     && self
                         .concepts
                         .get(c)

@@ -150,6 +150,12 @@ pub struct Credit {
 /// **one file claimed**, not that the spelling is legitimate — so a typo that
 /// got ingested never acquires the authority of a sleeve credit, and a bad one
 /// can be pruned by its basis without touching the aliases that were earned.
+/// **The order is precedence, and it is load-bearing** (#96).
+///
+/// Weakest first, so `Ord` says who wins: a person's judgement beats an
+/// import, an import beats an inference, an inference beats a tag. That is
+/// what makes a correction survive a resync — without it, retracting a wrong
+/// Discogs genre lasts exactly until the next Discogs pass.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]

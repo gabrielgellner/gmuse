@@ -40,10 +40,36 @@ in it and rejects the other by name.
 The rule is re-read whenever something it depends on moves. Rate a track and a `rating>=4` list gains it immediately;
 play one and a `play_count=0` list drops it. Nothing to refresh.
 
-That is also why it cannot be edited by hand — an exception list bolted onto a rule is how these become unexplainable.
+That is also why there is no exception list — "everything the rule says, minus these four" is how these become
+unexplainable. What you can do instead is **make the rule true**, which is the next section.
 
-    :freeze keepers           keep what it holds now, under a name
-    :playlist save keepers    the same crossing, said the other way
+## Adding to a rule writes the fact, not an exception
+
+    :add-view       add the selection to the open view
+
+It does not staple a row onto a list. It writes the fact that makes the row a member, and the status line says which
+fact before it does:
+
+    assign genre techno to 3
+
+Whether it is offered at all depends on **who authors the field**:
+
+| the rule is about                  | what `:add-view` does                                           |
+| ---------------------------------- | --------------------------------------------------------------- |
+| `genre`, `rating`, a crate         | writes it, and names it                                         |
+| `year`, `title`, `artist`, an mbid | refuses — these are read off the world, correct them on purpose |
+| `duration`, `bitrate`, a path      | refuses — there is nothing anybody asserts about these          |
+
+`year>=2015` translates perfectly well into "assert a year", which is exactly why it is refused: dropping a track into a
+list must never rewrite a release date.
+
+Three more refusals, each said out loud rather than doing nothing:
+
+- **`genre="techno" | genre="house"`** — ambiguous. Add to one of them.
+- **`rating>=4`** — names no single value. Four, five, or nothing in particular.
+- **`genre*="electronic"`** — satisfied by anything narrower, so writing the broad one would be a guess.
+
+  :freeze keepers keep what it holds now, under a name :playlist save keepers the same crossing, said the other way
 
 ## Freezing: a question becomes an answer you kept
 

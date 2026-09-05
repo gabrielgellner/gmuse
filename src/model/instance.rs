@@ -710,12 +710,20 @@ impl Instance {
     /// Decide a concept does not apply. Shadows rather than deletes, and
     /// silences every asserter at once — a person saying "this is not live" is
     /// answering the question, not arguing with one source.
-    pub fn retract_concept(&mut self, now: i64, subject: Described, facet_key: &str, label: &str) {
+    pub fn retract_concept(
+        &mut self,
+        now: i64,
+        subject: Described,
+        facet_key: &str,
+        label: &str,
+        basis: Source,
+    ) {
         self.append(
             now,
             Fact::ConceptRetracted {
                 subject,
                 concept: Id::<Concept>::in_facet(facet_key, label),
+                basis,
             },
         );
     }
@@ -725,8 +733,20 @@ impl Instance {
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
     )]
     /// Decide a version does not apply. Shadows rather than deletes.
-    pub fn retract_version(&mut self, now: i64, recording: Id<Recording>, label: &str) {
-        self.retract_concept(now, Described::Recording(recording), facet::VERSION, label);
+    pub fn retract_version(
+        &mut self,
+        now: i64,
+        recording: Id<Recording>,
+        label: &str,
+        basis: Source,
+    ) {
+        self.retract_concept(
+            now,
+            Described::Recording(recording),
+            facet::VERSION,
+            label,
+            basis,
+        );
     }
 
     #[allow(

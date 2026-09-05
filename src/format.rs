@@ -106,7 +106,66 @@ impl Field {
             _ => return None,
         })
     }
+}
 
+/// Whether a person may assert this, and how — #96, `query-language.md` §4.
+///
+/// **Authorship, not ambiguity.** An earlier draft said a view is editable
+/// when the translation is unambiguous, and that is too permissive: `year >=
+/// 2015` translates perfectly well — assert a year — and dragging a recording
+/// into it must absolutely not rewrite a release date.
+///
+/// The question is not "can this be turned into a fact" but "is this a fact a
+/// *person* authors", and the answer is a property of the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Authorship {
+    /// Nothing anybody asserts. A duration is what the file is; a play count
+    /// is what happened. **No affordance at all** — not a disabled one.
+    Observed,
+    /// Read off the world and correctable when the world was wrong: a year, a
+    /// title, an id. **Never by dragging.** Correcting a release date is a
+    /// deliberate act about a release, and it must look like one.
+    Correctable,
+    /// A judgement somebody made: a genre, a rating, what is in a crate.
+    /// Editable, and the confirmation names the fact rather than the list.
+    Authored,
+}
+
+impl Field {
+    /// Which of the three this field is.
+    ///
+    /// **In one place**, so a new field cannot quietly arrive uncategorised
+    /// and get an affordance nobody decided on. A test asserts every field
+    /// reaches this.
+    pub fn authorship(self) -> Authorship {
+        match self {
+            // A concept on an axis is the paradigm authored fact: somebody
+            // judged it, it carries who and how sure, and it is retractable.
+            Field::Facet(_) => Authorship::Authored,
+            // What the file is. Nothing to assert, and no honest way to.
+            Field::Duration
+            | Field::Bitrate
+            | Field::SampleRate
+            | Field::Channels
+            | Field::Path
+            | Field::FileName => Authorship::Observed,
+            // Read from tags or from an authority, and wrong often enough to
+            // be worth correcting — deliberately, never as a side effect.
+            Field::Artist
+            | Field::AlbumArtist
+            | Field::FileUnder
+            | Field::Album
+            | Field::Title
+            | Field::DisplayTitle
+            | Field::Track
+            | Field::Disc
+            | Field::Year
+            | Field::Label => Authorship::Correctable,
+        }
+    }
+}
+
+impl Field {
     /// What this field is written as. The inverse of [`Field::parse`], so a
     /// command that carries one round-trips through the line (#97).
     pub fn name(self) -> String {
@@ -490,6 +549,44 @@ fn render_atoms(atoms: &[Atom], row: &crate::model::rows::Listed<'_>, out: &mut 
 
 #[cfg(test)]
 mod tests {
+
+    /// **Every field is classified, in one place** — #96.
+    ///
+    /// A field that arrives uncategorised would get an affordance nobody
+    /// decided on, which is the failure this classification exists to
+    /// prevent: `year >= 2015` translates to a fact perfectly well, and
+    /// dragging a recording into it must not rewrite a release date.
+    #[test]
+    fn every_field_says_whether_a_person_authors_it() {
+        use crate::format::Authorship;
+
+        for name in Field::names() {
+            let f = Field::parse(name).unwrap_or_else(|| panic!("{name} does not parse"));
+            // The match is exhaustive, so this cannot fail — it is here so
+            // that adding a variant without a category fails to compile and
+            // adding one *with* the wrong category is at least visible.
+            let _ = f.authorship();
+        }
+
+        // The three that carry the decision, spot-checked so a careless
+        // re-categorisation shows up as a test rather than as an edit.
+        assert_eq!(
+            Field::parse("genre").unwrap().authorship(),
+            Authorship::Authored,
+            "a genre is a judgement somebody made"
+        );
+        assert_eq!(
+            Field::Year.authorship(),
+            Authorship::Correctable,
+            "a year is read off the world and corrected deliberately, never dragged"
+        );
+        assert_eq!(
+            Field::Duration.authorship(),
+            Authorship::Observed,
+            "nothing anybody asserts about a duration"
+        );
+    }
+
     use super::*;
     use crate::fixture::Tagged as Track;
     use std::path::PathBuf;
