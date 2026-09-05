@@ -28,8 +28,6 @@
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
-use crate::store::Track;
-
 /// Extensions we will open as a playlist.
 pub const EXTENSIONS: &[&str] = &["m3u8", "m3u", "pl"];
 
@@ -50,19 +48,38 @@ pub enum M3uError {
     },
 }
 
-/// Render tracks as an `.m3u8` body.
+/// One line of an export: where the file is, and what to say about it.
+///
+/// **The one place the player is allowed to hold a location** (#86). A row
+/// carries no path by design — that omission is what stopped `history.toml`
+/// being keyed by one — but an `.m3u` is a path format by definition, and an
+/// export naming paths is not a leak. So the locator is asked of
+/// [`Listing::playable`](crate::model::rows::Listing::playable) at the moment
+/// of writing and is never kept.
+///
+/// Assembled by the caller rather than taken as a row id, because the two
+/// halves come from different questions: what to *say* is a row, and where the
+/// file *is* is a holding.
+pub struct Entry<'a> {
+    pub locator: &'a Path,
+    /// The track's own credit where it has one, else who it files under.
+    pub who: &'a str,
+    pub title: &'a str,
+    pub duration: std::time::Duration,
+}
+
+/// Render entries as an `.m3u8` body.
 ///
 /// `at` is where the file will live; paths are made relative to its directory.
-pub fn render(at: &Path, tracks: &[&Track]) -> String {
+pub fn render(at: &Path, entries: &[Entry<'_>]) -> String {
     let base = at.parent().unwrap_or(Path::new(""));
     let mut out = String::from("#EXTM3U\n");
-    for t in tracks {
+    for e in entries {
         // Seconds, rounded — the format has no room for more, and nothing
         // reads it back anyway.
-        let secs = t.duration.as_secs();
-        let who = t.artist.as_deref().unwrap_or(t.file_under());
-        let _ = writeln!(out, "#EXTINF:{secs},{who} - {}", t.display_title());
-        let _ = writeln!(out, "{}", relative_to(base, &t.path).display());
+        let secs = e.duration.as_secs();
+        let _ = writeln!(out, "#EXTINF:{secs},{} - {}", e.who, e.title);
+        let _ = writeln!(out, "{}", relative_to(base, e.locator).display());
     }
     out
 }
@@ -71,7 +88,7 @@ pub fn render(at: &Path, tracks: &[&Track]) -> String {
 ///
 /// Temp-then-rename, so an interrupted write leaves the previous playlist
 /// intact rather than a truncated one — the same rule the history follows.
-pub fn write(at: &Path, tracks: &[&Track]) -> Result<(), M3uError> {
+pub fn write(at: &Path, entries: &[Entry<'_>]) -> Result<(), M3uError> {
     let fail = |source| M3uError::Write {
         path: at.to_path_buf(),
         source,
@@ -80,7 +97,7 @@ pub fn write(at: &Path, tracks: &[&Track]) -> Result<(), M3uError> {
         std::fs::create_dir_all(dir).map_err(fail)?;
     }
     let tmp = at.with_extension("tmp");
-    std::fs::write(&tmp, render(at, tracks)).map_err(fail)?;
+    std::fs::write(&tmp, render(at, entries)).map_err(fail)?;
     std::fs::rename(&tmp, at).map_err(fail)
 }
 
@@ -176,25 +193,25 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn track(path: &str, artist: Option<&str>, title: &str, secs: u64) -> Track {
-        Track {
-            path: PathBuf::from(path),
-            artist: artist.map(str::to_string),
-            title: Some(title.into()),
+    /// One entry, as the player assembles it from a row and a holding.
+    fn entry<'a>(path: &'a str, who: &'a str, title: &'a str, secs: u64) -> Entry<'a> {
+        Entry {
+            locator: Path::new(path),
+            who,
+            title,
             duration: Duration::from_secs(secs),
-            ..Default::default()
         }
     }
 
     #[test]
     fn a_playlist_is_extm3u_with_relative_paths() {
-        let t = track(
+        let t = entry(
             "/m/General/Sierra Ferrell/Long Time Coming/01 The Sea.mp3",
-            Some("Sierra Ferrell"),
+            "Sierra Ferrell",
             "The Sea",
             211,
         );
-        let out = render(Path::new("/m/.gmuse/playlists/road.m3u8"), &[&t]);
+        let out = render(Path::new("/m/.gmuse/playlists/road.m3u8"), &[t]);
         assert_eq!(
             out,
             "#EXTM3U\n\
@@ -207,12 +224,12 @@ mod tests {
     /// the whole reason for putting them under `data_dir`.
     #[test]
     fn a_written_playlist_reads_back_to_the_same_paths() {
-        let tracks = [
-            track("/m/General/a.mp3", Some("A"), "One", 100),
-            track("/m/Dance/b.mp3", Some("B"), "Two", 200),
+        let entries = [
+            entry("/m/General/a.mp3", "A", "One", 100),
+            entry("/m/Dance/b.mp3", "B", "Two", 200),
         ];
         let at = Path::new("/m/.gmuse/playlists/mix.m3u8");
-        let text = render(at, &tracks.iter().collect::<Vec<_>>());
+        let text = render(at, &entries);
         assert_eq!(
             parse(at, &text),
             vec![
@@ -269,15 +286,30 @@ mod tests {
     /// chain of `..` that climbs out of the filesystem.
     #[test]
     fn an_unrelated_path_stays_absolute() {
-        let t = track("/other/volume/x.mp3", Some("X"), "X", 10);
-        let out = render(Path::new("/m/.gmuse/p.m3u8"), &[&t]);
+        let t = entry("/other/volume/x.mp3", "X", "X", 10);
+        let out = render(Path::new("/m/.gmuse/p.m3u8"), &[t]);
         assert!(out.contains("\n/other/volume/x.mp3\n"), "{out}");
     }
 
+    /// **The fallback moved, and this test moved with it.**
+    ///
+    /// It used to build a `Track` with no artist and assert that `#EXTINF`
+    /// said `Unknown Artist`. An entry takes `who` already resolved, because
+    /// the caller has the row and the row has the answer: `file_under` is
+    /// never empty — the librarian substitutes `UNKNOWN_ARTIST` — and the
+    /// call site reads `row.artist.unwrap_or(row.file_under)`.
+    ///
+    /// So what is left to prove here is the narrower thing this file is still
+    /// responsible for: whatever it is given ends up in the line.
     #[test]
-    fn a_track_with_no_artist_still_gets_a_label() {
-        let t = track("/m/x.mp3", None, "Untitled", 5);
-        let out = render(Path::new("/m/p.m3u8"), &[&t]);
+    fn the_credit_it_is_given_is_the_credit_it_writes() {
+        let t = entry(
+            "/m/x.mp3",
+            crate::model::seam::UNKNOWN_ARTIST,
+            "Untitled",
+            5,
+        );
+        let out = render(Path::new("/m/p.m3u8"), &[t]);
         assert!(out.contains("#EXTINF:5,Unknown Artist - Untitled"), "{out}");
     }
 
@@ -286,9 +318,9 @@ mod tests {
         let d = std::env::temp_dir().join("gmuse-m3u-write");
         let _ = std::fs::remove_dir_all(&d);
         let at = d.join("playlists/mix.m3u8");
-        let t = track("/m/a.mp3", Some("A"), "One", 100);
+        let t = entry("/m/a.mp3", "A", "One", 100);
 
-        write(&at, &[&t]).unwrap();
+        write(&at, &[t]).unwrap();
         assert!(at.exists(), "the directory was not created");
         assert!(!at.with_extension("tmp").exists(), "a temp file was left");
         assert_eq!(read(&at).unwrap(), vec![PathBuf::from("/m/a.mp3")]);

@@ -678,18 +678,24 @@ mod tests {
         /// copy that was open, so resuming reopens the file that was open
         /// rather than whichever the canonical rule would pick now.
         ///
-        /// **The five left are three questions, and two of them may never
-        /// move:**
+        /// **The three left are three questions, and each needs a decision
+        /// rather than effort:**
         ///
-        /// - **three** read or write `.m3u`, which is a path format by
-        ///   definition. An export naming paths is not a leak.
-        /// - **one** is the remote's owned snapshot: another thread renders a
-        ///   caller's own template, and a borrowed row cannot cross a thread.
-        /// - **one** is the filter closure, which matches on a `&Track`.
+        /// - **one** reads `.m3u`: `id_for_path` turns a saved path back into
+        ///   a row id, which is a walk of the store's arena. What replaces it
+        ///   depends on what a row id *is* — see #86.
+        /// - **one** is the remote's owned snapshot. Another thread renders a
+        ///   caller's own template, and `rows::Listed` borrows, so nothing
+        ///   owned can be handed across.
+        /// - **one** is the filter closure, which matches on a `&Track`
+        ///   because `path=` and `file_name=` are selectors a person can
+        ///   write, and a row carries no location.
         ///
-        /// So its floor is **four**, and only the filter closure is still
-        /// worth moving.
-        const REACHES: usize = 5;
+        /// Two m3u *writes* left with #86's first pass: they ask
+        /// `Listing::listed` for what to say and `Listing::playable` for where
+        /// the file is, which is the sanctioned shape — an export naming paths
+        /// is not a leak, and neither answer is kept.
+        const REACHES: usize = 3;
 
         let (mut store, mut reaches) = (0, 0);
         let mut stray_paths: Vec<String> = Vec::new();

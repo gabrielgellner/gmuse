@@ -2761,11 +2761,23 @@ fn persist_open(ui: &mut Ui, ctx: &Context<'_>) {
     let (Some(Open::Saved(name)), Some(saved)) = (ui.open.clone(), ui.saved.clone()) else {
         return;
     };
-    let tracks: Vec<&crate::store::Track> = ui
+    let files: &dyn Listing = ctx.store;
+    // What to *say* is a row; where the file *is* is a holding. Two questions,
+    // asked at the moment of writing and neither answer kept (#86).
+    let listed: Vec<_> = ui
         .playlist
         .entries()
         .iter()
-        .filter_map(|id| ctx.store.get(*id))
+        .filter_map(|id| Some((files.listed(*id)?, files.playable(*id)?)))
+        .collect();
+    let tracks: Vec<crate::m3u::Entry<'_>> = listed
+        .iter()
+        .map(|(row, at)| crate::m3u::Entry {
+            locator: std::path::Path::new(at.locator),
+            who: row.artist.unwrap_or(row.file_under),
+            title: row.title,
+            duration: row.duration,
+        })
         .collect();
     if let Err(e) = crate::m3u::write(&saved.path_for(&name), &tracks) {
         ui.notify(e.to_string());
@@ -2784,11 +2796,23 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         ui.notify("the playlist is empty — nothing to save");
         return;
     }
-    let tracks: Vec<&crate::store::Track> = ui
+    let files: &dyn Listing = ctx.store;
+    // What to *say* is a row; where the file *is* is a holding. Two questions,
+    // asked at the moment of writing and neither answer kept (#86).
+    let listed: Vec<_> = ui
         .playlist
         .entries()
         .iter()
-        .filter_map(|id| ctx.store.get(*id))
+        .filter_map(|id| Some((files.listed(*id)?, files.playable(*id)?)))
+        .collect();
+    let tracks: Vec<crate::m3u::Entry<'_>> = listed
+        .iter()
+        .map(|(row, at)| crate::m3u::Entry {
+            locator: std::path::Path::new(at.locator),
+            who: row.artist.unwrap_or(row.file_under),
+            title: row.title,
+            duration: row.duration,
+        })
         .collect();
     let at = saved.path_for(name);
     match crate::m3u::write(&at, &tracks) {
