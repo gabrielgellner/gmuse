@@ -72,7 +72,15 @@ pub struct Listed<'a> {
     /// is meant to disappear for a track that is on no album, and rendering
     /// the placeholder there would show the stand-in as though it were a name.
     pub tagged_album: Option<&'a str>,
-    pub genre: Option<&'a str>,
+    /// Every genre assigned to this row.
+    ///
+    /// **A set, not a value** (#86). The model has always held
+    /// `(subject, genre, source) -> confidence`, so many genres per subject
+    /// with their lineage is what it says; this field said one because it was
+    /// shaped after the store's single raw tag string. Curation adds
+    /// better-sourced assignments and retracts wrong ones — it never collapses
+    /// them to one.
+    pub genre: &'a [String],
     /// The imprint. Its own field because a label sampler's `album_artist` is
     /// "Various Artists" and the label has nowhere else to go.
     pub label: Option<&'a str>,
@@ -80,6 +88,60 @@ pub struct Listed<'a> {
     pub bitrate: Option<u32>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
+}
+
+/// A drawn row the library **owns**.
+///
+/// [`Listed`] borrows, which suits a store that holds `Track`s with the
+/// strings already in them. The librarian does not: `file_under` is derived
+/// from the album-level credit and `album` from the slot a copy sits in, so
+/// there is nothing to lend a view of. It materialises these once per fold and
+/// lends from that (#86).
+///
+/// It is also what crosses a thread. The remote hands a caller the current row
+/// so it can render its own template, and a borrow cannot go with it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Drawn {
+    pub file_under: String,
+    pub album: String,
+    pub disc: Option<u32>,
+    pub track: Option<u32>,
+    pub title: String,
+    pub duration: std::time::Duration,
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub tagged_title: Option<String>,
+    pub tagged_album: Option<String>,
+    pub genre: Vec<String>,
+    pub label: Option<String>,
+    pub year: Option<i32>,
+    pub bitrate: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u8>,
+}
+
+impl Drawn {
+    /// The borrowed view a renderer takes.
+    pub fn listed(&self) -> Listed<'_> {
+        Listed {
+            file_under: &self.file_under,
+            album: &self.album,
+            disc: self.disc,
+            track: self.track,
+            title: &self.title,
+            duration: self.duration,
+            artist: self.artist.as_deref(),
+            album_artist: self.album_artist.as_deref(),
+            tagged_title: self.tagged_title.as_deref(),
+            tagged_album: self.tagged_album.as_deref(),
+            genre: &self.genre,
+            label: self.label.as_deref(),
+            year: self.year,
+            bitrate: self.bitrate,
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+        }
+    }
 }
 
 /// What is needed to *open* a row, as against to draw it.

@@ -25,11 +25,13 @@
 use crate::model::encoding::{Encoding, Encodings, Format, Verdict};
 use crate::model::entity::{Device, Recording, ReleaseGroup, Track};
 use crate::model::id::Id;
+use crate::model::ingest::Confidence;
 use crate::model::log::Catalogue;
 use crate::model::provenance::Provenance;
 use crate::model::reference::{CreditOn, Reference};
+use crate::model::rows::Drawn;
 use crate::model::spine::Spine;
-use crate::model::vocabulary::Vocabulary;
+use crate::model::vocabulary::{GenreOn, Vocabulary};
 
 /// What the player is allowed to ask, and what it is allowed to ask for.
 ///
@@ -55,6 +57,27 @@ pub struct Librarian {
     /// rating; a play is counted.
     pub ratings: std::collections::BTreeMap<Id<Recording>, u8>,
     pub plays: std::collections::BTreeMap<Id<Recording>, u32>,
+    /// Every genre assigned to each subject, by name.
+    ///
+    /// Folded down from `Catalogue::genres`, which keys by
+    /// `(subject, genre, source)`: several sources may assign the same genre,
+    /// and each carries its own confidence. Collapsed to the distinct names
+    /// here, most confident first, so a display that has room for one shows
+    /// the best-supported and a filter can ask about any of them.
+    pub genres: std::collections::BTreeMap<GenreOn, Vec<String>>,
+    /// Every row this library can draw, materialised once (#86).
+    ///
+    /// `Listed` borrows and the librarian computes — `file_under` from the
+    /// album-level credit, `album` from the slot — so there is nothing to lend
+    /// a view of unless it is kept. Built at the end of the fold and lent from
+    /// there.
+    rows: std::collections::BTreeMap<Id<Encoding>, Drawn>,
+    /// Where this device can open each row, from the holdings it asserted.
+    ///
+    /// Empty until [`Librarian::here`] says which device this is. The
+    /// librarian knows every holding; which of them is reachable *now* is a
+    /// fact about the machine it is running on.
+    locators: std::collections::BTreeMap<Id<Encoding>, String>,
     /// Which slot each copy sits in — issue #78.
     ///
     /// The field that makes a row's album a fact rather than a choice. Without
@@ -79,6 +102,9 @@ impl Librarian {
             provenance: Provenance::default(),
             ratings: Default::default(),
             plays: Default::default(),
+            genres: Default::default(),
+            rows: Default::default(),
+            locators: Default::default(),
             placed: Default::default(),
         }
     }
@@ -406,7 +432,153 @@ impl Librarian {
         }
         l.ratings = cat.ratings.clone();
         l.plays = cat.plays.clone();
+
+        // Every genre a subject is assigned, most confident first. Several
+        // sources may assign the same one — a tag and a curated pass agreeing
+        // is two rows in the fold and one genre on the shelf — so the best
+        // confidence for each name wins and the name is listed once.
+        let mut best: std::collections::BTreeMap<GenreOn, Vec<(Confidence, &str)>> =
+            std::collections::BTreeMap::new();
+        for ((subject, genre, _), confidence) in &cat.genres {
+            if cat.genres_retracted.contains(&(*subject, *genre)) {
+                continue;
+            }
+            let Some(name) = cat.genre_names.get(genre) else {
+                continue;
+            };
+            let seen = best.entry(*subject).or_default();
+            match seen.iter_mut().find(|(_, held)| *held == name.as_str()) {
+                Some(entry) if entry.0 < *confidence => entry.0 = *confidence,
+                Some(_) => {}
+                None => seen.push((*confidence, name.as_str())),
+            }
+        }
+        l.genres = best
+            .into_iter()
+            .map(|(subject, mut names)| {
+                // Most confident first, then by name.
+                //
+                // **Tag order does not survive the fold and is not meant to.**
+                // `Rock; Blues Rock; Alternative Rock` arrives broadest-first
+                // because that is how taggers write it, but the catalogue keys
+                // assignments by `(subject, genre, source)` — a set, with no
+                // position, because a position is a fact about a *string* and
+                // not about the genres. What should order these is the
+                // hierarchy: `Rock` is a top concept and `Alternative Rock` is
+                // narrower-of it, and depth is the real answer to "which is
+                // broadest". Until edges exist the order is alphabetical,
+                // which is at least the same twice.
+                names.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+                (
+                    subject,
+                    names.into_iter().map(|(_, n)| n.to_string()).collect(),
+                )
+            })
+            .collect();
+
+        l.draw();
         l
+    }
+
+    /// Say which device this is, so rows know where they can be opened.
+    pub fn here(&mut self, device: Id<Device>) {
+        self.locators = self
+            .encodings
+            .holdings
+            .iter()
+            .filter(|h| h.device.id() == device)
+            .map(|h| (h.encoding.id(), h.locator.clone()))
+            .collect();
+    }
+
+    /// Materialise every row.
+    ///
+    /// One pass at the end of the fold rather than one assembly per draw. The
+    /// UI redraws five times a second and a screenful is fifty rows; building
+    /// them on demand would recompute the same credits and album titles
+    /// hundreds of times a second for a library that changed between none of
+    /// them.
+    fn draw(&mut self) {
+        let ids: Vec<Id<Encoding>> = self.encodings.encodings.keys().copied().collect();
+        for id in ids {
+            let Some(drawn) = self.drawn_of(id) else {
+                continue;
+            };
+            self.rows.insert(id, drawn);
+        }
+    }
+
+    /// Assemble one row out of the entities behind it.
+    fn drawn_of(&self, copy: Id<Encoding>) -> Option<Drawn> {
+        let encoding = self.encodings.encodings.get(&copy)?;
+        let recording = encoding.recording?.id();
+        let row = self.row_of(recording, Some(copy))?;
+        let slot = self.placed.get(&copy).copied();
+        let (disc, track) = self.place_of(slot);
+        let group = self.group_of(slot);
+
+        // **Every genre on the recording**, and the album's only when the
+        // recording has none of its own — a compilation's `Pop` must not join
+        // what the track itself was assigned (#74).
+        let mut genre: Vec<String> = self
+            .genres
+            .get(&GenreOn::Recording(recording))
+            .cloned()
+            .unwrap_or_default();
+        if genre.is_empty() {
+            genre = group
+                .and_then(|g| self.genres.get(&GenreOn::ReleaseGroup(g)))
+                .cloned()
+                .unwrap_or_default();
+        }
+
+        let on_release = slot
+            .and_then(|s| self.spine.tracks.get(&s))
+            .and_then(|t| self.spine.media.get(&t.medium.id()))
+            .and_then(|m| self.spine.releases.get(&m.release.id()));
+
+        Some(Drawn {
+            file_under: row.file_under,
+            album: row
+                .album
+                .clone()
+                .unwrap_or_else(|| crate::model::tree::NO_ALBUM.to_string()),
+            // `u16::MAX` is `place_of`'s "not numbered" — it sorts unplaced
+            // copies last rather than first, which is why it is not zero. Read
+            // as a number it shows a track 65535.
+            disc: (disc != u16::MAX).then_some(u32::from(disc)),
+            track: (track != u16::MAX).then_some(u32::from(track)),
+            title: row.title.clone(),
+            duration: row.length,
+            artist: {
+                let credited = self.reference.credited_as(CreditOn::Recording(recording));
+                (!credited.is_empty()).then_some(credited)
+            },
+            album_artist: group.map(|g| self.reference.credited_as(CreditOn::ReleaseGroup(g))),
+            // The model's title *is* the tagged one, normalised. There is no
+            // file name to fall back to here, which is the point: a row holds
+            // no location, so it cannot borrow one for a label.
+            tagged_title: (!row.title.is_empty()).then(|| row.title.clone()),
+            tagged_album: row.album,
+            genre,
+            label: on_release
+                .and_then(|r| r.label)
+                .and_then(|l| self.reference.labels.get(&l.id()))
+                .map(|l| l.name.clone()),
+            // The album's first release where the tags say so, else this
+            // pressing's. `OriginalReleaseDate` is the #59-correct answer — a
+            // 2015 pressing of a 1982 album is 1982 — and 98% of this library
+            // does not carry it, so falling back is the difference between a
+            // year and a blank.
+            year: group
+                .and_then(|g| self.spine.groups.get(&g))
+                .and_then(|g| g.first_released)
+                .or_else(|| on_release.and_then(|r| r.released))
+                .map(|d| i32::from(d.year)),
+            bitrate: Some(encoding.bitrate),
+            sample_rate: encoding.sample_rate,
+            channels: encoding.channels,
+        })
     }
 
     /// The album a recording sits on, if any.
@@ -468,6 +640,37 @@ impl Librarian {
                 copy: Some(e.id),
             })
             .collect()
+    }
+}
+
+/// **The librarian answers the row contract** — #86, and the point of it.
+///
+/// `Scan` implemented this and the player read rows through the store. Now the
+/// library draws them, which is what lets the store go: the trait is the seam,
+/// and swapping which side of it answers is the whole migration.
+impl crate::model::rows::Listing for Librarian {
+    fn listed(&self, id: Id<Encoding>) -> Option<crate::model::rows::Listed<'_>> {
+        Some(self.rows.get(&id)?.listed())
+    }
+
+    fn audio_of(&self, id: Id<Encoding>) -> Option<crate::audio_id::AudioId> {
+        Some(self.encodings.encodings.get(&id)?.audio)
+    }
+
+    fn playable(&self, id: Id<Encoding>) -> Option<crate::model::rows::Playable<'_>> {
+        let levels = &self.encodings.encodings.get(&id)?.levels;
+        Some(crate::model::rows::Playable {
+            // Only a holding on *this* device. A row the library knows about
+            // and this machine does not hold is an ordinary row and an
+            // unplayable one, which is a different answer from "no such row".
+            locator: self.locators.get(&id)?,
+            gain: (!levels.is_empty()).then(|| crate::model::rows::Loudness {
+                track_db: levels.track_db(),
+                track_peak: levels.track_peak(),
+                album_db: levels.album_db(),
+                album_peak: levels.album_peak(),
+            }),
+        })
     }
 }
 
@@ -1014,6 +1217,45 @@ mod tests {
                 "Scan"
             ),
             1
+        );
+    }
+
+    /// **A tag's genres become facts, and a drawn row carries all of them.**
+    ///
+    /// The librarian showed no genre at all for 6,437 of 6,485 real rows,
+    /// because a scan observed none: genres in this model are concepts with a
+    /// basis and a confidence, and a tag had never been read as a claim. It is
+    /// one now, at `TagVariant` — the weakest rung, which a curated pass
+    /// outranks.
+    #[test]
+    fn the_genres_a_tag_names_reach_the_row() {
+        use crate::model::entity::Device;
+        use crate::model::instance::Instance;
+        use crate::model::rows::Listing;
+
+        let dir = std::env::temp_dir().join("gmuse-seam-genres");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01 Racing.wav");
+        crate::model::round_trip::write_wav(&file, 4410);
+        crate::model::round_trip::write_genre(&file, "Rock; Blues Rock; Alternative Rock");
+
+        let scan = vec![crate::model::ingest::read(&file).expect("reads")];
+        assert_eq!(scan[0].genres.len(), 3, "the scan saw three terms");
+
+        let device = Id::<Device>::derived(b"laptop");
+        let mut m = Instance::new(device);
+        m.ingest(100, &scan);
+        let l = Librarian::from_catalogue(&m.catalogue());
+
+        let copy = *l.encodings.encodings.keys().next().unwrap();
+        let row = l.listed(copy).expect("a row");
+        let mut shown: Vec<&str> = row.genre.iter().map(String::as_str).collect();
+        shown.sort_unstable();
+        assert_eq!(
+            shown,
+            ["Alternative Rock", "Blues Rock", "Rock"],
+            "every term, not the first and not the joined string"
         );
     }
 

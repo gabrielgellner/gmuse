@@ -160,6 +160,7 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // things: `DATE` is this pressing, `ORIGINALDATE` the album. They
         // disagree for 820 files in this library.
         label: Some(get(ItemKey::Label)).filter(|s| !s.is_empty()),
+        genres: crate::scan::split_genres(Some(&get(ItemKey::Genre))),
         levels: crate::model::encoding::Levels {
             track_cdb: cdb(&get(ItemKey::ReplayGainTrackGain)),
             track_peak_e4: peak_e4(&get(ItemKey::ReplayGainTrackPeak)),

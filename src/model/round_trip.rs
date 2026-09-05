@@ -38,6 +38,7 @@ fn album() -> Vec<Scanned> {
         audio: audio(hash),
         title: title.into(),
         artist: "Stephan Bodzin & Marc Romboy".into(),
+        genres: Vec::new(),
         identity: Some(Basis::MusicBrainz(uuid::Uuid::from_u128(mbid))),
         artist_mbid: Some(uuid::Uuid::from_u128(0xb0d21)),
         credit_is_joined: false,
@@ -453,6 +454,23 @@ pub(crate) fn write_tags(path: &std::path::Path, title: &str, artist: &str, mbid
             id.as_bytes().to_vec(),
         )));
     }
+    t.save_to_path(path, WriteOptions::default()).unwrap();
+}
+
+/// Write a title, an artist and a genre tag.
+///
+/// Separate from `write_tags` because a genre fixture wants the tag verbatim
+/// — `Rock; Blues Rock` is one field with three terms in it, and the point of
+/// the test is what happens to that string.
+pub(crate) fn write_genre(path: &std::path::Path, genre: &str) {
+    use lofty::config::WriteOptions;
+    use lofty::id3::v2::Id3v2Tag;
+    use lofty::prelude::{Accessor, TagExt};
+
+    let mut t = Id3v2Tag::default();
+    t.set_title("Racing to a Red Light".to_string());
+    t.set_artist("Early James".to_string());
+    t.set_genre(genre.to_string());
     t.save_to_path(path, WriteOptions::default()).unwrap();
 }
 

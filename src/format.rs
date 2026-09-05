@@ -140,7 +140,15 @@ impl Field {
             Field::Track => r.track?.to_string(),
             Field::Disc => r.disc?.to_string(),
             Field::Year => r.year?.to_string(),
-            Field::Genre => r.genre?.to_string(),
+            // Joined, because a row carries every genre assigned to it and a
+            // line has one slot. `; ` is the separator taggers write, so a
+            // library that has had no curation renders exactly its tags.
+            Field::Genre => {
+                if r.genre.is_empty() {
+                    return None;
+                }
+                r.genre.join("; ")
+            }
             Field::Label => r.label?.to_string(),
             Field::Duration => {
                 let secs = r.duration.as_secs();
@@ -442,7 +450,7 @@ mod tests {
             tracknumber: Some(1),
             discnumber: Some(1),
             date: Some(2021),
-            genre: Some("folk".into()),
+            genres: vec!["folk".into()],
             duration: Duration::from_secs(221),
             bitrate: Some(320),
             ..Default::default()

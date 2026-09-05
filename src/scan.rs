@@ -418,7 +418,7 @@ pub fn read_track(path: &Path, mtime: i64, size: u64) -> Result<Track, String> {
         track.artist = clean(tag.artist().map(|s| s.to_string()));
         track.album = clean(tag.album().map(|s| s.to_string()));
         track.title = clean(tag.title().map(|s| s.to_string()));
-        track.genre = clean(tag.genre().map(|s| s.to_string()));
+        track.genres = split_genres(tag.genre().as_deref());
         track.albumartist = clean(tag.get_string(ItemKey::AlbumArtist).map(str::to_string));
         // `Publisher` is `TPUB` in ID3 and `ORGANIZATION` in Vorbis. `LABEL`
         // is neither standard nor rare — Bandcamp and Picard both write it —
@@ -459,6 +459,26 @@ pub fn read_track(path: &Path, mtime: i64, size: u64) -> Result<Track, String> {
 ///
 /// ID3v2 in the wild contains NUL-padded and NUL-separated strings; leaving
 /// them in produces text that renders as a blank or truncates a terminal line.
+/// The terms a genre tag names.
+///
+/// Taggers write several genres into one field and disagree about the
+/// separator: `;` is the common one, `/` appears on older files, and a stray
+/// `,` shows up too. Split on all three, trimmed, blanks dropped, order kept
+/// — the first term is usually the broadest and that is what a one-line
+/// display wants first.
+///
+/// **Not split on `&`**: `Drum & Bass` is one genre.
+pub(crate) fn split_genres(tag: Option<&str>) -> Vec<String> {
+    tag.map(|s| {
+        s.split([';', '/', ','])
+            .map(str::trim)
+            .filter(|term| !term.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 fn clean(s: Option<String>) -> Option<String> {
     let s = s?;
     let s = s.replace('\0', " ");
@@ -636,6 +656,35 @@ mod tests {
     fn a_shared_name_prefix_is_not_containment() {
         let roots = [PathBuf::from("/m/B"), PathBuf::from("/m/Bach")];
         assert_eq!(prune_nested(&roots), roots.to_vec());
+    }
+
+    /// **A genre tag names several genres**, and which separator depends on
+    /// who wrote the file.
+    #[test]
+    fn a_genre_tag_is_split_into_its_terms() {
+        assert_eq!(
+            split_genres(Some("Rock; Blues Rock; Alternative Rock")),
+            ["Rock", "Blues Rock", "Alternative Rock"]
+        );
+        assert_eq!(
+            split_genres(Some("Electronic/Techno")),
+            ["Electronic", "Techno"]
+        );
+        assert_eq!(split_genres(Some("Folk, Country")), ["Folk", "Country"]);
+    }
+
+    /// `Drum & Bass` is one genre, and splitting on `&` would make it two
+    /// neither of which exists.
+    #[test]
+    fn an_ampersand_is_part_of_a_name_and_not_a_separator() {
+        assert_eq!(split_genres(Some("Drum & Bass")), ["Drum & Bass"]);
+    }
+
+    #[test]
+    fn a_blank_term_is_dropped_rather_than_named() {
+        assert_eq!(split_genres(Some("Rock;; ; Pop")), ["Rock", "Pop"]);
+        assert_eq!(split_genres(Some("   ")), Vec::<String>::new());
+        assert_eq!(split_genres(None), Vec::<String>::new());
     }
 
     #[test]

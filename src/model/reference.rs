@@ -244,18 +244,38 @@ impl Reference {
     /// through the reference, so a printed form never fragments the artist
     /// dimension.
     pub fn credited_as(&self, subject: CreditOn) -> String {
-        let credits = self.credits_on(subject);
+        // **A credit with no name is not a credit.** An artist the catalogue
+        // has no name for resolved to an empty string and still took its join
+        // phrase with it, so `Emmylou Harris with The Band` came out as
+        // `Emmylou Harris, ` — a trailing separator introducing nobody.
+        // Dropped here rather than trimmed afterwards, because the separator
+        // belongs to the credit that is missing.
+        // **One artist appears once.** Two facts crediting the same artist
+        // with different `as_credited` spellings both survive the fold — they
+        // are different claims — and joining them produced `Orbital, Orbital`
+        // and a Trio listed twice under two spellings of its own line. The
+        // first by position wins, which is the one the credit is ordered by.
+        let mut seen = std::collections::BTreeSet::new();
+        let named: Vec<_> = self
+            .credits_on(subject)
+            .into_iter()
+            .filter(|c| seen.insert(c.artist.id()))
+            .filter_map(|c| {
+                let name = c.as_credited.clone().unwrap_or_else(|| {
+                    self.artists
+                        .get(&c.artist.id())
+                        .map(|a| a.name.clone())
+                        .unwrap_or_default()
+                });
+                (!name.trim().is_empty()).then(|| (name, c.join_phrase.clone()))
+            })
+            .collect();
+
         let mut line = String::new();
-        for (i, c) in credits.iter().enumerate() {
-            let name = c.as_credited.clone().unwrap_or_else(|| {
-                self.artists
-                    .get(&c.artist.id())
-                    .map(|a| a.name.clone())
-                    .unwrap_or_default()
-            });
-            line.push_str(&name);
-            if i + 1 < credits.len() {
-                line.push_str(c.join_phrase.as_deref().unwrap_or(", "));
+        for (i, (name, join)) in named.iter().enumerate() {
+            line.push_str(name);
+            if i + 1 < named.len() {
+                line.push_str(join.as_deref().unwrap_or(", "));
             }
         }
         line

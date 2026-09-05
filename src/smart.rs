@@ -115,7 +115,7 @@ mod tests {
                 path: PathBuf::from(path),
                 artist: Some(artist.into()),
                 title: Some(artist.into()),
-                genre: Some(genre.into()),
+                genres: vec![genre.into()],
                 date: Some(year),
                 duration: Duration::from_secs(200),
                 // History hangs off an identity now, so a test track needs one.

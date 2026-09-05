@@ -4998,7 +4998,7 @@ mod tests {
                 artist: Some("Someone".into()),
                 album: Some("An Album".into()),
                 title: Some(title.into()),
-                genre: Some(genre.into()),
+                genres: vec![genre.into()],
                 duration: Duration::from_secs(200),
                 ..Default::default()
             }));

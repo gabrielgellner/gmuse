@@ -87,6 +87,15 @@ pub struct Scanned {
     /// The imprint, from `TPUB` / `ORGANIZATION` / `LABEL`. 5,786 of 6,500
     /// files here carry one.
     pub label: Option<String>,
+    /// The genres the tags name, one per term.
+    ///
+    /// **The weakest rung of the genre ladder** (#86). Genres in this model
+    /// are concepts in a hierarchical codelist with a basis and a confidence,
+    /// and nothing had ever asserted one — so a librarian that drew its own
+    /// rows showed no genre at all for 6,437 of 6,485 of them. A tag is a
+    /// claim like any other; it enters as `Source::TagVariant`, which is what
+    /// a curated pass outranks.
+    pub genres: Vec<String>,
     /// ReplayGain as the tags claim it. Every file here carries some.
     pub levels: crate::model::encoding::Levels,
     /// The release group id, where the tags carry one — what makes two devices
@@ -273,6 +282,32 @@ impl Instance {
                     role,
                     Source::TagVariant,
                     1,
+                );
+            }
+
+            // **The genres the tags name**, one assignment per term (#86).
+            //
+            // A tag is a claim like any other and it enters at the weakest
+            // rung, `TagVariant`, which is what a curated pass outranks. On
+            // the recording rather than the album: a compilation's `Pop`
+            // would otherwise be asserted over every track it holds (#74).
+            for name in &s.genres {
+                let genre = Id::<crate::model::entity::Genre>::of_name(name);
+                self.append(
+                    now,
+                    Fact::GenreCatalogued {
+                        genre,
+                        name: name.clone(),
+                    },
+                );
+                self.append(
+                    now,
+                    Fact::GenreAssigned {
+                        subject: crate::model::vocabulary::GenreOn::Recording(recording),
+                        genre,
+                        basis: Source::TagVariant,
+                        confidence: Confidence::Provisional,
+                    },
                 );
             }
 
@@ -1074,6 +1109,7 @@ mod containment_tests {
             bitrate: 320,
             released: None,
             first_released: None,
+            genres: Vec::new(),
             label: None,
             levels: Default::default(),
             sample_rate: Some(44_100),
@@ -1258,6 +1294,7 @@ mod credit_tests {
             bitrate: 320,
             released: None,
             first_released: None,
+            genres: Vec::new(),
             label: None,
             levels: Default::default(),
             sample_rate: Some(44_100),

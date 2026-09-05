@@ -426,21 +426,23 @@ fn compare(selector: Selector, op: Op, value: &Value, t: &Track, env: &Env) -> b
         (Selector::Any, Value::Text(glob)) => {
             let hit = ANY_FIELDS
                 .iter()
-                .any(|f| text_of(*f, t).is_some_and(|v| glob.matches(&v)));
+                .any(|f| texts_of(*f, t).iter().any(|v| glob.matches(v)));
             match op {
                 Op::Ne => !hit,
                 _ => hit,
             }
         }
-        (Selector::Field(f), Value::Text(glob)) => match text_of(f, t) {
+        (Selector::Field(f), Value::Text(glob)) => match texts_of(f, t).as_slice() {
             // A missing tag matches nothing, including `!=`. Three-valued
             // logic would be more correct and much harder to predict; `!` on
             // the whole comparison is how you ask for "or missing".
-            Some(v) => match op {
-                Op::Ne => !glob.matches(&v),
-                _ => glob.matches(&v),
+            [] => false,
+            // **Any of them**, and `!=` is none of them. A file tagged
+            // `Rock; Blues Rock` is Rock, and it is not `!=Rock`.
+            values => match op {
+                Op::Ne => !values.iter().any(|v| glob.matches(v)),
+                _ => values.iter().any(|v| glob.matches(v)),
             },
-            None => false,
         },
         (Selector::Field(f), Value::Number(n)) => match number_of(f, t) {
             Some(v) => match op {
@@ -465,25 +467,33 @@ fn compare(selector: Selector, op: Op, value: &Value, t: &Track, env: &Env) -> b
 /// the files worth finding.
 fn present(f: Field, t: &Track) -> bool {
     match f.kind() {
-        Kind::Text => text_of(f, t).is_some_and(|v| !v.trim().is_empty()),
+        Kind::Text => texts_of(f, t).iter().any(|v| !v.trim().is_empty()),
         Kind::Number => number_of(f, t).is_some(),
     }
 }
 
-pub(crate) fn text_of(f: Field, t: &Track) -> Option<String> {
-    Some(match f {
-        Field::Artist => t.artist.clone()?,
-        Field::AlbumArtist => t.albumartist.clone()?,
-        Field::FileUnder => t.file_under().to_string(),
-        Field::Album => t.album.clone()?,
-        Field::Title => t.title.clone()?,
-        Field::DisplayTitle => t.display_title().to_string(),
-        Field::Genre => t.genre.clone()?,
-        Field::Label => t.label.clone()?,
-        Field::Path => t.path.display().to_string(),
-        Field::FileName => t.path.file_name()?.to_string_lossy().into_owned(),
-        _ => return None,
-    })
+/// The values a text field has: none, one, or several.
+///
+/// **A list because one field genuinely has several** (#86). A genre tag names
+/// three terms in a hierarchical codelist, and comparing against the joined
+/// string meant `genre=Rock` could not match a file that was also tagged
+/// `Blues Rock`. Every other field returns nought or one, and the comparison
+/// is the same either way: does *any* value match.
+pub(crate) fn texts_of(f: Field, t: &Track) -> Vec<String> {
+    let one = |v: Option<String>| v.map(|v| vec![v]).unwrap_or_default();
+    match f {
+        Field::Artist => one(t.artist.clone()),
+        Field::AlbumArtist => one(t.albumartist.clone()),
+        Field::FileUnder => vec![t.file_under().to_string()],
+        Field::Album => one(t.album.clone()),
+        Field::Title => one(t.title.clone()),
+        Field::DisplayTitle => vec![t.display_title().to_string()],
+        Field::Genre => t.genres.clone(),
+        Field::Label => one(t.label.clone()),
+        Field::Path => vec![t.path.display().to_string()],
+        Field::FileName => one(t.path.file_name().map(|n| n.to_string_lossy().into_owned())),
+        _ => Vec::new(),
+    }
 }
 
 pub(crate) fn number_of(f: Field, t: &Track) -> Option<i64> {
@@ -768,7 +778,7 @@ mod tests {
             albumartist: Some("Sierra Ferrell".into()),
             album: Some("Long Time Coming".into()),
             title: Some("The Sea".into()),
-            genre: Some("folk".into()),
+            genres: vec!["folk".into()],
             tracknumber: Some(1),
             date: Some(2021),
             duration: Duration::from_secs(221),
@@ -939,10 +949,53 @@ mod tests {
     /// A missing tag matches nothing, including `!=`. Three-valued logic is
     /// more correct and much harder to predict; `!` on the whole comparison is
     /// how you ask for "or missing".
+    /// **Any of them, not the first of them** (#86).
+    ///
+    /// A genre tag names several terms in a hierarchical codelist, and a file
+    /// tagged `Rock; Blues Rock` is Rock. Matching only the joined string, or
+    /// only the first term, made most of the library unfindable by the genre
+    /// somebody would actually search for.
+    #[test]
+    fn a_genre_matches_any_of_the_terms_a_file_carries() {
+        let mut t = track();
+        t.genres = vec![
+            "Rock".into(),
+            "Blues Rock".into(),
+            "Alternative Rock".into(),
+        ];
+        assert!(matches(r#"genre="Rock""#, &t), "the first term");
+        assert!(matches(r#"genre="Blues Rock""#, &t), "and a later one");
+        assert!(matches(r#"genre="Alternative Rock""#, &t), "and the last");
+        assert!(
+            !matches(r#"genre="Jazz""#, &t),
+            "and nothing it does not carry"
+        );
+    }
+
+    /// And `!=` is *none* of them, not "not the first".
+    #[test]
+    fn not_equal_means_no_term_matches() {
+        let mut t = track();
+        t.genres = vec!["Rock".into(), "Blues Rock".into()];
+        assert!(!matches(r#"genre!="Blues Rock""#, &t), "it does carry it");
+        assert!(
+            matches(r#"genre!="Jazz""#, &t),
+            "and it does not carry this"
+        );
+    }
+
+    /// `any=` reaches every term too, since it is the same lookup.
+    #[test]
+    fn any_reaches_a_later_genre_term() {
+        let mut t = track();
+        t.genres = vec!["Rock".into(), "Shoegaze".into()];
+        assert!(matches(r#"any="Shoegaze""#, &t));
+    }
+
     #[test]
     fn a_missing_tag_matches_nothing() {
         let mut t = track();
-        t.genre = None;
+        t.genres.clear();
         t.date = None;
         assert!(!matches(r#"genre="folk""#, &t));
         assert!(!matches(r#"genre!="folk""#, &t));
@@ -1157,7 +1210,7 @@ mod tests {
     fn presence_and_absence() {
         let full = track();
         let mut bare = track();
-        bare.genre = None;
+        bare.genres.clear();
         bare.date = None;
 
         assert!(matches("genre?", &full));
@@ -1181,9 +1234,9 @@ mod tests {
     #[test]
     fn an_empty_tag_counts_as_missing() {
         let mut t = track();
-        t.genre = Some(String::new());
+        t.genres = vec![String::new()];
         assert!(!matches("genre?", &t));
-        t.genre = Some("   ".into());
+        t.genres = vec!["   ".into()];
         assert!(!matches("genre?", &t), "whitespace is not a genre either");
     }
 

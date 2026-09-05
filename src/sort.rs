@@ -277,7 +277,10 @@ fn cell(key: Key, id: TrackId, t: &Track, env: &SortEnv<'_>) -> Cell {
             // Case-folded, and with a leading article moved aside for the
             // artist keys — the same normalisation the library tree uses, so
             // the two agree about where a name belongs.
-            Kind::Text => match crate::filter::text_of(f, t) {
+            // The **first** value where a field has several: sorting is a
+            // total order over one key, and a genre tag naming three terms
+            // sorts under the first, which is the broadest (#86).
+            Kind::Text => match crate::filter::texts_of(f, t).into_iter().next() {
                 Some(v) if !v.trim().is_empty() => {
                     let smart = env.smart_artist_sort && is_artist(f);
                     Cell::Text(sort_key(&v, smart).as_str().to_string())

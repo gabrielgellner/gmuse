@@ -97,7 +97,15 @@ pub struct Track {
     pub tracknumber: Option<u32>,
     pub discnumber: Option<u32>,
     pub date: Option<i32>,
-    pub genre: Option<String>,
+    /// The genres this file's tags name, one per term.
+    ///
+    /// **A list, because a genre tag is one.** `Rock; Blues Rock; Alternative
+    /// Rock` is three terms in a hierarchical codelist, not one genre with an
+    /// unusual name, and keeping it as a single string made it unfilterable:
+    /// `genre=Rock` could not match a file whose tag also mentioned two other
+    /// things (#86).
+    #[serde(default)]
+    pub genres: Vec<String>,
     /// The record label, from `TPUB` / `ORGANIZATION` / `LABEL`.
     ///
     /// Its own field because it is otherwise homeless: a label sampler is a
@@ -174,7 +182,7 @@ impl Track {
             album_artist: self.albumartist.as_deref(),
             tagged_title: self.title.as_deref(),
             tagged_album: self.album.as_deref(),
-            genre: self.genre.as_deref(),
+            genre: &self.genres,
             label: self.label.as_deref(),
             year: self.date,
             bitrate: self.bitrate,

@@ -68,6 +68,7 @@ fn scanned(store: &Scan) -> Vec<Scanned> {
                 credit_is_joined: false,
                 album_artist_mbid: None,
                 album: t.album.clone(),
+                genres: t.genres.clone(),
                 album_artist: t.albumartist.clone(),
                 disc: t.discnumber.map(|d| d as u16),
                 track: t.tracknumber.map(|n| n as u16),
@@ -157,7 +158,12 @@ pub fn librarian(
         .collect();
     scratch.assert_holdings(now, held);
 
-    Librarian::from_catalogue(&scratch.catalogue())
+    let mut l = Librarian::from_catalogue(&scratch.catalogue());
+    // Which device this is, so a row knows where it can be opened. The
+    // librarian holds every holding; which of them is reachable *now* is a
+    // fact about the machine, and this is the only place that knows it.
+    l.here(device);
+    l
 }
 
 #[cfg(test)]
@@ -752,5 +758,170 @@ mod tests {
             1,
             "the duplicate became a second row"
         );
+    }
+}
+
+#[cfg(test)]
+mod the_two_sides_agree {
+    //! **The store and the librarian must draw the same row** — issue #86.
+    //!
+    //! `rows::Listing` is the seam, and the migration is entirely a matter of
+    //! swapping which side of it answers. That is only safe if the two answers
+    //! are the same, and the only place with enough material to say so is a
+    //! real library: 6,300 files, 453 of them resting on their bytes alone,
+    //! and every awkward case somebody actually owns.
+    //!
+    //! ## Where they stand, measured 2026-09-05 over 6,485 rows
+    //!
+    //! | field | differ | what it is |
+    //! | --- | --- | --- |
+    //! | `genre` | 5445 | the same set, alphabetical rather than in tag order |
+    //! | `disc` | 324 | store `None`, library `Some(1)` — the medium's position, which a tag often omits |
+    //! | `album_artist` | 36 | store `None`, library knows the album-level credit |
+    //! | `label` | 30 | mostly case the model has settled; a few the library has not learnt |
+    //! | `artist` | 21 | two credited entities on one recording, from two files' tags |
+    //! | `year` | 21 | different pressings of one album |
+    //! | `title` | 14 | `Burma-Shave` against `Burma Shave` — titles the model settled |
+    //! | `album`, `file_under`, `track` | 1 each | `ANTIGONE` against `Antigone`, and one real disagreement |
+    //!
+    //! **Every one of these but `genre` is the library being right**, which is
+    //! the answer this test was written to get. Four were not, and were fixed
+    //! because it found them: a `u16::MAX` sentinel rendering as track 65535,
+    //! a credit whose artist had no name still emitting its join phrase
+    //! (`Emmylou Harris, `), the same artist credited twice (`Orbital,
+    //! Orbital`), and `year` reading only `OriginalReleaseDate` — which 98% of
+    //! this library does not carry, so 6,373 rows had no year at all.
+    //!
+    //! `genre` was 6,437 — the librarian had none, because a scan observed no
+    //! genres at all. It asserts each term now at `Source::TagVariant`, the
+    //! weakest rung, and what is left is ordering: the fold holds a *set*, so
+    //! `Rock; Blues Rock; Alternative Rock` comes back alphabetised. The
+    //! hierarchy is what should order it and none exists yet — the log has no
+    //! genre facts in it at all, which is what `gmuse-tools genre apply` is
+    //! for.
+
+    use super::*;
+    use crate::model::rows::Listing;
+
+    /// Run deliberately: `cargo test --release -- --ignored agree`.
+    #[test]
+    #[ignore = "needs the real library; run deliberately"]
+    fn every_row_reads_the_same_from_either_side() {
+        let root = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("MusicLibrary");
+        if !root.exists() {
+            eprintln!("no library at {}", root.display());
+            return;
+        }
+
+        let mut store = Scan::new();
+        let report = crate::scan::scan(&mut store, std::slice::from_ref(&root));
+        assert_eq!(report.errors.len(), 0, "the scan must read everything");
+
+        let device = Id::<Device>::derived(b"agree");
+        let library = librarian(
+            &store,
+            &std::collections::BTreeSet::new(),
+            device,
+            1_788_000_000_000,
+        );
+
+        let (mut checked, mut differ) = (0usize, Vec::new());
+        for (id, _) in store.iter() {
+            let (Some(theirs), Some(ours)) = (store.listed(id), library.listed(id)) else {
+                differ.push(format!("{id:?}: one side has no row"));
+                continue;
+            };
+            checked += 1;
+            // Compared field by field, so a failure names the field rather
+            // than printing two sixteen-field structs and leaving the reader
+            // to diff them.
+            for (what, a, b) in [
+                (
+                    "file_under",
+                    theirs.file_under.to_string(),
+                    ours.file_under.to_string(),
+                ),
+                ("album", theirs.album.to_string(), ours.album.to_string()),
+                ("title", theirs.title.to_string(), ours.title.to_string()),
+                (
+                    "disc",
+                    format!("{:?}", theirs.disc),
+                    format!("{:?}", ours.disc),
+                ),
+                (
+                    "track",
+                    format!("{:?}", theirs.track),
+                    format!("{:?}", ours.track),
+                ),
+                (
+                    "duration",
+                    format!("{:?}", theirs.duration),
+                    format!("{:?}", ours.duration),
+                ),
+                (
+                    "artist",
+                    format!("{:?}", theirs.artist),
+                    format!("{:?}", ours.artist),
+                ),
+                (
+                    "album_artist",
+                    format!("{:?}", theirs.album_artist),
+                    format!("{:?}", ours.album_artist),
+                ),
+                (
+                    "genre",
+                    format!("{:?}", theirs.genre),
+                    format!("{:?}", ours.genre),
+                ),
+                (
+                    "label",
+                    format!("{:?}", theirs.label),
+                    format!("{:?}", ours.label),
+                ),
+                (
+                    "year",
+                    format!("{:?}", theirs.year),
+                    format!("{:?}", ours.year),
+                ),
+                (
+                    "bitrate",
+                    format!("{:?}", theirs.bitrate),
+                    format!("{:?}", ours.bitrate),
+                ),
+                (
+                    "sample_rate",
+                    format!("{:?}", theirs.sample_rate),
+                    format!("{:?}", ours.sample_rate),
+                ),
+                (
+                    "channels",
+                    format!("{:?}", theirs.channels),
+                    format!("{:?}", ours.channels),
+                ),
+            ] {
+                if a != b {
+                    differ.push(format!("{what}: store {a:?} vs library {b:?}"));
+                }
+            }
+        }
+
+        eprintln!("checked  {checked} rows, {} differences", differ.len());
+        let mut by_field: std::collections::BTreeMap<&str, (usize, Vec<String>)> =
+            Default::default();
+        for line in &differ {
+            let e = by_field
+                .entry(line.split(':').next().unwrap_or("?"))
+                .or_default();
+            e.0 += 1;
+            if e.1.len() < 3 {
+                e.1.push(line.clone());
+            }
+        }
+        for (field, (n, samples)) in &by_field {
+            eprintln!("  {field}: {n}");
+            for s in samples {
+                eprintln!("      {s}");
+            }
+        }
     }
 }
