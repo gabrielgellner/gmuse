@@ -135,7 +135,7 @@ pub struct Vocabulary {
     reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — cycle detection in the genre hierarchy, which no import path runs"
 )]
 /// How deep a hierarchy walk may go before it is called a cycle.
-const MAX_DEPTH: usize = 16;
+pub(crate) const MAX_DEPTH: usize = 16;
 
 #[allow(
     dead_code,
@@ -176,6 +176,36 @@ impl Vocabulary {
     /// This is what `genre="*electronic*"` has been faking: a substring match
     /// that finds `Electronic` inside `Electronic; Techno` by luck of spelling
     /// rather than by meaning.
+    /// How far a genre sits below a top concept — 0 for a top concept itself.
+    ///
+    /// **What should order the genres on a row** (#116). A row carries every
+    /// genre assigned to it and a line has one slot, so the broadest goes
+    /// first: `Rock` before `Alternative Rock`, because `Alternative Rock` is
+    /// narrower-of it. Alphabetical was the stand-in while no hierarchy
+    /// existed, and it put `Abstract` where the tag had put `Rock`.
+    ///
+    /// The shortest way up, because a genre may be narrower-of two things and
+    /// the broadest reading is the one a single slot wants. Bounded by
+    /// [`MAX_DEPTH`], so data that acquired a cycle answers rather than hangs.
+    pub fn depth(&self, genre: Id<Genre>) -> usize {
+        let mut frontier = BTreeSet::from([genre]);
+        let mut seen = frontier.clone();
+        for hops in 0..MAX_DEPTH {
+            let parents: BTreeSet<Id<Genre>> = self
+                .edges
+                .iter()
+                .filter(|e| frontier.contains(&e.child.id()))
+                .map(|e| e.parent.id())
+                .filter(|p| seen.insert(*p))
+                .collect();
+            if parents.is_empty() {
+                return hops;
+            }
+            frontier = parents;
+        }
+        MAX_DEPTH
+    }
+
     pub fn under(&self, hierarchy: Id<Hierarchy>, root: Id<Genre>) -> BTreeSet<Id<Genre>> {
         let mut seen = BTreeSet::from([root]);
         let mut frontier = vec![root];

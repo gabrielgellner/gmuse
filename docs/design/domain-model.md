@@ -310,6 +310,16 @@ cannot be checked, because it cannot disagree with itself and so can never revea
 A release holds ordered media; a medium holds ordered tracks; a track names a recording. This is MusicBrainz's shape and
 the Music Ontology's, and neither has a join entity here.
 
+**A file that names no album has no position and no date.** A track number is a position _on a medium of a release_, and
+a date is a fact about a pressing — so a file whose tags name no album gets neither, where a flat `Track` read both off
+the tag. That is the containment above working as stated rather than a gap: "track 3 of nothing" is not a fact, and a
+date with no edition to attach to is a claim about something the model does not hold.
+
+**Measured before accepting it: all 6,500 files in this library carry an album tag, so nothing is affected.** It is
+written down because it is a real behaviour change and because it is invisible — a loose single would simply show a
+blank where a year used to be. If that ever matters, the honest fix is to catalogue a single as what MusicBrainz calls
+it, a release of one track, rather than to let a recording carry a position it has no reference for.
+
 ### Derivation happens at two levels
 
 **A cover is not a derivation.** Three files here title _Buckets of Rain_ — Dylan's, Neko Case's and David Gray's — and

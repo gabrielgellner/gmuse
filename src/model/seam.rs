@@ -42,10 +42,11 @@ use crate::model::vocabulary::{GenreOn, Vocabulary};
 pub struct Librarian {
     pub spine: Spine,
     pub reference: Reference,
-    #[expect(
-        dead_code,
-        reason = "held so the librarian owns the whole fold; nothing reads them back through the seam yet"
-    )]
+    /// The genre codelist and its hierarchy.
+    ///
+    /// **This carried an `#[expect(dead_code)]` until #116**, and the
+    /// attribute retired itself the moment `depth` read the edges — which is
+    /// what `expect` is for and why #113 chose it over `allow`.
     pub vocabulary: Vocabulary,
     pub encodings: Encodings,
     #[allow(
@@ -440,11 +441,34 @@ impl Librarian {
         l.ratings = cat.ratings.clone();
         l.plays = cat.plays.clone();
 
+        // **The hierarchy, which nothing carried across before** (#116). The
+        // fold has held these edges since #74 and the librarian left them
+        // behind, so `depth` had nothing to walk and the genres on a row could
+        // only be ordered by name.
+        for (hierarchy, name) in &cat.hierarchies {
+            l.vocabulary.hierarchies.insert(
+                *hierarchy,
+                crate::model::vocabulary::HierarchyRecord {
+                    id: *hierarchy,
+                    name: name.clone(),
+                },
+            );
+        }
+        for (hierarchy, parent, child) in &cat.narrows {
+            l.vocabulary
+                .edges
+                .insert(crate::model::vocabulary::HierarchyEdge {
+                    hierarchy: crate::model::id::Ref::to(*hierarchy),
+                    parent: crate::model::id::Ref::to(*parent),
+                    child: crate::model::id::Ref::to(*child),
+                });
+        }
+
         // Every genre a subject is assigned, most confident first. Several
         // sources may assign the same one — a tag and a curated pass agreeing
         // is two rows in the fold and one genre on the shelf — so the best
         // confidence for each name wins and the name is listed once.
-        let mut best: std::collections::BTreeMap<GenreOn, Vec<(Confidence, &str)>> =
+        let mut best: std::collections::BTreeMap<GenreOn, Vec<(Confidence, usize, &str)>> =
             std::collections::BTreeMap::new();
         for ((subject, genre, _), confidence) in &cat.genres {
             if cat.genres_retracted.contains(&(*subject, *genre)) {
@@ -453,32 +477,36 @@ impl Librarian {
             let Some(name) = cat.genre_names.get(genre) else {
                 continue;
             };
+            let depth = l.vocabulary.depth(*genre);
             let seen = best.entry(*subject).or_default();
-            match seen.iter_mut().find(|(_, held)| *held == name.as_str()) {
+            match seen.iter_mut().find(|(_, _, held)| *held == name.as_str()) {
                 Some(entry) if entry.0 < *confidence => entry.0 = *confidence,
                 Some(_) => {}
-                None => seen.push((*confidence, name.as_str())),
+                None => seen.push((*confidence, depth, name.as_str())),
             }
         }
         l.genres = best
             .into_iter()
             .map(|(subject, mut names)| {
-                // Most confident first, then by name.
+                // Most confident, then **broadest**, then by name.
                 //
                 // **Tag order does not survive the fold and is not meant to.**
                 // `Rock; Blues Rock; Alternative Rock` arrives broadest-first
                 // because that is how taggers write it, but the catalogue keys
                 // assignments by `(subject, genre, source)` — a set, with no
                 // position, because a position is a fact about a *string* and
-                // not about the genres. What should order these is the
-                // hierarchy: `Rock` is a top concept and `Alternative Rock` is
-                // narrower-of it, and depth is the real answer to "which is
-                // broadest". Until edges exist the order is alphabetical,
-                // which is at least the same twice.
-                names.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+                // not about the genres.
+                //
+                // The hierarchy is what orders them: `Rock` is a top concept
+                // and `Alternative Rock` is narrower-of it, so depth answers
+                // "which is broadest" from the data rather than from the
+                // spelling. Where no edge places a genre it is depth 0 and the
+                // name breaks the tie, which is the alphabetical order this
+                // had before any hierarchy existed (#116).
+                names.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(b.2)));
                 (
                     subject,
-                    names.into_iter().map(|(_, n)| n.to_string()).collect(),
+                    names.into_iter().map(|(_, _, n)| n.to_string()).collect(),
                 )
             })
             .collect();
@@ -1248,6 +1276,99 @@ mod tests {
             ),
             1
         );
+    }
+
+    /// **The hierarchy orders a row's genres, broadest first** (#116).
+    ///
+    /// A row carries every genre assigned to it and a line has one slot, so
+    /// which comes first is the whole question. Tag order does not survive the
+    /// fold — the catalogue keys assignments by `(subject, genre, source)`, a
+    /// set with no position — and alphabetical was the stand-in, which put
+    /// `Abstract` where the tag had put `Rock`.
+    ///
+    /// This is what makes running `gmuse-tools genre apply` worth something:
+    /// the live log contains no hierarchy at all, so every genre is depth 0
+    /// today and the order falls back to the name.
+    #[test]
+    fn a_rows_genres_are_ordered_broadest_first() {
+        use crate::model::entity::Hierarchy;
+        use crate::model::instance::{Instance, Scanned};
+        use crate::model::rows::Listing;
+
+        let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
+        i.ingest(
+            100,
+            &[Scanned {
+                audio: crate::audio_id::AudioId { scheme: 1, hash: 9 },
+                title: "Racing to a Red Light".into(),
+                artist: "Early James".into(),
+                album: Some("Strange Time".into()),
+                // Deliberately in an order that is neither the tags' usual one
+                // nor alphabetical, so neither can pass by accident.
+                genres: vec![
+                    "Blues Rock".into(),
+                    "Alternative Rock".into(),
+                    "Rock".into(),
+                ],
+                ..Default::default()
+            }],
+        );
+
+        // `Rock` is the top concept, `Alternative Rock` is narrower-of it, and
+        // `Blues Rock` narrower again — so depth does more here than "is it a
+        // top concept", and alphabetical would give the opposite order.
+        let hierarchy = Id::<Hierarchy>::derived(b"discogs");
+        i.narrows(200, hierarchy, "Rock", "Alternative Rock");
+        i.narrows(200, hierarchy, "Alternative Rock", "Blues Rock");
+
+        let l = Librarian::from_catalogue(&i.catalogue());
+        let copy = *l.encodings.encodings.keys().next().expect("a copy");
+        let shown = l.listed(copy).expect("a row").genre.to_vec();
+
+        assert_eq!(
+            shown,
+            ["Rock", "Alternative Rock", "Blues Rock"],
+            "the genres were not ordered by how broad they are"
+        );
+    }
+
+    /// **A file that names no album has no position and no date.**
+    ///
+    /// A track number is a position *on a medium of a release* and a date is a
+    /// fact about a pressing, so a file whose tags name neither gets neither.
+    /// A flat `Track` read both straight off the tag; the containment says
+    /// otherwise, and "track 3 of nothing" is not a fact (#116).
+    ///
+    /// Pinned rather than left implicit because it is invisible when it bites:
+    /// a loose single would show a blank where a year used to be, and nobody
+    /// would know to look. All 6,500 files in the real library carry an album
+    /// tag, so nothing is affected today — which is exactly why a test has to
+    /// be the thing that notices if that stops being true.
+    #[test]
+    fn a_file_with_no_album_has_no_track_number_or_year() {
+        use crate::model::instance::{Instance, Scanned};
+        use crate::model::rows::Listing;
+
+        let loose = Scanned {
+            audio: crate::audio_id::AudioId { scheme: 1, hash: 5 },
+            title: "A Loose Single".into(),
+            artist: "Somebody".into(),
+            // The tags say both, and there is nowhere for either to live.
+            track: Some(3),
+            released: Some(crate::model::spine::PartialDate::year(2024)),
+            album: None,
+            ..Default::default()
+        };
+        let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
+        i.ingest(100, std::slice::from_ref(&loose));
+        let l = Librarian::from_catalogue(&i.catalogue());
+
+        let copy = *l.encodings.encodings.keys().next().expect("one copy");
+        let row = l.listed(copy).expect("a row");
+        assert_eq!(row.title, "A Loose Single", "it is still a row");
+        assert_eq!(row.track, None, "a position needs something to be on");
+        assert_eq!(row.disc, None);
+        assert_eq!(row.year, None, "a date needs an edition to be about");
     }
 
     /// **A tag's genres become facts, and a drawn row carries all of them.**
