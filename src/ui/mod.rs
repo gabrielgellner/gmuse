@@ -10742,7 +10742,7 @@ mod tests {
 
         let landed = ui.library.sorted()[ui.sorted];
         assert_eq!(
-            Listing::listed(lib_of(&store), landed).and_then(|r| r.tagged_album),
+            Listing::listed(lib_of(&store), landed).and_then(|r| r.album_if_named),
             Some("A Life ⧸ Young Alaska")
         );
     }

@@ -3481,11 +3481,18 @@ Append here as decisions are made. Format: date, decision, rationale.
   **Presentation, not membership.** Regrouping redraws and never refilters: the rows are the same either way, which is
   the distinction §9 exists to draw and is asserted rather than assumed.
 
-  **Two fields ask the model rather than the tags, and the tree wants the model's answer.** `album=` in a filter
-  deliberately reads the _tag_ — `!album?` has to stay meaningful — but a tree grouping by album must put two pressings
-  of one record together, which only the release group can say (#84). Same for who a row files under. Caught by
-  `the_album_comes_from_the_release_group`, which would otherwise have split a reissue whose tag capitalises
-  differently.
+  **A correction, made the same day.** This entry first said the tree had to "ask the model rather than the tags",
+  because `Listed` carried both `album` and what was then called `tagged_album`, and it claimed a test had caught the
+  difference. Both were wrong, and the question "shouldn't that all be in the library?" is what exposed them.
+
+  Nothing here reads a file. Both fields come from the fold, and they differ **only** in that `album` substitutes a
+  stand-in where nothing named one. The special case written for it was a no-op — removing it broke no test, which was
+  checked rather than assumed, and the test named above never failed at any point.
+
+  What the episode actually found is that **the field name lied.** `tagged_` said "off the file" about a value that is a
+  fold like every other, and the person writing the grouping code believed it. Renamed to `album_if_named` and
+  `title_if_named`. Tags are a serialisation the library consumes at import and never consults again — `library-api.md`
+  says exactly that — so a field name contradicting it is not a cosmetic problem.
 
   **The multi-valued precondition, honoured** — `tree-view-design.md` §6 named it before it could happen. A row has one
   artist and many genres, so grouping by genre files a copy under **each**, which is right: you want a techno track

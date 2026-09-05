@@ -96,11 +96,6 @@ fn values_of(field: Field, subject: &crate::model::rows::Subject<'_>) -> Vec<Str
     // *tag* says — `!album?` has to stay meaningful — but a tree grouping by
     // album must group two pressings of one record together, which only the
     // release group can say. Same for who it files under.
-    match field {
-        Field::Album => return vec![subject.row.album.to_string()],
-        Field::FileUnder => return vec![subject.row.file_under.to_string()],
-        _ => {}
-    }
     let held = crate::filter::texts_of(field, subject);
     if held.is_empty() {
         return vec![stand_in(field)];

@@ -631,8 +631,8 @@ impl Librarian {
             // The model's title *is* the tagged one, normalised. There is no
             // file name to fall back to here, which is the point: a row holds
             // no location, so it cannot borrow one for a label.
-            tagged_title: (!row.title.is_empty()).then(|| row.title.clone()),
-            tagged_album: row.album,
+            title_if_named: (!row.title.is_empty()).then(|| row.title.clone()),
+            album_if_named: row.album,
             concepts,
             label: on_release
                 .and_then(|r| r.label)

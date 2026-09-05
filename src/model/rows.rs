@@ -77,14 +77,21 @@ pub struct Listed<'a> {
     pub album_artist: Option<&'a str>,
     /// The title as tagged. `title` above is this or the file name — never
     /// empty — and a template can ask for either.
-    pub tagged_title: Option<&'a str>,
-    /// The album as tagged, **absent when there is none**.
+    pub title_if_named: Option<&'a str>,
+    /// The album, **absent when nothing named one**.
     ///
-    /// Distinct from `album` above, which stands in a placeholder so a tree
-    /// node always has a label. A template needs the difference: `[ — {album}]`
-    /// is meant to disappear for a track that is on no album, and rendering
-    /// the placeholder there would show the stand-in as though it were a name.
-    pub tagged_album: Option<&'a str>,
+    /// Distinct from `album` above only in that: `album` stands in a
+    /// placeholder so a tree node always has a label. A template needs the
+    /// difference — `[ — {album}]` is meant to disappear for a track on no
+    /// album, and rendering the placeholder there would show the stand-in as
+    /// though it were a name.
+    ///
+    /// **Was `tagged_album`, and the name was a lie** (#97). Both come from
+    /// the fold; neither reads a file. Tags are a serialisation the library
+    /// consumes at import and never consults again — but the name said
+    /// otherwise, and a comment claiming a tag-versus-model distinction that
+    /// does not exist got as far as the Decision Log before somebody asked.
+    pub album_if_named: Option<&'a str>,
     /// Every concept asserted about this row, by the axis it sits on.
     ///
     /// **A set per axis, not a value** (#86, #117). The model holds
@@ -126,8 +133,8 @@ pub struct Drawn {
     pub duration: std::time::Duration,
     pub artist: Option<String>,
     pub album_artist: Option<String>,
-    pub tagged_title: Option<String>,
-    pub tagged_album: Option<String>,
+    pub title_if_named: Option<String>,
+    pub album_if_named: Option<String>,
     pub concepts: std::collections::BTreeMap<Id<Facet>, Vec<String>>,
     pub label: Option<String>,
     pub year: Option<i32>,
@@ -153,8 +160,8 @@ impl Listed<'_> {
             duration: self.duration,
             artist: self.artist.map(str::to_string),
             album_artist: self.album_artist.map(str::to_string),
-            tagged_title: self.tagged_title.map(str::to_string),
-            tagged_album: self.tagged_album.map(str::to_string),
+            title_if_named: self.title_if_named.map(str::to_string),
+            album_if_named: self.album_if_named.map(str::to_string),
             concepts: self.concepts.clone(),
             label: self.label.map(str::to_string),
             year: self.year,
@@ -197,8 +204,8 @@ impl Drawn {
             duration: self.duration,
             artist: self.artist.as_deref(),
             album_artist: self.album_artist.as_deref(),
-            tagged_title: self.tagged_title.as_deref(),
-            tagged_album: self.tagged_album.as_deref(),
+            title_if_named: self.title_if_named.as_deref(),
+            album_if_named: self.album_if_named.as_deref(),
             concepts: &self.concepts,
             label: self.label.as_deref(),
             year: self.year,
@@ -363,8 +370,8 @@ mod tests {
             duration: std::time::Duration::from_secs(151),
             artist: Some("Boards of Canada".into()),
             album_artist: Some("Boards of Canada".into()),
-            tagged_title: Some("Roygbiv".into()),
-            tagged_album: Some("Music Has the Right to Children".into()),
+            title_if_named: Some("Roygbiv".into()),
+            album_if_named: Some("Music Has the Right to Children".into()),
             concepts: std::collections::BTreeMap::from([(
                 Id::of_key(crate::model::facet::GENRE),
                 vec!["Electronic".into(), "IDM".into()],

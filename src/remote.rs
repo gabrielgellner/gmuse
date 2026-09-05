@@ -329,9 +329,9 @@ mod tests {
             album_artist: Some("Boards of Canada".into()),
             file_under: "Boards of Canada".into(),
             album: "Music Has the Right to Children".into(),
-            tagged_album: Some("Music Has the Right to Children".into()),
+            album_if_named: Some("Music Has the Right to Children".into()),
             title: "Roygbiv".into(),
-            tagged_title: Some("Roygbiv".into()),
+            title_if_named: Some("Roygbiv".into()),
             ..Drawn::default()
         }
     }

@@ -518,8 +518,8 @@ pub(crate) fn texts_of(f: Field, s: &Subject<'_>) -> Vec<String> {
         // so a tree node always has a label, and `!album?` has to stay
         // meaningful — a filter must not find "No Album" as though somebody
         // had named an album that.
-        Field::Album => one(r.tagged_album),
-        Field::Title => one(r.tagged_title),
+        Field::Album => one(r.album_if_named),
+        Field::Title => one(r.title_if_named),
         Field::DisplayTitle => vec![r.title.to_string()],
         Field::Facet(f) => s.row.on(f).to_vec(),
         Field::Label => one(r.label),
