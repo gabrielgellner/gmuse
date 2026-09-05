@@ -84,6 +84,28 @@ pub struct Resolved {
     pub demoted_at: Vec<usize>,
 }
 
+impl Resolved {
+    /// The rows a shelf draws for this view.
+    ///
+    /// **A view yields recordings and a shelf's membership is copies**
+    /// (`query-language.md` §1, #78), so the two are one hop apart and this is
+    /// the hop. It belongs here rather than at the call site because the
+    /// direction matters: a recording with two copies contributes both rows,
+    /// which is what makes an album with a FLAC and an MP3 show the file you
+    /// actually hold rather than one of them.
+    ///
+    /// Order is not carried across. A sequence's order is over recordings, and
+    /// a shelf sorts its own rows by artist and album — #97's presentation
+    /// question, and not this one.
+    pub fn copies(&self, librarian: &Librarian) -> std::collections::HashSet<CopyId> {
+        let wanted: std::collections::HashSet<_> = self.rows.iter().collect();
+        Listing::rows(librarian)
+            .into_iter()
+            .filter(|id| Listing::recording_of(librarian, *id).is_some_and(|r| wanted.contains(&r)))
+            .collect()
+    }
+}
+
 impl Stack {
     /// Replace the stack with one term — `:view dance`.
     pub fn set(&mut self, what: What) {
@@ -108,8 +130,22 @@ impl Stack {
         if at < self.terms.len() {
             self.terms.remove(at);
         }
-        // A stack that now begins with a narrowing would narrow nothing, and a
-        // leading `Everything` that nothing narrows is noise.
+        self.normalise();
+    }
+
+    /// Put the stack back into a shape that means what it says.
+    ///
+    /// **Two rules, and both are about the first term.** The fold takes it as
+    /// the starting set whatever its operator, so a stack beginning with `-x`
+    /// would resolve to *x* — the exact opposite. `Everything` goes on the
+    /// front instead. And a lone `Everything` that nothing narrows is the
+    /// whole library said the long way, so it goes.
+    ///
+    /// One function because every rebuild needs it and two of them had it
+    /// separately: `drop_at` guarded the inversion and `set_catalogs`
+    /// reintroduced it, so `:view -x` followed by dropping the exclusion
+    /// selected exactly what had been excluded.
+    fn normalise(&mut self) {
         if self.terms.first().is_some_and(|t| t.op != Op::Or) {
             self.terms.insert(
                 0,
@@ -122,6 +158,45 @@ impl Stack {
         if self.terms.len() == 1 && self.terms[0].what == What::Everything {
             self.terms.clear();
         }
+    }
+
+    /// Replace the catalog terms, keeping whatever was typed.
+    ///
+    /// **`active_catalogs = ["general", "dance"]` is `general or dance`**, and
+    /// this is the translation. Which catalogs are selected stopped being a
+    /// property of the catalogs the moment the operator left the noun; view 6
+    /// still toggles them, and what it toggles is these terms.
+    ///
+    /// They go on the front, because a selection sets what you are in and a
+    /// predicate narrows it. That is the order the two nouns had when they
+    /// were two nouns, and it is the order somebody typing `:view dance
+    /// &year>=2015` writes.
+    pub fn set_catalogs<I: IntoIterator<Item = String>>(&mut self, names: I) {
+        let typed: Vec<Term> = self
+            .terms
+            .iter()
+            .filter(|t| matches!(t.what, What::Where(_)))
+            .cloned()
+            .collect();
+
+        self.terms = names
+            .into_iter()
+            .map(|name| Term {
+                op: Op::Or,
+                what: What::Catalog(name),
+            })
+            .collect();
+        self.terms.extend(typed);
+        self.normalise();
+    }
+
+    /// Take the typed predicates back off, leaving the saved terms.
+    ///
+    /// What `:filter` with no argument means: it clears what you typed, not
+    /// what you had selected. A catalog is a saved set and survives.
+    pub fn clear_predicates(&mut self) {
+        self.terms.retain(|t| !matches!(t.what, What::Where(_)));
+        self.normalise();
     }
 
     pub fn terms(&self) -> &[Term] {

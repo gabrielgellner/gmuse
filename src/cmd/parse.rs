@@ -269,15 +269,16 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         }
 
         // Views.
-        "view" => {
-            let n: u8 = rest
-                .parse()
-                .map_err(|_| ParseError::Bad(rest.into(), "view number"))?;
-            Command::View(
+        // **One verb, dispatching on its argument** (#94). A bare number is
+        // the numbered view it has always been; anything else composes. #97
+        // removes the numbered views and the first case goes with them.
+        "view" => match rest.parse::<u8>() {
+            Ok(n) => Command::View(
                 ViewId::from_number(n)
                     .ok_or_else(|| ParseError::Bad(rest.into(), "view number"))?,
-            )
-        }
+            ),
+            Err(_) => Command::Compose(compose_term(rest)?),
+        },
         "view-next" => Command::ViewNext,
         "view-prev" => Command::ViewPrev,
         "view-last" => Command::ViewLast,
@@ -313,6 +314,51 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
 /// Mixing bare names with adjustments is rejected rather than guessed at:
 /// `:catalog jazz -rock` could mean either "just jazz, minus rock" or "add
 /// jazz, remove rock", and being wrong silently is worse than asking again.
+/// `:view` with something other than a number after it.
+///
+/// ```text
+/// :view                    take it apart
+/// :view drop 2              drop the second term
+/// :view genre="folk"       set it
+/// :view +genre="jazz"      or       — widen
+/// :view &year>=2015        and      — narrow
+/// :view -genre="*xmas*"    and not  — exclude
+/// ```
+///
+/// The sign is the operator and it comes first, because that is how the stack
+/// reads back and a line somebody can read back is a line they can retype.
+fn compose_term(rest: &str) -> Result<crate::cmd::ViewTerm, ParseError> {
+    use crate::cmd::ViewTerm;
+    use crate::model::view::Op;
+
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(ViewTerm::Clear);
+    }
+    // **Dropping is spelled out**, because a bare number is already the
+    // numbered view and reaching this function means it was not one. `:view 2`
+    // switches to view 2 and always did; `:view drop 2` takes the second term
+    // off. When #97 removes the numbered views the number is free again.
+    if let Some(n) = rest.strip_prefix("drop") {
+        let n = n.trim();
+        return n
+            .parse::<usize>()
+            .map(ViewTerm::Drop)
+            .map_err(|_| ParseError::Bad(n.into(), "term number"));
+    }
+
+    let (op, expr, first) = match rest.split_at(1) {
+        ("+", tail) => (Op::Or, tail, false),
+        ("&", tail) => (Op::And, tail, false),
+        ("-", tail) => (Op::AndNot, tail, false),
+        // No sign sets the view rather than adding to it, which is what
+        // `:view dance` means in §2.
+        _ => (Op::Or, rest, true),
+    };
+    let filter = crate::filter::Filter::parse(expr.trim())?;
+    Ok(ViewTerm::Compose(op, Box::new(filter), first))
+}
+
 fn catalog_spec(rest: &str) -> Result<crate::catalog::Spec, ParseError> {
     let words: Vec<&str> = rest.split_whitespace().collect();
     if words.is_empty() {
@@ -628,6 +674,22 @@ pub fn format(cmd: &Command) -> String {
             PlaylistSpec::New(n) => format!("playlist new {n}"),
         },
         Command::Freeze => "freeze".into(),
+        // Round-trips through `command`, which is what `:bind` shown in the
+        // settings view depends on.
+        Command::Compose(crate::cmd::ViewTerm::Clear) => "view".into(),
+        Command::Compose(crate::cmd::ViewTerm::Drop(n)) => format!("view drop {n}"),
+        Command::Compose(crate::cmd::ViewTerm::Compose(op, f, first)) => {
+            let sign = if *first {
+                ""
+            } else {
+                match op {
+                    crate::model::view::Op::Or => "+",
+                    crate::model::view::Op::And => "&",
+                    crate::model::view::Op::AndNot => "-",
+                }
+            };
+            format!("view {sign}{}", f.source)
+        }
         Command::Filter(None) => "filter".into(),
         Command::Filter(Some(f)) => format!("filter {}", f.source),
         Command::Catalog(spec) => match spec {

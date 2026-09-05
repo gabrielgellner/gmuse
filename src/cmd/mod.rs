@@ -577,6 +577,17 @@ impl Fold {
     ];
 }
 
+/// What `:view` was asked to do.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewTerm {
+    /// `:view` alone — take the composition apart.
+    Clear,
+    /// `:view <n>` — drop one term by its position, 1-based as displayed.
+    Drop(usize),
+    /// `:view [+&-]<predicate>` — set, widen, narrow or exclude.
+    Compose(crate::model::view::Op, Box<crate::filter::Filter>, bool),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     // navigation
@@ -700,6 +711,20 @@ pub enum Command {
     /// Transient and anonymous, as against a catalog, which is the same idea
     /// named and persistent — see §7.
     Filter(Option<crate::filter::Filter>),
+    /// **One verb and three operators** — `query-language.md` §2.
+    ///
+    /// Spelled `:view` too, and the verb dispatches on its argument: a bare
+    /// number is the numbered view it has always been, and anything else
+    /// composes. That is not a permanent arrangement — #97 removes the
+    /// numbered views, and when it does the number case goes with them — but
+    /// it is better than a second verb for one idea, or than breaking
+    /// `:view 3` to introduce it.
+    ///
+    /// `:filter x` is `&x` written the way it always was. The two that had
+    /// nowhere to live are `+` and `-`, and #28's missing cell is the second:
+    /// a persistent *narrowing*, which a catalog could not be because a
+    /// catalog unions.
+    Compose(ViewTerm),
     Search {
         pattern: String,
         dir: SearchDir,

@@ -424,7 +424,14 @@ pub struct Ui {
     pub open: Option<Open>,
     /// A transient narrowing on top of the active catalogs. Anonymous and
     /// not saved — a named, persistent one is a catalog (§7).
-    pub filter: Option<crate::filter::Filter>,
+    /// **The composed view** — one verb and three operators (#94).
+    ///
+    /// This was `filter: Option<Filter>` beside `catalogs`, which is the shape
+    /// #28 found a missing cell in: catalogs unioned because they were
+    /// catalogs and the filter intersected because it was a filter, so a
+    /// persistent *narrowing* had nowhere to live. There is no grid; there is
+    /// a stack of terms, each carrying its own operator.
+    pub composed: crate::view::Stack,
     /// Keep playing past the end of the current album/artist pool. Kept here
     /// because it is a setting the user toggles, not a property of a track.
     pub continue_playing: bool,
@@ -517,7 +524,7 @@ impl Ui {
                 .expect("a literal template"),
             library,
             catalogs: crate::catalog::Catalogs::default(),
-            filter: None,
+            composed: crate::view::Stack::default(),
             continue_playing: true,
             album_headers: true,
             smart_artist_sort: true,
@@ -2184,12 +2191,45 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             run_search(ui, ctx, &pattern, dir);
         }
         Command::Rate(spec) => rate(ui, ctx, spec),
+        Command::Compose(term) => {
+            use crate::cmd::ViewTerm;
+            match term {
+                ViewTerm::Clear => ui.composed.clear_predicates(),
+                // 1-based, as the line shows them.
+                ViewTerm::Drop(n) => ui.composed.drop_at(n.saturating_sub(1)),
+                ViewTerm::Compose(op, f, first) => {
+                    let what = crate::view::What::Where(f);
+                    if first {
+                        ui.composed.set(what);
+                    } else {
+                        ui.composed.push(op, what);
+                    }
+                }
+            }
+            rebuild_library(ui, ctx);
+            let said = if ui.composed.is_empty() {
+                "view: all".to_string()
+            } else {
+                format!("view: {}", ui.composed.label())
+            };
+            ui.notify(format!("{said} ({} tracks)", ui.library.len()));
+        }
         Command::Filter(filter) => {
             let label = match &filter {
                 Some(f) => format!("filtered: {}", f.source),
                 None => "filter cleared".into(),
             };
-            ui.filter = filter;
+            match filter {
+                // `:filter x` narrows what is already composed, which is what
+                // it always did — it is spelled as a term now.
+                Some(f) => ui.composed.push(
+                    crate::model::view::Op::And,
+                    crate::view::What::Where(Box::new(f)),
+                ),
+                // And clearing takes the typed terms back off, leaving whatever
+                // catalogs were selected.
+                None => ui.composed.clear_predicates(),
+            }
             rebuild_library(ui, ctx);
             if ui.library.is_empty() {
                 ui.notify("nothing matches");
@@ -2881,27 +2921,67 @@ fn refresh_smart(ui: &mut Ui, ctx: &Context<'_>) {
     ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
 }
 
+/// Put the selected catalogs into the composed view.
+///
+/// **`active_catalogs = ["general", "dance"]` is `general or dance`** (#94).
+/// What changed is that the selection is terms in a stack rather than a set
+/// beside a filter, so a narrowing has somewhere to live and the fold is one
+/// path with three operators.
+///
+/// `Active::All` is no terms at all, because an empty stack is the whole
+/// library — the same thing "no catalog active" has always meant.
+///
+/// ## Where the boundary still is, and it is worth naming
+///
+/// `Active` remains the **truth** for which catalogs are selected: view 6
+/// toggles it, the config names it, the cache remembers it across a restart.
+/// The stack holds a projection of that plus the terms somebody typed.
+///
+/// So this runs on every rebuild rather than only when `:catalog` is executed
+/// — two sources that could disagree is the shape this project removes, and a
+/// test that drove `Catalogs` directly found the drift immediately. Moving the
+/// selection itself into the stack is the rest of #94 and wants #98's saved
+/// views to land with it, since a stack that survives a restart is a saved
+/// view by another name.
+fn sync_catalog_terms(ui: &mut Ui) {
+    let names: Vec<String> = match ui.catalogs.active() {
+        crate::catalog::Active::All => Vec::new(),
+        crate::catalog::Active::Only(names) => names.iter().cloned().collect(),
+    };
+    ui.composed.set_catalogs(names);
+}
+
 fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // §7's rule: active catalogs union, the transient filter intersects.
     // "Which bodies of music am I in" is a selection; "what am I looking for"
     // is a restriction.
-    let members = {
+    // Before anything is folded, so the stack and the selection cannot drift.
+    sync_catalog_terms(ui);
+    let (members, order_lost) = {
         // Scoped so the borrows of `history` and `filter` end before the
         // library is replaced below.
         let env = crate::filter::Env {
             listened: Some(&ui.listened),
             now: crate::history::now(),
         };
-        let rows: &dyn Listing = ctx.library;
-        let mut m = ui.catalogs.members(rows, &all_rows(ctx), env);
-        if let Some(f) = &ui.filter {
-            let matches = f.compile(env);
-            m.retain(|id| rows.subject(*id).is_some_and(|s| matches(&s)));
-        }
-        m
+        // **One fold over one stack** (#94). This used to union the active
+        // catalogs and then intersect the filter, with both operators baked
+        // into their nouns — so `-` had nowhere to live.
+        let resolved = ui.composed.resolve(ctx.library, &ui.catalogs, env);
+        // §2: `+` on a hand-made list has no defensible order, so it gives
+        // the order up — and says which term did it rather than leaving
+        // somebody to notice.
+        let lost = resolved.demoted_at.clone();
+        (resolved.copies(ctx.library), lost)
     };
     // The same projection the startup path uses (#84), so refiltering cannot
     // quietly file things a second way.
+    if let Some(at) = order_lost.first() {
+        ui.notify(format!(
+            "term {} widened the view, so the list order is gone",
+            at + 1
+        ));
+    }
     ui.library = Shelf::project(ctx.library, members, ui.smart_artist_sort);
     ui.tree.selected = 0;
     ui.sorted = 0;
@@ -3464,10 +3544,10 @@ fn draw_catalogs(frame: &mut Frame, area: Rect, ui: &Ui) {
     let defined = ui.catalogs.defined();
 
     let mut lines: Vec<Line> = Vec::new();
-    if let Some(f) = &ui.filter {
+    if !ui.composed.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("  filter  ", theme.get(theme::Role::StatusDim)),
-            Span::styled(f.source.clone(), theme.get(theme::Role::StatusNotice)),
+            Span::styled("  view    ", theme.get(theme::Role::StatusDim)),
+            Span::styled(ui.composed.label(), theme.get(theme::Role::StatusNotice)),
         ]));
         lines.push(Line::from(""));
     }
@@ -6803,6 +6883,69 @@ mod tests {
         ));
         ui.catalogs = catalogs;
         ui
+    }
+
+    /// **#28's missing cell, from the line.**
+    ///
+    /// A persistent narrowing had nowhere to live: catalogs unioned because
+    /// they were catalogs, so a `not christmas` catalog would have *widened*
+    /// the library. `-` is the cell.
+    #[test]
+    fn a_view_can_exclude() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let all = ui.library.len();
+        assert!(all > 1);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view -artist="Anderson .Paak""#);
+        let narrowed = ui.library.len();
+        assert!(
+            narrowed < all,
+            "excluding widened or did nothing: {narrowed} of {all}"
+        );
+
+        // And it is a term, so it comes off again.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view drop 2");
+        assert_eq!(
+            ui.library.len(),
+            all,
+            "dropping the exclusion did not undo it"
+        );
+    }
+
+    /// **The three operators are one verb**, and the stack reads back as it
+    /// was typed.
+    #[test]
+    fn the_composed_view_is_shown_as_it_was_written() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view artist="Anderson .Paak""#);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view &duration>1");
+
+        assert_eq!(
+            ui.composed.label(),
+            r#"artist="Anderson .Paak" &duration>1"#,
+            "the stack did not read back as it was typed"
+        );
+    }
+
+    /// A bare number still switches views, because #97 has not removed them.
+    #[test]
+    fn a_number_still_means_the_numbered_view() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 3");
+        assert_eq!(ui.view, View::Playlist, "`:view 3` stopped switching views");
+        assert!(ui.composed.is_empty(), "and it composed something instead");
     }
 
     #[test]
