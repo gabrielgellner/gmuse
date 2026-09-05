@@ -23,6 +23,7 @@ uv run gmuse-tools quality survey
 uv run gmuse-tools genre fetch
 uv run gmuse-tools cache stats
 uv run gmuse-tools audit library
+uv run gmuse-tools audit duplicates work.jsonl   # needs fpcalc
 ```
 
 | group      | commands                                                | subject                 |
@@ -31,7 +32,7 @@ uv run gmuse-tools audit library
 | `quality`  | `survey` `albums` `propose` `quarantine` `unquarantine` | what the **bytes** are  |
 | `genre`    | `fetch` `propose` `apply` `snapshot`                    | the vocabulary          |
 | `cache`    | `stats` `prune`                                         | what an authority said  |
-| `audit`    | `library` `dj`                                          | what is wrong           |
+| `audit`    | `library` `dj` `duplicates`                             | what is wrong           |
 | `credits`  | `scan` `apply` `restore`                                | who did what            |
 | `tags`     | `survey` `apply` `restore`                              | the serialization       |
 | `ingest`   | `apply`                                                 | bringing one in         |
@@ -43,6 +44,80 @@ uv run gmuse-tools audit library
 The groups are nouns on purpose. `identify` and `quality` are the two halves of "what is this file" and they answer
 about _different subjects_ — a recording and an encoding. Keeping them apart where someone types is where that
 distinction is most often forgotten.
+
+## `audit duplicates` — the same music held twice, when the bytes do not say so
+
+The scan already reports **byte-identical** files: two paths minting one encoding, which costs only disk. That half is
+exact and needs no tool.
+
+This is the other half. `~/MusicLibrary` held Thomas Brinkmann's _Studio 1_ in two folders differing only in spacing,
+and only four of thirteen tracks were byte-identical. The rest are **separate encodes of the same master** — identical
+duration, identical CBR 320, identical size, and 180,518 differing bytes spread to the last one. Different packets mean
+different encodings and different recordings, so the library showed **22 rows for a 13-track album**: nine phantoms you
+can play and rate, splitting the history of music you own once. No exact hash finds those.
+
+**Two stages, because only one of them is expensive.** Nomination uses what the library already knows — same artist,
+lengths within a second — which on 6,311 files is 2,603 candidate pairs over 2,579 files and finds all nine known
+Brinkmann pairs. Confirmation fingerprints only those, in parallel: about a minute.
+
+**Nominating on the title as well is the tempting mistake.** It is tighter, it is obviously right, and it scores 0 of 9
+— because the copy worth finding is precisely the one whose tags were lost. A test pins that.
+
+### It reports and does not decide, and the first version of it did
+
+The first version scored each pair and printed a verdict. Its verdict on the Brinkmann pair was **"the second buys
+nothing"**. The second holds Picard's whole release metadata — barcode, catalogue number, ASIN — and the side it
+preferred was better only on usable titles and play history. A judgement between real trade-offs, printed as a fact.
+
+The same overreach sat one level earlier: a 0.90 cutoff meant "below this, not the same music", which silently discarded
+every one of these —
+
+| score |                                               |                    |
+| ----- | --------------------------------------------- | ------------------ |
+| 0.883 | Emmylou Harris — `Hello Stranger`             | `Hello Stranger`   |
+| 0.812 | Nelly Furtado — `Te busqué (Spanish version)` | `Te busqué`        |
+| 0.754 | Pixies — `Holiday Song`                       | `The Holiday Song` |
+| 0.734 | Woody Guthrie — `Brown Eyes`                  | `Brown Eyes`       |
+
+— and a further 38 pairs scored **0.0**, which was not a fingerprint disagreeing but `fpcalc` failing to read the file
+at all. "Could not check" and "definitely unrelated" were the same answer.
+
+So the fingerprint is reported and never thresholded into a conclusion. Two lists whose names describe the evidence, a
+third for what could not be read, and a count of what sits below the noise floor:
+
+```
+2603 candidate pair(s) over 2579 file(s)
+
+── identical audio — 9 ──
+
+  Dance/Thomas Brinkmann/Studio 1 - Variationen/… - 01 Variation1.mp3
+  Dance/Thomas Brinkmann/Studio1-Variationen/01 Variation1.mp3
+    - fingerprint 1.000
+    - same length 320.03s
+    - both mp3 at 320k
+    - same size to within a tag
+    - folder names differ only in spelling: "Studio 1 - Variationen" vs "Studio1-Variationen"
+    - titled differently: "[untitled]" vs "Variation1"
+    - tag count 34 vs 13
+    - MusicBrainz ids on the first only
+
+── close — 26 ──
+── could not fingerprint — 38 ──
+
+2530 pair(s) scored below 0.60 and are not listed.
+Nothing here is a recommendation. Which copy to keep, and whether to keep both, is yours.
+```
+
+The last two evidence lines are the ones a person decides on, and the first version left them out entirely — choosing
+between the Brinkmann copies meant hand-inspecting both for Picard tags and ReplayGain **after** the tool had announced
+which was worthless.
+
+The `could not fingerprint` list earns its place immediately: the 38 pairs are 48 files, and **22 of them will not
+decode** — `fpcalc` reports `Invalid data found when processing input`, mostly across Ween and the Pixies. gmuse reads
+them, so this is a stricter decoder finding something gmuse's does not, and it is worth knowing either way.
+
+**It needs `fpcalc`** (`brew install chromaprint`), the only external binary beyond `ffprobe`. Feed it a work list:
+`gmuse shelf query > work.jsonl`.
 
 ## Checks
 

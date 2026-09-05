@@ -9,7 +9,7 @@ gmuse-tools identify fetch|propose      what a recording is
 gmuse-tools quality  survey|propose     what the bytes are
 gmuse-tools genre    fetch|propose|apply|snapshot
 gmuse-tools cache    stats|prune        what an authority said
-gmuse-tools audit    library|dj         what is wrong
+gmuse-tools audit    library|dj|duplicates  what is wrong
 gmuse-tools tags     normalise
 gmuse-tools ingest   run
 ```
@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import typer
 
-from gmuse_tools import audit_dj, audit_library, bronze, identify, ingest, quality, tags
+from gmuse_tools import audit_dj, audit_library, bronze, duplicates, identify, ingest, quality, tags
 
 # `credits` shadows a builtin, which ruff is right to flag — the module is named
 # for what it holds and the alias keeps both true.
@@ -73,6 +73,7 @@ tags.register(app)
 ingest.register(app)
 audit_library.register(audit_app)
 audit_dj.register(audit_app)
+duplicates.register(audit_app)
 genre_fetch.register(genre_app)
 genre_propose.register(genre_app)
 genre_apply.register(genre_app)
