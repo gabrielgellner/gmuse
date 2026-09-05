@@ -275,6 +275,15 @@ impl Librarian {
                 join_phrase: c.join_phrase.clone(),
             });
         }
+        for (id, name) in &cat.label_names {
+            l.reference.labels.insert(
+                *id,
+                crate::model::reference::LabelRecord {
+                    id: *id,
+                    name: name.clone(),
+                },
+            );
+        }
         for (id, title) in &cat.works {
             l.spine.works.insert(
                 *id,
@@ -316,6 +325,7 @@ impl Librarian {
                     group: crate::model::id::Ref::to(r.group),
                     title: r.title.clone(),
                     released: r.released,
+                    label: r.label.map(crate::model::id::Ref::to),
                     catalogue_number: None,
                 },
             );

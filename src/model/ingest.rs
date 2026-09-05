@@ -159,6 +159,7 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // Two dates, because the tags carry two and they mean different
         // things: `DATE` is this pressing, `ORIGINALDATE` the album. They
         // disagree for 820 files in this library.
+        label: Some(get(ItemKey::Label)).filter(|s| !s.is_empty()),
         released: PartialDate::parse(&get(ItemKey::RecordingDate)),
         first_released: PartialDate::parse(&get(ItemKey::OriginalReleaseDate)),
         sample_rate: tagged.properties().sample_rate(),

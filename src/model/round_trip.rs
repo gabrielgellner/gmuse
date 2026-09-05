@@ -59,6 +59,7 @@ fn album() -> Vec<Scanned> {
         bitrate: 320,
         released: None,
         first_released: None,
+        label: None,
         sample_rate: Some(44_100),
         channels: Some(2),
     };

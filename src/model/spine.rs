@@ -37,6 +37,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::model::entity::Encoding;
+use crate::model::entity::Label;
 use crate::model::id::{Id, Ref};
 
 /// A date known to whatever precision the source knew it.
@@ -176,6 +177,10 @@ pub struct Release {
     pub group: Ref<ReleaseGroup>,
     pub title: String,
     pub released: Option<PartialDate>,
+    /// Who issued it. **On the pressing rather than the album**, because that
+    /// is what a reissue changes: the record is the same and the imprint is
+    /// not.
+    pub label: Option<Ref<Label>>,
     pub catalogue_number: Option<String>,
 }
 
@@ -453,6 +458,7 @@ mod tests {
                     group: Ref::to(g),
                     title: title.into(),
                     released: Some(PartialDate::year(year)),
+                    label: None,
                     catalogue_number: None,
                 },
             );
@@ -596,6 +602,7 @@ mod tests {
                 group: Ref::to(group),
                 title: "Big Science".into(),
                 released: Some(PartialDate::year(2015)),
+                label: None,
                 catalogue_number: Some("NON-2015".into()),
             },
         );

@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
 use crate::model::entity::{
-    Artist, Device, Encoding, Genre, Hierarchy, Medium, Qualifier, Recording, Release,
+    Artist, Device, Encoding, Genre, Hierarchy, Label, Medium, Qualifier, Recording, Release,
     ReleaseGroup, Role, Track, Work,
 };
 use crate::model::id::Id;
@@ -318,6 +318,18 @@ pub enum Fact {
         track: Id<Track>,
     },
 
+    /// An imprint exists, and what it is called.
+    ///
+    /// The concept before the reference, as `GenreCatalogued` comes before
+    /// `GenreAssigned`: an id no fact resolves is an id nobody can render.
+    ///
+    /// Its own kind rather than a string on the release, because a label is a
+    /// thing the library holds an opinion about — a sampler's `album_artist`
+    /// is "Various Artists", so the imprint has nowhere else to go, and
+    /// Bandcamp writes it into `album_artist` for want of anywhere better,
+    /// which is what makes a label show up as though it were an artist.
+    LabelNamed { label: Id<Label>, name: String },
+
     /// One pressing of an album.
     ///
     /// The level between the group and the disc, and the one this model spent
@@ -333,6 +345,10 @@ pub enum Fact {
         /// #59's reissue trap is exactly this distinction: a 2015 pressing of
         /// a 1982 album sorts by 1982, and only the group knows that.
         released: Option<PartialDate>,
+        /// Who issued it. **On the pressing, not on the album**, because that
+        /// is what a reissue changes: the record is the same and the imprint
+        /// is not.
+        label: Option<Id<Label>>,
     },
 
     /// A disc or a side of a release.
@@ -594,6 +610,8 @@ pub struct Catalogue {
     pub genres_retracted: BTreeSet<(GenreOn, Id<Genre>)>,
     /// What each concept is called.
     pub genre_names: BTreeMap<Id<Genre>, String>,
+    /// What each imprint is called.
+    pub label_names: BTreeMap<Id<Label>, String>,
     /// Which version each recording is, **one row per asserter**, keyed and
     /// folded exactly as [`Catalogue::genres`] is.
     pub qualifiers: BTreeMap<(Id<Recording>, Id<Qualifier>, Source), Confidence>,
@@ -687,6 +705,7 @@ pub struct Released {
     pub group: Id<ReleaseGroup>,
     pub title: String,
     pub released: Option<PartialDate>,
+    pub label: Option<Id<Label>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -968,11 +987,15 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             Fact::EncodingPlaced { encoding, track } => {
                 cat.placed.insert(*encoding, *track);
             }
+            Fact::LabelNamed { label, name } => {
+                cat.label_names.insert(*label, name.clone());
+            }
             Fact::ReleaseCatalogued {
                 release,
                 group,
                 title,
                 released,
+                label,
             } => {
                 cat.releases.insert(
                     *release,
@@ -980,6 +1003,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         group: *group,
                         title: title.clone(),
                         released: *released,
+                        label: *label,
                     },
                 );
             }
@@ -1498,7 +1522,7 @@ mod reachability {
         ("release", Some("ReleaseCatalogued")),
         ("medium", Some("MediumCatalogued")),
         ("track", Some("TrackPlaced")),
-        ("label", None),
+        ("label", Some("LabelNamed")),
         ("genre", Some("GenreCatalogued")),
         ("qualifier", Some("QualifierCatalogued")),
         ("hierarchy", Some("HierarchyDefined")),
@@ -1518,7 +1542,7 @@ mod reachability {
     /// regression, and this is where it is caught.
     #[test]
     fn every_entity_is_reachable_from_a_fact_or_named_as_a_gap() {
-        const UNREACHABLE: usize = 4;
+        const UNREACHABLE: usize = 3;
 
         let kinds = crate::model::entity::ALL_KINDS;
 

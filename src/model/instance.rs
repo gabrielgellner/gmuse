@@ -21,7 +21,7 @@ use crate::model::clock::{Drift, HybridClock, Stamp};
 use crate::model::durable::{self, Damage, LogError};
 use crate::model::encoding::Format;
 use crate::model::entity::{
-    Artist, Device, Encoding, Genre, Hierarchy, Medium, Qualifier, Recording, Release,
+    Artist, Device, Encoding, Genre, Hierarchy, Label, Medium, Qualifier, Recording, Release,
     ReleaseGroup, Role, Track, Work,
 };
 use crate::model::id::Id;
@@ -84,6 +84,9 @@ pub struct Scanned {
     /// than needing to be inferred.
     pub released: Option<PartialDate>,
     pub first_released: Option<PartialDate>,
+    /// The imprint, from `TPUB` / `ORGANIZATION` / `LABEL`. 5,786 of 6,500
+    /// files here carry one.
+    pub label: Option<String>,
     /// The release group id, where the tags carry one — what makes two devices
     /// agree on an *album* without meeting.
     pub mb_release_group: Option<uuid::Uuid>,
@@ -336,6 +339,20 @@ impl Instance {
                 // number, which used to ride on the placement, is now the
                 // medium it was standing in for.
                 let release = Id::<Release>::of_release(s.mb_release, group);
+                // The imprint, where the sleeve names one. Catalogued first,
+                // because a reference to a concept nothing names renders as
+                // nothing.
+                let label = s.label.as_deref().map(|name| {
+                    let id = Id::<Label>::of_name(name);
+                    self.append(
+                        now,
+                        Fact::LabelNamed {
+                            label: id,
+                            name: name.trim().to_string(),
+                        },
+                    );
+                    id
+                });
                 self.append(
                     now,
                     Fact::ReleaseCatalogued {
@@ -343,6 +360,7 @@ impl Instance {
                         group,
                         title: album.clone(),
                         released: s.released,
+                        label,
                     },
                 );
                 let disc = s.disc.unwrap_or(1);
@@ -993,6 +1011,7 @@ mod containment_tests {
             bitrate: 320,
             released: None,
             first_released: None,
+            label: None,
             sample_rate: Some(44_100),
             channels: Some(2),
         }
@@ -1175,6 +1194,7 @@ mod credit_tests {
             bitrate: 320,
             released: None,
             first_released: None,
+            label: None,
             sample_rate: Some(44_100),
             channels: Some(2),
         }

@@ -42,6 +42,18 @@ pub struct ArtistRecord {
     pub sort_name: String,
 }
 
+impl Id<Label> {
+    /// The id an imprint's name always mints.
+    ///
+    /// Through [`crate::model::ingest::normalise`], like every other concept:
+    /// two devices reading the same sleeve land on the same imprint without
+    /// meeting. 218 distinct labels here, and `Columbia` on one file must be
+    /// `Columbia` on the next.
+    pub fn of_name(name: &str) -> Self {
+        Id::derived(crate::model::ingest::normalise(name).as_bytes())
+    }
+}
+
 /// An imprint.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelRecord {

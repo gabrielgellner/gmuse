@@ -78,6 +78,7 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                     .date
                     .map(|y| crate::model::spine::PartialDate::year(y as i16)),
                 first_released: None,
+                label: t.label.clone(),
                 length_ms: t.duration.as_millis() as u32,
                 format: format_of(t),
                 bitrate: t.bitrate.unwrap_or(0),
@@ -424,6 +425,46 @@ mod opening {
             .expect("the library refused a file this device is holding");
         assert_eq!(locator, "/m/callisto.mp3");
         assert_eq!(encoding.audio, AudioId { scheme: 1, hash: 7 });
+    }
+
+    /// **An imprint is a thing the library holds, not a string on a file.**
+    ///
+    /// A label sampler's album artist is "Various Artists", so the imprint has
+    /// nowhere else to go — and Bandcamp writes it into the album artist for
+    /// want of anywhere better, which is what makes a label appear in a
+    /// library as though it were an artist. 5,786 of 6,500 files here name
+    /// one, across 218 distinct imprints.
+    ///
+    /// **On the pressing rather than the album**, because that is what a
+    /// reissue changes: the record is the same and the imprint is not.
+    #[test]
+    fn a_pressing_names_the_imprint_that_issued_it() {
+        let device = Id::<Device>::derived(b"laptop");
+        let mut store = Store::default();
+        store.upsert(Track {
+            path: std::path::PathBuf::from("/m/callisto.mp3"),
+            title: Some("Callisto".into()),
+            artist: Some("Bodzin".into()),
+            album: Some("Luna".into()),
+            albumartist: Some("Bodzin".into()),
+            label: Some("Herzblut".into()),
+            audio_id: Some(AudioId { scheme: 1, hash: 7 }),
+            ..Default::default()
+        });
+        let l = librarian(&store, &BTreeSet::new(), device, 100);
+
+        let release = l.spine.releases.values().next().expect("a pressing");
+        let label = release.label.expect("the pressing named no imprint").id();
+        assert_eq!(
+            l.reference.labels.get(&label).map(|r| r.name.as_str()),
+            Some("Herzblut"),
+            "the imprint was referenced but never named, so nothing can render it"
+        );
+        assert_eq!(
+            label,
+            Id::<crate::model::entity::Label>::of_name("  herzblut  "),
+            "two sleeves spelling it differently must be one imprint"
+        );
     }
 
     /// **A copy knows its own shape** — issue #86.
