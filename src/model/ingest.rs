@@ -155,6 +155,8 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // rate. A verdict compares a cutoff against what the file *claims*, so
         // the claim has to come from the file rather than from a guess.
         length_ms: tagged.properties().duration().as_millis() as u32,
+        sample_rate: tagged.properties().sample_rate(),
+        channels: tagged.properties().channels(),
         bitrate: tagged
             .properties()
             .audio_bitrate()
@@ -415,6 +417,10 @@ mod tests {
         let s = read(&p).expect("reads");
         assert_eq!(s.title, "Callisto");
         assert_eq!(s.artist, "Stephan Bodzin & Marc Romboy");
+        // The shape of the audio, read off the same properties the bitrate
+        // is. The fixture is 44.1 kHz stereo by construction — see `wav`.
+        assert_eq!(s.sample_rate, Some(44_100), "the rate was not read");
+        assert_eq!(s.channels, Some(2), "the channel count was not read");
         assert_eq!(
             s.identity,
             uuid::Uuid::parse_str(mbid).ok().map(Basis::MusicBrainz)

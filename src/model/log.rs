@@ -110,6 +110,20 @@ pub enum Fact {
         bitrate: u32,
         /// Playing time in milliseconds. Zero means nobody has said.
         length_ms: u32,
+        /// How the audio is shaped — samples per second, and how many
+        /// channels.
+        ///
+        /// Facts about the bytes, read while the file is already open, and
+        /// the last two a display row asks for that the model could not
+        /// answer: 6,493 of 6,500 files here carry a sample rate and every
+        /// one carries a channel count, so a librarian that could not say
+        /// them could not replace the scanner as what a row is drawn from
+        /// (#86).
+        ///
+        /// `None` where the prober could not say, which is an unreadable
+        /// header rather than a file with no rate.
+        sample_rate: Option<u32>,
+        channels: Option<u8>,
     },
 
     /// Which recording an encoding holds. **Structural** — §4 Type 2, so it
@@ -703,6 +717,8 @@ pub struct Encoded {
     pub bitrate: u32,
     /// Playing time in milliseconds. Zero means nobody has said.
     pub length_ms: u32,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u8>,
 }
 
 /// Two devices bound one encoding to different recordings, from the same base.
@@ -795,6 +811,8 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 format,
                 bitrate,
                 length_ms,
+                sample_rate,
+                channels,
             } => {
                 cat.encodings.entry(*encoding).or_insert(Encoded {
                     audio: *audio,
@@ -802,6 +820,8 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     format: *format,
                     bitrate: *bitrate,
                     length_ms: *length_ms,
+                    sample_rate: *sample_rate,
+                    channels: *channels,
                 });
             }
             Fact::EncodingBound { encoding, from, to } => {

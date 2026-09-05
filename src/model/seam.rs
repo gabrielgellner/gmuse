@@ -362,6 +362,8 @@ impl Librarian {
                     recording: d.recording.map(crate::model::id::Ref::to),
                     format: d.format.unwrap_or(Format::Mp3),
                     bitrate: d.bitrate,
+                    sample_rate: d.sample_rate,
+                    channels: d.channels,
                     length: std::time::Duration::from_millis(u64::from(d.length_ms)),
                     cutoff_hz: cat.measurements.get(id).map(|(hz, analyser)| {
                         crate::model::encoding::Measured {

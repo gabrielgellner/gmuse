@@ -97,6 +97,11 @@ pub struct Scanned {
     /// rather than the encoder.
     pub format: Option<Format>,
     pub bitrate: u32,
+    /// How the audio is shaped. Read while the file is open, like the bitrate,
+    /// and the last two things a display row asks for that the model could not
+    /// answer (#86).
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u8>,
 }
 
 pub struct Instance {
@@ -372,6 +377,8 @@ impl Instance {
                     format: s.format,
                     bitrate: s.bitrate,
                     length_ms: s.length_ms,
+                    sample_rate: s.sample_rate,
+                    channels: s.channels,
                 },
             );
             self.append(
@@ -973,6 +980,8 @@ mod containment_tests {
             length_ms: 200_000,
             format: Some(crate::model::encoding::Format::Mp3),
             bitrate: 320,
+            sample_rate: Some(44_100),
+            channels: Some(2),
         }
     }
 
@@ -1151,6 +1160,8 @@ mod credit_tests {
             length_ms: 200_000,
             format: Some(crate::model::encoding::Format::Mp3),
             bitrate: 320,
+            sample_rate: Some(44_100),
+            channels: Some(2),
         }
     }
 

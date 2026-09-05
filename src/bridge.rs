@@ -76,6 +76,8 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                 length_ms: t.duration.as_millis() as u32,
                 format: format_of(t),
                 bitrate: t.bitrate.unwrap_or(0),
+                sample_rate: t.samplerate,
+                channels: t.channels,
             })
         })
         .collect()
@@ -419,6 +421,35 @@ mod opening {
         assert_eq!(encoding.audio, AudioId { scheme: 1, hash: 7 });
     }
 
+    /// **A copy knows its own shape** — issue #86.
+    ///
+    /// Sample rate and channel count are the last two fields a display row
+    /// asks for that the model could not answer, and they are not rare: 6,493
+    /// of 6,500 files here carry a rate and every one carries a channel
+    /// count. A librarian that could not say them could not replace the
+    /// scanner as the thing a row is drawn from, so deleting the scanner
+    /// would have quietly emptied two template fields.
+    #[test]
+    fn a_copy_carries_its_sample_rate_and_channels() {
+        let device = Id::<Device>::derived(b"laptop");
+        let mut store = Store::default();
+        store.upsert(Track {
+            path: std::path::PathBuf::from("/m/callisto.mp3"),
+            title: Some("Callisto".into()),
+            artist: Some("Bodzin".into()),
+            audio_id: Some(AudioId { scheme: 1, hash: 7 }),
+            samplerate: Some(48_000),
+            channels: Some(2),
+            ..Default::default()
+        });
+        let l = librarian(&store, &BTreeSet::new(), device, 100);
+
+        let recording = l.recordings().next().expect("a recording");
+        let copy = l.encodings.of(recording)[0];
+        assert_eq!(copy.sample_rate, Some(48_000));
+        assert_eq!(copy.channels, Some(2));
+    }
+
     /// **The copy that plays is not always the best copy**, which is why a
     /// play has to name the one it opened.
     ///
@@ -448,6 +479,8 @@ mod opening {
                 format: Some(Format::Flac),
                 bitrate: 1000,
                 length_ms: 200_000,
+                sample_rate: Some(44_100),
+                channels: Some(2),
             },
             Fact::EncodingBound {
                 encoding: elsewhere,

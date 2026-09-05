@@ -128,6 +128,13 @@ pub struct Encoding {
     pub recording: Option<Ref<Recording>>,
     pub format: Format,
     pub bitrate: u32,
+    /// Samples per second, and how many channels.
+    ///
+    /// Facts about the bytes, alongside the bitrate. Here because a display
+    /// row asks for both and a librarian that cannot say them cannot replace
+    /// the scanner as what a row is drawn from (#86).
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u8>,
     /// How long these bytes play.
     ///
     /// **Per encoding, and not reconciled with any other.** An edit, a radio
@@ -351,6 +358,8 @@ mod tests {
             recording: Some(Ref::to(rec)),
             format,
             bitrate,
+            sample_rate: Some(44_100),
+            channels: Some(2),
             length: std::time::Duration::from_secs(200),
             cutoff_hz: cutoff.map(Measured::now),
             gain: None,
