@@ -73,6 +73,11 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                 track: t.tracknumber.map(|n| n as u16),
                 mb_release_group: None,
                 mb_release: None,
+                // The plank reads a `Track`, which keeps only a year.
+                released: t
+                    .date
+                    .map(|y| crate::model::spine::PartialDate::year(y as i16)),
+                first_released: None,
                 length_ms: t.duration.as_millis() as u32,
                 format: format_of(t),
                 bitrate: t.bitrate.unwrap_or(0),

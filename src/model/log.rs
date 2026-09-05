@@ -219,6 +219,13 @@ pub enum Fact {
         title: String,
         /// Who the album is credited to, which is not always who a track is.
         artist: Id<Artist>,
+        /// When the **album** first appeared, not when this pressing did.
+        ///
+        /// The reissue trap, and the tags already know: `ORIGINALDATE` says
+        /// the album and `DATE` says the pressing, and they disagree for 820
+        /// files here. Without it, ordering an artist's albums by date files a
+        /// 1996 reissue of a 1995 record after everything from 1995 (#59).
+        first_released: Option<PartialDate>,
     },
 
     /// Two recordings are one, and this is the name it keeps.
@@ -701,6 +708,7 @@ pub struct Placed {
 pub struct Grouped {
     pub title: String,
     pub artist: Id<Artist>,
+    pub first_released: Option<PartialDate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -919,12 +927,14 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 group,
                 title,
                 artist,
+                first_released,
             } => {
                 cat.groups.insert(
                     *group,
                     Grouped {
                         title: title.clone(),
                         artist: *artist,
+                        first_released: *first_released,
                     },
                 );
             }

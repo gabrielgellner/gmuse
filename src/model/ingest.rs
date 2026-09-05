@@ -44,6 +44,7 @@ use lofty::probe::Probe;
 
 use crate::model::basis::Basis;
 use crate::model::instance::Scanned;
+use crate::model::spine::PartialDate;
 
 /// How much the catalogue trusts an identification.
 ///
@@ -155,6 +156,11 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // rate. A verdict compares a cutoff against what the file *claims*, so
         // the claim has to come from the file rather than from a guess.
         length_ms: tagged.properties().duration().as_millis() as u32,
+        // Two dates, because the tags carry two and they mean different
+        // things: `DATE` is this pressing, `ORIGINALDATE` the album. They
+        // disagree for 820 files in this library.
+        released: PartialDate::parse(&get(ItemKey::RecordingDate)),
+        first_released: PartialDate::parse(&get(ItemKey::OriginalReleaseDate)),
         sample_rate: tagged.properties().sample_rate(),
         channels: tagged.properties().channels(),
         bitrate: tagged
@@ -404,6 +410,54 @@ mod tests {
             )));
         }
         t.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    /// A file carrying **both** dates, which is the case they differ in.
+    fn tag_dated(path: &Path, pressed: &str, album: &str) {
+        use lofty::config::WriteOptions;
+        use lofty::id3::v2::Id3v2Tag;
+        use lofty::prelude::{ItemKey, TagExt};
+        use lofty::tag::{Accessor, ItemValue, Tag, TagItem};
+
+        let mut t = Id3v2Tag::default();
+        t.set_title("Second Bad Vilbel".into());
+        let mut tag: Tag = t.into();
+        tag.insert(TagItem::new(
+            ItemKey::RecordingDate,
+            ItemValue::Text(pressed.into()),
+        ));
+        tag.insert(TagItem::new(
+            ItemKey::OriginalReleaseDate,
+            ItemValue::Text(album.into()),
+        ));
+        tag.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    /// **The pressing and the album are different dates**, and reading one for
+    /// the other is the reissue trap (#59). They disagree for 820 files here:
+    /// `Tri Repetae++` is a 1996 pressing of a 1995 record.
+    #[test]
+    fn the_pressing_and_the_album_are_read_separately() {
+        let d = dir("dated");
+        let p = d.join("t.wav");
+        wav(&p, 4410);
+        tag_dated(&p, "1996-03-16", "1995");
+
+        let s = read(&p).expect("reads");
+        assert_eq!(
+            s.released,
+            Some(crate::model::spine::PartialDate {
+                year: 1996,
+                month: Some(3),
+                day: Some(16)
+            }),
+            "the pressing's date"
+        );
+        assert_eq!(
+            s.first_released,
+            Some(crate::model::spine::PartialDate::year(1995)),
+            "the album's date — reading the pressing's here is the trap itself"
+        );
     }
 
     #[test]

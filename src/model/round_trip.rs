@@ -57,6 +57,8 @@ fn album() -> Vec<Scanned> {
         )),
         format: Some(crate::model::encoding::Format::Mp3),
         bitrate: 320,
+        released: None,
+        first_released: None,
         sample_rate: Some(44_100),
         channels: Some(2),
     };

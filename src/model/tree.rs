@@ -252,6 +252,41 @@ mod tests {
         assert_eq!(tree.artist_name(key), "The Band", "the label reads");
     }
 
+    /// **A reissue sorts as the album, not as the pressing** — #59, with the
+    /// data it was waiting for.
+    ///
+    /// `first_released` was always `None`, so `albums_by_date` had nothing to
+    /// order by and the trap it exists to avoid was unavoidable. The tags knew
+    /// all along: `DATE` is the pressing and `ORIGINALDATE` the album, and
+    /// they disagree for 820 files in this library — `Tri Repetae++` is a 1996
+    /// pressing of a 1995 record.
+    #[test]
+    fn an_album_sorts_by_when_the_album_came_out() {
+        let mut older = scanned("Second Bad Vilbel", "Autechre", Some("Autechre"), 1);
+        older.album = Some("Tri Repetae++".into());
+        older.released = Some(PartialDate::year(1996));
+        older.first_released = Some(PartialDate::year(1995));
+
+        let mut newer = scanned("Gantz Graf", "Autechre", Some("Autechre"), 1);
+        newer.album = Some("Gantz Graf".into());
+        newer.released = Some(PartialDate::year(2002));
+        newer.first_released = Some(PartialDate::year(2002));
+
+        let (_, tree) = tree_of(&[older, newer]);
+        let (artist, _) = tree.artists().next().expect("an artist");
+        let order: Vec<&str> = tree
+            .albums_by_date(artist)
+            .iter()
+            .map(|a| a.title.as_str())
+            .collect();
+        assert_eq!(order, vec!["Tri Repetae++", "Gantz Graf"]);
+        assert_eq!(
+            tree.albums_by_date(artist)[0].first_released,
+            Some(PartialDate::year(1995)),
+            "the pressing's date was used, which is the trap itself"
+        );
+    }
+
     /// **A recording held by two albums: each copy files under its own.**
     ///
     /// One song, two copies on disk — the original album and a compilation —

@@ -28,6 +28,7 @@ use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
 use crate::model::reference::{AliasKind, Cataloguable, CreditOn, RoleClass, Source};
+use crate::model::spine::PartialDate;
 use crate::model::vocabulary::GenreOn;
 
 /// What a scan says about one file.
@@ -74,6 +75,15 @@ pub struct Scanned {
     /// checkable and this library has media whose numbering does not add up.
     pub disc: Option<u16>,
     pub track: Option<u16>,
+    /// When **this pressing** came out, and when the **album** first did.
+    ///
+    /// Two dates because the tags carry two and they disagree for 820 files
+    /// here: `Tri Repetae++` is a 1996 pressing of a 1995 album. `DATE` is
+    /// the pressing, `ORIGINALDATE` the album — which is exactly the
+    /// distinction #59's reissue trap is about, and it is in the tags rather
+    /// than needing to be inferred.
+    pub released: Option<PartialDate>,
+    pub first_released: Option<PartialDate>,
     /// The release group id, where the tags carry one — what makes two devices
     /// agree on an *album* without meeting.
     pub mb_release_group: Option<uuid::Uuid>,
@@ -306,6 +316,7 @@ impl Instance {
                         group,
                         title: album.clone(),
                         artist: group_artist,
+                        first_released: s.first_released,
                     },
                 );
                 // The album-level credit, which is what `file_under` asks for
@@ -331,7 +342,7 @@ impl Instance {
                         release,
                         group,
                         title: album.clone(),
-                        released: None,
+                        released: s.released,
                     },
                 );
                 let disc = s.disc.unwrap_or(1);
@@ -980,6 +991,8 @@ mod containment_tests {
             length_ms: 200_000,
             format: Some(crate::model::encoding::Format::Mp3),
             bitrate: 320,
+            released: None,
+            first_released: None,
             sample_rate: Some(44_100),
             channels: Some(2),
         }
@@ -1160,6 +1173,8 @@ mod credit_tests {
             length_ms: 200_000,
             format: Some(crate::model::encoding::Format::Mp3),
             bitrate: 320,
+            released: None,
+            first_released: None,
             sample_rate: Some(44_100),
             channels: Some(2),
         }

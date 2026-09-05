@@ -54,6 +54,28 @@ pub struct PartialDate {
 }
 
 impl PartialDate {
+    /// Read a date as tags write it: `1995`, `1996-03`, `1996-03-16`.
+    ///
+    /// **Partial on purpose.** A sleeve that says 1995 is not claiming the
+    /// first of January, and turning it into one would make a date sort ahead
+    /// of every dated day in the same year while looking like a fact somebody
+    /// asserted. Anything after the year that will not parse is dropped rather
+    /// than failing the whole date — a malformed month is worth less than the
+    /// year beside it.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.trim().split(['-', '/', '.']);
+        let year = parts.next()?.trim().parse::<i16>().ok()?;
+        let month = parts
+            .next()
+            .and_then(|m| m.trim().parse::<u8>().ok())
+            .filter(|m| (1..=12).contains(m));
+        let day = month
+            .and(parts.next())
+            .and_then(|d| d.trim().parse::<u8>().ok())
+            .filter(|d| (1..=31).contains(d));
+        Some(PartialDate { year, month, day })
+    }
+
     pub const fn year(year: i16) -> Self {
         PartialDate {
             year,
@@ -352,6 +374,40 @@ pub enum NumberingProblem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A date as tags write it, and no further.**
+    ///
+    /// A sleeve saying 1995 is not claiming the first of January, and turning
+    /// it into one would sort it ahead of every dated day in that year while
+    /// looking like something somebody asserted.
+    #[test]
+    fn a_date_is_read_as_far_as_it_is_given() {
+        assert_eq!(PartialDate::parse("1995"), Some(PartialDate::year(1995)));
+        assert_eq!(
+            PartialDate::parse("1996-03-16"),
+            Some(PartialDate {
+                year: 1996,
+                month: Some(3),
+                day: Some(16),
+            })
+        );
+        assert_eq!(
+            PartialDate::parse("1996-03"),
+            Some(PartialDate {
+                year: 1996,
+                month: Some(3),
+                day: None
+            })
+        );
+        // A month that cannot be one is dropped, and the year beside it kept:
+        // the year is worth more than the malformed part costs.
+        assert_eq!(
+            PartialDate::parse("1996-13-40"),
+            Some(PartialDate::year(1996))
+        );
+        assert_eq!(PartialDate::parse(""), None);
+        assert_eq!(PartialDate::parse("sometime"), None);
+    }
 
     fn spine_with_an_album_and_an_anthology() -> (Spine, Id<Recording>, Id<Medium>, Id<Medium>) {
         let mut s = Spine::default();

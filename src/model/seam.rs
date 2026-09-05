@@ -292,7 +292,7 @@ impl Librarian {
                 crate::model::spine::ReleaseGroup {
                     id: *group,
                     title: g.title.clone(),
-                    first_released: None,
+                    first_released: g.first_released,
                     kind: crate::model::spine::ReleaseType::Album,
                 },
             );
@@ -751,6 +751,7 @@ mod tests {
             Grouped {
                 title: "Luna".into(),
                 artist: Id::derived(b"bodzin"),
+                first_released: None,
             },
         );
 
