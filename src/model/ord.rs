@@ -62,8 +62,10 @@
 //! orders entries and does not identify them. `CollectionEntry` is keyed by
 //! `(collection, recording)` and carries the stamp that asserted it, so equal
 //! keys break by the asserting device — a deterministic total order after
-//! merge, and the same one on every machine. Encoding a device into the key
-//! instead would make one list read differently depending on who typed it.
+//! merge, and the same one on every machine. In the fold as built, the tie
+//! falls to the recording's id — `(collection, ord, recording)` — which is
+//! simpler and equally deterministic. Encoding a device into the key instead
+//! would make one list read differently depending on who typed it.
 //!
 //! ## What it costs, measured
 //!
@@ -81,7 +83,7 @@
 
 #![allow(
     dead_code,
-    reason = "the encoding is decided before the facts that will carry it (#92) — `Collection` and `CollectionEntry` are #76, and this is what their `ord` field will be. Tested to the point where those can be written against it rather than around it"
+    reason = "the encoding is decided before the facts that will carry it (#92) — the facts that carry it landed in the same milestone (#92) and this was decided first, so they could be written against it rather than around it"
 )]
 
 use std::fmt;

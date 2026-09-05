@@ -25,11 +25,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
 use crate::model::entity::{
-    Artist, Device, Encoding, Genre, Hierarchy, Label, Medium, Qualifier, Recording, Release,
-    ReleaseGroup, Role, Track, Work,
+    Artist, Collection, Device, Encoding, Genre, Hierarchy, Label, Medium, Qualifier, Recording,
+    Release, ReleaseGroup, Role, Track, Work,
 };
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
+use crate::model::ord::OrdKey;
 use crate::model::reference::{AliasKind, Cataloguable, CreditOn, RoleClass, Source};
 use crate::model::spine::PartialDate;
 use crate::model::vocabulary::GenreOn;
@@ -132,6 +133,46 @@ pub enum Fact {
         encoding: Id<Encoding>,
         from: Option<Id<Recording>>,
         to: Id<Recording>,
+    },
+
+    /// A collection exists, and what it is called.
+    ///
+    /// A playlist and a collection are one entity: a playlist is a collection
+    /// whose order means something. `ordered` is the difference and the UI is
+    /// free to keep calling an ordered one a playlist.
+    CollectionNamed {
+        collection: Id<Collection>,
+        name: String,
+        ordered: bool,
+    },
+
+    /// One recording sits in one collection, at one position.
+    ///
+    /// **Membership is row existence**, so two devices adding the same track
+    /// to the same list union to one entry rather than fighting over a count.
+    ///
+    /// The position is part of the claim's identity rather than an attribute
+    /// of it, which is what lets a **sequence admit duplicates** (#92): the
+    /// same recording twice in one playlist is two entries at two positions,
+    /// and a set keyed by `(collection, recording)` could not say that. Moving
+    /// an entry is therefore a retraction and an assertion, not an update.
+    CollectionEntryAdded {
+        collection: Id<Collection>,
+        recording: Id<Recording>,
+        /// A fractional index — see [`crate::model::ord::OrdKey`]. Inserting
+        /// between two entries mints a key between theirs and touches no other
+        /// row, which is the whole reason a position is not an integer.
+        ord: OrdKey,
+    },
+
+    /// …and is taken out again.
+    ///
+    /// Carries the position because that is part of which entry is meant, and
+    /// a playlist holding one recording twice has two of them.
+    CollectionEntryRemoved {
+        collection: Id<Collection>,
+        recording: Id<Recording>,
+        ord: OrdKey,
     },
 
     /// A genre on a recording. Membership is row existence, so this unions.
@@ -568,9 +609,9 @@ fn retract<S, C>(
 /// identity and an attribute, an edge is identity all the way down — there is
 /// nothing to say about `Techno narrows Electronic` beyond that somebody said
 /// it. So the key is the whole claim, and the fold is a set union.
-fn assert_edge<K: Ord + Copy>(live: &mut BTreeSet<K>, retracted: &mut BTreeSet<K>, edge: K) {
-    live.insert(edge);
+fn assert_edge<K: Ord + Clone>(live: &mut BTreeSet<K>, retracted: &mut BTreeSet<K>, edge: K) {
     retracted.remove(&edge);
+    live.insert(edge);
 }
 
 /// Fold one retraction of such a claim — the same rule as [`retract`].
@@ -584,7 +625,7 @@ fn assert_edge<K: Ord + Copy>(live: &mut BTreeSet<K>, retracted: &mut BTreeSet<K
 /// claims differ: an assignment's live key carries the basis that made it, so
 /// retracting one has to sweep every asserter. An edge has no asserter in its
 /// key, so there is one row to remove.
-fn retract_edge<K: Ord + Copy>(live: &mut BTreeSet<K>, retracted: &mut BTreeSet<K>, edge: K) {
+fn retract_edge<K: Ord + Clone>(live: &mut BTreeSet<K>, retracted: &mut BTreeSet<K>, edge: K) {
     live.remove(&edge);
     retracted.insert(edge);
 }
@@ -618,6 +659,22 @@ pub struct Catalogue {
     /// identity, so re-scoring an import (Discogs moving provisional to matched)
     /// updates in place, while a human's disagreement lands beside it.
     pub genres: BTreeMap<(GenreOn, Id<Genre>, Source), Confidence>,
+    /// What each collection is called, and whether its order means anything.
+    pub collections: BTreeMap<Id<Collection>, Collected>,
+    /// Every collection entry, **keyed by position before recording**.
+    ///
+    /// So that walking the set gives a collection's entries in list order —
+    /// a `BTreeSet` over `(collection, ord, recording)` is already sorted the
+    /// way the playlist reads, and the fold needs no comparator.
+    ///
+    /// Two devices inserting *different* recordings at the same point produce
+    /// equal `ord`s, which is fine: the recording breaks the tie, and it
+    /// breaks it the same way on both machines.
+    pub entries: BTreeSet<(Id<Collection>, OrdKey, Id<Recording>)>,
+    /// Entries somebody has taken out. Kept rather than deleted, for the same
+    /// reason every other retraction is: an absence cannot tell "removed" from
+    /// "never added", and a merge has to be able to.
+    pub entries_retracted: BTreeSet<(Id<Collection>, OrdKey, Id<Recording>)>,
     /// Every other name anything is known by. Row existence, so curation
     /// unions across devices the way `narrows` does.
     pub aliases: BTreeSet<(Cataloguable, String, AliasKind)>,
@@ -739,6 +796,15 @@ pub struct Placed {
     pub recording: Id<Recording>,
     pub position: u16,
     pub title_on_release: Option<String>,
+}
+
+/// A collection, as the fold has it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Collected {
+    pub name: String,
+    /// Whether the order means anything. A playlist is an ordered collection;
+    /// an unordered one is a set somebody curated by hand.
+    pub ordered: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -907,6 +973,37 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 &mut cat.qualifiers_retracted,
                 of(recording),
                 *concept,
+            ),
+            Fact::CollectionNamed {
+                collection,
+                name,
+                ordered,
+            } => {
+                cat.collections.insert(
+                    *collection,
+                    Collected {
+                        name: name.clone(),
+                        ordered: *ordered,
+                    },
+                );
+            }
+            Fact::CollectionEntryAdded {
+                collection,
+                recording,
+                ord,
+            } => assert_edge(
+                &mut cat.entries,
+                &mut cat.entries_retracted,
+                (*collection, ord.clone(), of(recording)),
+            ),
+            Fact::CollectionEntryRemoved {
+                collection,
+                recording,
+                ord,
+            } => retract_edge(
+                &mut cat.entries,
+                &mut cat.entries_retracted,
+                (*collection, ord.clone(), of(recording)),
             ),
             Fact::GenreCatalogued { genre, name } => {
                 cat.genre_names.insert(*genre, name.clone());
@@ -1567,10 +1664,14 @@ mod reachability {
         ("qualifier", Some("QualifierCatalogued")),
         ("hierarchy", Some("HierarchyDefined")),
         ("role", Some("RoleDefined")),
-        ("collection", None),
+        ("collection", Some("CollectionNamed")),
         ("credit", Some("CreditAsserted")),
         ("mix-entry", None),
-        ("collection-entry", None),
+        // A row rather than an entity: the fold keys an entry by
+        // `(collection, position, recording)`, which is what lets one
+        // recording appear in one playlist twice. Listed here because the
+        // fact is what brings it into being, and nothing else does (#92).
+        ("collection-entry", Some("CollectionEntryAdded")),
         ("genre-assignment", Some("GenreAssigned")),
     ];
 
@@ -1582,7 +1683,10 @@ mod reachability {
     /// regression, and this is where it is caught.
     #[test]
     fn every_entity_is_reachable_from_a_fact_or_named_as_a_gap() {
-        const UNREACHABLE: usize = 3;
+        // **One**, and it is `mix-entry`. `collection` and `collection-entry`
+        // closed with #92: a playlist is a sequence of facts now rather than a
+        // file on disk, so the log can record, correct, attribute and sync one.
+        const UNREACHABLE: usize = 1;
 
         let kinds = crate::model::entity::ALL_KINDS;
 

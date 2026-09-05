@@ -86,14 +86,17 @@ tags! {
     Hierarchy,
     /// What an artist did on something. Fields with #73.
     Role,
-    #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #76")]
-    /// A curated set, ordered or not. Fields with #76.
+    /// A curated set, ordered or not — a playlist is one whose order means
+    /// something. Minted by `CollectionNamed` since #92.
     Collection,
     #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #73")]
     /// An artist on a work, recording, release group or release. Fields with #73.
     Credit,
-    #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #76")]
-    /// One recording's membership of one collection. Fields with #76.
+    #[expect(
+        dead_code,
+        reason = "an entry is a row and not an entity (#92): the fold keys it by (collection, position, recording), which is what lets one recording appear twice. The tag stays because domain-model.md names it and something may yet want to derive from it"
+    )]
+    /// One recording's membership of one collection.
     CollectionEntry,
     #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #74")]
     /// One genre assigned to one subject. Fields with #74.

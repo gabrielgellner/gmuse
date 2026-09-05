@@ -27,6 +27,7 @@ use crate::model::entity::{
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
+use crate::model::ord::OrdKey;
 use crate::model::reference::{AliasKind, Cataloguable, CreditOn, RoleClass, Source};
 use crate::model::spine::PartialDate;
 use crate::model::vocabulary::GenreOn;
@@ -767,6 +768,82 @@ impl Instance {
                 hierarchy,
                 parent: Id::<Genre>::of_name(parent),
                 child: Id::<Genre>::of_name(child),
+            },
+        );
+    }
+
+    /// Name a collection, or rename one.
+    ///
+    /// Idempotent: the id derives from nothing, so the caller holds it and
+    /// saying the same name twice is the same record.
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
+    )]
+    pub fn name_collection(
+        &mut self,
+        now: i64,
+        collection: Id<crate::model::entity::Collection>,
+        name: &str,
+        ordered: bool,
+    ) {
+        self.append(
+            now,
+            Fact::CollectionNamed {
+                collection,
+                name: name.to_string(),
+                ordered,
+            },
+        );
+    }
+
+    /// Put a recording into a collection at a position.
+    ///
+    /// **The position is the caller's**, because only the caller knows where
+    /// in the list this is going — [`OrdKey::between`] takes the neighbours it
+    /// is landing between, and the fold has no notion of "the end".
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
+    )]
+    pub fn add_to_collection(
+        &mut self,
+        now: i64,
+        collection: Id<crate::model::entity::Collection>,
+        recording: Id<Recording>,
+        ord: OrdKey,
+    ) {
+        self.append(
+            now,
+            Fact::CollectionEntryAdded {
+                collection,
+                recording,
+                ord,
+            },
+        );
+    }
+
+    /// Take one entry out.
+    ///
+    /// The position identifies *which* entry, because a playlist may hold one
+    /// recording twice and removing "the track" would be ambiguous.
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
+    )]
+    pub fn remove_from_collection(
+        &mut self,
+        now: i64,
+        collection: Id<crate::model::entity::Collection>,
+        recording: Id<Recording>,
+        ord: OrdKey,
+    ) {
+        self.append(
+            now,
+            Fact::CollectionEntryRemoved {
+                collection,
+                recording,
+                ord,
             },
         );
     }

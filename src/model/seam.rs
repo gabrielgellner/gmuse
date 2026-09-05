@@ -23,10 +23,13 @@
 //! migration into something with a number on it that can only go down.
 
 use crate::model::encoding::{Encoding, Encodings, Format, Verdict};
-use crate::model::entity::{Device, Recording, ReleaseGroup, Track};
+use crate::model::entity::{Collection, Device, Recording, ReleaseGroup, Track};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
-use crate::model::log::Catalogue;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::model::log::{Catalogue, Collected};
+use crate::model::ord::OrdKey;
 use crate::model::provenance::Provenance;
 use crate::model::reference::{CreditOn, Reference};
 use crate::model::rows::Drawn;
@@ -85,6 +88,10 @@ pub struct Librarian {
     /// encoding, so both locators name it — which is the right answer for an
     /// `.m3u` that happens to list the copy you deleted.
     held_at: std::collections::BTreeMap<String, Id<Encoding>>,
+    /// What each collection is called.
+    pub collections: BTreeMap<Id<Collection>, Collected>,
+    /// Every collection entry, in list order — see [`Catalogue::entries`].
+    collected: BTreeSet<(Id<Collection>, OrdKey, Id<Recording>)>,
     /// Which slot each copy sits in — issue #78.
     ///
     /// The field that makes a row's album a fact rather than a choice. Without
@@ -113,6 +120,8 @@ impl Librarian {
             rows: Default::default(),
             locators: Default::default(),
             held_at: Default::default(),
+            collections: Default::default(),
+            collected: Default::default(),
             placed: Default::default(),
         }
     }
@@ -440,6 +449,8 @@ impl Librarian {
         }
         l.ratings = cat.ratings.clone();
         l.plays = cat.plays.clone();
+        l.collections = cat.collections.clone();
+        l.collected = cat.entries.clone();
 
         // **The hierarchy, which nothing carried across before** (#116). The
         // fold has held these edges since #74 and the librarian left them
@@ -680,6 +691,54 @@ impl Librarian {
                 copy: Some(e.id),
             })
             .collect()
+    }
+}
+
+/// **Reading a collection back** — #92.
+///
+/// Its own block because all of it is ahead of its callers: a playlist is
+/// still a file on disk until #92's UI half, and these are what that will
+/// read. `#[allow]` rather than `#[expect]` because tests exercise them, so
+/// the expectation would report itself unfulfilled under `cargo test`.
+#[allow(
+    dead_code,
+    reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
+)]
+impl Librarian {
+    /// What a collection holds, in order.
+    ///
+    /// **A sequence, so duplicates come back as duplicates** (#92). The same
+    /// recording twice in one playlist is two entries at two positions, and a
+    /// `Vec` is the only shape that can say so — a set could not, which is
+    /// exactly why a view is not only a predicate.
+    ///
+    /// Already in order: the fold keys entries by position before recording,
+    /// so walking them is walking the list.
+    pub fn entries_of(&self, collection: Id<Collection>) -> Vec<Id<Recording>> {
+        self.collected
+            .iter()
+            .filter(|(c, _, _)| *c == collection)
+            .map(|(_, _, recording)| *recording)
+            .collect()
+    }
+
+    /// The position of each entry, for a caller inserting between two of them.
+    ///
+    /// Separate from [`Librarian::entries_of`] because they are asked at
+    /// different moments: the recordings are what a list shows, and the keys
+    /// are what an edit needs — and an edit needs the two it is landing
+    /// between rather than all of them.
+    pub fn positions_of(&self, collection: Id<Collection>) -> Vec<OrdKey> {
+        self.collected
+            .iter()
+            .filter(|(c, _, _)| *c == collection)
+            .map(|(_, ord, _)| ord.clone())
+            .collect()
+    }
+
+    /// Every collection there is, by id.
+    pub fn collections(&self) -> &BTreeMap<Id<Collection>, Collected> {
+        &self.collections
     }
 }
 
@@ -1631,5 +1690,210 @@ mod tests {
     fn something_not_owned_is_not_a_missing_row() {
         let l = Librarian::new();
         assert!(l.row(Id::derived(b"never-catalogued")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod collections {
+    //! **A playlist is a sequence of facts** — #92, and `domain-model.md`
+    //! §"Collections".
+    //!
+    //! A collection and a playlist are one entity; a playlist is a collection
+    //! whose order means something. What makes it a *sequence* rather than a
+    //! set is that it admits duplicates and carries an order, and both of
+    //! those have to survive a merge — which is what these check.
+
+    use super::*;
+    use crate::model::entity::Collection;
+    use crate::model::instance::Instance;
+    use crate::model::ord::OrdKey;
+
+    fn instance(who: &[u8]) -> Instance {
+        Instance::new(Id::<Device>::derived(who))
+    }
+
+    fn list() -> Id<Collection> {
+        Id::<Collection>::derived(b"road trip")
+    }
+
+    fn song(n: u8) -> Id<Recording> {
+        Id::<Recording>::derived(&[n])
+    }
+
+    /// Append `n` songs, and give back the keys so a test can insert between.
+    fn appended(i: &mut Instance, songs: &[Id<Recording>]) -> Vec<OrdKey> {
+        let mut keys: Vec<OrdKey> = Vec::new();
+        for r in songs {
+            let k = OrdKey::between(keys.last(), None);
+            i.add_to_collection(100, list(), *r, k.clone());
+            keys.push(k);
+        }
+        keys
+    }
+
+    fn shelved(i: &Instance) -> Vec<Id<Recording>> {
+        Librarian::from_catalogue(&i.catalogue()).entries_of(list())
+    }
+
+    /// The ordinary case, and the one everything else is measured against.
+    #[test]
+    fn a_collection_comes_back_in_the_order_it_was_built() {
+        let mut i = instance(b"laptop");
+        i.name_collection(100, list(), "Road Trip", true);
+        appended(&mut i, &[song(1), song(2), song(3)]);
+
+        assert_eq!(shelved(&i), [song(1), song(2), song(3)]);
+        assert_eq!(
+            Librarian::from_catalogue(&i.catalogue()).collections()[&list()].name,
+            "Road Trip"
+        );
+    }
+
+    /// **The same recording twice is two entries.**
+    ///
+    /// The property that makes a view a sequence rather than a predicate. A
+    /// set keyed by `(collection, recording)` could not say this, and playing
+    /// one song twice in a queue is ordinary rather than exotic — which is why
+    /// #92 says "the queue is just a view" is false unless a view can be one.
+    #[test]
+    fn one_recording_twice_is_two_entries() {
+        let mut i = instance(b"laptop");
+        appended(&mut i, &[song(1), song(2), song(1)]);
+        assert_eq!(
+            shelved(&i),
+            [song(1), song(2), song(1)],
+            "the duplicate was folded away"
+        );
+    }
+
+    /// Inserting between two entries touches no other row — the whole reason
+    /// a position is a fractional index and not an integer.
+    #[test]
+    fn inserting_between_two_entries_moves_nothing_else() {
+        let mut i = instance(b"laptop");
+        appended(&mut i, &[song(1), song(3)]);
+        let before = i.catalogue().entries.clone();
+
+        // Asked of the library rather than remembered by the caller, which is
+        // how an edit will do it: the two keys it is landing between are what
+        // it needs, and nothing else.
+        let at = Librarian::from_catalogue(&i.catalogue()).positions_of(list());
+        let mid = OrdKey::between(Some(&at[0]), Some(&at[1]));
+        i.add_to_collection(200, list(), song(2), mid);
+
+        assert_eq!(shelved(&i), [song(1), song(2), song(3)]);
+        let after = i.catalogue().entries.clone();
+        assert!(
+            before.is_subset(&after) && after.len() == before.len() + 1,
+            "inserting rewrote an existing entry"
+        );
+    }
+
+    /// Removing one of two identical entries leaves the other, which is why
+    /// the position is part of what a removal names.
+    #[test]
+    fn removing_one_of_two_identical_entries_keeps_the_other() {
+        let mut i = instance(b"laptop");
+        let keys = appended(&mut i, &[song(1), song(1)]);
+        i.remove_from_collection(200, list(), song(1), keys[0].clone());
+
+        assert_eq!(shelved(&i), [song(1)], "both copies went, or neither did");
+    }
+
+    /// **A removal is a row that says so**, not an absence.
+    ///
+    /// The same rule every other retraction follows: an absence cannot tell
+    /// "somebody took this out" from "nobody put it in", and a merge with a
+    /// device that still has the entry has to be able to.
+    #[test]
+    fn a_removal_survives_a_merge_with_a_device_that_still_holds_it() {
+        let (mut mine, mut theirs) = (instance(b"laptop"), instance(b"nas"));
+        let keys = appended(&mut mine, &[song(1), song(2)]);
+        theirs.merge(150, mine.records());
+
+        // I take one out; they never hear about it until we sync.
+        mine.remove_from_collection(200, list(), song(2), keys[1].clone());
+        theirs.merge(300, mine.records());
+
+        assert_eq!(
+            Librarian::from_catalogue(&theirs.catalogue()).entries_of(list()),
+            [song(1)],
+            "the removal did not cross"
+        );
+    }
+
+    /// **Two devices building the same list agree on it**, and neither's
+    /// entries are lost.
+    ///
+    /// Membership is row existence, so concurrent adds union — and the
+    /// positions are what decides the order they union into.
+    #[test]
+    fn two_devices_adding_at_once_agree_on_the_result() {
+        let (mut mine, mut theirs) = (instance(b"laptop"), instance(b"nas"));
+        let keys = appended(&mut mine, &[song(1), song(4)]);
+        theirs.merge(150, mine.records());
+
+        // Both insert between the two, without seeing each other.
+        let a = OrdKey::between(Some(&keys[0]), Some(&keys[1]));
+        mine.add_to_collection(200, list(), song(2), a.clone());
+        theirs.add_to_collection(200, list(), song(3), a);
+
+        mine.merge(400, theirs.records());
+        theirs.merge(400, mine.records());
+
+        let (m, t) = (
+            Librarian::from_catalogue(&mine.catalogue()).entries_of(list()),
+            Librarian::from_catalogue(&theirs.catalogue()).entries_of(list()),
+        );
+        assert_eq!(m, t, "the two devices disagree about the list");
+        assert_eq!(m.len(), 4, "an entry was lost in the merge");
+        assert_eq!(m[0], song(1), "the list did not keep its ends");
+        assert_eq!(m[3], song(4));
+    }
+
+    /// Moving an entry is a retraction and an assertion, because the position
+    /// is part of which entry is meant.
+    #[test]
+    fn moving_an_entry_is_a_removal_and_an_add() {
+        let mut i = instance(b"laptop");
+        let keys = appended(&mut i, &[song(1), song(2), song(3)]);
+
+        // Take the last one and put it first.
+        i.remove_from_collection(200, list(), song(3), keys[2].clone());
+        let front = OrdKey::between(None, Some(&keys[0]));
+        i.add_to_collection(200, list(), song(3), front);
+
+        assert_eq!(shelved(&i), [song(3), song(1), song(2)]);
+    }
+
+    /// **Two collections do not leak into each other.**
+    ///
+    /// The entries all live in one set, keyed by collection first — so the
+    /// only thing keeping two playlists apart is that key, and every other
+    /// test here uses a single list and could not tell.
+    #[test]
+    fn one_collection_does_not_see_anothers_entries() {
+        let other = Id::<Collection>::derived(b"dinner");
+        let mut i = instance(b"laptop");
+        i.name_collection(100, list(), "Road Trip", true);
+        i.name_collection(100, other, "Dinner", true);
+
+        appended(&mut i, &[song(1), song(2)]);
+        i.add_to_collection(100, other, song(9), OrdKey::first());
+
+        let l = Librarian::from_catalogue(&i.catalogue());
+        assert_eq!(l.entries_of(list()), [song(1), song(2)]);
+        assert_eq!(l.entries_of(other), [song(9)]);
+        assert_eq!(l.positions_of(other).len(), 1, "positions leaked too");
+    }
+
+    /// An unordered collection is the same entity with the flag off — the UI
+    /// is free to keep calling the ordered one a playlist.
+    #[test]
+    fn a_collection_says_whether_its_order_means_anything() {
+        let mut i = instance(b"laptop");
+        i.name_collection(100, list(), "Odds and ends", false);
+        let l = Librarian::from_catalogue(&i.catalogue());
+        assert!(!l.collections()[&list()].ordered);
     }
 }
