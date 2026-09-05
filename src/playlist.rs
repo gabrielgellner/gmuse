@@ -4,7 +4,6 @@
 //! and the queue at once without being copied.
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
 
 use crate::model::rows::CopyId;
 
@@ -106,211 +105,69 @@ impl Queue {
     }
 }
 
-/// Named playlists on disk — issue #22.
-///
-/// A directory of `.m3u8` files under `data_dir`, so a playlist is a file
-/// anything can read and dropping one in from outside makes it appear. That is
-/// most of the argument for using a standard format rather than inventing one.
-///
-/// Deliberately not an index: the set *is* whatever the directory holds. An
-/// index would be a second source of truth to keep in step, and the directory
-/// is small enough to read every time it is asked for.
-#[derive(Debug, Clone)]
-pub struct Playlists {
-    dir: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Saved {
-    pub name: String,
-    pub path: PathBuf,
-}
-
-impl Playlists {
-    pub fn new(data_dir: &Path) -> Self {
-        Self {
-            dir: data_dir.join("playlists"),
-        }
-    }
-
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// Where a name is written. Always `.m3u8` — the `8` says UTF-8.
-    pub fn path_for(&self, name: &str) -> PathBuf {
-        self.dir
-            .join(format!("{}.{}", file_stem(name), crate::m3u::EXTENSION))
-    }
-
-    /// Every playlist in the directory, by name, sorted.
-    ///
-    /// Reads `.m3u`, `.m3u8` and cmus's `.pl`, so a folder someone already has
-    /// works without being converted first.
-    pub fn list(&self) -> Vec<Saved> {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return Vec::new();
-        };
-        let mut out: Vec<Saved> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.to_ascii_lowercase())
-                    .is_some_and(|e| crate::m3u::EXTENSIONS.contains(&e.as_str()))
-            })
-            .filter_map(|path| {
-                let name = path.file_stem()?.to_string_lossy().into_owned();
-                Some(Saved { name, path })
-            })
-            .collect();
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        out
-    }
-
-    /// Find a playlist by name, whatever extension it happens to have.
-    pub fn find(&self, name: &str) -> Option<Saved> {
-        self.list().into_iter().find(|s| s.name == name)
-    }
-}
-
-/// A name reaches a file name, so keep it to something a file name can hold.
-///
-/// Spaces stay — "late night" is a reasonable playlist name and a perfectly
-/// good file name. Separators and dots do not: a name is one file in one
-/// directory, never a path, and never a hidden file.
-fn file_stem(name: &str) -> String {
-    let cleaned: String = name
-        .trim()
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' => '-',
-            c if c.is_control() => ' ',
-            c => c,
-        })
-        .collect();
-    // Strip leading dots, dashes and spaces together, so `../../etc/passwd`
-    // reduces to a readable `etc-passwd` rather than a thicket of leftovers —
-    // and so nothing ends up hidden from its own listing.
-    let cleaned = cleaned
-        .trim()
-        .trim_start_matches(['.', '-', ' '])
-        .trim()
-        .to_string();
-    if cleaned.is_empty() {
-        "untitled".to_string()
-    } else {
-        cleaned
-    }
-}
+// **The `.m3u8` directory store lived here and is gone** (#118).
+//
+// `Playlists` listed a folder, `Saved` named a file in it, and `file_stem`
+// made a name safe to be one. Between them they made a *path* authoritative
+// for what a playlist contained: saved here, opened on another machine, it
+// resolved nothing — the same failure `roots` had for catalogs (#94), in the
+// one corner it survived.
+//
+// A playlist is an ordered collection now: `CollectionNamed { ordered: true }`
+// and one entry per recording, which is SKOS's `OrderedCollection` and is a
+// fact rather than a file. m3u is what `:export` writes, and nothing reads one
+// back.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::rows::CopyId;
 
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("gmuse-playlists-{name}"));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn id(n: u128) -> CopyId {
+        CopyId::from_uuid(uuid::Uuid::from_u128(n))
     }
 
-    /// The set *is* the directory, so a playlist dropped in from outside — by
-    /// another program, or by hand — simply appears. That is most of the point
-    /// of using a standard format.
+    /// **A playlist admits a repeat**, which is the difference between a
+    /// sequence and a set and the reason view 3 is not a `BTreeSet`.
     #[test]
-    fn the_directory_is_the_index() {
-        let data = scratch("index");
-        let ps = Playlists::new(&data);
-        assert!(ps.list().is_empty());
-
-        std::fs::create_dir_all(ps.dir()).unwrap();
-        std::fs::write(ps.dir().join("roadtrip.m3u8"), "#EXTM3U\n").unwrap();
-        std::fs::write(ps.dir().join("late night.m3u"), "").unwrap();
-        std::fs::write(ps.dir().join("from cmus.pl"), "").unwrap();
-        // Not a playlist, whatever it contains.
-        std::fs::write(ps.dir().join("notes.txt"), "/m/a.mp3\n").unwrap();
-
-        let names: Vec<String> = ps.list().into_iter().map(|s| s.name).collect();
-        assert_eq!(names, ["from cmus", "late night", "roadtrip"]);
-    }
-
-    /// Found by name whatever extension it happens to have, so a folder
-    /// someone already keeps works without being converted first.
-    #[test]
-    fn a_playlist_is_found_by_name_not_by_extension() {
-        let data = scratch("find");
-        let ps = Playlists::new(&data);
-        std::fs::create_dir_all(ps.dir()).unwrap();
-        std::fs::write(ps.dir().join("mix.pl"), "").unwrap();
-
-        assert_eq!(ps.find("mix").unwrap().path, ps.dir().join("mix.pl"));
-        assert!(ps.find("nope").is_none());
-        // But we always *write* .m3u8.
-        assert_eq!(ps.path_for("mix"), ps.dir().join("mix.m3u8"));
-    }
-
-    /// A name reaches a file name. Spaces are fine; separators are not, and a
-    /// leading dot would make the playlist hidden from its own listing.
-    #[test]
-    fn a_name_is_reduced_to_something_a_file_name_can_hold() {
-        assert_eq!(file_stem("late night"), "late night");
-        assert_eq!(file_stem("  spaced  "), "spaced");
-        assert_eq!(file_stem("a/b"), "a-b");
-        assert_eq!(file_stem(".hidden"), "hidden");
-        assert_eq!(file_stem("../../etc/passwd"), "etc-passwd");
-        assert_eq!(file_stem(""), "untitled");
-        assert_eq!(file_stem("   "), "untitled");
-    }
-
-    /// Names are one file in one directory — never a path out of it.
-    #[test]
-    fn a_name_cannot_escape_the_playlist_directory() {
-        let data = scratch("escape");
-        let ps = Playlists::new(&data);
-        for hostile in ["../../../etc/passwd", "/etc/passwd", "a/b/c", ".."] {
-            let path = ps.path_for(hostile);
-            // The property that matters: one file, in that directory, always.
-            assert_eq!(path.parent(), Some(ps.dir()), "{hostile:?} escaped");
-            assert_eq!(path.components().count(), ps.dir().components().count() + 1);
-        }
-    }
-
-    #[test]
-    fn playlist_allows_duplicates_and_keeps_order() {
+    fn a_playlist_holds_the_same_track_twice() {
         let mut p = Playlist::new();
-        p.push(crate::model::rows::row_of_test(3));
-        p.push(crate::model::rows::row_of_test(1));
-        p.push(crate::model::rows::row_of_test(3));
-        assert_eq!(
-            p.entries(),
-            [
-                crate::model::rows::row_of_test(3),
-                crate::model::rows::row_of_test(1),
-                crate::model::rows::row_of_test(3)
-            ]
-        );
-        assert_eq!(p.remove(1), Some(crate::model::rows::row_of_test(1)));
-        assert_eq!(
-            p.entries(),
-            [
-                crate::model::rows::row_of_test(3),
-                crate::model::rows::row_of_test(3)
-            ]
-        );
-        assert_eq!(p.remove(99), None);
+        p.push(id(1));
+        p.push(id(2));
+        p.push(id(1));
+        assert_eq!(p.len(), 3);
+        assert_eq!(p.entries(), [id(1), id(2), id(1)]);
     }
 
+    /// `p` on the last row puts *after* it, which is one past the end — the
+    /// ordinary case rather than an error, so the index is clamped.
     #[test]
-    fn queue_is_consumed_from_the_front() {
+    fn inserting_past_the_end_appends_rather_than_panicking() {
+        let mut p = Playlist::new();
+        p.push(id(1));
+        p.insert(99, id(2));
+        assert_eq!(p.entries(), [id(1), id(2)]);
+    }
+
+    /// `Vec::remove` panics out of range, so the bounds check is ours.
+    #[test]
+    fn removing_a_row_that_is_not_there_is_none_not_a_panic() {
+        let mut p = Playlist::new();
+        p.push(id(1));
+        assert_eq!(p.remove(5), None);
+        assert_eq!(p.remove(0), Some(id(1)));
+        assert!(p.is_empty());
+    }
+
+    /// The queue is consumed as it plays — §5 makes it win unconditionally
+    /// over the active source, and popping is what makes that a one-shot.
+    #[test]
+    fn the_queue_is_consumed_as_it_plays() {
         let mut q = Queue::new();
-        q.push_back(crate::model::rows::row_of_test(1));
-        q.push_back(crate::model::rows::row_of_test(2));
-        assert_eq!(q.pop_front(), Some(crate::model::rows::row_of_test(1)));
-        assert_eq!(q.len(), 1);
-        assert_eq!(q.pop_front(), Some(crate::model::rows::row_of_test(2)));
+        q.push_back(id(1));
+        q.push_back(id(2));
+        assert_eq!(q.pop_front(), Some(id(1)));
+        assert_eq!(q.pop_front(), Some(id(2)));
         assert_eq!(q.pop_front(), None);
-        assert!(q.is_empty());
     }
 }

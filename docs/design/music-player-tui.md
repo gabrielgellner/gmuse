@@ -3238,6 +3238,39 @@ Append here as decisions are made. Format: date, decision, rationale.
   `&Librarian`, which is what the seam was for and what made the overlay possible at all. And `:view clear` is not a
   spelling — a bare `:view` is the clear, which a test asserting the wrong one found.
 
+- **2026-09-05** **A playlist is an ordered collection, and m3u is only an export (#118).** `Playlists` listed a
+  directory of `.m3u8` files and `Saved` named one, so a **path was authoritative for what a list contained** — the same
+  failure `roots` had for catalogs (#94), surviving in the one corner that refactor did not reach. Save a playlist here,
+  open it on another machine, and it resolves nothing.
+
+  A playlist is now `CollectionNamed { ordered: true }` plus one entry per recording, which is SKOS's
+  `OrderedCollection` — a subclass of `Collection` adding a member _list_ where the parent has a member _set_. It is not
+  a second store to keep in step with anything: view 3's list of playlists is a question asked of the fold.
+
+  What that buys, beyond syncing: an entry is a **recording**, so a playlist survives a file being moved, being replaced
+  by a better encode, or being on the NAS today and here tomorrow. Where the `.m3u8` said "the library does not know
+  this path", the answer is now "no copy of this on this device", which is a better answer and a different one.
+
+  **`persist_open` is a diff, not a rewrite**, and this is what the fractional index was for. Retracting every entry and
+  re-adding the list would be correct and would cost two facts per track on every edit — a hundred-track playlist losing
+  one row would append two hundred facts. Instead a greedy alignment walks the desired list against the existing one,
+  keeps an entry's key where the recording still matches, mints a key between neighbours where it does not, and retracts
+  what is left over. `y`, `p` and `D` then cost one fact each. A wholesale reorder degrades to retract-and-add, which is
+  honest: nothing about the old keys describes the new order.
+
+  **`:export <path>` is what m3u is for now.** One-way by construction — the reading half of `m3u.rs` is deleted, so an
+  exported file going stale costs nothing and cannot re-key a list by location. `Playlists`, `Saved` and `file_stem` are
+  gone with it, and `Ui::saved` with them.
+
+  One test could not survive the change and was deleted rather than adapted:
+  `an_unreadable_playlist_is_listed_rather _than_hidden` made a directory named `broken.m3u8` and asserted the row read
+  "unreadable". There is no file to fail to read, so the state it guarded cannot be reached — a collection exists as
+  facts or it does not.
+
+  **What is still a file:** nothing about playlists. What is still _wrong_: `view::Fresh` from the `:collect` entry
+  above is still overlaying the fold, and every fact the UI writes that a reader takes through the seam will want the
+  same patch until the librarian can be refolded in place. Filed as its own issue.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

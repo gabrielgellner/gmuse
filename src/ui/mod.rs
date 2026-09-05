@@ -411,11 +411,6 @@ pub struct Ui {
     pub catalogs: crate::catalog::Catalogs,
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
-    /// Saved playlists on disk, under `data_dir/playlists` (#22).
-    ///
-    /// `None` when there is nowhere to keep them, which is the same guard the
-    /// event log uses — the feature is simply absent rather than half-working.
-    pub saved: Option<crate::playlist::Playlists>,
     /// What view 3 is showing, if anything.
     ///
     /// The *name*, not the tracks — those live in `playlist` like any other
@@ -473,7 +468,6 @@ impl Ui {
             status: String::new(),
             playlist: Playlist::new(),
             playlists: crate::smart::SmartPlaylists::default(),
-            saved: None,
             open: None,
             queue: Queue::new(),
             playback: Playback::default(),
@@ -2009,6 +2003,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             crate::cmd::PlaylistSpec::List => list_playlists(ui),
         },
         Command::Collect(name) => collect(ui, ctx, &name),
+        Command::Export(path) => export(ui, ctx, &path),
         Command::Freeze => match ui.open.take() {
             Some(Open::Rule(name)) => ui.notify(format!(
                 "froze {name} — {} tracks; `:playlist save <name>` keeps it",
@@ -2335,8 +2330,8 @@ fn open_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         load_smart(ui, ctx, name);
         return;
     }
-    if let Some(found) = ui.saved.as_ref().and_then(|s| s.find(name)) {
-        load_saved(ui, ctx, &found);
+    if saved_lists(ui).iter().any(|(n, _)| n == name) {
+        load_collection(ui, ctx, name);
         return;
     }
     let known = known_playlists(ui);
@@ -2364,32 +2359,99 @@ fn refresh_playlist_rows(ui: &mut Ui) {
             rule: true,
         });
     }
-    if let Some(saved) = &ui.saved {
-        for s in saved.list() {
-            if rows.iter().any(|r| r.name == s.name) {
-                continue;
-            }
-            // Read once, here, rather than per frame. A playlist that cannot
-            // be read still gets a row: it exists, and hiding it would be
-            // stranger than saying so.
-            let detail = match crate::m3u::read(&s.path) {
-                Ok(paths) => match paths.len() {
-                    1 => "1 track".to_string(),
-                    n => format!("{n} tracks"),
-                },
-                Err(_) => "unreadable".to_string(),
-            };
-            rows.push(PlaylistRow {
-                name: s.name,
-                detail,
-                rule: false,
-            });
+    // **From the fold, not from a directory** (#118). There is no file to fail
+    // to read any more, so the "unreadable" row this used to need is gone: a
+    // collection either exists as facts or it does not.
+    for (name, len) in saved_lists(ui) {
+        if rows.iter().any(|r| r.name == name) {
+            continue;
         }
+        rows.push(PlaylistRow {
+            detail: match len {
+                1 => "1 track".to_string(),
+                n => format!("{n} tracks"),
+            },
+            name,
+            rule: false,
+        });
     }
     ui.playlist_rows = rows;
     ui.playlists_sel = ui
         .playlists_sel
         .min(ui.playlist_rows.len().saturating_sub(1));
+}
+
+/// Every ordered collection, by name and length — the playlists.
+///
+/// **A playlist is an ordered collection** (#118), and SKOS says the same:
+/// `OrderedCollection` is a subclass of `Collection` that adds a member *list*
+/// where the parent has a member *set*. So this is not a separate store to
+/// keep in step with anything — it is a question asked of the one the library
+/// already holds.
+fn saved_lists(ui: &Ui) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = ui
+        .listened
+        .collections
+        .iter()
+        .filter(|(_, c)| c.ordered)
+        .map(|(id, c)| {
+            let n = ui
+                .listened
+                .entries
+                .iter()
+                .filter(|(coll, _, _)| coll == id)
+                .count();
+            (c.name.clone(), n)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Fill view 3 from a collection's entries.
+///
+/// **Entries are recordings and view 3 holds copies**, so this is the hop —
+/// and a recording the library knows about and this device does not hold is
+/// said out loud rather than silently dropped, because a playlist quietly
+/// missing three tracks is how you stop trusting it.
+///
+/// What it no longer does is read a path. The `.m3u8` this replaced named
+/// locations, so a playlist saved here and opened on another machine resolved
+/// nothing.
+fn load_collection(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+    use crate::model::entity::Collection;
+    use crate::model::id::Id;
+
+    let id = Id::<Collection>::of_name(name);
+    let held = holdings_here(ctx);
+    let entries: Vec<_> = ui
+        .listened
+        .entries
+        .iter()
+        .filter(|(c, _, _)| *c == id)
+        .map(|(_, _, recording)| *recording)
+        .collect();
+
+    let mut missing = 0;
+    ui.playlist.clear();
+    for recording in entries {
+        match held.get(&recording) {
+            Some(copy) => ui.playlist.push(*copy),
+            None => missing += 1,
+        }
+    }
+    ui.playlist_sel = 0;
+    ui.open = Some(Open::Saved(name.to_string()));
+    switch_view(ui, View::Playlist);
+    select_open_row(ui);
+    ui.playlist_pane = Pane::Tracks;
+    ui.notify(match missing {
+        0 => format!("{name}: {} tracks", ui.playlist.len()),
+        n => format!(
+            "{name}: {} tracks, {n} not held on this device",
+            ui.playlist.len()
+        ),
+    });
 }
 
 /// Every name `:playlist open` would accept.
@@ -2400,11 +2462,9 @@ fn known_playlists(ui: &Ui) -> Vec<String> {
         .into_iter()
         .map(str::to_string)
         .collect();
-    if let Some(saved) = &ui.saved {
-        for s in saved.list() {
-            if !names.contains(&s.name) {
-                names.push(s.name);
-            }
+    for (name, _) in saved_lists(ui) {
+        if !names.contains(&name) {
+            names.push(name);
         }
     }
     names.sort();
@@ -2417,50 +2477,10 @@ fn list_playlists(ui: &mut Ui) {
         ui.notify(known.join(", "));
         return;
     }
-    // Naming the directory turns "there are none" into something actionable —
-    // and it is where you would drop one in from another program.
-    ui.notify(
-        match ui.saved.as_ref().map(|s| s.dir().display().to_string()) {
-            Some(dir) => format!("no playlists yet — they live in {dir}"),
-            None => "no playlists — set `data_dir` in the config".into(),
-        },
-    );
-}
-
-/// Fill view 3 from a saved `.m3u8`.
-fn load_saved(ui: &mut Ui, ctx: &Context<'_>, found: &crate::playlist::Saved) {
-    let paths = match crate::m3u::read(&found.path) {
-        Ok(p) => p,
-        Err(e) => {
-            ui.notify(e.to_string());
-            return;
-        }
-    };
-    // A playlist names paths; the store may not know all of them — the file
-    // could predate a scan, or name music that has gone. Said out loud rather
-    // than silently short, because a playlist quietly missing three tracks is
-    // how you stop trusting it.
-    let mut missing = 0;
-    ui.playlist.clear();
-    let rows: &dyn Listing = ctx.library;
-    for path in &paths {
-        match path.to_str().and_then(|at| rows.at(at)) {
-            Some(id) => ui.playlist.push(id),
-            None => missing += 1,
-        }
-    }
-    ui.playlist_sel = 0;
-    ui.open = Some(Open::Saved(found.name.clone()));
-    switch_view(ui, View::Playlist);
-    select_open_row(ui);
-    ui.playlist_pane = Pane::Tracks;
-    ui.notify(match missing {
-        0 => format!("{}: {} tracks", found.name, ui.playlist.len()),
-        n => format!(
-            "{}: {} tracks, {n} not in the library",
-            found.name,
-            ui.playlist.len()
-        ),
+    ui.notify(if ui.data_dir.is_some() {
+        "no playlists yet — `:playlist save <name>` writes the current one"
+    } else {
+        "no playlists — set `data_dir` in the config"
     });
 }
 
@@ -2742,20 +2762,23 @@ fn remove_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
 /// The alternative to an invisible scratch list: adding to a playlist means
 /// adding to *the one you picked*, so there has to be a way to pick a new one.
 fn new_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
-    let Some(saved) = ui.saved.clone() else {
+    let Some(()) = ui.data_dir.as_ref().map(|_| ()) else {
         ui.notify("nowhere to keep playlists — set `data_dir` in the config");
         return;
     };
-    if saved.find(name).is_some() || ui.playlists.get(name).is_some() {
+    if saved_lists(ui).iter().any(|(n, _)| n == name) || ui.playlists.get(name).is_some() {
         ui.notify(format!("{name} already exists — `:playlist open {name}`"));
         return;
     }
-    // Written empty rather than held in memory, so it survives a crash and so
-    // it appears to anything else reading the directory.
-    if let Err(e) = crate::m3u::write(&saved.path_for(name), &[]) {
-        ui.notify(e.to_string());
-        return;
-    }
+    // **Named before it holds anything**, so it survives a crash and so it
+    // appears in the list. `CollectionNamed` on its own is a legitimate
+    // collection with no entries — the fold has always allowed that, and it is
+    // what an empty playlist is.
+    let id = crate::model::id::Id::<crate::model::entity::Collection>::of_name(name);
+    let now = crate::history::now_ms();
+    record(ui, now, |log| {
+        log.name_collection(now, id, name, true);
+    });
     ui.playlist.clear();
     ui.playlist_sel = 0;
     ui.open = Some(Open::Saved(name.to_string()));
@@ -2782,37 +2805,85 @@ fn select_open_row(ui: &mut Ui) {
 /// plays follow, and for the same reason — losing what you meant is worse
 /// than the cost of a write.
 fn persist_open(ui: &mut Ui, ctx: &Context<'_>) {
-    let (Some(Open::Saved(name)), Some(saved)) = (ui.open.clone(), ui.saved.clone()) else {
+    use crate::model::entity::Collection;
+    use crate::model::id::Id;
+    use crate::model::ord::OrdKey;
+
+    let Some(Open::Saved(name)) = ui.open.clone() else {
         return;
     };
-    let files: &dyn Listing = ctx.library;
-    // What to *say* is a row; where the file *is* is a holding. Two questions,
-    // asked at the moment of writing and neither answer kept (#86).
-    let listed: Vec<_> = ui
+    if ui.data_dir.is_none() {
+        return;
+    }
+    let id = Id::<Collection>::of_name(&name);
+    let rows: &dyn Listing = ctx.library;
+    let desired: Vec<_> = ui
         .playlist
         .entries()
         .iter()
-        .filter_map(|id| Some((files.listed(*id)?, files.playable(*id)?)))
+        .filter_map(|copy| rows.recording_of(*copy))
         .collect();
-    let tracks: Vec<crate::m3u::Entry<'_>> = listed
+    let existing: Vec<(OrdKey, _)> = ui
+        .listened
+        .entries
         .iter()
-        .map(|(row, at)| crate::m3u::Entry {
-            locator: std::path::Path::new(at.locator),
-            who: row.artist.unwrap_or(row.file_under),
-            title: row.title,
-            duration: row.duration,
-        })
+        .filter(|(c, _, _)| *c == id)
+        .map(|(_, ord, recording)| (ord.clone(), *recording))
         .collect();
-    if let Err(e) = crate::m3u::write(&saved.path_for(&name), &tracks) {
-        ui.notify(e.to_string());
+
+    // **A diff, not a rewrite**, and this is what the fractional index is for
+    // (`model/ord.rs`). Retracting every entry and re-adding the list would be
+    // correct and would cost two facts per track on every edit — a hundred-
+    // track playlist losing one row would append two hundred facts.
+    //
+    // A greedy alignment instead: walk the desired list against the existing
+    // one, keep an entry's key where the recording still matches, mint a key
+    // between its neighbours where it does not, and retract whatever is left
+    // over. Deleting and inserting — which is all `y`, `p` and `D` do — then
+    // cost one fact each. A wholesale reorder degrades to retract-and-add,
+    // which is honest: nothing about the old keys describes the new order.
+    let mut adds: Vec<(OrdKey, _)> = Vec::new();
+    let mut kept = vec![false; existing.len()];
+    let mut at = 0usize;
+    let mut last: Option<OrdKey> = None;
+    for recording in &desired {
+        if let Some(i) = existing[at..].iter().position(|(_, r)| r == recording) {
+            let i = at + i;
+            kept[i] = true;
+            last = Some(existing[i].0.clone());
+            at = i + 1;
+        } else {
+            let next = existing[at..].first().map(|(k, _)| k.clone());
+            let k = OrdKey::between(last.as_ref(), next.as_ref());
+            adds.push((k.clone(), *recording));
+            last = Some(k);
+        }
+    }
+    let drops: Vec<_> = existing
+        .iter()
+        .zip(&kept)
+        .filter(|(_, keep)| !**keep)
+        .map(|((ord, recording), _)| (ord.clone(), *recording))
+        .collect();
+
+    if adds.is_empty() && drops.is_empty() {
         return;
     }
+    let now = crate::history::now_ms();
+    record(ui, now, |log| {
+        for (ord, recording) in &drops {
+            log.remove_from_collection(now, id, *recording, ord.clone());
+        }
+        for (ord, recording) in &adds {
+            log.add_to_collection(now, id, *recording, ord.clone());
+        }
+    });
     refresh_playlist_rows(ui);
 }
 
 /// Copy the open playlist under a new name.
 fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
-    let Some(saved) = ui.saved.clone() else {
+    let Some(()) = ui.data_dir.as_ref().map(|_| ()) else {
         ui.notify("nowhere to save playlists — set `data_dir` in the config");
         return;
     };
@@ -2820,46 +2891,47 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         ui.notify("the playlist is empty — nothing to save");
         return;
     }
-    let files: &dyn Listing = ctx.library;
-    // What to *say* is a row; where the file *is* is a holding. Two questions,
-    // asked at the moment of writing and neither answer kept (#86).
-    let listed: Vec<_> = ui
+    // **Entries are recordings, and view 3 holds copies.** A recording with
+    // two copies contributes one entry, so saving may file fewer than it
+    // shows — and the count says what was filed.
+    let rows: &dyn Listing = ctx.library;
+    let members: Vec<_> = ui
         .playlist
         .entries()
         .iter()
-        .filter_map(|id| Some((files.listed(*id)?, files.playable(*id)?)))
+        .filter_map(|id| rows.recording_of(*id))
         .collect();
-    let tracks: Vec<crate::m3u::Entry<'_>> = listed
-        .iter()
-        .map(|(row, at)| crate::m3u::Entry {
-            locator: std::path::Path::new(at.locator),
-            who: row.artist.unwrap_or(row.file_under),
-            title: row.title,
-            duration: row.duration,
-        })
-        .collect();
-    let at = saved.path_for(name);
-    match crate::m3u::write(&at, &tracks) {
-        Ok(()) => {
-            // Saving a rule-defined list writes what it *currently* holds and
-            // detaches it, which is what `:freeze` does — so say so rather
-            // than leaving the title claiming a rule still owns it.
-            // Saving over an existing playlist replaces its contents, so its
-            // undo history no longer describes anything — `u` would restore a
-            // list this name never held.
-            ui.undo
-                .forget(&crate::undo::Key::Playlist(name.to_string()));
-            let was = ui.open.replace(Open::Saved(name.to_string()));
-            refresh_playlist_rows(ui);
-            ui.notify(match was {
-                Some(Open::Rule(rule)) => {
-                    format!("saved {} tracks as {name}, a copy of {rule}", tracks.len())
-                }
-                _ => format!("saved {} tracks as {name}", tracks.len()),
-            });
+
+    let id = crate::model::id::Id::<crate::model::entity::Collection>::of_name(name);
+    let now = crate::history::now_ms();
+    let filed = members.len();
+    record(ui, now, |log| {
+        log.name_collection(now, id, name, true);
+        // **Spread keys, because the order is the point.** A fractional index
+        // means inserting between two entries later mints a key between theirs
+        // and rewrites nothing — see `model/ord.rs`.
+        let mut key: Option<crate::model::ord::OrdKey> = None;
+        for recording in &members {
+            let k = crate::model::ord::OrdKey::between(key.as_ref(), None);
+            log.add_to_collection(now, id, *recording, k.clone());
+            key = Some(k);
         }
-        Err(e) => ui.notify(e.to_string()),
-    }
+    });
+
+    // Saving over an existing playlist replaces what the name means, so its
+    // undo history no longer describes anything — `u` would restore a list
+    // this name never held.
+    ui.undo
+        .forget(&crate::undo::Key::Playlist(name.to_string()));
+    // Saving a rule-defined list writes what it *currently* holds and detaches
+    // it, which is what `:freeze` does — so say so rather than leaving the
+    // title claiming a rule still owns it.
+    let was = ui.open.replace(Open::Saved(name.to_string()));
+    refresh_playlist_rows(ui);
+    ui.notify(match was {
+        Some(Open::Rule(rule)) => format!("saved {filed} tracks as {name}, a copy of {rule}"),
+        _ => format!("saved {filed} tracks as {name}"),
+    });
 }
 
 /// Every row the library holds, in one pass.
@@ -2950,6 +3022,61 @@ fn sync_catalog_terms(ui: &mut Ui) {
         crate::catalog::Active::Only(names) => names.iter().cloned().collect(),
     };
     ui.composed.set_catalogs(names);
+}
+
+/// `:export <path>` — write what view 3 holds as an `.m3u8`.
+///
+/// **The only thing m3u is for** (#118). It was the playlist's storage, which
+/// made a path authoritative for what a list contained — save here, open on
+/// another machine, resolve nothing. A playlist is an ordered collection now,
+/// and this is how one leaves the building: for a DJ program, a car stereo,
+/// anything that reads the standard format.
+///
+/// One-way by construction. Nothing reads an `.m3u8` back as authority, so an
+/// exported file going stale costs nothing and cannot re-key a list by
+/// location.
+fn export(ui: &mut Ui, ctx: &Context<'_>, path: &str) {
+    if ui.playlist.is_empty() {
+        ui.notify("nothing open to export");
+        return;
+    }
+    let rows: &dyn Listing = ctx.library;
+    // What to *say* is a row; where the file *is* is a holding. Two questions,
+    // asked at the moment of writing and neither answer kept (#86). A track
+    // this device does not hold has no location to write, so it is left out
+    // and counted.
+    let listed: Vec<_> = ui
+        .playlist
+        .entries()
+        .iter()
+        .filter_map(|id| Some((rows.listed(*id)?, rows.playable(*id)?)))
+        .collect();
+    let tracks: Vec<crate::m3u::Entry<'_>> = listed
+        .iter()
+        .map(|(row, at)| crate::m3u::Entry {
+            locator: std::path::Path::new(at.locator),
+            who: row.artist.unwrap_or(row.file_under),
+            title: row.title,
+            duration: row.duration,
+        })
+        .collect();
+    let missing = ui.playlist.len() - tracks.len();
+    let at = crate::config::expand_tilde(std::path::Path::new(path));
+    match crate::m3u::write(&at, &tracks) {
+        Ok(()) => {
+            ui.audit
+                .line("export", &format!("{} to {}", tracks.len(), at.display()));
+            ui.notify(match missing {
+                0 => format!("exported {} tracks to {}", tracks.len(), at.display()),
+                n => format!(
+                    "exported {} tracks to {}, {n} not held here",
+                    tracks.len(),
+                    at.display()
+                ),
+            });
+        }
+        Err(e) => ui.notify(e.to_string()),
+    }
 }
 
 /// `:collect <name>` — file what the view holds into a collection.
@@ -3585,11 +3712,10 @@ fn draw_playlists(frame: &mut Frame, area: Rect, ui: &Ui) {
     let mut lines: Vec<Line> = Vec::new();
 
     if ui.playlist_rows.is_empty() {
-        let hint = match ui.saved.as_ref().map(|s| s.dir().display().to_string()) {
-            Some(dir) => {
-                format!("  no playlists yet — `:playlist save <name>` writes one to {dir}")
-            }
-            None => "  no playlists — set `data_dir` in the config".to_string(),
+        let hint = if ui.data_dir.is_some() {
+            "  no playlists yet — `:playlist save <name>` writes the current one"
+        } else {
+            "  no playlists — set `data_dir` in the config"
         };
         lines.push(Line::from(Span::styled(
             hint,
@@ -5349,7 +5475,12 @@ mod tests {
         assert_eq!(snapshot.open_playlist.as_deref(), Some("roadtrip"));
 
         let mut fresh = with_playlists(&store);
-        fresh.saved = ui.saved.clone();
+        fresh.data_dir = ui.data_dir.clone();
+        // A relaunch folds the same log off disk — a playlist is facts now
+        // (#118) — so the fixture merges the records rather than sharing state.
+        fresh.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test2"));
+        fresh.log.merge(200, ui.log.records());
+        fresh.listened = fresh.log.catalogue();
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
         assert_eq!(
             fresh.open.as_ref().map(Open::name),
@@ -5377,7 +5508,12 @@ mod tests {
         assert_eq!(snapshot.open_playlist.as_deref(), Some("mix"));
 
         let mut fresh = with_playlists(&store);
-        fresh.saved = ui.saved.clone();
+        fresh.data_dir = ui.data_dir.clone();
+        // A relaunch folds the same log off disk — a playlist is facts now
+        // (#118) — so the fixture merges the records rather than sharing state.
+        fresh.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test2"));
+        fresh.log.merge(200, ui.log.records());
+        fresh.listened = fresh.log.catalogue();
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
 
         assert_eq!(fresh.view, View::Guide, "it landed on the playlist view");
@@ -5415,21 +5551,42 @@ mod tests {
         assert_eq!(snapshot.open_playlist.as_deref(), Some("electronic"));
 
         let mut fresh = with_playlists(&store);
-        fresh.saved = ui.saved.clone();
+        fresh.data_dir = ui.data_dir.clone();
+        // A relaunch folds the same log off disk — a playlist is facts now
+        // (#118) — so the fixture merges the records rather than sharing state.
+        fresh.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test2"));
+        fresh.log.merge(200, ui.log.records());
+        fresh.listened = fresh.log.catalogue();
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
         assert!(fresh.open.as_ref().is_some_and(Open::is_rule));
         assert_eq!(fresh.playlist.len(), 2, "the rule was not re-evaluated");
     }
 
+    /// How many entries a playlist holds, **read back from the facts**.
+    ///
+    /// Was `m3u::read(&path).len()` — a file on disk. A playlist is an ordered
+    /// collection now (#118), so "was it written through" is a question for
+    /// the log.
+    fn filed(ui: &Ui, name: &str) -> usize {
+        let id = crate::model::id::Id::<crate::model::entity::Collection>::of_name(name);
+        ui.listened
+            .entries
+            .iter()
+            .filter(|(c, _, _)| *c == id)
+            .count()
+    }
+
+    /// A UI that can write facts — which is where a playlist lives now (#118).
     fn ui_with_saved(store: &Scan, name: &str) -> (Ui, PathBuf) {
         let dir = scratch(name);
         let mut ui = with_playlists(store);
-        ui.saved = Some(crate::playlist::Playlists::new(&dir));
+        ui.data_dir = Some(dir.clone());
+        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         (ui, dir)
     }
 
     #[test]
-    fn a_saved_playlist_round_trips_through_a_file() {
+    fn a_saved_playlist_round_trips_through_the_log() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, dir) = ui_with_saved(&store, "save-open");
@@ -5439,11 +5596,8 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist save roadtrip");
-        assert!(
-            dir.join("playlists/roadtrip.m3u8").exists(),
-            "{}",
-            ui.status
-        );
+        assert_eq!(filed(&ui, "roadtrip"), 2, "{}", ui.status);
+        let _ = &dir;
 
         ui.playlist.clear();
         press(&mut ui, &ctx, ":");
@@ -5481,30 +5635,48 @@ mod tests {
         assert_eq!(ui.playlist.len(), before - 1, "still not editable");
     }
 
-    /// A playlist naming music the library does not have is short, and says so
-    /// — quietly dropping tracks is how you stop trusting it.
+    /// A playlist holding music **this device** does not have is short, and
+    /// says so — quietly dropping tracks is how you stop trusting it.
+    ///
+    /// **The question changed with the storage** (#118). An `.m3u8` named
+    /// paths, so the miss was "the library does not know this path". Entries
+    /// are recordings, so the library always knows them and the miss is now
+    /// "no copy here" — a row on the NAS is an ordinary row and an unopenable
+    /// one, which is a better answer than the old one could give.
     #[test]
-    fn tracks_a_playlist_names_but_the_library_lacks_are_reported() {
+    fn tracks_a_playlist_holds_but_this_device_lacks_are_reported() {
+        use crate::model::entity::{Collection, Recording};
+        use crate::model::id::Id;
+
         let store = genre_fixture();
         let ctx = ctx_of(&store);
-        let (mut ui, dir) = ui_with_saved(&store, "missing");
-        let known = store.iter().next().unwrap().at.display().to_string();
-        std::fs::create_dir_all(dir.join("playlists")).unwrap();
-        std::fs::write(
-            dir.join("playlists/partial.m3u8"),
-            format!(
-                "#EXTM3U
-{known}
-/m/gone.mp3
-"
-            ),
-        )
-        .unwrap();
+        let (mut ui, _dir) = ui_with_saved(&store, "missing");
+
+        let here = Listing::recording_of(lib_of(&store), Listing::rows(lib_of(&store))[0])
+            .expect("a scanned row");
+        let elsewhere = Id::<Recording>::derived(b"held on the NAS");
+        let id = Id::<Collection>::of_name("partial");
+        let now = 100;
+        record(&mut ui, now, |log| {
+            log.name_collection(now, id, "partial", true);
+            let first = crate::model::ord::OrdKey::between(None, None);
+            log.add_to_collection(now, id, here, first.clone());
+            log.add_to_collection(
+                now,
+                id,
+                elsewhere,
+                crate::model::ord::OrdKey::between(Some(&first), None),
+            );
+        });
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist open partial");
         assert_eq!(ui.playlist.len(), 1);
-        assert!(ui.status.contains("1 not in the library"), "{}", ui.status);
+        assert!(
+            ui.status.contains("1 not held on this device"),
+            "{}",
+            ui.status
+        );
     }
 
     /// One vocabulary: `open` takes a rule or a file without caring which.
@@ -5512,14 +5684,9 @@ mod tests {
     fn listing_shows_rules_and_saved_files_together() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
-        let (mut ui, dir) = ui_with_saved(&store, "listing");
-        std::fs::create_dir_all(dir.join("playlists")).unwrap();
-        std::fs::write(
-            dir.join("playlists/roadtrip.m3u8"),
-            "#EXTM3U
-",
-        )
-        .unwrap();
+        let (mut ui, _dir) = ui_with_saved(&store, "listing");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist new roadtrip");
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist list");
@@ -5541,7 +5708,8 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist save nothing");
         assert!(ui.status.contains("empty"), "{}", ui.status);
-        assert!(!dir.join("playlists/nothing.m3u8").exists());
+        assert_eq!(filed(&ui, "nothing"), 0);
+        let _ = &dir;
     }
 
     /// #45: this used to be a hardcoded 10, whatever the pane's height.
@@ -5706,13 +5874,9 @@ mod tests {
     fn the_left_pane_lists_rules_and_saved_files() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
-        let (mut ui, dir) = ui_with_saved(&store, "view8");
-        std::fs::create_dir_all(dir.join("playlists")).unwrap();
-        std::fs::write(
-            dir.join("playlists/roadtrip.m3u8"),
-            "#EXTM3U\n/m/a.mp3\n/m/b.mp3\n",
-        )
-        .unwrap();
+        let (mut ui, _dir) = ui_with_saved(&store, "view8");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist new roadtrip");
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 3");
@@ -5824,7 +5988,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         let dir = scratch("view8-empty");
-        ui.saved = Some(crate::playlist::Playlists::new(&dir));
+        ui.data_dir = Some(dir.clone());
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 3");
@@ -5833,24 +5997,13 @@ mod tests {
         assert!(out.contains("playlists"), "{out}");
     }
 
-    /// A file that cannot be read still gets a row — it exists, and hiding it
-    /// would be stranger than saying so.
-    #[test]
-    fn an_unreadable_playlist_is_listed_rather_than_hidden() {
-        let store = genre_fixture();
-        let ctx = ctx_of(&store);
-        let (mut ui, dir) = ui_with_saved(&store, "view8-unreadable");
-        std::fs::create_dir_all(dir.join("playlists/broken.m3u8")).unwrap();
-
-        press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 3");
-        let row = ui
-            .playlist_rows
-            .iter()
-            .find(|r| r.name == "broken")
-            .expect("not listed");
-        assert_eq!(row.detail, "unreadable");
-    }
+    // **`an_unreadable_playlist_is_listed_rather_than_hidden` lived here and
+    // is gone** (#118). It made a directory named `broken.m3u8`, opened view
+    // 3, and asserted the row said "unreadable".
+    //
+    // There is no file to fail to read any more. A playlist is a collection,
+    // so it exists as facts or it does not exist — the state the test was
+    // guarding against cannot be reached.
 
     /// The two panes are view 1's shape, so `tab` and `pane-left`/`right`
     /// work here without any new keys.
@@ -5897,8 +6050,8 @@ mod tests {
 
         assert_eq!(ui.playlist.len(), 1, "everything from the cursor should go");
         // Written through, like any other edit.
-        let at = dir.join("playlists/mix.m3u8");
-        assert_eq!(crate::m3u::read(&at).unwrap().len(), 1);
+        assert_eq!(filed(&ui, "mix"), 1);
+        let _ = &dir;
     }
 
     /// A count that runs off the end takes what is there and stops, rather
@@ -6135,8 +6288,8 @@ mod tests {
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "p");
 
-        let at = dir.join("playlists/mix.m3u8");
-        assert_eq!(crate::m3u::read(&at).unwrap().len(), 1, "{}", ui.status);
+        assert_eq!(filed(&ui, "mix"), 1, "{}", ui.status);
+        let _ = &dir;
     }
 
     #[test]
@@ -6191,9 +6344,9 @@ mod tests {
         press(&mut ui, &ctx, "u");
         assert_eq!(ui.playlist.entries(), original, "the cut was not undone");
 
-        // An undo is an edit like any other: the file follows.
-        let at = dir.join("playlists/mix.m3u8");
-        assert_eq!(crate::m3u::read(&at).unwrap().len(), original.len());
+        // An undo is an edit like any other: the facts follow.
+        assert_eq!(filed(&ui, "mix"), original.len());
+        let _ = &dir;
     }
 
     #[test]
@@ -6567,21 +6720,29 @@ mod tests {
 
     /// An edit is written through, the same rule ratings and plays follow:
     /// losing what you meant is worse than the cost of a write.
+    ///
+    /// **Written to the log rather than to a file** (#118), so this survives
+    /// being opened on another machine — which the `.m3u8` it replaced did
+    /// not, because the file named locations.
     #[test]
-    fn an_edit_is_written_to_the_file_immediately() {
+    fn an_edit_is_written_through_immediately() {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
-        let (mut ui, dir) = ui_with_saved(&store, "write-through");
+        let (mut ui, _dir) = ui_with_saved(&store, "write-through");
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist new roadtrip");
-        let at = dir.join("playlists/roadtrip.m3u8");
+        let named = crate::model::id::Id::<crate::model::entity::Collection>::of_name("roadtrip");
         assert!(
-            at.exists(),
-            "a new playlist is a file at once: {}",
+            ui.listened.collections.contains_key(&named),
+            "a new playlist is named at once: {}",
             ui.status
         );
-        assert!(crate::m3u::read(&at).unwrap().is_empty());
+        assert!(
+            ui.listened.collections[&named].ordered,
+            "a playlist is an *ordered* collection"
+        );
+        assert_eq!(filed(&ui, "roadtrip"), 0);
 
         ui.view = View::Sorted;
         execute(
@@ -6592,15 +6753,12 @@ mod tests {
                 path: None,
             },
         );
-        assert_eq!(crate::m3u::read(&at).unwrap().len(), 1, "{}", ui.status);
+        assert_eq!(filed(&ui, "roadtrip"), 1, "{}", ui.status);
 
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
         execute(&mut ui, &ctx, Command::Remove);
-        assert!(
-            crate::m3u::read(&at).unwrap().is_empty(),
-            "the removal was not written"
-        );
+        assert_eq!(filed(&ui, "roadtrip"), 0, "the removal was not written");
     }
 
     #[test]
@@ -6854,7 +7012,7 @@ mod tests {
 
         // Artist row selected: `y` adds everything under it — to the open
         // playlist, since adding means adding to the one you picked.
-        ui.saved = Some(crate::playlist::Playlists::new(&scratch("add-tree")));
+        ui.data_dir = Some(scratch("add-tree"));
         new_playlist(&mut ui, &ctx, "mix");
         ui.view = View::Tree;
         let expected = ui.tree.tracks_for(&ui.library).len();
@@ -6871,7 +7029,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.saved = Some(crate::playlist::Playlists::new(&scratch("remove-only")));
+        ui.data_dir = Some(scratch("remove-only"));
         new_playlist(&mut ui, &ctx, "mix");
         ui.view = View::Tree;
         press(&mut ui, &ctx, "a");

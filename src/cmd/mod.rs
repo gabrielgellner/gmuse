@@ -711,6 +711,12 @@ pub enum Command {
     /// had callers only in tests, so the Dance collection had to be seeded by
     /// a tool pass reading a folder.
     Collect(String),
+    /// `:export <path>` — write what view 3 holds as an `.m3u8`.
+    ///
+    /// **The only thing m3u is for** (#118). It was the playlist's storage,
+    /// which made a path authoritative for what a list contained; a playlist
+    /// is an ordered collection now, and m3u is how one leaves the building.
+    Export(String),
     Freeze,
     Rate(RateSpec),
     /// Narrow the library to what matches. `None` clears it.

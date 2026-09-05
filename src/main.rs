@@ -504,7 +504,6 @@ fn run_tui(
     let mut state = ui::Ui::new(library);
     state.catalogs = app.catalogs.clone();
     state.playlists = loaded.playlists.clone();
-    state.saved = Some(playlist::Playlists::new(&loaded.data_dir));
 
     // Opened before the terminal is taken over, so a failure is visible.
     if let Some(path) = log_path {

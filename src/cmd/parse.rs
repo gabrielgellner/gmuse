@@ -45,6 +45,7 @@ pub const VERBS: &[&str] = &[
     "catalog",
     "collect",
     "down",
+    "export",
     "filter",
     "fold",
     "go",
@@ -297,6 +298,15 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "rate" => Command::Rate(rate_spec(rest)?),
         "catalog" => Command::Catalog(catalog_spec(rest)?),
         "playlist" => Command::Playlist(playlist_spec(rest)?),
+        "export" => {
+            if rest.is_empty() {
+                return Err(ParseError::Missing {
+                    cmd: "export",
+                    what: "a path to write",
+                });
+            }
+            Command::Export(rest.to_string())
+        }
         "collect" => {
             if rest.is_empty() {
                 return Err(ParseError::Missing {
@@ -684,6 +694,7 @@ pub fn format(cmd: &Command) -> String {
             PlaylistSpec::New(n) => format!("playlist new {n}"),
         },
         Command::Collect(name) => format!("collect {name}"),
+        Command::Export(path) => format!("export {path}"),
         Command::Freeze => "freeze".into(),
         // Round-trips through `command`, which is what `:bind` shown in the
         // settings view depends on.
@@ -1071,6 +1082,7 @@ mod tests {
                 "view" => "view 1".to_string(),
                 "catalog" => format!("{verb} all"),
                 "collect" => "collect Dance".to_string(),
+                "export" => "export /tmp/x.m3u8".to_string(),
                 "playlist" => "playlist open fresh".to_string(),
                 "filter" => "filter year>2000".to_string(),
                 "rate" => "rate 4".to_string(),

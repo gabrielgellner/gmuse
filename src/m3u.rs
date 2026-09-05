@@ -1,4 +1,4 @@
-//! Reading and writing `.m3u8` — issue #22.
+//! Writing `.m3u8` — issue #22, narrowed by #118.
 //!
 //! Not a format of our own. A playlist **is** an ordered list of paths, which
 //! is exactly what M3U is, and M3U is what everything reads — VLC,
@@ -7,9 +7,19 @@
 //! every other program's ability to open the file.
 //!
 //! We write `.m3u8` — the `8` declares UTF-8, which removes the one genuine
-//! ambiguity in an otherwise unspecified format — and read `.m3u`, `.m3u8` and
-//! cmus's `.pl`, the last being path-per-line with no `#` lines and therefore
-//! a strict subset.
+//! ambiguity in an otherwise unspecified format.
+//!
+//! ## Export only, and the reading half is deleted
+//!
+//! This used to be the playlist's **storage**, which made a path authoritative
+//! for what a list contained: save here, open on another machine, resolve
+//! nothing. A playlist is an ordered collection of recordings now (#118), and
+//! m3u is how one leaves the building — for a DJ program, a car stereo,
+//! anything that reads the standard format.
+//!
+//! Nothing reads one back. That is enforced by there being no `read`: an
+//! exported file going stale costs nothing, and cannot re-key a list by
+//! location.
 //!
 //! ```text
 //! #EXTM3U
@@ -28,19 +38,8 @@
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
-/// Extensions we will open as a playlist.
-pub const EXTENSIONS: &[&str] = &["m3u8", "m3u", "pl"];
-
-/// What we write.
-pub const EXTENSION: &str = "m3u8";
-
 #[derive(Debug, thiserror::Error)]
 pub enum M3uError {
-    #[error("reading {path}: {source}")]
-    Read {
-        path: PathBuf,
-        source: std::io::Error,
-    },
     #[error("writing {path}: {source}")]
     Write {
         path: PathBuf,
@@ -101,38 +100,6 @@ pub fn write(at: &Path, entries: &[Entry<'_>]) -> Result<(), M3uError> {
     std::fs::rename(&tmp, at).map_err(fail)
 }
 
-/// The paths a playlist names, in order.
-///
-/// Comments and blank lines are skipped, which is what makes `#EXTINF`
-/// write-only and what lets a `.pl` — path-per-line, no `#` at all — be read
-/// by the same code.
-pub fn parse(at: &Path, text: &str) -> Vec<PathBuf> {
-    let base = at.parent().unwrap_or(Path::new(""));
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|l| {
-            let p = Path::new(l);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                // Relative to the playlist, not to the process's working
-                // directory — a playlist opened from anywhere must resolve the
-                // same way.
-                normalise(&base.join(p))
-            }
-        })
-        .collect()
-}
-
-pub fn read(at: &Path) -> Result<Vec<PathBuf>, M3uError> {
-    let text = std::fs::read_to_string(at).map_err(|source| M3uError::Read {
-        path: at.to_path_buf(),
-        source,
-    })?;
-    Ok(parse(at, &text))
-}
-
 /// `path` expressed relative to `base`, or absolute when that is not possible.
 ///
 /// Falls back to absolute across a drive or root boundary rather than
@@ -167,27 +134,6 @@ fn relative_to(base: &Path, path: &Path) -> PathBuf {
     }
 }
 
-/// Resolve `.` and `..` textually.
-///
-/// Not `canonicalize`: that touches the filesystem and fails on a path that
-/// does not exist, and a playlist naming a track on an unmounted drive should
-/// still round-trip rather than vanish.
-fn normalise(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
-                }
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,65 +166,15 @@ mod tests {
         );
     }
 
-    /// Relative so that a library and its playlists move together — which is
-    /// the whole reason for putting them under `data_dir`.
     #[test]
-    fn a_written_playlist_reads_back_to_the_same_paths() {
-        let entries = [
-            entry("/m/General/a.mp3", "A", "One", 100),
-            entry("/m/Dance/b.mp3", "B", "Two", 200),
-        ];
-        let at = Path::new("/m/.gmuse/playlists/mix.m3u8");
-        let text = render(at, &entries);
-        assert_eq!(
-            parse(at, &text),
-            vec![
-                PathBuf::from("/m/General/a.mp3"),
-                PathBuf::from("/m/Dance/b.mp3")
-            ]
-        );
-
-        // And the same list read from a moved library resolves under the new
-        // root, because nothing absolute was written.
-        assert_eq!(
-            parse(Path::new("/elsewhere/.gmuse/playlists/mix.m3u8"), &text),
-            vec![
-                PathBuf::from("/elsewhere/General/a.mp3"),
-                PathBuf::from("/elsewhere/Dance/b.mp3")
-            ]
-        );
-    }
-
-    /// `#EXTINF` is written for other programs and ignored on read: our own
-    /// tags are better, and a metadata cache in a text file goes stale.
-    #[test]
-    fn comments_and_blank_lines_are_skipped() {
-        let at = Path::new("/m/p.m3u8");
-        let text = "#EXTM3U\n\n#EXTINF:211,Someone - Something\n/abs/a.mp3\n\n# a note\nb.mp3\n";
-        assert_eq!(
-            parse(at, text),
-            vec![PathBuf::from("/abs/a.mp3"), PathBuf::from("/m/b.mp3")]
-        );
-    }
-
-    /// cmus's `.pl` is path-per-line with no `#` lines — a strict subset, so
-    /// the same parser reads it for free.
-    #[test]
-    fn a_bare_path_per_line_file_reads() {
-        let at = Path::new("/m/p.pl");
-        assert_eq!(
-            parse(at, "/abs/a.mp3\n/abs/b.mp3\n"),
-            vec![PathBuf::from("/abs/a.mp3"), PathBuf::from("/abs/b.mp3")]
-        );
-    }
-
-    #[test]
-    fn dot_segments_resolve_without_touching_the_filesystem() {
+    fn a_relative_path_is_written_without_touching_the_filesystem() {
         // `canonicalize` would fail here; a track on an unmounted drive must
-        // still round-trip rather than vanish.
+        // still be written rather than vanish.
         assert_eq!(
-            parse(Path::new("/m/.gmuse/p.m3u8"), "../General/../Dance/x.mp3\n"),
-            vec![PathBuf::from("/m/Dance/x.mp3")]
+            // `render` passes the playlist's *parent*, which is what a path in
+            // the file is relative to.
+            relative_to(Path::new("/m/.gmuse"), Path::new("/m/Dance/x.mp3")),
+            PathBuf::from("../Dance/x.mp3")
         );
     }
 
@@ -323,11 +219,10 @@ mod tests {
         write(&at, &[t]).unwrap();
         assert!(at.exists(), "the directory was not created");
         assert!(!at.with_extension("tmp").exists(), "a temp file was left");
-        assert_eq!(read(&at).unwrap(), vec![PathBuf::from("/m/a.mp3")]);
-    }
-
-    #[test]
-    fn reading_something_missing_is_an_error_not_an_empty_playlist() {
-        assert!(read(Path::new("/nope/nothing.m3u8")).is_err());
+        // Read back as text, not through a parser: there isn't one any more,
+        // and that is the point (#118) — nothing here reads an m3u as
+        // authority for what a list contains.
+        let written = std::fs::read_to_string(&at).unwrap();
+        assert!(written.contains("/m/a.mp3"), "{written}");
     }
 }
