@@ -7,6 +7,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use crate::model::entity::Encoding;
+use crate::model::id::Id;
+use crate::model::seam::Librarian;
 use crate::store::{Store, Track, TrackId};
 
 /// Re-exported so callers keep saying `library::SortKey`. It lives in the
@@ -59,6 +62,112 @@ impl Library {
         };
         lib.reindex(store);
         lib
+    }
+
+    /// Rebuild from what the **model** says — issue #84.
+    ///
+    /// The shape and every caller are unchanged: this still answers in
+    /// `TrackId`, because the player holds handles and dissolving that is a
+    /// separate move. What changes is where the two grouping decisions come
+    /// from.
+    ///
+    /// **Artist grouping asks for a credit** rather than picking album artist
+    /// else artist, which guesses at something the model states — and guesses
+    /// wrong on exactly the track carrying a guest credit.
+    ///
+    /// **The album level is the release group of the copy's own slot**, so two
+    /// pressings stop being two albums, and a song held on both an album and a
+    /// compilation appears under each rather than under whichever placement
+    /// sorted first (#78).
+    ///
+    /// A file the model has no listing for keeps its tag-derived place rather
+    /// than vanishing. Not tidiness: a library is browsed while it is being
+    /// catalogued, and a file dropping out of the tree because nothing has
+    /// identified it yet would be the worst possible moment to lose it.
+    pub fn project(
+        librarian: &Librarian,
+        store: &Store,
+        members: HashSet<TrackId>,
+        smart_artist_sort: bool,
+    ) -> Self {
+        let mut lib = Library {
+            members,
+            smart_artist_sort,
+            ..Default::default()
+        };
+
+        // Which files hold each copy. A copy is bytes, so two files with
+        // identical audio are one copy held twice — both belong in the tree.
+        let mut files: BTreeMap<Id<Encoding>, Vec<TrackId>> = BTreeMap::new();
+        for &id in &lib.members {
+            if let Some(audio) = store.get(id).and_then(|t| t.audio_id) {
+                files.entry(Id::of_audio(&audio)).or_default().push(id);
+            }
+        }
+
+        let tree = crate::model::tree::Tree::of(librarian, smart_artist_sort);
+        let mut placed: HashSet<TrackId> = HashSet::new();
+        for (artist_key, albums) in tree.artists() {
+            for (album_key, album) in albums {
+                for listing in &album.tracks {
+                    let Some(here) = listing.copy.and_then(|c| files.get(&c)) else {
+                        continue;
+                    };
+                    lib.artist_names
+                        .entry(artist_key.clone())
+                        .or_insert_with(|| tree.artist_name(artist_key).to_string());
+                    lib.album_names
+                        .entry((artist_key.clone(), album_key.clone()))
+                        .or_insert_with(|| album.title.clone());
+                    let into = lib
+                        .tree
+                        .entry(artist_key.clone())
+                        .or_default()
+                        .entry(album_key.clone())
+                        .or_default();
+                    for &track in here {
+                        into.push(track);
+                        placed.insert(track);
+                    }
+                }
+            }
+        }
+
+        let unplaced: HashSet<TrackId> = lib.members.difference(&placed).copied().collect();
+        lib.file_by_tag(store, &unplaced);
+        lib.sorted = lib
+            .tree
+            .values()
+            .flat_map(|albums| albums.values().flatten().copied())
+            .collect();
+        lib
+    }
+
+    /// File tracks under the names their tags carry — the pre-#84 rule, kept
+    /// for whatever the model cannot place.
+    fn file_by_tag(&mut self, store: &Store, ids: &HashSet<TrackId>) {
+        for &id in ids {
+            let Some(track) = store.get(id) else { continue };
+            let artist = sort_key(track.file_under(), self.smart_artist_sort);
+            let album = sort_key(track.album_or_unknown(), false);
+            self.artist_names
+                .entry(artist.clone())
+                .or_insert_with(|| track.file_under().to_string());
+            self.album_names
+                .entry((artist.clone(), album.clone()))
+                .or_insert_with(|| track.album_or_unknown().to_string());
+            self.tree
+                .entry(artist)
+                .or_default()
+                .entry(album)
+                .or_default()
+                .push(id);
+        }
+        for albums in self.tree.values_mut() {
+            for tracks in albums.values_mut() {
+                tracks.sort_by(|a, b| track_order(store, *a, *b));
+            }
+        }
     }
 
     fn reindex(&mut self, store: &Store) {
@@ -383,5 +492,103 @@ mod tests {
             sort_key("The Österreichers", true).as_str(),
             "osterreichers"
         );
+    }
+}
+
+#[cfg(test)]
+mod projection {
+    //! **Where the two grouping decisions come from** — issue #84.
+
+    use super::*;
+    use crate::model::instance::{Instance, Scanned};
+
+    fn scan(title: &str, artist: &str, album_artist: Option<&str>, album: &str) -> Scanned {
+        Scanned {
+            audio: crate::audio_id::AudioId {
+                scheme: 1,
+                hash: title.bytes().fold(1u128, |h, b| h * 31 + b as u128)
+                    + album.len() as u128 * 7919,
+            },
+            title: title.into(),
+            artist: artist.into(),
+            album: Some(album.into()),
+            album_artist: album_artist.map(str::to_string),
+            disc: Some(1),
+            track: Some(1),
+            ..Default::default()
+        }
+    }
+
+    fn build(scan: &[Scanned]) -> (Store, Library) {
+        let mut i = Instance::new(crate::model::id::Id::derived(b"laptop"));
+        i.ingest(100, scan);
+        let l = Librarian::from_catalogue(&i.catalogue());
+
+        let mut store = Store::default();
+        for s in scan {
+            let mut t = Track {
+                path: std::path::PathBuf::from(format!(
+                    "/m/{}-{}.mp3",
+                    s.album.as_deref().unwrap_or(""),
+                    s.title
+                )),
+                ..Default::default()
+            };
+            t.artist = Some(s.artist.clone());
+            t.albumartist = s.album_artist.clone();
+            t.album = s.album.clone();
+            t.title = Some(s.title.clone());
+            t.audio_id = Some(s.audio);
+            store.upsert(t);
+        }
+        let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
+        let lib = Library::project(&l, &store, members, false);
+        (store, lib)
+    }
+
+    /// **Two pressings of one album are one album**, which the tags cannot
+    /// say.
+    ///
+    /// `Track::album_or_unknown` reads the album string off each file, so a
+    /// reissue whose tag capitalises differently is a second album node. The
+    /// model groups by the release group both pressings name, and the group
+    /// has one title.
+    #[test]
+    fn the_album_comes_from_the_release_group() {
+        let mut a = scan("Callisto", "Bodzin", Some("Bodzin"), "Luna");
+        let mut b = scan("Oberon", "Bodzin", Some("Bodzin"), "Luna (Deluxe Edition)");
+        // One album to MusicBrainz; two pressings, and the tags say so.
+        let group = uuid::Uuid::from_u128(0x9e11);
+        a.mb_release_group = Some(group);
+        b.mb_release_group = Some(group);
+        let (store, lib) = build(&[a.clone(), b.clone()]);
+
+        assert_eq!(lib.album_count(), 1, "two pressings, one album");
+
+        let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
+        assert_eq!(
+            Library::from_members(&store, members, false).album_count(),
+            2,
+            "the tag reading has to disagree, or this test proves nothing"
+        );
+    }
+
+    /// **A file the model cannot place is still in the tree.** A library is
+    /// browsed while it is being catalogued.
+    #[test]
+    fn something_the_model_has_no_listing_for_is_kept() {
+        let mut store = Store::default();
+        let mut t = Track {
+            path: std::path::PathBuf::from("/m/x.mp3"),
+            ..Default::default()
+        };
+        t.artist = Some("Nobody".into());
+        t.album = Some("Untagged".into());
+        store.upsert(t);
+        let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
+
+        let lib = Library::project(&Librarian::new(), &store, members, false);
+        assert_eq!(lib.sorted().len(), 1, "an unidentified file vanished");
+        assert_eq!(lib.artist_count(), 1);
     }
 }

@@ -2745,7 +2745,9 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         }
         m
     };
-    ui.library = Library::from_members(ctx.store, members, ui.smart_artist_sort);
+    // The same projection the startup path uses (#84), so refiltering cannot
+    // quietly file things a second way.
+    ui.library = Library::project(ctx.library, ctx.store, members, ui.smart_artist_sort);
     ui.tree.selected = 0;
     ui.sorted = 0;
     // Playlists and the queue are deliberately untouched: they hold TrackIds

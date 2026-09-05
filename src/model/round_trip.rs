@@ -40,6 +40,7 @@ fn album() -> Vec<Scanned> {
         artist: "Stephan Bodzin & Marc Romboy".into(),
         identity: Some(Basis::MusicBrainz(uuid::Uuid::from_u128(mbid))),
         artist_mbid: Some(uuid::Uuid::from_u128(0xb0d21)),
+        credit_is_joined: false,
         album_artist_mbid: Some(uuid::Uuid::from_u128(0xb0d21)),
         album: Some("Luna".into()),
         album_artist: Some("Stephan Bodzin & Marc Romboy".into()),

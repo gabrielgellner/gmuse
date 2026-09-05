@@ -133,6 +133,7 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // `musicbrainz_trackid` onto it, and both mean the recording. The top
         // rung of #89's ladder; a harvest pass fills the middle one.
         artist_mbid: primary_artist(&get(ItemKey::MusicBrainzArtistId)),
+        credit_is_joined: get(ItemKey::MusicBrainzArtistId).contains('/'),
         album_artist_mbid: primary_artist(&get(ItemKey::MusicBrainzReleaseArtistId)),
         // The ladder, best rung first (#89): MusicBrainz where the tags carry
         // it, otherwise whatever authority does name this performance. `None`

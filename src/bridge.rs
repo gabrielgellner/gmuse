@@ -65,6 +65,7 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                 // splits it. `populate` reads the tag properly; this goes away
                 // with `Store` (#86).
                 artist_mbid: None,
+                credit_is_joined: false,
                 album_artist_mbid: None,
                 album: t.album.clone(),
                 album_artist: t.albumartist.clone(),

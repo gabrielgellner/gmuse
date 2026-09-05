@@ -44,9 +44,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::entity::{Recording, ReleaseGroup};
+use crate::model::entity::ReleaseGroup;
 use crate::model::id::Id;
-use crate::model::seam::Librarian;
+use crate::model::seam::{Librarian, Listing};
 use crate::model::sortkey::{SortKey, sort_key};
 use crate::model::spine::PartialDate;
 
@@ -58,7 +58,12 @@ pub struct Album {
     /// When the **album** first appeared, not when this pressing did.
     pub first_released: Option<PartialDate>,
     /// In disc-then-track order, as the tags claim it.
-    pub tracks: Vec<Id<Recording>>,
+    ///
+    /// **One entry per copy**, not per recording — issue #84. Two files are
+    /// two things you hold, and each knows which slot it sits in, so a song on
+    /// an album and on a compilation appears under both rather than under
+    /// whichever placement sorted first.
+    pub tracks: Vec<Listing>,
 }
 
 /// The tree a browser walks.
@@ -73,7 +78,7 @@ pub struct Tree {
     /// to recover the string, which is how a projection that exists to answer
     /// questions ends up unable to answer the simplest one.
     artist_names: BTreeMap<SortKey, String>,
-    flat: Vec<Id<Recording>>,
+    flat: Vec<Listing>,
 }
 
 /// Shown for a recording that belongs to no album.
@@ -89,37 +94,40 @@ impl Tree {
         // on every release that holds it; the file you have is on one, and the
         // tree is a list of what you have.
         for recording in l.recordings() {
-            let Some(row) = l.row(recording) else {
-                continue;
-            };
-            let artist = sort_key(&row.file_under, smart_artist_sort);
-            artist_names
-                .entry(artist.clone())
-                .or_insert_with(|| row.file_under.clone());
-            // Albums keep their article: "The Wall" belongs under T.
-            let title = row.album.clone().unwrap_or_else(|| NO_ALBUM.to_string());
-            let album_key = sort_key(&title, false);
-            let group = l.group_of(recording);
+            for listing in l.listings(recording) {
+                let Some(row) = l.row_of(recording, listing.copy) else {
+                    continue;
+                };
+                let slot = l.slot_of(listing.copy);
+                let artist = sort_key(&row.file_under, smart_artist_sort);
+                artist_names
+                    .entry(artist.clone())
+                    .or_insert_with(|| row.file_under.clone());
+                // Albums keep their article: "The Wall" belongs under T.
+                let title = row.album.clone().unwrap_or_else(|| NO_ALBUM.to_string());
+                let album_key = sort_key(&title, false);
+                let group = l.group_of(slot);
 
-            by_artist
-                .entry(artist)
-                .or_default()
-                .entry(album_key)
-                .or_insert_with(|| Album {
-                    group,
-                    title,
-                    first_released: group
-                        .and_then(|g| l.spine.groups.get(&g))
-                        .and_then(|g| g.first_released),
-                    tracks: Vec::new(),
-                })
-                .tracks
-                .push(recording);
+                by_artist
+                    .entry(artist)
+                    .or_default()
+                    .entry(album_key)
+                    .or_insert_with(|| Album {
+                        group,
+                        title,
+                        first_released: group
+                            .and_then(|g| l.spine.groups.get(&g))
+                            .and_then(|g| g.first_released),
+                        tracks: Vec::new(),
+                    })
+                    .tracks
+                    .push(listing);
+            }
         }
 
         for albums in by_artist.values_mut() {
             for album in albums.values_mut() {
-                album.tracks.sort_by_key(|r| l.place_of(*r));
+                album.tracks.sort_by_key(|c| l.place_of(l.slot_of(c.copy)));
             }
         }
         let flat = by_artist
@@ -139,7 +147,7 @@ impl Tree {
     }
 
     /// The whole tree flattened — artist, then album, then disc and track.
-    pub fn flat(&self) -> &[Id<Recording>] {
+    pub fn flat(&self) -> &[Listing] {
         &self.flat
     }
 
@@ -271,7 +279,19 @@ mod tests {
         // And both name the same performance, which is the whole premise.
         compilation.identity = original.identity.clone();
 
-        let (l, _) = tree_of(&[original.clone(), compilation.clone()]);
+        let (l, tree) = tree_of(&[original.clone(), compilation.clone()]);
+
+        // The tree lists both, each under its own album.
+        let albums: Vec<&str> = tree
+            .artists()
+            .flat_map(|(_, a)| a.values().map(|al| al.title.as_str()))
+            .collect();
+        assert_eq!(
+            albums,
+            vec!["Back in Black", "Who Made Who"],
+            "the tree showed one album for a song held on two"
+        );
+        assert_eq!(tree.flat().len(), 2, "two copies, two rows");
 
         // Each copy knows its own slot, so each answers with its own album.
         let mut seen: Vec<String> = Vec::new();
@@ -331,7 +351,7 @@ mod tests {
         let titles: Vec<_> = tree
             .flat()
             .iter()
-            .filter_map(|r| l.row(*r))
+            .filter_map(|c| l.row_of(c.recording, c.copy))
             .map(|r| r.title)
             .collect();
         assert_eq!(titles, ["First", "Second", "Third"]);
@@ -469,7 +489,7 @@ mod tests {
         let titles: Vec<_> = tree
             .flat()
             .iter()
-            .filter_map(|r| l.row(*r))
+            .filter_map(|c| l.row_of(c.recording, c.copy))
             .map(|r| r.title)
             .collect();
         assert_eq!(titles, ["First", "Second", "Nowhere"]);

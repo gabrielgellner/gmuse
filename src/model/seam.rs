@@ -389,8 +389,10 @@ impl Librarian {
     }
 
     /// The album a recording sits on, if any.
-    pub fn group_of(&self, recording: Id<Recording>) -> Option<Id<ReleaseGroup>> {
-        let track = self.spine.tracks_of_recording(recording).first().copied()?;
+    /// Asked of a slot, for the reason [`Librarian::files_under`] is: a
+    /// recording is on every release that holds it.
+    pub fn group_of(&self, slot: Option<Id<Track>>) -> Option<Id<ReleaseGroup>> {
+        let track = self.spine.tracks.get(&slot?)?;
         let medium = self.spine.media.get(&track.medium.id())?;
         let release = self.spine.releases.get(&medium.release.id())?;
         Some(release.group.id())
@@ -401,10 +403,8 @@ impl Librarian {
     /// Sorts unplaced recordings last rather than first, because a track with
     /// no number is a gap in what is known, and putting it at the top of an
     /// album would state something the tags never did.
-    pub fn place_of(&self, recording: Id<Recording>) -> (u16, u16) {
-        self.spine
-            .tracks_of_recording(recording)
-            .first()
+    pub fn place_of(&self, slot: Option<Id<Track>>) -> (u16, u16) {
+        slot.and_then(|s| self.spine.tracks.get(&s))
             .and_then(|t| {
                 self.spine
                     .media
@@ -419,6 +419,46 @@ impl Librarian {
     pub fn recordings(&self) -> impl Iterator<Item = Id<Recording>> + '_ {
         self.spine.recordings.keys().copied()
     }
+
+    /// Which slot a copy sits in.
+    pub fn slot_of(&self, copy: Option<Id<Encoding>>) -> Option<Id<Track>> {
+        self.placed.get(&copy?).copied()
+    }
+
+    /// **Every copy of a recording this library holds, as rows would list
+    /// them** — issue #84.
+    ///
+    /// One entry per copy, because a browse tree is a list of what you have
+    /// and two files are two things you have. A recording nothing holds is
+    /// still one entry, with no copy: §1 is explicit that a row nothing holds
+    /// is ordinary, and dropping it would make a wishlist entry invisible.
+    pub fn listings(&self, recording: Id<Recording>) -> Vec<Listing> {
+        let copies = self.encodings.of(recording);
+        if copies.is_empty() {
+            return vec![Listing {
+                recording,
+                copy: None,
+            }];
+        }
+        copies
+            .into_iter()
+            .map(|e| Listing {
+                recording,
+                copy: Some(e.id),
+            })
+            .collect()
+    }
+}
+
+/// A recording, and which copy of it a row is about.
+///
+/// The pair `row_of` takes, named so a browse tree can carry it. `copy` is
+/// `None` for a recording nothing here holds — an ordinary row, not a missing
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Listing {
+    pub recording: Id<Recording>,
+    pub copy: Option<Id<Encoding>>,
 }
 
 /// One displayed row.

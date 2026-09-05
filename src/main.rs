@@ -445,16 +445,12 @@ fn run_tui(
     }
     let first_run = log.records().is_empty();
 
-    let library = Library::from_members(
+    let members = app.catalogs.members(
         &app.store,
-        app.catalogs.members(
-            &app.store,
-            crate::filter::Env {
-                listened: Some(&listened),
-                now,
-            },
-        ),
-        smart_artist_sort,
+        crate::filter::Env {
+            listened: Some(&listened),
+            now,
+        },
     );
     // A socket that will not bind is a warning, not a failure: the player is
     // still a player without one, and refusing to start over a missing remote
@@ -477,6 +473,11 @@ fn run_tui(
         library_view.recordings().count(),
         assembling.elapsed().as_secs_f64()
     );
+
+    // **Grouped by what the model says, not by what the tags carry** (#84).
+    // The librarian has to exist first, which is why this sits below rather
+    // than beside the membership it is built from.
+    let library = Library::project(&library_view, &app.store, members, smart_artist_sort);
 
     let ctx = ui::Context {
         library: &library_view,

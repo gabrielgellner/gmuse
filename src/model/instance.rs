@@ -45,6 +45,15 @@ pub struct Scanned {
     /// a guest credit makes a new artist: `2Pac feat. Nate Dogg` is not `2Pac`
     /// to a hash (#89 §5).
     pub artist_mbid: Option<uuid::Uuid>,
+    /// Whether the artist tag names **several** artists.
+    ///
+    /// Picard `/`-joins every credited artist's id, so the field says outright
+    /// whether `Early James & Sierra Ferrell` is one artist's name or a credit
+    /// listing two. It matters because the id is minted from the *primary*
+    /// artist while the string names the whole credit — so naming an artist
+    /// from a joined string renames the primary artist to the joined credit,
+    /// globally, for every file that mentions them.
+    pub credit_is_joined: bool,
     /// **What names this performance**, if anything does — the identity half
     /// of a scan, kept apart from the descriptive half below.
     ///
@@ -182,13 +191,20 @@ impl Instance {
                 );
             }
 
-            self.append(
-                now,
-                Fact::ArtistNamed {
-                    artist,
-                    name: s.artist.clone(),
-                },
-            );
+            // **A joined credit names nobody.** The id belongs to the primary
+            // artist and the string belongs to the credit, so writing one as
+            // the other renamed Early James to `Early James & Sierra Ferrell`
+            // across the library. The string is kept — as `as_credited` on the
+            // credit, which is what a sleeve printed and where it belongs.
+            if !s.credit_is_joined {
+                self.append(
+                    now,
+                    Fact::ArtistNamed {
+                        artist,
+                        name: s.artist.clone(),
+                    },
+                );
+            }
             self.append(
                 now,
                 Fact::RecordingCatalogued {
@@ -246,13 +262,14 @@ impl Instance {
             // the only thing it could say. An unqualified tag really is a
             // performer credit; the difference is that this one was asserted,
             // by a scan, at a stamp, and can be corrected.
-            self.credit(
+            self.credit_as(
                 now,
                 CreditOn::Recording(recording),
                 artist,
                 "performer",
                 Source::TagVariant,
                 0,
+                s.credit_is_joined.then(|| s.artist.clone()),
             );
             // An album, where the tags name one. Its id derives from the
             // release group MBID when there is one, so two devices agree on
@@ -479,6 +496,22 @@ impl Instance {
         basis: Source,
         position: u8,
     ) {
+        self.credit_as(now, subject, artist, role, basis, position, None);
+    }
+
+    /// A credit, with what the sleeve printed where it differs from the
+    /// artist's own name — a joined credit being the usual case.
+    #[allow(clippy::too_many_arguments)]
+    pub fn credit_as(
+        &mut self,
+        now: i64,
+        subject: CreditOn,
+        artist: Id<Artist>,
+        role: &str,
+        basis: Source,
+        position: u8,
+        as_credited: Option<String>,
+    ) {
         let id = Id::<Role>::of_name(role);
         let class = crate::model::reference::ROLES
             .iter()
@@ -500,7 +533,7 @@ impl Instance {
                 role: id,
                 basis,
                 position,
-                as_credited: None,
+                as_credited,
                 join_phrase: None,
             },
         );
@@ -940,6 +973,7 @@ mod containment_tests {
             title: format!("Track {track}"),
             artist: "Bodzin".into(),
             artist_mbid: None,
+            credit_is_joined: false,
             identity: Some(crate::model::basis::Basis::MusicBrainz(
                 uuid::Uuid::from_u128(u128::from(disc) << 32 | u128::from(track)),
             )),
@@ -1117,6 +1151,7 @@ mod credit_tests {
             title: title.into(),
             artist: artist.into(),
             artist_mbid: None,
+            credit_is_joined: false,
             identity: Some(crate::model::basis::Basis::MusicBrainz(
                 uuid::Uuid::from_u128(title.len() as u128),
             )),
@@ -1254,6 +1289,40 @@ mod credit_tests {
                 .map(|(_, c, _)| *c)
                 .collect::<Vec<_>>(),
             vec![Id::<Qualifier>::of_label("radio-edit")]
+        );
+    }
+
+    /// **A joined credit names nobody.**
+    ///
+    /// The id is minted from the *primary* artist and the string names the
+    /// whole credit, so writing one as the other renames the primary artist to
+    /// the joined credit — globally, for every file that mentions them, since
+    /// the name is a last-writer register. On this library that renamed
+    /// `Early James` to `Early James & Sierra Ferrell` from a single track.
+    #[test]
+    fn a_joined_credit_does_not_rename_the_primary_artist() {
+        let mbid = uuid::Uuid::from_u128(0xea41);
+        let mut alone = scan("Pigsty", "Early James");
+        alone.artist_mbid = Some(mbid);
+        let mut joined = scan("Real Low Down Lonesome", "Early James & Sierra Ferrell");
+        joined.artist_mbid = Some(mbid);
+        joined.credit_is_joined = true;
+
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[alone, joined]);
+        let cat = i.catalogue();
+
+        let artist = Id::<Artist>::of_artist(Some(mbid), "anything");
+        assert_eq!(
+            cat.artist_names.get(&artist).map(String::as_str),
+            Some("Early James"),
+            "the joined credit renamed the artist it is only the primary of"
+        );
+        assert!(
+            cat.credits
+                .values()
+                .any(|c| c.as_credited.as_deref() == Some("Early James & Sierra Ferrell")),
+            "and the string the sleeve printed was thrown away"
         );
     }
 
