@@ -107,7 +107,7 @@ pub struct Config {
     /// rewrite every binding already resolved through it.
     #[serde(default)]
     pub leader: Option<String>,
-    /// Library roots, for when you do not want named catalogs.
+    /// Shelf roots, for when you do not want named catalogs.
     ///
     /// The durable home for roots: the cache is derived data and is thrown
     /// away whenever its format changes, so roots that live only there are

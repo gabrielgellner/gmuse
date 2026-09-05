@@ -272,12 +272,12 @@ pub fn fmt_duration(d: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Store, Track};
+    use crate::store::{Scan, Track};
     use std::path::PathBuf;
     use std::time::Duration;
 
-    fn store_with(rows: &[(&str, &str, Option<u32>, &str)]) -> (Store, Vec<TrackId>) {
-        let mut store = Store::new();
+    fn store_with(rows: &[(&str, &str, Option<u32>, &str)]) -> (Scan, Vec<TrackId>) {
+        let mut store = Scan::new();
         let mut ids = Vec::new();
         for (i, (artist, album, disc, title)) in rows.iter().enumerate() {
             ids.push(store.upsert(Track {

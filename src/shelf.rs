@@ -1,8 +1,17 @@
-//! The library projections — DESIGN §4.
+//! Where what you hold is arranged, so you can find it — DESIGN §4.
+//!
+//! It was called `Shelf` after this rename and `Library` before it, and the
+//! old name claimed too much in the same way `Store` did: this holds no
+//! truth, only an arrangement of it. Views 1 and 2 are one membership in two
+//! shapes — a tree by artist then album, and the same tracks in one order.
+//!
+//! Named for the vocabulary the rest of the model speaks — catalogue, spine,
+//! holdings, imprint — and deliberately not `view`, which #92 is about to
+//! give a precise meaning over the model rather than over `TrackId`s.
 //!
 //! Views 1 and 2 share membership and differ only in shape: view 1 is an
 //! artist → album → tracks tree, view 2 the same tracks as one sorted list.
-//! Both are rebuilt from the `Store`, never mutated in place, which is what
+//! Both are rebuilt from the `Scan`, never mutated in place, which is what
 //! makes `TrackId` indices worth having.
 
 use std::collections::{BTreeMap, HashSet};
@@ -10,16 +19,16 @@ use std::collections::{BTreeMap, HashSet};
 use crate::model::entity::Encoding;
 use crate::model::id::Id;
 use crate::model::seam::Librarian;
-use crate::store::{Store, Track, TrackId};
+use crate::store::{Scan, Track, TrackId};
 
-/// Re-exported so callers keep saying `library::SortKey`. It lives in the
+/// Re-exported so callers keep saying `shelf::SortKey`. It lives in the
 /// model now, because how a library orders its own names is a librarian
 /// question rather than a player one (#84).
 pub use crate::model::sortkey::{SortKey, sort_key};
 
 /// Views 1 and 2. Same membership, two shapes.
 #[derive(Debug, Default)]
-pub struct Library {
+pub struct Shelf {
     members: HashSet<TrackId>,
     tree: BTreeMap<SortKey, BTreeMap<SortKey, Vec<TrackId>>>,
     /// What to *show* for each sort key.
@@ -27,7 +36,7 @@ pub struct Library {
     /// The tree is keyed by a normalised sort key — case folded, marks
     /// flattened, article moved — which is right for ordering and unreadable
     /// on screen. Without this every renderer has to reach back into the
-    /// `Store` for a track under the node just to recover the string, which is
+    /// `Scan` for a track under the node just to recover the string, which is
     /// how a projection that exists to answer questions ends up unable to
     /// answer the simplest one.
     artist_names: BTreeMap<SortKey, String>,
@@ -39,9 +48,9 @@ pub struct Library {
 // Some of this is ahead of its callers: the filter and command layers (M6,
 // M8) are what will ask a library whether it contains a track.
 #[allow(dead_code)]
-impl Library {
+impl Shelf {
     /// Rebuild both projections from every track in the store.
-    pub fn rebuild(store: &Store, smart_artist_sort: bool) -> Self {
+    pub fn rebuild(store: &Scan, smart_artist_sort: bool) -> Self {
         Self::from_members(
             store,
             store.iter().map(|(id, _)| id).collect(),
@@ -54,8 +63,8 @@ impl Library {
     /// This is how catalogs work: §4 makes the library a projection over a
     /// *subset* of the store, so confining the subset confines browsing,
     /// shuffle and `aaa_mode` without `next()` knowing catalogs exist.
-    pub fn from_members(store: &Store, members: HashSet<TrackId>, smart_artist_sort: bool) -> Self {
-        let mut lib = Library {
+    pub fn from_members(store: &Scan, members: HashSet<TrackId>, smart_artist_sort: bool) -> Self {
+        let mut lib = Shelf {
             members,
             smart_artist_sort,
             ..Default::default()
@@ -86,11 +95,11 @@ impl Library {
     /// identified it yet would be the worst possible moment to lose it.
     pub fn project(
         librarian: &Librarian,
-        store: &Store,
+        store: &Scan,
         members: HashSet<TrackId>,
         smart_artist_sort: bool,
     ) -> Self {
-        let mut lib = Library {
+        let mut lib = Shelf {
             members,
             smart_artist_sort,
             ..Default::default()
@@ -145,7 +154,7 @@ impl Library {
 
     /// File tracks under the names their tags carry — the pre-#84 rule, kept
     /// for whatever the model cannot place.
-    fn file_by_tag(&mut self, store: &Store, ids: &HashSet<TrackId>) {
+    fn file_by_tag(&mut self, store: &Scan, ids: &HashSet<TrackId>) {
         for &id in ids {
             let Some(track) = store.get(id) else { continue };
             let artist = sort_key(track.file_under(), self.smart_artist_sort);
@@ -170,7 +179,7 @@ impl Library {
         }
     }
 
-    fn reindex(&mut self, store: &Store) {
+    fn reindex(&mut self, store: &Scan) {
         self.tree.clear();
         self.sorted.clear();
         self.artist_names.clear();
@@ -260,7 +269,7 @@ impl Library {
     /// Which artist and album a track sits under.
     ///
     /// `aaa_mode` needs this to narrow the candidate pool, and getting it from
-    /// the tree rather than the `Store` keeps `next()`'s inputs to exactly what
+    /// the tree rather than the `Scan` keeps `next()`'s inputs to exactly what
     /// DESIGN §5 lists.
     pub fn locate(&self, id: TrackId) -> Option<(&SortKey, &SortKey)> {
         self.tree.iter().find_map(|(artist, albums)| {
@@ -294,7 +303,7 @@ impl Library {
 /// Disc first is what makes a multi-disc album read as 1-01, 1-02, … 2-01
 /// rather than interleaving the two discs' track 1s. A missing disc number
 /// sorts as disc 1, since single-disc albums usually omit it entirely.
-fn track_order(store: &Store, a: TrackId, b: TrackId) -> std::cmp::Ordering {
+fn track_order(store: &Scan, a: TrackId, b: TrackId) -> std::cmp::Ordering {
     let (Some(ta), Some(tb)) = (store.get(a), store.get(b)) else {
         return std::cmp::Ordering::Equal;
     };
@@ -346,7 +355,7 @@ mod tests {
 
     #[test]
     fn compilations_group_under_albumartist() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         for (path, artist, title) in [
             ("/va/01.mp3", "Benjamin Tod", "The Mountain"),
             ("/va/02.mp3", "Sabine McCalla", "Baby, Please Don't Go"),
@@ -357,7 +366,7 @@ mod tests {
             store.upsert(track);
         }
 
-        let lib = Library::rebuild(&store, true);
+        let lib = Shelf::rebuild(&store, true);
         // One artist, not three: the whole point of the albumartist rule.
         assert_eq!(lib.artist_count(), 1);
         assert_eq!(lib.album_count(), 1);
@@ -368,7 +377,7 @@ mod tests {
 
     #[test]
     fn multi_disc_albums_order_by_disc_then_track() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         // Deliberately inserted out of order.
         for (disc, num, title) in [
             (2u32, 1u32, "disc two, one"),
@@ -387,7 +396,7 @@ mod tests {
             store.upsert(track);
         }
 
-        let lib = Library::rebuild(&store, true);
+        let lib = Shelf::rebuild(&store, true);
         let titles: Vec<&str> = lib
             .sorted()
             .iter()
@@ -407,7 +416,7 @@ mod tests {
 
     #[test]
     fn missing_tags_land_under_unknown_and_keep_the_file_name() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(t("/m/mystery.mp3", None, None, None));
         store.upsert(t(
             "/m/known.mp3",
@@ -416,7 +425,7 @@ mod tests {
             Some("Archangel"),
         ));
 
-        let lib = Library::rebuild(&store, true);
+        let lib = Shelf::rebuild(&store, true);
         assert_eq!(lib.artist_count(), 2);
 
         let unknown = lib
@@ -430,7 +439,7 @@ mod tests {
 
     #[test]
     fn untracked_tracks_sort_after_numbered_ones() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         let mut a = t("/m/a.mp3", Some("X"), Some("Y"), Some("no number"));
         a.tracknumber = None;
         let mut b = t("/m/b.mp3", Some("X"), Some("Y"), Some("number 9"));
@@ -438,7 +447,7 @@ mod tests {
         store.upsert(a);
         store.upsert(b);
 
-        let lib = Library::rebuild(&store, true);
+        let lib = Shelf::rebuild(&store, true);
         let titles: Vec<&str> = lib
             .sorted()
             .iter()
@@ -449,7 +458,7 @@ mod tests {
 
     #[test]
     fn view_two_is_the_tree_flattened() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(t("/m/1.mp3", Some("Zebra"), Some("Album"), Some("z")));
         store.upsert(t(
             "/m/2.mp3",
@@ -458,7 +467,7 @@ mod tests {
             Some("a"),
         ));
 
-        let lib = Library::rebuild(&store, true);
+        let lib = Shelf::rebuild(&store, true);
         let artists: Vec<&str> = lib.artists().map(|(k, _)| k.as_str()).collect();
         assert_eq!(artists, ["aardvarks", "zebra"]);
         // Same order in the flat view.
@@ -519,12 +528,12 @@ mod projection {
         }
     }
 
-    fn build(scan: &[Scanned]) -> (Store, Library) {
+    fn build(scan: &[Scanned]) -> (Scan, Shelf) {
         let mut i = Instance::new(crate::model::id::Id::derived(b"laptop"));
         i.ingest(100, scan);
         let l = Librarian::from_catalogue(&i.catalogue());
 
-        let mut store = Store::default();
+        let mut store = Scan::default();
         for s in scan {
             let mut t = Track {
                 path: std::path::PathBuf::from(format!(
@@ -542,7 +551,7 @@ mod projection {
             store.upsert(t);
         }
         let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
-        let lib = Library::project(&l, &store, members, false);
+        let lib = Shelf::project(&l, &store, members, false);
         (store, lib)
     }
 
@@ -567,7 +576,7 @@ mod projection {
 
         let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
         assert_eq!(
-            Library::from_members(&store, members, false).album_count(),
+            Shelf::from_members(&store, members, false).album_count(),
             2,
             "the tag reading has to disagree, or this test proves nothing"
         );
@@ -577,7 +586,7 @@ mod projection {
     /// browsed while it is being catalogued.
     #[test]
     fn something_the_model_has_no_listing_for_is_kept() {
-        let mut store = Store::default();
+        let mut store = Scan::default();
         let mut t = Track {
             path: std::path::PathBuf::from("/m/x.mp3"),
             ..Default::default()
@@ -587,7 +596,7 @@ mod projection {
         store.upsert(t);
         let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
 
-        let lib = Library::project(&Librarian::new(), &store, members, false);
+        let lib = Shelf::project(&Librarian::new(), &store, members, false);
         assert_eq!(lib.sorted().len(), 1, "an unidentified file vanished");
         assert_eq!(lib.artist_count(), 1);
     }

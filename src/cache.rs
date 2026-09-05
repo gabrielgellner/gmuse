@@ -1,4 +1,4 @@
-//! Persisting the `Store` between runs.
+//! Persisting the `Scan` between runs.
 //!
 //! postcard, because the cache is a private format read only by the version of
 //! gmuse that wrote it. There is no compatibility story: a format change bumps
@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store::Store;
+use crate::store::Scan;
 
-/// Bump on any change to `Track`, `Store`, or this envelope.
+/// Bump on any change to `Track`, `Scan`, or this envelope.
 const FORMAT_VERSION: u32 = 6;
 const MAGIC: &[u8; 5] = b"gmuse";
 
@@ -21,7 +21,7 @@ const MAGIC: &[u8; 5] = b"gmuse";
 struct Envelope {
     version: u32,
     roots: Vec<PathBuf>,
-    store: Store,
+    store: Scan,
     /// Which catalogs were active. Persisted so a choice survives a restart;
     /// the *definitions* come from the config, not from here.
     #[serde(default)]
@@ -58,7 +58,7 @@ pub enum Outcome {
     /// they should be told, rather than silently starting from nothing.
     Discarded,
     Loaded {
-        store: Store,
+        store: Scan,
         roots: Vec<PathBuf>,
         active: crate::catalog::Active,
     },
@@ -101,7 +101,7 @@ pub fn load(path: &Path) -> Result<Outcome, CacheError> {
 /// previous cache intact rather than a truncated one.
 pub fn save(
     path: &Path,
-    store: &Store,
+    store: &Scan,
     roots: &[PathBuf],
     active: &crate::catalog::Active,
 ) -> Result<(), CacheError> {
@@ -112,7 +112,7 @@ pub fn save(
     let envelope = Envelope {
         version: FORMAT_VERSION,
         roots: roots.to_vec(),
-        store: Store::clone_for_save(store),
+        store: Scan::clone_for_save(store),
         active: active.clone(),
     };
 
@@ -133,8 +133,8 @@ mod tests {
     use crate::store::Track;
     use std::time::Duration;
 
-    fn sample_store() -> Store {
-        let mut s = Store::new();
+    fn sample_store() -> Scan {
+        let mut s = Scan::new();
         s.upsert(Track {
             path: PathBuf::from("/m/a.mp3"),
             artist: Some("Burial".into()),

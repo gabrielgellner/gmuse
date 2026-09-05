@@ -1,12 +1,12 @@
 //! Catalogs: several bodies of music, one or more active at a time.
 //!
 //! A catalog is a **membership rule**, not a second library. DESIGN §4 already
-//! makes `Library` a projection over a subset of the `Store`, so confining that
+//! makes `Shelf` a projection over a subset of the `Scan`, so confining that
 //! subset confines browsing, shuffle and `aaa_mode` with it — `next()` needs no
 //! knowledge of catalogs at all.
 //!
 //! What catalogs deliberately do **not** touch: playlists and the queue hold
-//! `TrackId`s straight into the `Store`, so they cross catalog boundaries
+//! `TrackId`s straight into the `Scan`, so they cross catalog boundaries
 //! freely. That is the point of a playlist.
 
 use std::collections::{BTreeSet, HashSet};
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store::{Store, TrackId};
+use crate::store::{Scan, TrackId};
 
 /// The name used when tracks are scanned without any catalog claiming them —
 /// `--library` on the command line, or a config with no `[catalogs]` at all.
@@ -251,7 +251,7 @@ impl Catalogs {
     ///
     /// With nothing defined, or everything active, this is the whole store —
     /// so a user who never configures a catalog sees no change at all.
-    pub fn members(&self, store: &Store, env: crate::filter::Env<'_>) -> HashSet<TrackId> {
+    pub fn members(&self, store: &Scan, env: crate::filter::Env<'_>) -> HashSet<TrackId> {
         let active: Vec<&Catalog> = match &self.active {
             Active::All => self.defined.iter().collect(),
             Active::Only(names) => self
@@ -286,8 +286,8 @@ mod tests {
     use super::*;
     use crate::store::Track;
 
-    fn store_with(paths: &[&str]) -> Store {
-        let mut s = Store::new();
+    fn store_with(paths: &[&str]) -> Scan {
+        let mut s = Scan::new();
         for p in paths {
             s.upsert(Track {
                 path: PathBuf::from(p),
@@ -297,7 +297,7 @@ mod tests {
         s
     }
 
-    fn fixture() -> (Store, Catalogs) {
+    fn fixture() -> (Scan, Catalogs) {
         let store = store_with(&[
             "/m/general/a.mp3",
             "/m/general/b.mp3",
@@ -312,7 +312,7 @@ mod tests {
         (store, catalogs)
     }
 
-    fn paths(store: &Store, ids: &HashSet<TrackId>) -> BTreeSet<String> {
+    fn paths(store: &Scan, ids: &HashSet<TrackId>) -> BTreeSet<String> {
         ids.iter()
             .map(|id| store.get(*id).unwrap().path.display().to_string())
             .collect()

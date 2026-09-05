@@ -23,10 +23,10 @@ use std::cmp::Ordering;
 
 use crate::filter::Env;
 use crate::format::{Field, Kind};
-use crate::library::sort_key;
 use crate::model::entity::Recording;
 use crate::model::id::Id;
-use crate::store::{Store, Track, TrackId};
+use crate::shelf::sort_key;
+use crate::store::{Scan, Track, TrackId};
 
 /// What one sort key looks at.
 ///
@@ -187,7 +187,7 @@ impl Sort {
     /// Ties are broken by path, so the result is a total order and does not
     /// wobble between runs — `sort = "artist"` over an album has to give the
     /// same list twice.
-    pub fn apply(&self, ids: &mut [TrackId], store: &Store, env: SortEnv<'_>) {
+    pub fn apply(&self, ids: &mut [TrackId], store: &Scan, env: SortEnv<'_>) {
         // Decorate-sort-undecorate: the comparator runs O(n log n) times and
         // building a lowercase key inside it would allocate on every one.
         let mut decorated: Vec<(Vec<Cell>, &std::path::Path, TrackId)> = ids
@@ -333,8 +333,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    fn store() -> Store {
-        let mut s = Store::new();
+    fn store() -> Scan {
+        let mut s = Scan::new();
         // Track numbers either side of ten: the case foobar2000's
         // format-pattern sorting gets wrong without `$num()` padding.
         for (n, (path, artist, title, track)) in [
@@ -369,27 +369,27 @@ mod tests {
         s
     }
 
-    fn ids(s: &Store) -> Vec<TrackId> {
+    fn ids(s: &Scan) -> Vec<TrackId> {
         s.iter().map(|(id, _)| id).collect()
     }
 
     /// The recording a test path is, so a fact can name it.
-    fn rec_of(s: &Store, path: &str) -> Id<Recording> {
+    fn rec_of(s: &Scan, path: &str) -> Id<Recording> {
         let id = s.id_for_path(&PathBuf::from(path)).expect("a known track");
         s.recording_of(id).expect("with an identity")
     }
 
-    fn acquired(cat: &mut Catalogue, s: &Store, path: &str, at: i64) {
+    fn acquired(cat: &mut Catalogue, s: &Scan, path: &str, at: i64) {
         cat.acquired.insert(rec_of(s, path), at);
     }
 
-    fn played(cat: &mut Catalogue, s: &Store, path: &str, at: i64) {
+    fn played(cat: &mut Catalogue, s: &Scan, path: &str, at: i64) {
         let r = rec_of(s, path);
         *cat.plays.entry(r).or_insert(0) += 1;
         cat.last_played.insert(r, at);
     }
 
-    fn rated(cat: &mut Catalogue, s: &Store, path: &str, stars: u8) {
+    fn rated(cat: &mut Catalogue, s: &Scan, path: &str, stars: u8) {
         cat.ratings.insert(rec_of(s, path), stars);
     }
 
@@ -405,7 +405,7 @@ mod tests {
     }
 
     /// The order as file names, which is short enough to assert on directly.
-    fn order(sort: &str, s: &Store, e: SortEnv<'_>) -> Vec<String> {
+    fn order(sort: &str, s: &Scan, e: SortEnv<'_>) -> Vec<String> {
         let mut v = ids(s);
         Sort::parse(sort).expect("parses").apply(&mut v, s, e);
         v.iter()
@@ -517,7 +517,7 @@ mod tests {
         // Chosen so the article actually decides the order: "The Zombies"
         // files under Z with the setting on and under T with it off, which
         // puts it either side of "Yes".
-        let mut s = Store::new();
+        let mut s = Scan::new();
         for (path, artist) in [("/m/z.mp3", "The Zombies"), ("/m/y.mp3", "Yes")] {
             s.upsert(Track {
                 path: PathBuf::from(path),
@@ -536,10 +536,10 @@ mod tests {
     }
 
     /// The setting applies to *artists* only — "The Wall" is an album whose T
-    /// matters, which is the rule `library::sort_key` already encodes.
+    /// matters, which is the rule `shelf::sort_key` already encodes.
     #[test]
     fn smart_artist_sort_does_not_touch_album_titles() {
-        let mut s = Store::new();
+        let mut s = Scan::new();
         for (path, album) in [("/m/w.mp3", "The Wall"), ("/m/u.mp3", "Ummagumma")] {
             s.upsert(Track {
                 path: PathBuf::from(path),
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn later_terms_break_earlier_ties() {
-        let mut s = Store::new();
+        let mut s = Scan::new();
         for (path, album, track) in [
             ("/m/1.mp3", "B", 2u32),
             ("/m/2.mp3", "A", 9),
@@ -611,7 +611,7 @@ mod tests {
     /// otherwise `sort = "album"` over one album would wobble between runs.
     #[test]
     fn a_total_tie_is_still_deterministic() {
-        let mut s = Store::new();
+        let mut s = Scan::new();
         for path in ["/m/c.mp3", "/m/a.mp3", "/m/b.mp3"] {
             s.upsert(Track {
                 path: PathBuf::from(path),

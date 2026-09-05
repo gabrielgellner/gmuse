@@ -1,6 +1,6 @@
 //! The artist → album → track tree, over the model — issue #84.
 //!
-//! `library.rs` builds this shape from a `Store`, keyed by an arena index and
+//! `library.rs` builds this shape from a `Scan`, keyed by an arena index and
 //! grouped by a heuristic. This builds the same shape from a [`Librarian`],
 //! keyed by identity and grouped by facts the model states.
 //!

@@ -203,7 +203,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "seek" => Command::Seek(seek_spec(rest)?),
         "vol" => Command::Vol(vol_spec(rest)?),
 
-        // Library.
+        // Shelf.
         "add" => Command::Add {
             target: AddTarget::Library,
             path: optional_path(rest),

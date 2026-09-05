@@ -1,4 +1,13 @@
-//! The track arena — DESIGN §4 (INVARIANT).
+//! What the disk said, this run — DESIGN §4 (INVARIANT).
+//!
+//! It was called `Store`, which claimed too much: this is not where the
+//! library lives, it is a scan result — discardable, rebuilt, and upstream of
+//! everything durable. The librarian is what knows things; this is what the
+//! walker found.
+//!
+//! **The file is still `store.rs` and should join `scan.rs`.** The walker and
+//! what it produces belong in one module, and separating that from the rename
+//! keeps a 500-line move out of a diff about names (#86).
 //!
 //! One store; every view is a projection over it. Track identity is an integer
 //! index into an arena, never a pointer or an `Rc`. That keeps the whole model
@@ -11,10 +20,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::entity::Recording;
+use crate::model::entity::Encoding;
 use crate::model::id::Handle;
 #[cfg(test)]
 use crate::model::id::Id;
+#[cfg(test)]
+use crate::model::spine::Recording;
 
 /// A handle to a track. Stable for the life of the store.
 ///
@@ -32,18 +43,23 @@ use crate::model::id::Id;
 ///
 /// ## A hazard that exists only during the migration
 ///
-/// There are two arenas right now — this `Store` and `model::arena::Arena` —
-/// and their handles are now the same type. `Arena` stamps a generation into
-/// the top byte and refuses a handle from an older one; a handle minted here
-/// carries generation zero, which is what a *fresh* `Arena` also hands out.
-/// So a `Store` index passed to a new `Arena` could resolve rather than being
-/// refused.
+/// **A handle to a copy, and that is what it always indexed.**
 ///
-/// Nothing does that today: the player does not touch `Arena`, and the model
-/// does not touch `Store`. It stops being possible at all when this type goes
-/// (#86) and there is one arena. Until then it is written down here rather
-/// than left to be discovered.
-pub type TrackId = Handle<Recording>;
+/// It was `Handle<Recording>`, which said the wrong thing: one is minted per
+/// *file*, so two rips of one performance are two of these and one recording.
+/// After #78 a displayed row names a copy, and this is that row's key.
+///
+/// The rename also closes a hazard this doc used to describe rather than
+/// prevent. Two arenas exist — this `Scan` and `model::arena::Arena` — and
+/// their handles were the same type; `Arena` refuses a handle from an older
+/// generation, but a `Scan` index carries generation zero, which is what a
+/// *fresh* `Arena` also hands out. So a `Scan` index passed to a new `Arena`
+/// would have resolved rather than been refused, silently naming a different
+/// entity.
+///
+/// It does not compile now, and `a_store_handle_cannot_be_read_as_a_recording_handle`
+/// keeps it that way.
+pub type TrackId = Handle<Encoding>;
 
 /// ReplayGain, as found in tags. Values are dB (gain) and linear (peak).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -64,7 +80,7 @@ impl ReplayGain {
 }
 
 /// One track's metadata. Display strings are kept verbatim; normalised sort
-/// keys belong to the `Library` projection, not here.
+/// keys belong to the `Shelf` projection, not here.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub path: PathBuf,
@@ -137,7 +153,7 @@ impl Track {
 
     /// This file as a **row** — what a display template asks for.
     ///
-    /// Here rather than only in `Store::listed` because the remote holds a
+    /// Here rather than only in `Scan::listed` because the remote holds a
     /// cloned `Track` so another thread can render a caller's own format, and
     /// it needs the same view without an arena to look in.
     pub fn listed(&self) -> crate::model::rows::Listed<'_> {
@@ -196,7 +212,7 @@ pub const NO_ALBUM: &str = "singles";
 /// shifting, because shifting would invalidate every `TrackId` held in a
 /// playlist or the queue (DESIGN §4).
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Store {
+pub struct Scan {
     tracks: Vec<Option<Track>>,
     /// **Rebuilt on load, never persisted.** It is derivable from `tracks` in
     /// one pass, and not writing it is what lets [`TrackId`] have no
@@ -212,7 +228,7 @@ pub struct Store {
     tombstones: usize,
 }
 
-impl Store {
+impl Scan {
     pub fn new() -> Self {
         Self::default()
     }
@@ -366,14 +382,14 @@ impl Store {
     }
 }
 
-impl Store {
+impl Scan {
     /// A compacted copy for persisting.
     ///
     /// Tombstones exist to keep live `TrackId`s valid within a session; there
     /// is nothing holding an id across a restart, so writing them to the cache
     /// would only grow the file and the id space for ever.
-    pub(crate) fn clone_for_save(store: &Store) -> Store {
-        let mut out = Store::new();
+    pub(crate) fn clone_for_save(store: &Scan) -> Scan {
+        let mut out = Scan::new();
         for (_, track) in store.iter() {
             out.upsert(track.clone());
         }
@@ -385,7 +401,7 @@ impl Store {
 ///
 /// A temporary home: it moves to the librarian with #86, and the renderer does
 /// not change when it does — which is the point of the trait existing at all.
-impl crate::model::rows::Listing for Store {
+impl crate::model::rows::Listing for Scan {
     fn listed(&self, id: TrackId) -> Option<crate::model::rows::Listed<'_>> {
         Some(self.get(id)?.listed())
     }
@@ -436,6 +452,25 @@ mod tests {
 
     use super::*;
 
+    /// **The two-arena hazard is a type error now.**
+    ///
+    /// This type's doc used to say it out loud: two arenas exist, `Scan` and
+    /// `model::arena::Arena`, their handles were the same type, and a `Scan`
+    /// index passed to a fresh `Arena` would *resolve* rather than be refused
+    /// — silently naming a different entity. It was written down because
+    /// nothing did it yet.
+    ///
+    /// Nothing can now: a `TrackId` indexes a **copy** and `Arena<Recording>`
+    /// hands out handles to a recording, so the confusion does not compile.
+    #[test]
+    fn a_store_handle_cannot_be_read_as_a_recording_handle() {
+        let arena = crate::model::arena::Arena::<crate::model::spine::Recording>::new();
+        let id: TrackId = Handle::new(0);
+        // arena.at(id);   // <- does not compile: Handle<Encoding> vs Handle<Recording>
+        assert_eq!(arena.len(), 0);
+        assert_eq!(id.index(), 0);
+    }
+
     fn track(path: &str) -> Track {
         Track {
             path: PathBuf::from(path),
@@ -445,7 +480,7 @@ mod tests {
 
     #[test]
     fn upsert_is_stable_for_a_path() {
-        let mut s = Store::new();
+        let mut s = Scan::new();
         let a = s.upsert(track("/a.mp3"));
         let b = s.upsert(track("/b.mp3"));
         assert_ne!(a, b);
@@ -462,7 +497,7 @@ mod tests {
 
     #[test]
     fn removal_tombstones_rather_than_shifting() {
-        let mut s = Store::new();
+        let mut s = Scan::new();
         let a = s.upsert(track("/a.mp3"));
         let b = s.upsert(track("/b.mp3"));
         s.remove_path(Path::new("/a.mp3"));
@@ -477,7 +512,7 @@ mod tests {
 
     #[test]
     fn compact_reports_the_remap() {
-        let mut s = Store::new();
+        let mut s = Scan::new();
         let _a = s.upsert(track("/a.mp3"));
         let b = s.upsert(track("/b.mp3"));
         let c = s.upsert(track("/c.mp3"));

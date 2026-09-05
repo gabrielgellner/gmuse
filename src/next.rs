@@ -11,10 +11,10 @@
 //!   the next track ([`Source::Queue`]); the caller pops once it commits.
 //! - **Shuffle is a seeded permutation, not a played-set.** See [`shuffled`].
 
-use crate::library::Library;
 use crate::model::entity::Encoding;
 use crate::model::id::Id;
 use crate::playlist::{Playlist, Queue};
+use crate::shelf::Shelf;
 use crate::store::TrackId;
 
 /// Which list the player is walking through.
@@ -80,7 +80,7 @@ pub enum Source {
 pub struct NextInput<'a> {
     pub queue: &'a Queue,
     pub active: ActiveSource,
-    pub library: &'a Library,
+    pub library: &'a Shelf,
     pub playlist: &'a Playlist,
     pub current: Option<TrackId>,
     pub aaa_mode: AaaMode,
@@ -364,13 +364,13 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Store, Track};
+    use crate::store::{Scan, Track};
     use std::path::PathBuf;
 
     /// Three artists: A with two albums (2 + 1 tracks), B with one (2), C with
     /// one (1). Six tracks, so pools of several sizes are available.
-    fn fixture() -> (Store, Library) {
-        let mut store = Store::new();
+    fn fixture() -> (Scan, Shelf) {
+        let mut store = Scan::new();
         for (artist, album, n, title) in [
             ("A Artist", "First", 1u32, "a-first-1"),
             ("A Artist", "First", 2, "a-first-2"),
@@ -388,11 +388,11 @@ mod tests {
                 ..Default::default()
             });
         }
-        let lib = Library::rebuild(&store, true);
+        let lib = Shelf::rebuild(&store, true);
         (store, lib)
     }
 
-    fn id_of(store: &Store, title: &str) -> TrackId {
+    fn id_of(store: &Scan, title: &str) -> TrackId {
         store
             .iter()
             .find(|(_, t)| t.title.as_deref() == Some(title))
@@ -400,13 +400,13 @@ mod tests {
             .unwrap_or_else(|| panic!("no track titled {title}"))
     }
 
-    fn title_of(store: &Store, id: TrackId) -> &str {
+    fn title_of(store: &Scan, id: TrackId) -> &str {
         store.get(id).unwrap().title.as_deref().unwrap()
     }
 
     struct Ctx {
-        store: Store,
-        library: Library,
+        store: Scan,
+        library: Shelf,
         playlist: Playlist,
         queue: Queue,
     }
@@ -590,8 +590,8 @@ mod tests {
 
     #[test]
     fn empty_library_yields_nothing() {
-        let store = Store::new();
-        let library = Library::rebuild(&store, true);
+        let store = Scan::new();
+        let library = Shelf::rebuild(&store, true);
         let (playlist, queue) = (Playlist::new(), Queue::new());
         let p = Playback::default();
         let input = NextInput {
@@ -611,13 +611,13 @@ mod tests {
 
     #[test]
     fn single_track_stops_without_repeat_and_loops_with_it() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(Track {
             path: PathBuf::from("/m/only.mp3"),
             title: Some("only".into()),
             ..Default::default()
         });
-        let library = Library::rebuild(&store, true);
+        let library = Shelf::rebuild(&store, true);
         let (playlist, queue) = (Playlist::new(), Queue::new());
         let only = id_of(&store, "only");
 

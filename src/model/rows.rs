@@ -2,7 +2,7 @@
 //!
 //! The seam's read contract, small enough to state in one trait.
 //!
-//! `ui/list.rs` takes a `&Store` for one reason: to ask, of an arbitrary slice
+//! `ui/list.rs` takes a `&Scan` for one reason: to ask, of an arbitrary slice
 //! of ids, what each row groups under and what it should say. That is a
 //! question about the *library*, not about a store, and naming it as a trait is
 //! what lets the answer come from somewhere else later without the renderer
@@ -15,7 +15,7 @@
 //! rows should not allocate a thousand `String`s to decide where the albums
 //! change.
 
-use crate::model::entity::Recording;
+use crate::model::entity::Encoding;
 use crate::model::id::Handle;
 
 /// The same thing `store::TrackId` aliases, named from this side.
@@ -23,7 +23,7 @@ use crate::model::id::Handle;
 /// Written out rather than imported from `store`, because the model must not
 /// reach into the player (#77) — and because a handle is a model concept that
 /// the store happens to hand out, not the other way round.
-type Row = Handle<Recording>;
+type Row = Handle<Encoding>;
 
 /// Where a row files, and what it is called.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +98,7 @@ pub struct Loudness {
 
 /// Answering, for any id, what a list needs to draw it.
 ///
-/// Implemented by `Store` today and by the librarian when it takes over (#86).
+/// Implemented by `Scan` today and by the librarian when it takes over (#86).
 /// The renderer names this rather than either, so the swap is a change of
 /// argument and nothing else.
 pub trait Listing {

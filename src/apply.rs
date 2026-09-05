@@ -46,12 +46,12 @@ pub enum ApplyError {
 /// **What a file currently holds** comes from the log, because a relink is a
 /// decision somebody recorded and a scan cannot see one. Reading the binding
 /// off the disk instead would let an identification quietly undo the last one.
-struct Library {
+struct Shelf {
     disk: crate::model::log::Catalogue,
     log: crate::model::log::Catalogue,
 }
 
-impl proposal::Holdings for Library {
+impl proposal::Holdings for Shelf {
     fn holds(&self, subject: Subject) -> bool {
         match subject {
             Subject::Encoding(id) => self.disk.encodings.contains_key(&id),
@@ -121,7 +121,7 @@ pub fn run(
     })?;
 
     let (mut log, _) = Instance::open(data_dir, device, now);
-    let library = Library {
+    let library = Shelf {
         // What the disk says exists, which is what "holds" asks about:
         // encodings are established by looking, and a proposal against a file
         // that has since gone is stale rather than wrong.

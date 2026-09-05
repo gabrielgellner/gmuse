@@ -23,7 +23,6 @@ mod filter;
 mod format;
 mod guides;
 mod history;
-mod library;
 mod lock;
 mod m3u;
 mod model;
@@ -33,6 +32,7 @@ mod query;
 mod remote;
 mod scan;
 mod session;
+mod shelf;
 mod smart;
 mod sort;
 mod store;
@@ -46,13 +46,13 @@ use clap::Parser;
 
 use audio::PlayerHandle;
 use cli::Cli;
-use library::Library;
-use store::Store;
+use shelf::Shelf;
+use store::Scan;
 
 /// Everything the prompt operates on.
 struct App {
     player: PlayerHandle,
-    store: Store,
+    store: Scan,
     roots: Vec<PathBuf>,
     cache_path: Option<PathBuf>,
     catalogs: catalog::Catalogs,
@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // own scan of exactly the roots it was given, and opening a device for a
     // command that plays nothing was eighteen seconds and a hardware claim for
     // no reason.
-    if let Some(cli::Command::Library(op)) = &args.command {
+    if let Some(cli::Command::Shelf(op)) = &args.command {
         let loaded = if args.no_config {
             config::Loaded::default()
         } else {
@@ -166,13 +166,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Costs a rescan, so say so. Silently starting from nothing is how
             // a library appears to vanish.
             eprintln!("cache: discarded (wrong version or corrupt); rescanning");
-            (Store::new(), Vec::new(), None)
+            (Scan::new(), Vec::new(), None)
         }
         Some(Err(e)) => {
             eprintln!("cache: {e}");
-            (Store::new(), Vec::new(), None)
+            (Scan::new(), Vec::new(), None)
         }
-        _ => (Store::new(), Vec::new(), None),
+        _ => (Scan::new(), Vec::new(), None),
     };
     // Catalogs come from the config; `--library` roots join an implicit
     // "default" catalog so a user who configures none sees no change.
@@ -223,7 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !app.roots.is_empty() && (args.rescan || first_run) {
         if args.rescan {
             // Forget mtimes so every file is re-read.
-            app.store = Store::new();
+            app.store = Scan::new();
         }
         let roots = app.roots.clone();
         let report = scan::scan(&mut app.store, &roots);
@@ -284,14 +284,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// One library operation, and then exit.
 fn run_library(
-    op: &cli::Library,
+    op: &cli::Shelf,
     loaded: &config::Loaded,
     roots: &[std::path::PathBuf],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let machine = crate::events::machine_id(&config::default_state_dir());
     let device = crate::model::id::Id::derived(machine.as_bytes());
     match op {
-        cli::Library::Query { unidentified } => {
+        cli::Shelf::Query { unidentified } => {
             let (log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
@@ -306,7 +306,7 @@ fn run_library(
                 println!("{}", serde_json::to_string(&row)?);
             }
         }
-        cli::Library::Apply { file, write } => {
+        cli::Shelf::Apply { file, write } => {
             let outcome = apply::run(
                 file,
                 &loaded.data_dir,
@@ -477,7 +477,7 @@ fn run_tui(
     // **Grouped by what the model says, not by what the tags carry** (#84).
     // The librarian has to exist first, which is why this sits below rather
     // than beside the membership it is built from.
-    let library = Library::project(&library_view, &app.store, members, smart_artist_sort);
+    let library = Shelf::project(&library_view, &app.store, members, smart_artist_sort);
 
     let ctx = ui::Context {
         library: &library_view,

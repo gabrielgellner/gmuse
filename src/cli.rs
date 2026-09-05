@@ -47,7 +47,7 @@ pub struct Cli {
     #[arg(short = 'v', long, default_value_t = 1.0)]
     pub volume: f32,
 
-    /// Library root to scan. Repeat for several. Remembered in the cache, so
+    /// Shelf root to scan. Repeat for several. Remembered in the cache, so
     /// later runs need no argument.
     #[arg(
         short = 'L',
@@ -132,11 +132,11 @@ pub struct Cli {
 pub enum Command {
     /// Operations on the library itself.
     #[command(subcommand)]
-    Library(Library),
+    Shelf(Shelf),
 }
 
 #[derive(Debug, clap::Subcommand)]
-pub enum Library {
+pub enum Shelf {
     /// Apply a file of proposed facts.
     ///
     /// **A dry run unless given `--write`.** The genre pipeline already

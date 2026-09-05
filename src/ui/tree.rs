@@ -12,7 +12,7 @@
 //! `G` and the relative gutter all work over it uniformly, which is the point.
 
 use crate::cmd::Motion;
-use crate::library::{Library, SortKey};
+use crate::shelf::{Shelf, SortKey};
 use crate::store::TrackId;
 use crate::ui::fold::Expansion;
 
@@ -96,7 +96,7 @@ impl TreeState {
     ///
     /// Display names come from the first track under each node, since §4 keeps
     /// display strings on the `Track` and only sort keys in the tree.
-    pub fn rows(&self, lib: &Library) -> Vec<Row> {
+    pub fn rows(&self, lib: &Shelf) -> Vec<Row> {
         let mut rows = Vec::new();
         for (artist_key, albums) in lib.artists() {
             let display = lib.artist_name(artist_key).to_string();
@@ -157,7 +157,7 @@ impl TreeState {
 
     /// Every track under the selected row: one track, one album, or everything
     /// by an artist. What `a` and `e` add, and what `x` plays the first of.
-    pub fn tracks_for(&self, lib: &Library) -> Vec<TrackId> {
+    pub fn tracks_for(&self, lib: &Shelf) -> Vec<TrackId> {
         let rows = self.rows(lib);
         let Some(row) = rows.get(self.selected) else {
             return Vec::new();
@@ -179,7 +179,7 @@ impl TreeState {
     }
 
     /// The track on the selected row, if it is one.
-    pub fn selected_track(&self, lib: &Library) -> Option<TrackId> {
+    pub fn selected_track(&self, lib: &Shelf) -> Option<TrackId> {
         match self.rows(lib).get(self.selected) {
             Some(Row::Track { id, .. }) => Some(*id),
             _ => None,
@@ -191,7 +191,7 @@ impl TreeState {
     /// Deliberately **not** `close()` then `open()`: `close` walks up when the
     /// node is already shut, which is right for `h` and wrong here — toggling
     /// a closed album would close its artist instead of opening the album.
-    pub fn toggle(&mut self, lib: &Library) {
+    pub fn toggle(&mut self, lib: &Shelf) {
         let Some(path) = self.path_under(lib) else {
             return;
         };
@@ -199,14 +199,14 @@ impl TreeState {
     }
 
     /// `zo` — open the node under the cursor, and only it.
-    pub fn open(&mut self, lib: &Library) {
+    pub fn open(&mut self, lib: &Shelf) {
         if let Some(path) = self.path_under(lib) {
             self.folds.open(&path);
         }
     }
 
     /// `zO` — open the node under the cursor and everything beneath it.
-    pub fn open_deep(&mut self, lib: &Library) {
+    pub fn open_deep(&mut self, lib: &Shelf) {
         let Some(path) = self.path_under(lib) else {
             return;
         };
@@ -217,7 +217,7 @@ impl TreeState {
 
     /// `zC` — close the node under the cursor and everything beneath it, so
     /// that reopening it does not spill the subtree you had expanded inside.
-    pub fn close_deep(&mut self, lib: &Library) {
+    pub fn close_deep(&mut self, lib: &Shelf) {
         let Some(path) = self.path_under(lib) else {
             return;
         };
@@ -231,7 +231,7 @@ impl TreeState {
     /// Reads the node's own state rather than its subtree's, as vim does: the
     /// question `zA` answers is "is this one open", and what is underneath it
     /// follows rather than votes.
-    pub fn toggle_deep(&mut self, lib: &Library) {
+    pub fn toggle_deep(&mut self, lib: &Shelf) {
         let Some(path) = self.path_under(lib) else {
             return;
         };
@@ -244,22 +244,22 @@ impl TreeState {
 
     /// `zR` — every fold open. Depth 2 is the whole tree: artists at 0,
     /// albums at 1.
-    pub fn open_everything(&mut self, lib: &Library) {
+    pub fn open_everything(&mut self, lib: &Shelf) {
         self.keeping_cursor(lib, |t| t.folds.set_level(DEPTH));
     }
 
     /// `zM` — every fold closed.
-    pub fn close_everything(&mut self, lib: &Library) {
+    pub fn close_everything(&mut self, lib: &Shelf) {
         self.keeping_cursor(lib, |t| t.folds.set_level(0));
     }
 
     /// `zr` — one level more. From nothing that is artists, then albums.
-    pub fn more(&mut self, lib: &Library) {
+    pub fn more(&mut self, lib: &Shelf) {
         self.keeping_cursor(lib, |t| t.folds.more());
     }
 
     /// `zm` — one level fewer.
-    pub fn less(&mut self, lib: &Library) {
+    pub fn less(&mut self, lib: &Shelf) {
         self.keeping_cursor(lib, |t| t.folds.less());
     }
 
@@ -282,7 +282,7 @@ impl TreeState {
     /// Stops at the ends rather than wrapping, as vim's `}` and `]]` do. A
     /// motion that finds nothing leaves the cursor alone, so a count that
     /// overshoots lands on the last match instead of nowhere.
-    pub fn go(&mut self, lib: &Library, motion: Motion, count: usize) {
+    pub fn go(&mut self, lib: &Shelf, motion: Motion, count: usize) {
         for _ in 0..count.max(1) {
             let rows = self.rows(lib);
             let Some(at) = self.step(&rows, motion) else {
@@ -419,7 +419,7 @@ impl TreeState {
     /// sits on a row that `rows()` produced, so it is visible by construction.
     /// It is only meaningful *after* something has closed underneath it, which
     /// is exactly this.
-    pub fn only(&mut self, lib: &Library) {
+    pub fn only(&mut self, lib: &Shelf) {
         let rows = self.rows(lib);
         let Some(row) = rows.get(self.selected) else {
             return;
@@ -439,7 +439,7 @@ impl TreeState {
     ///
     /// Nothing else is disturbed — the point is to find the playing track
     /// without losing the shape you had built up looking for it.
-    pub fn reveal(&mut self, lib: &Library, id: TrackId) -> bool {
+    pub fn reveal(&mut self, lib: &Shelf, id: TrackId) -> bool {
         let Some((artist, album)) = lib.artists().find_map(|(artist, albums)| {
             albums
                 .iter()
@@ -474,13 +474,13 @@ impl TreeState {
     }
 
     /// The openable path under the cursor, if the cursor is on one.
-    fn path_under(&self, lib: &Library) -> Option<Vec<SortKey>> {
+    fn path_under(&self, lib: &Shelf) -> Option<Vec<SortKey>> {
         self.rows(lib).get(self.selected).and_then(Self::path_of)
     }
 
     /// Every openable path strictly under `path`. Only albums can be under
     /// anything, so this is one level deep by construction.
-    fn descendants(&self, lib: &Library, path: &[SortKey]) -> Vec<Vec<SortKey>> {
+    fn descendants(&self, lib: &Shelf, path: &[SortKey]) -> Vec<Vec<SortKey>> {
         let [artist] = path else { return Vec::new() };
         lib.artists()
             .find(|(k, _)| *k == artist)
@@ -498,7 +498,7 @@ impl TreeState {
     /// A level change can close the row out from under you. vim puts the
     /// cursor on the start of the fold that swallowed it, which here means the
     /// deepest visible ancestor of where you were.
-    fn keeping_cursor(&mut self, lib: &Library, change: impl FnOnce(&mut Self)) {
+    fn keeping_cursor(&mut self, lib: &Shelf, change: impl FnOnce(&mut Self)) {
         let seat = self.rows(lib).get(self.selected).map(Self::seat_of);
         change(self);
         let rows = self.rows(lib);
@@ -525,7 +525,7 @@ impl TreeState {
     /// rule, and it is what lets repeated `h` walk up and out without anything
     /// needing a concept of "level". `zc` is bound to it too, which is what
     /// vim's `zc` does on a line inside a fold.
-    pub fn close(&mut self, lib: &Library) -> bool {
+    pub fn close(&mut self, lib: &Shelf) -> bool {
         let rows = self.rows(lib);
         let Some(row) = rows.get(self.selected) else {
             return false;
@@ -556,12 +556,12 @@ impl TreeState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Store;
+    use crate::store::Scan;
     use crate::store::Track;
     use std::path::PathBuf;
 
-    fn store_with(rows: &[(&str, &str, &str, &str)]) -> Store {
-        let mut s = Store::new();
+    fn store_with(rows: &[(&str, &str, &str, &str)]) -> Scan {
+        let mut s = Scan::new();
         for (path, artist, album, title) in rows {
             s.upsert(Track {
                 path: PathBuf::from(path),
@@ -574,14 +574,14 @@ mod tests {
         s
     }
 
-    fn fixture() -> (Store, Library) {
+    fn fixture() -> (Scan, Shelf) {
         let store = store_with(&[
             ("/m/b1.mp3", "Burial", "Untrue", "Archangel"),
             ("/m/b2.mp3", "Burial", "Untrue", "Shell of Light"),
             ("/m/b3.mp3", "Burial", "Burial", "Night Bus"),
             ("/m/o1.mp3", "Mr. Oizo", "The Church", "Ham"),
         ]);
-        let lib = Library::rebuild(&store, true);
+        let lib = Shelf::rebuild(&store, true);
         (store, lib)
     }
 
@@ -845,7 +845,7 @@ mod tests {
 
     /// Rows as `depth:label`, so a test can say what the tree looks like
     /// without reproducing the render.
-    fn shape(state: &TreeState, lib: &Library) -> Vec<String> {
+    fn shape(state: &TreeState, lib: &Shelf) -> Vec<String> {
         state
             .rows(lib)
             .iter()
@@ -1068,7 +1068,7 @@ mod tests {
     /// "last track of the album" and "last track of the artist" are the same
     /// row, and with two artists a count of two and a count of one land in the
     /// same place.
-    fn deep_fixture() -> (Store, Library) {
+    fn deep_fixture() -> (Scan, Shelf) {
         let store = store_with(&[
             ("/m/a/1.mp3", "Anna", "First", "one"),
             ("/m/a/2.mp3", "Anna", "First", "two"),
@@ -1078,7 +1078,7 @@ mod tests {
             ("/m/b/1.mp3", "Bruno", "Third", "six"),
             ("/m/c/1.mp3", "Cleo", "Fourth", "seven"),
         ]);
-        let lib = Library::rebuild(&store, true);
+        let lib = Shelf::rebuild(&store, true);
         (store, lib)
     }
 
@@ -1086,7 +1086,7 @@ mod tests {
     ///
     ///     0 Anna  1 First  2 one  3 two  4 three  5 Second  6 four  7 five
     ///     8 Bruno  9 Third  10 six  11 Cleo  12 Fourth  13 seven
-    fn opened(lib: &Library) -> TreeState {
+    fn opened(lib: &Shelf) -> TreeState {
         let mut state = TreeState::default();
         state.open_everything(lib);
         state

@@ -1,7 +1,7 @@
 //! From what the scanner read to what the librarian holds — issue #77.
 //!
-//! **Transitional, and it dies with `Store` (#86).** The player needs a
-//! `Librarian` to read through before `Store` can go, and `Store` cannot go
+//! **Transitional, and it dies with `Scan` (#86).** The player needs a
+//! `Librarian` to read through before `Scan` can go, and `Scan` cannot go
 //! until the player reads through a `Librarian`. This is the plank across that
 //! gap: the scanner still fills a store, and this turns a store into the
 //! catalogue the librarian projects from.
@@ -43,7 +43,7 @@ use crate::model::id::Id;
 use crate::model::instance::{Instance, Scanned};
 use crate::model::log::Record;
 use crate::model::seam::Librarian;
-use crate::store::Store;
+use crate::store::Scan;
 
 /// What the scanner found, in the shape the ingest ladder takes.
 ///
@@ -51,7 +51,7 @@ use crate::store::Store;
 /// nothing to catalogue it as. That is the same call `populate` makes, and it
 /// is a file gmuse could not read as audio at all rather than one with bad
 /// tags.
-fn scanned(store: &Store) -> Vec<Scanned> {
+fn scanned(store: &Scan) -> Vec<Scanned> {
     store
         .iter()
         .filter_map(|(_, t)| {
@@ -63,7 +63,7 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                 // `Track` carries no artist id, so an artist crossing this
                 // plank is minted from its name and a guest credit still
                 // splits it. `populate` reads the tag properly; this goes away
-                // with `Store` (#86).
+                // with `Scan` (#86).
                 artist_mbid: None,
                 credit_is_joined: false,
                 album_artist_mbid: None,
@@ -127,7 +127,7 @@ fn format_of(track: &crate::store::Track) -> Option<Format> {
 /// `Instance` the model uses everywhere else means the ladder that chooses a
 /// recording's identity lives in exactly one place.
 pub fn librarian(
-    store: &Store,
+    store: &Scan,
     records: &BTreeSet<Record>,
     device: Id<Device>,
     now: i64,
@@ -204,8 +204,8 @@ mod forget_and_relink {
         }
     }
 
-    fn store_of(tracks: &[Track]) -> Store {
-        let mut s = Store::default();
+    fn store_of(tracks: &[Track]) -> Scan {
+        let mut s = Scan::default();
         for t in tracks {
             s.upsert(t.clone());
         }
@@ -408,8 +408,8 @@ mod opening {
     use crate::model::spine::Recording;
     use crate::store::Track;
 
-    fn store_with(path: &str, hash: u128) -> Store {
-        let mut s = Store::default();
+    fn store_with(path: &str, hash: u128) -> Scan {
+        let mut s = Scan::default();
         s.upsert(Track {
             path: std::path::PathBuf::from(path),
             title: Some("Callisto".into()),
@@ -451,7 +451,7 @@ mod opening {
     #[test]
     fn a_pressing_names_the_imprint_that_issued_it() {
         let device = Id::<Device>::derived(b"laptop");
-        let mut store = Store::default();
+        let mut store = Scan::default();
         store.upsert(Track {
             path: std::path::PathBuf::from("/m/callisto.mp3"),
             title: Some("Callisto".into()),
@@ -487,7 +487,7 @@ mod opening {
     #[test]
     fn a_copy_carries_the_loudness_its_tags_claim() {
         let device = Id::<Device>::derived(b"laptop");
-        let mut store = Store::default();
+        let mut store = Scan::default();
         store.upsert(Track {
             path: std::path::PathBuf::from("/m/callisto.mp3"),
             title: Some("Callisto".into()),
@@ -523,7 +523,7 @@ mod opening {
     #[test]
     fn a_copy_carries_its_sample_rate_and_channels() {
         let device = Id::<Device>::derived(b"laptop");
-        let mut store = Store::default();
+        let mut store = Scan::default();
         store.upsert(Track {
             path: std::path::PathBuf::from("/m/callisto.mp3"),
             title: Some("Callisto".into()),
@@ -653,7 +653,7 @@ mod tests {
     /// A file on disk becomes a row the player can draw.
     #[test]
     fn a_scanned_file_becomes_a_row() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
         let l = librarian(&store, &BTreeSet::new(), device(), 1_000);
 
@@ -672,7 +672,7 @@ mod tests {
     /// carry both or the player still needs two places to look.
     #[test]
     fn the_log_supplies_what_the_disk_cannot() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
 
         // What the recording will be, derived the same way the ladder does.
@@ -700,7 +700,7 @@ mod tests {
     /// four-minute sibling could never have earned a play at all.
     #[test]
     fn a_row_reports_the_length_of_the_copy_it_would_open() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         let mbid = uuid::Uuid::from_u128(0x1831_05b5);
 
         // One recording, one copy here, and it is the short one.
@@ -722,7 +722,7 @@ mod tests {
     /// catalogue it as. Left out rather than invented.
     #[test]
     fn a_file_with_no_audio_id_is_left_out() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         let mut orphan = track("/m/orphan.mp3", "Unknown", "Nobody", 1);
         orphan.audio_id = None;
         store.upsert(orphan);
@@ -737,7 +737,7 @@ mod tests {
     /// conventions, and it must not appear twice.
     #[test]
     fn one_recording_however_many_copies() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/01 Callisto.mp3", "Callisto", "Stephan Bodzin", 1));
         store.upsert(track(
             "/m/1 - Callisto.mp3",

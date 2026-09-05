@@ -8,7 +8,7 @@
 //! they narrow. The test is whether the rest of the library is still reachable
 //! while this thing is active. A catalog hides everything outside it; a
 //! playlist sits alongside the library and is simply one more place to play
-//! from. So a smart playlist fills view 3 and never touches the `Library`
+//! from. So a smart playlist fills view 3 and never touches the `Shelf`
 //! projection.
 //!
 //! That also settles what would otherwise be two mechanisms for one idea: a
@@ -17,14 +17,14 @@
 //! and which you want depends on the verb — *show me only my jazz* is a
 //! catalog, *play my highly rated* is a smart playlist.
 //!
-//! Membership is evaluated against the whole [`Store`], not the active
-//! `Library`. §4 is explicit that a playlist "must not be filtered by the
+//! Membership is evaluated against the whole [`Scan`], not the active
+//! `Shelf`. §4 is explicit that a playlist "must not be filtered by the
 //! active set" because crossing themes is the point of one; a smart playlist
 //! inherits that rather than being a special case.
 
 use crate::filter::Filter;
 use crate::sort::{Sort, SortEnv};
-use crate::store::{Store, TrackId};
+use crate::store::{Scan, TrackId};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SmartPlaylist {
@@ -42,7 +42,7 @@ impl SmartPlaylist {
     /// with the history behind it — a rule mentioning `play_count` has to
     /// answer differently after you play something, and a materialised list
     /// would need invalidating from every corner of the app instead.
-    pub fn members(&self, store: &Store, env: SortEnv<'_>) -> Vec<TrackId> {
+    pub fn members(&self, store: &Scan, env: SortEnv<'_>) -> Vec<TrackId> {
         let matches = self.filter.compile(env.env);
         let mut ids: Vec<TrackId> = store
             .iter()
@@ -101,8 +101,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    fn store() -> Store {
-        let mut s = Store::new();
+    fn store() -> Scan {
+        let mut s = Scan::new();
         for (n, (path, artist, genre, year)) in [
             ("/m/General/a.mp3", "Abba", "pop", 1976),
             ("/m/General/b.mp3", "Burial", "electronic", 2007),
@@ -138,7 +138,7 @@ mod tests {
     }
 
     /// Note a play against whatever recording `path` is, the way the log would.
-    fn played(cat: &mut crate::model::log::Catalogue, s: &Store, path: &str, at: i64) {
+    fn played(cat: &mut crate::model::log::Catalogue, s: &Scan, path: &str, at: i64) {
         let id = s.id_for_path(&PathBuf::from(path)).expect("a known track");
         let recording = s.recording_of(id).expect("with an identity");
         *cat.plays.entry(recording).or_insert(0) += 1;
@@ -166,7 +166,7 @@ mod tests {
         set.get("p").unwrap().clone()
     }
 
-    fn names(p: &SmartPlaylist, s: &Store, e: SortEnv<'_>) -> Vec<String> {
+    fn names(p: &SmartPlaylist, s: &Scan, e: SortEnv<'_>) -> Vec<String> {
         p.members(s, e)
             .iter()
             .map(|id| s.get(*id).unwrap().artist.clone().unwrap())
@@ -190,7 +190,7 @@ mod tests {
 
     /// §4 says a playlist "must not be filtered by the active set", because
     /// crossing themes is the point of one. A smart playlist inherits that: it
-    /// draws from the whole `Store`, so a rule can reach a track no active
+    /// draws from the whole `Scan`, so a rule can reach a track no active
     /// catalog would show.
     #[test]
     fn membership_crosses_catalogs() {

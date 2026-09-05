@@ -27,14 +27,14 @@ use crate::cmd::{
     AddTarget, Command, Fold, Motion, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId,
     VolSpec, parse,
 };
-use crate::library::Library;
 use crate::model::entity::Encoding;
 use crate::model::id::Id;
 use crate::model::rows::Listing;
 use crate::model::spine::Recording;
 use crate::next::{self, ActiveSource, Playback, Source};
 use crate::playlist::{Playlist, Queue};
-use crate::store::{Store, TrackId};
+use crate::shelf::Shelf;
+use crate::store::{Scan, TrackId};
 use tree::{Pane, TreeState};
 
 /// The five views M4 covers. cmus numbers them, and so do we — the digits are
@@ -407,7 +407,7 @@ pub struct Ui {
     pub track_line: crate::format::Template,
     /// The library projection. Owned rather than borrowed, because changing
     /// the active catalogs — or `smart_artist_sort` — rebuilds it.
-    pub library: Library,
+    pub library: Shelf,
     pub catalogs: crate::catalog::Catalogs,
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
@@ -443,7 +443,7 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(library: Library) -> Self {
+    pub fn new(library: Shelf) -> Self {
         let mut ui = Self::bare(library);
         // Resolve the placeholder the defaults were written with, so the
         // shipped `<leader> ?` works before any config is read.
@@ -451,7 +451,7 @@ impl Ui {
         ui
     }
 
-    fn bare(library: Library) -> Self {
+    fn bare(library: Shelf) -> Self {
         Self {
             view: View::Tree,
             tree: TreeState::default(),
@@ -681,7 +681,7 @@ pub struct Context<'a> {
     /// with no path in it. `store` is what has not moved yet, and the two are
     /// built from one scan so they cannot disagree.
     pub library: &'a crate::model::seam::Librarian,
-    pub store: &'a Store,
+    pub store: &'a Scan,
     /// `None` in tests, which have no audio device.
     pub player: Option<&'a PlayerHandle>,
     /// `None` in tests, and when the socket could not be bound.
@@ -2883,11 +2883,11 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     };
     // The same projection the startup path uses (#84), so refiltering cannot
     // quietly file things a second way.
-    ui.library = Library::project(ctx.library, ctx.store, members, ui.smart_artist_sort);
+    ui.library = Shelf::project(ctx.library, ctx.store, members, ui.smart_artist_sort);
     ui.tree.selected = 0;
     ui.sorted = 0;
     // Playlists and the queue are deliberately untouched: they hold TrackIds
-    // straight into the Store and are meant to cross catalogs.
+    // straight into the Scan and are meant to cross catalogs.
     //
     // A smart playlist is re-evaluated rather than left alone, but for a
     // different reason: it did not cross a catalog boundary, the *store* may
@@ -4403,8 +4403,8 @@ mod tests {
         track
     }
 
-    fn big_fixture(n: u32) -> Store {
-        let mut store = Store::new();
+    fn big_fixture(n: u32) -> Scan {
+        let mut store = Scan::new();
         for i in 1..=n {
             store.upsert(identified(Track {
                 path: PathBuf::from(format!("/m/long/{i:04}.mp3")),
@@ -4420,8 +4420,8 @@ mod tests {
         store
     }
 
-    fn fixture() -> Store {
-        let mut store = Store::new();
+    fn fixture() -> Scan {
+        let mut store = Scan::new();
 
         // A normal album, with a guest credit on one track — the case that
         // would split the album if we filed by `artist`.
@@ -4648,7 +4648,7 @@ mod tests {
     /// Leaking is the cheap way to give a test borrow a `'static` life. The
     /// process is about to end, and the alternative is threading a second
     /// local through every call site in a ten-thousand-line file.
-    fn lib_of(store: &Store) -> &'static crate::model::seam::Librarian {
+    fn lib_of(store: &Scan) -> &'static crate::model::seam::Librarian {
         Box::leak(Box::new(crate::bridge::librarian(
             store,
             &std::collections::BTreeSet::new(),
@@ -4657,7 +4657,7 @@ mod tests {
         )))
     }
 
-    fn ctx_of(store: &Store) -> Context<'_> {
+    fn ctx_of(store: &Scan) -> Context<'_> {
         Context {
             library: lib_of(store),
             store,
@@ -4668,7 +4668,7 @@ mod tests {
 
     /// Open the artist under the cursor and its first album, so the tracks
     /// are on screen. Tracks live inline now, two folds down.
-    fn expand_to_tracks(ui: &mut Ui, _store: &Store) {
+    fn expand_to_tracks(ui: &mut Ui, _store: &Scan) {
         let lib = std::mem::take(&mut ui.library);
         ui.tree.toggle(&lib);
         ui.tree.selected += 1;
@@ -4677,8 +4677,8 @@ mod tests {
     }
 
     /// A `Ui` over the whole fixture library.
-    fn ui_of(store: &Store, smart: bool) -> Ui {
-        Ui::new(Library::rebuild(store, smart))
+    fn ui_of(store: &Scan, smart: bool) -> Ui {
+        Ui::new(Shelf::rebuild(store, smart))
     }
 
     #[test]
@@ -4944,7 +4944,7 @@ mod tests {
     }
 
     /// A `Ui` with two smart playlists defined and a history to test against.
-    fn with_playlists(store: &Store) -> Ui {
+    fn with_playlists(store: &Scan) -> Ui {
         let mut ui = ui_of(store, true);
         ui.playlists.define(
             "electronic",
@@ -4962,8 +4962,8 @@ mod tests {
     }
 
     /// A store where genre is set, so a rule has something to select on.
-    fn genre_fixture() -> Store {
-        let mut s = Store::new();
+    fn genre_fixture() -> Scan {
+        let mut s = Scan::new();
         for (path, title, genre) in [
             ("/m/a.mp3", "Zebra", "electronic"),
             ("/m/b.mp3", "Antelope", "electronic"),
@@ -5242,7 +5242,7 @@ mod tests {
         assert_eq!(fresh.playlist.len(), 2, "the rule was not re-evaluated");
     }
 
-    fn ui_with_saved(store: &Store, name: &str) -> (Ui, PathBuf) {
+    fn ui_with_saved(store: &Scan, name: &str) -> (Ui, PathBuf) {
         let dir = scratch(name);
         let mut ui = with_playlists(store);
         ui.saved = Some(crate::playlist::Playlists::new(&dir));
@@ -6780,11 +6780,11 @@ mod tests {
     use crate::catalog::{Catalogs, Spec};
 
     /// A fixture split into two catalogs by directory.
-    fn catalog_ui(store: &Store) -> Ui {
+    fn catalog_ui(store: &Scan) -> Ui {
         let mut catalogs = Catalogs::default();
         catalogs.define("paak", vec![PathBuf::from("/m/paak")], None);
         catalogs.define("va", vec![PathBuf::from("/m/va")], None);
-        let mut ui = Ui::new(Library::from_members(
+        let mut ui = Ui::new(Shelf::from_members(
             store,
             catalogs.members(store, crate::filter::Env::default()),
             true,
@@ -6822,7 +6822,7 @@ mod tests {
 
     /// The whole point: shuffle must not cross a catalog boundary. §5 builds
     /// its pool from the library, so this is really a test that nothing has
-    /// started building pools from the Store instead.
+    /// started building pools from the Scan instead.
     #[test]
     fn playback_stays_inside_the_active_catalog() {
         let store = fixture();
@@ -7881,7 +7881,7 @@ mod tests {
         assert_eq!(ui.library.len(), 0);
     }
 
-    /// Playlists and the queue hold `TrackId`s straight into the `Store` and
+    /// Playlists and the queue hold `TrackId`s straight into the `Scan` and
     /// must survive a filter — crossing boundaries is the point of them.
     #[test]
     fn a_filter_leaves_the_playlist_and_queue_alone() {
@@ -8136,7 +8136,7 @@ mod tests {
 
         // The same audio, renumbered on disk — which is exactly what stranded
         // a four-star rating when history was keyed by path.
-        let mut renamed = crate::store::Store::new();
+        let mut renamed = crate::store::Scan::new();
         let mut track = store.get(id).unwrap().clone();
         track.path = moved_from.with_file_name("99 renumbered.mp3");
         let after = renamed.upsert(track);
@@ -8162,7 +8162,7 @@ mod tests {
         dir
     }
 
-    fn ui_with_history(store: &Store, name: &str) -> Ui {
+    fn ui_with_history(store: &Scan, name: &str) -> Ui {
         let mut ui = ui_of(store, true);
         ui.data_dir = Some(scratch(name));
         ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
@@ -8172,7 +8172,7 @@ mod tests {
     /// What the library says about a recording, after a change.
     ///
     /// Takes the identity rather than a store and an index, which is the shape
-    /// the seam is moving to anyway — and keeps the `Store` count in this file
+    /// the seam is moving to anyway — and keeps the `Scan` count in this file
     /// falling rather than rising.
     fn stars(ui: &Ui, recording: Option<Recording2>) -> Option<u8> {
         ui.listened.ratings.get(&recording?).copied()
@@ -9135,8 +9135,8 @@ mod tests {
 
     /// A list longer than the pane, so the cursor has somewhere to be other
     /// than the edge.
-    fn tall_fixture(n: usize) -> Store {
-        let mut store = Store::new();
+    fn tall_fixture(n: usize) -> Scan {
+        let mut store = Scan::new();
         for i in 0..n {
             store.upsert(Track {
                 path: PathBuf::from(format!("/m/tall/{i:03}.mp3")),
@@ -9242,8 +9242,8 @@ mod tests {
     /// Its own store rather than the shared fixture: adding a row there moves
     /// every count and rendering assertion in the file, and this needs exactly
     /// two tracks to say what it means.
-    fn marked_fixture() -> Store {
-        let mut store = Store::new();
+    fn marked_fixture() -> Scan {
+        let mut store = Scan::new();
         store.upsert(Track {
             path: PathBuf::from("/m/loffler/01.mp3"),
             artist: Some("Christian Löffler".into()),
@@ -9325,8 +9325,8 @@ mod tests {
     }
 
     /// A library deep enough that a `zr` inserts many rows above the cursor.
-    fn many_artists(n: usize) -> Store {
-        let mut store = Store::new();
+    fn many_artists(n: usize) -> Scan {
+        let mut store = Scan::new();
         for i in 0..n {
             for t in 1..=2u32 {
                 store.upsert(Track {
@@ -10771,8 +10771,8 @@ mod tests {
     /// Two albums by one artist, followed by another artist — the shape that
     /// separates `}` from `]]`. The shared fixture cannot: its only
     /// two-album artist sorts last, so there is nothing for `]]` to reach.
-    fn two_albums_then_another_artist() -> Store {
-        let mut store = Store::new();
+    fn two_albums_then_another_artist() -> Scan {
+        let mut store = Scan::new();
         for (path, artist, album, title, n) in [
             ("/m/a1.mp3", "Anna", "First", "one", 1u32),
             ("/m/a2.mp3", "Anna", "First", "two", 2),

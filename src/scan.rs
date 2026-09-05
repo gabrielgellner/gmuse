@@ -1,4 +1,4 @@
-//! Library scanning: walk the filesystem, read tags, update the `Store`.
+//! Shelf scanning: walk the filesystem, read tags, update the `Scan`.
 //!
 //! Rescans are incremental by mtime — a file whose mtime is unchanged is not
 //! reopened. On a library of any size the second scan is a `stat` per file and
@@ -15,7 +15,7 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
 use lofty::probe::Probe;
 
-use crate::store::{ReplayGain, Store, Track};
+use crate::store::{ReplayGain, Scan, Track};
 
 /// Extensions we will try to read. Anything else in the tree is ignored
 /// without opening it, which matters when a music folder also holds artwork,
@@ -40,7 +40,7 @@ pub struct ScanReport {
     pub unchanged: usize,
     pub removed: usize,
     /// Departures paired with arrivals. Counted in `added` and `removed` too,
-    /// because that is what happened to the `Store`; what makes them moves is
+    /// because that is what happened to the `Scan`; what makes them moves is
     /// that everything keyed by path can follow them.
     pub moves: Vec<Move>,
     /// Files that looked like audio but could not be read.
@@ -89,7 +89,7 @@ impl std::fmt::Display for ScanReport {
 /// Tracks under a root that no longer exist on disk are removed. Tracks
 /// outside every root are left alone, so scanning one folder does not evict a
 /// library built from another.
-pub fn scan(store: &mut Store, roots: &[PathBuf]) -> ScanReport {
+pub fn scan(store: &mut Scan, roots: &[PathBuf]) -> ScanReport {
     let start = Instant::now();
     // A root under another root would have every one of its files walked
     // twice — read twice on a cold scan, and counted twice in the report,
@@ -238,7 +238,7 @@ fn signature(t: &Track) -> Signature<'_> {
 /// arbitrarily — and a wrong pairing attaches somebody's rating to the wrong
 /// song, which is worse than the loss this is preventing. Ambiguity is
 /// declined rather than guessed.
-fn detect_moves(store: &Store, gone: &[PathBuf], arrived: &[PathBuf]) -> Vec<Move> {
+fn detect_moves(store: &Scan, gone: &[PathBuf], arrived: &[PathBuf]) -> Vec<Move> {
     if gone.is_empty() || arrived.is_empty() {
         return Vec::new();
     }
@@ -501,7 +501,7 @@ mod tests {
         if !root.exists() {
             return;
         }
-        let mut store = crate::store::Store::new();
+        let mut store = crate::store::Scan::new();
         let r = scan(&mut store, &[root]);
         eprintln!(
             "{} of {} tracks identified ({:.1}%)",
@@ -556,7 +556,7 @@ mod tests {
 
         // The stale parent beside its two real children, as the cache had it.
         let roots = vec![d.join("Dance"), d.join("General"), d.clone()];
-        let mut store = Store::new();
+        let mut store = Scan::new();
         let report = scan(&mut store, &roots);
 
         assert_eq!(report.errors, vec![], "the fixture files did not read");
@@ -578,7 +578,7 @@ mod tests {
         write_wav(&d.join("General/b.wav"), 4410);
         let roots = vec![d.join("Dance"), d.join("General"), d.clone()];
 
-        let mut store = Store::new();
+        let mut store = Scan::new();
         scan(&mut store, &roots);
         let again = scan(&mut store, &roots);
 
@@ -658,7 +658,7 @@ mod tests {
     /// and only the path changed.
     #[test]
     fn a_file_at_a_new_path_is_recognised_as_the_same_track() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/old/03 Song.mp3", 5_000_000, "Song"));
         store.upsert(track("/m/Singles/03 Song.mp3", 5_000_000, "Song"));
 
@@ -681,7 +681,7 @@ mod tests {
     /// are exactly the reorganisations worth surviving.
     #[test]
     fn a_move_that_reset_the_mtime_is_still_a_move() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/old/a.mp3", 5_000_000, "Song"));
         let mut arrived = track("/m/new/a.mp3", 5_000_000, "Song");
         arrived.mtime = 9_999_999;
@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn size_alone_distinguishes_two_otherwise_identical_tracks() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/old/a.mp3", 5_000_000, "Song"));
         store.upsert(track("/m/new/a.mp3", 4_000_000, "Song"));
 
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn a_retagged_file_is_not_a_move() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/old/a.mp3", 5_000_000, "Song"));
         store.upsert(track("/m/new/a.mp3", 5_000_000, "A Different Song"));
 
@@ -731,7 +731,7 @@ mod tests {
     /// wrong song, which is worse than the loss this is preventing.
     #[test]
     fn two_identical_departures_are_ambiguous_and_declined() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/one/a.mp3", 5_000_000, "Song"));
         store.upsert(track("/m/two/a.mp3", 5_000_000, "Song"));
         store.upsert(track("/m/new/a.mp3", 5_000_000, "Song"));
@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn two_identical_arrivals_are_ambiguous_and_declined() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/old/a.mp3", 5_000_000, "Song"));
         store.upsert(track("/m/one/a.mp3", 5_000_000, "Song"));
         store.upsert(track("/m/two/a.mp3", 5_000_000, "Song"));
@@ -769,7 +769,7 @@ mod tests {
     /// is left alone.
     #[test]
     fn a_genuine_addition_alongside_a_move_is_not_swept_up() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/old/a.mp3", 5_000_000, "Song"));
         store.upsert(track("/m/new/a.mp3", 5_000_000, "Song"));
         store.upsert(track("/m/new/b.mp3", 7_000_000, "Another"));
@@ -785,7 +785,7 @@ mod tests {
 
     #[test]
     fn nothing_gone_or_nothing_arrived_means_no_moves() {
-        let mut store = Store::new();
+        let mut store = Scan::new();
         store.upsert(track("/m/new/a.mp3", 5_000_000, "Song"));
         assert!(detect_moves(&store, &[], &[PathBuf::from("/m/new/a.mp3")]).is_empty());
         assert!(detect_moves(&store, &[PathBuf::from("/m/old/a.mp3")], &[]).is_empty());
@@ -886,7 +886,7 @@ mod tests {
             tag.save_to_path(&from, WriteOptions::default()).unwrap();
         }
 
-        let mut store = Store::default();
+        let mut store = Scan::default();
         let report = scan(&mut store, std::slice::from_ref(&d));
         assert_eq!(report.added, 1);
 

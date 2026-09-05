@@ -2,7 +2,7 @@
 //!
 //! Separate from the player by construction: nothing here knows about audio,
 //! terminals or key bindings, and nothing in `ui/` should reach past this
-//! module to a `Store` or a path. That seam is the point of the milestone this
+//! module to a `Scan` or a path. That seam is the point of the milestone this
 //! module opens (#77).
 //!
 //! The layer is built bottom-up, ahead of the callers that will use it, so its

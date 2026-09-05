@@ -3,7 +3,7 @@
 //! **The library answers questions and accepts changes; the player asks and
 //! plays.** This module is where that sentence becomes a type.
 //!
-//! Today `src/ui/` reaches into a `Store` and handles `PathBuf`s directly, so
+//! Today `src/ui/` reaches into a `Scan` and handles `PathBuf`s directly, so
 //! the player and the librarian are one program by accident rather than by
 //! design. [`Librarian`] is the surface that ends that: everything the player
 //! needs, expressed in the model's terms, and nothing that requires it to know
@@ -33,7 +33,7 @@ use crate::model::vocabulary::Vocabulary;
 
 /// What the player is allowed to ask, and what it is allowed to ask for.
 ///
-/// Deliberately small. The four things `src/ui/` asks a `Store` for today are
+/// Deliberately small. The four things `src/ui/` asks a `Scan` for today are
 /// *get*, *iterate*, *upsert* and *look up by path* — and the last of those is
 /// the one that must not survive the move, because a path is a fact about one
 /// device's copy and the player has no business holding one.
@@ -581,7 +581,7 @@ mod tests {
 
     /// **The direction that does not hold yet**, with a number on it.
     ///
-    /// `src/ui/` still names a `Store` and still handles `PathBuf`s. Asserting
+    /// `src/ui/` still names a `Scan` and still handles `PathBuf`s. Asserting
     /// zero today would just fail; asserting *no worse than today* turns a
     /// 10,000-line migration into a ratchet, and makes any new leak a test
     /// failure rather than something to be found later.
@@ -592,13 +592,13 @@ mod tests {
     /// Two of the three have now been revised rather than driven to zero,
     /// because zero was never the right target for them. `PathBuf` counted
     /// four legitimate uses and could not fall further; it is a question now
-    /// instead of a count. `Store` cannot reach zero while the type exists,
+    /// instead of a count. `Scan` cannot reach zero while the type exists,
     /// which is #86. Only `reaches` still measures a migration in progress,
     /// and its own floor is four.
     ///
-    /// **It counts the substring, so prose counted too.** Two `Store`
+    /// **It counts the substring, so prose counted too.** Two `Scan`
     /// mentions were the word *Stored* in doc comments and one was a comment
-    /// naming `Store::recording_of` — three of five, in a number somebody was
+    /// naming `Scan::recording_of` — three of five, in a number somebody was
     /// going to chase to zero. Reworded rather than subtracted, so the count
     /// means what it says. What is left is the import, the `Context` field,
     /// and one comment about what playlists hold.
@@ -643,7 +643,7 @@ mod tests {
         ];
         /// **The number that actually measures the seam.** The player reaches
         /// through `ctx.store` far more often than it names the type, so
-        /// counting `Store` alone said 5 while sixteen reads went around the
+        /// counting `Scan` alone said 5 while sixteen reads went around the
         /// librarian. Replacing a read lowers this and leaves the others flat,
         /// which is exactly the progress #77 is made of.
         ///
@@ -683,7 +683,7 @@ mod tests {
         let mut stray_paths: Vec<String> = Vec::new();
         for (name, text) in read("src/ui") {
             let live = production(&text);
-            store += live.matches("Store").count();
+            store += live.matches("Scan").count();
             reaches += live.matches("ctx.store.").count();
             for line in live.lines().filter(|l| l.contains("PathBuf")) {
                 if !SANCTIONED_PATHS.iter().any(|ok| line.contains(ok)) {
@@ -699,11 +699,11 @@ mod tests {
         );
         assert!(
             store <= STORE && reaches <= REACHES,
-            "the seam widened: Store {store} (was {STORE}), \
+            "the seam widened: Scan {store} (was {STORE}), \
              reaches {reaches} (was {REACHES})"
         );
         if store < STORE || reaches < REACHES {
-            eprintln!("seam narrowed to Store {store}, reaches {reaches} — lower the constants");
+            eprintln!("seam narrowed to Scan {store}, reaches {reaches} — lower the constants");
         }
     }
 
