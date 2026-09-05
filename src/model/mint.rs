@@ -155,6 +155,8 @@ impl Id<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::entity::Concept;
+    use crate::model::facet;
 
     fn audio(scheme: u8, hash: u128) -> AudioId {
         AudioId { scheme, hash }
@@ -211,7 +213,7 @@ mod tests {
     #[test]
     fn the_minting_is_pinned() {
         use crate::model::basis::Basis;
-        use crate::model::entity::{Artist, Genre, Label, Medium, Qualifier, Role, Track};
+        use crate::model::entity::{Artist, Label, Medium, Role, Track};
         use crate::model::spine::Recording;
 
         let a = audio(1, 0x8fb0_dcfb_f145_dfff_6649_7842_65da_0229);
@@ -291,15 +293,24 @@ mod tests {
             // and the pin proved nothing about it. Each carries the shape the
             // rule is *for*: a doubled space, surrounding space, a capital, a
             // tab.
+            // **Unchanged across #117**, and that is the point: the genre
+            // facet's key is the string `Genre::KIND` was, so making the facet
+            // the domain separator re-mints nothing.
             (
                 "genre concept",
-                Id::<Genre>::of_name("Dub  Techno").to_string(),
+                Id::<Concept>::in_facet(facet::GENRE, "Dub  Techno").to_string(),
                 "70a98a74-2ef9-5ce6-95fb-c0aa48472f53",
             ),
+            // **Changed, once, deliberately.** Was
+            // `940e7f75-036b-50cc-b881-de887c835e4a`, seeded from the facet
+            // key `qualifier`; renaming the axis to `version` (#117) re-mints
+            // every concept on it. Free when it was done — the live log held
+            // no version fact at all, measured — and it is exactly the change
+            // this pin exists to make somebody argue for.
             (
                 "version concept",
-                Id::<Qualifier>::of_label("  Instrumental  ").to_string(),
-                "940e7f75-036b-50cc-b881-de887c835e4a",
+                Id::<Concept>::in_facet(facet::VERSION, "  Instrumental  ").to_string(),
+                "c3bfce70-6a45-535c-9f19-1bc91c6c6909",
             ),
             (
                 "credit role",

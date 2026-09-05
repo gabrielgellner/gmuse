@@ -24,43 +24,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::model::entity::{Genre, Hierarchy};
+use crate::model::entity::{Concept, Hierarchy};
+use crate::model::facet::{self, Described};
 use crate::model::id::{Id, Ref};
 use crate::model::reference::Source;
 
-impl Id<Genre> {
-    /// The id a genre name always mints, on any machine.
-    ///
-    /// **Convergent, because two devices tagging "Techno" must agree without
-    /// meeting** — and there is no external authority for a genre the way
-    /// MusicBrainz is one for a recording, so the name is what there is.
-    ///
-    /// Folded to lowercase and trimmed, so `Techno`, `techno` and ` Techno `
-    /// are one concept. Nothing else is normalised: `Deep House` and
-    /// `deep-house` stay apart, because collapsing them is a judgement about
-    /// the vocabulary rather than about whitespace, and a wrong collapse is a
-    /// merge — the error this model cannot repair.
-    ///
-    /// The consequence is honest and named in the docs above: **the id is
-    /// derived from the label, so renaming a concept mints a new one.** That
-    /// is what `Merges<Genre>` is for, and it is the same trade `Basis::Audio`
-    /// makes for a recording — convergence now, a repairable split later.
-    /// The id a name always mints.
-    ///
-    /// **Through [`crate::model::ingest::normalise`] and nothing else**, which
-    /// is what lets two devices define a concept independently and union into
-    /// one row with no registry — the same bet recording ids make. It was
-    /// spelled out here and again in `Vocabulary::define`, agreeing only by
-    /// coincidence; two spellings of the identity rule is one waiting to drift.
-    pub fn of_name(name: &str) -> Self {
-        Id::derived(crate::model::ingest::normalise(name).as_bytes())
-    }
-}
-
 /// A concept in the vocabulary. The id is meaningless; the label is mutable.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GenreRecord {
-    pub id: Id<Genre>,
+pub struct Term {
+    pub id: Id<Concept>,
     pub name: String,
 }
 
@@ -80,21 +52,8 @@ pub struct HierarchyRecord {
 )]
 pub struct HierarchyEdge {
     pub hierarchy: Ref<Hierarchy>,
-    pub parent: Ref<Genre>,
-    pub child: Ref<Genre>,
-}
-
-/// What a genre is assigned to.
-///
-/// The release group by default, because that is how this library is curated
-/// and where the data lives: querying the release found genres for 3 of 49
-/// records, the group for 130 of 429.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-pub enum GenreOn {
-    ReleaseGroup(Id<crate::model::entity::ReleaseGroup>),
-    Recording(Id<crate::model::entity::Recording>),
+    pub parent: Ref<Concept>,
+    pub child: Ref<Concept>,
 }
 
 /// One genre on one subject, with why it was assigned and how confidently.
@@ -102,9 +61,9 @@ pub enum GenreOn {
 /// A bare reference would have nowhere to record either, which is exactly what
 /// `genre-uncertain.tsv` tracks today and throws away at the end of every pass.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GenreAssignment {
-    pub subject: GenreOn,
-    pub genre: Ref<Genre>,
+pub struct ConceptAssertion {
+    pub subject: Described,
+    pub genre: Ref<Concept>,
     pub basis: Source,
     pub confidence: crate::model::ingest::Confidence,
 }
@@ -117,17 +76,17 @@ pub struct GenreAssignment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cycle {
     pub hierarchy: Id<Hierarchy>,
-    pub at: Id<Genre>,
+    pub at: Id<Concept>,
 }
 
 /// The vocabulary, its hierarchies, and what has been assigned from it.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(bound = "")]
 pub struct Vocabulary {
-    pub genres: BTreeMap<Id<Genre>, GenreRecord>,
+    pub genres: BTreeMap<Id<Concept>, Term>,
     pub hierarchies: BTreeMap<Id<Hierarchy>, HierarchyRecord>,
     pub edges: BTreeSet<HierarchyEdge>,
-    pub assignments: Vec<GenreAssignment>,
+    pub assignments: Vec<ConceptAssertion>,
 }
 
 #[allow(
@@ -142,9 +101,9 @@ pub(crate) const MAX_DEPTH: usize = 16;
     reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — cycle detection in the genre hierarchy, which no import path runs"
 )]
 impl Vocabulary {
-    pub fn define(&mut self, name: &str) -> Id<Genre> {
-        let id = Id::<Genre>::of_name(name);
-        self.genres.entry(id).or_insert_with(|| GenreRecord {
+    pub fn define(&mut self, name: &str) -> Id<Concept> {
+        let id = Id::<Concept>::in_facet(facet::GENRE, name);
+        self.genres.entry(id).or_insert_with(|| Term {
             id,
             name: name.to_string(),
         });
@@ -163,7 +122,7 @@ impl Vocabulary {
     }
 
     /// `child` is narrower than `parent`, in this hierarchy.
-    pub fn narrows(&mut self, hierarchy: Id<Hierarchy>, child: Id<Genre>, parent: Id<Genre>) {
+    pub fn narrows(&mut self, hierarchy: Id<Hierarchy>, child: Id<Concept>, parent: Id<Concept>) {
         self.edges.insert(HierarchyEdge {
             hierarchy: Ref::to(hierarchy),
             parent: Ref::to(parent),
@@ -187,11 +146,11 @@ impl Vocabulary {
     /// The shortest way up, because a genre may be narrower-of two things and
     /// the broadest reading is the one a single slot wants. Bounded by
     /// [`MAX_DEPTH`], so data that acquired a cycle answers rather than hangs.
-    pub fn depth(&self, genre: Id<Genre>) -> usize {
+    pub fn depth(&self, genre: Id<Concept>) -> usize {
         let mut frontier = BTreeSet::from([genre]);
         let mut seen = frontier.clone();
         for hops in 0..MAX_DEPTH {
-            let parents: BTreeSet<Id<Genre>> = self
+            let parents: BTreeSet<Id<Concept>> = self
                 .edges
                 .iter()
                 .filter(|e| frontier.contains(&e.child.id()))
@@ -206,7 +165,7 @@ impl Vocabulary {
         MAX_DEPTH
     }
 
-    pub fn under(&self, hierarchy: Id<Hierarchy>, root: Id<Genre>) -> BTreeSet<Id<Genre>> {
+    pub fn under(&self, hierarchy: Id<Hierarchy>, root: Id<Concept>) -> BTreeSet<Id<Concept>> {
         let mut seen = BTreeSet::from([root]);
         let mut frontier = vec![root];
         for _ in 0..MAX_DEPTH {
@@ -230,7 +189,7 @@ impl Vocabulary {
     }
 
     /// The concepts with no parent — the top of a hierarchy.
-    pub fn top_of(&self, hierarchy: Id<Hierarchy>) -> BTreeSet<Id<Genre>> {
+    pub fn top_of(&self, hierarchy: Id<Hierarchy>) -> BTreeSet<Id<Concept>> {
         let children: BTreeSet<_> = self
             .edges
             .iter()
@@ -287,22 +246,22 @@ impl Vocabulary {
         &self,
         recording: Id<crate::model::entity::Recording>,
         groups: &[(Id<crate::model::entity::ReleaseGroup>, bool)],
-    ) -> BTreeSet<Id<Genre>> {
+    ) -> BTreeSet<Id<Concept>> {
         let own: BTreeSet<_> = self
             .assignments
             .iter()
-            .filter(|a| a.subject == GenreOn::Recording(recording))
+            .filter(|a| a.subject == Described::Recording(recording))
             .map(|a| a.genre.id())
             .collect();
         if !own.is_empty() {
             return own;
         }
 
-        let from = |only_albums: bool| -> BTreeSet<Id<Genre>> {
+        let from = |only_albums: bool| -> BTreeSet<Id<Concept>> {
             self.assignments
                 .iter()
                 .filter_map(|a| match a.subject {
-                    GenreOn::ReleaseGroup(g)
+                    Described::ReleaseGroup(g)
                         if groups
                             .iter()
                             .any(|(id, comp)| *id == g && (!only_albums || !*comp)) =>
@@ -326,11 +285,12 @@ impl Vocabulary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::entity::Concept;
     use crate::model::entity::{Recording, ReleaseGroup};
     use crate::model::ingest::Confidence;
 
     /// The vocabulary `tools/genre/propose.py` already holds, in miniature.
-    fn library_vocabulary() -> (Vocabulary, Id<Hierarchy>, Id<Genre>, Id<Genre>) {
+    fn library_vocabulary() -> (Vocabulary, Id<Hierarchy>, Id<Concept>, Id<Concept>) {
         let mut v = Vocabulary::default();
         let browse = v.hierarchy("browse");
         let electronic = v.define("Electronic");
@@ -401,8 +361,8 @@ mod tests {
         let song = Id::<Recording>::derived(b"the-song");
 
         for (subject, genre) in [(album, rock), (comp, pop)] {
-            v.assignments.push(GenreAssignment {
-                subject: GenreOn::ReleaseGroup(subject),
+            v.assignments.push(ConceptAssertion {
+                subject: Described::ReleaseGroup(subject),
                 genre: Ref::to(genre),
                 basis: Source::Discogs,
                 confidence: Confidence::Matched,
@@ -424,8 +384,8 @@ mod tests {
         let pop = v.define("Pop");
         let comp = Id::<ReleaseGroup>::derived(b"80s-hits");
         let song = Id::<Recording>::derived(b"only-here");
-        v.assignments.push(GenreAssignment {
-            subject: GenreOn::ReleaseGroup(comp),
+        v.assignments.push(ConceptAssertion {
+            subject: Described::ReleaseGroup(comp),
             genre: Ref::to(pop),
             basis: Source::Discogs,
             confidence: Confidence::Matched,
@@ -446,14 +406,14 @@ mod tests {
         let (rock, jazz) = (v.define("Rock"), v.define("Jazz"));
         let album = Id::<ReleaseGroup>::derived(b"album");
         let song = Id::<Recording>::derived(b"song");
-        v.assignments.push(GenreAssignment {
-            subject: GenreOn::ReleaseGroup(album),
+        v.assignments.push(ConceptAssertion {
+            subject: Described::ReleaseGroup(album),
             genre: Ref::to(rock),
             basis: Source::Discogs,
             confidence: Confidence::Matched,
         });
-        v.assignments.push(GenreAssignment {
-            subject: GenreOn::Recording(song),
+        v.assignments.push(ConceptAssertion {
+            subject: Described::Recording(song),
             genre: Ref::to(jazz),
             basis: Source::Manual,
             confidence: Confidence::Confirmed,
@@ -473,8 +433,8 @@ mod tests {
         let (a, b) = (v.define("Electronic"), v.define("Ambient"));
         let group = Id::<ReleaseGroup>::derived(b"g");
         for g in [a, b] {
-            v.assignments.push(GenreAssignment {
-                subject: GenreOn::ReleaseGroup(group),
+            v.assignments.push(ConceptAssertion {
+                subject: Described::ReleaseGroup(group),
                 genre: Ref::to(g),
                 basis: Source::Discogs,
                 confidence: Confidence::Matched,
@@ -511,13 +471,15 @@ mod concept_tests {
     //! and the price is that renaming can split one concept into two. The
     //! split is accepted because it is the error that can be repaired.
 
-    use crate::model::entity::{Device, Genre};
+    use crate::model::entity::Concept;
+    use crate::model::entity::Device;
+    use crate::model::facet;
     use crate::model::id::Id;
     use crate::model::ingest::Confidence;
     use crate::model::instance::Instance;
     use crate::model::merge::Merges;
     use crate::model::reference::{AliasKind, Cataloguable, Source};
-    use crate::model::vocabulary::GenreOn;
+    use crate::model::vocabulary::Described;
     use crate::model::{basis::Basis, spine::Recording};
 
     fn device(n: u128) -> Id<Device> {
@@ -536,10 +498,10 @@ mod concept_tests {
     /// use, and a registry would need one of them to be online.
     #[test]
     fn one_label_is_one_concept_however_it_is_typed() {
-        let canonical = Id::<Genre>::of_name("Dub Techno");
+        let canonical = Id::<Concept>::in_facet(facet::GENRE, "Dub Techno");
         for spelling in ["dub techno", "  DUB TECHNO  ", "dub  techno", "Dub\tTechno"] {
             assert_eq!(
-                Id::<Genre>::of_name(spelling),
+                Id::<Concept>::in_facet(facet::GENRE, spelling),
                 canonical,
                 "{spelling:?} minted a second concept"
             );
@@ -555,24 +517,26 @@ mod concept_tests {
     /// would have said so.
     #[test]
     fn every_concept_id_is_minted_through_one_function() {
-        use crate::model::entity::Qualifier;
-        use crate::model::ingest::normalise;
-
+        // **One function now, where there were two** (#117). `of_name` and
+        // `of_label` were separate spellings of the same rule; `in_facet` is
+        // the rule, and the axis is an argument to it rather than a copy of it.
         for label in ["Dub Techno", " Deep  House ", "IDM"] {
-            assert_eq!(
-                Id::<Genre>::of_name(label),
-                Id::<Genre>::derived(normalise(label).as_bytes())
-            );
-            assert_eq!(
-                Id::<Qualifier>::of_label(label),
-                Id::<Qualifier>::derived(normalise(label).as_bytes())
-            );
+            for axis in [facet::GENRE, facet::VERSION] {
+                assert_eq!(
+                    Id::<Concept>::in_facet(axis, label),
+                    Id::<Concept>::in_facet(axis, &label.to_lowercase()),
+                    "{axis}/{label} normalises differently from itself"
+                );
+            }
         }
 
         // And the two entry points agree, which is the pair that used to be
         // two independent spellings of the same rule.
         let mut v = super::Vocabulary::default();
-        assert_eq!(v.define("Dub Techno"), Id::<Genre>::of_name("dub techno"));
+        assert_eq!(
+            v.define("Dub Techno"),
+            Id::<Concept>::in_facet(facet::GENRE, "dub techno")
+        );
     }
 
     /// **A rename does not re-mint, and the split that follows is repaired
@@ -585,29 +549,29 @@ mod concept_tests {
     #[test]
     fn a_rename_splits_and_a_merge_repairs() {
         let mut mine = Instance::new(device(1));
-        let old = Id::<Genre>::of_name("Minimal");
+        let old = Id::<Concept>::in_facet(facet::GENRE, "Minimal");
         mine.assign_genre(
             100,
-            GenreOn::Recording(rec()),
+            Described::Recording(rec()),
             "Minimal",
             Source::Discogs,
             Confidence::Matched,
         );
-        mine.rename_genre(200, old, "Minimal", "Minimal Techno");
+        mine.rename_concept(200, facet::GENRE, old, "Minimal", "Minimal Techno");
 
         let cat = mine.catalogue();
         assert_eq!(
-            cat.genre_names[&old], "Minimal Techno",
+            cat.concepts[&old].label, "Minimal Techno",
             "the label is a last-writer register and the rename is a write"
         );
         assert!(
-            cat.genres
-                .contains_key(&(GenreOn::Recording(rec()), old, Source::Discogs)),
+            cat.assertions
+                .contains_key(&(Described::Recording(rec()), old, Source::Discogs)),
             "the assignment followed the id, which is the point of not re-minting"
         );
         assert!(
             cat.aliases.contains(&(
-                Cataloguable::Genre(old),
+                Cataloguable::Concept(old),
                 "Minimal".to_string(),
                 AliasKind::Retired
             )),
@@ -616,13 +580,13 @@ mod concept_tests {
 
         // Elsewhere, somebody meets the new label with no history and mints
         // from it. Nothing is wrong yet — there are simply two rows.
-        let fresh = Id::<Genre>::of_name("Minimal Techno");
+        let fresh = Id::<Concept>::in_facet(facet::GENRE, "Minimal Techno");
         assert_ne!(fresh, old, "a rename that re-minted would defeat the test");
 
         let mut theirs = Instance::new(device(2));
         theirs.assign_genre(
             300,
-            GenreOn::Recording(rec()),
+            Described::Recording(rec()),
             "Minimal Techno",
             Source::Manual,
             Confidence::Confirmed,
@@ -630,7 +594,7 @@ mod concept_tests {
         mine.merge(400, theirs.records());
         assert_eq!(
             mine.catalogue()
-                .genres
+                .assertions
                 .keys()
                 .filter(|(_, _, _)| true)
                 .count(),
@@ -639,7 +603,7 @@ mod concept_tests {
         );
 
         // The repair is the ordinary one, and it is permanent.
-        let mut merges = Merges::<Genre>::new();
+        let mut merges = Merges::<Concept>::new();
         merges.merge(fresh, old).expect("a split is mergeable");
         assert_eq!(merges.resolve(fresh), old);
         assert_eq!(merges.resolve(old), old);
@@ -648,7 +612,7 @@ mod concept_tests {
         // moves rows onto one concept, it does not decide who said what.
         let cat = mine.catalogue();
         let after: Vec<Source> = cat
-            .genres
+            .assertions
             .keys()
             .map(|(_, g, basis)| {
                 assert_eq!(merges.resolve(*g), old, "a row did not resolve");
@@ -668,19 +632,19 @@ mod concept_tests {
 
         let mut i = Instance::new(device(1));
         let browse = Id::<Hierarchy>::derived(b"browse");
-        i.narrows(100, browse, "Electronic", "Techno");
+        i.narrows(100, browse, facet::GENRE, "Electronic", "Techno");
         // A placed concept, so the query has something to *not* return —
         // otherwise it passes on a catalogue that holds one genre.
         i.assign_genre(
             200,
-            GenreOn::Recording(rec()),
+            Described::Recording(rec()),
             "Techno",
             Source::Discogs,
             Confidence::Matched,
         );
         i.assign_genre(
             300,
-            GenreOn::Recording(rec()),
+            Described::Recording(rec()),
             "Hardvapour",
             Source::Manual,
             Confidence::Confirmed,
@@ -688,16 +652,21 @@ mod concept_tests {
 
         let cat = i.catalogue();
         assert!(
-            cat.genres.contains_key(&(
-                GenreOn::Recording(rec()),
-                Id::<Genre>::of_name("Hardvapour"),
+            cat.assertions.contains_key(&(
+                Described::Recording(rec()),
+                Id::<Concept>::in_facet(facet::GENRE, "Hardvapour"),
                 Source::Manual
             )),
             "the assignment was refused for want of a place in the tree"
         );
         assert_eq!(
-            cat.unplaced_genres(browse),
-            [Id::<Genre>::of_name("Hardvapour")].into_iter().collect(),
+            cat.unplaced_concepts(
+                browse,
+                Id::<crate::model::entity::Facet>::of_key(facet::GENRE)
+            ),
+            [Id::<Concept>::in_facet(facet::GENRE, "Hardvapour")]
+                .into_iter()
+                .collect(),
             "the review query is what turns an orphan into a backlog item"
         );
     }
@@ -711,12 +680,13 @@ mod genre_retraction_tests {
     //! function, so these test the wiring rather than the rule — the rule's
     //! five cases live beside the qualifier facts.
 
-    use crate::model::entity::Genre;
+    use crate::model::entity::Concept;
+    use crate::model::facet;
     use crate::model::id::Id;
     use crate::model::ingest::Confidence;
     use crate::model::instance::Instance;
     use crate::model::reference::Source;
-    use crate::model::vocabulary::GenreOn;
+    use crate::model::vocabulary::Described;
     use crate::model::{basis::Basis, spine::Recording};
 
     fn rec() -> Id<Recording> {
@@ -726,8 +696,8 @@ mod genre_retraction_tests {
         })
     }
 
-    fn on() -> GenreOn {
-        GenreOn::Recording(rec())
+    fn on() -> Described {
+        Described::Recording(rec())
     }
 
     /// A retraction silences every asserter, and leaves a row saying it was
@@ -743,24 +713,24 @@ mod genre_retraction_tests {
             Source::TagVariant,
             Confidence::Provisional,
         );
-        assert_eq!(i.catalogue().genres.len(), 2);
+        assert_eq!(i.catalogue().assertions.len(), 2);
 
-        i.retract_genre(300, on(), "Techno");
+        i.retract_concept(300, on(), facet::GENRE, "Techno");
         let cat = i.catalogue();
         assert!(
-            cat.genres.is_empty(),
+            cat.assertions.is_empty(),
             "one asserter survived the retraction"
         );
         assert!(
-            cat.genres_retracted
-                .contains(&(on(), Id::<Genre>::of_name("Techno"))),
+            cat.assertions_retracted
+                .contains(&(on(), Id::<Concept>::in_facet(facet::GENRE, "Techno"))),
             "the decision left no row, so it reads as though nobody had said"
         );
 
         // And it is a decision rather than a tombstone.
         i.assign_genre(400, on(), "Techno", Source::Manual, Confidence::Confirmed);
-        assert_eq!(i.catalogue().genres.len(), 1);
-        assert!(i.catalogue().genres_retracted.is_empty());
+        assert_eq!(i.catalogue().assertions.len(), 1);
+        assert!(i.catalogue().assertions_retracted.is_empty());
     }
 }
 
@@ -777,23 +747,25 @@ mod hierarchy_retraction_tests {
     //! assignments; those carry a basis in their live key and so retract by
     //! sweeping, where an edge names no asserter and is one row.
 
-    use crate::model::entity::{Genre, Hierarchy};
+    use crate::model::entity::Concept;
+    use crate::model::entity::Hierarchy;
+    use crate::model::facet;
     use crate::model::id::Id;
     use crate::model::ingest::Confidence;
     use crate::model::instance::Instance;
     use crate::model::reference::Source;
-    use crate::model::vocabulary::GenreOn;
+    use crate::model::vocabulary::Described;
     use crate::model::{basis::Basis, spine::Recording};
 
     fn browse() -> Id<Hierarchy> {
         Id::derived(b"browse")
     }
 
-    fn edge(parent: &str, child: &str) -> (Id<Hierarchy>, Id<Genre>, Id<Genre>) {
+    fn edge(parent: &str, child: &str) -> (Id<Hierarchy>, Id<Concept>, Id<Concept>) {
         (
             browse(),
-            Id::<Genre>::of_name(parent),
-            Id::<Genre>::of_name(child),
+            Id::<Concept>::in_facet(facet::GENRE, parent),
+            Id::<Concept>::in_facet(facet::GENRE, child),
         )
     }
 
@@ -805,10 +777,10 @@ mod hierarchy_retraction_tests {
     #[test]
     fn a_withdrawn_edge_leaves_a_decision_behind() {
         let mut i = instance(1);
-        i.narrows(100, browse(), "Rock", "Techno");
+        i.narrows(100, browse(), facet::GENRE, "Rock", "Techno");
         assert!(i.catalogue().narrows.contains(&edge("Rock", "Techno")));
 
-        i.retract_narrowing(200, browse(), "Rock", "Techno");
+        i.retract_narrowing(200, browse(), facet::GENRE, "Rock", "Techno");
         let cat = i.catalogue();
         assert!(!cat.narrows.contains(&edge("Rock", "Techno")));
         assert!(
@@ -828,10 +800,10 @@ mod hierarchy_retraction_tests {
     #[test]
     fn a_retracted_edge_is_not_restored_by_a_replica() {
         let mut mine = instance(1);
-        mine.narrows(100, browse(), "Rock", "Techno");
+        mine.narrows(100, browse(), facet::GENRE, "Rock", "Techno");
         let stale = mine.records().clone();
 
-        mine.retract_narrowing(200, browse(), "Rock", "Techno");
+        mine.retract_narrowing(200, browse(), facet::GENRE, "Rock", "Techno");
         mine.merge(300, &stale);
         assert!(
             !mine.catalogue().narrows.contains(&edge("Rock", "Techno")),
@@ -844,9 +816,9 @@ mod hierarchy_retraction_tests {
     #[test]
     fn filing_an_edge_again_revives_it() {
         let mut i = instance(1);
-        i.narrows(100, browse(), "Electronic", "Techno");
-        i.retract_narrowing(200, browse(), "Electronic", "Techno");
-        i.narrows(300, browse(), "Electronic", "Techno");
+        i.narrows(100, browse(), facet::GENRE, "Electronic", "Techno");
+        i.retract_narrowing(200, browse(), facet::GENRE, "Electronic", "Techno");
+        i.narrows(300, browse(), facet::GENRE, "Electronic", "Techno");
 
         let cat = i.catalogue();
         assert!(cat.narrows.contains(&edge("Electronic", "Techno")));
@@ -868,23 +840,33 @@ mod hierarchy_retraction_tests {
             key: "callisto".into(),
         });
         let mut i = instance(1);
-        i.narrows(100, browse(), "Electronic", "Techno");
+        i.narrows(100, browse(), facet::GENRE, "Electronic", "Techno");
         i.assign_genre(
             200,
-            GenreOn::Recording(rec),
+            Described::Recording(rec),
             "Techno",
             Source::Discogs,
             Confidence::Matched,
         );
         assert!(
-            i.catalogue().unplaced_genres(browse()).is_empty(),
+            i.catalogue()
+                .unplaced_concepts(
+                    browse(),
+                    Id::<crate::model::entity::Facet>::of_key(facet::GENRE)
+                )
+                .is_empty(),
             "a placed concept is not a backlog item"
         );
 
-        i.retract_narrowing(300, browse(), "Electronic", "Techno");
+        i.retract_narrowing(300, browse(), facet::GENRE, "Electronic", "Techno");
         assert_eq!(
-            i.catalogue().unplaced_genres(browse()),
-            [Id::<Genre>::of_name("Techno")].into_iter().collect(),
+            i.catalogue().unplaced_concepts(
+                browse(),
+                Id::<crate::model::entity::Facet>::of_key(facet::GENRE)
+            ),
+            [Id::<Concept>::in_facet(facet::GENRE, "Techno")]
+                .into_iter()
+                .collect(),
             "the concept is unreachable by closure and nothing said so"
         );
     }

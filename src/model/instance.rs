@@ -21,16 +21,16 @@ use crate::model::clock::{Drift, HybridClock, Stamp};
 use crate::model::durable::{self, Damage, LogError};
 use crate::model::encoding::Format;
 use crate::model::entity::{
-    Artist, Device, Encoding, Genre, Hierarchy, Label, Medium, Qualifier, Recording, Release,
+    Artist, Concept, Device, Encoding, Facet, Hierarchy, Label, Medium, Recording, Release,
     ReleaseGroup, Role, Track, Work,
 };
+use crate::model::facet::{self, Described};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
 use crate::model::ord::OrdKey;
 use crate::model::reference::{AliasKind, Cataloguable, CreditOn, RoleClass, Source};
 use crate::model::spine::PartialDate;
-use crate::model::vocabulary::GenreOn;
 
 /// What a scan says about one file.
 ///
@@ -252,7 +252,7 @@ impl Instance {
             // a title is the weakest thing a claim can be read off, and a
             // human disagreeing lands beside this rather than on it.
             for label in crate::model::qualifier::qualifiers_in(&s.title) {
-                self.assign_qualifier(
+                self.assign_version(
                     now,
                     recording,
                     label,
@@ -293,22 +293,13 @@ impl Instance {
             // the recording rather than the album: a compilation's `Pop`
             // would otherwise be asserted over every track it holds (#74).
             for name in &s.genres {
-                let genre = Id::<crate::model::entity::Genre>::of_name(name);
-                self.append(
+                self.assert_concept(
                     now,
-                    Fact::GenreCatalogued {
-                        genre,
-                        name: name.clone(),
-                    },
-                );
-                self.append(
-                    now,
-                    Fact::GenreAssigned {
-                        subject: crate::model::vocabulary::GenreOn::Recording(recording),
-                        genre,
-                        basis: Source::TagVariant,
-                        confidence: Confidence::Provisional,
-                    },
+                    Described::Recording(recording),
+                    facet::GENRE,
+                    name,
+                    Source::TagVariant,
+                    Confidence::Provisional,
                 );
             }
 
@@ -510,43 +501,67 @@ impl Instance {
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
     )]
-    pub fn assign_genre(
+    /// **Claim that a concept describes a subject, on one axis** — #117.
+    ///
+    /// The one writer for every facet, where genre and version had one each.
+    ///
+    /// The concept is catalogued before the claim, because an id that no fact
+    /// resolves is an id nobody can render. Idempotent: both ids derive from
+    /// the label and its facet key, so a repeat is the same record.
+    pub fn assert_concept(
         &mut self,
         now: i64,
-        subject: GenreOn,
-        name: &str,
+        subject: Described,
+        facet_key: &str,
+        label: &str,
         basis: Source,
         confidence: Confidence,
     ) {
-        // **The concept before the assignment.** An id that no fact resolves
-        // is an id nobody can render, so the vocabulary entry is asserted
-        // alongside — idempotently, since both ids derive from the name and a
-        // repeat is the same record.
-        let genre = Id::<Genre>::of_name(name);
+        let facet = Id::<Facet>::of_key(facet_key);
+        let concept = Id::<Concept>::in_facet(facet_key, label);
         self.append(
             now,
-            Fact::GenreCatalogued {
-                genre,
-                name: name.trim().to_string(),
+            Fact::ConceptCatalogued {
+                facet,
+                concept,
+                label: label.trim().to_string(),
+                node_label: false,
             },
         );
         self.append(
             now,
-            Fact::GenreAssigned {
+            Fact::ConceptAsserted {
                 subject,
-                genre,
+                concept,
                 basis,
                 confidence,
             },
         );
     }
 
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, and every production path now goes through `assert_concept` with the axis named — which is the point of #117, so this is the convenience that survives for the tests that read better with it"
+    )]
+    /// A genre, which is a concept on the `genre` axis.
+    pub fn assign_genre(
+        &mut self,
+        now: i64,
+        subject: Described,
+        name: &str,
+        basis: Source,
+        confidence: Confidence,
+    ) {
+        self.assert_concept(now, subject, facet::GENRE, name, basis, confidence);
+    }
+
     /// Say which version of a song a recording is.
     ///
-    /// Refuses a grouping concept: `mix-variant` is a place in the tree, not a
-    /// claim about a song, and accepting it would fold to an assignment nobody
+    /// Refuses a node label: `mix-variant` is a place in the array, not a
+    /// claim about a song, and ISO 25964's rule is that a node label does not
+    /// take part in retrieval. Accepting it would fold to an assertion nobody
     /// can see — indistinguishable from one nobody made.
-    pub fn assign_qualifier(
+    pub fn assign_version(
         &mut self,
         now: i64,
         recording: Id<Recording>,
@@ -557,22 +572,13 @@ impl Instance {
         if !crate::model::qualifier::assignable(label) {
             return false;
         }
-        let concept = Id::<Qualifier>::of_label(label);
-        self.append(
+        self.assert_concept(
             now,
-            Fact::QualifierCatalogued {
-                concept,
-                label: label.trim().to_string(),
-            },
-        );
-        self.append(
-            now,
-            Fact::QualifierAssigned {
-                recording,
-                concept,
-                basis,
-                confidence,
-            },
+            Described::Recording(recording),
+            facet::VERSION,
+            label,
+            basis,
+            confidence,
         );
         true
     }
@@ -670,18 +676,27 @@ impl Instance {
     ///
     /// `Retired` rather than `SearchHint`, because the name did not stop being
     /// this concept's — it stopped being the one it is called by.
-    pub fn rename_genre(&mut self, now: i64, genre: Id<Genre>, was: &str, now_called: &str) {
+    pub fn rename_concept(
+        &mut self,
+        now: i64,
+        facet_key: &str,
+        concept: Id<Concept>,
+        was: &str,
+        now_called: &str,
+    ) {
         self.append(
             now,
-            Fact::GenreCatalogued {
-                genre,
-                name: now_called.trim().to_string(),
+            Fact::ConceptCatalogued {
+                facet: Id::<Facet>::of_key(facet_key),
+                concept,
+                label: now_called.trim().to_string(),
+                node_label: false,
             },
         );
         self.append(
             now,
             Fact::AliasAsserted {
-                subject: Cataloguable::Genre(genre),
+                subject: Cataloguable::Concept(concept),
                 value: was.trim().to_string(),
                 kind: AliasKind::Retired,
             },
@@ -692,14 +707,15 @@ impl Instance {
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
     )]
-    /// Decide a genre does not apply. Shadows rather than deletes, and
-    /// silences every asserter — see [`Instance::retract_qualifier`].
-    pub fn retract_genre(&mut self, now: i64, subject: GenreOn, name: &str) {
+    /// Decide a concept does not apply. Shadows rather than deletes, and
+    /// silences every asserter at once — a person saying "this is not live" is
+    /// answering the question, not arguing with one source.
+    pub fn retract_concept(&mut self, now: i64, subject: Described, facet_key: &str, label: &str) {
         self.append(
             now,
-            Fact::GenreRetracted {
+            Fact::ConceptRetracted {
                 subject,
-                genre: Id::<Genre>::of_name(name),
+                concept: Id::<Concept>::in_facet(facet_key, label),
             },
         );
     }
@@ -708,15 +724,9 @@ impl Instance {
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
     )]
-    /// Decide a qualifier does not apply. Shadows rather than deletes.
-    pub fn retract_qualifier(&mut self, now: i64, recording: Id<Recording>, label: &str) {
-        self.append(
-            now,
-            Fact::QualifierRetracted {
-                recording,
-                concept: Id::<Qualifier>::of_label(label),
-            },
-        );
+    /// Decide a version does not apply. Shadows rather than deletes.
+    pub fn retract_version(&mut self, now: i64, recording: Id<Recording>, label: &str) {
+        self.retract_concept(now, Described::Recording(recording), facet::VERSION, label);
     }
 
     #[allow(
@@ -727,21 +737,44 @@ impl Instance {
     ///
     /// Idempotent: every id derives from its label, so a second call appends
     /// records the set already holds.
-    pub fn seed_qualifiers(&mut self, now: i64) {
-        for (label, parent, _) in crate::model::qualifier::SEED {
-            let concept = Id::<Qualifier>::of_label(label);
+    pub fn seed_versions(&mut self, now: i64) {
+        let facet = Id::<Facet>::of_key(facet::VERSION);
+        let hierarchy = Id::<Facet>::array(facet::VERSION);
+        self.append(
+            now,
+            Fact::FacetDefined {
+                facet,
+                key: facet::VERSION.to_string(),
+                label: "Version".to_string(),
+            },
+        );
+        self.append(
+            now,
+            Fact::HierarchyDefined {
+                hierarchy,
+                facet,
+                name: "Version".to_string(),
+            },
+        );
+        for (label, parent, assignable) in crate::model::qualifier::SEED {
+            let concept = Id::<Concept>::in_facet(facet::VERSION, label);
             self.append(
                 now,
-                Fact::QualifierCatalogued {
+                Fact::ConceptCatalogued {
+                    facet,
                     concept,
                     label: (*label).to_string(),
+                    // **A node label groups and does not describe** — ISO
+                    // 25964's rule, and the seed already knew which are which.
+                    node_label: !assignable,
                 },
             );
             if let Some(p) = parent {
                 self.append(
                     now,
-                    Fact::QualifierNarrowed {
-                        parent: Id::<Qualifier>::of_label(p),
+                    Fact::HierarchyNarrowed {
+                        hierarchy,
+                        parent: Id::<Concept>::in_facet(facet::VERSION, p),
                         child: concept,
                     },
                 );
@@ -759,6 +792,7 @@ impl Instance {
         &mut self,
         now: i64,
         hierarchy: Id<Hierarchy>,
+        facet_key: &str,
         parent: &str,
         child: &str,
     ) {
@@ -766,8 +800,8 @@ impl Instance {
             now,
             Fact::HierarchyNarrowRetracted {
                 hierarchy,
-                parent: Id::<Genre>::of_name(parent),
-                child: Id::<Genre>::of_name(child),
+                parent: Id::<Concept>::in_facet(facet_key, parent),
+                child: Id::<Concept>::in_facet(facet_key, child),
             },
         );
     }
@@ -853,13 +887,20 @@ impl Instance {
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
     )]
     /// Say that one concept is narrower than another, inside one hierarchy.
-    pub fn narrows(&mut self, now: i64, hierarchy: Id<Hierarchy>, parent: &str, child: &str) {
+    pub fn narrows(
+        &mut self,
+        now: i64,
+        hierarchy: Id<Hierarchy>,
+        facet_key: &str,
+        parent: &str,
+        child: &str,
+    ) {
         self.append(
             now,
             Fact::HierarchyNarrowed {
                 hierarchy,
-                parent: Id::<Genre>::of_name(parent),
-                child: Id::<Genre>::of_name(child),
+                parent: Id::<Concept>::in_facet(facet_key, parent),
+                child: Id::<Concept>::in_facet(facet_key, child),
             },
         );
     }
@@ -1343,7 +1384,6 @@ mod credit_tests {
     //! only role said nothing at all.
 
     use super::*;
-    use crate::model::entity::Qualifier;
     use crate::model::reference::{CreditOn, RoleClass};
 
     fn scan(title: &str, artist: &str) -> Scanned {
@@ -1414,8 +1454,11 @@ mod credit_tests {
         i.ingest(100, &[scan("212 (Instrumental)", "Azealia Banks")]);
 
         let cat = i.catalogue();
-        let (_, concept, basis) = cat.qualifiers.keys().next().expect("no qualifier");
-        assert_eq!(*concept, Id::<Qualifier>::of_label("instrumental"));
+        let (_, concept, basis) = cat.assertions.keys().next().expect("no version");
+        assert_eq!(
+            *concept,
+            Id::<Concept>::in_facet(facet::VERSION, "instrumental")
+        );
         assert_eq!(
             *basis,
             Source::TagVariant,
@@ -1423,9 +1466,9 @@ mod credit_tests {
              person disagreeing has to land beside this rather than on it"
         );
         assert_eq!(
-            cat.qualifier_labels.get(concept).map(String::as_str),
+            cat.concepts.get(concept).map(|c| c.label.as_str()),
             Some("instrumental"),
-            "the concept was assigned before anything named it"
+            "the concept was asserted before anything named it"
         );
     }
 
@@ -1437,7 +1480,7 @@ mod credit_tests {
         i.ingest(100, &[scan("Phobos (Pan-Pot Remix)", "Pig&Dan")]);
         let cat = i.catalogue();
 
-        assert!(cat.qualifiers.is_empty(), "a person is not a version");
+        assert!(cat.assertions.is_empty(), "a person is not a version");
 
         let remixer = Id::<Role>::of_name("remixer");
         let (_, artist, _, basis) = cat
@@ -1495,11 +1538,11 @@ mod credit_tests {
         i.ingest(100, &[scan("Alors on danse (Radio Edit)", "Stromae")]);
         assert_eq!(
             i.catalogue()
-                .qualifiers
+                .assertions
                 .keys()
                 .map(|(_, c, _)| *c)
                 .collect::<Vec<_>>(),
-            vec![Id::<Qualifier>::of_label("radio-edit")]
+            vec![Id::<Concept>::in_facet(facet::VERSION, "radio-edit")]
         );
     }
 

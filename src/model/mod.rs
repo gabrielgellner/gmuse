@@ -41,6 +41,7 @@ pub mod clock;
 pub mod durable;
 pub mod encoding;
 pub mod entity;
+pub mod facet;
 pub mod id;
 pub mod ingest;
 pub mod instance;

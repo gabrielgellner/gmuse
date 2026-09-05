@@ -39,13 +39,13 @@ use std::collections::BTreeSet;
 
 use crate::model::basis::Basis;
 use crate::model::clock::HybridClock;
-use crate::model::entity::{Collection, Device, Encoding, Genre, Qualifier, Recording};
+use crate::model::entity::{Collection, Concept, Device, Encoding, Facet, Recording};
+use crate::model::facet::{self, Described};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Fact, Record};
 use crate::model::ord::OrdKey;
 use crate::model::reference::Source;
-use crate::model::vocabulary::GenreOn;
 
 /// One assertion, as a tool writes it.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -357,9 +357,7 @@ pub fn parse(
 fn declares_a_concept(fact: &Fact) -> bool {
     matches!(
         fact,
-        Fact::GenreCatalogued { .. }
-            | Fact::CollectionNamed { .. }
-            | Fact::QualifierCatalogued { .. }
+        Fact::ConceptCatalogued { .. } | Fact::CollectionNamed { .. }
     )
 }
 
@@ -395,15 +393,17 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             basis,
             confidence,
         } => {
-            let id = Id::<Genre>::of_name(&genre);
+            let concept = Id::<Concept>::in_facet(facet::GENRE, &genre);
             vec![
-                Fact::GenreCatalogued {
-                    genre: id,
-                    name: genre.trim().to_string(),
+                Fact::ConceptCatalogued {
+                    facet: Id::<Facet>::of_key(facet::GENRE),
+                    concept,
+                    label: genre.trim().to_string(),
+                    node_label: false,
                 },
-                Fact::GenreAssigned {
-                    subject: GenreOn::Recording(recording),
-                    genre: id,
+                Fact::ConceptAsserted {
+                    subject: Described::Recording(recording),
+                    concept,
                     basis,
                     confidence,
                 },
@@ -456,17 +456,19 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
         } => {
             if !crate::model::qualifier::assignable(&qualifier) {
                 return Err(format!(
-                    "{qualifier:?} is a grouping concept and says nothing about a recording"
+                    "{qualifier:?} is a node label and says nothing about a recording"
                 ));
             }
-            let concept = Id::<Qualifier>::of_label(&qualifier);
+            let concept = Id::<Concept>::in_facet(facet::VERSION, &qualifier);
             vec![
-                Fact::QualifierCatalogued {
+                Fact::ConceptCatalogued {
+                    facet: Id::<Facet>::of_key(facet::VERSION),
                     concept,
                     label: qualifier.trim().to_string(),
+                    node_label: false,
                 },
-                Fact::QualifierAssigned {
-                    recording,
+                Fact::ConceptAsserted {
+                    subject: Described::Recording(recording),
                     concept,
                     basis,
                     confidence,
@@ -706,7 +708,7 @@ pub(crate) mod tests {
         assert_eq!(report.applied, 1, "one line, however many facts");
         assert!(
             records.iter().any(
-                |r| matches!(&r.fact, Fact::GenreCatalogued { name, .. } if name == "Dub Techno")
+                |r| matches!(&r.fact, Fact::ConceptCatalogued { label, .. } if label == "Dub Techno")
             ),
             "the assignment names a concept nothing defines"
         );
@@ -735,7 +737,7 @@ pub(crate) mod tests {
             assert!(report.malformed.is_empty(), "{wire}: {report}");
             assert!(records.iter().any(|r| matches!(
                 &r.fact,
-                Fact::GenreAssigned { basis: b, .. } if *b == basis
+                Fact::ConceptAsserted { basis: b, .. } if *b == basis
             )));
         }
     }
@@ -755,8 +757,8 @@ pub(crate) mod tests {
         assert!(report.refused.is_empty(), "{report}");
         assert!(records.iter().any(|r| matches!(
             &r.fact,
-            Fact::QualifierAssigned { concept, .. }
-                if *concept == Id::<Qualifier>::of_label("instrumental")
+            Fact::ConceptAsserted { concept, .. }
+                if *concept == Id::<Concept>::in_facet(facet::VERSION, "instrumental")
         )));
     }
 

@@ -25,15 +25,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
 use crate::model::entity::{
-    Artist, Collection, Device, Encoding, Genre, Hierarchy, Label, Medium, Qualifier, Recording,
+    Artist, Collection, Concept, Device, Encoding, Facet, Hierarchy, Label, Medium, Recording,
     Release, ReleaseGroup, Role, Track, Work,
 };
+use crate::model::facet::{ConceptRecord, Described, FacetRecord};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::ord::OrdKey;
 use crate::model::reference::{AliasKind, Cataloguable, CreditOn, RoleClass, Source};
 use crate::model::spine::PartialDate;
-use crate::model::vocabulary::GenreOn;
 
 /// One thing a device wrote down.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -175,17 +175,43 @@ pub enum Fact {
         ord: OrdKey,
     },
 
-    /// A genre on a recording. Membership is row existence, so this unions.
-    /// A concept exists in the vocabulary, and what it is called.
+    /// An axis of description exists, and what it is called — #117.
     ///
-    /// Needed before an assignment can name one by id — a device folding a
-    /// log has to be able to resolve `Id<Genre>` to something a person reads.
-    GenreCatalogued { genre: Id<Genre>, name: String },
+    /// The key is load-bearing twice over: concepts on this axis seed their
+    /// ids from it, and the query language names the axis by it. Renaming a
+    /// facet's *key* therefore re-mints every concept on it; renaming its
+    /// *label* costs nothing, which is why they are two fields.
+    FacetDefined {
+        facet: Id<Facet>,
+        key: String,
+        label: String,
+    },
+
+    /// A concept exists on one axis, and what it is called.
+    ///
+    /// Needed before an assertion can name one by id — a device folding a log
+    /// has to be able to resolve `Id<Concept>` to something a person reads.
+    ///
+    /// **Was `GenreCatalogued` and `QualifierCatalogued`** (#117), which were
+    /// the same fact written twice. The facet is what told them apart, and it
+    /// is a field now.
+    ConceptCatalogued {
+        facet: Id<Facet>,
+        concept: Id<Concept>,
+        label: String,
+        /// See [`crate::model::facet::ConceptRecord::node_label`].
+        node_label: bool,
+    },
 
     /// One grouping of the concepts exists. A vocabulary may carry several —
     /// a browse hierarchy and a filter hierarchy over one list, as in SDMX.
+    ///
+    /// Scoped to a facet, because an array groups concepts *of one inherent
+    /// category* — a hierarchy spanning genre and version would be the two
+    /// axes collapsing back into one, which is what #117 exists to stop.
     HierarchyDefined {
         hierarchy: Id<Hierarchy>,
+        facet: Id<Facet>,
         name: String,
     },
 
@@ -195,8 +221,8 @@ pub enum Fact {
     /// `Genre.children` for two curators to collide over.
     HierarchyNarrowed {
         hierarchy: Id<Hierarchy>,
-        parent: Id<Genre>,
-        child: Id<Genre>,
+        parent: Id<Concept>,
+        child: Id<Concept>,
     },
 
     /// Withdraw a narrower-of edge.
@@ -209,29 +235,38 @@ pub enum Fact {
     /// a stale replica re-delivering the edge would otherwise resurrect it.
     HierarchyNarrowRetracted {
         hierarchy: Id<Hierarchy>,
-        parent: Id<Genre>,
-        child: Id<Genre>,
+        parent: Id<Concept>,
+        child: Id<Concept>,
     },
 
-    /// One genre on one subject, with why it was assigned and how confidently.
+    /// **A sourced claim that a concept describes a subject** — #117.
     ///
-    /// **All four fields, and the previous shape had two.** It was
-    /// `{ recording, genre: String }`, which threw away three things the rest
-    /// of the model already had:
+    /// Reads: *according to `basis`, `subject` is described by `concept`, and
+    /// `basis` is this sure.* Not "this recording is techno" — the model never
+    /// says that. Truth is a fold over claims and is deliberately never
+    /// collapsed, which is why `basis` is part of the key in
+    /// [`Catalogue::assertions`] rather than an attribute beside it.
     ///
-    /// - the **subject** could only be a recording, where `vocabulary.rs`'s
-    ///   own census says the release group is the right default: genres were
-    ///   found for 130 of 429 groups against 3 of 49 releases
-    /// - the **genre** was a string, so it could not reach the hierarchy and
-    ///   `Vocabulary::under` had nothing folded to close over
-    /// - **basis and confidence** were dropped on the floor. `proposal.rs`
-    ///   carried both on the wire and the conversion read
-    ///   `{ recording, genre, .. } => Fact::GenreAssigned { recording, genre }`
-    ///   — a Discogs guess and a typed answer became the same fact, which is
-    ///   precisely what `genre-uncertain.tsv` exists to prevent
-    GenreAssigned {
-        subject: GenreOn,
-        genre: Id<Genre>,
+    /// **Asserted, not assigned.** Neither standard word fits exactly. An
+    /// *annotation* (W3C) carries its source natively but takes any body at
+    /// all, which is the thing a controlled vocabulary exists to prevent. An
+    /// *assignment* (ISO 25964, subject indexing) constrains the body to a
+    /// scheme but leaves the indexer implicit and aims at one right answer —
+    /// and that suggestion has already cost this codebase once, when
+    /// `rows::Listed.genre: Option<&str>` collapsed a set of claims to one
+    /// string. What is stored is a claim with a name on it, which is what
+    /// `assert_edge`, `CreditAsserted` and `AliasAsserted` already call an
+    /// assertion.
+    ///
+    /// **All four fields**, where the shape before the vocabulary work had two
+    /// — `{ recording, genre: String }` — and threw away the subject (only a
+    /// recording, where the release group is the right default: genres for 130
+    /// of 429 groups against 3 of 49 releases), the concept's identity (a
+    /// string cannot reach a hierarchy), and basis and confidence both, so a
+    /// Discogs guess and a typed answer became the same fact.
+    ConceptAsserted {
+        subject: Described,
+        concept: Id<Concept>,
         basis: Source,
         confidence: Confidence,
     },
@@ -459,42 +494,6 @@ pub enum Fact {
         analyser: u16,
     },
 
-    /// A concept exists in the version vocabulary.
-    QualifierCatalogued {
-        concept: Id<Qualifier>,
-        label: String,
-    },
-
-    /// One narrower-of edge in the version vocabulary. Row existence, as the
-    /// genre hierarchy is.
-    QualifierNarrowed {
-        parent: Id<Qualifier>,
-        child: Id<Qualifier>,
-    },
-
-    /// Which version of a song a recording is.
-    ///
-    /// On the **recording**, not on its link to a work — 7.3% of this library
-    /// has no work and some never will, and a fact on the work link could not
-    /// mark an instrumental white label at all.
-    QualifierAssigned {
-        recording: Id<Recording>,
-        concept: Id<Qualifier>,
-        basis: Source,
-        confidence: Confidence,
-    },
-
-    /// Someone has decided a qualifier does not apply.
-    ///
-    /// **Not a delete, because there are none.** The log is append-only and
-    /// merges by union, so removing an imported assignment would destroy the
-    /// provenance that says where it came from, and a stale replica would
-    /// deliver it again on the next sync. This shadows instead: the pair is
-    /// live or not according to whichever of assign and retract carries the
-    /// later stamp, which the hybrid clock already makes total.
-    ///
-    /// Deliberately *not* "assertions outnumber retractions" — that counting
-    /// rule turns a disagreement into a war nobody can end.
     /// Another name for something, so a name that was once right stays
     /// findable.
     ///
@@ -507,14 +506,24 @@ pub enum Fact {
         value: String,
         kind: AliasKind,
     },
-    /// Decide a genre does not apply. Shadows rather than deletes, and folds
-    /// exactly as [`Fact::QualifierRetracted`] does — same rule, one
-    /// implementation, because "somebody ruled this out" is one idea and the
-    /// vocabulary it is about does not change it.
-    GenreRetracted { subject: GenreOn, genre: Id<Genre> },
-    QualifierRetracted {
-        recording: Id<Recording>,
-        concept: Id<Qualifier>,
+    /// Somebody has decided a concept does not apply.
+    ///
+    /// **Not a delete, because there are none.** The log is append-only and
+    /// merges by union, so removing an imported claim would destroy the
+    /// provenance saying where it came from, and a stale replica would deliver
+    /// it again on the next sync. This shadows instead: the pair is live or
+    /// not according to whichever of assert and retract carries the later
+    /// stamp, which the hybrid clock already makes total.
+    ///
+    /// Deliberately *not* "assertions outnumber retractions" — that counting
+    /// rule turns a disagreement into a war nobody can end.
+    ///
+    /// **Keyed one field shorter than what it shadows**, and see
+    /// [`Catalogue::assertions_retracted`] for why: somebody saying "this is
+    /// not live" is answering the question, not arguing with one asserter.
+    ConceptRetracted {
+        subject: Described,
+        concept: Id<Concept>,
     },
 
     /// A rating, or its removal with `None`.
@@ -647,7 +656,7 @@ pub struct Catalogue {
     /// seen, and is what the projection reads. This is the one that survives a
     /// log with no scan beside it — the case a relink lives in.
     pub bound: BTreeMap<Id<Encoding>, Id<Recording>>,
-    /// Every genre assignment, **one row per asserter**.
+    /// Every assertion, on every axis, **one row per asserter**.
     ///
     /// The key is the claim's identity and it includes *who says so*, because
     /// Discogs saying Techno and a person saying Techno are two independent
@@ -658,7 +667,24 @@ pub struct Catalogue {
     /// The value is the claim's one **attribute**: last writer wins per
     /// identity, so re-scoring an import (Discogs moving provisional to matched)
     /// updates in place, while a human's disagreement lands beside it.
-    pub genres: BTreeMap<(GenreOn, Id<Genre>, Source), Confidence>,
+    ///
+    /// The facet is not in the key because it is already in the concept's id
+    /// (#117) — `ambient` on two axes is two concepts, so one map holds both
+    /// without a third field to keep in step.
+    pub assertions: BTreeMap<(Described, Id<Concept>, Source), Confidence>,
+    /// Pairs somebody has ruled out.
+    ///
+    /// **Keyed without a basis, unlike the assertions it shadows.** A person
+    /// saying "this is not live" is answering the question, not arguing with
+    /// one asserter, so a retraction silences every basis at once — otherwise
+    /// retracting would mean retracting once per source that ever said it, and
+    /// the next import would put it back.
+    ///
+    /// Kept rather than dropped, because *decided against* and *nobody has
+    /// said* are different answers and only a row can tell them apart. A later
+    /// assertion clears the entry, or a retraction would be a delete wearing
+    /// another name.
+    pub assertions_retracted: BTreeSet<(Described, Id<Concept>)>,
     /// What each collection is called, and whether its order means anything.
     pub collections: BTreeMap<Id<Collection>, Collected>,
     /// Every collection entry, **keyed by position before recording**.
@@ -678,41 +704,26 @@ pub struct Catalogue {
     /// Every other name anything is known by. Row existence, so curation
     /// unions across devices the way `narrows` does.
     pub aliases: BTreeSet<(Cataloguable, String, AliasKind)>,
-    /// Subjects somebody has ruled a genre out for. Keyed and folded exactly
-    /// as [`Catalogue::qualifiers_retracted`] is.
-    pub genres_retracted: BTreeSet<(GenreOn, Id<Genre>)>,
-    /// What each concept is called.
-    pub genre_names: BTreeMap<Id<Genre>, String>,
+    /// Every axis of description there is.
+    pub facets: BTreeMap<Id<Facet>, FacetRecord>,
+    /// Every term, on whichever axis it sits.
+    ///
+    /// **One list for every facet** (#117), where genre and version kept two.
+    /// Nothing can collide: a concept's id seeds from its facet's key, so
+    /// `ambient` the style and `ambient` the function are different rows.
+    pub concepts: BTreeMap<Id<Concept>, ConceptRecord>,
     /// What each imprint is called.
     pub label_names: BTreeMap<Id<Label>, String>,
     /// ReplayGain per encoding, as the tags claim it.
     pub levels: BTreeMap<Id<Encoding>, crate::model::encoding::Levels>,
-    /// Which version each recording is, **one row per asserter**, keyed and
-    /// folded exactly as [`Catalogue::genres`] is.
-    pub qualifiers: BTreeMap<(Id<Recording>, Id<Qualifier>, Source), Confidence>,
-    /// Pairs somebody has ruled out.
-    ///
-    /// **Keyed without a basis, unlike the assignments it shadows.** A person
-    /// saying "this is not live" is answering the question, not arguing with
-    /// one asserter, so a retraction silences every basis at once — otherwise
-    /// retracting would mean retracting once per source that ever said it, and
-    /// the next import would put it back.
-    ///
-    /// Kept rather than dropped, because *decided against* and *nobody has
-    /// said* are different answers and only a row can tell them apart. A later
-    /// assignment clears the entry, or a retraction would be a delete wearing
-    /// another name.
-    pub qualifiers_retracted: BTreeSet<(Id<Recording>, Id<Qualifier>)>,
-    pub qualifier_labels: BTreeMap<Id<Qualifier>, String>,
-    pub qualifier_narrows: BTreeSet<(Id<Qualifier>, Id<Qualifier>)>,
-    /// What each hierarchy is called.
-    pub hierarchies: BTreeMap<Id<Hierarchy>, String>,
+    /// What each hierarchy is called, and which axis it groups.
+    pub hierarchies: BTreeMap<Id<Hierarchy>, (Id<Facet>, String)>,
     /// Every narrower-of edge. Row existence, so curation unions.
-    pub narrows: BTreeSet<(Id<Hierarchy>, Id<Genre>, Id<Genre>)>,
+    pub narrows: BTreeSet<(Id<Hierarchy>, Id<Concept>, Id<Concept>)>,
     /// Edges somebody has ruled out. Kept for the reason
-    /// [`Catalogue::qualifiers_retracted`] is: a decision and a silence are
+    /// [`Catalogue::assertions_retracted`] is: a decision and a silence are
     /// different answers, and only a row can tell them apart.
-    pub narrows_retracted: BTreeSet<(Id<Hierarchy>, Id<Genre>, Id<Genre>)>,
+    pub narrows_retracted: BTreeSet<(Id<Hierarchy>, Id<Concept>, Id<Concept>)>,
     pub plays: BTreeMap<Id<Recording>, u32>,
     /// What each recording's identity was derived from.
     pub identified: BTreeMap<Id<Recording>, crate::model::basis::Basis>,
@@ -896,8 +907,8 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
         }
     }
     let of = |r: &Id<Recording>| cat.merges.resolve(*r);
-    let genre_on = |s: &GenreOn| match s {
-        GenreOn::Recording(r) => GenreOn::Recording(cat.merges.resolve(*r)),
+    let described = |s: &Described| match s {
+        Described::Recording(r) => Described::Recording(cat.merges.resolve(*r)),
         other => *other,
     };
     let credit_on = |s: &CreditOn| match s {
@@ -949,31 +960,6 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     .or_default()
                     .push((*stamp, of(to)));
             }
-            Fact::QualifierCatalogued { concept, label } => {
-                cat.qualifier_labels.insert(*concept, label.clone());
-            }
-            Fact::QualifierNarrowed { parent, child } => {
-                cat.qualifier_narrows.insert((*parent, *child));
-            }
-            Fact::QualifierAssigned {
-                recording,
-                concept,
-                basis,
-                confidence,
-            } => assign(
-                &mut cat.qualifiers,
-                &mut cat.qualifiers_retracted,
-                of(recording),
-                *concept,
-                *basis,
-                *confidence,
-            ),
-            Fact::QualifierRetracted { recording, concept } => retract(
-                &mut cat.qualifiers,
-                &mut cat.qualifiers_retracted,
-                of(recording),
-                *concept,
-            ),
             Fact::CollectionNamed {
                 collection,
                 name,
@@ -1005,11 +991,36 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 &mut cat.entries_retracted,
                 (*collection, ord.clone(), of(recording)),
             ),
-            Fact::GenreCatalogued { genre, name } => {
-                cat.genre_names.insert(*genre, name.clone());
+            Fact::FacetDefined { facet, key, label } => {
+                cat.facets.insert(
+                    *facet,
+                    FacetRecord {
+                        key: key.clone(),
+                        label: label.clone(),
+                    },
+                );
             }
-            Fact::HierarchyDefined { hierarchy, name } => {
-                cat.hierarchies.insert(*hierarchy, name.clone());
+            Fact::ConceptCatalogued {
+                facet,
+                concept,
+                label,
+                node_label,
+            } => {
+                cat.concepts.insert(
+                    *concept,
+                    ConceptRecord {
+                        facet: *facet,
+                        label: label.clone(),
+                        node_label: *node_label,
+                    },
+                );
+            }
+            Fact::HierarchyDefined {
+                hierarchy,
+                facet,
+                name,
+            } => {
+                cat.hierarchies.insert(*hierarchy, (*facet, name.clone()));
             }
             Fact::HierarchyNarrowed {
                 hierarchy,
@@ -1029,16 +1040,16 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 &mut cat.narrows_retracted,
                 (*hierarchy, *parent, *child),
             ),
-            Fact::GenreAssigned {
+            Fact::ConceptAsserted {
                 subject,
-                genre,
+                concept,
                 basis,
                 confidence,
             } => assign(
-                &mut cat.genres,
-                &mut cat.genres_retracted,
-                genre_on(subject),
-                *genre,
+                &mut cat.assertions,
+                &mut cat.assertions_retracted,
+                described(subject),
+                *concept,
                 *basis,
                 *confidence,
             ),
@@ -1049,11 +1060,11 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             } => {
                 cat.aliases.insert((*subject, value.clone(), *kind));
             }
-            Fact::GenreRetracted { subject, genre } => retract(
-                &mut cat.genres,
-                &mut cat.genres_retracted,
-                genre_on(subject),
-                *genre,
+            Fact::ConceptRetracted { subject, concept } => retract(
+                &mut cat.assertions,
+                &mut cat.assertions_retracted,
+                described(subject),
+                *concept,
             ),
             Fact::HoldingsAsserted { device, held } => {
                 // Records arrive in stamp order, so the last one simply wins.
@@ -1266,6 +1277,48 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the genre curation backlog, which no command asks for"
 )]
 impl Catalogue {
+    /// Live assertions about one subject, on one axis.
+    ///
+    /// **The reader's half of one map holding every facet** (#117). Callers
+    /// used to reach for `genres` or `qualifiers` and get the axis for free;
+    /// now they name it, which is the point — asking for "the genres" without
+    /// saying so was what let a single-value row shape look reasonable.
+    ///
+    /// Retracted pairs are gone and node labels never appear: ISO 25964's rule
+    /// is that a term put into an array to organise it does not take part in
+    /// retrieval.
+    pub fn asserted(
+        &self,
+        subject: Described,
+        facet: Id<Facet>,
+    ) -> Vec<(Id<Concept>, Source, Confidence)> {
+        self.assertions
+            .iter()
+            .filter(|((s, c, _), _)| {
+                *s == subject
+                    && !self.assertions_retracted.contains(&(*s, *c))
+                    && self
+                        .concepts
+                        .get(c)
+                        .is_some_and(|r| r.facet == facet && !r.node_label)
+            })
+            .map(|((_, c, basis), confidence)| (*c, *basis, *confidence))
+            .collect()
+    }
+
+    /// The same, as the labels a person reads, deduplicated and sorted.
+    pub fn labels_on(&self, subject: Described, facet_key: &str) -> Vec<&str> {
+        let facet = Id::<Facet>::of_key(facet_key);
+        let mut out: Vec<&str> = self
+            .asserted(subject, facet)
+            .into_iter()
+            .filter_map(|(c, _, _)| self.concepts.get(&c).map(|r| r.label.as_str()))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Concepts this hierarchy does not place — a standing review query.
     ///
     /// **An orphan concept is legitimate, not an error.** A genre defined at
@@ -1279,17 +1332,28 @@ impl Catalogue {
     /// exists — found only by naming it exactly. That is why this is a query
     /// rather than a rule: the concepts are fine, and the list of them is the
     /// curation backlog.
-    pub fn unplaced_genres(&self, hierarchy: Id<Hierarchy>) -> BTreeSet<Id<Genre>> {
-        let placed: BTreeSet<Id<Genre>> = self
+    /// **The axis is an argument, not read off the hierarchy.** A hierarchy
+    /// need not be declared before an edge names it — `narrows` mints the
+    /// edge, not the array — so deriving the facet from
+    /// [`Catalogue::hierarchies`] would silently return nothing for exactly
+    /// the vocabularies still being built, which is when a backlog matters.
+    pub fn unplaced_concepts(
+        &self,
+        hierarchy: Id<Hierarchy>,
+        facet: Id<Facet>,
+    ) -> BTreeSet<Id<Concept>> {
+        let placed: BTreeSet<Id<Concept>> = self
             .narrows
             .iter()
             .filter(|(h, _, _)| *h == hierarchy)
             .flat_map(|(_, parent, child)| [*parent, *child])
             .collect();
-        self.genre_names
-            .keys()
-            .filter(|g| !placed.contains(g))
-            .copied()
+        // **Only this hierarchy's own axis**, or every version concept would
+        // read as an unplaced genre the moment one list held both (#117).
+        self.concepts
+            .iter()
+            .filter(|(id, c)| c.facet == facet && !placed.contains(*id))
+            .map(|(id, _)| *id)
             .collect()
     }
 
@@ -1660,8 +1724,8 @@ mod reachability {
         ("medium", Some("MediumCatalogued")),
         ("track", Some("TrackPlaced")),
         ("label", Some("LabelNamed")),
-        ("genre", Some("GenreCatalogued")),
-        ("qualifier", Some("QualifierCatalogued")),
+        ("facet", Some("FacetDefined")),
+        ("concept", Some("ConceptCatalogued")),
         ("hierarchy", Some("HierarchyDefined")),
         ("role", Some("RoleDefined")),
         ("collection", Some("CollectionNamed")),
@@ -1672,7 +1736,7 @@ mod reachability {
         // recording appear in one playlist twice. Listed here because the
         // fact is what brings it into being, and nothing else does (#92).
         ("collection-entry", Some("CollectionEntryAdded")),
-        ("genre-assignment", Some("GenreAssigned")),
+        ("assertion", Some("ConceptAsserted")),
     ];
 
     /// **The allowlist only shrinks.**

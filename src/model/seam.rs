@@ -28,13 +28,14 @@ use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::model::facet::Described;
 use crate::model::log::{Catalogue, Collected};
 use crate::model::ord::OrdKey;
 use crate::model::provenance::Provenance;
 use crate::model::reference::{CreditOn, Reference};
 use crate::model::rows::Drawn;
 use crate::model::spine::Spine;
-use crate::model::vocabulary::{GenreOn, Vocabulary};
+use crate::model::vocabulary::Vocabulary;
 
 /// What the player is allowed to ask, and what it is allowed to ask for.
 ///
@@ -68,7 +69,7 @@ pub struct Librarian {
     /// and each carries its own confidence. Collapsed to the distinct names
     /// here, most confident first, so a display that has room for one shows
     /// the best-supported and a filter can ask about any of them.
-    pub genres: std::collections::BTreeMap<GenreOn, Vec<String>>,
+    pub genres: std::collections::BTreeMap<Described, Vec<String>>,
     /// Every row this library can draw, materialised once (#86).
     ///
     /// `Listed` borrows and the librarian computes — `file_under` from the
@@ -456,7 +457,7 @@ impl Librarian {
         // fold has held these edges since #74 and the librarian left them
         // behind, so `depth` had nothing to walk and the genres on a row could
         // only be ordered by name.
-        for (hierarchy, name) in &cat.hierarchies {
+        for (hierarchy, (_, name)) in &cat.hierarchies {
             l.vocabulary.hierarchies.insert(
                 *hierarchy,
                 crate::model::vocabulary::HierarchyRecord {
@@ -479,16 +480,22 @@ impl Librarian {
         // sources may assign the same one — a tag and a curated pass agreeing
         // is two rows in the fold and one genre on the shelf — so the best
         // confidence for each name wins and the name is listed once.
-        let mut best: std::collections::BTreeMap<GenreOn, Vec<(Confidence, usize, &str)>> =
+        let genre_facet =
+            crate::model::id::Id::<crate::model::entity::Facet>::of_key(crate::model::facet::GENRE);
+        let mut best: std::collections::BTreeMap<Described, Vec<(Confidence, usize, &str)>> =
             std::collections::BTreeMap::new();
-        for ((subject, genre, _), confidence) in &cat.genres {
-            if cat.genres_retracted.contains(&(*subject, *genre)) {
+        for ((subject, concept, _), confidence) in &cat.assertions {
+            if cat.assertions_retracted.contains(&(*subject, *concept)) {
                 continue;
             }
-            let Some(name) = cat.genre_names.get(genre) else {
+            // **One map holds every axis now** (#117), so a row's genres are
+            // the assertions on the genre facet and nothing else. A version
+            // reaching this list would put `instrumental` in the genre column.
+            let Some(record) = cat.concepts.get(concept).filter(|c| c.facet == genre_facet) else {
                 continue;
             };
-            let depth = l.vocabulary.depth(*genre);
+            let name = &record.label;
+            let depth = l.vocabulary.depth(*concept);
             let seen = best.entry(*subject).or_default();
             match seen.iter_mut().find(|(_, _, held)| *held == name.as_str()) {
                 Some(entry) if entry.0 < *confidence => entry.0 = *confidence,
@@ -573,12 +580,12 @@ impl Librarian {
         // what the track itself was assigned (#74).
         let mut genre: Vec<String> = self
             .genres
-            .get(&GenreOn::Recording(recording))
+            .get(&Described::Recording(recording))
             .cloned()
             .unwrap_or_default();
         if genre.is_empty() {
             genre = group
-                .and_then(|g| self.genres.get(&GenreOn::ReleaseGroup(g)))
+                .and_then(|g| self.genres.get(&Described::ReleaseGroup(g)))
                 .cloned()
                 .unwrap_or_default();
         }
@@ -842,6 +849,7 @@ pub const UNKNOWN_ARTIST: &str = "Unknown Artist";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::facet;
     use std::path::Path;
 
     fn read(dir: &str) -> Vec<(String, String)> {
@@ -1200,7 +1208,8 @@ mod tests {
             "Credit",
             "Device",
             "Encoding",
-            "Genre",
+            "Concept",
+            "Facet",
             "Hierarchy",
             "Holdings",
             "Label",
@@ -1208,7 +1217,6 @@ mod tests {
             "Release",
             "ReleaseGroup",
             "Role",
-            "Qualifier",
             "Recording",
             "Track",
             "Work",
@@ -1385,8 +1393,14 @@ mod tests {
         // `Blues Rock` narrower again — so depth does more here than "is it a
         // top concept", and alphabetical would give the opposite order.
         let hierarchy = Id::<Hierarchy>::derived(b"discogs");
-        i.narrows(200, hierarchy, "Rock", "Alternative Rock");
-        i.narrows(200, hierarchy, "Alternative Rock", "Blues Rock");
+        i.narrows(200, hierarchy, facet::GENRE, "Rock", "Alternative Rock");
+        i.narrows(
+            200,
+            hierarchy,
+            facet::GENRE,
+            "Alternative Rock",
+            "Blues Rock",
+        );
 
         let l = Librarian::from_catalogue(&i.catalogue());
         let copy = *l.encodings.encodings.keys().next().expect("a copy");

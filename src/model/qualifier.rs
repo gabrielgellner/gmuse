@@ -30,9 +30,6 @@
 //! being rows rather than a field, and it is why the query language's default
 //! quantification has to be stated rather than discovered.
 
-use crate::model::entity::Qualifier;
-use crate::model::id::Id;
-
 /// The concepts this scheme seeds with.
 ///
 /// **Grouping concepts are marked, and are not assignable.** `mix-variant` and
@@ -71,20 +68,13 @@ pub const SEED: &[(&str, Option<&str>, bool)] = &[
     ("partial", None, true),
 ];
 
-impl Id<Qualifier> {
-    /// The id a concept label always mints. Convergent for the reason
-    /// `Id::<Genre>::of_name` is, and through the same function — one
-    /// normalisation, so the two vocabularies cannot drift apart.
-    pub fn of_label(label: &str) -> Self {
-        Id::derived(crate::model::ingest::normalise(label).as_bytes())
-    }
-}
-
 /// Whether this concept may be asserted about a recording.
 ///
-/// A grouping concept may not. Refusing is better than accepting and folding
-/// to nothing, because an assignment nobody can see is indistinguishable from
-/// one nobody made.
+/// A **node label** may not — ISO 25964's term for a concept put into an array
+/// purely to organise it, which by the standard's own rule does not take part
+/// in retrieval. Refusing is better than accepting and folding to nothing,
+/// because an assertion nobody can see is indistinguishable from one nobody
+/// made.
 pub fn assignable(label: &str) -> bool {
     let wanted = label.trim().to_lowercase();
     SEED.iter()
@@ -292,6 +282,9 @@ fn normalise_dashes(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::entity::Concept;
+    use crate::model::facet;
+    use crate::model::id::Id;
 
     /// A grouping concept is a place in the tree, not a claim about a song.
     #[test]
@@ -474,16 +467,17 @@ mod tests {
         assert!(qualifiers_in("Whatever (Mix Variant)").is_empty());
     }
 
-    /// Convergent, and case-folded, exactly as genre is.
+    /// Convergent, and case-folded, exactly as genre is — one minting for
+    /// every axis since #117, so two vocabularies cannot drift apart.
     #[test]
     fn one_label_one_concept() {
         assert_eq!(
-            Id::<Qualifier>::of_label("Instrumental"),
-            Id::<Qualifier>::of_label(" instrumental ")
+            Id::<Concept>::in_facet(facet::VERSION, "Instrumental"),
+            Id::<Concept>::in_facet(facet::VERSION, " instrumental ")
         );
         assert_ne!(
-            Id::<Qualifier>::of_label("live"),
-            Id::<Qualifier>::of_label("demo")
+            Id::<Concept>::in_facet(facet::VERSION, "live"),
+            Id::<Concept>::in_facet(facet::VERSION, "demo")
         );
     }
 
@@ -505,7 +499,8 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod fold_tests {
-    use crate::model::entity::{Device, Qualifier, Recording};
+    use crate::model::entity::{Concept, Device, Recording};
+    use crate::model::facet::{self, Described};
     use crate::model::id::Id;
     use crate::model::ingest::Confidence;
     use crate::model::instance::Instance;
@@ -522,20 +517,20 @@ pub(crate) mod fold_tests {
     /// Does anybody say so — the question the player asks, which does not
     /// care who. The review queue asks the other one, by reading the rows.
     pub(crate) fn live(i: &Instance, label: &str) -> bool {
-        let concept = Id::<Qualifier>::of_label(label);
+        let concept = Id::<Concept>::in_facet(facet::VERSION, label);
         i.catalogue()
-            .qualifiers
+            .assertions
             .keys()
-            .any(|(r, c, _)| *r == rec() && *c == concept)
+            .any(|(r, c, _)| *r == Described::Recording(rec()) && *c == concept)
     }
 
     /// Every asserter of one claim, with what each of them settled on.
     pub(crate) fn claims(i: &Instance, label: &str) -> Vec<(Source, Confidence)> {
-        let concept = Id::<Qualifier>::of_label(label);
+        let concept = Id::<Concept>::in_facet(facet::VERSION, label);
         i.catalogue()
-            .qualifiers
+            .assertions
             .iter()
-            .filter(|((r, c, _), _)| *r == rec() && *c == concept)
+            .filter(|((r, c, _), _)| *r == Described::Recording(rec()) && *c == concept)
             .map(|((_, _, basis), conf)| (*basis, *conf))
             .collect()
     }
@@ -544,14 +539,14 @@ pub(crate) mod fold_tests {
     #[test]
     fn a_recording_carries_several_qualifiers() {
         let mut i = Instance::new(device(1));
-        i.assign_qualifier(
+        i.assign_version(
             100,
             rec(),
             "live",
             Source::TagVariant,
             Confidence::Confirmed,
         );
-        i.assign_qualifier(
+        i.assign_version(
             200,
             rec(),
             "instrumental",
@@ -568,7 +563,7 @@ pub(crate) mod fold_tests {
     #[test]
     fn a_retraction_is_not_undone_by_a_replica() {
         let mut mine = Instance::new(device(1));
-        mine.assign_qualifier(
+        mine.assign_version(
             100,
             rec(),
             "instrumental",
@@ -577,7 +572,7 @@ pub(crate) mod fold_tests {
         );
         let import = mine.records().clone();
 
-        mine.retract_qualifier(200, rec(), "instrumental");
+        mine.retract_version(200, rec(), "instrumental");
         assert!(!live(&mine, "instrumental"), "the retraction did not take");
 
         // The other machine still holds only the import and sends it back.
@@ -600,19 +595,23 @@ pub(crate) mod fold_tests {
     #[test]
     fn a_retraction_is_a_decision_and_not_a_silence() {
         let mut i = Instance::new(device(1));
-        i.assign_qualifier(100, rec(), "live", Source::Discogs, Confidence::Matched);
-        i.retract_qualifier(200, rec(), "live");
+        i.assign_version(100, rec(), "live", Source::Discogs, Confidence::Matched);
+        i.retract_version(200, rec(), "live");
 
         let cat = i.catalogue();
         assert!(
-            cat.qualifiers_retracted
-                .contains(&(rec(), Id::<Qualifier>::of_label("live"))),
+            cat.assertions_retracted.contains(&(
+                Described::Recording(rec()),
+                Id::<Concept>::in_facet(facet::VERSION, "live")
+            )),
             "a retraction has to leave a row saying it was decided — dropping \
              it makes a decision indistinguishable from a silence"
         );
         assert!(
-            !cat.qualifiers_retracted
-                .contains(&(rec(), Id::<Qualifier>::of_label("instrumental"))),
+            !cat.assertions_retracted.contains(&(
+                Described::Recording(rec()),
+                Id::<Concept>::in_facet(facet::VERSION, "instrumental")
+            )),
             "and something nobody has ruled on has no row at all"
         );
     }
@@ -622,9 +621,9 @@ pub(crate) mod fold_tests {
     #[test]
     fn a_later_assertion_undoes_a_retraction() {
         let mut i = Instance::new(device(1));
-        i.assign_qualifier(100, rec(), "live", Source::Discogs, Confidence::Matched);
-        i.retract_qualifier(200, rec(), "live");
-        i.assign_qualifier(300, rec(), "live", Source::Manual, Confidence::Confirmed);
+        i.assign_version(100, rec(), "live", Source::Discogs, Confidence::Matched);
+        i.retract_version(200, rec(), "live");
+        i.assign_version(300, rec(), "live", Source::Manual, Confidence::Confirmed);
         assert!(live(&i, "live"));
     }
 
@@ -633,18 +632,18 @@ pub(crate) mod fold_tests {
     #[test]
     fn a_retraction_keeps_what_it_shadows() {
         let mut i = Instance::new(device(1));
-        i.assign_qualifier(
+        i.assign_version(
             100,
             rec(),
             "instrumental",
             Source::Discogs,
             Confidence::Matched,
         );
-        i.retract_qualifier(200, rec(), "instrumental");
+        i.retract_version(200, rec(), "instrumental");
         let kinds: Vec<_> = i
             .records()
             .iter()
-            .filter(|r| format!("{:?}", r.fact).starts_with("QualifierAssigned"))
+            .filter(|r| format!("{:?}", r.fact).starts_with("ConceptAsserted"))
             .collect();
         assert_eq!(kinds.len(), 1, "the shadowed assertion was thrown away");
     }
@@ -654,7 +653,7 @@ pub(crate) mod fold_tests {
     #[test]
     fn a_grouping_concept_is_refused_at_the_door() {
         let mut i = Instance::new(device(1));
-        let taken = i.assign_qualifier(
+        let taken = i.assign_version(
             100,
             rec(),
             "mix-variant",
@@ -669,11 +668,11 @@ pub(crate) mod fold_tests {
     #[test]
     fn seeding_is_idempotent() {
         let mut i = Instance::new(device(1));
-        i.seed_qualifiers(100);
-        let after_one = i.catalogue().qualifier_labels.len();
-        i.seed_qualifiers(200);
-        assert_eq!(i.catalogue().qualifier_labels.len(), after_one);
-        assert!(i.catalogue().qualifier_narrows.len() >= 6);
+        i.seed_versions(100);
+        let after_one = i.catalogue().concepts.len();
+        i.seed_versions(200);
+        assert_eq!(i.catalogue().concepts.len(), after_one);
+        assert!(i.catalogue().narrows.len() >= 6);
     }
 }
 
@@ -688,14 +687,15 @@ mod claim_tests {
     //! is tested through the round trip.
 
     use super::fold_tests::{claims, device, live, rec};
-    use crate::model::entity::Qualifier;
+    use crate::model::entity::Concept;
+    use crate::model::facet::{self, Described};
     use crate::model::id::Id;
     use crate::model::ingest::Confidence;
     use crate::model::instance::Instance;
     use crate::model::reference::Source;
 
     fn assign(i: &mut Instance, at: i64, basis: Source, confidence: Confidence) {
-        i.assign_qualifier(at, rec(), "instrumental", basis, confidence);
+        i.assign_version(at, rec(), "instrumental", basis, confidence);
     }
 
     /// **Case 1 — the same source, re-imported.** Idempotent by construction,
@@ -770,7 +770,7 @@ mod claim_tests {
         let mut i = Instance::new(device(1));
         assign(&mut i, 100, Source::Discogs, Confidence::Matched);
         assign(&mut i, 200, Source::TagVariant, Confidence::Provisional);
-        i.retract_qualifier(300, rec(), "instrumental");
+        i.retract_version(300, rec(), "instrumental");
         assert!(claims(&i, "instrumental").is_empty());
 
         // And any basis revives it, because a retraction is a decision and not
@@ -778,9 +778,10 @@ mod claim_tests {
         assign(&mut i, 400, Source::Manual, Confidence::Confirmed);
         assert!(live(&i, "instrumental"));
         assert!(
-            !i.catalogue()
-                .qualifiers_retracted
-                .contains(&(rec(), Id::<Qualifier>::of_label("instrumental"))),
+            !i.catalogue().assertions_retracted.contains(&(
+                Described::Recording(rec()),
+                Id::<Concept>::in_facet(facet::VERSION, "instrumental")
+            )),
             "the pair still reads as ruled against while a claim stands"
         );
     }

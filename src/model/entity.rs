@@ -72,18 +72,26 @@ tags! {
     Artist,
     /// An imprint. Fields with #73.
     Label,
-    /// A concept in the genre vocabulary. Fields with #74.
-    Genre,
-    /// A concept in the **version** vocabulary — instrumental, live, acappella.
-    ///
-    /// A separate scheme from `Genre` rather than a corner of it, because the
-    /// two answer different questions and are curated by different evidence: a
-    /// genre says what kind of music this is, a qualifier says which version of
-    /// it you are holding. Sharing a list would make `genre = instrumental`
-    /// expressible, and it is not a genre.
-    Qualifier,
+// **`Genre` and `Qualifier` were kinds here and are gone** (#117).
+    //
+    // They were two copies of one structure, and the copies had drifted: the
+    // genre hierarchy kept its edges in a separate artefact and could retract
+    // one, the version hierarchy hung `broader` on the concept and could not.
+    // A third axis would have been a third dialect.
+    //
+    // Both are `Concept` now, told apart by the `Facet` they sit on — which is
+    // also their id's namespace, so `ambient` the style and `ambient` the
+    // function cannot collide.
     /// One grouping of genre concepts. Fields with #74.
     Hierarchy,
+    /// One axis of description — see `model/facet.rs`. `genre` says what kind
+    /// of music this is, `version` says which version you are holding, and
+    /// they are siblings rather than one hierarchy carrying both (#117).
+    Facet,
+    /// One term on one axis. **Its namespace is its facet**, not this kind
+    /// string, so `ambient` the style and `ambient` the function are two
+    /// concepts sharing a label (#117).
+    Concept,
     /// What an artist did on something. Fields with #73.
     Role,
     /// A curated set, ordered or not — a playlist is one whose order means
@@ -98,9 +106,12 @@ tags! {
     )]
     /// One recording's membership of one collection.
     CollectionEntry,
-    #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #74")]
-    /// One genre assigned to one subject. Fields with #74.
-    GenreAssignment,
+    #[expect(
+        dead_code,
+        reason = "an assertion is a row and not an entity (#117): the fold keys it by (subject, concept, basis), which is what lets two sources agree without one overwriting the other. The tag stays because domain-model.md names it"
+    )]
+    /// One concept asserted about one subject. Fields with #74.
+    Assertion,
 }
 
 kinds! {
@@ -115,15 +126,15 @@ kinds! {
     Device => "device",
     Artist => "artist",
     Label => "label",
-    Genre => "genre",
-    Qualifier => "qualifier",
     Hierarchy => "hierarchy",
+    Facet => "facet",
+    Concept => "concept",
     Role => "role",
     Collection => "collection",
     Credit => "credit",
     MixEntry => "mix-entry",
     CollectionEntry => "collection-entry",
-    GenreAssignment => "genre-assignment",
+    Assertion => "assertion",
 }
 
 pub use crate::model::encoding::Encoding;

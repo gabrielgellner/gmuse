@@ -15,13 +15,14 @@ use std::collections::BTreeSet;
 
 use crate::audio_id::AudioId;
 use crate::model::basis::Basis;
-use crate::model::entity::{Artist, Device, Encoding, Genre, Recording};
+use crate::model::entity::Concept;
+use crate::model::entity::{Artist, Device, Encoding, Recording};
+use crate::model::facet::{self, Described};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::instance::{Instance, Scanned};
 use crate::model::log::Record;
 use crate::model::reference::Source;
-use crate::model::vocabulary::GenreOn;
 
 fn device(n: u128) -> Id<Device> {
     Id::from_uuid(uuid::Uuid::from_u128(n))
@@ -125,7 +126,7 @@ fn two_instances_one_album_and_a_full_round_trip() {
     m1.rename_artist(200, artist, "Bodzin & Romboy");
     m2.assign_genre(
         240,
-        GenreOn::Recording(callisto),
+        Described::Recording(callisto),
         "Techno",
         Source::TagVariant,
         Confidence::Confirmed,
@@ -163,9 +164,9 @@ fn two_instances_one_album_and_a_full_round_trip() {
 
     // The rename is an LWW register; the assignment is row existence.
     assert_eq!(one.artist_names[&artist], "Bodzin & Romboy");
-    let techno = Id::<Genre>::of_name("Techno");
+    let techno = Id::<Concept>::in_facet(facet::GENRE, "Techno");
     assert_eq!(
-        one.genre_names[&techno], "Techno",
+        one.concepts[&techno].label, "Techno",
         "the concept has to be resolvable, or the id renders as nothing"
     );
     // **Both halves, and the basis is the one that used to be dropped.** The
@@ -175,7 +176,7 @@ fn two_instances_one_album_and_a_full_round_trip() {
     // The basis is in the *key*, so it crosses the merge or the row is not
     // found at all — a claim without an asserter does not exist here.
     assert_eq!(
-        one.genres[&(GenreOn::Recording(callisto), techno, Source::TagVariant)],
+        one.assertions[&(Described::Recording(callisto), techno, Source::TagVariant)],
         Confidence::Confirmed,
         "the basis crossed the merge with the assignment"
     );
@@ -286,7 +287,7 @@ fn the_result_does_not_depend_on_which_way_the_sync_ran() {
         b.ingest(140, &scan);
         b.assign_genre(
             200,
-            GenreOn::Recording(ids(&scan).1),
+            Described::Recording(ids(&scan).1),
             "Techno",
             Source::TagVariant,
             Confidence::Confirmed,

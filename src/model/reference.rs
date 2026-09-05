@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::entity::{Artist, Genre, Label, Recording, Release, ReleaseGroup, Role, Work};
+use crate::model::entity::{Artist, Concept, Label, Recording, Release, ReleaseGroup, Role, Work};
 use crate::model::id::{Id, Ref};
 use crate::model::spine::PartialDate;
 
@@ -27,7 +27,7 @@ pub enum Cataloguable {
     Release(Id<Release>),
     ReleaseGroup(Id<ReleaseGroup>),
     Artist(Id<Artist>),
-    Genre(Id<Genre>),
+    Concept(Id<Concept>),
     Role(Id<Role>),
     Label(Id<Label>),
 }
