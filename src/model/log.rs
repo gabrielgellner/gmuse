@@ -1563,6 +1563,21 @@ impl crate::filter::Listened for Catalogue {
         self.ratings.get(&recording).copied()
     }
 
+    fn claims(&self, recording: Id<Recording>, facet_key: &str) -> Vec<(String, String, String)> {
+        let facet = Id::<crate::model::entity::Facet>::of_key(facet_key);
+        self.asserted(crate::model::facet::Described::Recording(recording), facet)
+            .into_iter()
+            .filter_map(|(concept, basis, confidence)| {
+                let label = self.concepts.get(&concept)?.label.clone();
+                Some((
+                    label,
+                    basis.written().to_string(),
+                    confidence.written().to_string(),
+                ))
+            })
+            .collect()
+    }
+
     fn broader(&self, facet_key: &str, label: &str) -> Vec<String> {
         use crate::model::entity::Concept;
         use std::collections::BTreeSet;

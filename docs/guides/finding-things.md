@@ -101,6 +101,25 @@ That asymmetry is deliberate. A file tagged `Rock; Blues Rock` **is** rock, and 
 `all` is not true of nothing. A track with no genre fails `all(genre)="rock"` rather than passing it on a technicality;
 `!genre?` is how you ask for the untagged, and it is a different question.
 
+## Asking about who said so
+
+A genre on a row is a **claim**: somebody said it, and was more or less sure. A bracket asks about one claim rather than
+about the row:
+
+    genre[basis=discogs]                          Discogs said something
+    genre[basis=discogs & confidence!=confirmed]  …and was not sure — the review queue
+
+    basis         tag  inferred  musicbrainz  discogs  manual
+    confidence    provisional  matched  confirmed
+    label         the concept itself
+
+**The brackets are what correlate.** Written as two separate questions — "Discogs said something" and "something is
+unsure" — a row where Discogs was _confirmed_ and the tag was unsure would match, and that is a different set from the
+one you meant. Inside one bracket, both have to be true of the **same claim**.
+
+`|` inside a bracket is refused, and nothing is lost by it: `genre[basis=discogs] | genre[basis=tag]` says everything
+`genre[a | b]` would. Only `&` needs the bracket, because only `&` fails to distribute.
+
 ## Asking about a whole branch
 
 A genre hierarchy exists so you can ask for a _kind_ of music without naming every term under it:

@@ -65,6 +65,18 @@ pub enum Confidence {
     Confirmed,
 }
 
+impl Confidence {
+    /// How it is written in a filter — the review queue is
+    /// `genre[basis=discogs & confidence!=confirmed]` (#93).
+    pub fn written(self) -> &'static str {
+        match self {
+            Confidence::Provisional => "provisional",
+            Confidence::Matched => "matched",
+            Confidence::Confirmed => "confirmed",
+        }
+    }
+}
+
 /// Why a file could not be read at all.
 ///
 /// Only ever an I/O or format failure. **Bad metadata is not an error** — that

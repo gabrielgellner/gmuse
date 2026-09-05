@@ -3589,7 +3589,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   The memo lives as long as the filter is in use and cannot go stale against a refold, because a refold compiles a new
   filter.
 
-  **What is still not done.** Dotted paths
+  **Correlated paths, and the bracket is what correlates (#93).** `genre[basis=discogs & confidence!=confirmed]` — the
+  review queue, and the last thing #93 asked for.
+
+  The open question was whether two clauses on one path mean _one_ claim has both or two independent existentials.
+  **Three traditions converge**: SQL is correlated by default because `WHERE` runs per joined row; SPARQL correlates
+  through a variable naming the node; XPath has both and distinguishes them by where the brackets go — and its
+  uncorrelated form is a famous pitfall precisely because it _looks_ correlated. The rule underneath all three:
+  **correlation requires naming the thing being correlated.**
+
+  Kimball answers the other half of the same shape. A multi-valued dimension is a bridge table, and his warning is
+  double-counting — sum a fact across a bridge and it counts once per member — with a weighting factor as the remedy,
+  chosen per report against the plain existential. That is `Shelf::distinct` versus summing nodes (#97): distinct is
+  right for "how many tracks" and would be wrong for anything genuinely allocated. He also permits a designated _primary
+  member_; gmuse refuses that for genre, because it is the "show the best one" collapse already rejected.
+
+  **`|` inside a bracket is refused, and the proof is why.** ∃x(P∨Q) ≡ ∃xP ∨ ∃xQ, so `genre[a] | genre[b]` says
+  everything `genre[a | b]` would; it is exactly ∃x(P∧Q) that does not distribute. So conjunction is the only thing the
+  bracket is _for_, and refusing disjunction inside leaves one way to write each meaning rather than two.
+
+  **The bracket does not breach the tree-shaped fragment.** It is a local existential scope, not a variable shared
+  between branches — so "recordings whose remixer also produced something else I hold" stays unreachable, which is the
+  line #93 drew on purpose.
+
+  The dotted form `genre.basis = discogs` is **not** accepted, though #93 proposed it. It is the spelling that is
+  ambiguous when repeated and that XPath's pitfall is made of, and every single-clause use of it is `genre[basis=…]`
+  anyway — so refusing it is one rule instead of two, and the error names the bracket.
 
 ## 14. Prior art worth reading
 

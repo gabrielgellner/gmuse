@@ -171,6 +171,20 @@ pub enum Source {
     Manual,
 }
 
+impl Source {
+    /// How it is written in a filter and in a proposal file — one spelling,
+    /// so `genre[basis=discogs]` matches what a tool wrote (#93).
+    pub fn written(self) -> &'static str {
+        match self {
+            Source::TagVariant => "tag",
+            Source::Inferred => "inferred",
+            Source::MusicBrainz => "musicbrainz",
+            Source::Discogs => "discogs",
+            Source::Manual => "manual",
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]

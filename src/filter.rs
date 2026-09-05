@@ -58,6 +58,15 @@ pub trait Listened {
     fn acquired(&self, recording: Id<Recording>) -> Option<i64>;
     /// Stars. `None` is unrated, which is not the same as nought stars.
     fn rating(&self, recording: Id<Recording>) -> Option<u8>;
+    /// Every claim about this recording on one axis, as `(label, basis,
+    /// confidence)` — #93's correlated paths.
+    ///
+    /// **One tuple per assertion**, which is the whole point: the model keys
+    /// `(subject, concept, basis) -> confidence`, so "Discogs said techno,
+    /// provisionally" is one row and asking about it needs the row rather than
+    /// three independent sets.
+    fn claims(&self, recording: Id<Recording>, facet_key: &str) -> Vec<(String, String, String)>;
+
     /// Every concept **broader than** this one, on this axis — #93's closure.
     ///
     /// Walking *up* rather than down is what makes closure cheap: a row has a
@@ -353,11 +362,52 @@ impl Filter {
     }
 }
 
+/// One attribute of a single claim — what a bracket asks about (#93).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// The concept itself: `genre[label="techno"]`.
+    Label,
+    /// Who said so — `tag`, `inferred`, `musicbrainz`, `discogs`, `manual`.
+    Basis,
+    /// How sure they were — `provisional`, `matched`, `confirmed`.
+    Confidence,
+}
+
+impl Claim {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "label" => Claim::Label,
+            "basis" => Claim::Basis,
+            "confidence" => Claim::Confidence,
+            _ => return None,
+        })
+    }
+
+    pub const NAMES: &'static [&'static str] = &["basis", "confidence", "label"];
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
+    /// `genre[basis=discogs & confidence!=confirmed]` — **one claim satisfies
+    /// all of these** (#93).
+    ///
+    /// The bracket is the correlation scope, which is XPath's answer and the
+    /// one three traditions converge on: SQL correlates because `WHERE` runs
+    /// per joined row, SPARQL because a variable names the node, XPath because
+    /// of where the brackets go. **Correlation requires naming the thing being
+    /// correlated**, and this is the name.
+    ///
+    /// A conjunction only, and that is not a limitation: ∃x(P∨Q) ≡ ∃xP ∨ ∃xQ,
+    /// so `genre[a] | genre[b]` says everything `genre[a | b]` would. It is
+    /// exactly ∃x(P∧Q) that does *not* distribute, which is why the bracket is
+    /// needed at all.
+    Claims {
+        facet: &'static str,
+        of: Vec<(Claim, Op, Value)>,
+    },
     Cmp {
         selector: Selector,
         op: Op,
@@ -374,6 +424,21 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FilterError {
+    #[error("{name:?} is not an axis — `genre[…]` asks about a genre's claims")]
+    NotAnAxis { name: String },
+    #[error(
+        "{name:?} is not something a claim carries — try one of: {}",
+        Claim::NAMES.join(", ")
+    )]
+    NotAClaim { name: String },
+    #[error("{facet}[…] needs something inside it")]
+    EmptyBracket { facet: &'static str },
+    #[error("{facet}[…] is missing its closing bracket")]
+    UnclosedBracket { facet: &'static str },
+    #[error(
+        "`|` inside a bracket says nothing extra — `genre[a] | genre[b]` is the same question, and `&` is the one that needs the bracket"
+    )]
+    OrInBracket,
     #[error("{name}(…) is missing its closing bracket")]
     UnclosedQuantifier { name: String },
     #[error("a quantifier asks about the values, so `?` belongs outside it")]
@@ -460,6 +525,30 @@ impl Expr {
                 op,
                 value,
             } => compare(*selector, *op, value, t, env, memo),
+            Expr::Claims { facet, of } => {
+                let (Some(recording), Some(listened)) = (t.recording, env.listened) else {
+                    return false;
+                };
+                listened
+                    .claims(recording, facet)
+                    .iter()
+                    .any(|(label, basis, confidence)| {
+                        of.iter().all(|(what, op, value)| {
+                            let held = match what {
+                                Claim::Label => label,
+                                Claim::Basis => basis,
+                                Claim::Confidence => confidence,
+                            };
+                            let Value::Text(glob) = value else {
+                                return false;
+                            };
+                            match op {
+                                Op::Ne => !glob.matches(held),
+                                _ => glob.matches(held),
+                            }
+                        })
+                    })
+            }
         }
     }
 }
@@ -519,6 +608,57 @@ fn history_number(f: HistoryField, s: &Subject<'_>, env: &Env) -> Option<i64> {
 
 fn days_since(then: i64, now: i64) -> i64 {
     (now - then).max(0) / 86_400
+}
+
+impl Parser {
+    /// The inside of a `[…]`: comparisons joined by `&`.
+    ///
+    /// **`|` is refused, and nothing is lost by it.** ∃x(P∨Q) ≡ ∃xP ∨ ∃xQ, so
+    /// `genre[a] | genre[b]` says everything `genre[a | b]` would — where
+    /// ∃x(P∧Q) does *not* distribute, which is the entire reason the bracket
+    /// exists. Refusing it keeps one way to write each meaning.
+    fn claims(&mut self, facet: &'static str) -> Result<Expr, FilterError> {
+        let mut of = Vec::new();
+        loop {
+            let name = match self.next() {
+                Some(Token::Word(w)) => w,
+                _ => return Err(FilterError::EmptyBracket { facet }),
+            };
+            let what = Claim::parse(&name).ok_or(FilterError::NotAClaim { name })?;
+            let op = match self.next() {
+                Some(Token::Op(op)) => op,
+                _ => return Err(FilterError::ExpectedOperator(name_of(what))),
+            };
+            if !matches!(op, Op::Eq | Op::Ne) {
+                return Err(FilterError::NotOrderable {
+                    field: name_of(what),
+                    op: "an ordering",
+                });
+            }
+            let value = match self.next() {
+                Some(Token::Word(w)) => Value::Text(Glob::new(&w)),
+                Some(Token::Quoted(q)) => Value::Text(Glob::new(&q)),
+                _ => return Err(FilterError::ExpectedOperator(name_of(what))),
+            };
+            of.push((what, op, value));
+            match self.next() {
+                Some(Token::CloseBracket) => break,
+                Some(Token::And) => {}
+                Some(Token::Or) => return Err(FilterError::OrInBracket),
+                _ => return Err(FilterError::UnclosedBracket { facet }),
+            }
+        }
+        Ok(Expr::Claims { facet, of })
+    }
+}
+
+fn name_of(what: Claim) -> String {
+    match what {
+        Claim::Label => "label",
+        Claim::Basis => "basis",
+        Claim::Confidence => "confidence",
+    }
+    .to_string()
 }
 
 /// What a closure walk already answered, for the life of one compiled filter.
@@ -693,6 +833,8 @@ enum Token {
     Not,
     OpenParen,
     CloseParen,
+    OpenBracket,
+    CloseBracket,
 }
 
 impl Token {
@@ -704,6 +846,8 @@ impl Token {
             Token::And => "&".into(),
             Token::Or => "|".into(),
             Token::Not => "!".into(),
+            Token::OpenBracket => "[".into(),
+            Token::CloseBracket => "]".into(),
             Token::OpenParen => "(".into(),
             Token::CloseParen => ")".into(),
         }
@@ -720,6 +864,8 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
             '|' => out.push(Token::Or),
             '(' => out.push(Token::OpenParen),
             ')' => out.push(Token::CloseParen),
+            '[' => out.push(Token::OpenBracket),
+            ']' => out.push(Token::CloseBracket),
             '!' => {
                 if chars.peek() == Some(&'=') {
                     chars.next();
@@ -768,7 +914,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
             c => {
                 let mut w = String::from(c);
                 while let Some(&n) = chars.peek() {
-                    if n.is_whitespace() || "&|!()=<>\"".contains(n) {
+                    if n.is_whitespace() || "&|!()[]=<>\"".contains(n) {
                         break;
                     }
                     w.push(n);
@@ -891,6 +1037,18 @@ impl Parser {
         } else {
             Reach::Exact
         };
+
+        // **`genre[…]` is a correlated existential over one row's claims**
+        // (#93). Read here, before the field lookup, because the bracket
+        // changes what the word means: `genre` is a value on the row and
+        // `genre[…]` is a question about the assertions behind it.
+        if self.peek() == Some(&Token::OpenBracket) {
+            let Some(facet) = crate::model::facet::key_of(&name) else {
+                return Err(FilterError::NotAnAxis { name });
+            };
+            self.next();
+            return self.claims(facet);
+        }
 
         let selector = if name == "any" {
             Selector::Any
@@ -1280,6 +1438,84 @@ mod tests {
         );
     }
 
+    /// **The bracket correlates, and that is the whole reason it exists** —
+    /// #93.
+    ///
+    /// The review queue is "Discogs said so, and was not sure". Asked as two
+    /// independent existentials it also matches a row where **Discogs was
+    /// confirmed and somebody else was unsure**, which is a different set and
+    /// not the one anybody wants.
+    #[test]
+    fn a_bracket_asks_about_one_claim_rather_than_two() {
+        let t = track();
+        // Discogs was confirmed; the *tag* is the unsure one.
+        let crossed = Fake {
+            claims: vec![
+                ("techno".into(), "discogs".into(), "confirmed".into()),
+                ("house".into(), "tag".into(), "provisional".into()),
+            ],
+            ..Fake::default()
+        };
+        // And here Discogs itself is unsure, which is the review queue.
+        let wanted = Fake {
+            claims: vec![("techno".into(), "discogs".into(), "provisional".into())],
+            ..Fake::default()
+        };
+
+        let review = r#"genre[basis=discogs & confidence!=confirmed]"#;
+        assert!(matches_env(review, &t, &wanted, 0));
+        assert!(
+            !matches_env(review, &t, &crossed, 0),
+            "the two halves came from different claims"
+        );
+
+        // Each half on its own is true of the crossed row, which is exactly
+        // what makes the uncorrelated reading wrong rather than merely loose.
+        assert!(matches_env("genre[basis=discogs]", &t, &crossed, 0));
+        assert!(matches_env(
+            r#"genre[confidence!=confirmed]"#,
+            &t,
+            &crossed,
+            0
+        ));
+    }
+
+    /// **`|` inside a bracket is refused, and nothing is lost.**
+    ///
+    /// ∃x(P∨Q) ≡ ∃xP ∨ ∃xQ, so the outside form says the same thing. It is
+    /// ∃x(P∧Q) that does not distribute — which is why the bracket exists at
+    /// all, and why refusing `|` leaves one way to write each meaning.
+    #[test]
+    fn or_inside_a_bracket_is_refused_because_it_says_nothing_new() {
+        let err = Expr::parse("genre[basis=discogs | basis=tag]").expect_err("should refuse");
+        assert!(format!("{err}").contains("same question"), "{err}");
+
+        let t = track();
+        let h = Fake {
+            claims: vec![("techno".into(), "tag".into(), "provisional".into())],
+            ..Fake::default()
+        };
+        assert!(matches_env(
+            "genre[basis=discogs] | genre[basis=tag]",
+            &t,
+            &h,
+            0
+        ));
+    }
+
+    /// A bracket on something that is not an axis, and a claim nothing
+    /// carries, both name what would have worked.
+    #[test]
+    fn a_bracket_says_what_it_would_have_accepted() {
+        let err = Expr::parse("artist[basis=discogs]").expect_err("not an axis");
+        assert!(format!("{err}").contains("genre[…]"), "{err}");
+
+        let err = Expr::parse("genre[loudness=high]").expect_err("not a claim");
+        for named in ["basis", "confidence", "label"] {
+            assert!(format!("{err}").contains(named), "{err}");
+        }
+    }
+
     /// **`*` is zero-or-more and `+` is one-or-more** — #93, SPARQL's
     /// spelling, one meaning per character.
     ///
@@ -1472,6 +1708,8 @@ mod tests {
         collected: u32,
         /// A narrower-of chain, child first, as `broader` would return it.
         broader: Vec<String>,
+        /// `(label, basis, confidence)` per claim, as the fold holds them.
+        claims: Vec<(String, String, String)>,
     }
 
     impl Listened for Fake {
@@ -1486,6 +1724,9 @@ mod tests {
         }
         fn collected(&self, _: Id<Recording>) -> u32 {
             self.collected
+        }
+        fn claims(&self, _: Id<Recording>, _: &str) -> Vec<(String, String, String)> {
+            self.claims.clone()
         }
         fn broader(&self, _: &str, label: &str) -> Vec<String> {
             // The fixture's chain, from wherever the label sits upward.
@@ -1507,6 +1748,7 @@ mod tests {
             rating: None,
             collected: 0,
             broader: Vec::new(),
+            claims: Vec::new(),
         }
     }
 
