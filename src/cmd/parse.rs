@@ -532,11 +532,15 @@ fn levels_spec(rest: &str) -> Result<crate::shelf::Levels, ParseError> {
     if rest.is_empty() {
         return Ok(crate::shelf::Levels::default());
     }
+    // **`flat` is a level list of none**, which is what view 2 was.
+    if rest == "flat" {
+        return Ok(crate::shelf::Levels::Flat);
+    }
     let (outer, inner) = rest.split_once(',').unwrap_or((rest, "album"));
     let field = |name: &str| {
         Field::parse(name.trim()).ok_or_else(|| ParseError::Bad(name.trim().into(), "field"))
     };
-    Ok(crate::shelf::Levels {
+    Ok(crate::shelf::Levels::By {
         outer: field(outer)?,
         inner: field(inner)?,
     })
@@ -804,7 +808,7 @@ pub fn format(cmd: &Command) -> String {
         }
         Command::Compose(crate::cmd::ViewTerm::Save(name)) => format!("view save {name}"),
         Command::Compose(crate::cmd::ViewTerm::Levels(l)) => {
-            format!("view levels {},{}", l.outer.name(), l.inner.name())
+            format!("view levels {}", l.written())
         }
         Command::Filter(None) => "filter".into(),
         Command::Filter(Some(f)) => format!("filter {}", f.source),

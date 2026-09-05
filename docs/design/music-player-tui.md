@@ -3501,10 +3501,16 @@ Append here as decisions are made. Format: date, decision, rationale.
   because without them "a subtree reports 42 tracks and enqueues 37". `Levels::outer_is_multi` is a **declared** answer,
   not a guess.
 
-  **What is not done, and why it is separate.** The `View` enum stays, so the number keys are still built-in rather than
-  bindings, and there are no splits. Both need `ui/tree.rs`'s `Row::{Artist, Album, Track}` to stop naming the levels it
-  draws — about a hundred call sites across two files — and doing that badly would be worse than doing it next. The
-  value being a value is the part everything else builds on, and it is done.
+  **`levels` is now the single answer to "how is this grouped".** `:view 2` sets `Levels::Flat` and `:view 1` sets the
+  default pair, and setting the value picks the drawing — so the two can no longer disagree, which they could while the
+  view was a mode and `levels` did not exist. That is §9's first sentence made true: **views 1 and 2 are one set drawn
+  two ways.**
+
+  **What is not done, and why it is separate.** The `View` enum survives as a rendering detail, and there are no splits.
+  Deleting the enum means unifying the two cursors and two scrolls behind it — `ui.sorted`/`ui.tree.selected`,
+  `sorted_scroll`/`tree_scroll` — across **79 `match ui.view` arms** that are not centralised. Every one is a place a
+  cursor could quietly land somewhere else, and tests do not catch a scroll that is off by a screen. Worth its own pass,
+  and cheaper now that the enum is a function of `levels` rather than a state beside it.
 
 ## 14. Prior art worth reading
 

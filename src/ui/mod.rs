@@ -2371,7 +2371,25 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         }
 
         // ---- views
-        Command::View(id) => switch_view(ui, View::from_id(id)),
+        Command::View(id) => {
+            // **`1` and `2` set `levels`, and the drawing follows** (#97).
+            // They were two views; they are one view drawn two ways, and the
+            // number key is the shorthand for saying which. Kept in step here
+            // rather than by remembering, so they cannot disagree.
+            let view = View::from_id(id);
+            match view {
+                View::Tree if ui.levels.is_flat() => {
+                    ui.levels = crate::shelf::Levels::default();
+                    rebuild_library(ui, ctx);
+                }
+                View::Sorted if !ui.levels.is_flat() => {
+                    ui.levels = crate::shelf::Levels::Flat;
+                    rebuild_library(ui, ctx);
+                }
+                _ => {}
+            }
+            switch_view(ui, view);
+        }
         // `gt` steps forward; `<count>gt` goes straight to that view.
         Command::ViewNext => match count {
             Some(n) => {
@@ -2431,18 +2449,33 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 // is a thing to say at all.
                 ViewTerm::Levels(levels) => {
                     ui.levels = levels;
-                    rebuild_library(ui, ctx);
-                    let said = format!(
-                        "levels: {},{} ({} {})",
-                        levels.outer.name(),
-                        levels.inner.name(),
-                        ui.library.artist_count(),
-                        if levels.outer_is_multi() {
-                            "groups, a track may be in several"
+                    // **The drawing follows the value, never the other way**
+                    // (#97). Views 1 and 2 are one set drawn two ways, so
+                    // `levels` decides which and the two cannot disagree —
+                    // which is what has to be true before the enum can go.
+                    switch_view(
+                        ui,
+                        if levels.is_flat() {
+                            View::Sorted
                         } else {
-                            "groups"
-                        }
+                            View::Tree
+                        },
                     );
+                    rebuild_library(ui, ctx);
+                    let said = if levels.is_flat() {
+                        format!("levels: flat ({} tracks)", ui.library.len())
+                    } else {
+                        format!(
+                            "levels: {} ({} {})",
+                            levels.written(),
+                            ui.library.artist_count(),
+                            if levels.outer_is_multi() {
+                                "groups, a track may be in several"
+                            } else {
+                                "groups"
+                            }
+                        )
+                    };
                     ui.notify(said);
                     return;
                 }
@@ -9143,6 +9176,41 @@ mod tests {
         ui.data_dir = Some(scratch(name));
         ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         ui
+    }
+
+    /// **Views 1 and 2 are one set drawn two ways, and `levels` says which**
+    /// — #97's first sentence, made true.
+    ///
+    /// They could disagree before: the view was a mode and `levels` did not
+    /// exist. Now the number key sets the value and the drawing follows, so
+    /// there is one answer to "how is this grouped" rather than two that have
+    /// to be kept in step.
+    #[test]
+    fn the_number_keys_set_levels_and_the_drawing_follows() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let tracks = ui.library.len();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 2");
+        assert_eq!(ui.view, View::Sorted);
+        assert!(ui.levels.is_flat(), "view 2 is `levels: flat`");
+        assert_eq!(ui.library.len(), tracks, "the set changed");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 1");
+        assert_eq!(ui.view, View::Tree);
+        assert!(!ui.levels.is_flat());
+
+        // And the other direction: saying the value picks the drawing.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels flat");
+        assert_eq!(ui.view, View::Sorted, "{}", ui.status);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels genre,album");
+        assert_eq!(ui.view, View::Tree);
+        assert!(!ui.levels.is_flat());
     }
 
     /// **`levels` is a field on the view, settable in place** — #97.

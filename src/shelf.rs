@@ -53,15 +53,24 @@ pub struct Shelf {
 /// distinct rather than a sum. `tree-view-design.md` §6 named this before it
 /// could happen; grouping by a chosen field is what made it possible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Levels {
-    pub outer: crate::format::Field,
-    pub inner: crate::format::Field,
+pub enum Levels {
+    /// No grouping — one row per track, which is what view 2 was.
+    ///
+    /// **`levels: []` in `query-language.md` §10**, and the reason views 1 and
+    /// 2 were "one set drawn two ways": nothing about the *membership*
+    /// differed, only whether it was grouped.
+    Flat,
+    /// Grouped by two fields. `[artist, album]` is the tree as it has always
+    /// been, said out loud rather than hardcoded.
+    By {
+        outer: crate::format::Field,
+        inner: crate::format::Field,
+    },
 }
 
 impl Default for Levels {
-    /// Artist then album — the tree as it has always been, now said out loud.
     fn default() -> Self {
-        Self {
+        Levels::By {
             outer: crate::format::Field::FileUnder,
             inner: crate::format::Field::Album,
         }
@@ -69,13 +78,38 @@ impl Default for Levels {
 }
 
 impl Levels {
+    /// The pair to group by, or `None` when flat.
+    pub fn pair(self) -> Option<(crate::format::Field, crate::format::Field)> {
+        match self {
+            Levels::Flat => None,
+            Levels::By { outer, inner } => Some((outer, inner)),
+        }
+    }
+
+    pub fn is_flat(self) -> bool {
+        matches!(self, Levels::Flat)
+    }
+
+    /// How it would be typed, so `:view levels …` round-trips.
+    pub fn written(self) -> String {
+        match self {
+            Levels::Flat => "flat".to_string(),
+            Levels::By { outer, inner } => format!("{},{}", outer.name(), inner.name()),
+        }
+    }
     /// Whether the outer level can put one row in more than one node.
     ///
     /// The **declared** answer, not a guess: a level is single-valued unless
     /// it says otherwise, and this is the flag `tree-view-design.md` §6 said
     /// must exist before a multi-valued grouping does.
     pub fn outer_is_multi(self) -> bool {
-        matches!(self.outer, crate::format::Field::Facet(_))
+        matches!(
+            self,
+            Levels::By {
+                outer: crate::format::Field::Facet(_),
+                ..
+            }
+        )
     }
 }
 
@@ -145,11 +179,15 @@ impl Shelf {
         // row rather than two rows to be grouped, and the lookup below is
         // "is this copy one of ours".
         lib.levels = levels;
-        let tree = crate::model::tree::Tree::grouped(
-            librarian,
-            (levels.outer, levels.inner),
-            smart_artist_sort,
-        );
+        // **Flat is still grouped underneath**, by the default pair, because
+        // the flat list is the tree read in order — `sorted` is built from it
+        // below. What flat changes is how it is *drawn*, which is the whole
+        // point of `levels` being presentation (#97).
+        let pair = levels
+            .pair()
+            .or_else(|| Levels::default().pair())
+            .expect("the default is grouped");
+        let tree = crate::model::tree::Tree::grouped(librarian, pair, smart_artist_sort);
         let mut placed: HashSet<CopyId> = HashSet::new();
         for (artist_key, albums) in tree.artists() {
             for (album_key, album) in albums {
@@ -594,7 +632,7 @@ mod projection {
         let by_genre = Shelf::grouped(
             &l,
             members,
-            Levels {
+            Levels::By {
                 outer: genre,
                 inner: crate::format::Field::Album,
             },
@@ -633,7 +671,7 @@ mod projection {
         let members: HashSet<CopyId> = Listing::rows(&l).into_iter().collect();
         let id = *members.iter().next().unwrap();
 
-        let levels = Levels {
+        let levels = Levels::By {
             outer: crate::format::Field::parse("genre").unwrap(),
             inner: crate::format::Field::Album,
         };
