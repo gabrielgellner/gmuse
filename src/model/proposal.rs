@@ -279,6 +279,9 @@ pub fn parse(
     library: &impl Holdings,
 ) -> (BTreeSet<Record>, Report) {
     let mut clock = HybridClock::new(device);
+    // Keyed by rendering, because `Fact` is neither `Hash` nor `Ord` and a
+    // declaration's identity is exactly what it says.
+    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out = BTreeSet::new();
     let mut report = Report::default();
 
@@ -306,6 +309,31 @@ pub fn parse(
             }
         };
         for fact in facts {
+            // **A concept is declared once per file, not once per line.**
+            //
+            // Every assignment brings its concept with it, which is right —
+            // an id no fact resolves is an id nobody can render. But a file of
+            // 761 proposals into one collection carried 761 identical
+            // `CollectionNamed` records, and a file of genre assignments does
+            // the same with `GenreCatalogued`. They fold to one row and cost a
+            // durable line each; the Dance seeding put 761 of them into a log
+            // of 7,974.
+            //
+            // **Only the declarations**, and the narrowing is a guard rather
+            // than a fix. No proposal produces a fact that has to survive
+            // twice — a play is recorded by the player, not proposed — so
+            // deduplicating everything would behave identically today, and a
+            // mutation making it do so passes every test here.
+            //
+            // It is still the right shape. `RecordingPlayed` carries no
+            // timestamp, so two plays of one track are the same fact told
+            // apart only by their stamps; the day something proposes one, a
+            // blanket rule would count one play where there were two, and
+            // silently. `declares_a_concept` is what makes adding that a
+            // deliberate act rather than an accident.
+            if declares_a_concept(&fact) && !declared.insert(format!("{fact:?}")) {
+                continue;
+            }
             out.insert(Record {
                 stamp: clock.stamp(now),
                 fact,
@@ -314,6 +342,25 @@ pub fn parse(
         report.applied += 1;
     }
     (out, report)
+}
+
+/// Whether a fact only *declares* something, so saying it twice says nothing.
+///
+/// These name a concept so that an id resolves to something a person reads.
+/// They are pure upserts: two identical ones fold to one row, and the second
+/// buys a line in a durable log and nothing else.
+///
+/// **Kept to a list rather than inferred.** "Idempotent" is not a property the
+/// type system carries here — `RecordingPlayed` is *counted*, and it holds no
+/// timestamp, so two plays of one track are the same fact told apart only by
+/// their stamps. Anything added to this list has to be checked, not guessed.
+fn declares_a_concept(fact: &Fact) -> bool {
+    matches!(
+        fact,
+        Fact::GenreCatalogued { .. }
+            | Fact::CollectionNamed { .. }
+            | Fact::QualifierCatalogued { .. }
+    )
 }
 
 /// One proposal becomes the facts it implies, or says why it cannot.
@@ -969,6 +1016,65 @@ mod collecting {
                 .iter()
                 .any(|f| matches!(f, Fact::CollectionEntryAdded { .. })),
             "nothing was put in it: {facts:?}"
+        );
+    }
+
+    /// **A concept is declared once per file, not once per line.**
+    ///
+    /// Every assignment brings its concept with it, because an id no fact
+    /// resolves is an id nobody can render. But seeding the Dance collection
+    /// from its folder was 761 proposals into one collection, and it put 761
+    /// identical `CollectionNamed` records into a log of 7,974 — they fold to
+    /// one row and cost a durable line each.
+    #[test]
+    fn one_collection_is_named_once_however_many_go_into_it() {
+        let file = (1..=2)
+            .map(|n| line(n, "Dance"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (records, report) = parse(&file, dev(), 100, HELD);
+        assert_eq!(report.applied, 2, "{report}");
+
+        let named = records
+            .iter()
+            .filter(|r| matches!(&r.fact, Fact::CollectionNamed { .. }))
+            .count();
+        assert_eq!(named, 1, "the collection was named once per entry");
+        let added = records
+            .iter()
+            .filter(|r| matches!(&r.fact, Fact::CollectionEntryAdded { .. }))
+            .count();
+        assert_eq!(added, 2, "and both entries still went in");
+    }
+
+    /// **But a play is counted, so the rule is a list and not a guess.**
+    ///
+    /// `RecordingPlayed` carries no timestamp: two plays of one track are the
+    /// same fact told apart only by their stamps. Nothing proposes one today —
+    /// a play is recorded by the player, not proposed — so this cannot be
+    /// reached through `parse`, and asserting the predicate is the honest way
+    /// to say it. Somebody adding a `Played` proposal has to come past this.
+    #[test]
+    fn a_counted_fact_is_not_a_declaration() {
+        assert!(declares_a_concept(&Fact::CollectionNamed {
+            collection: Id::<Collection>::of_name("Dance"),
+            name: "Dance".into(),
+            ordered: false,
+        }));
+        assert!(
+            !declares_a_concept(&Fact::RecordingPlayed {
+                recording: rec(1),
+                encoding: None,
+            }),
+            "deduplicating this would count one play where there were two"
+        );
+        assert!(
+            !declares_a_concept(&Fact::CollectionEntryAdded {
+                collection: Id::<Collection>::of_name("Dance"),
+                recording: rec(1),
+                ord: crate::model::ord::OrdKey::first(),
+            }),
+            "an entry is membership, not a declaration"
         );
     }
 
