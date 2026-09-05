@@ -195,17 +195,115 @@ mod tests {
     /// the next attempt loud.
     #[test]
     fn the_minting_is_pinned() {
+        use crate::model::basis::Basis;
+        use crate::model::entity::{Artist, Genre, Label, Medium, Qualifier, Role, Track};
+        use crate::model::spine::Recording;
+
         let a = audio(1, 0x8fb0_dcfb_f145_dfff_6649_7842_65da_0229);
-        assert_eq!(
-            Id::of_audio(&a).to_string(),
-            "fcda6141-233b-5b1f-8d1d-ec0af7926402",
-            "encoding minting changed: every stored id is now wrong"
-        );
         let mbid = Uuid::parse_str("183105b5-0000-4000-8000-000000000000").unwrap();
-        assert_eq!(
-            Id::<Release>::of_musicbrainz(mbid).to_string(),
-            "1f4e63fd-2605-557d-ba5b-05ae0c641352",
-            "release minting changed: every stored id is now wrong"
-        );
+        let group = Id::<ReleaseGroup>::of_musicbrainz(mbid);
+        let release = Id::<Release>::of_release(Some(mbid), group);
+        let medium = Id::<Medium>::of_medium(release, 1);
+        let recording = Id::<Recording>::of_basis(&Basis::MusicBrainz(mbid));
+
+        // Every derivation, with the input beside the answer, so a failure
+        // says which rung moved rather than only that something did.
+        let pinned: &[(&str, String, &str)] = &[
+            (
+                "encoding, from its bytes",
+                Id::of_audio(&a).to_string(),
+                "fcda6141-233b-5b1f-8d1d-ec0af7926402",
+            ),
+            (
+                "release, from a MusicBrainz id",
+                release.to_string(),
+                "1f4e63fd-2605-557d-ba5b-05ae0c641352",
+            ),
+            // **The one that actually changed**, and the one nothing was
+            // watching: `of_basis` mints recordings, and a recording is what
+            // every rating and play in the log hangs off.
+            (
+                "recording, named by MusicBrainz",
+                recording.to_string(),
+                "8e86783f-0e86-58c8-aa82-f0b080b06a2c",
+            ),
+            (
+                "recording, named by another authority",
+                Id::<Recording>::of_basis(&Basis::External {
+                    authority: "beatport".into(),
+                    key: "12345".into(),
+                })
+                .to_string(),
+                "80e0595d-a335-5edc-8cb1-cbe9675cb84e",
+            ),
+            (
+                "recording, resting on its bytes",
+                Id::<Recording>::of_basis(&Basis::Audio(a)).to_string(),
+                "0a565b68-a9b2-5d5b-bf99-874166cb19b4",
+            ),
+            (
+                "artist, from a MusicBrainz id",
+                Id::<Artist>::of_artist(Some(mbid), "ignored").to_string(),
+                "9154d623-5bb4-51db-b1fd-8691d2674bad",
+            ),
+            (
+                "artist, from a name",
+                Id::<Artist>::of_artist(None, "  Stephan   Bodzin  ").to_string(),
+                "4d18f179-cb5d-5244-b07a-3db6d1c704a3",
+            ),
+            (
+                "release, falling back to its group",
+                Id::<Release>::of_release(None, group).to_string(),
+                "7e00a5cf-4a80-512d-85d9-7d8da8f57e4c",
+            ),
+            (
+                "medium, from its position",
+                medium.to_string(),
+                "bb9fe36a-6317-5928-8e83-2af13e66f3e0",
+            ),
+            (
+                "track, from the recording filling it",
+                Id::<Track>::of_track(medium, recording).to_string(),
+                "b897335e-2065-595f-a90d-bf4b945d4a1d",
+            ),
+            // These four go through `ingest::normalise`, so a change there
+            // moves all of them at once — which is the second thing that
+            // regenerated this library's log.
+            //
+            // **The inputs are deliberately untidy.** A first version used
+            // `"Dub Techno"` and `"performer"`, which normalise to themselves,
+            // so reverting the collapse of internal whitespace changed nothing
+            // and the pin proved nothing about it. Each carries the shape the
+            // rule is *for*: a doubled space, surrounding space, a capital, a
+            // tab.
+            (
+                "genre concept",
+                Id::<Genre>::of_name("Dub  Techno").to_string(),
+                "70a98a74-2ef9-5ce6-95fb-c0aa48472f53",
+            ),
+            (
+                "version concept",
+                Id::<Qualifier>::of_label("  Instrumental  ").to_string(),
+                "940e7f75-036b-50cc-b881-de887c835e4a",
+            ),
+            (
+                "credit role",
+                Id::<Role>::of_name("Performer").to_string(),
+                "30cad611-d34c-5fcf-a07c-29f2073bca18",
+            ),
+            (
+                "imprint",
+                Id::<Label>::of_name("Herzblut\tRecords").to_string(),
+                "7fb47fe3-0670-5f7f-aa73-d28bf2804b68",
+            ),
+        ];
+
+        for (what, got, want) in pinned {
+            assert_eq!(
+                got, want,
+                "minting changed for {what} — every stored id of that kind is \
+                 now wrong, and every fact naming one points at nothing"
+            );
+        }
     }
 }

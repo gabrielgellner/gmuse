@@ -156,8 +156,26 @@ impl Id<crate::model::entity::Artist> {
                 // the wrong reason, which is worse than not existing. The
                 // prefix stays so that adding a third rung later cannot
                 // silently create the collision this cannot yet have.
+                // **Through `normalise`, like every other name-derived id.**
+                //
+                // It seeded from the raw string, and the argument for that
+                // was accents: three names in this library were ASCII-folded
+                // by an earlier tool and are wanted back as their real
+                // spellings, so `Christian Löffler` and `Christian Loffler`
+                // must stay two artists until somebody merges them. A merge
+                // repairs a split; nothing repairs a fold.
+                //
+                // That argument does not reach case and whitespace.
+                // `normalise` is deliberately shallow — it lowercases and
+                // collapses spaces and touches nothing else — so it merges
+                // `ANTIGONE` with `Antigone` and leaves `Löffler` and
+                // `Loffler` apart, which is exactly the line wanted.
+                //
+                // Measured before changing: of 381 distinct artist strings in
+                // this library, normalising merges **one** pair, and it is
+                // `ANTIGONE`/`Antigone` — one producer, filed twice.
                 let mut seed = b"name\x1f".to_vec();
-                seed.extend_from_slice(name.as_bytes());
+                seed.extend_from_slice(crate::model::ingest::normalise(name).as_bytes());
                 Id::derived(&seed)
             }
         }
@@ -167,6 +185,31 @@ impl Id<crate::model::entity::Artist> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **`ANTIGONE` and `Antigone` are one producer**, and a stray space is
+    /// not a second artist.
+    ///
+    /// The id seeded from the raw string, on an argument about accents that
+    /// does not reach case or spacing. `normalise` is shallow enough to draw
+    /// the line in the right place — it lowercases and collapses spaces and
+    /// touches nothing else.
+    #[test]
+    fn case_and_spacing_are_not_two_artists() {
+        let one = Id::<crate::model::entity::Artist>::of_artist(None, "ANTIGONE");
+        assert_eq!(one, Id::of_artist(None, "Antigone"));
+        assert_eq!(one, Id::of_artist(None, "  antigone  "));
+    }
+
+    /// **But an accent still is**, and deliberately: three names here were
+    /// ASCII-folded by an earlier tool and are wanted back as their real
+    /// spellings. A merge repairs a split; nothing repairs a fold.
+    #[test]
+    fn a_folded_name_is_still_a_different_artist() {
+        assert_ne!(
+            Id::<crate::model::entity::Artist>::of_artist(None, "Christian Löffler"),
+            Id::of_artist(None, "Christian Loffler"),
+        );
+    }
 
     fn audio(hash: u128) -> AudioId {
         AudioId { scheme: 1, hash }
