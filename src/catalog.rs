@@ -289,10 +289,10 @@ mod tests {
     fn store_with(paths: &[&str]) -> Scan {
         let mut s = Scan::new();
         for p in paths {
-            s.upsert(Track {
+            s.upsert(crate::store::heard(Track {
                 path: PathBuf::from(p),
                 ..Default::default()
-            });
+            }));
         }
         s
     }

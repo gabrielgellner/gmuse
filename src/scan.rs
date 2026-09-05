@@ -148,10 +148,13 @@ pub fn scan(store: &mut Scan, roots: &[PathBuf]) -> ScanReport {
     }
 
     // Anything under a root we did not see has gone away.
+    // **Files, not rows.** Two paths holding identical bytes are one row, so
+    // walking rows would show only one of them — and the other, unseen, would
+    // never be reported as gone. That turned a move into a deletion (#86).
     let gone: Vec<PathBuf> = store
-        .iter()
-        .filter(|(_, t)| !seen.contains(&t.path) && roots.iter().any(|r| t.path.starts_with(r)))
-        .map(|(_, t)| t.path.clone())
+        .files()
+        .filter(|t| !seen.contains(&t.path) && roots.iter().any(|r| t.path.starts_with(r)))
+        .map(|t| t.path.clone())
         .collect();
 
     // Pair the two halves up before the departures are destroyed: a file that
@@ -246,7 +249,7 @@ fn detect_moves(store: &Scan, gone: &[PathBuf], arrived: &[PathBuf]) -> Vec<Move
     let mut departures: std::collections::HashMap<Key<'_>, Option<&PathBuf>> =
         std::collections::HashMap::new();
     for path in gone {
-        let Some(t) = store.id_for_path(path).and_then(|id| store.get(id)) else {
+        let Some(t) = store.track_at(path) else {
             continue;
         };
         // `None` marks a signature seen more than once, so it stays ambiguous
@@ -259,14 +262,14 @@ fn detect_moves(store: &Scan, gone: &[PathBuf], arrived: &[PathBuf]) -> Vec<Move
 
     let mut counts: std::collections::HashMap<Key<'_>, usize> = std::collections::HashMap::new();
     for path in arrived {
-        if let Some(t) = store.id_for_path(path).and_then(|id| store.get(id)) {
+        if let Some(t) = store.track_at(path) {
             *counts.entry(key(t)).or_insert(0) += 1;
         }
     }
 
     let mut moves = Vec::new();
     for path in arrived {
-        let Some(t) = store.id_for_path(path).and_then(|id| store.get(id)) else {
+        let Some(t) = store.track_at(path) else {
             continue;
         };
         let k = key(t);
@@ -551,8 +554,11 @@ mod tests {
     #[test]
     fn scanning_overlapping_roots_visits_each_file_once() {
         let d = scan_dir("overlapping");
+        // Different lengths, so the two are different files. Written the same
+        // once, which made them one row and made this test about duplicates
+        // rather than about overlapping roots (#86).
         write_wav(&d.join("Dance/a.wav"), 4410);
-        write_wav(&d.join("General/b.wav"), 4410);
+        write_wav(&d.join("General/b.wav"), 8820);
 
         // The stale parent beside its two real children, as the cache had it.
         let roots = vec![d.join("Dance"), d.join("General"), d.clone()];

@@ -96,7 +96,7 @@ mod tests {
 
     fn snap(ids: &[u32], selected: usize) -> Snapshot {
         Snapshot {
-            entries: ids.iter().map(|n| TrackId::new(*n)).collect(),
+            entries: ids.iter().map(|n| crate::store::row_of_test(*n)).collect(),
             selected,
         }
     }

@@ -16,14 +16,26 @@
 //! change.
 
 use crate::model::entity::Encoding;
-use crate::model::id::Handle;
+use crate::model::id::Id;
 
 /// The same thing `store::TrackId` aliases, named from this side.
 ///
 /// Written out rather than imported from `store`, because the model must not
-/// reach into the player (#77) — and because a handle is a model concept that
-/// the store happens to hand out, not the other way round.
-type Row = Handle<Encoding>;
+/// reach into the player (#77).
+///
+/// **It is an `Id`, not a `Handle`** (#86). It was an index into the `Scan`'s
+/// arena, which the librarian does not own and which will not exist — so a
+/// row is named by the durable id of the bytes it draws.
+///
+/// The consequence is that two files with identical bytes are **one row**,
+/// because they are one encoding. Measured on this library that is exactly
+/// one pair, and that row is the truthful one: you hold one encoding, stored
+/// at two paths. `HoldingsAsserted` is keyed by encoding, so the model could
+/// not have said otherwise in any case.
+///
+/// What it buys is that a row id survives a restart, which is what lets a
+/// session, a playlist and the undo stack name rows rather than paths.
+type Row = Id<Encoding>;
 
 /// Where a row files, and what it is called.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

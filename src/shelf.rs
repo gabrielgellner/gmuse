@@ -327,14 +327,14 @@ mod tests {
     use std::time::Duration;
 
     fn t(path: &str, artist: Option<&str>, album: Option<&str>, title: Option<&str>) -> Track {
-        Track {
+        crate::store::heard(Track {
             path: PathBuf::from(path),
             artist: artist.map(String::from),
             album: album.map(String::from),
             title: title.map(String::from),
             duration: Duration::from_secs(1),
             ..Default::default()
-        }
+        })
     }
 
     #[test]
@@ -587,10 +587,10 @@ mod projection {
     #[test]
     fn something_the_model_has_no_listing_for_is_kept() {
         let mut store = Scan::default();
-        let mut t = Track {
+        let mut t = crate::store::heard(Track {
             path: std::path::PathBuf::from("/m/x.mp3"),
             ..Default::default()
-        };
+        });
         t.artist = Some("Nobody".into());
         t.album = Some("Untagged".into());
         store.upsert(t);

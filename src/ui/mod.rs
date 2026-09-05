@@ -8166,7 +8166,10 @@ mod tests {
         let after = renamed.upsert(track);
 
         assert_eq!(
-            stars(&ui, renamed.recording_of(after)),
+            stars(
+                &ui,
+                renamed.recording_of(after.expect("the moved file has bytes"))
+            ),
             Some(4),
             "the rating did not follow the audio across a rename"
         );
@@ -9162,7 +9165,7 @@ mod tests {
     fn tall_fixture(n: usize) -> Scan {
         let mut store = Scan::new();
         for i in 0..n {
-            store.upsert(Track {
+            store.upsert(crate::store::heard(Track {
                 path: PathBuf::from(format!("/m/tall/{i:03}.mp3")),
                 artist: Some("Tall".into()),
                 album: Some("Album".into()),
@@ -9170,7 +9173,7 @@ mod tests {
                 tracknumber: Some(i as u32 + 1),
                 duration: Duration::from_secs(100),
                 ..Default::default()
-            });
+            }));
         }
         store
     }
@@ -9268,7 +9271,7 @@ mod tests {
     /// two tracks to say what it means.
     fn marked_fixture() -> Scan {
         let mut store = Scan::new();
-        store.upsert(Track {
+        store.upsert(crate::store::heard(Track {
             path: PathBuf::from("/m/loffler/01.mp3"),
             artist: Some("Christian Löffler".into()),
             album: Some("A Life ⧸ Young Alaska".into()),
@@ -9276,8 +9279,8 @@ mod tests {
             tracknumber: Some(1),
             duration: Duration::from_secs(267),
             ..Default::default()
-        });
-        store.upsert(Track {
+        }));
+        store.upsert(crate::store::heard(Track {
             path: PathBuf::from("/m/aaa/01.mp3"),
             artist: Some("Aaa Ordinary".into()),
             album: Some("Plain".into()),
@@ -9285,7 +9288,7 @@ mod tests {
             tracknumber: Some(1),
             duration: Duration::from_secs(100),
             ..Default::default()
-        });
+        }));
         store
     }
 
@@ -9353,7 +9356,7 @@ mod tests {
         let mut store = Scan::new();
         for i in 0..n {
             for t in 1..=2u32 {
-                store.upsert(Track {
+                store.upsert(crate::store::heard(Track {
                     path: PathBuf::from(format!("/m/{i:03}/{t}.mp3")),
                     artist: Some(format!("Artist {i:03}")),
                     album: Some(format!("Album {i:03}")),
@@ -9361,7 +9364,7 @@ mod tests {
                     tracknumber: Some(t),
                     duration: Duration::from_secs(100),
                     ..Default::default()
-                });
+                }));
             }
         }
         store
@@ -10804,7 +10807,7 @@ mod tests {
             ("/m/a4.mp3", "Anna", "Second", "four", 2),
             ("/m/b1.mp3", "Bruno", "Third", "five", 1),
         ] {
-            store.upsert(Track {
+            store.upsert(crate::store::heard(Track {
                 path: PathBuf::from(path),
                 artist: Some(artist.into()),
                 album: Some(album.into()),
@@ -10812,7 +10815,7 @@ mod tests {
                 tracknumber: Some(n),
                 duration: Duration::from_secs(100),
                 ..Default::default()
-            });
+            }));
         }
         store
     }

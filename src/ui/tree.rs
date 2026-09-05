@@ -563,13 +563,13 @@ mod tests {
     fn store_with(rows: &[(&str, &str, &str, &str)]) -> Scan {
         let mut s = Scan::new();
         for (path, artist, album, title) in rows {
-            s.upsert(Track {
+            s.upsert(crate::store::heard(Track {
                 path: PathBuf::from(path),
                 artist: Some((*artist).into()),
                 album: Some((*album).into()),
                 title: Some((*title).into()),
                 ..Default::default()
-            });
+            }));
         }
         s
     }

@@ -14,16 +14,14 @@
 //! `Send`, makes views cheap to rebuild, and lets the same track appear in the
 //! library, several playlists and the queue as the same `u32`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::model::entity::Encoding;
-use crate::model::id::Handle;
-#[cfg(test)]
-use crate::model::id::Id;
+use crate::model::id::{Handle, Id};
 #[cfg(test)]
 use crate::model::spine::Recording;
 
@@ -59,7 +57,15 @@ use crate::model::spine::Recording;
 ///
 /// It does not compile now, and `a_store_handle_cannot_be_read_as_a_recording_handle`
 /// keeps it that way.
-pub type TrackId = Handle<Encoding>;
+pub type TrackId = Id<Encoding>;
+
+/// Where a track sits in the arena.
+///
+/// Private, and it stays private. It was `TrackId` until #86 — the player held
+/// arena indices, so nothing it remembered could outlive the arena, which is
+/// why a session and a playlist had to be written down as paths. A row is
+/// named by its bytes now and this is only how `Scan` finds one.
+type Slot = Handle<Encoding>;
 
 /// ReplayGain, as found in tags. Values are dB (gain) and linear (peak).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -223,9 +229,57 @@ pub struct Scan {
     /// The same trick `Handle<T>` uses in `model/id.rs`, applied to the type
     /// it was modelled on.
     #[serde(skip)]
-    by_path: HashMap<PathBuf, TrackId>,
+    by_path: HashMap<PathBuf, Slot>,
+    /// Durable id to arena slot. **Rebuilt on load, never persisted**, for the
+    /// same reason as `by_path`.
+    ///
+    /// The arena is an implementation detail that dies with this file (#86).
+    /// What callers hold is the id of the *bytes*, so a playlist entry means
+    /// the same thing after a restart, after a rescan, and on another machine.
+    #[serde(skip)]
+    by_id: BTreeMap<TrackId, Slot>,
     /// Count of tombstones, so callers can decide when a compaction is worth it.
     tombstones: usize,
+}
+
+/// Fixture bytes for a file that a test does not care about the audio of.
+///
+/// A row is named by its audio (#86), so a `Track` with no `audio_id` is a
+/// file the store can hold and will never list — which is right, and which
+/// makes every fixture that builds one by hand say what it is holding. This
+/// derives them from the path, because distinct paths in a test mean distinct
+/// files unless the test is about the case where they do not.
+#[cfg(test)]
+pub fn heard(mut track: Track) -> Track {
+    let seed = track
+        .path
+        .to_string_lossy()
+        .bytes()
+        .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(u64::from(b)));
+    track.audio_id = Some(crate::audio_id::AudioId {
+        scheme: 1,
+        hash: u128::from(seed),
+    });
+    track
+}
+
+/// A row id for a fixture, deterministic and distinct per number.
+///
+/// Tests used to write `crate::store::row_of_test(3)` — an arena index, which is exactly
+/// what a row id stopped being (#86). Derived from the number so the same
+/// fixture gets the same id every run, and so a test that asserts an ordering
+/// asserts a real one.
+#[cfg(test)]
+pub fn row_of_test(n: u32) -> TrackId {
+    TrackId::derived(&n.to_le_bytes())
+}
+
+/// The row id a track has, if its bytes could be read.
+///
+/// One place, because "a row is named by its audio" is the rule the whole file
+/// now turns on and it should be stated once.
+fn row_id(track: &Track) -> Option<TrackId> {
+    Some(Id::<Encoding>::of_audio(&track.audio_id?))
 }
 
 impl Scan {
@@ -243,13 +297,23 @@ impl Scan {
             .tracks
             .iter()
             .enumerate()
-            .filter_map(|(i, t)| t.as_ref().map(|t| (t.path.clone(), TrackId::new(i as u32))))
+            .filter_map(|(i, t)| t.as_ref().map(|t| (t.path.clone(), Slot::new(i as u32))))
+            .collect();
+        self.by_id = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| Some((row_id(t.as_ref()?)?, Slot::new(i as u32))))
             .collect();
     }
 
-    /// Number of live tracks.
+    /// Number of rows.
+    ///
+    /// Rows, not files: two paths holding identical bytes are one encoding and
+    /// therefore one of these (#86). A file whose audio would not read is
+    /// neither.
     pub fn len(&self) -> usize {
-        self.tracks.len() - self.tombstones
+        self.by_id.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -273,19 +337,43 @@ impl Scan {
     }
 
     pub fn get(&self, id: TrackId) -> Option<&Track> {
-        self.tracks.get(id.index() as usize)?.as_ref()
+        self.at(*self.by_id.get(&id)?)
     }
 
+    fn at(&self, slot: Slot) -> Option<&Track> {
+        self.tracks.get(slot.index() as usize)?.as_ref()
+    }
+
+    /// The **row** at this path, if the file there has one.
     pub fn id_for_path(&self, path: &Path) -> Option<TrackId> {
-        self.by_path.get(path).copied()
+        row_id(self.track_at(path)?)
+    }
+
+    /// The **file** at this path, row or not.
+    ///
+    /// Distinct from `id_for_path` on purpose. A file whose audio would not
+    /// read is not a row, and the scanner still has to reason about it: move
+    /// detection falls back to a shape signature precisely for those, and it
+    /// cannot do that for a file it is unable to look up (#86).
+    pub(crate) fn track_at(&self, path: &Path) -> Option<&Track> {
+        self.at(*self.by_path.get(path)?)
     }
 
     /// Live tracks, with their ids.
+    ///
+    /// **A file whose audio could not be read is not here.** It has no
+    /// encoding, so it has no row — and it is not playable either, since the
+    /// same read fails. `Report::unhashed` names them rather than leaving them
+    /// to vanish, which is the lesson !179 paid for.
     pub fn iter(&self) -> impl Iterator<Item = (TrackId, &Track)> {
-        self.tracks
+        // Driven by the id index rather than the arena, so two paths holding
+        // identical bytes are drawn once. Ordered, because a `BTreeMap` is:
+        // walking the arena gave scan order, and a projection that changed
+        // with the order files happened to be read would be a bad trade for a
+        // hash lookup.
+        self.by_id
             .iter()
-            .enumerate()
-            .filter_map(|(i, t)| t.as_ref().map(|t| (TrackId::new(i as u32), t)))
+            .filter_map(|(id, slot)| Some((*id, self.at(*slot)?)))
     }
 
     /// Insert a new track, or update the one already at that path.
@@ -325,60 +413,93 @@ impl Scan {
         crate::history::recording_id_for(t.mb_recording, t.audio_id)
     }
 
-    pub fn upsert(&mut self, track: Track) -> TrackId {
-        if let Some(id) = self.by_path.get(&track.path).copied() {
-            self.tracks[id.index() as usize] = Some(track);
-            return id;
+    /// Every live **file**, whatever it is a row of.
+    ///
+    /// Distinct from `iter`, which yields **rows** — and two files holding
+    /// identical bytes are one row (#86). Anything reasoning about the disk
+    /// wants this one: what left, what arrived, and what to write to the
+    /// cache are questions about files. Making the scan walk rows silently
+    /// hid the second copy of a duplicated file, so a move looked like a
+    /// deletion and a saved cache lost the copy it did not list.
+    pub(crate) fn files(&self) -> impl Iterator<Item = &Track> {
+        self.tracks.iter().filter_map(Option::as_ref)
+    }
+
+    /// Insert or update, returning the row id when the file has one.
+    ///
+    /// `None` for a file whose audio would not read: there is no encoding to
+    /// name it by. The track is still stored, so a rescan does not read it
+    /// again, and `iter` leaves it out.
+    pub fn upsert(&mut self, track: Track) -> Option<TrackId> {
+        let id = row_id(&track);
+        let slot = match self.by_path.get(&track.path).copied() {
+            Some(slot) => {
+                if let Some(old) = self.at(slot).and_then(row_id) {
+                    self.by_id.remove(&old);
+                }
+                self.tracks[slot.index() as usize] = Some(track);
+                slot
+            }
+            None => {
+                let slot = Slot::new(self.tracks.len() as u32);
+                self.by_path.insert(track.path.clone(), slot);
+                self.tracks.push(Some(track));
+                slot
+            }
+        };
+        if let Some(id) = id {
+            // Two paths, identical bytes: one row. The second wins, as
+            // `HoldingsAsserted` does — it is a map keyed by encoding too.
+            self.by_id.insert(id, slot);
         }
-        let id = TrackId::new(self.tracks.len() as u32);
-        self.by_path.insert(track.path.clone(), id);
-        self.tracks.push(Some(track));
         id
     }
 
     /// Tombstone the track at `path`, if present.
     pub fn remove_path(&mut self, path: &Path) -> Option<TrackId> {
-        let id = self.by_path.remove(path)?;
-        if let Some(slot) = self.tracks.get_mut(id.index() as usize)
-            && slot.take().is_some()
+        let slot = self.by_path.remove(path)?;
+        let id = self.at(slot).and_then(row_id);
+        if let Some(taken) = self.tracks.get_mut(slot.index() as usize)
+            && taken.take().is_some()
         {
             self.tombstones += 1;
         }
-        Some(id)
+        // Two paths can share an id, and dropping one copy must not unlist the
+        // other — so the id is re-pointed at a surviving holder where there is
+        // one, and only dropped when there is none. The search is over
+        // `by_path` rather than the arena because a tombstoned slot is gone
+        // from it already, and removals are per-file during a scan of what
+        // vanished: rare, and bounded by what actually left.
+        if let Some(id) = id
+            && self.by_id.get(&id) == Some(&slot)
+        {
+            match self
+                .by_path
+                .values()
+                .copied()
+                .find(|other| self.at(*other).and_then(row_id) == Some(id))
+            {
+                Some(other) => self.by_id.insert(id, other),
+                None => self.by_id.remove(&id),
+            };
+        }
+        id
     }
 
-    /// Drop tombstones and reassign ids, returning `old id -> new id`.
+    /// Drop tombstones.
     ///
-    /// A rebuild, not an index shift: every holder of a `TrackId` must be
-    /// remapped through the returned table, so this is deliberately explicit
-    /// rather than something a rescan does behind your back.
-    ///
-    /// Nothing calls this yet — there is no playlist or queue to remap until
-    /// M4/M5. It exists now because §4 specifies removal as "a tombstone or a
-    /// rebuild", and the rebuild half is far easier to get right (and test)
-    /// alongside the tombstone half than bolted on later.
-    #[allow(dead_code)]
-    pub fn compact(&mut self) -> HashMap<TrackId, TrackId> {
-        let mut remap = HashMap::with_capacity(self.len());
-        let mut fresh = Vec::with_capacity(self.len());
-        for (i, slot) in self.tracks.drain(..).enumerate() {
-            if let Some(track) = slot {
-                let new = TrackId::new(fresh.len() as u32);
-                remap.insert(TrackId::new(i as u32), new);
-                fresh.push(Some(track));
-            }
-        }
-        self.tracks = fresh;
+    /// **No longer a remap** (#86). It returned `old id -> new id` because ids
+    /// were arena indices and rebuilding renumbered them, so every holder had
+    /// to be walked. A row id is derived from the file's bytes now, so it does
+    /// not move when the arena does and nothing needs telling.
+    #[allow(
+        dead_code,
+        reason = "removal is specified as tombstone-or-rebuild; nothing rebuilds yet"
+    )]
+    pub fn compact(&mut self) {
+        self.tracks.retain(Option::is_some);
         self.tombstones = 0;
-        self.by_path.clear();
-        let entries: Vec<(PathBuf, TrackId)> = self
-            .tracks
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| t.as_ref().map(|t| (t.path.clone(), TrackId::new(i as u32))))
-            .collect();
-        self.by_path.extend(entries);
-        remap
+        self.reindex();
     }
 }
 
@@ -390,7 +511,10 @@ impl Scan {
     /// would only grow the file and the id space for ever.
     pub(crate) fn clone_for_save(store: &Scan) -> Scan {
         let mut out = Scan::new();
-        for (_, track) in store.iter() {
+        // Every file, not every row: a duplicated file that did not win its
+        // id still has to come back after a restart, or the next scan reports
+        // it as an arrival and the one before it as gone.
+        for track in store.files() {
             out.upsert(track.clone());
         }
         out
@@ -460,20 +584,95 @@ mod tests {
     /// — silently naming a different entity. It was written down because
     /// nothing did it yet.
     ///
-    /// Nothing can now: a `TrackId` indexes a **copy** and `Arena<Recording>`
-    /// hands out handles to a recording, so the confusion does not compile.
+    /// **The hazard is gone rather than guarded** (#86). A row id is an `Id`,
+    /// not a handle into anything, so there is no index to hand to the wrong
+    /// arena. What is worth asserting instead is the property that replaced
+    /// it: the id is derived from the bytes, so it is the same id every time
+    /// those bytes are seen — by this process, by the next one, and on
+    /// another machine.
     #[test]
-    fn a_store_handle_cannot_be_read_as_a_recording_handle() {
-        let arena = crate::model::arena::Arena::<crate::model::spine::Recording>::new();
-        let id: TrackId = Handle::new(0);
-        // arena.at(id);   // <- does not compile: Handle<Encoding> vs Handle<Recording>
-        assert_eq!(arena.len(), 0);
-        assert_eq!(id.index(), 0);
+    fn a_row_id_is_the_same_every_time_the_bytes_are() {
+        let mut one = Scan::new();
+        let mut two = Scan::new();
+        // Inserted in a different order, so nothing about position can agree
+        // by accident.
+        one.upsert(track("/a.mp3"));
+        let a = one.upsert(track("/b.mp3"));
+        two.upsert(track("/b.mp3"));
+        let b = two.upsert(track("/b.mp3"));
+        assert_eq!(a, b);
+        assert!(a.is_some());
     }
 
+    /// **The cost of naming a row by its bytes, stated as a test.**
+    ///
+    /// Two files with identical audio are one encoding and therefore one row.
+    /// Measured on the real library that is one pair, and the row is the
+    /// truthful one: you hold one encoding, stored at two paths.
+    /// `HoldingsAsserted` is a map keyed by encoding, so the model could not
+    /// have said otherwise in any case.
+    #[test]
+    fn two_paths_with_identical_bytes_are_one_row() {
+        let mut s = Scan::new();
+        let a = s.upsert(with_bytes("/one.mp3", "same"));
+        let b = s.upsert(with_bytes("/two.mp3", "same"));
+        assert_eq!(a, b, "one encoding, one row");
+        assert_eq!(s.iter().count(), 1, "and one row drawn");
+        // Both paths still resolve, because both files are still there.
+        assert_eq!(s.id_for_path(Path::new("/one.mp3")), a);
+        assert_eq!(s.id_for_path(Path::new("/two.mp3")), b);
+    }
+
+    /// And dropping one copy does not unlist the other.
+    #[test]
+    fn removing_one_of_two_identical_files_keeps_the_row() {
+        let mut s = Scan::new();
+        s.upsert(with_bytes("/one.mp3", "same"));
+        let id = s.upsert(with_bytes("/two.mp3", "same"));
+        s.remove_path(Path::new("/two.mp3"));
+        assert!(
+            s.get(id.unwrap()).is_some(),
+            "the other copy still holds these bytes"
+        );
+    }
+
+    /// A file whose audio will not read has no encoding, so it has no row.
+    ///
+    /// It is still stored, so a rescan does not read it again, and it is not
+    /// playable either — the same read fails.
+    #[test]
+    fn a_file_whose_bytes_would_not_read_is_not_a_row() {
+        let mut s = Scan::new();
+        let unreadable = Track {
+            path: PathBuf::from("/broken.mp3"),
+            ..Default::default()
+        };
+        assert_eq!(s.upsert(unreadable), None);
+        assert_eq!(s.iter().count(), 0);
+        assert_eq!(s.id_for_path(Path::new("/broken.mp3")), None);
+    }
+
+    /// A file, with bytes of its own.
+    ///
+    /// The audio id is what a row is named by now, so a fixture without one is
+    /// a file the store can hold and never list. Derived from the path here
+    /// because distinct paths in these tests mean distinct files — the tests
+    /// that mean *the same bytes at two paths* say so explicitly.
     fn track(path: &str) -> Track {
+        heard(Track {
+            path: PathBuf::from(path),
+            ..Default::default()
+        })
+    }
+
+    /// A file at `path` whose audio is whatever `bytes` names.
+    fn with_bytes(path: &str, bytes: &str) -> Track {
         Track {
             path: PathBuf::from(path),
+            audio_id: Some(crate::audio_id::AudioId {
+                scheme: 1,
+                hash: u128::from(bytes.bytes().fold(0u64, |a, b| a * 31 + u64::from(b))),
+            }),
             ..Default::default()
         }
     }
@@ -492,7 +691,7 @@ mod tests {
         let again = s.upsert(updated);
         assert_eq!(a, again);
         assert_eq!(s.len(), 2);
-        assert_eq!(s.get(a).unwrap().title.as_deref(), Some("changed"));
+        assert_eq!(s.get(a.unwrap()).unwrap().title.as_deref(), Some("changed"));
     }
 
     #[test]
@@ -504,28 +703,35 @@ mod tests {
 
         assert_eq!(s.len(), 1);
         assert_eq!(s.tombstones(), 1);
-        assert!(s.get(a).is_none());
+        assert!(s.get(a.unwrap()).is_none());
         // b's id survives the removal of a — the whole point.
-        assert_eq!(s.get(b).unwrap().path, PathBuf::from("/b.mp3"));
+        assert_eq!(s.get(b.unwrap()).unwrap().path, PathBuf::from("/b.mp3"));
         assert_eq!(s.iter().count(), 1);
     }
 
+    /// **Compaction has nothing to report, and that is the point.**
+    ///
+    /// It used to return `old id -> new id`, because rebuilding the arena
+    /// renumbered every row and each holder had to be walked. A row id is
+    /// derived from the file's bytes now, so compaction moves the arena
+    /// underneath and the ids do not move at all.
     #[test]
-    fn compact_reports_the_remap() {
+    fn compaction_moves_the_arena_and_not_the_ids() {
         let mut s = Scan::new();
-        let _a = s.upsert(track("/a.mp3"));
+        s.upsert(track("/a.mp3"));
         let b = s.upsert(track("/b.mp3"));
         let c = s.upsert(track("/c.mp3"));
         s.remove_path(Path::new("/a.mp3"));
 
-        let remap = s.compact();
+        s.compact();
         assert_eq!(s.tombstones(), 0);
-        assert_eq!(s.capacity(), 2);
-        assert_eq!(remap[&b], TrackId::new(0));
-        assert_eq!(remap[&c], TrackId::new(1));
-        assert_eq!(s.get(remap[&b]).unwrap().path, PathBuf::from("/b.mp3"));
-        // Lookups still work after ids move.
-        assert_eq!(s.id_for_path(Path::new("/c.mp3")), Some(remap[&c]));
+        assert_eq!(s.capacity(), 2, "the arena shrank");
+        assert_eq!(
+            s.get(b.unwrap()).unwrap().path,
+            PathBuf::from("/b.mp3"),
+            "and the id still finds it"
+        );
+        assert_eq!(s.id_for_path(Path::new("/c.mp3")), c);
     }
 
     #[test]

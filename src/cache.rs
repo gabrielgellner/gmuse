@@ -135,7 +135,7 @@ mod tests {
 
     fn sample_store() -> Scan {
         let mut s = Scan::new();
-        s.upsert(Track {
+        s.upsert(crate::store::heard(Track {
             path: PathBuf::from("/m/a.mp3"),
             artist: Some("Burial".into()),
             album: Some("Burial (S-T)".into()),
@@ -144,13 +144,13 @@ mod tests {
             duration: Duration::from_secs(154),
             mtime: 42,
             ..Default::default()
-        });
-        s.upsert(Track {
+        }));
+        s.upsert(crate::store::heard(Track {
             path: PathBuf::from("/m/b.opus"),
             title: Some("Years".into()),
             mtime: 43,
             ..Default::default()
-        });
+        }));
         s
     }
 
@@ -179,6 +179,56 @@ mod tests {
         assert_eq!(t.artist.as_deref(), Some("Burial"));
         assert_eq!(t.duration, Duration::from_secs(154));
         assert_eq!(t.mtime, 42);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file that is not a row of its own still has to come back.**
+    ///
+    /// Two paths holding identical bytes are one row (#86), so a save that
+    /// walks *rows* writes one of them and silently drops the other. The next
+    /// scan then reports the dropped path as an arrival and — if it is the
+    /// one the id happens to point at — the other as gone.
+    ///
+    /// The real library has one such pair, which is exactly the number that
+    /// makes this the kind of bug nobody notices.
+    #[test]
+    fn both_copies_of_a_duplicated_file_survive_a_restart() {
+        let dir = std::env::temp_dir().join("gmuse-cache-test-dupe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.postcard");
+
+        let same = crate::audio_id::AudioId { scheme: 1, hash: 7 };
+        let mut store = Scan::new();
+        for at in [
+            "/m/13 This Is How It Goes Down.mp3",
+            "/m/13 This Is How It Goes Down (1).mp3",
+        ] {
+            store.upsert(Track {
+                path: PathBuf::from(at),
+                title: Some("This Is How It Goes Down".into()),
+                audio_id: Some(same),
+                ..Default::default()
+            });
+        }
+        assert_eq!(store.len(), 1, "one encoding, one row");
+
+        save(&path, &store, &[], &crate::catalog::Active::All).unwrap();
+        let Outcome::Loaded { store: back, .. } = load(&path).unwrap() else {
+            panic!("should have loaded")
+        };
+
+        assert_eq!(back.len(), 1, "still one row");
+        assert!(
+            back.id_for_path(Path::new("/m/13 This Is How It Goes Down.mp3"))
+                .is_some(),
+            "the first copy came back"
+        );
+        assert!(
+            back.id_for_path(Path::new("/m/13 This Is How It Goes Down (1).mp3"))
+                .is_some(),
+            "and so did the second, which is the half a row-walk loses"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

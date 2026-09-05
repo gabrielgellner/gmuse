@@ -379,14 +379,14 @@ mod tests {
             ("B Artist", "Only", 2, "b-only-2"),
             ("C Artist", "Solo", 1, "c-solo-1"),
         ] {
-            store.upsert(Track {
+            store.upsert(crate::store::heard(Track {
                 path: PathBuf::from(format!("/m/{title}.mp3")),
                 artist: Some(artist.into()),
                 album: Some(album.into()),
                 title: Some(title.into()),
                 tracknumber: Some(n),
                 ..Default::default()
-            });
+            }));
         }
         let lib = Shelf::rebuild(&store, true);
         (store, lib)
@@ -612,11 +612,11 @@ mod tests {
     #[test]
     fn single_track_stops_without_repeat_and_loops_with_it() {
         let mut store = Scan::new();
-        store.upsert(Track {
+        store.upsert(crate::store::heard(Track {
             path: PathBuf::from("/m/only.mp3"),
             title: Some("only".into()),
             ..Default::default()
-        });
+        }));
         let library = Shelf::rebuild(&store, true);
         let (playlist, queue) = (Playlist::new(), Queue::new());
         let only = id_of(&store, "only");
@@ -1058,11 +1058,16 @@ mod tests {
 
     #[test]
     fn shuffled_is_a_permutation() {
-        let pool: Vec<TrackId> = (0..50).map(TrackId::new).collect();
+        let pool: Vec<TrackId> = (0..50).map(crate::store::row_of_test).collect();
+        // Sorted on both sides. A row id used to be an arena index, so a pool
+        // built from `0..50` was already in order and only the result needed
+        // sorting; a derived id has no such order (#86).
+        let mut want = pool.clone();
+        want.sort();
         for seed in [0u64, 1, 42, u64::MAX] {
             let mut got = shuffled(&pool, seed);
             got.sort();
-            assert_eq!(got, pool, "seed {seed} lost or duplicated a track");
+            assert_eq!(got, want, "seed {seed} lost or duplicated a track");
         }
     }
 }

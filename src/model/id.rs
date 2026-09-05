@@ -59,6 +59,16 @@ pub struct Id<T> {
 }
 
 impl<T> Id<T> {
+    /// The identity as a number, for seeding a hash.
+    ///
+    /// Not an ordering and not a key — `Id` is already both. This exists so a
+    /// deterministic shuffle can mix something stable: seeded from an arena
+    /// index the order changed whenever the arena did, and the same library
+    /// shuffled differently after a rescan (#86).
+    pub fn scalar(&self) -> u128 {
+        self.uuid.as_u128()
+    }
+
     /// Mint a fresh identity, unique without coordinating with anyone.
     ///
     /// For entities with no external binding to derive from. Where a binding

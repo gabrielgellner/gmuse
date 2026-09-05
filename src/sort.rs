@@ -309,7 +309,11 @@ fn cell(key: Key, id: TrackId, t: &Track, env: &SortEnv<'_>) -> Cell {
         // Hashed rather than drawn, so the comparator stays a valid ordering:
         // a key that answered differently each time it was asked would make
         // `sort_by` produce garbage rather than a shuffle.
-        Key::Random => Cell::Num(mix(u64::from(id.index()), env.seed) as i64),
+        //
+        // Mixed from the row's **durable** id since #86, so a seed shuffles a
+        // library the same way twice. Seeded from an arena index it did not:
+        // the order changed whenever a rescan renumbered the arena.
+        Key::Random => Cell::Num(mix(id.scalar() as u64, env.seed) as i64),
     }
 }
 
@@ -361,11 +365,11 @@ mod tests {
             });
         }
         // Untagged, so every key is missing for it.
-        s.upsert(Track {
+        s.upsert(crate::store::heard(Track {
             path: PathBuf::from("/m/z_orphan.mp3"),
             duration: Duration::from_secs(100),
             ..Default::default()
-        });
+        }));
         s
     }
 
@@ -519,11 +523,11 @@ mod tests {
         // puts it either side of "Yes".
         let mut s = Scan::new();
         for (path, artist) in [("/m/z.mp3", "The Zombies"), ("/m/y.mp3", "Yes")] {
-            s.upsert(Track {
+            s.upsert(crate::store::heard(Track {
                 path: PathBuf::from(path),
                 artist: Some(artist.into()),
                 ..Default::default()
-            });
+            }));
         }
         let h = Catalogue::default();
 
@@ -541,11 +545,11 @@ mod tests {
     fn smart_artist_sort_does_not_touch_album_titles() {
         let mut s = Scan::new();
         for (path, album) in [("/m/w.mp3", "The Wall"), ("/m/u.mp3", "Ummagumma")] {
-            s.upsert(Track {
+            s.upsert(crate::store::heard(Track {
                 path: PathBuf::from(path),
                 album: Some(album.into()),
                 ..Default::default()
-            });
+            }));
         }
         let h = Catalogue::default();
         let mut e = env(&h);
@@ -593,12 +597,12 @@ mod tests {
             ("/m/2.mp3", "A", 9),
             ("/m/3.mp3", "B", 1),
         ] {
-            s.upsert(Track {
+            s.upsert(crate::store::heard(Track {
                 path: PathBuf::from(path),
                 album: Some(album.into()),
                 tracknumber: Some(track),
                 ..Default::default()
-            });
+            }));
         }
         let h = Catalogue::default();
         assert_eq!(
@@ -613,11 +617,11 @@ mod tests {
     fn a_total_tie_is_still_deterministic() {
         let mut s = Scan::new();
         for path in ["/m/c.mp3", "/m/a.mp3", "/m/b.mp3"] {
-            s.upsert(Track {
+            s.upsert(crate::store::heard(Track {
                 path: PathBuf::from(path),
                 album: Some("One".into()),
                 ..Default::default()
-            });
+            }));
         }
         let h = Catalogue::default();
         assert_eq!(order("album", &s, env(&h)), ["a.mp3", "b.mp3", "c.mp3"]);

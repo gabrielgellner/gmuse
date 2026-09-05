@@ -280,16 +280,20 @@ mod tests {
         let mut store = Scan::new();
         let mut ids = Vec::new();
         for (i, (artist, album, disc, title)) in rows.iter().enumerate() {
-            ids.push(store.upsert(Track {
-                path: PathBuf::from(format!("/m/{i}.mp3")),
-                artist: Some((*artist).into()),
-                album: Some((*album).into()),
-                title: Some((*title).into()),
-                discnumber: *disc,
-                tracknumber: Some(i as u32 + 1),
-                duration: Duration::from_secs(100),
-                ..Default::default()
-            }));
+            ids.push(
+                store
+                    .upsert(crate::store::heard(Track {
+                        path: PathBuf::from(format!("/m/{i}.mp3")),
+                        artist: Some((*artist).into()),
+                        album: Some((*album).into()),
+                        title: Some((*title).into()),
+                        discnumber: *disc,
+                        tracknumber: Some(i as u32 + 1),
+                        duration: Duration::from_secs(100),
+                        ..Default::default()
+                    }))
+                    .expect("a fixture has bytes"),
+            );
         }
         (store, ids)
     }
