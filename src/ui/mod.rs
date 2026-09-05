@@ -771,6 +771,13 @@ pub enum Stop {
     Refold,
     /// The disk is out of date: walk the roots again, then refold.
     Rescan,
+    /// `:edit` — hand the composed query to `$EDITOR` (#99).
+    ///
+    /// **The same reason `Refold` returns rather than acting in place.** The
+    /// draw loop owns the terminal, and a subprocess that wants it has to be
+    /// run where the loop is not. `main` restores the screen, edits, and comes
+    /// back through the refresh every stop already goes through.
+    Edit,
 }
 
 pub fn run<B>(terminal: &mut Terminal<B>, ui: &mut Ui, ctx: &Context<'_>) -> io::Result<Stop>
@@ -2476,6 +2483,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             run_search(ui, ctx, &pattern, dir);
         }
         Command::Rate(spec) => rate(ui, ctx, spec),
+        // **The loop has to stop before the editor starts.** Nothing inside
+        // the draw loop may take the terminal, so this asks `main` to do it —
+        // the same door `:collect` uses to get a refold (#120).
+        Command::Edit => ui.stop = Some(Stop::Edit),
         Command::Compose(term) => {
             use crate::cmd::ViewTerm;
             match term {
@@ -3924,6 +3935,15 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
         }
         crate::view::What::Everything => {
             ui.notify("everything is not a claim about anything");
+            return;
+        }
+        // A group is a composition, so it is the union case again: it may name
+        // several facts and cannot say which one membership turns on.
+        crate::view::What::Group(inner) => {
+            ui.notify(format!(
+                "({}) is composed — add to one term of it",
+                inner.label()
+            ));
             return;
         }
     };
@@ -9499,6 +9519,23 @@ mod tests {
             "the affordance named a fact and wrote nothing: {}",
             ui.status
         );
+    }
+
+    /// **`:edit` stops the loop rather than shelling out under the draw** —
+    /// #99.
+    ///
+    /// The editor wants the terminal and the loop owns it, so the command's
+    /// whole job is to ask `main` to step outside. Anything that took the
+    /// screen from inside `execute` would be drawing over a subprocess.
+    #[test]
+    fn edit_hands_the_terminal_back_before_the_editor_runs() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "edit");
+        assert_eq!(ui.stop, Some(Stop::Edit));
     }
 
     /// **`A or B` refuses rather than choosing** — #96.

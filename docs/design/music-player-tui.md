@@ -3641,6 +3641,35 @@ Append here as decisions are made. Format: date, decision, rationale.
   assertion lifts a shadow only when it is at least as strong as the one that cast it. A re-import cannot undo a
   person's correction, and a tag cannot undo what a person ruled out.
 
+- **`:edit` is a bigger window, not a translation — and the "opaque view" it was going to need does not exist** (#99).
+  The third tier of `query-language.md` §11 writes the composed view out one term to a line, opens `$VISUAL`/`$EDITOR`,
+  and reads it back. The document is **the same grammar as the `:` line** plus two things that are inert on one line: a
+  newline is whitespace, and `#` starts a comment. Comments are carried on the term they were written above, so the
+  round trip is lossless — a format that admits comments and then eats them teaches people not to write any.
+
+  A term after the first still carries its sign. A line without one is an error naming the line, because an implicit
+  operator is the guess that would make a view mean something nobody said.
+
+  **The issue predicted that a core-edited query would have to go opaque**, withdrawing the droppable-term UI for the
+  whole view. It does not. `A + (B & C)` is unreachable from a left fold, which is exactly what the editor is for — but
+  a parenthesised sub-view is one `What::Group` term: droppable as a whole, and the affordance stands down only _inside_
+  it, where the fold is no longer a list. The genuinely non-tree shapes the issue worried about — two paths meeting at a
+  shared variable — are the ones #93 already refused at the language level, so no parseable query can reach that state.
+  The control is withdrawn where it would lie and kept everywhere it would not.
+
+  **`all` had to become a keyword**, which was a live round-trip bug rather than a new need. `normalise` puts
+  `Everything` in front of a stack that begins by narrowing, so `:view -in="Christmas"` labels as `all -in="Christmas"`
+  — and `all` was a bare word, refused by the #119 rule. Every stack starting with an exclusion failed to parse back,
+  and a saved view of one reported as _missing_: the "a broken definition looks like a missing one" failure, caught by
+  the thing built to prevent it.
+
+  **Nothing is guessed when no editor is named.** git and crontab fall back to `vi`; this refuses and says which
+  variable to set. Dropping somebody into a modal editor they did not choose is the same inference this project refuses
+  everywhere else, and the fix is one line of shell.
+
+  The loop returns `Stop::Edit` rather than shelling out under the draw, which is the door `Stop::Refold` already
+  opened: the terminal belongs to the loop, so anything that wants it runs where the loop is not.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

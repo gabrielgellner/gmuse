@@ -49,6 +49,7 @@ pub const VERBS: &[&str] = &[
     "bottom",
     "collect",
     "down",
+    "edit",
     "export",
     "find",
     "only",
@@ -209,6 +210,9 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "play" => Command::Play,
         "pause" => Command::Pause,
         "stop" => Command::Stop,
+        // `query-language.md` §11's third tier. No argument: what it edits is
+        // what is composed, which is the only thing it could sensibly mean.
+        "edit" => Command::Edit,
         "next" => Command::Next,
         "prev" => Command::Prev,
         "seek" => Command::Seek(seek_spec(rest)?),
@@ -451,6 +455,14 @@ fn source(expr: &str) -> Result<crate::view::What, ParseError> {
     }
     if let Some(name) = quoted_value(expr, "saved") {
         return Ok(What::Saved(name));
+    }
+    // **`all` is a keyword, not a bare word**, because it is already the
+    // written form of `What::Everything` — and without it the round trip was
+    // broken where it matters most: `:view -in="Christmas"` normalises to
+    // `all -in="Christmas"`, so *every* stack beginning with an exclusion
+    // failed to parse back, and a saved view of one reported as missing.
+    if expr == "all" {
+        return Ok(What::Everything);
     }
     // A word on its own is not a field, and the filter parser's "unknown
     // field" would not say what the two ways of naming a group are.
@@ -714,6 +726,7 @@ fn setting_value(key: SettingKey, text: &str) -> Result<SettingValue, ParseError
 pub fn format(cmd: &Command) -> String {
     match cmd {
         Command::Up => "up".into(),
+        Command::Edit => "edit".into(),
         Command::Down => "down".into(),
         Command::Mode(m) => format!("mode {}", m.name()),
         Command::SeekPercent => "seek-percent".into(),

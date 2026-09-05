@@ -82,6 +82,45 @@ Catalogs are named and persistent, and they **union**: turn on jazz and blues an
 
 `6` — or `<leader>fg` — opens a picker over what you have saved, and `enter` makes it the view.
 
+## Three tiers, one language
+
+Simple things inline; composed things in an editor.
+
+    :view genre="techno"    one line
+    :view                   take the composition apart
+    :edit                   open the whole query in $EDITOR
+
+`:edit` writes the composed view out one term to a line, opens it in `$VISUAL` or `$EDITOR`, and reads it back when you
+save. It is **the same text** the `:` line takes — not a save format, not a form. Two things the one-line version has
+nowhere to put:
+
+    # the ones I actually reach for
+    in="Dance"
+    # but not the seasonal ones
+    - genre="*christmas*"
+    & year>=2015
+
+A newline is whitespace, so a long query gets a line each; `#` starts a comment, and comments survive the round trip.
+Every term still carries its sign — a line without one is an error, because guessing whether you meant `+` or `&` is
+exactly the kind of guess that makes a view mean something you did not say.
+
+If a line does not parse, **nothing is applied** and the status line names the line:
+
+    line 4: "jazz" on its own names nothing — a collection is `in="jazz"`, a saved view is `saved="jazz"`, …
+
+Set `$EDITOR` first. Nothing is guessed if neither `$VISUAL` nor `$EDITOR` is set — being dropped into an editor you did
+not choose is worse than being told to choose one.
+
+## Parentheses — the thing the line cannot say
+
+`:view` builds a **left fold**, so `A + B & C` always means `(A + B) & C`. To say the other one, group it:
+
+    in="Dance" + (saved="mornings" & year>=2015)
+
+A group is **one term**: it drops as a whole, and the terms inside it are not separately droppable — a stack of controls
+over something that is no longer a stack would be a control that lies. That is the only thing `:edit` can make that the
+line cannot, and it round-trips exactly.
+
 ## Saying how many
 
 A row carries **many** genres, so a question about them needs to say how many have to match:

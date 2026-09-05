@@ -71,6 +71,19 @@ pub enum What {
     /// Written `in="Jazz"`. **By name**, so a stack round-trips through its
     /// own label — which is what a saved view stores.
     Collection(String),
+    /// A parenthesised sub-view — written `(in="Jazz" + saved="mornings")`.
+    ///
+    /// **What `:edit` is for** (#99). The stack is a left fold, so
+    /// `A + (B & C)` is unreachable from the line — and it is the first thing
+    /// anyone tries. A group makes it one term: droppable as a whole, and the
+    /// per-term affordance stands down *inside* it, where the fold is no
+    /// longer a list.
+    ///
+    /// The issue expected this case to make a view **opaque**. It does not
+    /// have to: what cannot be rendered as a flat list of droppable terms is
+    /// the group's insides, not the view — so the control is withdrawn where
+    /// it would lie and kept everywhere it would not.
+    Group(Box<Stack>),
     /// A saved view, inlined — written `saved="mornings"`.
     ///
     /// **By name, and resolved at use.** Late binding is what makes a saved
@@ -115,6 +128,12 @@ impl Definitions for crate::model::log::Catalogue {
 pub struct Term {
     pub op: Op,
     pub what: What,
+    /// Comment lines written above this term in the edited document (#99).
+    ///
+    /// **Carried so the round trip is lossless.** A format that admits
+    /// comments and then eats them teaches people not to write any, and the
+    /// editor is where somebody explains a query to themselves.
+    pub note: Vec<String>,
 }
 
 /// A composed view: a left fold over terms.
@@ -209,7 +228,11 @@ impl Resolved {
 impl Stack {
     /// Replace the stack with one term — `:view dance`.
     pub fn set(&mut self, what: What) {
-        self.terms = vec![Term { op: Op::Or, what }];
+        self.terms = vec![Term {
+            op: Op::Or,
+            what,
+            note: Vec::new(),
+        }];
     }
 
     /// Add a term — `:view +jazz`, `&year>=2015`, `-genre="*christmas*"`.
@@ -220,9 +243,14 @@ impl Stack {
             self.terms.push(Term {
                 op: Op::Or,
                 what: What::Everything,
+                note: Vec::new(),
             });
         }
-        self.terms.push(Term { op, what });
+        self.terms.push(Term {
+            op,
+            what,
+            note: Vec::new(),
+        });
     }
 
     /// Drop one term, so a composition can be taken apart as well as built.
@@ -252,6 +280,7 @@ impl Stack {
                 Term {
                     op: Op::Or,
                     what: What::Everything,
+                    note: Vec::new(),
                 },
             );
         }
@@ -278,17 +307,50 @@ impl Stack {
     /// would be a second dialect, and the first operator added to one and not
     /// the other would make a saved view mean something it did not say.
     pub fn parse(source: &str) -> Result<Self, crate::cmd::parse::ParseError> {
+        Stack::parse_at(source, 0)
+    }
+
+    /// **Nesting is bounded**, for the same reason the saved-view walk is:
+    /// text can nest as deep as somebody types, and a parser that recurses on
+    /// it hands a stack overflow to a person who typed too many brackets.
+    fn parse_at(source: &str, depth: usize) -> Result<Self, crate::cmd::parse::ParseError> {
+        use crate::model::view::Op;
+
         let mut out = Stack::default();
         for (at, piece) in split_terms(source).into_iter().enumerate() {
-            match crate::cmd::parse::view_term(&piece)? {
-                crate::cmd::ViewTerm::Compose(op, what, _) => {
-                    if at == 0 {
-                        out.set(*what);
-                    } else {
-                        out.push(op, *what);
+            // The sign is the stack's, so it comes off before the term is read
+            // — a group's insides are bound by the group's own operators.
+            let (op, rest) = match piece.split_at_checked(1) {
+                Some(("+", tail)) => (Op::Or, tail),
+                Some(("&", tail)) => (Op::And, tail),
+                Some(("-", tail)) => (Op::AndNot, tail),
+                _ => (Op::Or, piece.as_str()),
+            };
+            let what = match group_body(rest) {
+                Some(body) => {
+                    if depth >= MAX_DEPTH {
+                        return Err(crate::cmd::parse::ParseError::Bad(
+                            piece.clone(),
+                            "view group, nested too deep",
+                        ));
                     }
+                    What::Group(Box::new(Stack::parse_at(body, depth + 1)?))
                 }
-                _ => return Err(crate::cmd::parse::ParseError::Bad(piece, "view term")),
+                None => match crate::cmd::parse::view_term(&piece)? {
+                    crate::cmd::ViewTerm::Compose(_, what, _) => *what,
+                    _ => return Err(crate::cmd::parse::ParseError::Bad(piece, "view term")),
+                },
+            };
+            if at == 0 {
+                out.set(what);
+                // `set` starts the stack, so a first term that narrows needs
+                // `Everything` put in front of it exactly as `push` would.
+                if op != Op::Or {
+                    out.terms[0].op = op;
+                    out.normalise();
+                }
+            } else {
+                out.push(op, what);
             }
         }
         Ok(out)
@@ -412,19 +474,43 @@ impl Stack {
                 };
 
                 entering.push(name.clone());
-                let mut rows: Option<Rows> = None;
-                for term in &inner.terms {
-                    let theirs =
-                        self.select(&term.what, librarian, defs, all, env, entering, problems);
-                    rows = Some(match rows {
-                        None => theirs,
-                        Some(mine) => mine.combine(term.op, &theirs).rows,
-                    });
-                }
+                let rows = self.fold(&inner, librarian, defs, all, env, entering, problems);
                 entering.pop();
-                rows.unwrap_or_else(|| Rows::of_query(recordings(librarian, all)))
+                rows
             }
+            // **A group is folded, not flattened.** Flattening it here would
+            // put its terms back into the outer left fold, which is the exact
+            // grouping it exists to escape.
+            What::Group(inner) => self.fold(inner, librarian, defs, all, env, entering, problems),
         }
+    }
+
+    /// Fold a stack's terms into rows, ignoring demotion.
+    ///
+    /// Shared by a saved view and a group, which are the two ways one stack
+    /// resolves inside another. `resolve` keeps its own copy because it is the
+    /// only one that reports which term cost the order — inside a nested view
+    /// there is no term number to report it against.
+    #[allow(clippy::too_many_arguments)]
+    fn fold(
+        &self,
+        stack: &Stack,
+        librarian: &dyn Listing,
+        defs: &dyn Definitions,
+        all: &[CopyId],
+        env: crate::filter::Env<'_>,
+        entering: &mut Vec<String>,
+        problems: &mut Vec<Problem>,
+    ) -> Rows {
+        let mut rows: Option<Rows> = None;
+        for term in &stack.terms {
+            let theirs = self.select(&term.what, librarian, defs, all, env, entering, problems);
+            rows = Some(match rows {
+                None => theirs,
+                Some(mine) => mine.combine(term.op, &theirs).rows,
+            });
+        }
+        rows.unwrap_or_else(|| Rows::of_query(recordings(librarian, all)))
     }
 
     /// The stack as somebody typed it, for the line that shows it.
@@ -446,6 +532,184 @@ impl Stack {
     }
 }
 
+/// A view written out for `$EDITOR`, and read back — issue #99.
+///
+/// **The same grammar as the line, with two things that are inert on one.**
+/// A newline is whitespace, so a long composition can be laid out one term to
+/// a line; and `#` starts a comment, which the line would never carry because
+/// there is nowhere to put it. Neither is a second syntax: every term is the
+/// text `:view` would take, and the operators are the stack's `+ & -`.
+///
+/// That the escape hatch is the *same text* is what makes the three tiers one
+/// language rather than three — `query-language.md` §11. A structured save
+/// format would make the editor a translation.
+impl Stack {
+    /// The composed view, one term to a line, with its comments.
+    ///
+    /// Deliberately no generated header. Anything this wrote as a preamble
+    /// would come back as a comment on the first term and be written again,
+    /// so the file would grow its own instructions every time it was opened.
+    /// What the format is belongs in the guide; what the file holds is the
+    /// query.
+    pub fn document(&self) -> String {
+        let mut out = String::new();
+        for (at, term) in self.terms.iter().enumerate() {
+            for line in &term.note {
+                out.push_str(line);
+                out.push('\n');
+            }
+            let sign = match (at, term.op) {
+                (0, _) => "",
+                (_, Op::Or) => "+ ",
+                (_, Op::And) => "& ",
+                (_, Op::AndNot) => "- ",
+            };
+            out.push_str(sign);
+            out.push_str(&name_of(&term.what));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Read a document back, naming the line a bad term is on.
+    ///
+    /// **The line number is the point of the whole function.** A parse error
+    /// against a fifteen-line file that does not say where is a worse message
+    /// than the one-line form gives, and the editor exists for the queries too
+    /// long to read at a glance.
+    pub fn parse_document(text: &str) -> Result<Self, DocumentError> {
+        let mut source = String::new();
+        // Where each term *starts*, by the byte offset of its first character
+        // — filled in as the comment-stripped source is built, so a term
+        // spanning three lines is reported against the line it opened on.
+        let mut lines: Vec<(usize, usize)> = Vec::new();
+        // Where a run of comment lines started, and what it said.
+        let mut notes: Vec<(usize, Vec<String>)> = Vec::new();
+        let mut pending: Vec<String> = Vec::new();
+
+        for (at, raw) in text.lines().enumerate() {
+            let (code, comment) = split_comment(raw);
+            if let Some(c) = comment
+                && code.trim().is_empty()
+            {
+                pending.push(c.to_string());
+                continue;
+            }
+            if code.trim().is_empty() {
+                continue;
+            }
+            lines.push((source.len(), at + 1));
+            if !pending.is_empty() {
+                notes.push((source.len(), std::mem::take(&mut pending)));
+            }
+            source.push_str(code);
+            source.push(' ');
+        }
+        // A trailing comment with no term under it has nothing to hang on, and
+        // silently eating it would be the losing half of "text all the way
+        // down". It joins the last term instead.
+        if !pending.is_empty()
+            && let Some((at, _)) = lines.last()
+        {
+            notes.push((*at, pending));
+        }
+
+        let mut out = Stack::parse(&source).map_err(|error| DocumentError {
+            line: line_of(&source, &lines, &error),
+            error,
+        })?;
+        attach_notes(&mut out, &source, &notes);
+        Ok(out)
+    }
+}
+
+/// A document that did not parse, and the line it went wrong on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentError {
+    /// 1-based, so it matches what the editor shows.
+    pub line: usize,
+    pub error: crate::cmd::parse::ParseError,
+}
+
+impl std::fmt::Display for DocumentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "line {}: {}", self.line, self.error)
+    }
+}
+
+impl std::error::Error for DocumentError {}
+
+/// Split a line into its code and its comment.
+///
+/// **Quote-aware**, because `genre="#1 hits"` is a genre and not a comment —
+/// the one case that makes a naive `find('#')` wrong.
+fn split_comment(line: &str) -> (&str, Option<&str>) {
+    let mut quoted = false;
+    for (at, c) in line.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '#' if !quoted => return (&line[..at], Some(&line[at..])),
+            _ => {}
+        }
+    }
+    (line, None)
+}
+
+/// Which line the term holding this error opened on.
+///
+/// The stack parser reports the offending *piece*, so the piece is found in
+/// the joined source and the line whose span covers it is the answer. A error
+/// that names no piece falls back to the first line, which is the honest
+/// answer for "the document as a whole".
+fn line_of(source: &str, lines: &[(usize, usize)], error: &crate::cmd::parse::ParseError) -> usize {
+    let needle = piece_of(error);
+    let at = needle
+        .and_then(|n| source.find(n.trim()))
+        .unwrap_or(usize::MAX);
+    lines
+        .iter()
+        .take_while(|(start, _)| *start <= at)
+        .last()
+        .or_else(|| lines.first())
+        .map_or(1, |(_, line)| *line)
+}
+
+/// The text a parse error was raised against, when it names one.
+fn piece_of(error: &crate::cmd::parse::ParseError) -> Option<&str> {
+    use crate::cmd::parse::ParseError;
+    match error {
+        ParseError::Bad(what, _) | ParseError::Bare(what) => Some(what),
+        _ => None,
+    }
+}
+
+/// Put the comment lines back on the terms they were written above.
+///
+/// Matched by where each term started in the joined source, which is the same
+/// thing `split_terms` cut on — so a term that moved because `normalise` put
+/// `all` in front of it keeps its own comment rather than the next one's.
+fn attach_notes(stack: &mut Stack, source: &str, notes: &[(usize, Vec<String>)]) {
+    let starts: Vec<usize> = split_terms(source)
+        .iter()
+        .scan(0usize, |from, piece| {
+            let at = source[*from..].find(piece.trim()).map(|i| *from + i)?;
+            *from = at + piece.trim().len();
+            Some(at)
+        })
+        .collect();
+    for (at, body) in notes {
+        let Some(which) = starts.iter().position(|s| s >= at) else {
+            continue;
+        };
+        // `normalise` may have inserted `all` at the front, so the stack can
+        // hold one more term than the source had pieces.
+        let offset = stack.terms.len().saturating_sub(starts.len());
+        if let Some(term) = stack.terms.get_mut(which + offset) {
+            term.note.clone_from(body);
+        }
+    }
+}
+
 /// One term as it would be typed — the round trip a saved view rests on.
 pub fn written(what: &What) -> String {
     name_of(what)
@@ -457,22 +721,39 @@ fn name_of(what: &What) -> String {
         What::Where(f) => f.source.clone(),
         What::Collection(name) => format!("in={name:?}"),
         What::Saved(name) => format!("saved={name:?}"),
+        What::Group(inner) => format!("({})", inner.label()),
     }
 }
 
 /// Split a stack's label back into its terms.
 ///
 /// The sign starts a term, and a quoted value may hold one — `-genre="a-b"`
-/// splits after the quote, not inside it.
+/// splits after the quote, not inside it. **Nor inside parentheses or
+/// brackets**: a group is one term at this level, and so is #93's qualifier
+/// bracket. The operators binding their insides are theirs, not the stack's.
+///
+/// The bracket was the live bug — `genre[basis=discogs & confidence!=confirmed]`
+/// is one term with a conjunction inside it, and splitting on that `&` cut a
+/// filter in half. It only showed on the way *back*: typed at the line the
+/// term never passes through here, so a saved view of it broke and a `:edit`
+/// of it would have.
 fn split_terms(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut quoted = false;
+    let mut depth = 0usize;
     for c in source.chars() {
         if c == '"' {
             quoted = !quoted;
         }
-        if !quoted && matches!(c, '+' | '&' | '-') && !current.trim().is_empty() {
+        if !quoted {
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        if !quoted && depth == 0 && matches!(c, '+' | '&' | '-') && !current.trim().is_empty() {
             out.push(current.trim().to_string());
             current.clear();
         }
@@ -482,6 +763,32 @@ fn split_terms(source: &str) -> Vec<String> {
         out.push(current.trim().to_string());
     }
     out
+}
+
+/// The body of a piece that is one balanced parenthesised group, if it is.
+///
+/// **Balanced end to end**, so `(a) & (b)` is not read as a group whose body
+/// is `a) & (b` — the check is not "starts with `(` and ends with `)`".
+fn group_body(piece: &str) -> Option<&str> {
+    let piece = piece.trim();
+    let inner = piece.strip_prefix('(')?.strip_suffix(')')?;
+    let (mut depth, mut quoted) = (0usize, false);
+    for c in inner.chars() {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        if quoted {
+            continue;
+        }
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+            }
+            _ => {}
+        }
+    }
+    (depth == 0).then_some(inner)
 }
 
 /// The recordings behind a set of rows.
@@ -502,6 +809,136 @@ fn recordings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A tree-shaped query round-trips through the document exactly** —
+    /// #99's third requirement, and what makes `:edit` a bigger window rather
+    /// than a translation.
+    #[test]
+    fn a_document_round_trips_including_its_comments() {
+        let written = concat!(
+            "# the ones I actually reach for\n",
+            "in=\"Dance\"\n",
+            "# but not the seasonal ones\n",
+            "- genre=\"*christmas*\"\n",
+            "& year>=2015\n",
+        );
+        let stack = Stack::parse_document(written).expect("it parses");
+        assert_eq!(stack.document(), written, "the document did not survive");
+        assert_eq!(stack.terms().len(), 3);
+        assert_eq!(
+            stack.terms()[1].note,
+            ["# but not the seasonal ones"],
+            "a comment landed on the wrong term"
+        );
+    }
+
+    /// **A newline is whitespace, not a term separator.** One grammar: the
+    /// sign is what starts a term, on a line or on the `:` line.
+    #[test]
+    fn a_term_may_be_laid_out_over_several_lines() {
+        let stack = Stack::parse_document("in=\"Dance\"\n  & year>=2015\n").expect("parses");
+        assert_eq!(stack.terms().len(), 2);
+        assert_eq!(
+            stack.label(),
+            Stack::parse("in=\"Dance\" &year>=2015").unwrap().label()
+        );
+    }
+
+    /// **A bad term is reported against its line**, which is the whole reason
+    /// the editor gets a document rather than a line.
+    #[test]
+    fn a_parse_error_names_the_line_it_is_on() {
+        let bad = "in=\"Dance\"\n# a note\n& year>=2015\n+ jazz\n";
+        let e = Stack::parse_document(bad).expect_err("`jazz` is a bare word");
+        assert_eq!(e.line, 4, "{e}");
+        assert!(e.to_string().starts_with("line 4:"), "{e}");
+    }
+
+    /// **A comment cannot be a `#` inside a value.** `genre="#1 hits"` is a
+    /// genre, and the naive split would have cut it in half.
+    #[test]
+    fn a_hash_inside_quotes_is_not_a_comment() {
+        let stack = Stack::parse_document("genre=\"#1 hits\"\n").expect("parses");
+        assert_eq!(stack.terms().len(), 1);
+        assert_eq!(stack.document(), "genre=\"#1 hits\"\n");
+    }
+
+    /// **`A + (B & C)` is what the editor is for** — unreachable from the left
+    /// fold, and the first thing anyone tries.
+    #[test]
+    fn a_group_is_one_droppable_term_and_writes_itself_back() {
+        let stack = Stack::parse_document("in=\"Dance\"\n+ (saved=\"mornings\" & year>=2015)\n")
+            .expect("parses");
+        assert_eq!(stack.terms().len(), 2, "the group is one term");
+        assert!(matches!(stack.terms()[1].what, What::Group(_)));
+        assert_eq!(
+            stack.document(),
+            "in=\"Dance\"\n+ (saved=\"mornings\" &year>=2015)\n"
+        );
+    }
+
+    /// **The grouping changes the answer**, which is the whole reason a group
+    /// exists rather than being flattened back into the fold.
+    ///
+    /// `Folk + Techno & artist="Bodzin"` folds left: everything folk or
+    /// techno, then narrowed to Bodzin — the two techno tracks.
+    /// `Folk + (Techno & artist="Bodzin")` is folk *plus* Bodzin's techno —
+    /// four. Same terms, same operators, different tree.
+    #[test]
+    fn a_group_is_not_the_left_fold_of_its_terms() {
+        let (l, _) = library();
+
+        let flat = Stack::parse(r#"genre="Folk" +genre="Techno" &artist="Bodzin""#).unwrap();
+        assert_eq!(count(&flat, &l), 2);
+
+        let grouped = Stack::parse(r#"genre="Folk" +(genre="Techno" &artist="Bodzin")"#).unwrap();
+        assert_eq!(
+            count(&grouped, &l),
+            4,
+            "the group was flattened back into the fold"
+        );
+    }
+
+    /// **Every shape the language can write survives the round trip**, both
+    /// through the label a saved view stores and through the document `:edit`
+    /// hands to the editor.
+    ///
+    /// The bracket is the one that was broken. `genre[basis=discogs &
+    /// confidence!=confirmed]` is one term holding a conjunction, and the term
+    /// splitter cut it on that `&` — invisible from the line, where a term
+    /// never passes through the splitter, and fatal on the way back.
+    #[test]
+    fn every_written_shape_parses_back_to_itself() {
+        for src in [
+            r#"in="General""#,
+            r#"all -in="Christmas""#,
+            r#"in="Dance" +(saved="mornings" &year>=2015)"#,
+            r#"genre="Drum & Bass""#,
+            r#"any(genre*)="electronic" &rating>=4"#,
+            r#"genre[basis=discogs & confidence!=confirmed]"#,
+            r#"(genre="folk"|genre="country") &year>2000"#,
+        ] {
+            let stack = Stack::parse(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            assert_eq!(stack.label(), src, "the label is not what was written");
+
+            let doc = stack.document();
+            let back = Stack::parse_document(&doc).unwrap_or_else(|e| panic!("{src}: {e}"));
+            assert_eq!(back.document(), doc, "the document did not survive");
+            assert_eq!(back.label(), src, "the document lost what the label had");
+        }
+    }
+
+    /// **A stack that begins with an exclusion parses back.** `normalise` puts
+    /// `all` in front of it, and `all` was a bare word — so every such view
+    /// failed to round-trip, and a saved one reported as missing.
+    #[test]
+    fn a_view_that_starts_by_excluding_survives_being_saved() {
+        let mut stack = Stack::default();
+        stack.push(Op::AndNot, What::Collection("Christmas".into()));
+        let back = Stack::parse(&stack.label()).expect("`all` is a keyword");
+        assert_eq!(back.label(), stack.label());
+    }
+
     use crate::filter::Filter;
     use crate::model::entity::Device;
     use crate::model::instance::{Instance, Scanned};

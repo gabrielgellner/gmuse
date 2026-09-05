@@ -17,6 +17,7 @@ mod cli;
 mod cmd;
 mod config;
 mod datadir;
+mod edit;
 mod events;
 mod filter;
 #[cfg(test)]
@@ -701,6 +702,30 @@ fn run_tui(
             ui::Stop::Refold => {
                 library_view =
                     crate::bridge::librarian(&app.store, state.log.records(), device, now_ms);
+            }
+            // **Outside the draw loop, which is the whole point of the trip
+            // out here** (#99): the editor wants the terminal, so the screen
+            // is given back before it runs and taken again after.
+            ui::Stop::Edit => {
+                ratatui::restore();
+                let said = match edit::edit(&state.composed, state.data_dir.as_deref()) {
+                    Ok(back) => {
+                        let label = back.label();
+                        state.composed = back;
+                        if label.is_empty() {
+                            "view: everything".to_string()
+                        } else {
+                            format!("view: {label}")
+                        }
+                    }
+                    // **A parse error names its line and nothing is applied.**
+                    // Half-applying an edited document would leave a view
+                    // nobody wrote, which is worse than the edit not landing.
+                    Err(e) => format!("{e}"),
+                };
+                state.audit.line("edit", &said);
+                state.notify(said);
+                terminal = ratatui::init();
             }
         }
         // The shelf is a projection of the librarian, so it goes too — through

@@ -767,6 +767,11 @@ pub enum Command {
     /// a persistent *narrowing*, which a catalog could not be because a
     /// catalog unions.
     Compose(ViewTerm),
+    /// `:edit` — the composed query in `$EDITOR` (#99).
+    ///
+    /// The third tier of one language: simple things inline, composed things
+    /// in an editor, and the escape hatch is the same text.
+    Edit,
     Search {
         pattern: String,
         dir: SearchDir,
