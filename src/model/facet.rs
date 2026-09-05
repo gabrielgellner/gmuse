@@ -107,6 +107,50 @@ pub const GENRE: &str = "genre";
 /// `qualifier=instrumental` needs a gloss.
 pub const VERSION: &str = "version";
 
+/// What music is *for* — `dance-floor`, `background`, `ceremony`.
+///
+/// **The axis the `Dance` folder was on all along**, and the one genre could
+/// not carry. Measured, the closest genre predicate to that folder had 876
+/// false positives: `Electronic` is is-ness and the folder is for-ness, so
+/// Enya is correctly one and emphatically not the other.
+///
+/// It asserts nothing on its own — a facet is an axis, and what is *on* it is
+/// somebody's claim. Whether a recording earns `dance-floor` stays a curation
+/// question, and what belongs to the Dance collection stays a separate one
+/// (#90): a facet is a collection development policy, not the holdings.
+pub const FUNCTION: &str = "function";
+
+/// Every axis, and what to call it.
+///
+/// **A closed list, where concepts on an axis are open**, and the promotion
+/// test in `vocabulary.rs` is why. Adding a *concept* needs no behaviour
+/// written for it — that is what makes a genre data. Adding an *axis* needs a
+/// query field name and a place in completion, which is behaviour, however
+/// little. It is also an editorial act: facet analysis is a design decision
+/// about how a collection is described, not something a tag should be able to
+/// invent.
+///
+/// So a new axis costs **one line here** — no fact, no fold arm, no map, no
+/// entity kind, no match arm. `FacetDefined` still exists so a facet's label
+/// is in the log and syncs; this is what the parser knows without one.
+pub const ALL: &[(&str, &str)] = &[
+    (GENRE, "Genre"),
+    (VERSION, "Version"),
+    (FUNCTION, "Function"),
+];
+
+/// The axis this name refers to, if any names it.
+///
+/// **Where an unknown field stops being a query.** `genrre=techno` is a typo
+/// and has to say so; resolving any word to a facet id would make it a query
+/// that quietly matches nothing, which is the failure this project keeps
+/// turning into a declaration.
+pub fn key_of(name: &str) -> Option<&'static str> {
+    ALL.iter()
+        .find(|(key, _)| *key == name)
+        .map(|(key, _)| *key)
+}
+
 impl Id<Facet> {
     /// The id a facet's key always mints.
     pub fn of_key(key: &str) -> Self {

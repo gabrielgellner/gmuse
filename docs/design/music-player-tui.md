@@ -3173,6 +3173,39 @@ Append here as decisions are made. Format: date, decision, rationale.
   collection came back holding the whole library — the copy only knew about the filter half. It goes through `named`
   now, and there is one rule.
 
+- **2026-09-05** **A facet is a query field, and an axis costs one line (#117).** `Field::Genre` was one enum variant
+  for one axis, so `version` and `function` were not expressible at all — the query language knew about genre because
+  somebody had typed it out, and every axis after the first would have been another variant, another `texts_of` arm,
+  another row field.
+
+  `Field::Facet(Id<Facet>)` resolves any key in `facet::ALL`. **The id derives from the key**, so the parser needs no
+  vocabulary to consult — which matters because `Filter::parse` is called from the config, from the `:` line and from
+  smart playlists, and only one of those has a library to hand.
+
+  **A closed list of axes, over open lists of concepts**, and the promotion test in `vocabulary.rs` is why. Adding a
+  _concept_ needs no behaviour written for it, which is what makes a genre data. Adding an _axis_ needs a query field
+  name and a place in completion — little, but not nothing, and it is an editorial act besides: facet analysis is a
+  decision about how a collection is described, not something a tag should be able to invent. So a new axis is one line
+  in `facet::ALL` and nothing else. `FacetDefined` still exists so a facet's label is in the log and syncs; the const is
+  what the parser knows without one.
+
+  The row changed shape with it. `Listed.genre: &[String]` became `concepts: &BTreeMap<Id<Facet>, Vec<String>>`, so the
+  seam carries every axis rather than one, and the album-falls-back-to-track rule now runs **per axis** — an album-level
+  genre and a track-level version no longer shadow each other.
+
+  Two things that fall out and were worth having:
+
+  1. `Field::NAMES` was a hand-written list beside the enum, and a hand-written list is exactly what silently stops
+     asking. It is `Field::names()` now, built from `facet::ALL`, so an axis reaches completion and the "unknown field"
+     message for free.
+  2. **A name no axis claims is still a typo.** Resolving any word to a facet id would have been shorter and would have
+     turned `genrre=techno` into a query that quietly matches nothing — the inference this project keeps turning into a
+     declaration.
+
+  What this makes possible, and what it does not: `function=dance-floor` is now typeable, and it is _not_ the Dance
+  collection. A facet is the collection development policy; the collection is the holdings; the gap between them is a
+  review. That distinction is #90's and this entry does not blur it.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

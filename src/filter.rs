@@ -327,7 +327,7 @@ pub enum FilterError {
 }
 
 fn field_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = Field::NAMES.to_vec();
+    let mut names: Vec<&'static str> = Field::names();
     names.extend_from_slice(HistoryField::NAMES);
     names.push("any");
     names.sort_unstable();
@@ -373,14 +373,21 @@ impl Expr {
 ///
 /// Not `path`: every track's path contains the library root, so including it
 /// would make `any="*music*"` match the entire library.
-const ANY_FIELDS: &[Field] = &[
-    Field::Artist,
-    Field::AlbumArtist,
-    Field::Album,
-    Field::Title,
-    Field::Genre,
-    Field::FileName,
-];
+///
+/// **A function, not a const**, because a facet's id is a hash of its key and
+/// cannot be computed at compile time. Genre alone is here: `any` is the
+/// "search everything" escape and every axis in it would make `any=live` match
+/// a version somebody never meant to search.
+fn any_fields() -> Vec<Field> {
+    vec![
+        Field::Artist,
+        Field::AlbumArtist,
+        Field::Album,
+        Field::Title,
+        Field::Facet(crate::model::id::Id::of_key(crate::model::facet::GENRE)),
+        Field::FileName,
+    ]
+}
 
 /// A history field's value. `None` is "cannot say" — no history, or never
 /// played — and a comparison against it is false, like any missing field.
@@ -427,7 +434,7 @@ fn compare(selector: Selector, op: Op, value: &Value, t: &Subject<'_>, env: &Env
         // A history field against a quoted pattern is rejected by the parser.
         (Selector::History(_), Value::Text(_)) => false,
         (Selector::Any, Value::Text(glob)) => {
-            let hit = ANY_FIELDS
+            let hit = any_fields()
                 .iter()
                 .any(|f| texts_of(*f, t).iter().any(|v| glob.matches(v)));
             match op {
@@ -496,7 +503,7 @@ pub(crate) fn texts_of(f: Field, s: &Subject<'_>) -> Vec<String> {
         Field::Album => one(r.tagged_album),
         Field::Title => one(r.tagged_title),
         Field::DisplayTitle => vec![r.title.to_string()],
-        Field::Genre => r.genre.to_vec(),
+        Field::Facet(f) => s.row.on(f).to_vec(),
         Field::Label => one(r.label),
         // The two that need the file's whereabouts, asked at the moment of
         // matching and not kept.
@@ -830,6 +837,74 @@ mod tests {
         Expr::parse(expr)
             .expect("should parse")
             .compile(Env::default())(&subject)
+    }
+
+    /// **Every axis is queryable, and a new one costs a line** — #117.
+    ///
+    /// `genre` was a `Field` variant, so `version` and `function` were not
+    /// expressible at all: the query language knew one axis because somebody
+    /// had typed it out. `Field::Facet(Id<Facet>)` resolves any key in
+    /// `facet::ALL`, and the id derives from the key, so the parser needs no
+    /// vocabulary to consult and two axes cannot collide.
+    #[test]
+    fn a_facet_is_a_query_field() {
+        use crate::model::facet;
+
+        // A version, read off the title by `ingest` — the claim that had
+        // nowhere to go before #101 and nowhere to be *asked about* before now.
+        let mut instrumental = track();
+        instrumental.title = Some("212 (Instrumental)".into());
+        assert!(matches(r#"version="instrumental""#, &instrumental));
+        assert!(!matches(r#"version="live""#, &instrumental));
+
+        // And the axis the `Dance` folder was on. Nothing on disk says a
+        // recording is for dancing, so this is asserted the way a curation
+        // pass would assert it.
+        let mut held = crate::scan::Holdings::new();
+        held.insert(instrumental.held());
+        let bare = crate::fixture::from_holdings(&held);
+        let copy = crate::model::id::Id::of_audio(&instrumental.held().seen.audio);
+        let recording = crate::model::rows::Listing::recording_of(&bare, copy).expect("scanned");
+
+        let mut i = crate::model::instance::Instance::new(crate::fixture::device());
+        i.assert_concept(
+            100,
+            crate::model::facet::Described::Recording(recording),
+            facet::FUNCTION,
+            "dance-floor",
+            crate::model::reference::Source::Manual,
+            crate::model::ingest::Confidence::Confirmed,
+        );
+        let l = crate::fixture::from_holdings_and(&held, i.records());
+        let row = crate::model::rows::Listing::listed(&l, copy).expect("a row");
+        let subject = Subject {
+            row,
+            locator: instrumental.path.to_str(),
+            recording: Some(recording),
+        };
+        let hit = |e: &str| {
+            Expr::parse(e)
+                .expect("should parse")
+                .compile(Env::default())(&subject)
+        };
+
+        assert!(hit(r#"function="dance-floor""#));
+        assert!(!hit(r#"function="background""#));
+        // **The axes stay apart**, which is what putting the facet in the id
+        // buys: a function is not a genre however it is spelled.
+        assert!(!hit(r#"genre="dance-floor""#));
+        assert!(hit(r#"function="dance-floor" & version="instrumental""#));
+    }
+
+    /// A name no axis claims is a typo, and has to say so.
+    ///
+    /// Resolving any word to a facet id would have been one line shorter and
+    /// would have turned `genrre=techno` into a query that quietly matches
+    /// nothing — the inference this project keeps turning into a declaration.
+    #[test]
+    fn a_name_no_axis_claims_is_not_a_field() {
+        let err = Expr::parse("genrre=techno").expect_err("a typo parsed");
+        assert!(format!("{err}").contains("genrre"), "{err}");
     }
 
     /// The label joins one vocabulary, so it filters without the filter

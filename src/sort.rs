@@ -61,7 +61,7 @@ pub enum Key {
 impl Key {
     /// Every name, for error messages and completion.
     pub fn names() -> Vec<&'static str> {
-        let mut names: Vec<&'static str> = Field::NAMES.to_vec();
+        let mut names: Vec<&'static str> = Field::names();
         names.extend_from_slice(&["added", "last_played", "play_count", "random", "rating"]);
         names.sort_unstable();
         names

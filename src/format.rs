@@ -30,7 +30,13 @@ pub enum Field {
     Track,
     Disc,
     Year,
-    Genre,
+    /// A concept on one axis — `genre=techno`, `version=live`,
+    /// `function=dance-floor`.
+    ///
+    /// **One variant for every axis** (#117), where `Genre` was one variant
+    /// for one. The id is derived from the facet's key, so the parser resolves
+    /// a name without a vocabulary to consult and two axes cannot collide.
+    Facet(crate::model::id::Id<crate::model::entity::Facet>),
     /// The record label (`TPUB`), which is where a label sampler's imprint
     /// belongs — not in `albumartist`, where it looks like an artist.
     Label,
@@ -60,7 +66,7 @@ impl Field {
             | Field::Album
             | Field::Title
             | Field::DisplayTitle
-            | Field::Genre
+            | Field::Facet(_)
             | Field::Label
             | Field::Path
             | Field::FileName => Kind::Text,
@@ -85,7 +91,11 @@ impl Field {
             "track" => Field::Track,
             "disc" => Field::Disc,
             "year" => Field::Year,
-            "genre" => Field::Genre,
+            // Any axis, resolved by key — so adding one costs a line in
+            // `facet::ALL` and nothing here (#117).
+            name if crate::model::facet::key_of(name).is_some() => {
+                Field::Facet(crate::model::id::Id::of_key(name))
+            }
             "label" => Field::Label,
             "duration" => Field::Duration,
             "bitrate" => Field::Bitrate,
@@ -97,8 +107,20 @@ impl Field {
         })
     }
 
-    /// Every name, for error messages and completion.
-    pub const NAMES: &'static [&'static str] = &[
+    /// Every name a field can be written as, sorted.
+    ///
+    /// **Built rather than typed out**, so a new axis in `facet::ALL` reaches
+    /// completion and the "unknown field" message with no second list to keep
+    /// in step (#117).
+    pub fn names() -> Vec<&'static str> {
+        let mut out = Self::FIXED.to_vec();
+        out.extend(crate::model::facet::ALL.iter().map(|(key, _)| *key));
+        out.sort_unstable();
+        out
+    }
+
+    /// The fields that are not an axis.
+    const FIXED: &'static [&'static str] = &[
         "album",
         "albumartist",
         "artist",
@@ -109,7 +131,6 @@ impl Field {
         "duration",
         "file_under",
         "filename",
-        "genre",
         "label",
         "path",
         "samplerate",
@@ -140,14 +161,16 @@ impl Field {
             Field::Track => r.track?.to_string(),
             Field::Disc => r.disc?.to_string(),
             Field::Year => r.year?.to_string(),
-            // Joined, because a row carries every genre assigned to it and a
-            // line has one slot. `; ` is the separator taggers write, so a
-            // library that has had no curation renders exactly its tags.
-            Field::Genre => {
-                if r.genre.is_empty() {
+            // Joined, because a row carries every concept asserted on this
+            // axis and a line has one slot. `; ` is the separator taggers
+            // write, so a library that has had no curation renders exactly its
+            // tags.
+            Field::Facet(f) => {
+                let held = r.on(f);
+                if held.is_empty() {
                     return None;
                 }
-                r.genre.join("; ")
+                held.join("; ")
             }
             Field::Label => r.label?.to_string(),
             Field::Duration => {
@@ -274,7 +297,7 @@ enum Atom {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FormatError {
-    #[error("unknown field {name:?} — try one of: {}", Field::NAMES.join(", "))]
+    #[error("unknown field {name:?} — try one of: {}", Field::names().join(", "))]
     UnknownField { name: String },
     #[error(
         "{name:?} is a property of this machine's copy, not of the track — a displayed row carries no location"
@@ -461,6 +484,60 @@ mod tests {
         Template::parse(source)
             .unwrap()
             .render(&track.drawn().listed())
+    }
+
+    /// **An axis reaches completion and the error message for free** — #117.
+    ///
+    /// The names were a hand-written list beside the enum, so a new field
+    /// meant remembering two places and the second one failed silently: an
+    /// axis nobody listed is an axis nobody can be told about when they
+    /// mistype it. Built from `facet::ALL` now, so the list cannot fall behind.
+    #[test]
+    fn every_axis_is_a_field_name() {
+        let names = Field::names();
+        for (key, _) in crate::model::facet::ALL {
+            assert!(names.contains(key), "{key} is an axis and not a field name");
+            assert!(
+                Field::parse(key).is_some(),
+                "{key} is a field name and does not parse"
+            );
+        }
+        assert!(
+            names.windows(2).all(|w| w[0] <= w[1]),
+            "not sorted: {names:?}"
+        );
+        assert!(
+            Field::parse("genrre").is_none(),
+            "a typo resolved to an axis"
+        );
+    }
+
+    /// A template renders any axis, joined, and disappears when nothing is
+    /// asserted on it — the `[…]` group behaviour every optional field has.
+    #[test]
+    fn a_template_renders_any_axis() {
+        use crate::model::facet;
+        let mut drawn = full().drawn();
+        drawn.concepts.insert(
+            crate::model::id::Id::of_key(facet::FUNCTION),
+            vec!["dance-floor".to_string()],
+        );
+        let show = |src: &str, d: &crate::model::rows::Drawn| {
+            Template::parse(src).expect("parses").render(&d.listed())
+        };
+        assert_eq!(show("{genre}", &drawn), "folk");
+        assert_eq!(show("{function}", &drawn), "dance-floor");
+        assert_eq!(
+            show("{title}[ — {function}]", &drawn),
+            "The Sea — dance-floor"
+        );
+
+        // Nothing on the axis, so the group disappears rather than rendering
+        // an empty dash.
+        drawn
+            .concepts
+            .remove(&crate::model::id::Id::of_key(facet::FUNCTION));
+        assert_eq!(show("{title}[ — {function}]", &drawn), "The Sea");
     }
 
     #[test]

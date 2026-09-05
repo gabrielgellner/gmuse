@@ -65,11 +65,15 @@ pub struct Librarian {
     /// Every genre assigned to each subject, by name.
     ///
     /// Folded down from `Catalogue::genres`, which keys by
-    /// `(subject, genre, source)`: several sources may assign the same genre,
-    /// and each carries its own confidence. Collapsed to the distinct names
-    /// here, most confident first, so a display that has room for one shows
+    /// `(subject, concept, source)`: several sources may assert the same
+    /// concept, and each carries its own confidence. Collapsed to the distinct
+    /// labels here, most confident first, so a display with room for one shows
     /// the best-supported and a filter can ask about any of them.
-    pub genres: std::collections::BTreeMap<Described, Vec<String>>,
+    ///
+    /// **Keyed by axis too** (#117), so `genre` and `version` share one map
+    /// and a third axis needs no fourth field.
+    pub concepts:
+        std::collections::BTreeMap<(Described, Id<crate::model::entity::Facet>), Vec<String>>,
     /// Every row this library can draw, materialised once (#86).
     ///
     /// `Listed` borrows and the librarian computes — `file_under` from the
@@ -117,7 +121,7 @@ impl Librarian {
             provenance: Provenance::default(),
             ratings: Default::default(),
             plays: Default::default(),
-            genres: Default::default(),
+            concepts: Default::default(),
             rows: Default::default(),
             locators: Default::default(),
             held_at: Default::default(),
@@ -480,30 +484,29 @@ impl Librarian {
         // sources may assign the same one — a tag and a curated pass agreeing
         // is two rows in the fold and one genre on the shelf — so the best
         // confidence for each name wins and the name is listed once.
-        let genre_facet =
-            crate::model::id::Id::<crate::model::entity::Facet>::of_key(crate::model::facet::GENRE);
-        let mut best: std::collections::BTreeMap<Described, Vec<(Confidence, usize, &str)>> =
-            std::collections::BTreeMap::new();
+        // **Keyed by axis, not one map per axis** (#117), so an axis added to
+        // `facet::ALL` crosses the seam with nothing written here. A node
+        // label is left out: ISO 25964's rule is that a term put into an array
+        // to organise it does not take part in retrieval.
+        let mut best: BTreeMap<(Described, Id<crate::model::entity::Facet>), Ranked<'_>> =
+            BTreeMap::new();
         for ((subject, concept, _), confidence) in &cat.assertions {
             if cat.assertions_retracted.contains(&(*subject, *concept)) {
                 continue;
             }
-            // **One map holds every axis now** (#117), so a row's genres are
-            // the assertions on the genre facet and nothing else. A version
-            // reaching this list would put `instrumental` in the genre column.
-            let Some(record) = cat.concepts.get(concept).filter(|c| c.facet == genre_facet) else {
+            let Some(record) = cat.concepts.get(concept).filter(|c| !c.node_label) else {
                 continue;
             };
             let name = &record.label;
             let depth = l.vocabulary.depth(*concept);
-            let seen = best.entry(*subject).or_default();
+            let seen = best.entry((*subject, record.facet)).or_default();
             match seen.iter_mut().find(|(_, _, held)| *held == name.as_str()) {
                 Some(entry) if entry.0 < *confidence => entry.0 = *confidence,
                 Some(_) => {}
                 None => seen.push((*confidence, depth, name.as_str())),
             }
         }
-        l.genres = best
+        l.concepts = best
             .into_iter()
             .map(|(subject, mut names)| {
                 // Most confident, then **broadest**, then by name.
@@ -575,19 +578,31 @@ impl Librarian {
         let (disc, track) = self.place_of(slot);
         let group = self.group_of(slot);
 
-        // **Every genre on the recording**, and the album's only when the
-        // recording has none of its own — a compilation's `Pop` must not join
-        // what the track itself was assigned (#74).
-        let mut genre: Vec<String> = self
-            .genres
-            .get(&Described::Recording(recording))
-            .cloned()
-            .unwrap_or_default();
-        if genre.is_empty() {
-            genre = group
-                .and_then(|g| self.genres.get(&Described::ReleaseGroup(g)))
+        // **Every concept on the recording**, per axis, and the album's only
+        // where the recording carries none of its own — a compilation's `Pop`
+        // must not join what the track itself was asserted (#74). The rule is
+        // per axis rather than per row, so an album-level genre and a
+        // track-level version do not shadow one another.
+        let mut concepts: std::collections::BTreeMap<_, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for facet in crate::model::facet::ALL
+            .iter()
+            .map(|(key, _)| Id::<crate::model::entity::Facet>::of_key(key))
+        {
+            let mut held = self
+                .concepts
+                .get(&(Described::Recording(recording), facet))
                 .cloned()
                 .unwrap_or_default();
+            if held.is_empty() {
+                held = group
+                    .and_then(|g| self.concepts.get(&(Described::ReleaseGroup(g), facet)))
+                    .cloned()
+                    .unwrap_or_default();
+            }
+            if !held.is_empty() {
+                concepts.insert(facet, held);
+            }
         }
 
         let on_release = slot
@@ -618,7 +633,7 @@ impl Librarian {
             // no location, so it cannot borrow one for a label.
             tagged_title: (!row.title.is_empty()).then(|| row.title.clone()),
             tagged_album: row.album,
-            genre,
+            concepts,
             label: on_release
                 .and_then(|r| r.label)
                 .and_then(|l| self.reference.labels.get(&l.id()))
@@ -796,6 +811,10 @@ impl crate::model::rows::Listing for Librarian {
         })
     }
 }
+
+/// The claims about one subject on one axis, before they are collapsed to
+/// labels: how confident, how deep in the hierarchy, and what it is called.
+type Ranked<'a> = Vec<(Confidence, usize, &'a str)>;
 
 /// A recording, and which copy of it a row is about.
 ///
@@ -1404,7 +1423,7 @@ mod tests {
 
         let l = Librarian::from_catalogue(&i.catalogue());
         let copy = *l.encodings.encodings.keys().next().expect("a copy");
-        let shown = l.listed(copy).expect("a row").genre.to_vec();
+        let shown = l.listed(copy).expect("a row").genre().to_vec();
 
         assert_eq!(
             shown,
@@ -1482,7 +1501,7 @@ mod tests {
 
         let copy = *l.encodings.encodings.keys().next().unwrap();
         let row = l.listed(copy).expect("a row");
-        let mut shown: Vec<&str> = row.genre.iter().map(String::as_str).collect();
+        let mut shown: Vec<&str> = row.genre().iter().map(String::as_str).collect();
         shown.sort_unstable();
         assert_eq!(
             shown,

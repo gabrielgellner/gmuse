@@ -15,7 +15,7 @@
 //! rows should not allocate a thousand `String`s to decide where the albums
 //! change.
 
-use crate::model::entity::Encoding;
+use crate::model::entity::{Encoding, Facet};
 use crate::model::id::Id;
 
 /// What names a row: **the copy it draws**.
@@ -85,15 +85,18 @@ pub struct Listed<'a> {
     /// is meant to disappear for a track that is on no album, and rendering
     /// the placeholder there would show the stand-in as though it were a name.
     pub tagged_album: Option<&'a str>,
-    /// Every genre assigned to this row.
+    /// Every concept asserted about this row, by the axis it sits on.
     ///
-    /// **A set, not a value** (#86). The model has always held
-    /// `(subject, genre, source) -> confidence`, so many genres per subject
-    /// with their lineage is what it says; this field said one because it was
-    /// shaped after the store's single raw tag string. Curation adds
-    /// better-sourced assignments and retracts wrong ones — it never collapses
+    /// **A set per axis, not a value** (#86, #117). The model holds
+    /// `(subject, concept, source) -> confidence`, so many concepts per
+    /// subject with their lineage is what it says; this field was one string
+    /// because it was shaped after the store's single raw tag. Curation adds
+    /// better-sourced assertions and retracts wrong ones — it never collapses
     /// them to one.
-    pub genre: &'a [String],
+    ///
+    /// Keyed by facet rather than one field per axis, which is what lets a new
+    /// axis reach the query language without a row shape to widen.
+    pub concepts: &'a std::collections::BTreeMap<Id<Facet>, Vec<String>>,
     /// The imprint. Its own field because a label sampler's `album_artist` is
     /// "Various Artists" and the label has nowhere else to go.
     pub label: Option<&'a str>,
@@ -125,7 +128,7 @@ pub struct Drawn {
     pub album_artist: Option<String>,
     pub tagged_title: Option<String>,
     pub tagged_album: Option<String>,
-    pub genre: Vec<String>,
+    pub concepts: std::collections::BTreeMap<Id<Facet>, Vec<String>>,
     pub label: Option<String>,
     pub year: Option<i32>,
     pub bitrate: Option<u32>,
@@ -152,13 +155,33 @@ impl Listed<'_> {
             album_artist: self.album_artist.map(str::to_string),
             tagged_title: self.tagged_title.map(str::to_string),
             tagged_album: self.tagged_album.map(str::to_string),
-            genre: self.genre.to_vec(),
+            concepts: self.concepts.clone(),
             label: self.label.map(str::to_string),
             year: self.year,
             bitrate: self.bitrate,
             sample_rate: self.sample_rate,
             channels: self.channels,
         }
+    }
+}
+
+impl Listed<'_> {
+    /// The concepts on one axis, in the order the librarian settled on.
+    ///
+    /// Empty rather than absent when nothing has been asserted: "no genre" and
+    /// "no such axis" are the same answer to a row, and the difference belongs
+    /// to the parser, which refuses an axis nobody declared.
+    pub fn on(&self, facet: Id<Facet>) -> &[String] {
+        self.concepts.get(&facet).map_or(&[], Vec::as_slice)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the convenience for the axis almost every caller means; used by tests today, and every production reader goes through `on` with the axis named — which is the point of #117"
+    )]
+    /// The genres, which is the axis almost every caller means.
+    pub fn genre(&self) -> &[String] {
+        self.on(Id::of_key(crate::model::facet::GENRE))
     }
 }
 
@@ -176,7 +199,7 @@ impl Drawn {
             album_artist: self.album_artist.as_deref(),
             tagged_title: self.tagged_title.as_deref(),
             tagged_album: self.tagged_album.as_deref(),
-            genre: &self.genre,
+            concepts: &self.concepts,
             label: self.label.as_deref(),
             year: self.year,
             bitrate: self.bitrate,
@@ -342,7 +365,10 @@ mod tests {
             album_artist: Some("Boards of Canada".into()),
             tagged_title: Some("Roygbiv".into()),
             tagged_album: Some("Music Has the Right to Children".into()),
-            genre: vec!["Electronic".into(), "IDM".into()],
+            concepts: std::collections::BTreeMap::from([(
+                Id::of_key(crate::model::facet::GENRE),
+                vec!["Electronic".into(), "IDM".into()],
+            )]),
             label: Some("Warp".into()),
             year: Some(1998),
             bitrate: Some(320),
