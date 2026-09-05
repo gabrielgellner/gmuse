@@ -40,6 +40,7 @@ mod sort;
 mod text;
 mod ui;
 mod undo;
+mod view;
 
 use std::path::PathBuf;
 

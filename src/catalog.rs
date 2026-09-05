@@ -262,6 +262,35 @@ impl Catalogs {
     ///
     /// With nothing defined, or everything active, this is the whole store —
     /// so a user who never configures a catalog sees no change at all.
+    #[allow(
+        dead_code,
+        reason = "what the composed view asks for (#94); `rebuild_library` still asks for the active set"
+    )]
+    /// One catalog's membership, by name.
+    ///
+    /// **The composed view asks for a term rather than for "the active set"**
+    /// (#94). Which catalogs are active stopped being a property of the
+    /// catalogs the moment the operator left the noun: `general or dance` is a
+    /// stack, and `Active` is what it used to be spelled as.
+    pub fn named(
+        &self,
+        name: &str,
+        rows: &dyn crate::model::rows::Listing,
+        all: &[CopyId],
+        env: crate::filter::Env<'_>,
+    ) -> Vec<CopyId> {
+        let Some(catalog) = self.defined.iter().find(|c| c.name == name) else {
+            // A stack naming a catalog that no longer exists selects nothing,
+            // which is what a renamed catalog should look like — empty and
+            // visible, rather than silently the whole library.
+            return Vec::new();
+        };
+        all.iter()
+            .copied()
+            .filter(|id| rows.subject(*id).is_some_and(|s| catalog.contains(&s, env)))
+            .collect()
+    }
+
     pub fn members(
         &self,
         rows: &dyn crate::model::rows::Listing,
