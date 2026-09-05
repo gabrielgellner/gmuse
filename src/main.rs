@@ -445,15 +445,6 @@ fn run_tui(
     }
     let first_run = log.records().is_empty();
 
-    let all: Vec<_> = app.store.iter().map(|(id, _)| id).collect();
-    let members = app.catalogs.members(
-        &app.store,
-        &all,
-        crate::filter::Env {
-            listened: Some(&listened),
-            now,
-        },
-    );
     // A socket that will not bind is a warning, not a failure: the player is
     // still a player without one, and refusing to start over a missing remote
     // would be the tail wagging the dog.
@@ -476,14 +467,26 @@ fn run_tui(
         assembling.elapsed().as_secs_f64()
     );
 
+    // **Membership is asked of the same seam the rows come from** (#86), so
+    // the two cannot disagree about what exists — which is what made the
+    // `file_by_tag` fallback reachable and is why it is gone.
+    let all = crate::model::rows::Listing::rows(&library_view);
+    let members = app.catalogs.members(
+        &library_view,
+        &all,
+        crate::filter::Env {
+            listened: Some(&listened),
+            now,
+        },
+    );
+
     // **Grouped by what the model says, not by what the tags carry** (#84).
     // The librarian has to exist first, which is why this sits below rather
     // than beside the membership it is built from.
-    let library = Shelf::project(&library_view, &app.store, members, smart_artist_sort);
+    let library = Shelf::project(&library_view, members, smart_artist_sort);
 
     let ctx = ui::Context {
         library: &library_view,
-        store: &app.store,
         player: Some(&app.player),
         remote: server.as_ref(),
     };

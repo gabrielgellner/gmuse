@@ -673,10 +673,6 @@ impl crate::model::rows::Listing for Librarian {
         self.held_at.get(locator).copied()
     }
 
-    fn audio_of(&self, id: Id<Encoding>) -> Option<crate::audio_id::AudioId> {
-        Some(self.encodings.encodings.get(&id)?.audio)
-    }
-
     /// **The binding the library holds**, which is what a relink changes.
     fn recording_of(&self, id: Id<Encoding>) -> Option<Id<Recording>> {
         Some(self.encodings.encodings.get(&id)?.recording?.id())
@@ -847,14 +843,22 @@ mod tests {
     /// renamed a file in. A fixture is not a leak. What leaks is the player.
     #[test]
     fn the_leak_from_the_player_only_narrows() {
-        /// The import and the `Context` field — and now only those. The third
-        /// was a comment about what playlists hold, and it stopped counting
-        /// when the ratchet stopped reading prose (#113): both remaining
-        /// mentions are the player genuinely naming the type.
+        /// **Zero** (#86). The player does not name the store at all.
         ///
-        /// **This one reaches zero at #86 and not before** — the player must
-        /// name the type for as long as the type exists.
-        const STORE: usize = 2;
+        /// The last two were the import and the `Context` field, and they went
+        /// together because they were the same thing: `Context.store` was what
+        /// the import was for. Every read that went through it now goes to the
+        /// librarian, which answers `rows::Listing` — so swapping which side
+        /// of the seam answered was the whole of it.
+        ///
+        /// Two helpers dissolved on the way. `recording_of` *is*
+        /// `Listing::recording_of`, and `holdings_here` is `rows()` folded by
+        /// it. `audio_of` left the trait entirely: it existed so a caller
+        /// could take one hop through each arena, and there is one arena.
+        ///
+        /// Like `REACHES`, this is a floor and not a ratchet. What is left to
+        /// catch is a mention appearing.
+        const STORE: usize = 0;
         /// **What a `PathBuf` in the player is allowed to be.**
         ///
         /// Counting them was the wrong measure and it had reached its floor
@@ -948,13 +952,10 @@ mod tests {
             "the player reached past the seam again: {reaches} time(s)"
         );
 
-        assert!(
-            store <= STORE,
-            "the seam widened: Scan {store} (was {STORE})"
+        assert_eq!(
+            store, STORE,
+            "the player named the store again: {store} time(s)"
         );
-        if store < STORE {
-            eprintln!("seam narrowed to Scan {store} — lower the constant");
-        }
     }
 
     /// **An assignment is identified by what it says, never by an id.**

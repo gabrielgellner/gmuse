@@ -546,10 +546,6 @@ impl crate::model::rows::Listing for Scan {
         self.id_for_path(Path::new(locator))
     }
 
-    fn audio_of(&self, id: TrackId) -> Option<crate::audio_id::AudioId> {
-        self.get(id)?.audio_id
-    }
-
     /// **Minted from the tags, which is the wrong answer after a relink.**
     ///
     /// The store has no binding to consult — that lives in the library — so

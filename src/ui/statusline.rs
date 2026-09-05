@@ -62,7 +62,7 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
         ));
     } else if let Some(id) = ui.playback.current
         && let Some(track) = {
-            let files: &dyn crate::model::rows::Listing = ctx.store;
+            let files: &dyn crate::model::rows::Listing = ctx.library;
             files.listed(id)
         }
     {

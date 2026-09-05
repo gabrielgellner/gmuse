@@ -34,7 +34,7 @@ use crate::model::spine::Recording;
 use crate::next::{self, ActiveSource, Playback, Source};
 use crate::playlist::{Playlist, Queue};
 use crate::shelf::Shelf;
-use crate::store::{Scan, TrackId};
+use crate::store::TrackId;
 use tree::{Pane, TreeState};
 
 /// The five views M4 covers. cmus numbers them, and so do we — the digits are
@@ -681,7 +681,6 @@ pub struct Context<'a> {
     /// with no path in it. `store` is what has not moved yet, and the two are
     /// built from one scan so they cannot disagree.
     pub library: &'a crate::model::seam::Librarian,
-    pub store: &'a Scan,
     /// `None` in tests, which have no audio device.
     pub player: Option<&'a PlayerHandle>,
     /// `None` in tests, and when the socket could not be bound.
@@ -757,7 +756,7 @@ fn serve_remote(ui: &mut Ui, ctx: &Context<'_>) {
     }
 
     if let Some(player) = ctx.player {
-        let files: &dyn Listing = ctx.store;
+        let files: &dyn Listing = ctx.library;
         let current = ui.playback.current.and_then(|id| files.listed(id));
         // **An owned row, so another thread can render a caller's own
         // template.** A borrow cannot cross one, which is the whole reason
@@ -1309,7 +1308,7 @@ fn source_for(
     ctx: &Context<'_>,
     id: TrackId,
 ) -> Option<(crate::audio::TrackSource, Option<Id<Encoding>>)> {
-    let files: &dyn Listing = ctx.store;
+    let files: &dyn Listing = ctx.library;
 
     // The library first: it picks per device, honours a pin, and refuses what
     // this machine cannot reach. A file it cannot place still plays — the same
@@ -1355,19 +1354,10 @@ fn source_for(
 /// and a session naming a hundred queued recordings would otherwise walk it a
 /// hundred times.
 fn holdings_here(ctx: &Context<'_>) -> std::collections::HashMap<Id<Recording>, TrackId> {
-    let files: &dyn Listing = ctx.store;
-    ctx.store
-        .iter()
-        .filter_map(|(id, _)| {
-            let audio = files.audio_of(id)?;
-            let recording = ctx
-                .library
-                .encodings
-                .encodings
-                .get(&Id::<Encoding>::of_audio(&audio))
-                .and_then(|e| e.recording)?;
-            Some((recording.id(), id))
-        })
+    let rows: &dyn Listing = ctx.library;
+    rows.rows()
+        .into_iter()
+        .filter_map(|id| Some((rows.recording_of(id)?, id)))
         .collect()
 }
 
@@ -1377,14 +1367,8 @@ fn holdings_here(ctx: &Context<'_>) -> std::collections::HashMap<Id<Recording>, 
 /// tags and knows nothing of a relink — after identifying 377 files it returns
 /// the id they used to have.
 fn recording_of(ctx: &Context<'_>, id: TrackId) -> Option<Id<Recording>> {
-    let files: &dyn Listing = ctx.store;
-    let audio = files.audio_of(id)?;
-    ctx.library
-        .encodings
-        .encodings
-        .get(&Id::<Encoding>::of_audio(&audio))
-        .and_then(|e| e.recording)
-        .map(|r| r.id())
+    let rows: &dyn Listing = ctx.library;
+    rows.recording_of(id)
 }
 
 fn replay_gain(ui: &Ui, loudness: Option<crate::model::rows::Loudness>) -> f32 {
@@ -2417,7 +2401,7 @@ fn load_saved(ui: &mut Ui, ctx: &Context<'_>, found: &crate::playlist::Saved) {
     // how you stop trusting it.
     let mut missing = 0;
     ui.playlist.clear();
-    let rows: &dyn Listing = ctx.store;
+    let rows: &dyn Listing = ctx.library;
     for path in &paths {
         match path.to_str().and_then(|at| rows.at(at)) {
             Some(id) => ui.playlist.push(id),
@@ -2760,7 +2744,7 @@ fn persist_open(ui: &mut Ui, ctx: &Context<'_>) {
     let (Some(Open::Saved(name)), Some(saved)) = (ui.open.clone(), ui.saved.clone()) else {
         return;
     };
-    let files: &dyn Listing = ctx.store;
+    let files: &dyn Listing = ctx.library;
     // What to *say* is a row; where the file *is* is a holding. Two questions,
     // asked at the moment of writing and neither answer kept (#86).
     let listed: Vec<_> = ui
@@ -2795,7 +2779,7 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         ui.notify("the playlist is empty — nothing to save");
         return;
     }
-    let files: &dyn Listing = ctx.store;
+    let files: &dyn Listing = ctx.library;
     // What to *say* is a row; where the file *is* is a holding. Two questions,
     // asked at the moment of writing and neither answer kept (#86).
     let listed: Vec<_> = ui
@@ -2844,7 +2828,7 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
 /// from (#86). Built here rather than taken as an iterator so a smart
 /// playlist and a catalog see the same list.
 fn all_rows(ctx: &Context<'_>) -> Vec<TrackId> {
-    let rows: &dyn Listing = ctx.store;
+    let rows: &dyn Listing = ctx.library;
     rows.rows()
 }
 
@@ -2853,7 +2837,7 @@ fn load_smart(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let Some(spec) = ui.playlists.get(name) else {
         return;
     };
-    let ids = spec.members(ctx.store, &all_rows(ctx), ui.sort_env());
+    let ids = spec.members(ctx.library, &all_rows(ctx), ui.sort_env());
     let count = ids.len();
     // An empty result is the confusing case, so it says what the rule was
     // rather than leaving you to go and read the config.
@@ -2889,7 +2873,7 @@ fn refresh_smart(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(spec) = ui.playlists.get(&name) else {
         return;
     };
-    let ids = spec.members(ctx.store, &all_rows(ctx), ui.sort_env());
+    let ids = spec.members(ctx.library, &all_rows(ctx), ui.sort_env());
     ui.playlist.clear();
     for id in ids {
         ui.playlist.push(id);
@@ -2908,7 +2892,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
             listened: Some(&ui.listened),
             now: crate::history::now(),
         };
-        let rows: &dyn Listing = ctx.store;
+        let rows: &dyn Listing = ctx.library;
         let mut m = ui.catalogs.members(rows, &all_rows(ctx), env);
         if let Some(f) = &ui.filter {
             let matches = f.compile(env);
@@ -2918,7 +2902,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     };
     // The same projection the startup path uses (#84), so refiltering cannot
     // quietly file things a second way.
-    ui.library = Shelf::project(ctx.library, ctx.store, members, ui.smart_artist_sort);
+    ui.library = Shelf::project(ctx.library, members, ui.smart_artist_sort);
     ui.tree.selected = 0;
     ui.sorted = 0;
     // Playlists and the queue are deliberately untouched: they hold TrackIds
@@ -3060,8 +3044,8 @@ fn flat_step(ui: &Ui, ctx: &Context<'_>, motion: Motion, count: usize) -> Option
         Motion::NextSection
         | Motion::PrevSection
         | Motion::NextSectionEnd
-        | Motion::PrevSectionEnd => list::artist_starts(ctx.store, ids),
-        _ => list::album_starts(ctx.store, ids),
+        | Motion::PrevSectionEnd => list::artist_starts(ctx.library, ids),
+        _ => list::album_starts(ctx.library, ids),
     };
     let mut at = current_cursor(ui).min(ids.len() - 1);
 
@@ -3267,16 +3251,11 @@ fn run_search(ui: &mut Ui, ctx: &Context<'_>, pattern: &str, dir: SearchDir) {
 /// rather than per comparison, so a search over the library does the work once
 /// per row instead of once per row per keystroke.
 fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
+    let rows: &dyn Listing = ctx.library;
     let describe = |id: &crate::store::TrackId| {
-        ctx.store
-            .get(*id)
-            .map(|t| {
-                crate::text::Haystack::of(&format!(
-                    "{} {} {}",
-                    t.file_under(),
-                    t.album_or_unknown(),
-                    t.display_title()
-                ))
+        rows.listed(*id)
+            .map(|r| {
+                crate::text::Haystack::of(&format!("{} {} {}", r.file_under, r.album, r.title))
             })
             .unwrap_or_else(|| crate::text::Haystack::of(""))
     };
@@ -3865,7 +3844,7 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
         .map(|p| p.state())
         .unwrap_or(crate::audio::State::Stopped);
     let position = ctx.player.map(|p| p.position()).unwrap_or(Duration::ZERO);
-    let files: &dyn Listing = ctx.store;
+    let files: &dyn Listing = ctx.library;
     let track = ui.playback.current.and_then(|id| files.listed(id));
 
     match track {
@@ -4143,7 +4122,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
                         Style::default()
                     };
                     spans.push(Span::raw(row.label()));
-                    let files: &dyn Listing = ctx.store;
+                    let files: &dyn Listing = ctx.library;
                     let text = files
                         .listed(*id)
                         .map(|row| ui.track_line.render(&row))
@@ -4316,7 +4295,7 @@ fn draw_tracks(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: 
 /// other caller counts tracks.
 fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: TrackList<'_>) {
     let mut rows = if spec.divide && ui.album_headers {
-        list::rows(ctx.store, spec.ids)
+        list::rows(ctx.library, spec.ids)
     } else {
         spec.ids.iter().copied().map(list::Row::Track).collect()
     };
@@ -4338,7 +4317,7 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
     }
     let items = list::items(
         &ui.theme,
-        ctx.store,
+        ctx.library,
         &rows,
         list::RowStyle {
             relative: ui.relative_numbers,
@@ -4411,7 +4390,7 @@ fn highlight(theme: &theme::Theme, focused: bool) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Track;
+    use crate::store::{Scan, Track};
     use ratatui::backend::TestBackend;
     use std::time::{Duration, Instant};
 
@@ -4541,7 +4520,6 @@ mod tests {
         let store = fixture();
         let ctx = Context {
             library: lib_of(&store),
-            store: &store,
             player: None,
             remote: None,
         };
@@ -4566,7 +4544,6 @@ mod tests {
         let store = fixture();
         let ctx = Context {
             library: lib_of(&store),
-            store: &store,
             player: None,
             remote: None,
         };
@@ -4592,7 +4569,6 @@ mod tests {
         let store = fixture();
         let ctx = Context {
             library: lib_of(&store),
-            store: &store,
             player: None,
             remote: None,
         };
@@ -4615,7 +4591,6 @@ mod tests {
         let store = fixture();
         let ctx = Context {
             library: lib_of(&store),
-            store: &store,
             player: None,
             remote: None,
         };
@@ -4637,7 +4612,6 @@ mod tests {
         let store = fixture();
         let ctx = Context {
             library: lib_of(&store),
-            store: &store,
             player: None,
             remote: None,
         };
@@ -4655,7 +4629,6 @@ mod tests {
         let store = fixture();
         let ctx = Context {
             library: lib_of(&store),
-            store: &store,
             player: None,
             remote: None,
         };
@@ -4695,7 +4668,6 @@ mod tests {
     fn ctx_of(store: &Scan) -> Context<'_> {
         Context {
             library: lib_of(store),
-            store,
             player: None,
             remote: None,
         }
@@ -8362,7 +8334,6 @@ mod tests {
         )));
         let ctx = Context {
             library,
-            store: &store,
             player: None,
             remote: None,
         };

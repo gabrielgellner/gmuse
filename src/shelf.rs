@@ -16,10 +16,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::model::entity::Encoding;
-use crate::model::id::Id;
+use crate::model::rows::Listing;
 use crate::model::seam::Librarian;
-use crate::store::{Scan, Track, TrackId};
+use crate::store::TrackId;
 
 /// Re-exported so callers keep saying `shelf::SortKey`. It lives in the
 /// model now, because how a library orders its own names is a librarian
@@ -49,13 +48,9 @@ pub struct Shelf {
 // M8) are what will ask a library whether it contains a track.
 #[allow(dead_code)]
 impl Shelf {
-    /// Rebuild both projections from every track in the store.
-    pub fn rebuild(store: &Scan, smart_artist_sort: bool) -> Self {
-        Self::from_members(
-            store,
-            store.iter().map(|(id, _)| id).collect(),
-            smart_artist_sort,
-        )
+    /// Rebuild both projections from every row the library holds.
+    pub fn rebuild(rows: &dyn Listing, smart_artist_sort: bool) -> Self {
+        Self::from_members(rows, rows.rows().into_iter().collect(), smart_artist_sort)
     }
 
     /// Rebuild from an explicit membership.
@@ -63,13 +58,17 @@ impl Shelf {
     /// This is how catalogs work: §4 makes the library a projection over a
     /// *subset* of the store, so confining the subset confines browsing,
     /// shuffle and `aaa_mode` without `next()` knowing catalogs exist.
-    pub fn from_members(store: &Scan, members: HashSet<TrackId>, smart_artist_sort: bool) -> Self {
+    pub fn from_members(
+        rows: &dyn Listing,
+        members: HashSet<TrackId>,
+        smart_artist_sort: bool,
+    ) -> Self {
         let mut lib = Shelf {
             members,
             smart_artist_sort,
             ..Default::default()
         };
-        lib.reindex(store);
+        lib.reindex(rows);
         lib
     }
 
@@ -95,7 +94,6 @@ impl Shelf {
     /// identified it yet would be the worst possible moment to lose it.
     pub fn project(
         librarian: &Librarian,
-        store: &Scan,
         members: HashSet<TrackId>,
         smart_artist_sort: bool,
     ) -> Self {
@@ -105,21 +103,18 @@ impl Shelf {
             ..Default::default()
         };
 
-        // Which files hold each copy. A copy is bytes, so two files with
-        // identical audio are one copy held twice — both belong in the tree.
-        let mut files: BTreeMap<Id<Encoding>, Vec<TrackId>> = BTreeMap::new();
-        for &id in &lib.members {
-            if let Some(audio) = store.get(id).and_then(|t| t.audio_id) {
-                files.entry(Id::of_audio(&audio)).or_default().push(id);
-            }
-        }
-
+        // **This map used to be here and is now the identity** (#86). It went
+        // from a copy's id to the files holding it, because a row was an arena
+        // index and several could name one copy. A row *is* the copy now — the
+        // durable id of its bytes — so two files with identical audio are one
+        // row rather than two rows to be grouped, and the lookup below is
+        // "is this copy one of ours".
         let tree = crate::model::tree::Tree::of(librarian, smart_artist_sort);
         let mut placed: HashSet<TrackId> = HashSet::new();
         for (artist_key, albums) in tree.artists() {
             for (album_key, album) in albums {
                 for listing in &album.tracks {
-                    let Some(here) = listing.copy.and_then(|c| files.get(&c)) else {
+                    let Some(here) = listing.copy.filter(|c| lib.members.contains(c)) else {
                         continue;
                     };
                     lib.artist_names
@@ -134,16 +129,21 @@ impl Shelf {
                         .or_default()
                         .entry(album_key.clone())
                         .or_default();
-                    for &track in here {
-                        into.push(track);
-                        placed.insert(track);
-                    }
+                    into.push(here);
+                    placed.insert(here);
                 }
             }
         }
 
-        let unplaced: HashSet<TrackId> = lib.members.difference(&placed).copied().collect();
-        lib.file_by_tag(store, &unplaced);
+        // **`file_by_tag` used to run here and is gone** (#86).
+        //
+        // It filed anything the model could not place under the names its tags
+        // carried — the pre-#84 rule, kept as a fallback while the store and
+        // the librarian were two sources that could disagree about what
+        // existed. They are one source now: membership is asked of the same
+        // seam the rows come from, so a row the model cannot place is not a
+        // row. What is left of the case it covered is a track on no album,
+        // and the tree files that under a stand-in rather than dropping it.
         lib.sorted = lib
             .tree
             .values()
@@ -152,52 +152,25 @@ impl Shelf {
         lib
     }
 
-    /// File tracks under the names their tags carry — the pre-#84 rule, kept
-    /// for whatever the model cannot place.
-    fn file_by_tag(&mut self, store: &Scan, ids: &HashSet<TrackId>) {
-        for &id in ids {
-            let Some(track) = store.get(id) else { continue };
-            let artist = sort_key(track.file_under(), self.smart_artist_sort);
-            let album = sort_key(track.album_or_unknown(), false);
-            self.artist_names
-                .entry(artist.clone())
-                .or_insert_with(|| track.file_under().to_string());
-            self.album_names
-                .entry((artist.clone(), album.clone()))
-                .or_insert_with(|| track.album_or_unknown().to_string());
-            self.tree
-                .entry(artist)
-                .or_default()
-                .entry(album)
-                .or_default()
-                .push(id);
-        }
-        for albums in self.tree.values_mut() {
-            for tracks in albums.values_mut() {
-                tracks.sort_by(|a, b| track_order(store, *a, *b));
-            }
-        }
-    }
-
-    fn reindex(&mut self, store: &Scan) {
+    fn reindex(&mut self, rows: &dyn Listing) {
         self.tree.clear();
         self.sorted.clear();
         self.artist_names.clear();
         self.album_names.clear();
 
         for &id in &self.members {
-            let Some(track) = store.get(id) else { continue };
-            let artist = sort_key(track.file_under(), self.smart_artist_sort);
+            let Some(row) = rows.listed(id) else { continue };
+            let artist = sort_key(row.file_under, self.smart_artist_sort);
             // Albums keep their article: "The Wall" belongs under T.
-            let album = sort_key(track.album_or_unknown(), false);
+            let album = sort_key(row.album, false);
             // First one under a node names it, which is what every renderer
             // was doing by hand.
             self.artist_names
                 .entry(artist.clone())
-                .or_insert_with(|| track.file_under().to_string());
+                .or_insert_with(|| row.file_under.to_string());
             self.album_names
                 .entry((artist.clone(), album.clone()))
-                .or_insert_with(|| track.album_or_unknown().to_string());
+                .or_insert_with(|| row.album.to_string());
             self.tree
                 .entry(artist)
                 .or_default()
@@ -209,7 +182,7 @@ impl Shelf {
 
         for albums in self.tree.values_mut() {
             for tracks in albums.values_mut() {
-                tracks.sort_by(|a, b| track_order(store, *a, *b));
+                tracks.sort_by(|a, b| track_order(rows, *a, *b));
             }
         }
         // View 2 is the tree flattened: artist, then album, then disc/track.
@@ -303,26 +276,30 @@ impl Shelf {
 /// Disc first is what makes a multi-disc album read as 1-01, 1-02, … 2-01
 /// rather than interleaving the two discs' track 1s. A missing disc number
 /// sorts as disc 1, since single-disc albums usually omit it entirely.
-fn track_order(store: &Scan, a: TrackId, b: TrackId) -> std::cmp::Ordering {
-    let (Some(ta), Some(tb)) = (store.get(a), store.get(b)) else {
+fn track_order(rows: &dyn Listing, a: TrackId, b: TrackId) -> std::cmp::Ordering {
+    let (Some(ra), Some(rb)) = (rows.listed(a), rows.listed(b)) else {
         return std::cmp::Ordering::Equal;
     };
-    key_of(ta).cmp(&key_of(tb))
+    key_of(&ra, a).cmp(&key_of(&rb, b))
 }
 
-fn key_of(t: &Track) -> (u32, u32, String, &std::path::PathBuf) {
+fn key_of(r: &crate::model::rows::Listed<'_>, id: TrackId) -> (u32, u32, String, TrackId) {
     (
-        t.discnumber.unwrap_or(1),
+        r.disc.unwrap_or(1),
         // Untracked tracks sort after numbered ones rather than before.
-        t.tracknumber.unwrap_or(u32::MAX),
-        t.display_title().to_lowercase(),
-        &t.path,
+        r.track.unwrap_or(u32::MAX),
+        r.title.to_lowercase(),
+        // The last tie-break used to be the path, which is a location a row
+        // does not carry. The id is stable and unique, which is all a
+        // tie-break has to be (#86).
+        id,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{Scan, Track};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -510,6 +487,7 @@ mod projection {
 
     use super::*;
     use crate::model::instance::{Instance, Scanned};
+    use crate::store::{Scan, Track};
 
     fn scan(title: &str, artist: &str, album_artist: Option<&str>, album: &str) -> Scanned {
         Scanned {
@@ -551,7 +529,7 @@ mod projection {
             store.upsert(t);
         }
         let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
-        let lib = Shelf::project(&l, &store, members, false);
+        let lib = Shelf::project(&l, members, false);
         (store, lib)
     }
 
@@ -582,22 +560,34 @@ mod projection {
         );
     }
 
-    /// **A file the model cannot place is still in the tree.** A library is
-    /// browsed while it is being catalogued.
+    /// **A track on no album is still in the tree**, under a stand-in.
+    ///
+    /// This used to build a populated store beside an *empty* librarian and
+    /// assert the `file_by_tag` fallback caught the difference. That state
+    /// cannot occur any more and the fallback is gone (#86): membership is
+    /// asked of the same seam the rows come from, so a row the model cannot
+    /// place is not a row at all.
+    ///
+    /// What survives of the case is the one that was always the real one — a
+    /// file whose tags name no album — and the answer is that it is filed
+    /// rather than dropped.
     #[test]
-    fn something_the_model_has_no_listing_for_is_kept() {
-        let mut store = Scan::default();
-        let mut t = crate::store::heard(Track {
-            path: std::path::PathBuf::from("/m/x.mp3"),
-            ..Default::default()
-        });
-        t.artist = Some("Nobody".into());
-        t.album = Some("Untagged".into());
-        store.upsert(t);
-        let members: HashSet<TrackId> = store.iter().map(|(i, _)| i).collect();
+    fn a_track_on_no_album_is_filed_rather_than_dropped() {
+        let mut i = Instance::new(crate::model::id::Id::derived(b"laptop"));
+        i.ingest(
+            100,
+            &[Scanned {
+                album: None,
+                ..scan("Mystery", "Nobody", None, "")
+            }],
+        );
+        let l = Librarian::from_catalogue(&i.catalogue());
 
-        let lib = Shelf::project(&Librarian::new(), &store, members, false);
-        assert_eq!(lib.sorted().len(), 1, "an unidentified file vanished");
+        let members: HashSet<TrackId> = crate::model::rows::Listing::rows(&l).into_iter().collect();
+        assert_eq!(members.len(), 1, "the scan produced a row");
+
+        let lib = Shelf::project(&l, members, false);
+        assert_eq!(lib.sorted().len(), 1, "a track with no album vanished");
         assert_eq!(lib.artist_count(), 1);
     }
 }

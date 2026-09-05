@@ -271,15 +271,6 @@ pub trait Listing {
     /// forgotten, a locator is used immediately and never written down.
     fn playable(&self, id: Row) -> Option<Playable<'_>>;
 
-    /// What this row's *audio* is, so a caller can ask the library which
-    /// recording holds it.
-    ///
-    /// A handle indexes an arena the library does not own, and the binding
-    /// from bytes to performance lives in the library — so answering "which
-    /// recording is this handle" takes one hop through each, and this is the
-    /// half the handle's owner can give.
-    fn audio_of(&self, id: Row) -> Option<crate::audio_id::AudioId>;
-
     /// How many distinct albums and artists a slice covers.
     ///
     /// Here rather than at the call site because it is the same fold every
