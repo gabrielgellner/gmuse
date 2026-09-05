@@ -239,9 +239,48 @@ impl HistoryField {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selector {
-    Field(Field),
+    Field(Quant, Field),
     Any,
     History(HistoryField),
+}
+
+/// How many of a multi-valued field's values must satisfy the comparison —
+/// #93, `query-language.md` §7.
+///
+/// **The language had both and said neither.** A row carries many genres, and
+/// `genre="rock"` meant *some* while `genre!="rock"` meant *none* — two
+/// different quantifiers on one syntax, chosen silently. Both readings are
+/// useful and a reader could not tell which they were getting.
+///
+/// **The defaults are unchanged and now stated.** They are the readings people
+/// want, and they differ by operator:
+///
+/// | written | means |
+/// | --- | --- |
+/// | `genre="rock"` | **any** — some genre is rock |
+/// | `genre!="rock"` | **all** — no genre is rock |
+///
+/// A file tagged `Rock; Blues Rock` *is* Rock, and every one of its genres is
+/// not Jazz. Making both default to `any` would have made `genre!="rock"` true
+/// of that file, which is not what anybody means — so the asymmetry stays, and
+/// what changes is that it has a name and the other reading is sayable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quant {
+    /// Nobody wrote one, so the operator decides — see the table above.
+    ///
+    /// A third state rather than resolving at parse time, because the two
+    /// halves of the answer live apart: the quantifier is read before the
+    /// operator is.
+    Unsaid,
+    /// `any(genre)="rock"` — some value matches.
+    Any,
+    /// `all(genre)="rock"` — every value matches, and a row with none fails.
+    ///
+    /// **Not vacuously true on an empty set.** Formal logic says every element
+    /// of nothing satisfies anything; a listener asking "all of its genres are
+    /// rock" about a track with no genre does not mean yes. `!genre?` is how
+    /// you ask for the untagged, and it is a different question.
+    All,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +345,10 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FilterError {
+    #[error("{name}(…) is missing its closing bracket")]
+    UnclosedQuantifier { name: String },
+    #[error("a quantifier asks about the values, so `?` belongs outside it")]
+    PresenceInQuantifier,
     #[error("unknown field {name:?} — try one of: {}", field_names().join(", "))]
     UnknownField { name: String },
     #[error("expected a field name, found {0:?}")]
@@ -367,7 +410,7 @@ impl Expr {
             Expr::And(a, b) => a.eval(t, env) && b.eval(t, env),
             Expr::Or(a, b) => a.eval(t, env) || b.eval(t, env),
             Expr::Not(e) => !e.eval(t, env),
-            Expr::Present(Selector::Field(f)) => present(*f, t),
+            Expr::Present(Selector::Field(_, f)) => present(*f, t),
             Expr::Present(Selector::Any) => true,
             Expr::Present(Selector::History(h)) => history_number(*h, t, env).is_some(),
             Expr::Cmp {
@@ -460,19 +503,33 @@ fn compare(selector: Selector, op: Op, value: &Value, t: &Subject<'_>, env: &Env
                 _ => hit,
             }
         }
-        (Selector::Field(f), Value::Text(glob)) => match texts_of(f, t).as_slice() {
+        (Selector::Field(q, f), Value::Text(glob)) => match texts_of(f, t).as_slice() {
             // A missing tag matches nothing, including `!=`. Three-valued
             // logic would be more correct and much harder to predict; `!` on
-            // the whole comparison is how you ask for "or missing".
+            // the whole comparison is how you ask for "or missing". `all` is
+            // not vacuously true here for the same reason.
             [] => false,
-            // **Any of them**, and `!=` is none of them. A file tagged
-            // `Rock; Blues Rock` is Rock, and it is not `!=Rock`.
-            values => match op {
-                Op::Ne => !values.iter().any(|v| glob.matches(v)),
-                _ => values.iter().any(|v| glob.matches(v)),
-            },
+            values => {
+                let hit = |v: &String| glob.matches(v);
+                // The unsaid quantifier is the operator's default: `=` asks
+                // whether any matches, `!=` whether none does.
+                let q = match (q, op) {
+                    (Quant::Unsaid, Op::Ne) => Quant::All,
+                    (Quant::Unsaid, _) => Quant::Any,
+                    (said, _) => said,
+                };
+                match (q, op) {
+                    // A file tagged `Rock; Blues Rock` is Rock…
+                    (Quant::Any, Op::Ne) => values.iter().any(|v| !hit(v)),
+                    (Quant::Any, _) => values.iter().any(hit),
+                    // …and every one of its genres is not Jazz.
+                    (Quant::All, Op::Ne) => !values.iter().any(hit),
+                    (Quant::All, _) => values.iter().all(hit),
+                    (Quant::Unsaid, _) => unreachable!("resolved just above"),
+                }
+            }
         },
-        (Selector::Field(f), Value::Number(n)) => match number_of(f, t) {
+        (Selector::Field(_, f), Value::Number(n)) => match number_of(f, t) {
             Some(v) => match op {
                 Op::Eq => v == *n,
                 Op::Ne => v != *n,
@@ -717,24 +774,54 @@ impl Parser {
             name.pop();
         }
 
+        // **`any(f)` and `all(f)` say which quantifier** (#93). Written as a
+        // call because it reads aloud — "all of its genres" — and because
+        // `any` on its own is already the search-everything pseudo-field. The
+        // parenthesis is what tells them apart, and it has to be read as a
+        // token: the grammar already has grouping parens, so `any` and `(`
+        // arrive separately.
+        let quant = match (name.as_str(), self.peek()) {
+            ("all", Some(Token::OpenParen)) => Quant::All,
+            ("any", Some(Token::OpenParen)) => Quant::Any,
+            _ => Quant::Unsaid,
+        };
+        if quant != Quant::Unsaid {
+            self.next();
+            name = match self.next() {
+                Some(Token::Word(w)) => w,
+                _ => return Err(FilterError::ExpectedOperator(name)),
+            };
+            if !matches!(self.next(), Some(Token::CloseParen)) {
+                return Err(FilterError::UnclosedQuantifier { name });
+            }
+            // A presence test inside a quantifier — `all(genre?)` — asks
+            // nothing extra: presence is about the set, not its members.
+            if name.ends_with('?') {
+                return Err(FilterError::PresenceInQuantifier);
+            }
+        }
+
         let selector = if name == "any" {
             Selector::Any
         } else if let Some(h) = HistoryField::parse(&name) {
             Selector::History(h)
         } else {
-            Selector::Field(Field::parse(&name).ok_or_else(|| match name.as_str() {
-                // The sort language's spelling of the two date fields. Naming
-                // the replacement keeps a wrong guess to one message.
-                "added" => FilterError::WrongLanguage {
-                    name: name.clone(),
-                    instead: "days_since_added",
-                },
-                "last_played" => FilterError::WrongLanguage {
-                    name: name.clone(),
-                    instead: "days_since_played",
-                },
-                _ => FilterError::UnknownField { name: name.clone() },
-            })?)
+            Selector::Field(
+                quant,
+                Field::parse(&name).ok_or_else(|| match name.as_str() {
+                    // The sort language's spelling of the two date fields. Naming
+                    // the replacement keeps a wrong guess to one message.
+                    "added" => FilterError::WrongLanguage {
+                        name: name.clone(),
+                        instead: "days_since_added",
+                    },
+                    "last_played" => FilterError::WrongLanguage {
+                        name: name.clone(),
+                        instead: "days_since_played",
+                    },
+                    _ => FilterError::UnknownField { name: name.clone() },
+                })?,
+            )
         };
 
         if presence {
@@ -751,7 +838,7 @@ impl Parser {
 
         let kind = match selector {
             Selector::Any => Kind::Text,
-            Selector::Field(f) => f.kind(),
+            Selector::Field(_, f) => f.kind(),
             Selector::History(_) => Kind::Number,
         };
 
@@ -1099,6 +1186,77 @@ mod tests {
             !matches(r#"genre="Jazz""#, &t),
             "and nothing it does not carry"
         );
+    }
+
+    /// **Quantification is explicit, or the language lies** — #93.
+    ///
+    /// The two readings were both here and neither was sayable: `=` meant
+    /// *some* and `!=` meant *none*, one syntax and two quantifiers. Both are
+    /// useful and a reader could not tell which they were getting.
+    #[test]
+    fn any_and_all_say_which_quantifier() {
+        let mut t = track();
+        t.genres = vec!["Rock".into(), "Blues Rock".into()];
+
+        // Some of them, which is what the bare form has always meant.
+        assert!(matches(r#"any(genre)="Rock""#, &t));
+        assert!(!matches(r#"any(genre)="Jazz""#, &t));
+
+        // **Every one of them**, which could not be asked before.
+        assert!(
+            !matches(r#"all(genre)="Rock""#, &t),
+            "Blues Rock is not Rock"
+        );
+        assert!(matches(r#"all(genre)="*Rock""#, &t), "both end in Rock");
+
+        // And the two readings of `!=`, which is where the silence was.
+        assert!(
+            matches(r#"any(genre)!="Rock""#, &t),
+            "some genre is not Rock — Blues Rock"
+        );
+        assert!(
+            !matches(r#"all(genre)!="Rock""#, &t),
+            "but not every one of them"
+        );
+    }
+
+    /// **The defaults are unchanged, and now they have names.**
+    ///
+    /// `=` is `any` and `!=` is `all`, which is the asymmetry #93 called
+    /// silent. Making both `any` would have made `genre!="Rock"` true of a
+    /// file tagged `Rock; Blues Rock`, which is not what anybody means.
+    #[test]
+    fn the_bare_form_is_the_operators_default() {
+        let mut t = track();
+        t.genres = vec!["Rock".into(), "Blues Rock".into()];
+
+        for (bare, said) in [
+            (r#"genre="Rock""#, r#"any(genre)="Rock""#),
+            (r#"genre="Jazz""#, r#"any(genre)="Jazz""#),
+            (r#"genre!="Rock""#, r#"all(genre)!="Rock""#),
+            (r#"genre!="Jazz""#, r#"all(genre)!="Jazz""#),
+        ] {
+            assert_eq!(
+                matches(bare, &t),
+                matches(said, &t),
+                "{bare} and {said} disagree"
+            );
+        }
+    }
+
+    /// **`all` is not vacuously true on nothing.**
+    ///
+    /// Formal logic says every element of the empty set satisfies anything; a
+    /// listener asking "all of its genres are rock" about an untagged track
+    /// does not mean yes. `!genre?` is the question they would be asking, and
+    /// it is a different one.
+    #[test]
+    fn all_of_nothing_is_not_everything() {
+        let mut t = track();
+        t.genres.clear();
+        assert!(!matches(r#"all(genre)="Rock""#, &t));
+        assert!(!matches(r#"all(genre)!="Rock""#, &t));
+        assert!(matches("!genre?", &t), "which is how you ask for untagged");
     }
 
     /// And `!=` is *none* of them, not "not the first".

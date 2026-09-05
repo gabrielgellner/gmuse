@@ -3540,6 +3540,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   - **The second pane starts on where you were.** Not a choice offered, because the case is "these two lists I have been
     going between", and that is exactly what `previous_view` holds.
 
+- **2026-09-05** **Quantification is explicit, because the language had both and said neither (#93).** §7's complaint
+  was concrete and it was already true here: `genre="rock"` meant _some_ genre is rock and `genre!="rock"` meant _none_
+  is — **one syntax, two quantifiers, chosen silently.** A row carries many genres, both readings are useful, and a
+  reader could not tell which they were getting.
+
+  `any(f)` and `all(f)` say which. Written as a call because it reads aloud — "all of its genres" — and because `any`
+  alone is already the search-everything pseudo-field; the parenthesis is what tells them apart, and it has to be read
+  as a _token_, since the grammar already has grouping parens and `any` and `(` arrive separately.
+
+  **The defaults do not change, and that is the decision.** Making both default to `any` would have made `genre!="rock"`
+  true of a file tagged `Rock; Blues Rock`, which is not what anybody means. So the asymmetry stays, and what changes is
+  that it has a name (`Quant::Unsaid`, resolved by the operator) and the other reading is sayable. A test asserts each
+  bare form against its explicit equivalent, so the two cannot drift.
+
+  **`all` is not vacuously true on nothing.** Formal logic says every element of the empty set satisfies anything; a
+  listener asking "all of its genres are rock" about an untagged track does not mean yes. `!genre?` is the question they
+  would be asking and it is a different one — the same reasoning that already makes a missing tag match nothing,
+  including `!=`.
+
+  **What is not done, and it is most of #93.** Dotted paths (`any(encoding).verdict = suspect`,
+  `credit[role=remixer].artist`, `genre.basis = discogs`) and closure (`genre*`, `derived+`) both need the evaluator to
+  reach the librarian, and `Subject` deliberately carries only a row. Adding a library handle to `Env` is the shape — it
+  is how `listened` already works — but it is a wider change than quantification, and closure additionally needs the
+  depth bound #79 asks for. Quantification was worth doing first because it is the item that makes the existing language
+  _honest_ rather than the one that makes it bigger.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

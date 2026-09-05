@@ -82,6 +82,25 @@ Catalogs are named and persistent, and they **union**: turn on jazz and blues an
 
 `6` — or `<leader>fg` — opens a picker over what you have saved, and `enter` makes it the view.
 
+## Saying how many
+
+A row carries **many** genres, so a question about them needs to say how many have to match:
+
+    any(genre)="rock"     some genre is rock
+    all(genre)="rock"     every one of them is
+
+Both readings were already here and neither could be written. The bare form is the one you almost always want, and it
+differs by operator:
+
+    genre="rock"     is any(genre)="rock"     — some
+    genre!="rock"    is all(genre)!="rock"    — none
+
+That asymmetry is deliberate. A file tagged `Rock; Blues Rock` **is** rock, and every one of its genres is **not** jazz
+— making both default to "some" would have made `genre!="rock"` true of that file, which is not what anyone means.
+
+`all` is not true of nothing. A track with no genre fails `all(genre)="rock"` rather than passing it on a technicality;
+`!genre?` is how you ask for the untagged, and it is a different question.
+
 ## History, ratings, and what you have filed
 
 Five fields come from what you have done rather than from tags:
