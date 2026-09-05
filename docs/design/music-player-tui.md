@@ -3206,6 +3206,38 @@ Append here as decisions are made. Format: date, decision, rationale.
   collection. A facet is the collection development policy; the collection is the holdings; the gap between them is a
   review. That distinction is #90's and this entry does not blur it.
 
+- **2026-09-05** **`:collect` — the write the model never had (#118).** Collections have been facts since #92 and
+  nothing in the player could make one: `add_to_collection` had callers only in tests, so the Dance collection had to be
+  seeded by a tool pass that read a folder. `:collect <name>` files what the view holds, and reads no path at all.
+
+  Three decisions, each of which could plausibly have gone the other way:
+
+  1. **Entries are recordings; the view yields copies.** A recording held twice — a FLAC and an MP3 — is one entry, so
+     collecting 100 rows may file fewer than 100 things. Correct rather than a rounding error, and the notification says
+     the number filed rather than the number seen.
+  2. **The shape comes from the view.** A sequence keeps its order and becomes an ordered collection; a set has none to
+     keep, so its entries share `OrdKey::first()` — an arbitrary order that looks meaningful is worse than none. This is
+     #92's set-versus-sequence being load-bearing: `:view <a playlist> & year>=2015` then `:collect` keeps the running
+     order, because narrowing a sequence leaves a subsequence of it.
+  3. **Filing into a collection that exists is a union.** Entries are row existence, so re-collecting the same view is
+     idempotent and collecting a second view adds to the first. Emptying one is a retraction, a verb nobody has needed
+     yet.
+
+  **The bug this found, and the half-fix it got.** `:collect Dance` wrote the facts correctly and `:catalog dance`
+  showed nothing. The librarian is a fold of the log _as it was at startup_, and a catalog resolves membership through
+  `Listing` (#94) — so a collection written this session was invisible until the next launch. Ratings dodge this because
+  a filter reads them from `Env::listened`, which is the live log; collections went through the seam and had no such
+  route.
+
+  `view::Fresh` overlays the one answer that goes stale: **entries come from the log, everything else from the
+  librarian.** It is not the general fix. The general fix is the librarian being refoldable while the UI holds it, which
+  is the same obstacle `Command::Rescan` has been a stub for since the launch-does-not-scan entry above — the UI holds a
+  `&` and refolding needs ownership. Two symptoms, one cause, and worth fixing once rather than overlaying twice.
+
+  Two smaller things fell out. `Rows::of_collection` and `Stack::resolve` now take `&dyn Listing` rather than
+  `&Librarian`, which is what the seam was for and what made the overlay possible at all. And `:view clear` is not a
+  spelling — a bare `:view` is the clear, which a test asserting the wrong one found.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

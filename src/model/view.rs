@@ -41,7 +41,6 @@ use std::collections::BTreeSet;
 
 use crate::model::entity::{Collection, Recording};
 use crate::model::id::Id;
-use crate::model::seam::Librarian;
 
 /// A view's contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,8 +76,15 @@ pub struct Combined {
 
 impl Rows {
     /// A collection's entries, in order and with their duplicates.
-    pub fn of_collection(librarian: &Librarian, collection: Id<Collection>) -> Self {
-        Rows::Sequence(librarian.entries_of(collection))
+    ///
+    /// **Through the seam, not through one implementation of it** (#118), so
+    /// the player can overlay the entries it has written this session — see
+    /// `view::Fresh`.
+    pub fn of_collection(
+        rows: &dyn crate::model::rows::Listing,
+        collection: Id<Collection>,
+    ) -> Self {
+        Rows::Sequence(rows.entries_of(collection))
     }
 
     /// Whatever a predicate matched.
@@ -157,6 +163,7 @@ mod tests {
     use crate::model::entity::Device;
     use crate::model::instance::Instance;
     use crate::model::ord::OrdKey;
+    use crate::model::seam::Librarian;
 
     fn song(n: u8) -> Id<Recording> {
         Id::<Recording>::derived(&[n])

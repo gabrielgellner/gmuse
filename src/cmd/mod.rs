@@ -704,6 +704,13 @@ pub enum Command {
     /// an exception list bolted onto the rule, which is how these become
     /// unexplainable. Dropping the rule and keeping the tracks is the honest
     /// version of the same wish.
+    /// `:collect <name>` — file what the view holds into a collection.
+    ///
+    /// **The write the model never had** (#118). Collections have been facts
+    /// since #92 and nothing in the player could make one: `add_to_collection`
+    /// had callers only in tests, so the Dance collection had to be seeded by
+    /// a tool pass reading a folder.
+    Collect(String),
     Freeze,
     Rate(RateSpec),
     /// Narrow the library to what matches. `None` clears it.

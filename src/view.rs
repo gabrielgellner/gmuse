@@ -41,7 +41,6 @@
 use crate::model::entity::Collection;
 use crate::model::id::Id;
 use crate::model::rows::{CopyId, Listing};
-use crate::model::seam::Librarian;
 use crate::model::view::{Op, Rows};
 
 /// What one term of a composed view selects.
@@ -97,11 +96,63 @@ impl Resolved {
     /// Order is not carried across. A sequence's order is over recordings, and
     /// a shelf sorts its own rows by artist and album — #97's presentation
     /// question, and not this one.
-    pub fn copies(&self, librarian: &Librarian) -> std::collections::HashSet<CopyId> {
+    pub fn copies(&self, librarian: &dyn Listing) -> std::collections::HashSet<CopyId> {
         let wanted: std::collections::HashSet<_> = self.rows.iter().collect();
         Listing::rows(librarian)
             .into_iter()
             .filter(|id| Listing::recording_of(librarian, *id).is_some_and(|r| wanted.contains(&r)))
+            .collect()
+    }
+}
+
+/// The librarian, with the facts written since it was folded.
+///
+/// **The librarian is a fold, and the player writes facts into it** (#118). A
+/// rating dodges this because a filter reads it from `Env::listened`, which is
+/// the live log; a collection does not, because a catalog resolves membership
+/// through `Listing` (#94) and the librarian's copy is as old as startup. So
+/// `:collect Dance` filed the facts correctly and `:catalog dance` showed
+/// nothing until the next launch.
+///
+/// This overlays the one answer that goes stale. It is not a general fix —
+/// the real one is the librarian being refoldable while the UI holds it, which
+/// is the same obstacle `Command::Rescan` is a stub for, recorded in §13. What
+/// it is, is honest about which answer the fold cannot give yet: **entries
+/// come from the log, everything else from the librarian.**
+pub struct Fresh<'a> {
+    pub under: &'a dyn Listing,
+    pub log: &'a crate::model::log::Catalogue,
+}
+
+impl Listing for Fresh<'_> {
+    fn listed(&self, id: CopyId) -> Option<crate::model::rows::Listed<'_>> {
+        self.under.listed(id)
+    }
+    fn rows(&self) -> Vec<CopyId> {
+        self.under.rows()
+    }
+    fn at(&self, locator: &str) -> Option<CopyId> {
+        self.under.at(locator)
+    }
+    fn recording_of(&self, id: CopyId) -> Option<Id<crate::model::entity::Recording>> {
+        self.under.recording_of(id)
+    }
+    fn playable(&self, id: CopyId) -> Option<crate::model::rows::Playable<'_>> {
+        self.under.playable(id)
+    }
+
+    /// **From the log, not the fold.** Already in order: the catalogue keys
+    /// entries by position before recording, so walking them is walking the
+    /// list.
+    fn entries_of(
+        &self,
+        collection: Id<crate::model::entity::Collection>,
+    ) -> Vec<Id<crate::model::entity::Recording>> {
+        self.log
+            .entries
+            .iter()
+            .filter(|(c, _, _)| *c == collection)
+            .map(|(_, _, recording)| *recording)
             .collect()
     }
 }
@@ -213,7 +264,7 @@ impl Stack {
     /// and no filter" has always meant.
     pub fn resolve(
         &self,
-        librarian: &Librarian,
+        librarian: &dyn Listing,
         catalogs: &crate::catalog::Catalogs,
         env: crate::filter::Env<'_>,
     ) -> Resolved {
@@ -249,7 +300,7 @@ impl Stack {
     fn select(
         &self,
         what: &What,
-        librarian: &Librarian,
+        librarian: &dyn Listing,
         catalogs: &crate::catalog::Catalogs,
         all: &[CopyId],
         env: crate::filter::Env<'_>,
@@ -307,7 +358,10 @@ fn name_of(what: &What) -> String {
 /// so the two are one hop apart. Two copies of one performance are one
 /// recording in a view, which is what makes `+` a set union rather than a
 /// count.
-fn recordings(librarian: &Librarian, rows: &[CopyId]) -> Vec<Id<crate::model::entity::Recording>> {
+fn recordings(
+    librarian: &dyn Listing,
+    rows: &[CopyId],
+) -> Vec<Id<crate::model::entity::Recording>> {
     rows.iter()
         .filter_map(|id| Listing::recording_of(librarian, *id))
         .collect()
@@ -320,6 +374,7 @@ mod tests {
     use crate::model::entity::Device;
     use crate::model::instance::{Instance, Scanned};
     use crate::model::ord::OrdKey;
+    use crate::model::seam::Librarian;
 
     fn scanned(title: &str, artist: &str, genre: &str, hash: u128) -> Scanned {
         Scanned {

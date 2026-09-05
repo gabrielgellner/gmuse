@@ -2008,6 +2008,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             crate::cmd::PlaylistSpec::New(name) => new_playlist(ui, ctx, &name),
             crate::cmd::PlaylistSpec::List => list_playlists(ui),
         },
+        Command::Collect(name) => collect(ui, ctx, &name),
         Command::Freeze => match ui.open.take() {
             Some(Open::Rule(name)) => ui.notify(format!(
                 "froze {name} — {} tracks; `:playlist save <name>` keeps it",
@@ -2951,6 +2952,89 @@ fn sync_catalog_terms(ui: &mut Ui) {
     ui.composed.set_catalogs(names);
 }
 
+/// `:collect <name>` — file what the view holds into a collection.
+///
+/// **The write the model never had** (#118). Collections have been facts since
+/// #92 and nothing in the player could make one, so the Dance collection had
+/// to be seeded by a tool pass that read a folder. This is the in-app route,
+/// and it reads no path at all.
+///
+/// Three decisions worth stating, because each could plausibly have gone the
+/// other way:
+///
+/// **Entries are recordings, and the view yields copies.** A recording held
+/// twice — a FLAC and an MP3 — is one entry, so collecting 100 rows may file
+/// fewer than 100 things. That is correct rather than a rounding error, and
+/// the notification says the number it filed rather than the number it saw.
+///
+/// **The shape comes from the view.** A sequence keeps its order and becomes
+/// an ordered collection; a set does not have one to keep. That is #92's
+/// distinction being load-bearing rather than decorative — and it means
+/// `:view <a playlist> & year>=2015` then `:collect` preserves the running
+/// order, because narrowing a sequence leaves a subsequence of it.
+///
+/// **Adding to a collection that exists is a union, not a replacement.** The
+/// entries are row existence, so re-collecting the same view is idempotent and
+/// collecting a second view adds to the first. Emptying one is a retraction,
+/// which is a separate verb nobody has asked for yet.
+fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+    use crate::model::entity::Collection;
+    use crate::model::id::Id;
+    use crate::model::ord::OrdKey;
+
+    let name = name.trim();
+    if name.is_empty() {
+        ui.notify("a collection needs a name");
+        return;
+    }
+    if ui.data_dir.is_none() {
+        ui.notify("collecting needs somewhere to record it");
+        return;
+    }
+
+    let resolved = {
+        let env = crate::filter::Env {
+            listened: Some(&ui.listened),
+            now: crate::history::now(),
+        };
+        ui.composed.resolve(ctx.library, &ui.catalogs, env)
+    };
+    let ordered = resolved.rows.is_sequence();
+    let members: Vec<_> = resolved.rows.iter().collect();
+    if members.is_empty() {
+        ui.notify(format!("nothing to collect into {name}"));
+        return;
+    }
+
+    let id = Id::<Collection>::of_name(name);
+    let now = crate::history::now_ms();
+    record(ui, now, |log| {
+        log.name_collection(now, id, name, ordered);
+        // **Keys spread only for a sequence.** A set has no running order, so
+        // giving each entry a distinct key would invent one — and an arbitrary
+        // order that looks meaningful is worse than none. Entries stay
+        // distinct either way, because the fold keys them by
+        // `(collection, position, recording)`.
+        let mut key: Option<OrdKey> = None;
+        for recording in &members {
+            let k = if ordered {
+                OrdKey::between(key.as_ref(), None)
+            } else {
+                OrdKey::first()
+            };
+            log.add_to_collection(now, id, *recording, k.clone());
+            key = Some(k);
+        }
+    });
+
+    let shape = if ordered { "in order" } else { "unordered" };
+    let said = format!("collected {} into {name} ({shape})", members.len());
+    ui.audit.line("collect", &said);
+    ui.notify(said);
+    // A catalog defined by this collection now selects differently.
+    rebuild_library(ui, ctx);
+}
+
 fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // §7's rule: active catalogs union, the transient filter intersects.
     // "Which bodies of music am I in" is a selection; "what am I looking for"
@@ -2967,12 +3051,19 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         // **One fold over one stack** (#94). This used to union the active
         // catalogs and then intersect the filter, with both operators baked
         // into their nouns — so `-` had nowhere to live.
-        let resolved = ui.composed.resolve(ctx.library, &ui.catalogs, env);
+        // **Through the log for the one answer the fold cannot give yet.**
+        // A collection filed with `:collect` is a fact this session wrote, and
+        // the librarian was folded at startup — see `view::Fresh`.
+        let fresh = crate::view::Fresh {
+            under: ctx.library,
+            log: &ui.listened,
+        };
+        let resolved = ui.composed.resolve(&fresh, &ui.catalogs, env);
         // §2: `+` on a hand-made list has no defensible order, so it gives
         // the order up — and says which term did it rather than leaving
         // somebody to notice.
         let lost = resolved.demoted_at.clone();
-        (resolved.copies(ctx.library), lost)
+        (resolved.copies(&fresh), lost)
     };
     // The same projection the startup path uses (#84), so refiltering cannot
     // quietly file things a second way.
@@ -8341,6 +8432,102 @@ mod tests {
         ui.data_dir = Some(scratch(name));
         ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         ui
+    }
+
+    /// **The write the model never had** — #118.
+    ///
+    /// Collections have been facts since #92 and nothing in the player could
+    /// make one: `add_to_collection` had callers only in tests, so the Dance
+    /// collection had to be seeded by a tool pass that read a folder. Now a
+    /// view is filed from the line, and nothing about it reads a path.
+    #[test]
+    fn a_view_is_collected_into_facts() {
+        use crate::model::entity::Collection;
+        use crate::model::id::Id;
+
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "collect");
+        let everything = ui.library.len();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view artist="Anderson .Paak""#);
+        let narrowed = ui.library.len();
+        assert!(narrowed < everything, "the view did not narrow");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "collect Paak");
+
+        let id = Id::<Collection>::of_name("Paak");
+        let held: Vec<_> = ui
+            .listened
+            .entries
+            .iter()
+            .filter(|(c, _, _)| *c == id)
+            .collect();
+        assert!(!held.is_empty(), "nothing was filed");
+        assert_eq!(
+            ui.listened.collections.get(&id).map(|c| c.name.as_str()),
+            Some("Paak"),
+            "the collection was filed and never named"
+        );
+
+        // **A set, so it is unordered** — a filter has no running order and
+        // inventing one would be worse than having none.
+        assert!(
+            !ui.listened.collections[&id].ordered,
+            "a filter has no running order and one was invented for it"
+        );
+
+        // **Entries are recordings, and the view yields copies.** Filing is
+        // idempotent because entries are row existence, so saying it twice is
+        // the same rows.
+        let before = held.len();
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "collect Paak");
+        assert_eq!(
+            ui.listened
+                .entries
+                .iter()
+                .filter(|(c, _, _)| *c == id)
+                .count(),
+            before,
+            "collecting the same view twice filed it twice"
+        );
+    }
+
+    /// **A collection is reachable as a catalog the moment it exists**, which
+    /// is the loop #90 and #94 left open: the Dance catalog was a collection
+    /// the player could read and could not write.
+    #[test]
+    fn a_collected_view_can_be_selected_as_a_catalog() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "collect-catalog");
+        let everything = ui.library.len();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view artist="Anderson .Paak""#);
+        let wanted = ui.library.len();
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "collect Paak");
+
+        // Back to everything — a bare `:view` is the clear — then select the
+        // collection by name.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+        assert_eq!(ui.library.len(), everything, "the view did not clear");
+
+        ui.catalogs.define("paak", Some("Paak".into()), None);
+        ui.catalogs
+            .apply(crate::catalog::Spec::Only(vec!["paak".into()]))
+            .unwrap();
+        rebuild_library(&mut ui, &ctx);
+        assert_eq!(
+            ui.library.len(),
+            wanted,
+            "the catalog did not hold what was collected into it"
+        );
     }
 
     /// What the library says about a recording, after a change.
