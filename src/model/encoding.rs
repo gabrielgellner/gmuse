@@ -521,6 +521,75 @@ mod tests {
         );
     }
 
+    /// **The ordering is pinned, so `POLICY` means something.**
+    ///
+    /// The constant promises that "a changed ordering should read as an
+    /// explainable diff rather than as a mystery", and nothing read it — a
+    /// version nobody checks is a comment with extra steps. This is what
+    /// makes the promise enforceable: change `canonical_key` and this fails,
+    /// and the way to make it pass is to say what changed and bump `POLICY`.
+    ///
+    /// The set is chosen so every term of the tuple decides at least one
+    /// pair: a liar, two formats, two bitrates, and one measured against one
+    /// not.
+    #[test]
+    fn the_canonical_ordering_is_pinned() {
+        let rec = Id::<Recording>::derived(b"r");
+        let mut e = Encodings::default();
+        let cases = [
+            ("suspect mp3", Format::Mp3, 320, Some(15_000)),
+            ("honest opus", Format::Opus, 128, Some(19_500)),
+            ("unmeasured flac", Format::Flac, 1000, None),
+            ("measured flac", Format::Flac, 1000, Some(22_000)),
+            ("good mp3", Format::Mp3, 320, Some(20_000)),
+            // Format and bitrate disagree here, and nothing else does: a
+            // better format at a worse rate. Without this pair, swapping the
+            // two terms changes no answer and the pin proves nothing about
+            // their order.
+            ("low mp3", Format::Mp3, 96, Some(15_500)),
+            ("high aac", Format::Aac, 256, Some(19_000)),
+            // Bitrate and cutoff disagree here, and the type cannot keep them
+            // apart — both are `u32`, so only a case where they point
+            // different ways pins which comes first. Both are honest: 320
+            // expects 19 kHz and 256 expects 19 kHz, and each clears it.
+            ("fat mp3", Format::Mp3, 320, Some(19_200)),
+            ("wide mp3", Format::Mp3, 256, Some(21_000)),
+        ];
+        let mut named = Vec::new();
+        for (name, format, bitrate, cutoff) in cases {
+            let enc = encoding(rec, format, bitrate, cutoff);
+            named.push((name, enc.id));
+            e.encodings.insert(enc.id, enc);
+        }
+        let mut order: Vec<&str> = named.iter().map(|(n, _)| *n).collect();
+        order.sort_by_key(|n| {
+            let id = named.iter().find(|(m, _)| m == n).unwrap().1;
+            std::cmp::Reverse(canonical_key(&e.encodings[&id]))
+        });
+
+        assert_eq!(
+            order,
+            vec![
+                "measured flac",
+                "unmeasured flac",
+                // `low mp3` above `high aac` is the format outranking the
+                // bitrate, which is the whole reason the pair is here.
+                "good mp3",
+                // `fat mp3` above `wide mp3` is the bitrate outranking the
+                // measurement, which the tuple's types cannot express.
+                "fat mp3",
+                "wide mp3",
+                "low mp3",
+                "high aac",
+                "honest opus",
+                "suspect mp3",
+            ],
+            "the canonical ordering changed — say what changed and bump POLICY \
+             (it is {POLICY})"
+        );
+        assert_eq!(POLICY, 2, "the ordering above is what POLICY 2 means");
+    }
+
     /// Every replica computes the same canonical without talking to anyone.
     #[test]
     fn canonical_is_the_same_answer_everywhere() {

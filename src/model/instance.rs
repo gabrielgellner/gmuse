@@ -539,20 +539,6 @@ impl Instance {
         );
     }
 
-    /// Write the role codelist into the log, so its ids resolve.
-    pub fn seed_roles(&mut self, now: i64) {
-        for (name, class) in crate::model::reference::ROLES {
-            self.append(
-                now,
-                Fact::RoleDefined {
-                    role: Id::<Role>::of_name(name),
-                    name: (*name).to_string(),
-                    class: *class,
-                },
-            );
-        }
-    }
-
     /// Say a recording performs a work, cataloguing the work alongside.
     pub fn performs(&mut self, now: i64, recording: Id<Recording>, work: Id<Work>, title: &str) {
         self.append(
