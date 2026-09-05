@@ -3304,6 +3304,45 @@ Append here as decisions are made. Format: date, decision, rationale.
   this seam takes a location as an argument**. That is the rule `library-api.md` states, and #94 could only half enforce
   it while `at` was there.
 
+- **2026-09-05** **A saved view is a fact, and a bare word names nothing (#119).** Two storage mechanisms for one idea:
+  a collection was a fact in the log and a catalog was a table in `config.toml`. `data_dir` is documented as "where
+  everything _you_ have decided about your music lives", and a named selection sitting beside the colour scheme does not
+  sync, does not merge, has no provenance, and is invisible to the library everything else routes through.
+
+  `ViewSaved { view, name, source }` stores **the source line**, not a parsed structure. It is diffable, it is what you
+  typed, and it round-trips through the same parser the `:` line uses — so an operator added to the language needs no
+  fact added here. `a_stack_round_trips_through_its_label` pins that, and it is load-bearing: if the round trip ever
+  breaks, a saved view means something other than what was typed, silently, on reload, long after the edit.
+
+  **By-name/by-value stopped being a fork.** #98 framed it as a hard choice, but a by-value saved view _is a stored list
+  of recordings with a name_ — which is a collection, and `:collect` already writes one. So: definitions are late
+  binding, collections are lists, and freezing one into the other only goes that way. Cycle detection then has exactly
+  one place to live, because a collection is always a leaf.
+
+  **Two things must be loud, and neither can be an empty result.** A view naming one that has gone, and a view that
+  reaches itself, both look exactly like a query that matched nothing. `Resolved::problems` carries them out the way
+  `demoted_at` already carried demotion, and the notification _replaces_ the "0 tracks" count rather than being
+  overwritten by it — the first draft reported the problem and then said "view: saved=\"nope\" (0 tracks)" over the top
+  of it. A loop is named with the path that closes it (`a → b → c → a`), because a stack overflow says nothing about
+  which two definitions disagree.
+
+  **`in=` and `saved=`, because a bare word names nothing.** `jazz` could be a collection, a saved view or a genre
+  concept, and `filter.rs` had already settled the principle — `any` is an explicit pseudo-field "so 'search everything'
+  is explicit rather than a bare word with implicit meaning". Three namespaces resolved by guessing would be that rule
+  broken where it matters most, so `:view jazz` is an error that names all three spellings.
+
+  Two bugs the tests found, both worth recording because both were invisible:
+
+  1. `saved="mornings"` starts with `save`, so the `:view save <name>` prefix test swallowed a term that _named_ a view
+     as the verb that _saves_ one. The space is load-bearing.
+  2. `set_catalogs` kept `Where` terms and dropped everything else, which was correct while a catalog and a filter were
+     the only two kinds of term — and silently discarded `in=` and `saved=` on every rebuild the moment they existed. It
+     keeps everything that is not a catalog now, and the catalog noun being special-cased there is the last of it.
+
+  **Still to come on #119:** `Catalogs`, `Active`, `Spec` and `[catalogs.*]` are not deleted yet — a catalog is now
+  provably a saved view with a second name, and removing it touches config, the session, the cache and view 6. Kept
+  separate so the mechanism lands proven rather than mid-rewrite.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

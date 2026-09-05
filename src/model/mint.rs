@@ -54,6 +54,23 @@ impl Id<Encoding> {
     }
 }
 
+impl Id<crate::model::entity::View> {
+    /// The id a saved view's name always mints.
+    ///
+    /// Convergent through [`crate::model::ingest::normalise`], like every
+    /// other named thing here, so two devices saving `mornings` independently
+    /// write one definition rather than two.
+    ///
+    /// The consequence is the usual one, and here it is a *feature*: renaming
+    /// a view mints a new id, so the old name keeps resolving to the old
+    /// definition until somebody drops it. A view referenced by name from
+    /// another view therefore breaks loudly at use rather than silently
+    /// resolving to something that has moved.
+    pub fn of_name(name: &str) -> Self {
+        Id::derived(crate::model::ingest::normalise(name).as_bytes())
+    }
+}
+
 impl Id<crate::model::entity::Collection> {
     /// The id a collection's name always mints.
     ///

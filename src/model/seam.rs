@@ -1234,6 +1234,7 @@ mod tests {
             "Role",
             "Recording",
             "Track",
+            "View",
             "Work",
         ];
 

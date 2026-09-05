@@ -584,8 +584,14 @@ pub enum ViewTerm {
     Clear,
     /// `:view <n>` — drop one term by its position, 1-based as displayed.
     Drop(usize),
-    /// `:view [+&-]<predicate>` — set, widen, narrow or exclude.
-    Compose(crate::model::view::Op, Box<crate::filter::Filter>, bool),
+    /// `:view [+&-]<term>` — set, widen, narrow or exclude.
+    ///
+    /// Carries a [`crate::view::What`] rather than a `Filter`, because a term
+    /// is not always a predicate: `in="Jazz"` names a collection and
+    /// `saved="mornings"` names a definition (#119).
+    Compose(crate::model::view::Op, Box<crate::view::What>, bool),
+    /// `:view save <name>` — name what is composed, as a fact.
+    Save(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

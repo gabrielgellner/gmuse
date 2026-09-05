@@ -26,7 +26,7 @@ use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
 use crate::model::entity::{
     Artist, Collection, Concept, Device, Encoding, Facet, Hierarchy, Label, Medium, Recording,
-    Release, ReleaseGroup, Role, Track, Work,
+    Release, ReleaseGroup, Role, Track, View, Work,
 };
 use crate::model::facet::{ConceptRecord, Described, FacetRecord};
 use crate::model::id::Id;
@@ -145,6 +145,32 @@ pub enum Fact {
         name: String,
         ordered: bool,
     },
+
+    /// A query somebody named — #119.
+    ///
+    /// **The source line, not a parsed structure.** It is diffable, it is what
+    /// a person typed, and it round-trips through the same parser the `:` line
+    /// uses — so an operator added to the language needs no fact added here.
+    ///
+    /// **In the log rather than the config**, because `data_dir` is where
+    /// everything you have decided about your music lives. A named selection
+    /// in `config.toml` sits beside the colour scheme: it does not sync, does
+    /// not merge, has no provenance, and is invisible to the library
+    /// everything else routes through.
+    ///
+    /// Last-writer-wins on the name, like an artist's: editing a saved view is
+    /// a rewrite of one definition, and two devices editing the same one is a
+    /// disagreement the clock settles rather than a set to union.
+    ViewSaved {
+        view: Id<View>,
+        name: String,
+        source: String,
+    },
+
+    /// A saved view somebody deleted. Shadows rather than removes, for the
+    /// reason every retraction here does: a stale replica re-delivering the
+    /// definition would otherwise resurrect it.
+    ViewDropped { view: Id<View> },
 
     /// One recording sits in one collection, at one position.
     ///
@@ -685,6 +711,11 @@ pub struct Catalogue {
     /// assertion clears the entry, or a retraction would be a delete wearing
     /// another name.
     pub assertions_retracted: BTreeSet<(Described, Id<Concept>)>,
+    /// Every saved view, by the id its name mints.
+    pub views: BTreeMap<Id<View>, SavedView>,
+    /// Views somebody has dropped. Kept, because *deleted* and *never existed*
+    /// are different answers and only a row can tell them apart.
+    pub views_dropped: BTreeSet<Id<View>>,
     /// What each collection is called, and whether its order means anything.
     pub collections: BTreeMap<Id<Collection>, Collected>,
     /// Every collection entry, **keyed by position before recording**.
@@ -807,6 +838,14 @@ pub struct Placed {
     pub recording: Id<Recording>,
     pub position: u16,
     pub title_on_release: Option<String>,
+}
+
+/// A saved view, as the fold has it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedView {
+    pub name: String,
+    /// The stack as somebody typed it — `in="Jazz" &year>=2015`.
+    pub source: String,
 }
 
 /// A collection, as the fold has it.
@@ -959,6 +998,20 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     .entry((*encoding, from.map(|f| of(&f))))
                     .or_default()
                     .push((*stamp, of(to)));
+            }
+            Fact::ViewSaved { view, name, source } => {
+                cat.views.insert(
+                    *view,
+                    SavedView {
+                        name: name.clone(),
+                        source: source.clone(),
+                    },
+                );
+                cat.views_dropped.remove(view);
+            }
+            Fact::ViewDropped { view } => {
+                cat.views.remove(view);
+                cat.views_dropped.insert(*view);
             }
             Fact::CollectionNamed {
                 collection,
@@ -1729,6 +1782,7 @@ mod reachability {
         ("hierarchy", Some("HierarchyDefined")),
         ("role", Some("RoleDefined")),
         ("collection", Some("CollectionNamed")),
+        ("view", Some("ViewSaved")),
         ("credit", Some("CreditAsserted")),
         ("mix-entry", None),
         // A row rather than an entity: the fold keys an entry by

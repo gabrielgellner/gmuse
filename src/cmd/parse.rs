@@ -23,6 +23,10 @@ pub enum ParseError {
     },
     #[error("{0:?} is not a {1}")]
     Bad(String, &'static str),
+    #[error(
+        "{0:?} on its own names nothing — a collection is `in={0:?}`, a saved view is `saved={0:?}`, a genre is `genre={0:?}`"
+    )]
+    Bare(String),
     #[error("{0}")]
     Key(#[from] keys::KeyParseError),
     #[error("{0}")]
@@ -347,6 +351,15 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
 ///
 /// The sign is the operator and it comes first, because that is how the stack
 /// reads back and a line somebody can read back is a line they can retype.
+/// One `:view` term, from the text after the verb.
+///
+/// Public because `view::Stack::parse` reads a saved definition back through
+/// it — **one parser, so a saved view cannot mean something the line would
+/// not** (#119).
+pub fn view_term(rest: &str) -> Result<crate::cmd::ViewTerm, ParseError> {
+    compose_term(rest)
+}
+
 fn compose_term(rest: &str) -> Result<crate::cmd::ViewTerm, ParseError> {
     use crate::cmd::ViewTerm;
     use crate::model::view::Op;
@@ -367,16 +380,73 @@ fn compose_term(rest: &str) -> Result<crate::cmd::ViewTerm, ParseError> {
             .map_err(|_| ParseError::Bad(n.into(), "term number"));
     }
 
+    // **The space is load-bearing.** `saved="mornings"` starts with `save`,
+    // so a bare prefix test read a term naming a view as the verb that saves
+    // one — caught by the round-trip test, which is what it is for.
+    if let Some(name) = rest
+        .strip_prefix("save ")
+        .or_else(|| (rest.trim_end() == "save").then_some(""))
+    {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ParseError::Missing {
+                cmd: "view save",
+                what: "a name",
+            });
+        }
+        return Ok(ViewTerm::Save(name.to_string()));
+    }
+
     let (op, expr, first) = match rest.split_at(1) {
         ("+", tail) => (Op::Or, tail, false),
         ("&", tail) => (Op::And, tail, false),
         ("-", tail) => (Op::AndNot, tail, false),
         // No sign sets the view rather than adding to it, which is what
-        // `:view dance` means in §2.
+        // `:view in="dance"` means in §2.
         _ => (Op::Or, rest, true),
     };
-    let filter = crate::filter::Filter::parse(expr.trim())?;
-    Ok(ViewTerm::Compose(op, Box::new(filter), first))
+    Ok(ViewTerm::Compose(op, Box::new(source(expr.trim())?), first))
+}
+
+/// One term's source: a collection, a saved view, or a predicate.
+///
+/// **A bare word is refused rather than guessed at** (#119). `jazz` could name
+/// a collection, a saved view or a genre concept, and the codebase already
+/// settled that question for the filter language — `any` is an explicit
+/// pseudo-field "so 'search everything' is explicit rather than a bare word
+/// with implicit meaning". Three namespaces resolved by guessing would be that
+/// rule broken in the place it matters most.
+fn source(expr: &str) -> Result<crate::view::What, ParseError> {
+    use crate::view::What;
+
+    if let Some(name) = quoted_value(expr, "in") {
+        return Ok(What::Collection(name));
+    }
+    if let Some(name) = quoted_value(expr, "saved") {
+        return Ok(What::Saved(name));
+    }
+    // A word on its own is not a field, and the filter parser's "unknown
+    // field" would not say what the two ways of naming a group are.
+    if !expr.is_empty()
+        && expr
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == ' ')
+    {
+        return Err(ParseError::Bare(expr.to_string()));
+    }
+    Ok(What::Where(Box::new(crate::filter::Filter::parse(expr)?)))
+}
+
+/// `key="value"` or `key=value`, if this is that key.
+fn quoted_value(expr: &str, key: &str) -> Option<String> {
+    let rest = expr.strip_prefix(key)?.trim_start();
+    let rest = rest.strip_prefix('=')?.trim();
+    Some(
+        match rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+            Some(inner) => inner.to_string(),
+            None => rest.to_string(),
+        },
+    )
 }
 
 fn catalog_spec(rest: &str) -> Result<crate::catalog::Spec, ParseError> {
@@ -710,8 +780,9 @@ pub fn format(cmd: &Command) -> String {
                     crate::model::view::Op::AndNot => "-",
                 }
             };
-            format!("view {sign}{}", f.source)
+            format!("view {sign}{}", crate::view::written(f))
         }
+        Command::Compose(crate::cmd::ViewTerm::Save(name)) => format!("view save {name}"),
         Command::Filter(None) => "filter".into(),
         Command::Filter(Some(f)) => format!("filter {}", f.source),
         Command::Catalog(spec) => match spec {

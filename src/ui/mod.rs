@@ -411,6 +411,12 @@ pub struct Ui {
     pub catalogs: crate::catalog::Catalogs,
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// What went wrong resolving the composed view, if anything.
+    ///
+    /// Set by every fold, so a caller that has something better to say than
+    /// "0 tracks" can say it. Cleared when the fold is clean, or a stale
+    /// complaint would outlive the view it was about.
+    pub view_problem: Option<String>,
     /// Why the loop should hand control back, if it should.
     ///
     /// Taken by [`run`] at the top of each pass rather than acted on where it
@@ -462,6 +468,7 @@ impl Ui {
     fn bare(library: Shelf) -> Self {
         Self {
             stop: None,
+            view_problem: None,
             view: View::Tree,
             tree: TreeState::default(),
             tree_scroll: Scroll::default(),
@@ -2236,16 +2243,27 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 ViewTerm::Clear => ui.composed.clear_predicates(),
                 // 1-based, as the line shows them.
                 ViewTerm::Drop(n) => ui.composed.drop_at(n.saturating_sub(1)),
-                ViewTerm::Compose(op, f, first) => {
-                    let what = crate::view::What::Where(f);
+                ViewTerm::Compose(op, what, first) => {
                     if first {
-                        ui.composed.set(what);
+                        ui.composed.set(*what);
                     } else {
-                        ui.composed.push(op, what);
+                        ui.composed.push(op, *what);
                     }
+                }
+                ViewTerm::Save(name) => {
+                    save_view(ui, &name);
+                    return;
                 }
             }
             rebuild_library(ui, ctx);
+            // **A broken reference wins over the count.** "0 tracks" is the
+            // most misleading thing this could say about a view naming one
+            // that has gone, because it is what a query matching nothing says
+            // too (#119).
+            if let Some(problem) = ui.view_problem.clone() {
+                ui.notify(problem);
+                return;
+            }
             let said = if ui.composed.is_empty() {
                 "view: all".to_string()
             } else {
@@ -3122,6 +3140,47 @@ fn export(ui: &mut Ui, ctx: &Context<'_>, path: &str) {
     }
 }
 
+/// `:view save <name>` — name what is composed, as a fact.
+///
+/// **A definition, where `:collect` writes a list** (#119). The two are the
+/// pair the whole design turns on: a saved view is intensional and stays
+/// current as the library changes, a collection is extensional and stays put.
+/// Freezing one into the other is `:collect`, and it only goes that way.
+///
+/// What is stored is the **source line**, so it is diffable, it is what you
+/// typed, and it round-trips through the same parser the `:` line uses.
+fn save_view(ui: &mut Ui, name: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        ui.notify("a view needs a name");
+        return;
+    }
+    if ui.composed.is_empty() {
+        ui.notify("nothing composed to save");
+        return;
+    }
+    if ui.data_dir.is_none() {
+        ui.notify("saving a view needs somewhere to record it");
+        return;
+    }
+    let source = ui.composed.label();
+    // **Refused rather than saved and left to fail at use.** A view that names
+    // itself is the one cycle somebody creates by accident, and catching it
+    // here costs nothing.
+    if source.contains(&format!("saved={name:?}")) {
+        ui.notify(format!("{name} would name itself"));
+        return;
+    }
+    let id = crate::model::id::Id::<crate::model::entity::View>::of_name(name);
+    let now = crate::history::now_ms();
+    let stored = source.clone();
+    record(ui, now, |log| {
+        log.save_view(now, id, name, &stored);
+    });
+    ui.audit.line("view", &format!("saved {name} as {source}"));
+    ui.notify(format!("saved {name}: {source}"));
+}
+
 /// `:collect <name>` — file what the view holds into a collection.
 ///
 /// **The write the model never had** (#118). Collections have been facts since
@@ -3167,7 +3226,8 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
             listened: Some(&ui.listened),
             now: crate::history::now(),
         };
-        ui.composed.resolve(ctx.library, &ui.catalogs, env)
+        ui.composed
+            .resolve(ctx.library, &ui.catalogs, &ui.listened, env)
     };
     let ordered = resolved.rows.is_sequence();
     let members: Vec<_> = resolved.rows.iter().collect();
@@ -3227,7 +3287,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // is a restriction.
     // Before anything is folded, so the stack and the selection cannot drift.
     sync_catalog_terms(ui);
-    let (members, order_lost) = {
+    let (members, order_lost, problems) = {
         // Scoped so the borrows of `history` and `filter` end before the
         // library is replaced below.
         let env = crate::filter::Env {
@@ -3237,12 +3297,15 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         // **One fold over one stack** (#94). This used to union the active
         // catalogs and then intersect the filter, with both operators baked
         // into their nouns — so `-` had nowhere to live.
-        let resolved = ui.composed.resolve(ctx.library, &ui.catalogs, env);
+        let resolved = ui
+            .composed
+            .resolve(ctx.library, &ui.catalogs, &ui.listened, env);
         // §2: `+` on a hand-made list has no defensible order, so it gives
         // the order up — and says which term did it rather than leaving
         // somebody to notice.
         let lost = resolved.demoted_at.clone();
-        (resolved.copies(ctx.library), lost)
+        let problems = resolved.problems.clone();
+        (resolved.copies(ctx.library), lost, problems)
     };
     // The same projection the startup path uses (#84), so refiltering cannot
     // quietly file things a second way.
@@ -3251,6 +3314,16 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
             "term {} widened the view, so the list order is gone",
             at + 1
         ));
+    }
+    // **A broken reference is said out loud, not shown as an empty library**
+    // (#119). A saved view that names one which has gone, or one that names
+    // itself, looks exactly like a query that matched nothing — and telling
+    // those apart by staring at the screen is the failure this project keeps
+    // paying for.
+    ui.view_problem = problems.first().map(ToString::to_string);
+    if let Some(p) = ui.view_problem.clone() {
+        ui.audit.line("view", &p);
+        ui.notify(p);
     }
     ui.library = Shelf::project(ctx.library, members, ui.smart_artist_sort);
     ui.tree.selected = 0;
@@ -8660,6 +8733,80 @@ mod tests {
         ui.data_dir = Some(scratch(name));
         ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         ui
+    }
+
+    /// **A saved view is a fact, and it is recalled by name** — #119.
+    ///
+    /// The pair the design turns on: `:collect` writes a *list*, `:view save`
+    /// writes a *definition*. A definition stays current as the library
+    /// changes; a list stays put. Freezing one into the other is `:collect`,
+    /// and it only goes that way.
+    #[test]
+    fn a_saved_view_is_a_fact_and_comes_back_by_name() {
+        use crate::model::entity::View as ViewEntity;
+        use crate::model::id::Id;
+
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "save-view");
+        let everything = ui.library.len();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view artist="Anderson .Paak""#);
+        let narrowed = ui.library.len();
+        assert!(narrowed < everything, "the view did not narrow");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view save paak");
+        let id = Id::<ViewEntity>::of_name("paak");
+        assert_eq!(
+            ui.listened.views.get(&id).map(|v| v.source.as_str()),
+            Some(r#"artist="Anderson .Paak""#),
+            "the source line is what is stored, so it round-trips"
+        );
+
+        // Clear, then recall it by name.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+        assert_eq!(ui.library.len(), everything);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view saved="paak""#);
+        assert_eq!(ui.library.len(), narrowed, "the saved view did not resolve");
+    }
+
+    /// **A name nothing defines is said out loud**, because an empty library
+    /// looks exactly like a query that matched nothing.
+    #[test]
+    fn a_view_naming_one_that_is_gone_is_reported() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "missing-view");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view saved="nope""#);
+        assert!(ui.status.contains("no saved view"), "{}", ui.status);
+    }
+
+    /// **A bare word names nothing**, and the error says the three ways to
+    /// name something rather than leaving somebody to guess which was meant.
+    ///
+    /// The rule this follows is already in `filter.rs`: `any` is an explicit
+    /// pseudo-field "so 'search everything' is explicit rather than a bare
+    /// word with implicit meaning".
+    #[test]
+    fn a_bare_word_is_refused_and_says_how_to_name_things() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "bare-word");
+        let everything = ui.library.len();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view jazz");
+        for spelling in ["in=", "saved=", "genre="] {
+            assert!(ui.status.contains(spelling), "{}", ui.status);
+        }
+        assert_eq!(ui.library.len(), everything, "a refused term still applied");
     }
 
     /// **The write the model never had** — #118.

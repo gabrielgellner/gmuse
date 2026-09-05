@@ -97,6 +97,13 @@ tags! {
     /// A curated set, ordered or not — a playlist is one whose order means
     /// something. Minted by `CollectionNamed` since #92.
     Collection,
+    /// A **stored query** — a definition, where a collection is a list (#119).
+    ///
+    /// The pair is SKOS's `Concept`/`Collection` distinction one level up: a
+    /// collection says *these* recordings, a view says *whatever matches*. The
+    /// transformation between them is one-way and already exists — freezing a
+    /// view by value produces a collection, which is what `:collect` writes.
+    View,
     #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #73")]
     /// An artist on a work, recording, release group or release. Fields with #73.
     Credit,
@@ -131,6 +138,7 @@ kinds! {
     Concept => "concept",
     Role => "role",
     Collection => "collection",
+    View => "view",
     Credit => "credit",
     MixEntry => "mix-entry",
     CollectionEntry => "collection-entry",

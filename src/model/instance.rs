@@ -814,6 +814,24 @@ impl Instance {
         dead_code,
         reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
     )]
+    /// Name a query, or rewrite one that already has this name.
+    pub fn save_view(
+        &mut self,
+        now: i64,
+        view: Id<crate::model::entity::View>,
+        name: &str,
+        source: &str,
+    ) {
+        self.append(
+            now,
+            Fact::ViewSaved {
+                view,
+                name: name.trim().to_string(),
+                source: source.trim().to_string(),
+            },
+        );
+    }
+
     pub fn name_collection(
         &mut self,
         now: i64,
