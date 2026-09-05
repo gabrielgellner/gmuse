@@ -12,8 +12,6 @@
 
 use std::fmt::Write as _;
 
-use crate::store::Track;
-
 /// One field of a track that a template can name.
 ///
 /// Named rather than single-letter (`%a`): the alphabet runs out, and fields
@@ -125,32 +123,47 @@ impl Field {
     /// `None` is what makes a `[…]` group disappear, so the fields that always
     /// have a value — `display_title`, `file_under` — deliberately never
     /// return it.
-    fn value(self, t: &Track) -> Option<String> {
+    /// **Asked of a row, not of a file** — issue #78.
+    ///
+    /// It took a `&Track` and read sixteen fields of it, which is why five of
+    /// the player's remaining reaches into the store were this one function.
+    /// A `Listed` answers fourteen of them; the two it cannot are the two a
+    /// row must never carry, and `Template::parse` refuses those outright.
+    fn value(self, r: &crate::model::rows::Listed<'_>) -> Option<String> {
         Some(match self {
-            Field::Artist => t.artist.clone()?,
-            Field::AlbumArtist => t.albumartist.clone()?,
-            Field::FileUnder => t.file_under().to_string(),
-            Field::Album => t.album.clone()?,
-            Field::Title => t.title.clone()?,
-            Field::DisplayTitle => t.display_title().to_string(),
-            Field::Track => t.tracknumber?.to_string(),
-            Field::Disc => t.discnumber?.to_string(),
-            Field::Year => t.date?.to_string(),
-            Field::Genre => t.genre.clone()?,
-            Field::Label => t.label.clone()?,
+            Field::Artist => r.artist?.to_string(),
+            Field::AlbumArtist => r.album_artist?.to_string(),
+            Field::FileUnder => r.file_under.to_string(),
+            Field::Album => r.tagged_album?.to_string(),
+            Field::Title => r.tagged_title?.to_string(),
+            Field::DisplayTitle => r.title.to_string(),
+            Field::Track => r.track?.to_string(),
+            Field::Disc => r.disc?.to_string(),
+            Field::Year => r.year?.to_string(),
+            Field::Genre => r.genre?.to_string(),
+            Field::Label => r.label?.to_string(),
             Field::Duration => {
-                let secs = t.duration.as_secs();
+                let secs = r.duration.as_secs();
                 format!("{}:{:02}", secs / 60, secs % 60)
             }
-            Field::Bitrate => t.bitrate?.to_string(),
-            Field::SampleRate => t.samplerate?.to_string(),
-            Field::Channels => t.channels?.to_string(),
-            Field::Path => t.path.display().to_string(),
-            Field::FileName => t
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())?,
+            Field::Bitrate => r.bitrate?.to_string(),
+            Field::SampleRate => r.sample_rate?.to_string(),
+            Field::Channels => r.channels?.to_string(),
+            // Refused at parse time, so this is unreachable rather than blank.
+            Field::Path | Field::FileName => return None,
         })
+    }
+
+    /// Whether a row can answer this at all.
+    ///
+    /// `path` and `file_name` are properties of one device's copy, and a row
+    /// holds no location — the omission that stopped history being keyed by
+    /// path, learned at the cost of a four-star rating on a file that still
+    /// existed. A template asking for one is refused when it is parsed rather
+    /// than rendering an empty space, because a silent blank is exactly the
+    /// inference this project keeps turning into a declaration.
+    const fn is_of_a_row(self) -> bool {
+        !matches!(self, Field::Path | Field::FileName)
     }
 }
 
@@ -255,6 +268,10 @@ enum Atom {
 pub enum FormatError {
     #[error("unknown field {name:?} — try one of: {}", Field::NAMES.join(", "))]
     UnknownField { name: String },
+    #[error(
+        "{name:?} is a property of this machine's copy, not of the track — a displayed row carries no location"
+    )]
+    NotOnARow { name: String },
     #[error("bad width {0:?} — expected a number, optionally prefixed with 0 or >")]
     BadPad(String),
     #[error("unclosed {0}")]
@@ -299,9 +316,9 @@ impl Template {
         Ok(Template { atoms })
     }
 
-    pub fn render(&self, track: &Track) -> String {
+    pub fn render(&self, row: &crate::model::rows::Listed<'_>) -> String {
         let mut out = String::new();
-        render_atoms(&self.atoms, track, &mut out);
+        render_atoms(&self.atoms, row, &mut out);
         out
     }
 }
@@ -351,6 +368,14 @@ fn parse_atoms(
                 };
                 let field = Field::parse(name.trim())
                     .ok_or_else(|| FormatError::UnknownField { name: name.into() })?;
+                // Refused here rather than rendered blank. A row holds no
+                // location, so a template asking for one is a mistake worth
+                // being told about at the moment it is written (#78).
+                if !field.is_of_a_row() {
+                    return Err(FormatError::NotOnARow {
+                        name: name.trim().into(),
+                    });
+                }
                 let pad = Pad::parse(spec).ok_or_else(|| FormatError::BadPad(spec.into()))?;
                 atoms.push(Atom::Field { field, pad });
             }
@@ -375,12 +400,12 @@ fn parse_atoms(
 }
 
 /// Render into `out`, returning whether every field encountered had a value.
-fn render_atoms(atoms: &[Atom], track: &Track, out: &mut String) -> bool {
+fn render_atoms(atoms: &[Atom], row: &crate::model::rows::Listed<'_>, out: &mut String) -> bool {
     let mut complete = true;
     for atom in atoms {
         match atom {
             Atom::Literal(text) => out.push_str(text),
-            Atom::Field { field, pad } => match field.value(track) {
+            Atom::Field { field, pad } => match field.value(row) {
                 Some(v) => {
                     let _ = write!(out, "{}", pad.apply(&v));
                 }
@@ -391,7 +416,7 @@ fn render_atoms(atoms: &[Atom], track: &Track, out: &mut String) -> bool {
                 // nothing behind — including its literal text, which is the
                 // whole point of grouping.
                 let mut nested = String::new();
-                if render_atoms(inner, track, &mut nested) {
+                if render_atoms(inner, row, &mut nested) {
                     out.push_str(&nested);
                 }
             }
@@ -403,6 +428,7 @@ fn render_atoms(atoms: &[Atom], track: &Track, out: &mut String) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Track;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -424,7 +450,7 @@ mod tests {
     }
 
     fn render(source: &str, track: &Track) -> String {
-        Template::parse(source).unwrap().render(track)
+        Template::parse(source).unwrap().render(&track.listed())
     }
 
     #[test]
@@ -438,6 +464,41 @@ mod tests {
     }
 
     /// `{track:02}` is the reason padding exists at all.
+    /// **A row carries no location, so a template may not ask for one.**
+    ///
+    /// Refused when the template is parsed rather than rendering an empty
+    /// space, because a blank field is an inference and this project keeps
+    /// turning those into declarations. The two names still parse — they are
+    /// real fields of a file — and it is asking a *row* for them that fails.
+    #[test]
+    fn a_template_cannot_ask_a_row_where_the_file_is() {
+        for name in ["path", "filename"] {
+            let err = Template::parse(&format!("{{{name}}}")).unwrap_err();
+            assert!(
+                matches!(err, FormatError::NotOnARow { .. }),
+                "{name} was accepted, and would render nothing"
+            );
+            // Not confused with a typo: the message has to say which mistake
+            // it is, or somebody will go looking for a misspelling.
+            assert!(err.to_string().contains("carries no location"), "{err}");
+        }
+        assert!(matches!(
+            Template::parse("{pahт}").unwrap_err(),
+            FormatError::UnknownField { .. }
+        ));
+    }
+
+    /// **The stand-in is not a name.** `album` falls back to a placeholder so
+    /// a tree node always has a label, and a template must not show that
+    /// placeholder as though the tags had said it — `[ — {album}]` is meant to
+    /// disappear for a track that is on no album.
+    #[test]
+    fn a_track_on_no_album_renders_no_album() {
+        let mut bare = full();
+        bare.album = None;
+        assert_eq!(render("{artist}[ — {album}]", &bare), "Sierra Ferrell");
+    }
+
     #[test]
     fn padding() {
         assert_eq!(render("{track:02}", &full()), "01");
@@ -535,7 +596,7 @@ mod tests {
         assert_eq!(render("{display_title}", &empty), "whatever.mp3");
         assert!(!render("{file_under}", &empty).is_empty());
         assert_eq!(
-            Template::default().render(&empty),
+            Template::default().render(&empty.listed()),
             format!("{} — whatever.mp3", empty.file_under())
         );
     }

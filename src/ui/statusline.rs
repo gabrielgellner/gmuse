@@ -61,7 +61,10 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
             theme.get(Role::StatusNotice),
         ));
     } else if let Some(id) = ui.playback.current
-        && let Some(track) = ctx.store.get(id)
+        && let Some(track) = {
+            let files: &dyn crate::model::rows::Listing = ctx.store;
+            files.listed(id)
+        }
     {
         let state = ctx.player.map(|p| p.state()).unwrap_or(State::Stopped);
         spans.push(Span::styled(
@@ -73,7 +76,7 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
             theme.get(Role::StatusPlaying),
         ));
         spans.push(Span::styled(
-            ui.now_playing.render(track),
+            ui.now_playing.render(&track),
             theme.get(Role::StatusText),
         ));
         let position = ctx.player.map(|p| p.position()).unwrap_or(Duration::ZERO);

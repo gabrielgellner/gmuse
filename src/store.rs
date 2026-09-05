@@ -135,6 +135,32 @@ impl Track {
             .unwrap_or(UNKNOWN_ARTIST)
     }
 
+    /// This file as a **row** — what a display template asks for.
+    ///
+    /// Here rather than only in `Store::listed` because the remote holds a
+    /// cloned `Track` so another thread can render a caller's own format, and
+    /// it needs the same view without an arena to look in.
+    pub fn listed(&self) -> crate::model::rows::Listed<'_> {
+        crate::model::rows::Listed {
+            file_under: self.file_under(),
+            album: self.album_or_unknown(),
+            disc: self.discnumber,
+            track: self.tracknumber,
+            title: self.display_title(),
+            duration: self.duration,
+            artist: self.artist.as_deref(),
+            album_artist: self.albumartist.as_deref(),
+            tagged_title: self.title.as_deref(),
+            tagged_album: self.album.as_deref(),
+            genre: self.genre.as_deref(),
+            label: self.label.as_deref(),
+            year: self.date,
+            bitrate: self.bitrate,
+            sample_rate: self.samplerate,
+            channels: self.channels,
+        }
+    }
+
     /// The album a track should file under, or [`NO_ALBUM`] when it has none.
     pub fn album_or_unknown(&self) -> &str {
         self.album.as_deref().unwrap_or(NO_ALBUM)
@@ -361,15 +387,7 @@ impl Store {
 /// not change when it does — which is the point of the trait existing at all.
 impl crate::model::rows::Listing for Store {
     fn listed(&self, id: TrackId) -> Option<crate::model::rows::Listed<'_>> {
-        let t = self.get(id)?;
-        Some(crate::model::rows::Listed {
-            file_under: t.file_under(),
-            album: t.album_or_unknown(),
-            disc: t.discnumber,
-            track: t.tracknumber,
-            title: t.display_title(),
-            duration: t.duration,
-        })
+        Some(self.get(id)?.listed())
     }
 
     fn audio_of(&self, id: TrackId) -> Option<crate::audio_id::AudioId> {

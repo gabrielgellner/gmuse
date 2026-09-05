@@ -27,7 +27,7 @@ pub struct Expansion<K> {
     /// Everything **shallower** than this is open. `0` closes everything;
     /// `1` opens the top level; and so on.
     ///
-    /// Stored unclamped. vim's `zr` past the deepest fold is a no-op rather
+    /// Kept unclamped. vim's `zr` past the deepest fold is a no-op rather
     /// than an error, and clamping here would make the next `zm` asymmetric —
     /// you would have to press it once for nothing before it moved.
     level: u16,

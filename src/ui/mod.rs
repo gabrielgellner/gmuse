@@ -425,7 +425,7 @@ pub struct Ui {
     /// A transient narrowing on top of the active catalogs. Anonymous and
     /// not saved — a named, persistent one is a catalog (§7).
     pub filter: Option<crate::filter::Filter>,
-    /// Keep playing past the end of the current album/artist pool. Stored here
+    /// Keep playing past the end of the current album/artist pool. Kept here
     /// because it is a setting the user toggles, not a property of a track.
     pub continue_playing: bool,
     /// Divide track lists by album. cmus does; the alternative is one
@@ -757,18 +757,23 @@ fn serve_remote(ui: &mut Ui, ctx: &Context<'_>) {
     }
 
     if let Some(player) = ctx.player {
-        let current = ui.playback.current.and_then(|id| ctx.store.get(id));
+        let files: &dyn Listing = ctx.store;
+        let current = ui.playback.current.and_then(|id| files.listed(id));
+        // The remote holds an owned snapshot so another thread can render a
+        // caller's own template. That is the one thing a borrowed row cannot
+        // do, and the only reason this still reaches for the record itself.
+        let owned = ui.playback.current.and_then(|id| ctx.store.get(id));
         // The `Track` is cloned so the listener can render a caller's own
         // format without reaching into the store from another thread. Only when
         // the track *changes*, not every tick: it is a handful of `String`s and
         // this loop runs five times a second.
         let track = match (ui.playback.current, ui.remote_track) {
             (Some(id), Some(seen)) if id == seen => None,
-            _ => current.cloned(),
+            _ => owned.cloned(),
         };
         let next = crate::remote::Status {
             state: Some(player.state()),
-            rendered: current.map(|t| ui.now_playing.render(t)),
+            rendered: current.as_ref().map(|row| ui.now_playing.render(row)),
             track,
             position: player.position(),
         };
@@ -3765,7 +3770,8 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
         .map(|p| p.state())
         .unwrap_or(crate::audio::State::Stopped);
     let position = ctx.player.map(|p| p.position()).unwrap_or(Duration::ZERO);
-    let track = ui.playback.current.and_then(|id| ctx.store.get(id));
+    let files: &dyn Listing = ctx.store;
+    let track = ui.playback.current.and_then(|id| files.listed(id));
 
     match track {
         Some(track) => {
@@ -3783,7 +3789,7 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
                     },
                     theme.get(theme::Role::StatusPlaying),
                 ),
-                Span::styled(ui.transport_line.render(track), text),
+                Span::styled(ui.transport_line.render(&track), text),
             ]));
             lines.push(Line::from(Span::styled(
                 progress_bar(position, track.duration, area.width.saturating_sub(2)),
@@ -3820,8 +3826,8 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
     // What is next is worth a line precisely because shuffle makes it
     // unguessable, and `next()` is pure so asking costs nothing.
     let next = crate::next::next_with_source(next_input(ui))
-        .and_then(|(id, _)| ctx.store.get(id))
-        .map(|t| format!("next  {}", ui.now_playing.render(t)))
+        .and_then(|(id, _)| files.listed(id))
+        .map(|row| format!("next  {}", ui.now_playing.render(&row)))
         .unwrap_or_else(|| "next  —".to_string());
     lines.push(Line::from(Span::styled(next, dim)));
 
@@ -4042,10 +4048,10 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
                         Style::default()
                     };
                     spans.push(Span::raw(row.label()));
-                    let text = ctx
-                        .store
-                        .get(*id)
-                        .map(|t| ui.track_line.render(t))
+                    let files: &dyn Listing = ctx.store;
+                    let text = files
+                        .listed(*id)
+                        .map(|row| ui.track_line.render(&row))
                         .unwrap_or_default();
                     spans.push(Span::styled(text, style));
                 }

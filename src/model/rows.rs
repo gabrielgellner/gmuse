@@ -36,6 +36,38 @@ pub struct Listed<'a> {
     pub track: Option<u32>,
     pub title: &'a str,
     pub duration: std::time::Duration,
+
+    // **Everything below is here because a display template asks for it** —
+    // issue #78. `format::Template` read sixteen fields off a `Track`, which
+    // is why five of the player's remaining reaches into the store were one
+    // function. These are the fourteen a row can answer.
+    //
+    // The two it cannot are `path` and `file_name`. A row holds identities and
+    // values and **never a location** — that omission is what stopped
+    // `history.toml` being keyed by path, and it cost a four-star rating on a
+    // file that still existed to learn. So a template may not ask for one, and
+    // `Template::parse` refuses rather than rendering a blank.
+    /// The track's own credit, which is not always who it files under.
+    pub artist: Option<&'a str>,
+    pub album_artist: Option<&'a str>,
+    /// The title as tagged. `title` above is this or the file name — never
+    /// empty — and a template can ask for either.
+    pub tagged_title: Option<&'a str>,
+    /// The album as tagged, **absent when there is none**.
+    ///
+    /// Distinct from `album` above, which stands in a placeholder so a tree
+    /// node always has a label. A template needs the difference: `[ — {album}]`
+    /// is meant to disappear for a track that is on no album, and rendering
+    /// the placeholder there would show the stand-in as though it were a name.
+    pub tagged_album: Option<&'a str>,
+    pub genre: Option<&'a str>,
+    /// The imprint. Its own field because a label sampler's `album_artist` is
+    /// "Various Artists" and the label has nowhere else to go.
+    pub label: Option<&'a str>,
+    pub year: Option<i32>,
+    pub bitrate: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u8>,
 }
 
 /// What is needed to *open* a row, as against to draw it.

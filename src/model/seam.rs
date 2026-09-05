@@ -575,6 +575,13 @@ mod tests {
     ///
     /// **Lower these as the migration lands. Never raise them.**
     ///
+    /// **It counts the substring, so prose counted too.** Two `Store`
+    /// mentions were the word *Stored* in doc comments and one was a comment
+    /// naming `Store::recording_of` — three of five, in a number somebody was
+    /// going to chase to zero. Reworded rather than subtracted, so the count
+    /// means what it says. What is left is the import, the `Context` field,
+    /// and one comment about what playlists hold.
+    ///
     /// **Test code is not counted**, and that is a correction rather than a
     /// loophole. Counting it measured the wrong thing twice over: most of what
     /// it found was fixtures building a library to test against, and the first
@@ -583,7 +590,7 @@ mod tests {
     /// renamed a file in. A fixture is not a leak. What leaks is the player.
     #[test]
     fn the_leak_from_the_player_only_narrows() {
-        const STORE: usize = 5;
+        const STORE: usize = 3;
         const PATHS: usize = 4;
         /// **The number that actually measures the seam.** The player reaches
         /// through `ctx.store` far more often than it names the type, so
@@ -601,17 +608,18 @@ mod tests {
         /// are waiting on is not effort but three other decisions**, and they
         /// are listed here so the next person does not re-derive them:
         ///
-        /// - **five** render through `format::Template`, which takes a
-        ///   `&Track` and reads sixteen fields of it — path, file name, genre,
-        ///   channels. A `Row` carries six. Deciding what a displayed row
-        ///   needs is #78, and this is the rest of it.
+        /// The five that rendered through `format::Template` are gone: it
+        /// takes a `rows::Listed` now, which answers fourteen of the sixteen
+        /// fields it used to read off a `Track`. The two it does not are
+        /// `path` and `file_name`, and a template asking for either is refused
+        /// when it is parsed — a row carries no location (#78).
         /// - **three** are `id_for_path`, restoring a session or a playlist.
         ///   A session stores paths, which is exactly what #37 says has to
         ///   stop.
         /// - **two** write `.m3u`, which is a path format by definition. That
         ///   one is an export and may never move.
         /// - **one** is the filter closure, which matches on a `&Track`.
-        const REACHES: usize = 11;
+        const REACHES: usize = 8;
 
         let (mut store, mut paths, mut reaches) = (0, 0, 0);
         for (_, text) in read("src/ui") {
