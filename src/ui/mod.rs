@@ -2231,16 +2231,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Collect(name) => collect(ui, ctx, &name),
         Command::Find(source) => open_picker(ui, ctx, source),
         Command::Export(path) => export(ui, ctx, &path),
-        Command::Freeze => match ui.open.take() {
-            Some(Open::Rule(name)) => ui.notify(format!(
-                "froze {name} — {} tracks; `:playlist save <name>` keeps it",
-                ui.playlist.len()
-            )),
-            other => {
-                ui.open = other;
-                ui.notify("only a rule can be frozen");
-            }
-        },
+        Command::Freeze(name) => freeze(ui, ctx, &name),
 
         // ---- transport
         // `x` plays **what is under the cursor**. It used to mean "resume if
@@ -3357,6 +3348,183 @@ fn save_view(ui: &mut Ui, name: &str) {
     ui.notify(format!("saved {name}: {source}"));
 }
 
+/// `:freeze <name>` — a question becomes an answer somebody kept.
+///
+/// **The crossing between the two kinds of view** (#95, `query-language.md`
+/// §3). A dynamic view is a question and stays current as the library changes;
+/// a frozen one is what the answer was at a moment, and stays put.
+///
+/// Two gestures, one verb, and which you get depends on whether the name
+/// already means something:
+///
+/// - **not yet frozen** — materialise the composed view, recording the query
+///   it came from. That is `:collect`, and this is its name when the point is
+///   the crossing rather than the filing.
+/// - **already frozen** — re-run *what it was frozen from* and say what
+///   changed. Without the recorded source that is a retype; with it, drift is
+///   one keystroke to see and one to take.
+///
+/// **Order comes from the view's shape**, as it does for `:collect`: a
+/// sequence keeps its running order, a set has none to keep. The sort you were
+/// looking at is deliberately not copied — a sort is a presentation (#97), and
+/// storing it as entry positions would make a display choice into a fact about
+/// the list.
+fn freeze(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+    use crate::model::entity::Collection;
+    use crate::model::id::Id;
+
+    let name = name.trim();
+    if name.is_empty() {
+        ui.notify("a collection needs a name");
+        return;
+    }
+    let id = Id::<Collection>::of_name(name);
+    let Some(source) = ui
+        .listened
+        .collections
+        .get(&id)
+        .and_then(|c| c.from.clone())
+    else {
+        // **A rule open in view 3 is a question too**, and freezing it is the
+        // same crossing. It was two gestures before — `:freeze` then
+        // `:playlist save <name>`, because the first had nowhere to put the
+        // answer — and a name is what it was missing.
+        if let Some(Open::Rule(rule)) = ui.open.clone() {
+            freeze_open_rule(ui, ctx, name, &rule);
+            return;
+        }
+        // Otherwise this is the first crossing for the composed view.
+        collect(ui, ctx, name);
+        return;
+    };
+
+    // **Re-run what it was frozen from**, not what is on screen. Refreshing a
+    // frozen crate from whatever view happens to be open would silently make
+    // it something else — the one thing recording the source exists to stop.
+    let Ok(stack) = crate::view::Stack::parse(&source) else {
+        ui.notify(format!(
+            "{name} was frozen from {source:?}, which no longer parses"
+        ));
+        return;
+    };
+    let env = crate::filter::Env {
+        listened: Some(&ui.listened),
+        now: crate::history::now(),
+    };
+    let resolved = stack.resolve(ctx.library, &ui.listened, env);
+    if let Some(problem) = resolved.problems.first() {
+        ui.notify(format!("{name}: {problem}"));
+        return;
+    }
+
+    let ordered = resolved.rows.is_sequence();
+    let wanted: Vec<_> = resolved.rows.iter().collect();
+    let held: Vec<(crate::model::ord::OrdKey, _)> = ui
+        .listened
+        .entries
+        .iter()
+        .filter(|(c, _, _)| *c == id)
+        .map(|(_, ord, r)| (ord.clone(), *r))
+        .collect();
+
+    let now: std::collections::BTreeSet<_> = wanted.iter().copied().collect();
+    let before: std::collections::BTreeSet<_> = held.iter().map(|(_, r)| *r).collect();
+    let added: Vec<_> = wanted
+        .iter()
+        .copied()
+        .filter(|r| !before.contains(r))
+        .collect();
+    let gone: Vec<_> = held
+        .iter()
+        .filter(|(_, r)| !now.contains(r))
+        .cloned()
+        .collect();
+
+    if added.is_empty() && gone.is_empty() {
+        ui.notify(format!("{name} is up to date — {} tracks", held.len()));
+        return;
+    }
+    let stamp = crate::history::now_ms();
+    let (n_added, n_gone) = (added.len(), gone.len());
+    record(ui, stamp, |log| {
+        for (ord, recording) in &gone {
+            log.remove_from_collection(stamp, id, *recording, ord.clone());
+        }
+        let mut key = held.last().map(|(k, _)| k.clone());
+        for recording in &added {
+            let k = if ordered {
+                crate::model::ord::OrdKey::between(key.as_ref(), None)
+            } else {
+                crate::model::ord::OrdKey::first()
+            };
+            log.add_to_collection(stamp, id, *recording, k.clone());
+            key = Some(k);
+        }
+    });
+
+    // **What changed, not what it holds.** The count is the boring half; the
+    // drift is why anybody re-froze it.
+    let said = format!("{name}: +{n_added} −{n_gone}, from {source}");
+    ui.audit.line("freeze", &said);
+    ui.notify(said);
+    ui.stop = Some(Stop::Refold);
+}
+
+/// Freeze the rule open in view 3 into a named collection, and open that.
+///
+/// The members come from what the rule **currently** holds, which is what is
+/// on screen — that is the whole meaning of freezing: this is the answer as of
+/// now. The rule's own expression is recorded as the source, so re-freezing
+/// re-runs the rule rather than whatever view is open later.
+fn freeze_open_rule(ui: &mut Ui, ctx: &Context<'_>, name: &str, rule: &str) {
+    use crate::model::entity::Collection;
+    use crate::model::id::Id;
+    use crate::model::ord::OrdKey;
+
+    if ui.data_dir.is_none() {
+        ui.notify("freezing needs somewhere to record it");
+        return;
+    }
+    let Some(source) = ui.playlists.get(rule).map(|p| p.filter.source.clone()) else {
+        ui.notify(format!("no rule {rule:?}"));
+        return;
+    };
+    let rows: &dyn Listing = ctx.library;
+    let members: Vec<_> = ui
+        .playlist
+        .entries()
+        .iter()
+        .filter_map(|copy| rows.recording_of(*copy))
+        .collect();
+    if members.is_empty() {
+        ui.notify(format!("{rule} holds nothing to freeze"));
+        return;
+    }
+
+    let id = Id::<Collection>::of_name(name);
+    let now = crate::history::now_ms();
+    let filed = members.len();
+    record(ui, now, |log| {
+        // **Ordered**, because a rule carries a sort and freezing keeps what
+        // was on screen. That order is a fact now and will diverge from the
+        // rule's the moment either changes — which is the point of freezing.
+        log.name_collection(now, id, name, true);
+        log.froze(now, id, &source);
+        let mut key: Option<OrdKey> = None;
+        for recording in &members {
+            let k = OrdKey::between(key.as_ref(), None);
+            log.add_to_collection(now, id, *recording, k.clone());
+            key = Some(k);
+        }
+    });
+    ui.open = Some(Open::Saved(name.to_string()));
+    refresh_playlist_rows(ui);
+    let said = format!("froze {rule} as {name} — {filed} tracks, from {source}");
+    ui.audit.line("freeze", &said);
+    ui.notify(said);
+    ui.stop = Some(Stop::Refold);
+}
+
 /// `:collect <name>` — file what the view holds into a collection.
 ///
 /// **The write the model never had** (#118). Collections have been facts since
@@ -3413,8 +3581,14 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
 
     let id = Id::<Collection>::of_name(name);
     let now = crate::history::now_ms();
+    // **What it was frozen from, always** (#95). There is no reason to file a
+    // view into a collection and not record the query that produced it: it is
+    // what makes drift answerable, and what makes re-freezing a keystroke
+    // rather than a retype.
+    let source = ui.composed.label();
     record(ui, now, |log| {
         log.name_collection(now, id, name, ordered);
+        log.froze(now, id, &source);
         // **Keys spread only for a sequence.** A set has no running order, so
         // giving each entry a distinct key would invent one — and an arbitrary
         // order that looks meaningful is worse than none. Entries stay
@@ -5766,33 +5940,50 @@ mod tests {
         assert!(ui.status.contains(":freeze"), "{}", ui.status);
     }
 
+    /// **Freezing a rule keeps its tracks and makes them editable**, and now
+    /// it takes a name — it was two gestures before, because the first had
+    /// nowhere to put the answer (#95).
     #[test]
-    fn freezing_keeps_the_tracks_and_makes_them_editable() {
+    fn freezing_a_rule_keeps_the_tracks_and_makes_them_editable() {
+        use crate::model::entity::Collection;
+        use crate::model::id::Id;
+
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let mut ui = with_playlists(&store);
+        ui.data_dir = Some(scratch("freeze-rule"));
+        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist open electronic");
         let before = ui.playlist.len();
+        assert!(ui.open.as_ref().is_some_and(Open::is_rule));
 
-        execute(&mut ui, &ctx, Command::Freeze);
-        assert!(ui.open.is_none());
+        execute(&mut ui, &ctx, Command::Freeze("kept".into()));
+        assert_eq!(
+            ui.open.as_ref().map(Open::name),
+            Some("kept"),
+            "{}",
+            ui.status
+        );
+        assert!(!ui.open.as_ref().unwrap().is_rule(), "still a rule");
         assert_eq!(ui.playlist.len(), before, "freezing must keep the tracks");
+
+        // **And it remembers what it was frozen from**, which is what makes
+        // drift answerable and re-freezing a keystroke.
+        let id = Id::<Collection>::of_name("kept");
+        assert_eq!(
+            ui.listened.collections[&id].from.as_deref(),
+            ui.playlists
+                .get("electronic")
+                .map(|p| p.filter.source.as_str()),
+            "the rule was not recorded"
+        );
 
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
         execute(&mut ui, &ctx, Command::Remove);
         assert_eq!(ui.playlist.len(), before - 1, "still not editable");
-    }
-
-    #[test]
-    fn freezing_an_ordinary_playlist_says_so() {
-        let store = genre_fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = with_playlists(&store);
-        execute(&mut ui, &ctx, Command::Freeze);
-        assert!(ui.status.contains("only a rule"), "{}", ui.status);
     }
 
     /// A live query, not a snapshot: rating a track has to change what a
@@ -5828,9 +6019,13 @@ mod tests {
         let out = render(&ui, &ctx, 90, 10);
         assert!(out.contains("electronic"), "{out}");
 
-        execute(&mut ui, &ctx, Command::Freeze);
+        // Freezing renames what is open rather than closing it: the answer
+        // has somewhere to live now, which is the name it takes (#95).
+        ui.data_dir = Some(scratch("freeze-title"));
+        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
+        execute(&mut ui, &ctx, Command::Freeze("kept".into()));
         let out = render(&ui, &ctx, 90, 10);
-        assert!(out.contains("nothing open"), "{out}");
+        assert!(out.contains("kept"), "{out}");
     }
 
     /// The defect #22 opened with — a playlist lost on quit while the
@@ -9118,6 +9313,72 @@ mod tests {
             assert!(ui.status.contains(spelling), "{}", ui.status);
         }
         assert_eq!(ui.library.len(), everything, "a refused term still applied");
+    }
+
+    /// **A frozen view remembers what it was frozen from, and re-freezing
+    /// says what changed** — #95's whole point.
+    ///
+    /// Without the recorded source, "this crate was `rating>=4`, in March" is
+    /// unanswerable, drift is invisible, and re-freezing is a retype rather
+    /// than a keystroke.
+    #[test]
+    fn re_freezing_re_runs_the_source_and_reports_the_drift() {
+        use crate::model::entity::Collection;
+        use crate::model::id::Id;
+
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "freeze-drift");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view rating>=4");
+        assert_eq!(ui.library.len(), 0, "nothing is rated yet");
+
+        // Nothing to freeze yet, so say so rather than writing an empty crate.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "freeze good");
+        assert!(ui.status.contains("nothing to collect"), "{}", ui.status);
+
+        // Rate one, freeze, and the source is recorded.
+        let id = Listing::rows(lib_of(&store))[0];
+        ui.playback.current = Some(id);
+        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(5)));
+        rebuild_library(&mut ui, &ctx);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "freeze good");
+
+        let crate_id = Id::<Collection>::of_name("good");
+        assert_eq!(
+            ui.listened.collections[&crate_id].from.as_deref(),
+            Some("rating>=4"),
+            "the query was not recorded"
+        );
+        let filed = |ui: &Ui| {
+            ui.listened
+                .entries
+                .iter()
+                .filter(|(c, _, _)| *c == crate_id)
+                .count()
+        };
+        assert_eq!(filed(&ui), 1);
+
+        // **Re-freezing from a different view re-runs the recorded source**,
+        // not what is on screen — the one thing recording it exists to stop.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "freeze good");
+        assert!(ui.status.contains("up to date"), "{}", ui.status);
+        assert_eq!(filed(&ui), 1, "the whole library was frozen into it");
+
+        // Rate a second, and the drift is reported rather than counted.
+        let second = Listing::rows(lib_of(&store))[1];
+        ui.playback.current = Some(second);
+        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(4)));
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "freeze good");
+        assert!(ui.status.contains("+1 −0"), "{}", ui.status);
+        assert_eq!(filed(&ui), 2);
     }
 
     /// **The write the model never had** — #118.

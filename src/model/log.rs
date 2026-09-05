@@ -172,6 +172,27 @@ pub enum Fact {
     /// definition would otherwise resurrect it.
     ViewDropped { view: Id<View> },
 
+    /// What a collection was frozen from — #95.
+    ///
+    /// **A separate fact, not a field on `CollectionNamed`.** Naming a list
+    /// and saying where it came from are two claims, and one of them is
+    /// optional: a hand-built crate has no source, and a frozen one has a
+    /// query that may be re-run. Adding a field would also have rewritten the
+    /// meaning of 6,311 facts already on disk.
+    ///
+    /// Last-writer-wins on the collection: re-freezing is a rewrite of one
+    /// answer, not a set to union.
+    ///
+    /// This is what makes drift *visible*. Without it, "this crate was
+    /// `rating>=4 & genre="*techno*"`, in March" is unanswerable and
+    /// re-freezing is a retype rather than a keystroke.
+    CollectionFrozen {
+        collection: Id<Collection>,
+        /// The stack as it was typed — the same round-tripping text a saved
+        /// view stores, so one parser reads both.
+        source: String,
+    },
+
     /// One recording sits in one collection, at one position.
     ///
     /// **Membership is row existence**, so two devices adding the same track
@@ -855,6 +876,13 @@ pub struct Collected {
     /// Whether the order means anything. A playlist is an ordered collection;
     /// an unordered one is a set somebody curated by hand.
     pub ordered: bool,
+    /// The query it was frozen from, if it was frozen rather than hand-built.
+    ///
+    /// `None` is "somebody made this by hand", which is a different answer
+    /// from "frozen from a query that happens to match nothing" — and only a
+    /// distinct value can tell them apart.
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1018,13 +1046,22 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 name,
                 ordered,
             } => {
+                // The source survives a rename: it is a claim about where the
+                // membership came from, not about what the list is called.
+                let from = cat.collections.get(collection).and_then(|c| c.from.clone());
                 cat.collections.insert(
                     *collection,
                     Collected {
                         name: name.clone(),
                         ordered: *ordered,
+                        from,
                     },
                 );
+            }
+            Fact::CollectionFrozen { collection, source } => {
+                if let Some(c) = cat.collections.get_mut(collection) {
+                    c.from = Some(source.clone());
+                }
             }
             Fact::CollectionEntryAdded {
                 collection,

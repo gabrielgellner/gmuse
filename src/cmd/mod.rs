@@ -725,7 +725,11 @@ pub enum Command {
     Export(String),
     /// `:find` / `:find groups` — the fuzzy picker (#54).
     Find(crate::ui::picker::Source),
-    Freeze,
+    /// `:freeze <name>` — a question becomes an answer somebody kept.
+    ///
+    /// Materialises the composed view, or re-runs what a frozen one was frozen
+    /// from and says what changed (#95).
+    Freeze(String),
     Rate(RateSpec),
     /// Narrow the library to what matches. `None` clears it.
     ///

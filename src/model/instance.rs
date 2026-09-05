@@ -858,6 +858,22 @@ impl Instance {
         dead_code,
         reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
     )]
+    /// Record what a collection was frozen from — #95.
+    pub fn froze(
+        &mut self,
+        now: i64,
+        collection: Id<crate::model::entity::Collection>,
+        source: &str,
+    ) {
+        self.append(
+            now,
+            Fact::CollectionFrozen {
+                collection,
+                source: source.trim().to_string(),
+            },
+        );
+    }
+
     pub fn add_to_collection(
         &mut self,
         now: i64,

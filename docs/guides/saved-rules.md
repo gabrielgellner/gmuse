@@ -42,5 +42,23 @@ play one and a `play_count=0` list drops it. Nothing to refresh.
 
 That is also why it cannot be edited by hand — an exception list bolted onto a rule is how these become unexplainable.
 
-    :playlist save keepers    copy what it currently holds, editable
-    :freeze                   detach it without writing anything
+    :freeze keepers           keep what it holds now, under a name
+    :playlist save keepers    the same crossing, said the other way
+
+## Freezing: a question becomes an answer you kept
+
+A rule is a **question** and stays current. Freezing it keeps **what the answer was**, and that list stays put — you can
+edit it, reorder it, delete rows.
+
+    :freeze keepers      the first time: keeps what the rule holds now
+    :freeze keepers      after that: re-runs the rule and says what changed
+
+**It remembers what it was frozen from.** So `keepers` can tell you it came from `rating>=4`, and re-freezing is one
+keystroke rather than retyping the question. The report is the drift — `keepers: +3 −1` — because the count is the
+boring half.
+
+Re-freezing re-runs **the recorded query**, not whatever view happens to be open. Refreshing a crate from something else
+would quietly make it a different crate, which is the one thing recording the source exists to stop.
+
+`:freeze <name>` works on the composed view too, so any question you can ask is one you can keep. What is **not** a
+third kind of thing: a list that "reduces as you play it" is `in="keepers" & play_count=0`, and it is a question.

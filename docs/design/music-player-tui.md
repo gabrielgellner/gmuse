@@ -3439,6 +3439,37 @@ Append here as decisions are made. Format: date, decision, rationale.
   A file sitting directly in a root gets no suggestion — there is no folder to suggest — which is asserted rather than
   left to be discovered by somebody with a stray `.wav`.
 
+- **2026-09-05** **`:freeze` — a question becomes an answer somebody kept (#95).** It reported and wrote nothing:
+  _"froze {name} — {n} tracks; `:playlist save <name>` keeps it"_. Two gestures, because the first had nowhere to put
+  the answer. A name is what it was missing.
+
+  **The crossing already existed as `:collect`**, so the work was not the materialisation but the **provenance**.
+  `CollectionFrozen { collection, source }` records what a crate was frozen from — a separate fact rather than a field
+  on `CollectionNamed`, because naming a list and saying where it came from are two claims and one of them is optional:
+  a hand-built crate has no source. It also avoided rewriting the meaning of the 6,311 `CollectionNamed` facts already
+  on disk.
+
+  That single field is what makes three things possible, and none of them worked without it: _"this crate was
+  `rating>=4`, in March"_ is answerable; **drift is visible**; and re-freezing is a keystroke rather than a retype.
+
+  **Re-freezing re-runs the recorded source, not what is on screen.** Refreshing a frozen crate from whatever view
+  happens to be open would silently make it a different crate — the one thing recording the source exists to stop. The
+  report is the **drift** (`good: +1 −0`) rather than the total, because the count is the boring half and nobody
+  re-froze it to learn that.
+
+  `:collect` records a source too, always. There is no reason to file a view into a collection and _not_ record the
+  query that produced it, so the two verbs differ only in emphasis: `:collect` is about the filing, `:freeze` about the
+  crossing, and `:freeze` on a name that is already frozen is the refresh.
+
+  **Order comes from the view's shape**, as it already did for `:collect` — a sequence keeps its running order, a set
+  has none to keep. #95 asked whether freeze should copy the order; the answer is that **the sort you were looking at is
+  not copied**, because a sort is a presentation (#97) and storing it as entry positions would turn a display choice
+  into a fact about the list. A rule _is_ frozen ordered, because a rule carries a sort and what was on screen is what
+  freezing keeps — and that order is now a fact that will diverge from the rule's, which is the point.
+
+  Not a third kind of noun, as the issue insisted: a list that "reduces as you play it" is
+  `in="keepers" & play_count=0`, and it is a question.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

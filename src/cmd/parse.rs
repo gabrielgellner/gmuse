@@ -320,7 +320,15 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             }
             Command::Collect(rest.to_string())
         }
-        "freeze" => Command::Freeze,
+        "freeze" => {
+            if rest.is_empty() {
+                return Err(ParseError::Missing {
+                    cmd: "freeze",
+                    what: "a collection name",
+                });
+            }
+            Command::Freeze(rest.to_string())
+        }
         "filter" => Command::Filter(if rest.is_empty() {
             None
         } else {
@@ -750,7 +758,7 @@ pub fn format(cmd: &Command) -> String {
             crate::ui::picker::Source::Tracks => "find".into(),
             crate::ui::picker::Source::Groups => "find groups".into(),
         },
-        Command::Freeze => "freeze".into(),
+        Command::Freeze(name) => format!("freeze {name}"),
         // Round-trips through `command`, which is what `:bind` shown in the
         // settings view depends on.
         Command::Compose(crate::cmd::ViewTerm::Clear) => "view".into(),
@@ -869,7 +877,10 @@ mod tests {
     #[test]
     fn rate_takes_one_to_five_or_none() {
         assert_eq!(command("rate").unwrap(), Command::Rate(RateSpec::Report));
-        assert_eq!(command("freeze").unwrap(), Command::Freeze);
+        assert_eq!(
+            command("freeze crate").unwrap(),
+            Command::Freeze("crate".into())
+        );
         assert_eq!(
             command("rate none").unwrap(),
             Command::Rate(RateSpec::Clear)
@@ -1125,6 +1136,7 @@ mod tests {
                 "unbind" => "unbind common x".to_string(),
                 "view" => "view 1".to_string(),
                 "collect" => "collect Dance".to_string(),
+                "freeze" => "freeze Dance".to_string(),
                 "find" => "find groups".to_string(),
                 "export" => "export /tmp/x.m3u8".to_string(),
                 "playlist" => "playlist open fresh".to_string(),
