@@ -23,10 +23,8 @@ use crate::next::AaaMode;
 pub enum Context {
     Common,
     Library,
-    SortedLibrary,
     Playlist,
     Queue,
-    Filters,
     /// View 7, the guides.
     Guide,
     /// Transport mode's keymap (#33). Not a view — a *mode*, so it is the one
@@ -39,10 +37,8 @@ impl Context {
         match self {
             Context::Common => "common",
             Context::Library => "library",
-            Context::SortedLibrary => "sorted",
             Context::Playlist => "playlist",
             Context::Queue => "queue",
-            Context::Filters => "filters",
             Context::Guide => "guide",
             Context::Transport => "transport",
         }
@@ -52,10 +48,8 @@ impl Context {
         Some(match s {
             "common" => Context::Common,
             "library" | "tree" => Context::Library,
-            "sorted" | "sorted_library" => Context::SortedLibrary,
             "playlist" => Context::Playlist,
             "queue" => Context::Queue,
-            "filters" => Context::Filters,
             "guide" => Context::Guide,
             "transport" => Context::Transport,
             _ => return None,

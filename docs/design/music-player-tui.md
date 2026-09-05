@@ -3506,11 +3506,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   view was a mode and `levels` did not exist. That is §9's first sentence made true: **views 1 and 2 are one set drawn
   two ways.**
 
-  **What is not done, and why it is separate.** The `View` enum survives as a rendering detail, and there are no splits.
-  Deleting the enum means unifying the two cursors and two scrolls behind it — `ui.sorted`/`ui.tree.selected`,
-  `sorted_scroll`/`tree_scroll` — across **79 `match ui.view` arms** that are not centralised. Every one is a place a
-  cursor could quietly land somewhere else, and tests do not catch a scroll that is off by a screen. Worth its own pass,
-  and cheaper now that the enum is a function of `levels` rather than a state beside it.
+  **The `View` enum is down to what genuinely differs.** Two of its six members were not views:
+
+  - **`Sorted` was `Tree` drawn flat** — one set, two drawings, and `levels` says which. `2` still works and means
+    `levels: flat`.
+  - **`Filters` was a picker wearing a tab** — `6` opens the groups picker now, which ranks over the whole set instead
+    of listing one you scroll (#54, #119).
+
+  What is left is `Tree`, `Playlist`, `Queue` and `Guide`: three things that hold genuinely different rows, and prose.
+  `Context::SortedLibrary` and `Context::Filters` went with them, and neither had a binding.
+
+  **Three behaviours had to be told apart by hand**, and each was a place the flat drawing is not a tree: `}`/`[[` read
+  album dividers rather than tree depths, `a`/`y` add the row under the cursor rather than a subtree, and the cursor and
+  scroll stay separate per drawing — switching between flat and grouped does not scramble the other's position. Two of
+  the three were caught by tests rather than by reading, which is the argument for having done it as its own pass.
+
+  **One test caught the change itself.** `gt_steps_through_the_views_and_wraps` counted a lap as `ALL.len() - 1` because
+  it started one view in; with four members instead of six it landed on the guide. It counts a full lap from where it
+  starts now, which is what it meant.
+
+  **Splits are still not built**, and are the remaining item on #97. They are a genuinely separate feature rather than a
+  consequence of this one: `g<Tab>` covers moving between two things, and a split is for looking at both at once.
 
 ## 14. Prior art worth reading
 

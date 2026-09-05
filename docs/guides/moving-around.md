@@ -1,13 +1,20 @@
 # Moving around
 
-Six views, switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight to view 3; `g<Tab>` returns to the one you
+Views are switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight to view 3; `g<Tab>` returns to the one you
 were on before.
 
-    1 library    2 sorted     3 playlist   4 queue
-                 6 scope      7 guide
+    1 library    3 playlist   4 queue      7 guide
 
-`5` is unbound. It was a file browser, and gmuse navigates the library rather than a filesystem — the digit is left
-empty rather than moving `scope` and `guide` out from under your fingers.
+Three of them hold rows, and the guide holds prose. `2` and `6` still work and are **not views**:
+
+    2   the library, drawn flat — the same rows, ungrouped
+    6   the picker over your saved views and collections
+
+That is the difference the numbers used to hide. `2` was never a different set from `1`, only a different drawing, so it
+is `:view levels flat` — see [the library tree](the-library-tree.md). And `6` was a list you scrolled; it is a fuzzy
+picker now, the same one `<leader>fg` opens.
+
+`5` is unbound. It was a file browser, and gmuse navigates the library rather than a filesystem.
 
 Within any of them the motions are vim's. `j` and `k` move, and take a count — `3j` goes down three. `gg` and `G` go to
 the top and bottom, and `12G` goes to row 12. The arrow keys — `up`, `down`, `left`, `right` — and `home`, `end`,

@@ -38,18 +38,28 @@ use crate::playlist::{Playlist, Queue};
 use crate::shelf::Shelf;
 use tree::{Pane, TreeState};
 
-/// The five views M4 covers. cmus numbers them, and so do we — the digits are
-/// the binding.
+/// The genuinely different **sets** — which is all a view can be now (#97).
+///
+/// §9 found two axes conflated, and two of these were not views at all:
+///
+/// - **`Sorted` was `Tree` drawn flat.** One set, two drawings, and `levels`
+///   is what says which — so it was a value wearing a tab. `2` still works and
+///   now means `levels: flat`.
+/// - **`Filters` was a picker wearing a tab.** `<leader>fg` ranks over the
+///   whole set instead of listing one you have to scroll (#54, #119), and `6`
+///   opens it.
+///
+/// What is left is things that hold genuinely different rows, plus a guide
+/// that holds none. Splits are what `g<Tab>` does not cover, and are not
+/// built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Tree = 1,
-    Sorted = 2,
     Playlist = 3,
     Queue = 4,
     // 5 was the file browser. It is gone rather than renumbered: gmuse
     // navigates the library, and a filesystem view leaks the file-based model
     // back into a library-first player.
-    Filters = 6,
     /// Prose: how to do the things, as against which key does what — plus the
     /// generated index of every binding, which is what view 7 used to be (#47).
     Guide = 7,
@@ -59,10 +69,8 @@ impl View {
     pub fn title(self) -> &'static str {
         match self {
             View::Tree => "library",
-            View::Sorted => "sorted",
             View::Playlist => "playlist",
             View::Queue => "queue",
-            View::Filters => "scope",
             View::Guide => "guide",
         }
     }
@@ -70,10 +78,12 @@ impl View {
     pub fn from_id(id: ViewId) -> Self {
         match id {
             ViewId::Library => View::Tree,
-            ViewId::Sorted => View::Sorted,
+            // `2` and `6` name a value and a picker; the library view is
+            // where both land.
+            ViewId::Sorted => View::Tree,
             ViewId::Playlist => View::Playlist,
             ViewId::Queue => View::Queue,
-            ViewId::Filters => View::Filters,
+            ViewId::Filters => View::Tree,
             ViewId::Guide => View::Guide,
         }
     }
@@ -92,23 +102,14 @@ impl View {
         all[(i + all.len() - 1) % all.len()]
     }
 
-    pub const ALL: &'static [View] = &[
-        View::Tree,
-        View::Sorted,
-        View::Playlist,
-        View::Queue,
-        View::Filters,
-        View::Guide,
-    ];
+    pub const ALL: &'static [View] = &[View::Tree, View::Playlist, View::Queue, View::Guide];
 
     pub fn context(self) -> crate::cmd::Context {
         use crate::cmd::Context as C;
         match self {
             View::Tree => C::Library,
-            View::Sorted => C::SortedLibrary,
             View::Playlist => C::Playlist,
             View::Queue => C::Queue,
-            View::Filters => C::Filters,
             View::Guide => C::Guide,
         }
     }
@@ -342,8 +343,6 @@ pub struct Ui {
     /// still hearing the track before it — but the pool has already moved on,
     /// so this is where the answer lives in between.
     pending_next: Option<CopyId>,
-    /// Cursor in view 6, the catalog list.
-    pub catalog_sel: usize,
     /// Which guide is open, and how far down it we are.
     pub guide_sel: usize,
     pub guide_scroll: usize,
@@ -526,7 +525,6 @@ impl Ui {
             playlists_sel: 0,
             playlist_pane: Pane::Tree,
             playlist_rows: Vec::new(),
-            catalog_sel: 0,
             guide_sel: 0,
             guide_scroll: 0,
             guide_view: std::cell::Cell::new((0, 0)),
@@ -678,14 +676,14 @@ impl Ui {
             // The row itself when it is a track, and otherwise the first
             // track underneath — so `x` on a closed album plays it from the
             // top rather than doing nothing.
+            View::Tree if self.levels.is_flat() => self.library.sorted().get(self.sorted).copied(),
             View::Tree => self
                 .tree
                 .selected_track(&self.library)
                 .or_else(|| self.tree.tracks_for(&self.library).first().copied()),
-            View::Sorted => self.library.sorted().get(self.sorted).copied(),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
-            View::Filters | View::Guide => None,
+            View::Guide => None,
         }
     }
 }
@@ -1829,7 +1827,10 @@ fn choose_from_picker(ui: &mut Ui, ctx: &Context<'_>) {
     ui.picker = None;
     match chosen {
         Chosen::Track(id) => {
-            switch_view(ui, View::Sorted);
+            // Flat, because a picked track is a row rather than a place in a
+            // tree — and `levels` is what says flat now (#97).
+            ui.levels = crate::shelf::Levels::Flat;
+            switch_view(ui, View::Tree);
             if let Some(at) = ui.library.sorted().iter().position(|r| *r == id) {
                 ui.sorted = at;
             }
@@ -2067,13 +2068,8 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // sensible reading outside a tree.
         Command::Fold(what) => {
             if ui.view != View::Tree {
-                if what == Fold::Toggle {
-                    // One catalog on or off. The union of what is on is the
-                    // library, so this reads as "include this too".
-                    if ui.view == View::Filters {
-                        toggle_catalog_under_cursor(ui, ctx);
-                    }
-                }
+                // **The saved-view list was view 6 and is the picker now**
+                // (#97, #119), so there is nothing here to toggle.
                 return;
             }
             // Hold the cursor still **on screen** across a level change.
@@ -2124,7 +2120,9 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // a flat list the album and artist boundaries are the structure, which
         // is the same idea seen edge-on.
         Command::Go(motion) => {
-            if ui.view == View::Tree {
+            // **Flat is not a tree**, and the structural motions read the
+            // album dividers instead — the same idea seen edge-on (#31, #97).
+            if ui.view == View::Tree && !ui.levels.is_flat() {
                 ui.tree.go(&ui.library, motion, n);
             } else if let Some(at) = flat_step(ui, ctx, motion, n) {
                 set_cursor(ui, at);
@@ -2170,16 +2168,6 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 };
                 open_playlist(ui, ctx, &row.name);
                 ui.playlist_pane = Pane::Tracks;
-            }
-            // Enter makes this the only term — the common case, and one
-            // keypress rather than dropping the others by hand.
-            View::Filters => {
-                let Some(name) = catalog_under_cursor(ui) else {
-                    return;
-                };
-                ui.composed.set(crate::view::What::Saved(name));
-                rebuild_library(ui, ctx);
-                say_view(ui);
             }
             // Enter *confirms*: it opens or closes a node, and on a track —
             // where there is nothing left to descend into — it plays. That is
@@ -2376,19 +2364,25 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             // They were two views; they are one view drawn two ways, and the
             // number key is the shorthand for saying which. Kept in step here
             // rather than by remembering, so they cannot disagree.
-            let view = View::from_id(id);
-            match view {
-                View::Tree if ui.levels.is_flat() => {
-                    ui.levels = crate::shelf::Levels::default();
-                    rebuild_library(ui, ctx);
+            // **The number names a value or a picker, not a view** (#97).
+            // `1` and `2` were two views and are one drawn two ways, so the
+            // digit sets `levels`; `6` was a list and is the picker.
+            let wanted = match id {
+                ViewId::Library => Some(crate::shelf::Levels::default()),
+                ViewId::Sorted => Some(crate::shelf::Levels::Flat),
+                ViewId::Filters => {
+                    open_picker(ui, ctx, crate::ui::picker::Source::Groups);
+                    return;
                 }
-                View::Sorted if !ui.levels.is_flat() => {
-                    ui.levels = crate::shelf::Levels::Flat;
-                    rebuild_library(ui, ctx);
-                }
-                _ => {}
+                _ => None,
+            };
+            if let Some(levels) = wanted
+                && levels != ui.levels
+            {
+                ui.levels = levels;
+                rebuild_library(ui, ctx);
             }
-            switch_view(ui, view);
+            switch_view(ui, View::from_id(id));
         }
         // `gt` steps forward; `<count>gt` goes straight to that view.
         Command::ViewNext => match count {
@@ -2453,14 +2447,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                     // (#97). Views 1 and 2 are one set drawn two ways, so
                     // `levels` decides which and the two cannot disagree —
                     // which is what has to be true before the enum can go.
-                    switch_view(
-                        ui,
-                        if levels.is_flat() {
-                            View::Sorted
-                        } else {
-                            View::Tree
-                        },
-                    );
+                    switch_view(ui, View::Tree);
                     rebuild_library(ui, ctx);
                     let said = if levels.is_flat() {
                         format!("levels: flat ({} tracks)", ui.library.len())
@@ -2543,45 +2530,6 @@ fn saved_views(ui: &Ui) -> Vec<(String, String)> {
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
-}
-
-/// Whether the composed view names this one.
-fn view_is_active(ui: &Ui, name: &str) -> bool {
-    ui.composed
-        .terms()
-        .iter()
-        .any(|t| matches!(&t.what, crate::view::What::Saved(n) if n == name))
-}
-
-fn catalog_under_cursor(ui: &Ui) -> Option<String> {
-    saved_views(ui).get(ui.catalog_sel).map(|(n, _)| n.clone())
-}
-
-/// Space on view 6: widen the stack by this view, or take it back out.
-///
-/// **`+` and drop, which is what toggling always was** (#94). A catalog list
-/// with checkboxes was `active_catalogs`, and `active_catalogs = ["a", "b"]`
-/// is `a or b` — so the checkbox is a term being pushed or dropped, and there
-/// is no second state to keep in step with the stack.
-fn toggle_catalog_under_cursor(ui: &mut Ui, ctx: &Context<'_>) {
-    let Some(name) = catalog_under_cursor(ui) else {
-        return;
-    };
-    if let Some(at) = ui
-        .composed
-        .terms()
-        .iter()
-        .position(|t| matches!(&t.what, crate::view::What::Saved(n) if *n == name))
-    {
-        ui.composed.drop_at(at);
-    } else {
-        ui.composed.push(
-            crate::model::view::Op::Or,
-            crate::view::What::Saved(name.clone()),
-        );
-    }
-    rebuild_library(ui, ctx);
-    say_view(ui);
 }
 
 /// What the view is now, or what is wrong with it.
@@ -2941,7 +2889,7 @@ fn rows_at_cursor(ui: &Ui, n: usize) -> Vec<CopyId> {
         }
         View::Playlist => return Vec::new(),
         View::Queue => (ui.queue.entries().copied().collect(), ui.queue_sel),
-        View::Sorted => (ui.library.sorted().to_vec(), ui.sorted),
+        View::Tree if ui.levels.is_flat() => (ui.library.sorted().to_vec(), ui.sorted),
         _ => return Vec::new(),
     };
     entries.into_iter().skip(at).take(n).collect()
@@ -3795,8 +3743,9 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
 fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
     let ids: Vec<crate::model::rows::CopyId> = match ui.view {
         // From the tree, add everything the cursor covers — an album or an
-        // artist — which is the whole point of adding from a tree.
-        View::Tree => ui.tree.tracks_for(&ui.library),
+        // artist — which is the whole point of adding from a tree. A flat list
+        // has no subtree: the cursor is one row, which the fallthrough gives.
+        View::Tree if !ui.levels.is_flat() => ui.tree.tracks_for(&ui.library),
         _ => ui.selected_track(ctx).into_iter().collect(),
     };
     if ids.is_empty() {
@@ -3853,7 +3802,7 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
 fn flat_step(ui: &Ui, ctx: &Context<'_>, motion: Motion, count: usize) -> Option<usize> {
     let owned;
     let ids: &[crate::model::rows::CopyId] = match ui.view {
-        View::Sorted => ui.library.sorted(),
+        View::Tree if ui.levels.is_flat() => ui.library.sorted(),
         View::Playlist if ui.playlist_pane == Pane::Tracks => ui.playlist.entries(),
         View::Queue => {
             owned = ui.queue.entries().copied().collect::<Vec<_>>();
@@ -3965,12 +3914,12 @@ fn half_page_height(ui: &Ui) -> usize {
 
 fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
     Some(match ui.view {
+        View::Tree if ui.levels.is_flat() => &ui.sorted_scroll,
         View::Tree => &ui.tree_scroll,
-        View::Sorted => &ui.sorted_scroll,
         View::Playlist if ui.playlist_pane == Pane::Tracks => &ui.playlist_scroll,
         View::Queue => &ui.queue_scroll,
         View::Guide if ui.guide_pane == Pane::Tree => &ui.guides_scroll,
-        View::Playlist | View::Guide | View::Filters => return None,
+        View::Playlist | View::Guide => return None,
     })
 }
 
@@ -3984,14 +3933,16 @@ fn go_to_playing(ui: &mut Ui, _ctx: &Context<'_>) {
         return;
     };
     let found = match ui.view {
-        View::Tree => ui.tree.reveal(&ui.library, id),
-        View::Sorted => match ui.library.sorted().iter().position(|t| *t == id) {
-            Some(at) => {
-                ui.sorted = at;
-                true
+        View::Tree if ui.levels.is_flat() => {
+            match ui.library.sorted().iter().position(|t| *t == id) {
+                Some(at) => {
+                    ui.sorted = at;
+                    true
+                }
+                None => false,
             }
-            None => false,
-        },
+        }
+        View::Tree => ui.tree.reveal(&ui.library, id),
         View::Playlist => match ui.playlist.entries().iter().position(|t| *t == id) {
             Some(at) => {
                 ui.playlist_sel = at;
@@ -4085,6 +4036,7 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
             .unwrap_or_else(|| crate::text::Haystack::of(""))
     };
     match ui.view {
+        View::Tree if ui.levels.is_flat() => ui.library.sorted().iter().map(describe).collect(),
         // Artists, albums and tracks are all rows now, so `/` searches the
         // lot — which is what a single buffer should do.
         View::Tree => ui
@@ -4096,17 +4048,16 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
                 other => crate::text::Haystack::of(&other.label()),
             })
             .collect(),
-        View::Sorted => ui.library.sorted().iter().map(describe).collect(),
         View::Playlist => ui.playlist.entries().iter().map(describe).collect(),
         View::Queue => ui.queue.entries().map(describe).collect(),
-        View::Filters | View::Guide => Vec::new(),
+        View::Guide => Vec::new(),
     }
 }
 
 fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
     match ui.view {
+        View::Tree if ui.levels.is_flat() => ui.library.sorted().len(),
         View::Tree => ui.tree.rows(&ui.library).len(),
-        View::Sorted => ui.library.sorted().len(),
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlist_rows.len(),
             Pane::Tracks => ui.playlist.len(),
@@ -4114,7 +4065,6 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
         // The whole projection, not just the queued part: the cursor ranges
         // over what would play next, and only the edits are confined.
         View::Queue => up_next(ui, ctx).len(),
-        View::Filters => saved_views(ui).len(),
         View::Guide => match ui.guide_pane {
             Pane::Tree => crate::guides::GUIDES.len(),
             // Scrolling *is* moving a cursor down the text, so the pane's
@@ -4131,14 +4081,13 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
 
 fn current_cursor(ui: &Ui) -> usize {
     match ui.view {
+        View::Tree if ui.levels.is_flat() => ui.sorted,
         View::Tree => ui.tree.selected,
-        View::Sorted => ui.sorted,
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlists_sel,
             Pane::Tracks => ui.playlist_sel,
         },
         View::Queue => ui.queue_sel,
-        View::Filters => ui.catalog_sel,
         View::Guide => match ui.guide_pane {
             Pane::Tree => ui.guide_sel,
             Pane::Tracks => ui.guide_scroll,
@@ -4148,14 +4097,13 @@ fn current_cursor(ui: &Ui) -> usize {
 
 fn set_cursor(ui: &mut Ui, next: usize) {
     match ui.view {
+        View::Tree if ui.levels.is_flat() => ui.sorted = next,
         View::Tree => ui.tree.selected = next,
-        View::Sorted => ui.sorted = next,
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlists_sel = next,
             Pane::Tracks => ui.playlist_sel = next,
         },
         View::Queue => ui.queue_sel = next,
-        View::Filters => ui.catalog_sel = next,
         View::Guide => match ui.guide_pane {
             Pane::Tree => {
                 ui.guide_sel = next;
@@ -4283,61 +4231,6 @@ fn draw_playlists(frame: &mut Frame, area: Rect, ui: &Ui) {
     );
 }
 
-fn draw_catalogs(frame: &mut Frame, area: Rect, ui: &Ui) {
-    let theme = &ui.theme;
-    let defined = saved_views(ui);
-
-    let mut lines: Vec<Line> = Vec::new();
-    if !ui.composed.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("  view    ", theme.get(theme::Role::StatusDim)),
-            Span::styled(ui.composed.label(), theme.get(theme::Role::StatusNotice)),
-        ]));
-        lines.push(Line::from(""));
-    }
-
-    if defined.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  no saved views — compose one and `:view save <name>`",
-            theme.get(theme::Role::StatusDim),
-        )));
-    }
-
-    for (i, (name, source)) in defined.iter().enumerate() {
-        let on = view_is_active(ui, name);
-        let selected = i == ui.catalog_sel;
-        let body = if selected {
-            theme.get(theme::Role::SelectionFocused)
-        } else if on {
-            theme.get(theme::Role::StatusText)
-        } else {
-            theme.get(theme::Role::StatusDim)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                if on { "  [x] " } else { "  [ ] " },
-                theme.get(if on {
-                    theme::Role::StatusPlaying
-                } else {
-                    theme::Role::StatusDim
-                }),
-            ),
-            Span::styled(format!("{name:<14}"), body),
-            Span::styled(source.clone(), theme.get(theme::Role::StatusDim)),
-        ]));
-    }
-
-    let title = if ui.composed.is_empty() {
-        "views — all".to_string()
-    } else {
-        format!("views — {}", ui.composed.label())
-    };
-    frame.render_widget(
-        Paragraph::new(lines).block(pane_block(theme, &title, true)),
-        area,
-    );
-}
-
 pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     // A completion menu takes room from the bottom of the body, so the view
     // above stays visible rather than being replaced.
@@ -4425,8 +4318,9 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     };
 
     match ui.view {
-        View::Tree => draw_tree(frame, body, ui, ctx),
-        View::Sorted => draw_tracks(
+        // **One view, drawn by what `levels` says** (#97).
+        View::Tree if !ui.levels.is_flat() => draw_tree(frame, body, ui, ctx),
+        View::Tree => draw_tracks(
             frame,
             body,
             ui,
@@ -4491,7 +4385,6 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 },
             )
         }
-        View::Filters => draw_catalogs(frame, body, ui),
         View::Guide => draw_guides(frame, body, ui),
     }
 
@@ -5578,6 +5471,12 @@ mod tests {
         }
     }
 
+    /// The library view drawn flat — what view 2 was (#97).
+    fn flat_view(ui: &mut Ui) {
+        ui.view = View::Tree;
+        ui.levels = crate::shelf::Levels::Flat;
+    }
+
     fn ctx_of(store: &Scan) -> Context<'_> {
         Context {
             library: lib_of(store),
@@ -5984,7 +5883,7 @@ mod tests {
         assert_eq!(ui.playlist.len(), before, "a rule-owned entry was removed");
         assert!(ui.status.contains(":freeze"), "{}", ui.status);
 
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         execute(
             &mut ui,
             &ctx,
@@ -6056,7 +5955,7 @@ mod tests {
         assert!(ui.playlist.is_empty(), "nothing is rated yet");
 
         // Rate the track under the cursor in view 2.
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 0;
         execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(5)));
 
@@ -6096,7 +5995,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist new roadtrip");
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         execute(
             &mut ui,
             &ctx,
@@ -6365,7 +6264,7 @@ mod tests {
         for rows in [24u16, 44] {
             let expect = page_of(rows);
             let mut ui = ui_of(&store, true);
-            ui.view = View::Sorted;
+            flat_view(&mut ui);
             // A frame, so the body height is recorded.
             let _ = render(&ui, &ctx, 100, rows);
             press(&mut ui, &ctx, "^f");
@@ -6383,7 +6282,7 @@ mod tests {
         let store = big_fixture(200);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         let _ = render(&ui, &ctx, 100, 24);
 
         press(&mut ui, &ctx, "^d");
@@ -6405,7 +6304,7 @@ mod tests {
         let store = big_fixture(200);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         let _ = render(&ui, &ctx, 100, 24);
 
         for _ in 0..6 {
@@ -6823,7 +6722,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "yank-cross");
         new_playlist(&mut ui, &ctx, "one");
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         press(&mut ui, &ctx, "a");
         assert_eq!(ui.playlist.len(), 1);
 
@@ -7013,7 +6912,7 @@ mod tests {
         let ids: Vec<_> = Listing::rows(lib_of(&store));
 
         new_playlist(&mut ui, &ctx, "one");
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         press(&mut ui, &ctx, "a");
         assert_eq!(ui.playlist.len(), 1);
 
@@ -7040,7 +6939,7 @@ mod tests {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "undo-queue");
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         press(&mut ui, &ctx, "e");
         let before = ui.queue.len();
         assert!(before > 0);
@@ -7062,7 +6961,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "undo-overwrite");
         new_playlist(&mut ui, &ctx, "mix");
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         press(&mut ui, &ctx, "a");
         assert!(!ui.playlist.is_empty());
 
@@ -7100,11 +6999,11 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "enter-structure");
         new_playlist(&mut ui, &ctx, "mix");
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         press(&mut ui, &ctx, "a");
 
         for (view, pane) in [
-            (View::Sorted, Pane::Tree),
+            (View::Tree, Pane::Tree),
             (View::Playlist, Pane::Tracks),
             (View::Queue, Pane::Tree),
         ] {
@@ -7145,7 +7044,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         press(&mut ui, &ctx, "e");
         let queued = ui.queue.len();
         assert!(queued > 0);
@@ -7340,7 +7239,7 @@ mod tests {
         let store = genre_fixture();
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "add-nothing-open");
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         execute(
             &mut ui,
@@ -7380,7 +7279,7 @@ mod tests {
         );
         assert_eq!(filed(&ui, "roadtrip"), 0);
 
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         execute(
             &mut ui,
             &ctx,
@@ -7457,10 +7356,8 @@ mod tests {
                 crate::cmd::Context::Common | crate::cmd::Context::Transport => View::Tree,
                 other => View::from_id(match other {
                     crate::cmd::Context::Library => ViewId::Library,
-                    crate::cmd::Context::SortedLibrary => ViewId::Sorted,
                     crate::cmd::Context::Playlist => ViewId::Playlist,
                     crate::cmd::Context::Queue => ViewId::Queue,
-                    crate::cmd::Context::Filters => ViewId::Filters,
                     crate::cmd::Context::Guide => ViewId::Guide,
                     crate::cmd::Context::Common | crate::cmd::Context::Transport => {
                         unreachable!()
@@ -7487,17 +7384,18 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        press(&mut ui, &ctx, "g t");
-        assert_eq!(ui.view, View::Sorted);
+        // **Three tabs, not five** (#97): `sorted` was `library` drawn flat
+        // and `scope` was a picker, so neither was ever a set of its own.
         press(&mut ui, &ctx, "g t");
         assert_eq!(ui.view, View::Playlist);
         press(&mut ui, &ctx, "g T");
-        assert_eq!(ui.view, View::Sorted);
+        assert_eq!(ui.view, View::Tree);
 
-        // Wrapping, so you can always get anywhere with one key. Counted
-        // from `ALL` rather than a literal, so adding a view does not silently
-        // turn this into a test of something else.
-        for _ in 0..View::ALL.len() - 1 {
+        // Wrapping, so you can always get anywhere with one key. A full lap
+        // from where it starts, counted from `ALL` rather than a literal — so
+        // adding or removing a view does not silently turn this into a test of
+        // something else, which is what it just caught.
+        for _ in 0..View::ALL.len() {
             press(&mut ui, &ctx, "g t");
         }
         assert_eq!(ui.view, View::Tree);
@@ -7613,7 +7511,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "/");
         type_line(&mut ui, &ctx, "years");
@@ -7634,7 +7532,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         press(&mut ui, &ctx, "/");
         type_line(&mut ui, &ctx, "zzzznotthere");
         assert!(ui.status.contains("no match"), "{}", ui.status);
@@ -7976,7 +7874,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = catalog_ui(&store);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = ui.library.sorted().len() - 1;
 
         select_view(&mut ui, &ctx, "paak");
@@ -7986,19 +7884,22 @@ mod tests {
         assert!(ui.sorted < ui.library.sorted().len());
     }
 
-    /// View 7 used to list catalogs too, which was always a duplicate of view
-    /// 6 — the scope view lists them as its whole purpose. Deleting view 7
-    /// (#47) lost nothing here, and this checks the survivor rather than
-    /// assuming it.
+    /// **View 6 was a list and is the picker** (#97, #119). `6` opens it.
     #[test]
-    fn catalogs_show_in_the_scope_view() {
+    fn six_opens_the_groups_picker() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = catalog_ui(&store);
-        ui.view = View::Filters;
-        let out = render(&ui, &ctx, 110, 24);
-        assert!(out.contains("paak"), "{out}");
-        assert!(out.contains("va"), "{out}");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 6");
+        let picker = ui.picker.as_ref().expect("no picker");
+        assert_eq!(picker.source, crate::ui::picker::Source::Groups);
+        let names: Vec<&str> = picker.shown.iter().map(|c| c.label.as_str()).collect();
+        assert!(
+            names.contains(&"paak") && names.contains(&"va"),
+            "{names:?}"
+        );
     }
     // ---- album headers (#7) ----------------------------------------------
 
@@ -8021,7 +7922,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         // Moving down N times must land on the (N+1)th *track*, however many
         // dividers were drawn above it.
@@ -8038,7 +7939,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         let out = render(&ui, &ctx, 100, 24);
         let found = dividers(&out);
         assert!(!found.is_empty(), "no divider drawn:\n{out}");
@@ -8054,7 +7955,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "set album_headers=false");
@@ -8072,7 +7973,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         let total = ui.library.sorted().len();
         let mut seen = Vec::new();
@@ -8109,7 +8010,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "3");
         press(&mut ui, &ctx, "j");
@@ -8125,7 +8026,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         let len = ui.library.sorted().len();
 
         for c in "12".chars() {
@@ -8143,7 +8044,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "0");
         assert_eq!(ui.count, None, "0 started a count");
@@ -8159,7 +8060,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         let len = ui.library.sorted().len();
 
         press(&mut ui, &ctx, "3");
@@ -8178,7 +8079,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "3");
         press(&mut ui, &ctx, "j");
@@ -8215,7 +8116,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "g g");
         assert_eq!(ui.pending_label(), None, "the chord left a trace");
@@ -8267,7 +8168,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "bind common \"G x\" top");
@@ -8282,7 +8183,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, ":");
         // `w` is unbound, so it can start a chord.
@@ -8299,7 +8200,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         // `u` is undo by default.
         press(&mut ui, &ctx, ":");
@@ -8319,7 +8220,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.relative_numbers = true;
         press(&mut ui, &ctx, "j");
 
@@ -8435,7 +8336,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 1;
 
         // No panes here, so these must not disturb anything.
@@ -8979,52 +8880,11 @@ mod tests {
         );
     }
 
-    /// View 6 lists the **saved views**, shows which are in the stack, and
-    /// toggles them.
-    ///
-    /// The checkbox was `active_catalogs` once, and it is a term now: space
-    /// pushes `+saved="x"` or drops it, so there is no second state to keep in
-    /// step with the composed view (#119).
-    #[test]
-    fn view_six_lists_and_toggles_saved_views() {
-        let store = fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = ui_with_history(&store, "view6");
-        for (name, source) in [("alpha", "duration>=0"), ("beta", "duration>=0")] {
-            let id = crate::model::id::Id::<crate::model::entity::View>::of_name(name);
-            record(&mut ui, 100, |log| log.save_view(100, id, name, source));
-        }
-
-        press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 6");
-        assert_eq!(ui.view, View::Filters);
-        let out = render(&ui, &ctx, 100, 20);
-        assert!(out.contains("alpha") && out.contains("beta"), "{out}");
-
-        // Space adds the one under the cursor to the stack.
-        press(&mut ui, &ctx, "o");
-        assert!(view_is_active(&ui, "alpha"), "space did not add it");
-        assert!(!view_is_active(&ui, "beta"));
-        assert!(
-            render(&ui, &ctx, 100, 20).contains("[x]"),
-            "not shown as on"
-        );
-
-        // And again takes it back out — one state, not two.
-        press(&mut ui, &ctx, "o");
-        assert!(!view_is_active(&ui, "alpha"), "space did not remove it");
-
-        // Enter makes the one under the cursor the only term.
-        press(&mut ui, &ctx, "j");
-        press(&mut ui, &ctx, "enter");
-        assert!(view_is_active(&ui, "beta"));
-        assert!(!view_is_active(&ui, "alpha"));
-        assert_eq!(
-            ui.composed.terms().len(),
-            1,
-            "enter should replace, not add"
-        );
-    }
+    // **`view_six_lists_and_toggles_saved_views` lived here and is gone**
+    // (#97). It asserted a checkbox list in a tab; `6` opens the picker now,
+    // which `six_opens_the_groups_picker` covers. The checkbox was
+    // `active_catalogs` wearing a third name, and the term it toggled is what
+    // `:view +saved="x"` says out loud.
 
     /// A play is counted once, however long the track is left running, and
     /// only after enough of it has been heard.
@@ -9194,7 +9054,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 2");
-        assert_eq!(ui.view, View::Sorted);
+        assert_eq!(ui.view, View::Tree, "2 is the library view drawn flat");
         assert!(ui.levels.is_flat(), "view 2 is `levels: flat`");
         assert_eq!(ui.library.len(), tracks, "the set changed");
 
@@ -9206,7 +9066,8 @@ mod tests {
         // And the other direction: saying the value picks the drawing.
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view levels flat");
-        assert_eq!(ui.view, View::Sorted, "{}", ui.status);
+        assert!(ui.levels.is_flat(), "{}", ui.status);
+        assert_eq!(ui.view, View::Tree);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view levels genre,album");
         assert_eq!(ui.view, View::Tree);
@@ -9293,7 +9154,8 @@ mod tests {
         // keys, so the picker keeps the distinction.
         press(&mut ui, &ctx, "enter");
         assert!(ui.picker.is_none(), "the picker stayed open");
-        assert_eq!(ui.view, View::Sorted);
+        assert_eq!(ui.view, View::Tree);
+        assert!(ui.levels.is_flat(), "a picked track lands in a flat list");
         assert!(
             ui.playback.current.is_none(),
             "enter played something it was only asked to go to"
@@ -9683,7 +9545,7 @@ mod tests {
         let ids: Vec<CopyId> = Listing::rows(lib_of(&store));
         let (playing, selected) = (ids[0], ids[1]);
         ui.playback.current = Some(playing);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = ui
             .library
             .sorted()
@@ -9712,7 +9574,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "selection");
         ui.playback.current = None;
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 0;
         let under_cursor = ui.library.sorted()[0];
 
@@ -10482,7 +10344,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         let playing = ui.library.sorted()[2];
         ui.playback.current = Some(playing);
@@ -10509,7 +10371,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 0;
 
         let bold_tracks = |ui: &Ui| {
@@ -10591,7 +10453,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         let playing = ui.library.sorted()[1];
         let title = Listing::listed(lib_of(&store), playing)
@@ -10665,7 +10527,7 @@ mod tests {
         let store = tall_fixture(40);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.album_headers = false;
 
         press(&mut ui, &ctx, "G");
@@ -10689,7 +10551,7 @@ mod tests {
         let store = tall_fixture(40);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.album_headers = false;
 
         press(&mut ui, &ctx, "g g");
@@ -10708,7 +10570,7 @@ mod tests {
         let store = tall_fixture(40);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.album_headers = false;
 
         press(&mut ui, &ctx, "G");
@@ -10718,7 +10580,7 @@ mod tests {
         let queue = render(&ui, &ctx, 90, 12);
         assert!(!queue.contains("Track 039"), "the queue is empty:\n{queue}");
 
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         let back = render(&ui, &ctx, 90, 12);
         assert!(
             back.contains("Track 039"),
@@ -10734,7 +10596,7 @@ mod tests {
         let store = tall_fixture(40);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.album_headers = false;
         ui.sorted = 0;
         ui.sorted_scroll.scroll_to(9_999);
@@ -10780,7 +10642,7 @@ mod tests {
 
         for typed in ["loffler", "loeffler", "löffler", "Loffler"] {
             let mut ui = ui_of(&store, true);
-            ui.view = View::Sorted;
+            flat_view(&mut ui);
             ui.sorted = 0;
             press(&mut ui, &ctx, "/");
             type_line(&mut ui, &ctx, typed);
@@ -10802,7 +10664,7 @@ mod tests {
         let store = marked_fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 0;
 
         press(&mut ui, &ctx, "/");
@@ -10822,7 +10684,7 @@ mod tests {
         let store = marked_fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 0;
 
         press(&mut ui, &ctx, "/");
@@ -11275,7 +11137,7 @@ mod tests {
         let store = big_fixture(200);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         let _ = render(&ui, &ctx, 100, 24);
 
         // `d` has one continuation, so its popup cannot overflow.
@@ -11371,7 +11233,7 @@ mod tests {
         let store = big_fixture(12);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "/");
         assert_eq!(ui.sorted, 0);
@@ -11390,7 +11252,7 @@ mod tests {
         let store = big_fixture(12);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "/");
         for c in "track".chars() {
@@ -11423,7 +11285,7 @@ mod tests {
         let store = big_fixture(12);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 3;
 
         press(&mut ui, &ctx, "/");
@@ -11443,7 +11305,7 @@ mod tests {
         let store = big_fixture(12);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 3;
 
         press(&mut ui, &ctx, "/");
@@ -11463,7 +11325,7 @@ mod tests {
         let store = big_fixture(12);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "/");
         for c in "rack".chars() {
@@ -11708,7 +11570,7 @@ mod tests {
         let store = big_fixture(50);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "j");
         assert_eq!(ui.sorted, 1, "j should navigate in normal mode");
@@ -12011,7 +11873,7 @@ mod tests {
         let store = many_artists(30);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         press(&mut ui, &ctx, "2 0 G");
         let _ = render(&ui, &ctx, 90, 14);
@@ -12159,7 +12021,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 0;
 
         let l = lib_of(&store);
@@ -12183,7 +12045,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 0;
 
         let artist_of = |ui: &Ui| {
@@ -12201,7 +12063,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         // Onto the second track of an album that has more than one.
         press(&mut ui, &ctx, "}");
@@ -12232,7 +12094,7 @@ mod tests {
         let store = many_artists(5);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 0;
 
         let album_of = |ui: &Ui| {
@@ -12259,7 +12121,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
         ui.sorted = 0;
 
         press(&mut ui, &ctx, "}");
@@ -12303,7 +12165,7 @@ mod tests {
         let store = two_albums_then_another_artist();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         let artist_of = |ui: &Ui| {
             Listing::listed(lib_of(&store), ui.library.sorted()[ui.sorted])
@@ -12335,7 +12197,7 @@ mod tests {
         let store = two_albums_then_another_artist();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Sorted;
+        flat_view(&mut ui);
 
         ui.sorted = 3; // the second track of Anna's second album
         press(&mut ui, &ctx, "[ [");

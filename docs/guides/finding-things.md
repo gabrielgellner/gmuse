@@ -76,12 +76,11 @@ because titles have those and nobody ever wanted "exactly one character" from a 
 Catalogs are named and persistent, and they **union**: turn on jazz and blues and you get both. A filter then
 **intersects** whatever they add up to.
 
-    :catalog dance          only this one
-    :catalog +general       add it
-    :catalog all            everything
+    :view saved="dance"        only this one
+    :view +saved="general"     add it
+    :view                      everything
 
-View 6 lists them, and `space` turns one on or off. That view is called _scope_ because it shows the whole answer — the
-catalogs and the filter together.
+`6` — or `<leader>fg` — opens a picker over what you have saved, and `enter` makes it the view.
 
 ## History, ratings, and what you have filed
 
