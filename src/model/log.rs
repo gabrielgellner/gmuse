@@ -1563,6 +1563,43 @@ impl crate::filter::Listened for Catalogue {
         self.ratings.get(&recording).copied()
     }
 
+    fn broader(&self, facet_key: &str, label: &str) -> Vec<String> {
+        use crate::model::entity::Concept;
+        use std::collections::BTreeSet;
+
+        // How far a walk may climb before the data is called cyclic. Sixteen
+        // is `vocabulary::MAX_DEPTH`, for the same reason: deeper than any
+        // real music taxonomy, shallower than a loop can hide in.
+        const MAX_DEPTH: usize = 16;
+
+        let mut seen: BTreeSet<Id<Concept>> = BTreeSet::new();
+        let mut here = vec![Id::<Concept>::in_facet(facet_key, label)];
+        let mut out = Vec::new();
+        for _ in 0..MAX_DEPTH {
+            let mut next = Vec::new();
+            for child in here.drain(..) {
+                for (_, parent, _) in self.narrows.iter().filter(|(h, p, c)| {
+                    *c == child && !self.narrows_retracted.contains(&(*h, *p, *c))
+                }) {
+                    // `seen` is what stops a cycle rather than the bound: the
+                    // bound is the backstop for a chain long enough that
+                    // walking it was a mistake either way.
+                    if seen.insert(*parent) {
+                        if let Some(record) = self.concepts.get(parent) {
+                            out.push(record.label.clone());
+                        }
+                        next.push(*parent);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            here = next;
+        }
+        out
+    }
+
     /// **Distinct collections, not entries** — a playlist holding one track
     /// twice is one collection that holds it, and counting entries would make
     /// `collected>1` mean "repeated somewhere" instead of "in two crates".
@@ -1573,6 +1610,95 @@ impl crate::filter::Listened for Catalogue {
             .map(|(c, _, _)| *c)
             .collect::<std::collections::BTreeSet<_>>()
             .len() as u32
+    }
+}
+
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+    use crate::filter::Listened;
+    use crate::model::entity::{Device, Hierarchy};
+    use crate::model::instance::Instance;
+
+    fn built(edges: &[(&str, &str)]) -> Catalogue {
+        let mut i = Instance::new(Id::<Device>::derived(b"test"));
+        let h = Id::<Hierarchy>::derived(b"browse");
+        for (parent, child) in edges {
+            for label in [parent, child] {
+                i.assert_concept(
+                    100,
+                    crate::model::facet::Described::Recording(Id::derived(b"anything")),
+                    crate::model::facet::GENRE,
+                    label,
+                    crate::model::reference::Source::Manual,
+                    crate::model::ingest::Confidence::Confirmed,
+                );
+            }
+            i.narrows(100, h, crate::model::facet::GENRE, parent, child);
+        }
+        i.catalogue()
+    }
+
+    /// **Closure walks up, at any depth** — #93.
+    #[test]
+    fn broader_reaches_every_ancestor() {
+        let cat = built(&[("Music", "Electronic"), ("Electronic", "Techno")]);
+        let up = cat.broader(crate::model::facet::GENRE, "Techno");
+        assert!(up.contains(&"Electronic".to_string()), "{up:?}");
+        assert!(
+            up.contains(&"Music".to_string()),
+            "not at any depth: {up:?}"
+        );
+        assert!(
+            !up.contains(&"Techno".to_string()),
+            "a concept is not broader than itself"
+        );
+    }
+
+    /// **A cycle must not hang a render** — #79's requirement, and the reason
+    /// the bound is not optional.
+    ///
+    /// A hierarchy is curated by hand, so a loop is a question of when rather
+    /// than whether: `Techno` narrower-of `Rock` narrower-of `Techno` is two
+    /// edits nobody would make together and somebody eventually will.
+    #[test]
+    fn a_cycle_in_the_hierarchy_terminates() {
+        let cat = built(&[("Rock", "Techno"), ("Techno", "Rock")]);
+        let up = cat.broader(crate::model::facet::GENRE, "Techno");
+        assert!(up.contains(&"Rock".to_string()), "{up:?}");
+        // It returns, which is the whole assertion — and each concept once.
+        assert_eq!(up.len(), 2, "walked a loop more than once: {up:?}");
+    }
+
+    /// A withdrawn edge stops being walked, or repairing a wrong placement
+    /// would mean the hierarchy could only ever grow.
+    #[test]
+    fn a_retracted_edge_is_not_climbed() {
+        let mut i = Instance::new(Id::<Device>::derived(b"test"));
+        let h = Id::<Hierarchy>::derived(b"browse");
+        for label in ["Rock", "Techno"] {
+            i.assert_concept(
+                100,
+                crate::model::facet::Described::Recording(Id::derived(b"anything")),
+                crate::model::facet::GENRE,
+                label,
+                crate::model::reference::Source::Manual,
+                crate::model::ingest::Confidence::Confirmed,
+            );
+        }
+        i.narrows(100, h, crate::model::facet::GENRE, "Rock", "Techno");
+        assert_eq!(
+            i.catalogue().broader(crate::model::facet::GENRE, "Techno"),
+            ["Rock"]
+        );
+
+        i.retract_narrowing(200, h, crate::model::facet::GENRE, "Rock", "Techno");
+        assert!(
+            i.catalogue()
+                .broader(crate::model::facet::GENRE, "Techno")
+                .is_empty(),
+            "a withdrawn edge was still climbed"
+        );
     }
 }
 

@@ -101,6 +101,22 @@ That asymmetry is deliberate. A file tagged `Rock; Blues Rock` **is** rock, and 
 `all` is not true of nothing. A track with no genre fails `all(genre)="rock"` rather than passing it on a technicality;
 `!genre?` is how you ask for the untagged, and it is a different question.
 
+## Asking about a whole branch
+
+A genre hierarchy exists so you can ask for a _kind_ of music without naming every term under it:
+
+    genre="electronic"     tagged exactly that
+    genre*="electronic"    that, or anything narrower, at any depth
+    genre+="electronic"    strictly narrower — techno yes, electronic no
+
+`*` is zero-or-more hops and `+` is one-or-more, as in SPARQL and every regex you have met. One meaning per character.
+
+Put the marker on the field, inside a quantifier if there is one — `any(genre*)="electronic"`. The closure is about the
+field; the quantifier is about how many of its values have to match.
+
+A hierarchy is curated by hand, so a loop in it is a question of when rather than whether. Closure walks a bounded
+distance and visits each concept once: a cycle stops it rather than hanging.
+
 ## History, ratings, and what you have filed
 
 Five fields come from what you have done rather than from tags:

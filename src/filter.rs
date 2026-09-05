@@ -58,6 +58,19 @@ pub trait Listened {
     fn acquired(&self, recording: Id<Recording>) -> Option<i64>;
     /// Stars. `None` is unrated, which is not the same as nought stars.
     fn rating(&self, recording: Id<Recording>) -> Option<u8>;
+    /// Every concept **broader than** this one, on this axis — #93's closure.
+    ///
+    /// Walking *up* rather than down is what makes closure cheap: a row has a
+    /// few genres and the question is whether any of them sits under the one
+    /// asked about, so this walks each of the row's own values to the top
+    /// rather than expanding the target's descendants.
+    ///
+    /// **Bounded, and the bound is not optional** (#79). A cycle somebody's
+    /// data acquired — `Techno` narrower-of `Rock` narrower-of `Techno` — must
+    /// not hang a render, and a hierarchy is curated by hand so a cycle is a
+    /// question of when rather than whether.
+    fn broader(&self, facet_key: &str, label: &str) -> Vec<String>;
+
     /// How many collections hold this — #119's "in no crate".
     ///
     /// A count rather than a yes/no, so `collected>1` finds the overlap the
@@ -237,9 +250,25 @@ impl HistoryField {
     }
 }
 
+/// How far up the hierarchy a comparison reaches — #93, SPARQL's spelling.
+///
+/// **One meaning per character.** `*` is zero-or-more and `+` is one-or-more,
+/// as in SPARQL and every regex anybody has met. An earlier draft used `+` for
+/// both and justified it by the borrowing, which stops being true the moment
+/// the meaning changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// `genre="techno"` — this concept, and nothing else.
+    Exact,
+    /// `genre*="electronic"` — it, or anything narrower, at any depth.
+    OrNarrower,
+    /// `genre+="electronic"` — strictly narrower. Techno yes, electronic no.
+    Narrower,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selector {
-    Field(Quant, Field),
+    Field(Quant, Reach, Field),
     Any,
     History(HistoryField),
 }
@@ -410,7 +439,7 @@ impl Expr {
             Expr::And(a, b) => a.eval(t, env) && b.eval(t, env),
             Expr::Or(a, b) => a.eval(t, env) || b.eval(t, env),
             Expr::Not(e) => !e.eval(t, env),
-            Expr::Present(Selector::Field(_, f)) => present(*f, t),
+            Expr::Present(Selector::Field(_, _, f)) => present(*f, t),
             Expr::Present(Selector::Any) => true,
             Expr::Present(Selector::History(h)) => history_number(*h, t, env).is_some(),
             Expr::Cmp {
@@ -503,14 +532,28 @@ fn compare(selector: Selector, op: Op, value: &Value, t: &Subject<'_>, env: &Env
                 _ => hit,
             }
         }
-        (Selector::Field(q, f), Value::Text(glob)) => match texts_of(f, t).as_slice() {
+        (Selector::Field(q, reach, f), Value::Text(glob)) => match texts_of(f, t).as_slice() {
             // A missing tag matches nothing, including `!=`. Three-valued
             // logic would be more correct and much harder to predict; `!` on
             // the whole comparison is how you ask for "or missing". `all` is
             // not vacuously true here for the same reason.
             [] => false,
             values => {
-                let hit = |v: &String| glob.matches(v);
+                // **Closure walks up from the row's own values** (#93). The
+                // question is whether one of them sits at or under the concept
+                // asked about, and a row has a few genres where a taxonomy has
+                // thousands of descendants.
+                let hit = |v: &String| match reach {
+                    Reach::Exact => glob.matches(v),
+                    Reach::OrNarrower | Reach::Narrower => {
+                        (reach == Reach::OrNarrower && glob.matches(v))
+                            || env.listened.is_some_and(|l| {
+                                l.broader(f.name().as_str(), v)
+                                    .iter()
+                                    .any(|up| glob.matches(up))
+                            })
+                    }
+                };
                 // The unsaid quantifier is the operator's default: `=` asks
                 // whether any matches, `!=` whether none does.
                 let q = match (q, op) {
@@ -529,7 +572,7 @@ fn compare(selector: Selector, op: Op, value: &Value, t: &Subject<'_>, env: &Env
                 }
             }
         },
-        (Selector::Field(_, f), Value::Number(n)) => match number_of(f, t) {
+        (Selector::Field(_, _, f), Value::Number(n)) => match number_of(f, t) {
             Some(v) => match op {
                 Op::Eq => v == *n,
                 Op::Ne => v != *n,
@@ -801,6 +844,21 @@ impl Parser {
             }
         }
 
+        // **A trailing `*` or `+` reaches up the hierarchy** (#93). Read
+        // *after* the quantifier, because the marker sits against the field
+        // name and the field name is inside the brackets: `any(genre*)`, not
+        // `any(genre)*`. Closure is about the field; the quantifier is about
+        // how many of its values must satisfy the test.
+        let reach = if name.ends_with('*') {
+            name.pop();
+            Reach::OrNarrower
+        } else if name.ends_with('+') {
+            name.pop();
+            Reach::Narrower
+        } else {
+            Reach::Exact
+        };
+
         let selector = if name == "any" {
             Selector::Any
         } else if let Some(h) = HistoryField::parse(&name) {
@@ -808,6 +866,7 @@ impl Parser {
         } else {
             Selector::Field(
                 quant,
+                reach,
                 Field::parse(&name).ok_or_else(|| match name.as_str() {
                     // The sort language's spelling of the two date fields. Naming
                     // the replacement keeps a wrong guess to one message.
@@ -838,7 +897,7 @@ impl Parser {
 
         let kind = match selector {
             Selector::Any => Kind::Text,
-            Selector::Field(_, f) => f.kind(),
+            Selector::Field(_, _, f) => f.kind(),
             Selector::History(_) => Kind::Number,
         };
 
@@ -1188,6 +1247,64 @@ mod tests {
         );
     }
 
+    /// **`*` is zero-or-more and `+` is one-or-more** — #93, SPARQL's
+    /// spelling, one meaning per character.
+    ///
+    /// `genre="electronic"` finds what is tagged exactly that. Neither is what
+    /// somebody means by "play me electronic music", which is the whole reason
+    /// a hierarchy exists — and until now the only way to ask was to name
+    /// every narrower term.
+    #[test]
+    fn closure_reaches_narrower_concepts() {
+        let mut t = track();
+        t.genres = vec!["Techno".into()];
+        // Techno narrower-of Electronic narrower-of Music.
+        let h = Fake {
+            broader: vec!["Techno".into(), "Electronic".into(), "Music".into()],
+            ..Fake::default()
+        };
+
+        // Exact reaches nothing it is not.
+        assert!(!matches_env(r#"genre="Electronic""#, &t, &h, 0));
+
+        // `*` is it or anything narrower; `+` is strictly narrower.
+        assert!(matches_env(r#"genre*="Electronic""#, &t, &h, 0));
+        assert!(matches_env(r#"genre+="Electronic""#, &t, &h, 0));
+        assert!(
+            matches_env(r#"genre*="Music""#, &t, &h, 0),
+            "at any depth, not one hop"
+        );
+
+        // And on the concept itself the two differ, which is the point of
+        // having both characters.
+        let mut electronic = track();
+        electronic.genres = vec!["Electronic".into()];
+        assert!(matches_env(r#"genre*="Electronic""#, &electronic, &h, 0));
+        assert!(
+            !matches_env(r#"genre+="Electronic""#, &electronic, &h, 0),
+            "`+` is one hop or more, so a concept is not narrower than itself"
+        );
+    }
+
+    /// Closure composes with the quantifier rather than replacing it.
+    #[test]
+    fn closure_and_quantification_are_separate_questions() {
+        let mut t = track();
+        t.genres = vec!["Techno".into(), "Folk".into()];
+        let h = Fake {
+            broader: vec!["Techno".into(), "Electronic".into()],
+            ..Fake::default()
+        };
+
+        // **The marker goes inside**: closure is about the field, the
+        // quantifier is about how many of its values must satisfy the test.
+        assert!(matches_env(r#"any(genre*)="Electronic""#, &t, &h, 0));
+        assert!(
+            !matches_env(r#"all(genre*)="Electronic""#, &t, &h, 0),
+            "folk is not electronic"
+        );
+    }
+
     /// **Quantification is explicit, or the language lies** — #93.
     ///
     /// The two readings were both here and neither was sayable: `=` meant
@@ -1320,6 +1437,8 @@ mod tests {
         acquired: Option<i64>,
         rating: Option<u8>,
         collected: u32,
+        /// A narrower-of chain, child first, as `broader` would return it.
+        broader: Vec<String>,
     }
 
     impl Listened for Fake {
@@ -1335,6 +1454,13 @@ mod tests {
         fn collected(&self, _: Id<Recording>) -> u32 {
             self.collected
         }
+        fn broader(&self, _: &str, label: &str) -> Vec<String> {
+            // The fixture's chain, from wherever the label sits upward.
+            match self.broader.iter().position(|l| l == label) {
+                Some(at) => self.broader[at + 1..].to_vec(),
+                None => Vec::new(),
+            }
+        }
         fn rating(&self, _: Id<Recording>) -> Option<u8> {
             self.rating
         }
@@ -1347,6 +1473,7 @@ mod tests {
             acquired: Some(added),
             rating: None,
             collected: 0,
+            broader: Vec::new(),
         }
     }
 

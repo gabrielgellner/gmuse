@@ -3559,12 +3559,28 @@ Append here as decisions are made. Format: date, decision, rationale.
   would be asking and it is a different one — the same reasoning that already makes a missing tag match nothing,
   including `!=`.
 
-  **What is not done, and it is most of #93.** Dotted paths (`any(encoding).verdict = suspect`,
-  `credit[role=remixer].artist`, `genre.basis = discogs`) and closure (`genre*`, `derived+`) both need the evaluator to
-  reach the librarian, and `Subject` deliberately carries only a row. Adding a library handle to `Env` is the shape — it
-  is how `listened` already works — but it is a wider change than quantification, and closure additionally needs the
-  depth bound #79 asks for. Quantification was worth doing first because it is the item that makes the existing language
-  _honest_ rather than the one that makes it bigger.
+  **Closure, and one meaning per character.** `genre*="electronic"` is it or anything narrower at any depth; `genre+` is
+  strictly narrower. SPARQL's spelling, and an earlier draft used `+` for both and justified it by the borrowing — which
+  stops being true the moment the meaning changes.
+
+  **It walks up, not down.** The question is whether one of a row's own genres sits under the concept asked about, and a
+  row has a few genres where a taxonomy has thousands of descendants. So `Listened::broader` climbs from each value,
+  which also makes the glob case fall out: an ancestor is tested against the pattern like anything else.
+
+  **The bound is not optional** (#79). A hierarchy is curated by hand, so a loop is a question of when rather than
+  whether — `Techno` narrower-of `Rock` narrower-of `Techno` is two edits nobody would make together and somebody
+  eventually will. A visited-set stops the cycle and a depth of 16 is the backstop beside it, the same pair
+  `view::Stack` uses for saved views. Asserted against the real fold, not a fixture: a cycle terminates and each concept
+  is visited once.
+
+  The marker goes **inside** a quantifier — `any(genre*)`, not `any(genre)*` — because closure is about the field and
+  the quantifier is about how many of its values must satisfy the test. The parser reads it after unwrapping the
+  brackets, which is what makes both spellings of the field name work.
+
+  **What is still not done.** Dotted paths — `any(encoding).verdict = suspect`, `credit[role=remixer].artist`,
+  `genre.basis = discogs` — need the evaluator to reach the _librarian_, where closure needed only the _catalogue_ and
+  the catalogue was already on `Env` as `listened`. That difference is why closure landed and paths did not: one was a
+  method on a channel that existed, the other is a new channel.
 
 ## 14. Prior art worth reading
 
