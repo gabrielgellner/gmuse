@@ -573,7 +573,15 @@ mod tests {
     /// 10,000-line migration into a ratchet, and makes any new leak a test
     /// failure rather than something to be found later.
     ///
-    /// **Lower these as the migration lands. Never raise them.**
+    /// **Lower these as the migration lands. Never raise them** — and where
+    /// one stops falling, say why rather than leaving it at a number.
+    ///
+    /// Two of the three have now been revised rather than driven to zero,
+    /// because zero was never the right target for them. `PathBuf` counted
+    /// four legitimate uses and could not fall further; it is a question now
+    /// instead of a count. `Store` cannot reach zero while the type exists,
+    /// which is #86. Only `reaches` still measures a migration in progress,
+    /// and its own floor is four.
     ///
     /// **It counts the substring, so prose counted too.** Two `Store`
     /// mentions were the word *Stored* in doc comments and one was a comment
@@ -590,8 +598,36 @@ mod tests {
     /// renamed a file in. A fixture is not a leak. What leaks is the player.
     #[test]
     fn the_leak_from_the_player_only_narrows() {
+        /// The import, the `Context` field, and one comment about what
+        /// playlists hold. **This one reaches zero at #86 and not before** —
+        /// the player must name the type for as long as the type exists.
         const STORE: usize = 3;
-        const PATHS: usize = 4;
+        /// **What a `PathBuf` in the player is allowed to be.**
+        ///
+        /// Counting them was the wrong measure and it had reached its floor
+        /// without anyone noticing. All four that remain are legitimate, and
+        /// two are not track paths at all:
+        ///
+        /// - `session_path` and `data_dir` are the **player's own files**.
+        ///   Nothing about "the library must not be keyed by a path" says the
+        ///   program may not know where it keeps its own state.
+        /// - `PathBuf::from(locator)` is the sanctioned production point —
+        ///   §"the locator is produced here and used immediately", and the
+        ///   whole discipline is that it is not *kept*.
+        /// - the `use` itself.
+        ///
+        /// So the count could only ever fall to four, and a number with a
+        /// floor nobody had written down is a number somebody will chase.
+        /// Replaced by the question it was standing in for: **is the player
+        /// holding a path that is neither its own file nor one it is opening
+        /// right now?** That fails on a new one and stays silent on these,
+        /// which is what the ratchet was for.
+        const SANCTIONED_PATHS: &[&str] = &[
+            "use std::path",
+            "session_path",
+            "data_dir",
+            "PathBuf::from(locator)",
+        ];
         /// **The number that actually measures the seam.** The player reaches
         /// through `ctx.store` far more often than it names the type, so
         /// counting `Store` alone said 5 while sixteen reads went around the
@@ -625,26 +661,36 @@ mod tests {
         /// - **one** is the remote's owned snapshot: another thread renders a
         ///   caller's own template, and a borrowed row cannot cross a thread.
         /// - **one** is the filter closure, which matches on a `&Track`.
+        ///
+        /// So its floor is **four**, and only the filter closure is still
+        /// worth moving.
         const REACHES: usize = 5;
 
-        let (mut store, mut paths, mut reaches) = (0, 0, 0);
-        for (_, text) in read("src/ui") {
+        let (mut store, mut reaches) = (0, 0);
+        let mut stray_paths: Vec<String> = Vec::new();
+        for (name, text) in read("src/ui") {
             let live = production(&text);
             store += live.matches("Store").count();
-            paths += live.matches("PathBuf").count();
             reaches += live.matches("ctx.store.").count();
+            for line in live.lines().filter(|l| l.contains("PathBuf")) {
+                if !SANCTIONED_PATHS.iter().any(|ok| line.contains(ok)) {
+                    stray_paths.push(format!("{name}: {}", line.trim()));
+                }
+            }
         }
 
         assert!(
-            store <= STORE && paths <= PATHS && reaches <= REACHES,
-            "the seam widened: Store {store} (was {STORE}), \
-             PathBuf {paths} (was {PATHS}), reaches {reaches} (was {REACHES})"
+            stray_paths.is_empty(),
+            "the player is holding a path that is not one of its own files, \
+             and not one produced at the moment of opening: {stray_paths:#?}"
         );
-        if store < STORE || paths < PATHS || reaches < REACHES {
-            eprintln!(
-                "seam narrowed to Store {store}, PathBuf {paths}, reaches {reaches} \
-                 — lower the constants"
-            );
+        assert!(
+            store <= STORE && reaches <= REACHES,
+            "the seam widened: Store {store} (was {STORE}), \
+             reaches {reaches} (was {REACHES})"
+        );
+        if store < STORE || reaches < REACHES {
+            eprintln!("seam narrowed to Store {store}, reaches {reaches} — lower the constants");
         }
     }
 
