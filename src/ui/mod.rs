@@ -1121,13 +1121,29 @@ pub fn save_session(ui: &mut Ui, ctx: &Context<'_>) {
 ///
 /// Paths rather than `TrackId`s — see the note on `Session::queue`.
 pub fn capture_session(ui: &Ui, ctx: &Context<'_>) -> crate::session::Session {
-    let path_of = |id: TrackId| ctx.store.get(id).map(|t| t.path.clone());
+    // **Identities, not paths** (#112). A recording id survives a rename, a
+    // move, and being carried to another machine; a path survives none of
+    // those, and it was only ever here because a `TrackId` is an arena index
+    // that does not outlive its cache.
     crate::session::Session {
         version: 0, // stamped by `save`
-        queue: ui.queue.entries().filter_map(|id| path_of(*id)).collect(),
+        queue: ui
+            .queue
+            .entries()
+            .filter_map(|id| recording_of(ctx, *id))
+            .collect(),
         open_playlist: ui.open.as_ref().map(|o| o.name().to_string()),
         view: Some(ui.view as u8),
-        current: ui.playback.current.and_then(path_of),
+        // The copy too, so resuming reopens the file that was open rather
+        // than whichever the canonical rule would pick now.
+        current: ui
+            .playback
+            .current
+            .and_then(|id| recording_of(ctx, id))
+            .map(|recording| crate::session::Playing {
+                recording,
+                copy: ui.playback.playing,
+            }),
         position_secs: ctx
             .player
             .map(|p| p.position().as_secs_f64())
@@ -1196,11 +1212,17 @@ pub fn restore_session(
     // Restored *after* shuffle, because setting shuffle reseeds.
     ui.playback.rng_state = m.rng_state;
 
+    // Which file holds each recording, this time. An identity outlives a
+    // path, but a *handle* does not outlive the cache that issued it, so the
+    // pairing has to be made again on every launch — which is the whole reason
+    // the session cannot store handles and no longer stores paths either.
+    let here = holdings_here(ctx);
+
     ui.queue.clear();
     let mut missing = 0;
-    for path in &saved.queue {
-        match ctx.store.id_for_path(path) {
-            Some(id) => ui.queue.push_back(id),
+    for recording in &saved.queue {
+        match here.get(recording) {
+            Some(id) => ui.queue.push_back(*id),
             None => missing += 1,
         }
     }
@@ -1224,8 +1246,8 @@ pub fn restore_session(
         ui.previous_view = view;
     }
 
-    if let Some(path) = saved.current.as_ref()
-        && let Some(id) = ctx.store.id_for_path(path)
+    if let Some(playing) = saved.current.as_ref()
+        && let Some(&id) = here.get(&playing.recording)
     {
         ui.playback.current = Some(id);
         // Held until the resumed track's `Loaded` has been seen, so that the
@@ -1311,6 +1333,28 @@ fn source_for(
         },
         encoding,
     ))
+}
+
+/// Which file holds each recording on this device, for one restore.
+///
+/// Built once rather than asked per row: it is a walk of the store either way,
+/// and a session naming a hundred queued recordings would otherwise walk it a
+/// hundred times.
+fn holdings_here(ctx: &Context<'_>) -> std::collections::HashMap<Id<Recording>, TrackId> {
+    let files: &dyn Listing = ctx.store;
+    ctx.store
+        .iter()
+        .filter_map(|(id, _)| {
+            let audio = files.audio_of(id)?;
+            let recording = ctx
+                .library
+                .encodings
+                .encodings
+                .get(&Id::<Encoding>::of_audio(&audio))
+                .and_then(|e| e.recording)?;
+            Some((recording.id(), id))
+        })
+        .collect()
 }
 
 /// Which recording a file holds, **as the model has it**.
@@ -7648,7 +7692,10 @@ mod tests {
 
         let id = store.iter().next().unwrap().0;
         let mut saved = saved_with(false, "all", 0);
-        saved.current = Some(store.get(id).unwrap().path.clone());
+        saved.current = Some(crate::session::Playing {
+            recording: recording_of(&ctx, id).unwrap(),
+            copy: None,
+        });
         saved.position_secs = 42.5;
 
         restore_session(&mut ui, &ctx, &saved, &Default::default());
@@ -7666,6 +7713,39 @@ mod tests {
         assert!(path.exists(), "saving never restarted");
     }
 
+    /// **A session names what it was playing, and which copy** — #112.
+    ///
+    /// It stored paths, which was the only durable thing to hand when a
+    /// `TrackId` was the alternative. A recording id survives a rename, a
+    /// move, and being carried to another machine; a path survives none of
+    /// them.
+    #[test]
+    fn a_session_round_trips_through_identities() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let id = store.iter().next().unwrap().0;
+        ui.playback.current = Some(id);
+        ui.playback.playing = Some(Id::<Encoding>::of_audio(
+            &store.get(id).unwrap().audio_id.unwrap(),
+        ));
+        ui.queue.push_back(id);
+
+        let saved = capture_session(&ui, &ctx);
+        assert_eq!(saved.queue, vec![recording_of(&ctx, id).unwrap()]);
+        let playing = saved.current.as_ref().expect("nothing was playing");
+        assert_eq!(playing.recording, recording_of(&ctx, id).unwrap());
+        assert_eq!(
+            playing.copy, ui.playback.playing,
+            "the session forgot which copy was open"
+        );
+
+        let mut back = ui_of(&store, true);
+        restore_session(&mut back, &ctx, &saved, &Default::default());
+        assert_eq!(back.playback.current, Some(id));
+        assert_eq!(back.queue.entries().copied().collect::<Vec<_>>(), vec![id]);
+    }
+
     /// A track that has moved or gone is skipped, not an error — a library
     /// reorganised between sessions must not stop the player starting.
     #[test]
@@ -7675,8 +7755,13 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         let mut saved = saved_with(false, "all", 0);
-        saved.queue = vec![PathBuf::from("/gone/a.mp3"), PathBuf::from("/gone/b.mp3")];
-        saved.current = Some(PathBuf::from("/gone/c.mp3"));
+        // Identities nothing here holds — the shape of a session carried from
+        // another machine, or one whose files have been deleted.
+        saved.queue = vec![Id::derived(b"gone-a"), Id::derived(b"gone-b")];
+        saved.current = Some(crate::session::Playing {
+            recording: Id::derived(b"gone-c"),
+            copy: None,
+        });
         restore_session(&mut ui, &ctx, &saved, &Default::default());
 
         assert!(ui.queue.is_empty(), "phantom entries were restored");

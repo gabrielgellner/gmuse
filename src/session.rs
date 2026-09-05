@@ -14,10 +14,28 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::entity::Encoding;
+use crate::model::id::Id;
+use crate::model::spine::Recording;
+
 /// Bumped when the shape changes. A file from another version is ignored
 /// rather than half-read: losing one session's position is nothing, and
 /// guessing at a field's meaning is how state files corrupt state.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+
+/// What was playing, and which copy of it — issue #112.
+///
+/// **A pair, because a row names a copy** (#78). Resuming should reopen the
+/// file that was open — the FLAC, not whichever the canonical rule would pick
+/// now — and the copy is what says which. Absent for a recording this device
+/// no longer holds, which resumes through `open` rather than refusing: a
+/// drive being unmounted is not the same as a file being gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Playing {
+    pub recording: Id<Recording>,
+    #[serde(default)]
+    pub copy: Option<Id<Encoding>>,
+}
 
 /// `$XDG_STATE_HOME/gmuse/session.toml`, beside the audit log.
 pub fn default_path() -> PathBuf {
@@ -55,12 +73,18 @@ pub struct Modes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
-    /// Paths, never `TrackId`s. An arena index is only meaningful for as long
-    /// as the cache that produced it survives; a discarded cache reassigns
-    /// every one, and a queue keyed by id would silently restore *other
-    /// tracks*.
+    /// **Identities.**
+    ///
+    /// It held paths, for a good reason that has been overtaken: a `TrackId`
+    /// is an arena index, only meaningful while the cache that produced it
+    /// survives, so a queue keyed by one would silently restore *other
+    /// tracks*. A path was the only durable thing to hand.
+    ///
+    /// A recording id is durable in a way a path is not — it survives a
+    /// rename, a move, and being carried to another machine, none of which a
+    /// path survives. And it is what everything else durable here is keyed by.
     #[serde(default)]
-    pub queue: Vec<PathBuf>,
+    pub queue: Vec<Id<Recording>>,
     /// Which playlist view 3 had open, by **name**.
     ///
     /// The name, not the tracks: every playlist is a file or a rule now, so
@@ -78,7 +102,7 @@ pub struct Session {
     #[serde(default)]
     pub view: Option<u8>,
     #[serde(default)]
-    pub current: Option<PathBuf>,
+    pub current: Option<Playing>,
     #[serde(default)]
     pub position_secs: f64,
     pub modes: Modes,
@@ -132,13 +156,46 @@ pub fn save(path: &Path, session: &Session) -> Result<(), SessionError> {
 mod tests {
     use super::*;
 
+    /// **A session written by an older gmuse is discarded, not half-read.**
+    ///
+    /// It used to hold paths, and losing where you were is the one loss this
+    /// program already accepts — where a partial read is not: a queue that
+    /// silently came back three tracks short would look like the queue.
+    ///
+    /// **What refuses it is the type, not the version.** A path is not a
+    /// UUID, so the parse fails before the version is looked at, and this
+    /// test passes with `VERSION` left at 1. The bump is still right — it is
+    /// what will refuse the next change, where the shapes happen to stay
+    /// compatible and only the meaning moves — but nothing here proves it
+    /// works, and a reader should not think otherwise.
+    #[test]
+    fn a_session_from_before_identities_is_refused() {
+        let dir = std::env::temp_dir().join("gmuse-session-old");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.toml");
+        std::fs::write(
+            &path,
+            "version = 1\nqueue = [\"/m/a.mp3\"]\ncurrent = \"/m/b.mp3\"\nposition_secs = 0.0\n",
+        )
+        .unwrap();
+
+        assert!(
+            load(&path).is_none(),
+            "a path-keyed session was read as though it named identities"
+        );
+    }
+
     fn sample() -> Session {
         Session {
             version: VERSION,
-            queue: vec![PathBuf::from("/m/a.mp3"), PathBuf::from("/m/b.flac")],
+            queue: vec![Id::derived(b"a"), Id::derived(b"b")],
             open_playlist: Some("mix".into()),
             view: Some(2),
-            current: Some(PathBuf::from("/m/c.opus")),
+            current: Some(Playing {
+                recording: Id::derived(b"c"),
+                copy: Some(Id::derived(b"copy")),
+            }),
             position_secs: 42.5,
             modes: Modes {
                 shuffle: true,

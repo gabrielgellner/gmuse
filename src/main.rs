@@ -595,7 +595,13 @@ fn run_tui(
                     saved
                         .current
                         .as_ref()
-                        .map(|p| format!("at {:.1}s in {}", saved.position_secs, p.display()))
+                        .and_then(|p| library_view.row_of(p.recording, p.copy))
+                        .map(|row| {
+                            format!(
+                                "at {:.1}s in {} — {}",
+                                saved.position_secs, row.file_under, row.title
+                            )
+                        })
                         .unwrap_or_else(|| "nothing playing".into())
                 ),
             );

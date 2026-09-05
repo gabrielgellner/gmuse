@@ -613,13 +613,19 @@ mod tests {
         /// fields it used to read off a `Track`. The two it does not are
         /// `path` and `file_name`, and a template asking for either is refused
         /// when it is parsed — a row carries no location (#78).
-        /// - **three** are `id_for_path`, restoring a session or a playlist.
-        ///   A session stores paths, which is exactly what #37 says has to
-        ///   stop.
-        /// - **two** write `.m3u`, which is a path format by definition. That
-        ///   one is an export and may never move.
+        /// The session's two went with #112 — it names a recording and the
+        /// copy that was open, so resuming reopens the file that was open
+        /// rather than whichever the canonical rule would pick now.
+        ///
+        /// **The five left are three questions, and two of them may never
+        /// move:**
+        ///
+        /// - **three** read or write `.m3u`, which is a path format by
+        ///   definition. An export naming paths is not a leak.
+        /// - **one** is the remote's owned snapshot: another thread renders a
+        ///   caller's own template, and a borrowed row cannot cross a thread.
         /// - **one** is the filter closure, which matches on a `&Track`.
-        const REACHES: usize = 8;
+        const REACHES: usize = 5;
 
         let (mut store, mut paths, mut reaches) = (0, 0, 0);
         for (_, text) in read("src/ui") {
