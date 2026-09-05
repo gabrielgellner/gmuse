@@ -34,11 +34,11 @@
 //! being deleted would be churn; `populate` reads it properly, and this goes
 //! away when it takes over.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::basis::Basis;
 use crate::model::encoding::Format;
-use crate::model::entity::Device;
+use crate::model::entity::{Device, Encoding};
 use crate::model::id::Id;
 use crate::model::instance::{Instance, Scanned};
 use crate::model::log::Record;
@@ -118,7 +118,145 @@ pub fn librarian(
     let mut scratch = Instance::new(device);
     scratch.merge(now, records);
     scratch.ingest(now, &scanned(store));
+
+    // **What this device can actually open** — issue #85.
+    //
+    // Without it the librarian knows every recording and can reach none of
+    // them: `open` looks for a holding on this device and finds no rows, so it
+    // refuses everything. A scan is exactly the moment that answer is known,
+    // and it is the only moment — by the time the player asks, all it has is
+    // an id.
+    let held: BTreeMap<Id<Encoding>, String> = store
+        .iter()
+        .filter_map(|(_, t)| {
+            let audio = t.audio_id?;
+            Some((
+                Id::<Encoding>::of_audio(&audio),
+                t.path.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    scratch.assert_holdings(now, held);
+
     Librarian::from_catalogue(&scratch.catalogue())
+}
+
+#[cfg(test)]
+mod opening {
+    //! **What this device can open** — issue #85.
+
+    use super::*;
+    use crate::audio_id::AudioId;
+    use crate::model::spine::Recording;
+    use crate::store::Track;
+
+    fn store_with(path: &str, hash: u128) -> Store {
+        let mut s = Store::default();
+        s.upsert(Track {
+            path: std::path::PathBuf::from(path),
+            title: Some("Callisto".into()),
+            artist: Some("Bodzin".into()),
+            audio_id: Some(AudioId { scheme: 1, hash }),
+            ..Default::default()
+        });
+        s
+    }
+
+    /// **The librarian could reach nothing at all**, because the bridge never
+    /// said what was here. `open` looks for a holding on this device and found
+    /// no rows, so it refused every file — which is the whole reason nothing
+    /// called it.
+    #[test]
+    fn the_library_can_open_what_this_device_holds() {
+        let device = Id::<Device>::derived(b"laptop");
+        let store = store_with("/m/callisto.mp3", 7);
+        let l = librarian(&store, &BTreeSet::new(), device, 100);
+
+        let recording = l.recordings().next().expect("a recording");
+        let (encoding, locator) = l
+            .open(recording, &[device], &[])
+            .expect("the library refused a file this device is holding");
+        assert_eq!(locator, "/m/callisto.mp3");
+        assert_eq!(encoding.audio, AudioId { scheme: 1, hash: 7 });
+    }
+
+    /// **The copy that plays is not always the best copy**, which is why a
+    /// play has to name the one it opened.
+    ///
+    /// A better encoding on the NAS wins `canonical` — it is the one to prefer
+    /// when there is a choice — and this machine cannot reach it, so `open`
+    /// hands back the local one. Recording the canonical copy against the play
+    /// would then say a listen came from bytes this device has never read.
+    #[test]
+    fn the_copy_that_opens_is_not_always_the_canonical_one() {
+        use crate::model::clock::HybridClock;
+        use crate::model::encoding::Format;
+        use crate::model::log::Fact;
+
+        let mine = Id::<Device>::derived(b"laptop");
+        let nas = Id::<Device>::derived(b"asnas");
+        let store = store_with("/m/callisto.mp3", 7);
+
+        // A better copy, held only by the NAS.
+        let better = AudioId { scheme: 1, hash: 8 };
+        let elsewhere = Id::<Encoding>::of_audio(&better);
+        let recording = Id::<Recording>::of_basis(&Basis::Audio(AudioId { scheme: 1, hash: 7 }));
+        let mut clock = HybridClock::new(nas);
+        let records: BTreeSet<Record> = [
+            Fact::EncodingDescribed {
+                encoding: elsewhere,
+                audio: better,
+                format: Some(Format::Flac),
+                bitrate: 1000,
+                length_ms: 200_000,
+            },
+            Fact::EncodingBound {
+                encoding: elsewhere,
+                from: None,
+                to: recording,
+            },
+            Fact::HoldingsAsserted {
+                device: nas,
+                held: [(elsewhere, "/nas/callisto.flac".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        ]
+        .into_iter()
+        .map(|fact| Record {
+            stamp: clock.stamp(100),
+            fact,
+        })
+        .collect();
+
+        let l = librarian(&store, &records, mine, 200);
+        assert_eq!(
+            l.encodings.canonical(recording).map(|e| e.id),
+            Some(elsewhere),
+            "the NAS copy is the better one, or this test proves nothing"
+        );
+        let (opened, locator) = l.open(recording, &[mine], &[]).expect("a local copy");
+        assert_eq!(locator, "/m/callisto.mp3");
+        assert_ne!(
+            opened.id, elsewhere,
+            "the player was handed a copy this device cannot read"
+        );
+    }
+
+    /// And refuses one it does not hold, rather than inventing a path. That is
+    /// the property that makes a locator safe to produce at the moment of
+    /// opening: it is either true of this machine now, or absent.
+    #[test]
+    fn the_library_refuses_what_another_device_holds() {
+        let mine = Id::<Device>::derived(b"laptop");
+        let theirs = Id::<Device>::derived(b"asnas");
+        let store = store_with("/m/callisto.mp3", 7);
+        let l = librarian(&store, &BTreeSet::new(), mine, 100);
+
+        let recording = l.recordings().next().expect("a recording");
+        assert!(l.open(recording, &[theirs], &[]).is_none());
+        let _: Option<Id<Recording>> = None;
+    }
 }
 
 #[cfg(test)]

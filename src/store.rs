@@ -357,6 +357,10 @@ impl crate::model::rows::Listing for Store {
         })
     }
 
+    fn audio_of(&self, id: TrackId) -> Option<crate::audio_id::AudioId> {
+        self.get(id)?.audio_id
+    }
+
     fn playable(&self, id: TrackId) -> Option<crate::model::rows::Playable<'_>> {
         let t = self.get(id)?;
         Some(crate::model::rows::Playable {

@@ -590,7 +590,12 @@ mod tests {
         /// counting `Store` alone said 5 while sixteen reads went around the
         /// librarian. Replacing a read lowers this and leaves the others flat,
         /// which is exactly the progress #77 is made of.
-        const REACHES: usize = 15;
+        ///
+        /// One went when playback started opening through the librarian
+        /// (#85): the locator and the recording behind it are asked of the
+        /// library now, and what remains of the store on that path is reached
+        /// through `rows::Listing` rather than by name.
+        const REACHES: usize = 14;
 
         let (mut store, mut paths, mut reaches) = (0, 0, 0);
         for (_, text) in read("src/ui") {

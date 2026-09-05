@@ -200,7 +200,9 @@ pub struct DeviceRecord {
 ///
 /// Canonical choices feed the re-buy list and the quality tables, so a changed
 /// ordering should read as an explainable diff rather than as a mystery.
-pub const POLICY: u16 = 1;
+///
+/// 2 — measurement stopped outranking the format (#110).
+pub const POLICY: u16 = 2;
 
 /// The ordering that decides which encoding represents a recording.
 ///
@@ -212,12 +214,28 @@ pub const POLICY: u16 = 1;
 /// else, so there is no holding and no setting in scope to read: every replica
 /// computes the same answer without coordinating, and a later edit *cannot*
 /// quietly make it machine-dependent without changing this line.
-pub fn canonical_key(e: &Encoding) -> (Verdict, u32, u32, std::cmp::Reverse<u8>, Id<Encoding>) {
+pub fn canonical_key(
+    e: &Encoding,
+) -> (bool, std::cmp::Reverse<u8>, u32, u32, Verdict, Id<Encoding>) {
     (
-        e.verdict(),
-        e.cutoff_hz.map(|c| c.value).unwrap_or(0),
-        e.bitrate,
+        // **"We know this is bad" and "we have not looked" are different**,
+        // and the ordering used to collapse them: `Verdict` sorted first, so a
+        // measured 320k MP3 outranked an unmeasured FLAC. Measurement status
+        // is a fact about our knowledge rather than about the audio, and
+        // sorting on it meant running the quality pass over part of the
+        // library *changed which copy represents a recording* — in the wrong
+        // direction (#110).
+        //
+        // Suspect still sinks to the bottom outright. A suspect FLAC is a
+        // lossy file upsampled to lossless, this library has real examples,
+        // and it must not beat a good MP3.
+        e.verdict() != Verdict::Suspect,
         std::cmp::Reverse(e.format.rank()),
+        e.bitrate,
+        // Below the format, so measuring only ever breaks a tie between copies
+        // that are otherwise equal.
+        e.cutoff_hz.map(|c| c.value).unwrap_or(0),
+        e.verdict(),
         e.id,
     )
 }
@@ -421,6 +439,86 @@ mod tests {
         e.encodings.insert(lossless.id, lossless);
 
         assert_eq!(e.canonical(rec).unwrap().id, want);
+    }
+
+    /// **Measurement is a fact about our knowledge, not about the audio.**
+    ///
+    /// `Verdict` used to sort first, so a measured 320k MP3 outranked an
+    /// unmeasured FLAC — meaning that running the quality pass over part of
+    /// the library changed which copy represents a recording, in the wrong
+    /// direction (#110).
+    #[test]
+    fn an_unmeasured_master_still_represents_the_recording() {
+        let rec = Id::<Recording>::derived(b"r");
+        let mut e = Encodings::default();
+        let mut looked_at = encoding(rec, Format::Mp3, 320, Some(20_000));
+        let mut untouched = encoding(rec, Format::Flac, 1000, None);
+        assert_eq!(looked_at.verdict(), Verdict::Good);
+        assert_eq!(untouched.verdict(), Verdict::Unmeasured);
+        stack_the_ids_against(&mut untouched, &mut looked_at);
+        let want = untouched.id;
+        e.encodings.insert(looked_at.id, looked_at);
+        e.encodings.insert(untouched.id, untouched);
+
+        assert_eq!(e.canonical(rec).unwrap().id, want);
+    }
+
+    /// **A copy we believe is lying sinks below everything.**
+    ///
+    /// This is why the verdict cannot simply be demoted under the format: a
+    /// file claiming 320k with a 15 kHz spectrum is a bad transcode wearing a
+    /// good bitrate, and it should lose to an honest copy in a worse format at
+    /// half the rate.
+    ///
+    /// Note the shape of the case. A *lossless* file cannot currently be
+    /// `Suspect` at all — `verdict` returns `Good` for any measured lossless
+    /// format without looking at the spectrum — so an upsampled lossy-to-FLAC
+    /// file reads as good. That is a hole in `verdict`, not in this ordering,
+    /// and it is why the case here is a lying MP3 rather than a lying FLAC.
+    #[test]
+    fn a_copy_that_lies_about_its_bitrate_loses_to_an_honest_one() {
+        let rec = Id::<Recording>::derived(b"r");
+        let mut e = Encodings::default();
+        // 320k claimed, 15 kHz delivered: a 128k source re-encoded upward.
+        let mut lying = encoding(rec, Format::Mp3, 320, Some(15_000));
+        let mut honest = encoding(rec, Format::Opus, 128, Some(19_500));
+        assert_eq!(lying.verdict(), Verdict::Suspect);
+        assert_ne!(honest.verdict(), Verdict::Suspect);
+        assert!(
+            Format::Opus.rank() > Format::Mp3.rank() && honest.bitrate < lying.bitrate,
+            "the honest copy has to be worse on every other term, or this \
+             test passes without the verdict doing anything"
+        );
+        stack_the_ids_against(&mut honest, &mut lying);
+        let want = honest.id;
+        e.encodings.insert(lying.id, lying);
+        e.encodings.insert(honest.id, honest);
+
+        assert_eq!(e.canonical(rec).unwrap().id, want);
+    }
+
+    /// **Measuring a copy does not move the canonical**, unless what it finds
+    /// is that the copy is suspect. That is the property the reordering is
+    /// for: the quality pass answers a question about the bytes, and it should
+    /// not silently rewrite which copy the library shows.
+    #[test]
+    fn measuring_a_copy_does_not_change_which_one_represents_it() {
+        let rec = Id::<Recording>::derived(b"r");
+        let mut e = Encodings::default();
+        let flac = encoding(rec, Format::Flac, 1000, None);
+        let mp3 = encoding(rec, Format::Mp3, 320, None);
+        let (flac_id, mp3_id) = (flac.id, mp3.id);
+        e.encodings.insert(flac_id, flac);
+        e.encodings.insert(mp3_id, mp3);
+        assert_eq!(e.canonical(rec).unwrap().id, flac_id);
+
+        // The analyser gets to the MP3 first and finds nothing wrong with it.
+        e.encodings.get_mut(&mp3_id).unwrap().cutoff_hz = Some(Measured::now(20_000));
+        assert_eq!(
+            e.canonical(rec).unwrap().id,
+            flac_id,
+            "looking at one copy changed which copy represents the recording"
+        );
     }
 
     /// Every replica computes the same canonical without talking to anyone.

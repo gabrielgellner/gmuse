@@ -12,6 +12,8 @@
 //! - **Shuffle is a seeded permutation, not a played-set.** See [`shuffled`].
 
 use crate::library::Library;
+use crate::model::entity::Encoding;
+use crate::model::id::Id;
 use crate::playlist::{Playlist, Queue};
 use crate::store::TrackId;
 
@@ -333,6 +335,16 @@ fn split_mix64(state: u64) -> u64 {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Playback {
     pub current: Option<TrackId>,
+    /// **Which copy is being heard** — issue #85.
+    ///
+    /// Set when the library chooses one to open, so a play names the copy that
+    /// actually played rather than the canonical one. Those are the same until
+    /// a pin or a device's reach makes them differ, and the whole point of
+    /// recording a play against an encoding is to answer which of several
+    /// copies was heard.
+    ///
+    /// `None` for a file the library cannot place — it still plays.
+    pub playing: Option<Id<Encoding>>,
     pub active: ActiveSource,
     pub aaa_mode: AaaMode,
     pub shuffle: bool,

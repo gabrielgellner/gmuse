@@ -28,7 +28,10 @@ use crate::cmd::{
     VolSpec, parse,
 };
 use crate::library::Library;
+use crate::model::entity::Encoding;
+use crate::model::id::Id;
 use crate::model::rows::Listing;
+use crate::model::spine::Recording;
 use crate::next::{self, ActiveSource, Playback, Source};
 use crate::playlist::{Playlist, Queue};
 use crate::store::{Store, TrackId};
@@ -804,7 +807,7 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
     let Some(id) = ui.playback.current else {
         return;
     };
-    let Some(recording) = ctx.store.recording_of(id) else {
+    let Some(recording) = recording_of(ctx, id) else {
         // Nothing stable to hang a play on. Better to count nothing than to
         // count it against a path, which is the failure #81 exists to end.
         ui.audit.line("played", "unidentified file, not counted");
@@ -824,7 +827,11 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
     ui.counted_current = true;
     // Milliseconds: this is a clock stamp, not a fact's date.
     let now = crate::history::now_ms();
-    let encoding = ctx.library.encodings.canonical(recording).map(|e| e.id);
+    // **The copy that played, not the one that would have been chosen** — a
+    // play is evidence about what was heard. These agree until a pin or a
+    // device's reach makes them differ, and the whole reason a play names an
+    // encoding is to answer which of several copies it was.
+    let encoding = ui.playback.playing;
     record(ui, now, |log| log.play_maybe(now, recording, encoding));
     let plays = ui.listened.plays.get(&recording).copied().unwrap_or(0);
     ui.audit
@@ -1077,7 +1084,10 @@ fn announce_next(ui: &mut Ui, ctx: &Context<'_>) -> Option<crate::audio::TrackSo
         Source::Wrapped if ui.playback.shuffle => ui.playback.reshuffle(),
         _ => {}
     }
-    let source = source_for(ui, ctx.store, id)?;
+    // The encoding is not remembered here: this is the *next* track being
+    // spliced on, and which copy is playing is only true once it is playing.
+    // `Loaded` sets it, from the same choice made again.
+    let (source, _) = source_for(ui, ctx, id)?;
     ui.pending_next = Some(id);
     Some(source)
 }
@@ -1216,7 +1226,8 @@ pub fn restore_session(
             // Load, seek, then pause: resuming playback unbidden on launch
             // would be obnoxious. The commands queue in order, so the decoder
             // opens the file, moves to where you were, and stops there.
-            if let Some(source) = source_for(ui, ctx.store, id) {
+            if let Some((source, encoding)) = source_for(ui, ctx, id) {
+                ui.playback.playing = encoding;
                 player.load(source);
             }
             if saved.position_secs > 0.0 {
@@ -1248,12 +1259,65 @@ fn db_label(gain: f32) -> String {
 /// Untagged files come back at unity, so this is inert until something has
 /// been tagged. Analysis is deliberately somebody else's job: §1 puts tag
 /// *editing* out of scope, and `rsgain` already does it well.
-fn source_for(ui: &Ui, lib: &dyn Listing, id: TrackId) -> Option<crate::audio::TrackSource> {
-    let playable = lib.playable(id)?;
-    Some(crate::audio::TrackSource {
-        path: PathBuf::from(playable.locator),
-        gain: replay_gain(ui, playable.gain),
-    })
+/// What to open, and which copy it turned out to be — issue #85.
+///
+/// **The library chooses the copy; the player is handed a locator at the
+/// moment of opening and never keeps one.** `Librarian::open` picks per
+/// device, honours a pin, and refuses what this machine cannot reach — none of
+/// which a path off a `Track` can do, because a path is one copy on one
+/// machine and cannot say there is another.
+///
+/// The returned encoding is what a play will name, so "which of these four
+/// copies did I actually listen to" is answered with data rather than by
+/// assuming the canonical one.
+///
+/// **The gain still comes from the file**, and that is a gap rather than a
+/// choice: ReplayGain lives in tags and no fact carries it, so the librarian
+/// has nothing to answer with. `Encoding::gain` is the *measured* loudness an
+/// analyser found, which is a different number for a different purpose.
+fn source_for(
+    ui: &Ui,
+    ctx: &Context<'_>,
+    id: TrackId,
+) -> Option<(crate::audio::TrackSource, Option<Id<Encoding>>)> {
+    let files: &dyn Listing = ctx.store;
+    let gain = replay_gain(ui, files.playable(id).and_then(|p| p.gain));
+
+    // The library first: it picks per device, honours a pin, and refuses what
+    // this machine cannot reach. A file it cannot place still plays — the same
+    // discipline the tree follows, because a library is used while it is being
+    // catalogued.
+    let chosen = recording_of(ctx, id)
+        .and_then(|r| ctx.library.open(r, &[ui.log.device()], &[]))
+        .map(|(e, locator)| (locator.to_string(), Some(e.id)));
+    let (locator, encoding) = match chosen {
+        Some(both) => both,
+        None => (files.playable(id)?.locator.to_string(), None),
+    };
+
+    Some((
+        crate::audio::TrackSource {
+            path: PathBuf::from(locator),
+            gain,
+        },
+        encoding,
+    ))
+}
+
+/// Which recording a file holds, **as the model has it**.
+///
+/// Deliberately not the scanner's own `recording_of`, which mints from the
+/// tags and knows nothing of a relink — after identifying 377 files it returns
+/// the id they used to have.
+fn recording_of(ctx: &Context<'_>, id: TrackId) -> Option<Id<Recording>> {
+    let files: &dyn Listing = ctx.store;
+    let audio = files.audio_of(id)?;
+    ctx.library
+        .encodings
+        .encodings
+        .get(&Id::<Encoding>::of_audio(&audio))
+        .and_then(|e| e.recording)
+        .map(|r| r.id())
 }
 
 fn replay_gain(ui: &Ui, loudness: Option<crate::model::rows::Loudness>) -> f32 {
@@ -1306,10 +1370,11 @@ fn next_input(ui: &Ui) -> next::NextInput<'_> {
 fn play(ui: &mut Ui, ctx: &Context<'_>, id: TrackId) {
     // The locator is produced here and used immediately. Nothing above this
     // line holds one, which is what stops anything being keyed by a path.
-    let Some(source) = source_for(ui, ctx.store, id) else {
+    let Some((source, encoding)) = source_for(ui, ctx, id) else {
         return;
     };
     ui.playback.current = Some(id);
+    ui.playback.playing = encoding;
     ui.status.clear();
     // An explicit play discards whatever was queued up to be spliced on; the
     // player drops it too, on `Load`.
