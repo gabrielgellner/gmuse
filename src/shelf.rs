@@ -41,57 +41,43 @@ pub struct Shelf {
     artist_names: BTreeMap<SortKey, String>,
     album_names: BTreeMap<(SortKey, SortKey), String>,
     sorted: Vec<CopyId>,
-    smart_artist_sort: bool,
 }
+
+// **`smart_artist_sort` was a field here and is not one any more** (#116). It
+// was held so `reindex` could fold a name the same way twice; there is one
+// projection now, and it passes the setting straight to `Tree::of`, which is
+// the only thing that folds a name at all.
 
 // Some of this is ahead of its callers: the filter and command layers (M6,
 // M8) are what will ask a library whether it contains a track.
 #[allow(dead_code)]
 impl Shelf {
-    /// Rebuild both projections from every row the library holds.
-    pub fn rebuild(rows: &dyn Listing, smart_artist_sort: bool) -> Self {
-        Self::from_members(rows, rows.rows().into_iter().collect(), smart_artist_sort)
+    /// Every row the library holds.
+    pub fn rebuild(librarian: &Librarian, smart_artist_sort: bool) -> Self {
+        let all = Listing::rows(librarian).into_iter().collect();
+        Self::from_members(librarian, all, smart_artist_sort)
     }
 
     /// Rebuild from an explicit membership.
     ///
     /// This is how catalogs work: §4 makes the library a projection over a
-    /// *subset* of the store, so confining the subset confines browsing,
+    /// *subset* of the rows, so confining the subset confines browsing,
     /// shuffle and `aaa_mode` without `next()` knowing catalogs exist.
+    ///
+    /// **There was a second one of these** (#116). `project` grouped by what
+    /// the model says and this grouped by what the tags carried, and #84 chose
+    /// between them. Both read `rows::Listing` after #86, so both read the
+    /// model — and measured over 6,485 real rows they built the same shelf,
+    /// once `Tree` was given a total order. One of them had to go, and the
+    /// one that stayed is the one carrying #59's reissue ordering.
     pub fn from_members(
-        rows: &dyn Listing,
+        librarian: &Librarian,
         members: HashSet<CopyId>,
         smart_artist_sort: bool,
     ) -> Self {
-        let mut lib = Shelf {
-            members,
-            smart_artist_sort,
-            ..Default::default()
-        };
-        lib.reindex(rows);
-        lib
+        Self::project(librarian, members, smart_artist_sort)
     }
 
-    /// Rebuild from what the **model** says — issue #84.
-    ///
-    /// The shape and every caller are unchanged: this still answers in
-    /// `CopyId`, because the player holds handles and dissolving that is a
-    /// separate move. What changes is where the two grouping decisions come
-    /// from.
-    ///
-    /// **Artist grouping asks for a credit** rather than picking album artist
-    /// else artist, which guesses at something the model states — and guesses
-    /// wrong on exactly the track carrying a guest credit.
-    ///
-    /// **The album level is the release group of the copy's own slot**, so two
-    /// pressings stop being two albums, and a song held on both an album and a
-    /// compilation appears under each rather than under whichever placement
-    /// sorted first (#78).
-    ///
-    /// A file the model has no listing for keeps its tag-derived place rather
-    /// than vanishing. Not tidiness: a library is browsed while it is being
-    /// catalogued, and a file dropping out of the tree because nothing has
-    /// identified it yet would be the worst possible moment to lose it.
     pub fn project(
         librarian: &Librarian,
         members: HashSet<CopyId>,
@@ -99,7 +85,6 @@ impl Shelf {
     ) -> Self {
         let mut lib = Shelf {
             members,
-            smart_artist_sort,
             ..Default::default()
         };
 
@@ -150,47 +135,6 @@ impl Shelf {
             .flat_map(|albums| albums.values().flatten().copied())
             .collect();
         lib
-    }
-
-    fn reindex(&mut self, rows: &dyn Listing) {
-        self.tree.clear();
-        self.sorted.clear();
-        self.artist_names.clear();
-        self.album_names.clear();
-
-        for &id in &self.members {
-            let Some(row) = rows.listed(id) else { continue };
-            let artist = sort_key(row.file_under, self.smart_artist_sort);
-            // Albums keep their article: "The Wall" belongs under T.
-            let album = sort_key(row.album, false);
-            // First one under a node names it, which is what every renderer
-            // was doing by hand.
-            self.artist_names
-                .entry(artist.clone())
-                .or_insert_with(|| row.file_under.to_string());
-            self.album_names
-                .entry((artist.clone(), album.clone()))
-                .or_insert_with(|| row.album.to_string());
-            self.tree
-                .entry(artist)
-                .or_default()
-                .entry(album)
-                .or_default()
-                .push(id);
-            self.sorted.push(id);
-        }
-
-        for albums in self.tree.values_mut() {
-            for tracks in albums.values_mut() {
-                tracks.sort_by(|a, b| track_order(rows, *a, *b));
-            }
-        }
-        // View 2 is the tree flattened: artist, then album, then disc/track.
-        self.sorted = self
-            .tree
-            .values()
-            .flat_map(|albums| albums.values().flatten().copied())
-            .collect();
     }
 
     pub fn len(&self) -> usize {
@@ -271,30 +215,12 @@ impl Shelf {
     }
 }
 
-/// Ordering of tracks inside one album: disc, then track number, then title.
-///
-/// Disc first is what makes a multi-disc album read as 1-01, 1-02, … 2-01
-/// rather than interleaving the two discs' track 1s. A missing disc number
-/// sorts as disc 1, since single-disc albums usually omit it entirely.
-fn track_order(rows: &dyn Listing, a: CopyId, b: CopyId) -> std::cmp::Ordering {
-    let (Some(ra), Some(rb)) = (rows.listed(a), rows.listed(b)) else {
-        return std::cmp::Ordering::Equal;
-    };
-    key_of(&ra, a).cmp(&key_of(&rb, b))
-}
-
-fn key_of(r: &crate::model::rows::Listed<'_>, id: CopyId) -> (u32, u32, String, CopyId) {
-    (
-        r.disc.unwrap_or(1),
-        // Untracked tracks sort after numbered ones rather than before.
-        r.track.unwrap_or(u32::MAX),
-        r.title.to_lowercase(),
-        // The last tie-break used to be the path, which is a location a row
-        // does not carry. The id is stable and unique, which is all a
-        // tie-break has to be (#86).
-        id,
-    )
-}
+// **`track_order` and `key_of` lived here and are gone with `reindex`** (#116).
+//
+// They ordered tracks inside one album — disc, then track number, then title
+// — which is what makes a multi-disc album read as 1-01, 1-02, … 2-01 rather
+// than interleaving the two discs' track 1s. `Tree::of` does it now, by the
+// same key, so there is one answer rather than two that agreed by luck.
 
 #[cfg(test)]
 mod tests {
@@ -610,5 +536,84 @@ mod projection {
         let lib = Shelf::project(&l, members, false);
         assert_eq!(lib.sorted().len(), 1, "a track with no album vanished");
         assert_eq!(lib.artist_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod the_two_projections {
+    //! **`project` and `from_members` must build the same shelf** — #116.
+    //!
+    //! They were a pair because one read the model and the other read the tags
+    //! off a `Track`, and #84 chose between them. Both read `rows::Listing`
+    //! now, so they should agree by construction — and "should" is not a thing
+    //! to delete a projection on.
+
+    use super::*;
+    use crate::model::rows::Listing;
+
+    /// Run deliberately: `cargo test --release -- --ignored projections`.
+    #[test]
+    #[ignore = "needs the real library; run deliberately"]
+    fn they_build_the_same_shelf() {
+        let root = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("MusicLibrary");
+        if !root.exists() {
+            eprintln!("no library at {}", root.display());
+            return;
+        }
+
+        let mut held = crate::scan::Holdings::new();
+        let report = crate::scan::scan(&mut held, std::slice::from_ref(&root));
+        assert_eq!(report.errors.len(), 0);
+        let l = crate::bridge::librarian(
+            &held,
+            &std::collections::BTreeSet::new(),
+            crate::model::id::Id::derived(b"compare"),
+            1_788_000_000_000,
+        );
+
+        let members: HashSet<CopyId> = Listing::rows(&l).into_iter().collect();
+        let a = Shelf::project(&l, members.clone(), true);
+        let b = Shelf::from_members(&l, members, true);
+
+        eprintln!(
+            "project   {} artists, {} albums, {} rows",
+            a.artist_count(),
+            a.album_count(),
+            a.sorted().len()
+        );
+        eprintln!(
+            "members   {} artists, {} albums, {} rows",
+            b.artist_count(),
+            b.album_count(),
+            b.sorted().len()
+        );
+
+        assert_eq!(a.artist_count(), b.artist_count(), "artist nodes differ");
+        assert_eq!(a.album_count(), b.album_count(), "album nodes differ");
+        assert_eq!(a.sorted().len(), b.sorted().len(), "row counts differ");
+
+        // Order too, not just membership: view 2 is the flattened tree and a
+        // different order is a different library to look at.
+        let differ = a
+            .sorted()
+            .iter()
+            .zip(b.sorted())
+            .filter(|(x, y)| x != y)
+            .count();
+        eprintln!(
+            "order     {differ} of {} rows in a different place",
+            a.sorted().len()
+        );
+        for (x, y) in a.sorted().iter().zip(b.sorted()).filter(|(x, y)| x != y) {
+            let (rx, ry) = (
+                Listing::listed(&l, *x).expect("a row"),
+                Listing::listed(&l, *y).expect("a row"),
+            );
+            eprintln!(
+                "  disc {:?} track {:?} on {:?} — {} vs {}",
+                rx.disc, rx.track, rx.album, rx.title, ry.title
+            );
+        }
+        assert_eq!(differ, 0, "the two projections order rows differently");
     }
 }

@@ -126,7 +126,24 @@ impl Tree {
 
         for albums in by_artist.values_mut() {
             for album in albums.values_mut() {
-                album.tracks.sort_by_key(|c| l.place_of(l.slot_of(c.copy)));
+                // **Position first, then the title, then the id** (#116).
+                //
+                // Position alone is not a total order and this library proves
+                // it: AC/DC's *High Voltage* is two different albums of that
+                // name in one folder, so six pairs of tracks share a number.
+                // Left to position alone the two orderings that existed here
+                // disagreed about twelve rows, which is a library that looks
+                // different depending on which projection drew it.
+                album.tracks.sort_by(|a, b| {
+                    let key = |c: &Listing| {
+                        let title = l
+                            .row_of(c.recording, c.copy)
+                            .map(|r| r.title.to_lowercase())
+                            .unwrap_or_default();
+                        (l.place_of(l.slot_of(c.copy)), title, c.copy)
+                    };
+                    key(a).cmp(&key(b))
+                });
             }
         }
         Tree {
@@ -230,6 +247,77 @@ mod tests {
         let l = Librarian::from_catalogue(&i.catalogue());
         let t = Tree::of(&l, false);
         (l, t)
+    }
+
+    /// **Two tracks at the same number still come out the same way twice.**
+    ///
+    /// A position is not a total order and this library proves it: AC/DC's
+    /// *High Voltage* is two different albums of that name — the 1975
+    /// Australian and the 1976 international — sharing one folder, so six
+    /// pairs of tracks carry the same number. Ordered by position alone, the
+    /// two projections that existed before #116 disagreed about twelve rows,
+    /// which is a library that looks different depending on which one drew it.
+    ///
+    /// Title first, then the copy's id: the id is the last resort and it is
+    /// durable, so the tie breaks the same way after a restart too.
+    #[test]
+    fn two_tracks_at_one_number_are_ordered_by_title() {
+        let (l, tree) = tree_of(&[
+            scanned("Zebra", "AC/DC", None, 1),
+            scanned("Antelope", "AC/DC", None, 1),
+        ]);
+        let titles: Vec<String> = tree
+            .artists()
+            .flat_map(|(_, albums)| albums.values())
+            .flat_map(|a| a.tracks.iter())
+            .filter_map(|c| l.row_of(c.recording, c.copy).map(|r| r.title))
+            .collect();
+        assert_eq!(
+            titles,
+            ["Antelope", "Zebra"],
+            "two tracks at number one came out in listing order"
+        );
+    }
+
+    /// **And two of the same name at the same number still have an order.**
+    ///
+    /// The last resort is the copy's id, which is derived from the bytes — so
+    /// the tie breaks the same way after a restart and on another machine.
+    /// Without it the order would be whatever the fold happened to yield,
+    /// which is deterministic today by accident rather than by saying so.
+    #[test]
+    fn two_of_one_name_at_one_number_are_ordered_by_their_bytes() {
+        let mut first = scanned("Little Lover", "AC/DC", None, 3);
+        let mut second = scanned("Little Lover", "AC/DC", None, 3);
+        first.audio.hash = 1;
+        second.audio.hash = 2;
+
+        let copy = |h: u128| {
+            Id::<crate::model::entity::Encoding>::of_audio(&crate::audio_id::AudioId {
+                scheme: 1,
+                hash: h,
+            })
+        };
+
+        let (_, tree) = tree_of(&[first, second]);
+        let order: Vec<_> = tree
+            .artists()
+            .flat_map(|(_, albums)| albums.values())
+            .flat_map(|a| a.tracks.iter())
+            .filter_map(|c| c.copy)
+            .collect();
+
+        // **By the copy's id, and these two disagree with the recordings'.**
+        //
+        // Which is the whole point of naming it: derived from the same two
+        // hashes, `of_audio` puts 1 before 2 and `of_basis` puts 2 before 1.
+        // Drop the id from the key and a stable sort leaves them in the fold's
+        // order — the recordings' — so this is what tells the two apart.
+        assert_eq!(
+            order,
+            [copy(1), copy(2)],
+            "the tie fell to whatever order the fold happened to yield"
+        );
     }
 
     /// **A node has to be able to say its own name.**
