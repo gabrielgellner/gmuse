@@ -262,6 +262,16 @@ pub trait Listing {
     /// so is what stops it quietly coming up short.
     fn at(&self, locator: &str) -> Option<CopyId>;
 
+    /// What a collection holds, in order.
+    ///
+    /// On the seam because a catalog may be defined by one (#94), and a
+    /// catalog is resolved through `Listing` like everything else the player
+    /// reads.
+    fn entries_of(
+        &self,
+        collection: crate::model::id::Id<crate::model::entity::Collection>,
+    ) -> Vec<crate::model::id::Id<crate::model::entity::Recording>>;
+
     /// Which recording this row's audio holds.
     fn recording_of(
         &self,

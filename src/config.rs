@@ -119,10 +119,16 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogTable {
+    /// `collection = "Dance"` — the catalog is what that collection holds.
+    ///
+    /// **A catalog no longer has roots** (#94). Membership by folder meant a
+    /// file changed what it belonged to by being moved, and the rule meant
+    /// nothing on a second machine. Where the files are is `library`; what a
+    /// catalog holds is a collection, a filter, or both.
     #[serde(default)]
-    pub roots: Vec<PathBuf>,
+    pub collection: Option<String>,
     /// `where = "genre=\"jazz\""` — a §7 filter expression. Combines with
-    /// `roots` when both are given. `where` is a Rust keyword, hence the
+    /// `collection` when both are given. `where` is a Rust keyword, hence the
     /// rename.
     #[serde(default, rename = "where")]
     pub filter: Option<String>,
@@ -183,6 +189,9 @@ pub struct Loaded {
     pub transport: crate::format::Template,
     /// How a track row reads in the library tree.
     pub track_line: Option<crate::format::Template>,
+    /// Where the music is, from `library`. **The only source of scan roots**
+    /// now that a catalog has none (#94).
+    pub library: Vec<PathBuf>,
     pub catalogs: crate::catalog::Catalogs,
     pub playlists: crate::smart::SmartPlaylists,
     /// Resolved: the config's `data_dir` with `~` expanded, or the default.
@@ -321,35 +330,26 @@ pub fn parse_text(text: &str) -> Loaded {
         }
     }
 
-    if !config.library.is_empty() {
-        out.catalogs.define(
-            crate::catalog::DEFAULT,
-            config.library.iter().map(|r| expand_tilde(r)).collect(),
-            None,
-        );
+    out.library = config.library.iter().map(|r| expand_tilde(r)).collect();
+    if !out.library.is_empty() {
+        // The catalog every row is in: no collection and no filter, so it
+        // holds whatever the library holds.
+        out.catalogs.define(crate::catalog::DEFAULT, None, None);
     }
 
-    // Catalogs. `~` is expanded here because a config file is where people
-    // write it, and nothing downstream would know what to do with it.
-    let mut defined: Vec<(String, Vec<PathBuf>, Option<String>)> = config
+    let mut defined: Vec<(String, Option<String>, Option<String>)> = config
         .catalogs
         .iter()
-        .map(|(name, table)| {
-            (
-                name.clone(),
-                table.roots.iter().map(|r| expand_tilde(r)).collect(),
-                table.filter.clone(),
-            )
-        })
+        .map(|(name, table)| (name.clone(), table.collection.clone(), table.filter.clone()))
         .collect();
     // HashMap order is arbitrary; the label reads better
     // in a stable one.
     defined.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, roots, filter_source) in defined {
-        if roots.is_empty() && filter_source.is_none() {
+    for (name, collection, filter_source) in defined {
+        if collection.is_none() && filter_source.is_none() {
             out.errors.push(ConfigError {
                 where_: format!("catalogs.{name}"),
-                message: "has neither roots nor where".into(),
+                message: "has neither collection nor where".into(),
             });
             continue;
         }
@@ -368,7 +368,7 @@ pub fn parse_text(text: &str) -> Loaded {
             },
             None => None,
         };
-        out.catalogs.define(&name, roots, filter);
+        out.catalogs.define(&name, collection, filter);
     }
 
     // Resolved here, at the boundary: nothing downstream sees a `~` or has to
@@ -808,7 +808,7 @@ mod tests {
             r#"
             active_catalogs = ["all"]
             [catalogs.a]
-            roots = ["/a"]
+            collection = "A"
             "#,
         );
         assert!(
@@ -835,9 +835,9 @@ mod tests {
             r#"
             active_catalogs = ["a"]
             [catalogs.a]
-            roots = ["/a"]
+            collection = "A"
             [catalogs.b]
-            roots = ["/b"]
+            collection = "B"
             "#,
         );
         assert!(loaded.active_specified);
@@ -864,10 +864,33 @@ mod tests {
     }
 
     #[test]
-    fn library_roots_become_the_default_catalog() {
+    fn library_says_where_the_music_is_and_gets_a_default_catalog() {
         let loaded = parse_text(r#"library = ["/music"]"#);
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.library, vec![PathBuf::from("/music")]);
         assert_eq!(loaded.catalogs.defined().len(), 1);
         assert_eq!(loaded.catalogs.defined()[0].name, crate::catalog::DEFAULT);
+        // **And it holds everything**, rather than everything under `/music`:
+        // where the files are is not what a catalog is for (#94).
+        assert!(loaded.catalogs.defined()[0].collection.is_none());
+    }
+
+    /// A catalog cannot be defined by a folder any more (#94).
+    #[test]
+    fn roots_on_a_catalog_is_rejected_rather_than_ignored() {
+        let loaded = parse_text(
+            r#"
+            [catalogs.dance]
+            roots = ["~/MusicLibrary/Dance"]
+            "#,
+        );
+        assert!(
+            loaded
+                .errors
+                .iter()
+                .any(|e| e.message.contains("unknown field `roots`")),
+            "a config written the old way must say so: {:?}",
+            loaded.errors
+        );
     }
 }

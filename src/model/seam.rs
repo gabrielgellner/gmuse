@@ -715,6 +715,10 @@ impl Librarian {
     /// Already in order: the fold keys entries by position before recording,
     /// so walking them is walking the list.
     pub fn entries_of(&self, collection: Id<Collection>) -> Vec<Id<Recording>> {
+        <Self as crate::model::rows::Listing>::entries_of(self, collection)
+    }
+
+    fn collection_entries(&self, collection: Id<Collection>) -> Vec<Id<Recording>> {
         self.collected
             .iter()
             .filter(|(c, _, _)| *c == collection)
@@ -748,6 +752,10 @@ impl Librarian {
 /// library draws them, which is what lets the store go: the trait is the seam,
 /// and swapping which side of it answers is the whole migration.
 impl crate::model::rows::Listing for Librarian {
+    fn entries_of(&self, collection: Id<Collection>) -> Vec<Id<Recording>> {
+        self.collection_entries(collection)
+    }
+
     fn listed(&self, id: Id<Encoding>) -> Option<crate::model::rows::Listed<'_>> {
         Some(self.rows.get(&id)?.listed())
     }

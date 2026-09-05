@@ -155,6 +155,17 @@ pub fn from_holdings(held: &crate::scan::Holdings) -> Librarian {
     crate::bridge::librarian(held, &std::collections::BTreeSet::new(), device(), 100)
 }
 
+/// The same, with a log — for a test about something only facts can say.
+///
+/// Collections are the case: nothing on disk says a recording is in one, so a
+/// test about a catalog defined by one has to hand the fold some records.
+pub fn from_holdings_and(
+    held: &crate::scan::Holdings,
+    records: &std::collections::BTreeSet<crate::model::log::Record>,
+) -> Librarian {
+    crate::bridge::librarian(held, records, device(), 100)
+}
+
 impl Tagged {
     /// The row this file would draw, for a test that renders or matches one.
     ///

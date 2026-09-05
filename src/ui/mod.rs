@@ -6870,11 +6870,15 @@ mod tests {
 
     use crate::catalog::{Catalogs, Spec};
 
-    /// A fixture split into two catalogs by directory.
+    /// A fixture split into two catalogs by album.
+    ///
+    /// It used to split by directory, which is what #94 took away: a catalog
+    /// is a collection, a filter, or both, and never a folder.
     fn catalog_ui(store: &Scan) -> Ui {
+        let filter = |src: &str| Some(crate::filter::Filter::parse(src).expect("a fixture filter"));
         let mut catalogs = Catalogs::default();
-        catalogs.define("paak", vec![PathBuf::from("/m/paak")], None);
-        catalogs.define("va", vec![PathBuf::from("/m/va")], None);
+        catalogs.define("paak", None, filter(r#"album="Malibu""#));
+        catalogs.define("va", None, filter(r#"album="YouTube Sessions""#));
         let l = lib_of(store);
         let mut ui = Ui::new(Shelf::from_members(
             l,
@@ -8164,9 +8168,8 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.catalogs.define("alpha", vec![PathBuf::from("/m")], None);
-        ui.catalogs
-            .define("beta", vec![PathBuf::from("/other")], None);
+        ui.catalogs.define("alpha", Some("Alpha".into()), None);
+        ui.catalogs.define("beta", Some("Beta".into()), None);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 6");

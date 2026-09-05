@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config::load(&args.config.clone().unwrap_or_else(config::default_path))
         };
         let roots = if args.library.is_empty() {
-            loaded.catalogs.all_roots()
+            loaded.library.clone()
         } else {
             args.library_roots()
         };
@@ -176,12 +176,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => (Holdings::new(), Vec::new(), None),
     };
-    // Catalogs come from the config; `--library` roots join an implicit
-    // "default" catalog so a user who configures none sees no change.
+    // Catalogs come from the config. `--library` says where to look, which is
+    // no longer a catalog's business (#94) — but a user who configures no
+    // catalog still needs one, so the implicit "default" is defined here.
     let mut catalogs = loaded.catalogs.clone();
     let config_chose_catalogs = loaded.active_specified;
     if !args.library.is_empty() {
-        catalogs.define(catalog::DEFAULT, args.library_roots(), None);
+        catalogs.define(catalog::DEFAULT, None, None);
     }
     // A remembered choice wins over the config default, unless the config
     // names one explicitly — otherwise picking a catalog would not stick.
@@ -191,15 +192,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         catalogs.set_active(active);
     }
 
-    // Scanning covers every catalog root regardless of what is active, so
-    // switching catalogs later needs no rescan.
+    // **Where the music is, which is `library` and nothing else** (#94). A
+    // catalog used to carry roots too, so what a catalog *held* and where the
+    // files *were* were the same field; scanning had to union every catalog's
+    // roots to avoid a rescan on every switch. Now there is one answer.
     //
     // The cache's roots are a **fallback**, not an addition: they exist so
     // that `gmuse -L ~/Music` once, then bare afterwards, keeps working. Adding
     // them to what the config and `--library` already say is what let a
     // one-off `-L` linger for ever, and a stale root that happened to be the
     // parent of two real ones made every file scan twice (#21).
-    let roots = scan_roots(catalogs.all_roots(), cached_roots);
+    let mut configured = loaded.library.clone();
+    for root in args.library_roots() {
+        if !configured.contains(&root) {
+            configured.push(root);
+        }
+    }
+    let roots = scan_roots(configured, cached_roots);
 
     let mut app = App {
         player,

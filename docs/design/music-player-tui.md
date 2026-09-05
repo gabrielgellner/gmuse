@@ -271,13 +271,13 @@ _subset_ of it. A catalog is therefore a membership rule, and:
   must **not** be filtered by the active set — a playlist is an explicit choice, and crossing themes is the point.
 - **One scan, one cache.** Catalogs partition what is _shown_, never what is indexed.
 
-**Membership is `roots` and `where`** (§7), settled 2026-08-30, either of which may be absent and which combine with
-**and** when both are given. A catalog _is_ a named, persistent filter, which is what cmus's `fset` already is.
+**Membership is `collection` and `where`** (§7), settled 2026-08-30 and narrowed 2026-09-05, either of which may be
+absent and which combine with **and** when both are given; a catalog with neither holds everything. A catalog _is_ a
+named, persistent filter, which is what cmus's `fset` already is.
 
-`roots` is **not** desugared into a path expression, which is what this section said before the implementation.
-Desugaring would replace `Path::starts_with` — component-wise — with string globbing, and smart-case would quietly make
-a lowercase root case-insensitive. Two optional keys describing one rule is not the "two mechanisms for one idea" that
-warning was about.
+**No membership decision reads a path** — INVARIANT, see the 2026-09-05 entry in §13. `roots` was the third key and is
+gone: membership by folder meant that moving a file changed what it belonged to, and that the same config selected
+nothing on a second machine. Where the files are is `library`, which is a different question and has one answer.
 
 Active catalogs **union**; a transient filter **intersects**:
 
@@ -1713,15 +1713,15 @@ Append here as decisions are made. Format: date, decision, rationale.
   without that in mind risks two mechanisms for one idea". Reading cmus's manual made the collision exact rather than
   theoretical:
 
-  | cmus                           | gmuse today                    |
-  | ------------------------------ | ------------------------------ |
-  | `fset dance=…`                 | `[catalogs.dance] roots = […]` |
-  | `factivate dance`              | `:catalog dance`               |
-  | view 6 lists them, space/enter | view 6 is a stub saying "M8"   |
+  | cmus                           | gmuse today                       |
+  | ------------------------------ | --------------------------------- |
+  | `fset dance=…`                 | `[catalogs.dance] collection = …` |
+  | `factivate dance`              | `:catalog dance`                  |
+  | view 6 lists them, space/enter | view 6 is a stub saying "M8"      |
 
   **We had already built cmus's named filters and called them catalogs.** That is a good outcome: the concept was right
-  and only the membership rule was narrow. So a catalog becomes a named filter expression, `roots` stays as sugar, and
-  view 6 finally has a job.
+  and only the membership rule was narrow. So a catalog becomes a named filter expression and view 6 finally has a job.
+  (`roots` stayed as sugar at the time; #94 removed it — see 2026-09-05.)
 
   The distinction that survives is not catalog-versus-filter but **lifetime** (named and persistent versus transient and
   anonymous) and **role** (narrows the world versus adds a play source — which is the line to smart playlists, #15). One
@@ -3141,6 +3141,37 @@ Append here as decisions are made. Format: date, decision, rationale.
   change is to quit and run `gmuse --rescan`, which is the coupling this entry set out to remove, one step further away.
   The obstacle is real rather than an oversight: the UI holds `&Store` and a scan needs `&mut Store`, so it wants the
   loop to return a reason for stopping rather than only ever stopping. Filed as its own issue.
+
+- **2026-09-05** **A catalog has no roots: no membership decision reads a path (#94).**
+  `[catalogs.dance] roots = ["~/MusicLibrary/Dance"]` made membership a fact about where a file sits. Three costs, all
+  real: tidying a folder silently emptied a catalog, the same config on a second machine selected nothing, and a
+  recording held on two devices under different prefixes belonged to the catalog on one of them.
+
+  A catalog is now `collection`, `where`, or both, and one with neither holds everything. A collection is a stored fact
+  — `CollectionEntryAdded` — so it survives a move and travels to another machine, which is exactly what a root could
+  not do.
+
+  **What replaced the Dance folder is a collection, not a rule.** Measured first, because a rule would have been better
+  if one existed: no genre predicate reproduces `~/MusicLibrary/Dance`. The closest is 876 false positives — every one
+  of its files carries a genre that files outside it carry too. So the folder was read once, and what it held became
+  1,522 facts naming 761 recordings. The folder is now where those files happen to live.
+
+  `general` is gone rather than converted. It was the complement of `dance`, and a complement is not a catalog: `-`
+  exists now, so it is `:view -dance` — a term you can drop again, not a second body of music that has to be kept in
+  step with the first.
+
+  Where the music is has one answer, `library` in the config, which is what `all_roots()` was standing in for. Scanning
+  used to union every catalog's roots so that switching catalogs needed no rescan; with catalogs holding no roots there
+  is nothing to union.
+
+  Cost: `Catalog::roots`, `Catalogs::all_roots`, `catalog::under` and the path half of `Catalog::contains` are deleted,
+  and `roots` on a catalog is now a config error rather than a key that quietly does nothing — `serde`'s
+  `deny_unknown_fields` was already there, so an old config says "unknown field `roots`, expected `collection` or
+  `where`" rather than presenting an empty catalog.
+
+  One bug this found in passing: `Catalogs::members` had its own copy of the membership rule, so a catalog defined by a
+  collection came back holding the whole library — the copy only knew about the filter half. It goes through `named`
+  now, and there is one rule.
 
 ## 14. Prior art worth reading
 
