@@ -723,6 +723,16 @@ pub enum Command {
     /// which made a path authoritative for what a list contained; a playlist
     /// is an ordered collection now, and m3u is how one leaves the building.
     Export(String),
+    /// `:split` / `:vsplit` — a second pane, for looking at two lists at
+    /// once (#97).
+    ///
+    /// What `g<Tab>` does not cover: it moves *between* two things, and this
+    /// is for digging in one while collecting into the other.
+    Split(crate::ui::Axis),
+    /// `:only` — back to one pane.
+    Only,
+    /// Move the focus to the other pane.
+    OtherPane,
     /// `:find` / `:find groups` — the fuzzy picker (#54).
     Find(crate::ui::picker::Source),
     /// `:freeze <name>` — a question becomes an answer somebody kept.

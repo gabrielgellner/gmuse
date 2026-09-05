@@ -126,6 +126,12 @@ pub const DEFAULTS: &[&str] = &[
     // snacks binds its pickers under `<leader>f`, and the second letter says
     // which. `ff` is the library, `fg` the groups you have made — collections
     // and saved views (#54, #119).
+    // vim's window commands, on vim's prefix. `s` and `v` split, `w` moves
+    // the focus, `o` keeps only this pane — the four that matter (#97).
+    "bind common \"^w s\" split",
+    "bind common \"^w v\" vsplit",
+    "bind common \"^w w\" other-pane",
+    "bind common \"^w o\" only",
     "bind common \"<leader> f f\" find",
     "bind common \"<leader> f g\" find groups",
     // `Z` was snacks' close-all, and `M-e` its opposite. Both are gone: `zM`

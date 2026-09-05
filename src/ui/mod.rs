@@ -115,6 +115,23 @@ impl View {
     }
 }
 
+/// Which way a split divides the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// Side by side — vim's `:vsplit`, and the one you want for "dig here,
+    /// collect there" on a wide terminal.
+    Vertical,
+    /// One above the other — vim's `:split`.
+    Horizontal,
+}
+
+/// The second pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Split {
+    pub other: View,
+    pub axis: Axis,
+}
+
 /// What the open prompt line is collecting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -412,6 +429,12 @@ pub struct Ui {
     // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// The second pane, when there is one (#97).
+    ///
+    /// **`ui.view` is the focused pane**, which is why every other match in
+    /// this file needs no notion of a split: the keys already go where they
+    /// should. Swapping focus swaps the two.
+    pub split: Option<Split>,
     /// How the tree is grouped — **a field on the view** (#97).
     pub levels: crate::shelf::Levels,
     /// The fuzzy picker, while it is open (#54).
@@ -473,6 +496,7 @@ impl Ui {
     fn bare(library: Shelf) -> Self {
         Self {
             stop: None,
+            split: None,
             levels: crate::shelf::Levels::default(),
             picker: None,
             view_problem: None,
@@ -2221,6 +2245,38 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         },
         Command::Collect(name) => collect(ui, ctx, &name),
         Command::Find(source) => open_picker(ui, ctx, source),
+        // **The other pane starts on something else**, because a split
+        // showing the same list twice is what `g<Tab>` already gives you and
+        // is not what anybody splits for. The cursors are per view *kind*, so
+        // two panes on different views have their own; two on the same view
+        // would share one, which is why this does not offer that.
+        Command::Split(axis) => {
+            let other = ui.previous_view;
+            if other == ui.view {
+                ui.notify("nothing else to put in the other pane — `g<Tab>` first");
+                return;
+            }
+            ui.split = Some(Split { other, axis });
+            ui.notify(format!("split: {} | {}", ui.view.title(), other.title()));
+        }
+        Command::Only => {
+            if ui.split.take().is_some() {
+                ui.notify(format!("one pane: {}", ui.view.title()));
+            }
+        }
+        // Focus swaps by swapping which view is `ui.view` — so every key in
+        // this file goes to the focused pane without knowing a split exists.
+        Command::OtherPane => match ui.split {
+            Some(split) => {
+                ui.split = Some(Split {
+                    other: ui.view,
+                    ..split
+                });
+                ui.view = split.other;
+                ui.notify(format!("pane: {}", ui.view.title()));
+            }
+            None => ui.notify("only one pane"),
+        },
         Command::Export(path) => export(ui, ctx, &path),
         Command::Freeze(name) => freeze(ui, ctx, &name),
 
@@ -4312,80 +4368,27 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
 
     // A rule-owned list says whose rule it is, so "why can I not delete this
     // row" has an answer on screen rather than only in the refusal message.
-    let playlist_title = match &ui.open {
-        Some(o) => o.name().to_string(),
-        None => "nothing open".to_string(),
-    };
-
-    match ui.view {
-        // **One view, drawn by what `levels` says** (#97).
-        View::Tree if !ui.levels.is_flat() => draw_tree(frame, body, ui, ctx),
-        View::Tree => draw_tracks(
-            frame,
-            body,
-            ui,
-            ctx,
-            TrackList {
-                scroll: &ui.sorted_scroll,
-                ids: ui.library.sorted(),
-                selected: ui.sorted,
-                title: "sorted",
-                focused: true,
-                divide: true,
-                section: None,
-            },
-        ),
-        View::Playlist => {
-            // Pick on the left, see it on the right — view 1's shape, because
-            // it is the same idea and `tab` already means this.
-            let [left, right] =
-                Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
-                    .areas(body);
-            draw_playlists(frame, left, ui);
-            draw_tracks(
-                frame,
-                right,
-                ui,
-                ctx,
-                TrackList {
-                    scroll: &ui.playlist_scroll,
-                    ids: ui.playlist.entries(),
-                    selected: ui.playlist_sel,
-                    title: &playlist_title,
-                    focused: ui.playlist_pane == Pane::Tracks,
-                    divide: false,
-                    section: None,
-                },
-            );
+    // **Two panes when there is a split, and the keys go to the focused one**
+    // (#97). `ui.view` *is* the focused pane, so nothing else in this file
+    // needs to know a split exists — which is the whole reason the state is
+    // "the other one" rather than a list of panes with an index.
+    match ui.split {
+        None => draw_body(frame, body, ui, ctx, ui.view, true),
+        Some(split) => {
+            let halves = match split.axis {
+                Axis::Vertical => {
+                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                }
+                Axis::Horizontal => {
+                    Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                }
+            }
+            .split(body);
+            // The focused pane keeps the first half, so a split does not move
+            // what you were looking at out from under you.
+            draw_body(frame, halves[0], ui, ctx, ui.view, true);
+            draw_body(frame, halves[1], ui, ctx, split.other, false);
         }
-        View::Queue => {
-            let rows = up_next(ui, ctx);
-            let entries: Vec<_> = rows.iter().map(|(id, _)| *id).collect();
-            let queued = rows
-                .iter()
-                .take_while(|(_, from)| *from == crate::next::Upcoming::Queued)
-                .count();
-            draw_tracks(
-                frame,
-                body,
-                ui,
-                ctx,
-                TrackList {
-                    scroll: &ui.queue_scroll,
-                    ids: &entries,
-                    selected: ui.queue_sel,
-                    title: "up next",
-                    focused: true,
-                    divide: false,
-                    // Drawn above the first row the queue does not own, so the
-                    // line between "you can move this" and "this is what would
-                    // happen" is shown rather than described.
-                    section: (queued < entries.len())
-                        .then(|| (queued, "the pool, from here".to_string())),
-                },
-            )
-        }
-        View::Guide => draw_guides(frame, body, ui),
     }
 
     // **Last, and over the middle of the view.** #34 put this in the bottom
@@ -4411,6 +4414,90 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
 /// the title format produces, which is what it ranks over.
 const PICKER_WIDTH: u16 = 78;
 const PICKER_HEIGHT: u16 = 18;
+
+/// Draw one pane.
+///
+/// **Takes the view rather than reading `ui.view`**, because a split draws two
+/// (#97). Everything else about a pane still comes from `ui`: the cursors are
+/// per view *kind*, so two panes showing different views already have their
+/// own — and two showing the same view share one, which is the honest
+/// limitation of not giving a pane its own state.
+fn draw_body(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, view: View, focused: bool) {
+    let playlist_title = match &ui.open {
+        Some(o) => o.name().to_string(),
+        None => "nothing open".to_string(),
+    };
+    match view {
+        // **One view, drawn by what `levels` says** (#97).
+        View::Tree if !ui.levels.is_flat() => draw_tree(frame, body, ui, ctx),
+        View::Tree => draw_tracks(
+            frame,
+            body,
+            ui,
+            ctx,
+            TrackList {
+                scroll: &ui.sorted_scroll,
+                ids: ui.library.sorted(),
+                selected: ui.sorted,
+                title: "sorted",
+                focused,
+                divide: true,
+                section: None,
+            },
+        ),
+        View::Playlist => {
+            // Pick on the left, see it on the right — view 1's shape, because
+            // it is the same idea and `tab` already means this.
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
+                    .areas(body);
+            draw_playlists(frame, left, ui);
+            draw_tracks(
+                frame,
+                right,
+                ui,
+                ctx,
+                TrackList {
+                    scroll: &ui.playlist_scroll,
+                    ids: ui.playlist.entries(),
+                    selected: ui.playlist_sel,
+                    title: &playlist_title,
+                    focused: focused && ui.playlist_pane == Pane::Tracks,
+                    divide: false,
+                    section: None,
+                },
+            );
+        }
+        View::Queue => {
+            let rows = up_next(ui, ctx);
+            let entries: Vec<_> = rows.iter().map(|(id, _)| *id).collect();
+            let queued = rows
+                .iter()
+                .take_while(|(_, from)| *from == crate::next::Upcoming::Queued)
+                .count();
+            draw_tracks(
+                frame,
+                body,
+                ui,
+                ctx,
+                TrackList {
+                    scroll: &ui.queue_scroll,
+                    ids: &entries,
+                    selected: ui.queue_sel,
+                    title: "up next",
+                    focused,
+                    divide: false,
+                    // Drawn above the first row the queue does not own, so the
+                    // line between "you can move this" and "this is what would
+                    // happen" is shown rather than described.
+                    section: (queued < entries.len())
+                        .then(|| (queued, "the pool, from here".to_string())),
+                },
+            )
+        }
+        View::Guide => draw_guides(frame, body, ui),
+    }
+}
 
 /// Cut a label to fit, by characters rather than bytes.
 ///
@@ -9036,6 +9123,48 @@ mod tests {
         ui.data_dir = Some(scratch(name));
         ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
         ui
+    }
+
+    /// **A split shows two lists at once, and the keys go to the focused
+    /// one** — #97's last item.
+    ///
+    /// `g<Tab>` moves *between* two things; this is for digging in one while
+    /// collecting into the other, which is the case it does not cover.
+    #[test]
+    fn a_split_shows_two_panes_and_the_keys_go_to_the_focused_one() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // Nothing to split with yet: the other pane starts on where you were.
+        press(&mut ui, &ctx, "^w v");
+        assert!(ui.split.is_none(), "{}", ui.status);
+        assert!(ui.status.contains("g<Tab>"), "{}", ui.status);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 4");
+        assert_eq!(ui.view, View::Queue);
+        press(&mut ui, &ctx, "^w v");
+        let split = ui.split.expect("no split");
+        assert_eq!(split.other, View::Tree, "the other pane is where you were");
+        assert_eq!(split.axis, Axis::Vertical);
+
+        // **`ui.view` is the focused pane**, which is why nothing else needs
+        // to know a split exists — focus swaps by swapping the two.
+        press(&mut ui, &ctx, "^w w");
+        assert_eq!(ui.view, View::Tree, "focus did not move");
+        assert_eq!(ui.split.unwrap().other, View::Queue);
+        press(&mut ui, &ctx, "^w w");
+        assert_eq!(ui.view, View::Queue, "focus did not move back");
+
+        // Both panes are drawn, and only one is focused.
+        let out = render(&ui, &ctx, 120, 20);
+        assert!(out.contains("up next"), "{out}");
+        assert!(out.contains("library"), "{out}");
+
+        press(&mut ui, &ctx, "^w o");
+        assert!(ui.split.is_none());
+        assert_eq!(ui.view, View::Queue, "closing moved what was focused");
     }
 
     /// **Views 1 and 2 are one set drawn two ways, and `levels` says which**

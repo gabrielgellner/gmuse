@@ -3525,8 +3525,20 @@ Append here as decisions are made. Format: date, decision, rationale.
   it started one view in; with four members instead of six it landed on the guide. It counts a full lap from where it
   starts now, which is what it meant.
 
-  **Splits are still not built**, and are the remaining item on #97. They are a genuinely separate feature rather than a
-  consequence of this one: `g<Tab>` covers moving between two things, and a split is for looking at both at once.
+  **Splits, which close #97.** `^wv`, `^ws`, `^ww`, `^wo` — vim's four that matter, on vim's prefix. What `g<Tab>` does
+  not cover: it moves _between_ two lists, and a split is for digging in one while collecting into the other.
+
+  **`ui.view` is the focused pane**, and that is the whole design. Every other `match ui.view` in the file already sends
+  keys where they should go, so nothing but the drawing had to learn a split exists — focus swaps by swapping which view
+  is `ui.view`, and closing keeps the focused one.
+
+  Two limitations, both deliberate and both stated to the user rather than discovered:
+
+  - **You cannot split a view against itself.** The cursors are per view _kind_, not per pane, so two panes on one list
+    would move together. Giving a pane its own cursor is the general fix and is a bigger change than the feature
+    warrants — `g<Tab>` already covers "the same list twice".
+  - **The second pane starts on where you were.** Not a choice offered, because the case is "these two lists I have been
+    going between", and that is exactly what `previous_view` holds.
 
 ## 14. Prior art worth reading
 

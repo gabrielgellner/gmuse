@@ -50,6 +50,10 @@ pub const VERBS: &[&str] = &[
     "down",
     "export",
     "find",
+    "only",
+    "other-pane",
+    "split",
+    "vsplit",
     "filter",
     "fold",
     "go",
@@ -302,6 +306,10 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "rate" => Command::Rate(rate_spec(rest)?),
         "playlist" => Command::Playlist(playlist_spec(rest)?),
         "find" => Command::Find(picker_source(rest)?),
+        "split" => Command::Split(crate::ui::Axis::Horizontal),
+        "vsplit" => Command::Split(crate::ui::Axis::Vertical),
+        "only" => Command::Only,
+        "other-pane" => Command::OtherPane,
         "export" => {
             if rest.is_empty() {
                 return Err(ParseError::Missing {
@@ -785,6 +793,10 @@ pub fn format(cmd: &Command) -> String {
         },
         Command::Collect(name) => format!("collect {name}"),
         Command::Export(path) => format!("export {path}"),
+        Command::Split(crate::ui::Axis::Horizontal) => "split".into(),
+        Command::Split(crate::ui::Axis::Vertical) => "vsplit".into(),
+        Command::Only => "only".into(),
+        Command::OtherPane => "other-pane".into(),
         Command::Find(source) => match source {
             crate::ui::picker::Source::Tracks => "find".into(),
             crate::ui::picker::Source::Groups => "find groups".into(),

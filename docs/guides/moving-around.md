@@ -14,6 +14,22 @@ That is the difference the numbers used to hide. `2` was never a different set f
 is `:view levels flat` — see [the library tree](the-library-tree.md). And `6` was a list you scrolled; it is a fuzzy
 picker now, the same one `<leader>fg` opens.
 
+## Two panes
+
+`g<Tab>` moves _between_ two lists. A split shows both — for digging in one while collecting into the other.
+
+    ^w v     side by side
+    ^w s     one above the other
+    ^w w     move the focus
+    ^w o     back to one pane
+
+The second pane starts on wherever you were before, which is what `g<Tab>` would have taken you to — so `g<Tab>` then
+`^wv` puts the two lists you have been going between on screen together.
+
+Keys go to the **focused** pane, and only that one is highlighted. Splitting the same view twice is not offered: two
+panes on one list is what `g<Tab>` already gives you, and the cursors are shared per list rather than per pane, so both
+halves would move together.
+
 `5` is unbound. It was a file browser, and gmuse navigates the library rather than a filesystem.
 
 Within any of them the motions are vim's. `j` and `k` move, and take a count — `3j` goes down three. `gg` and `G` go to
