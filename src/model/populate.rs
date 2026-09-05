@@ -40,6 +40,21 @@ pub struct Report {
     /// Ingested with nothing to converge on — the residue §11 leaves to the
     /// collision.
     pub provisional: usize,
+    /// Files whose bytes another file already had.
+    ///
+    /// **A scanner observation, not a library fact.** A holding answers "can
+    /// this device open this encoding, and how", and two identical files give
+    /// one answer — the second path buys no capability, so `held` is a map and
+    /// the second copy has nowhere to go. That is the right shape: a duplicate
+    /// is a filesystem accident, and modelling it would make every consumer
+    /// decide what two locators for one encoding *mean*.
+    ///
+    /// What it must not be is **silent**. The drop was invisible until a
+    /// duplicated album cost the migration nine play events, and the only way
+    /// the one duplicate in this library came to light was somebody hashing
+    /// 6,500 files for an unrelated reason. Said here, at the moment it is
+    /// seen, by the only thing that can see it.
+    pub duplicates: Vec<(PathBuf, PathBuf)>,
     pub elapsed: Duration,
     /// What each scanned path turned out to be.
     ///
@@ -73,7 +88,18 @@ impl std::fmt::Display for Report {
             self.confirmed,
             self.provisional,
             self.unreadable.len()
-        )
+        )?;
+        // Named, not counted. A count says "you have a problem somewhere in
+        // 6,500 files"; the pair says which one to delete.
+        for (dropped, kept) in &self.duplicates {
+            write!(
+                f,
+                "\n  duplicate: {}\n     same bytes as {}",
+                dropped.display(),
+                kept.display()
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -135,7 +161,11 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
                     report.provisional += 1;
                 }
                 let encoding = Id::<Encoding>::of_audio(&s.audio);
-                held.insert(encoding, path.display().to_string());
+                if let Some(first) = held.insert(encoding, path.display().to_string()) {
+                    // The map kept the later path; the report names both, so
+                    // "which one do I delete" is answerable.
+                    report.duplicates.push((path.clone(), PathBuf::from(first)));
+                }
                 minted.push((path, encoding));
                 scanned.push(s);
                 report.ingested += 1;
@@ -177,6 +207,8 @@ pub fn is_audio(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
     use crate::model::round_trip::{write_tags, write_wav};
     use crate::model::seam::Librarian;
 
@@ -225,6 +257,52 @@ mod tests {
             report.identified.contains_key(&two),
             "and so does the second"
         );
+    }
+
+    /// **The second copy is named, not silently dropped.**
+    ///
+    /// A holding answers "can this device open this encoding, and how", and
+    /// two identical files give one answer — so `held` is keyed by encoding
+    /// and the second path has nowhere to go. That is the right shape: a
+    /// duplicate is a filesystem accident, and modelling it would leave every
+    /// consumer deciding what two locators for one encoding *mean*.
+    ///
+    /// What it must not be is invisible. The one duplicate in the real library
+    /// came to light only because somebody hashed 6,500 files for an unrelated
+    /// reason, and a proxy of (size, duration) had put the figure at 28.
+    #[test]
+    fn a_duplicate_is_reported_with_both_of_its_paths() {
+        let dir = std::env::temp_dir().join("gmuse-populate-duplicate-said");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (one, two) = (dir.join("01 Callisto.wav"), dir.join("01 Callisto (1).wav"));
+        for path in [&one, &two] {
+            write_wav(path, 4410);
+            write_tags(path, "Callisto", "Stephan Bodzin", None);
+        }
+        // A third file, different bytes, that must not be reported.
+        let other = dir.join("02 Luna.wav");
+        write_wav(&other, 8820);
+        write_tags(&other, "Luna", "Stephan Bodzin", None);
+
+        let (_, report) = read_library("laptop", &[dir], 100);
+
+        assert_eq!(report.duplicates.len(), 1, "one pair, and only the pair");
+        let (dropped, kept) = &report.duplicates[0];
+        assert_ne!(dropped, kept, "two paths, not one named twice");
+        assert_eq!(
+            [dropped.clone(), kept.clone()]
+                .iter()
+                .collect::<BTreeSet<_>>(),
+            [&one, &two].into_iter().collect::<BTreeSet<_>>(),
+            "and both of them, so the answer to \"which do I delete\" is in it"
+        );
+        let said = report.to_string();
+        assert!(
+            said.contains("01 Callisto (1).wav"),
+            "named in the report: {said}"
+        );
+        assert!(!said.contains("Luna"), "and nothing else is: {said}");
     }
 
     /// **Every file is accounted for.** A scan that loses files without saying
