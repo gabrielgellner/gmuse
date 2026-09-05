@@ -49,8 +49,20 @@ pub enum What {
     /// Everything the library holds. What a view starts from when the first
     /// operator narrows rather than sets.
     Everything,
-    /// A named catalog — a saved set, however it decides its membership.
-    Catalog(String),
+    // **`Catalog(String)` lived here and is gone** (#119).
+    //
+    // A catalog claimed five things and a saved view does every one: several
+    // active at once is `+`, membership from a rule is a predicate, a rule and
+    // a collection together is `&`, switching by name is `saved=`. The only
+    // residue was "which are on persists across sessions", which is one
+    // remembered source line.
+    //
+    // #94 dissolved the *operator* — `active_catalogs = ["a", "b"]` became
+    // `a or b` — and left the *noun* standing, because deleting it was not on
+    // that checklist. The config made it worse than it looked:
+    // `[catalogs.jazz] collection = "Jazz"` was two independent strings for
+    // one thing, free to drift, which is the failure #90 talked us out of one
+    // layer down.
     /// A predicate typed at the line.
     Where(Box<crate::filter::Filter>),
     /// A collection's entries: **a sequence**, so it carries an order and its
@@ -230,7 +242,7 @@ impl Stack {
     /// whole library said the long way, so it goes.
     ///
     /// One function because every rebuild needs it and two of them had it
-    /// separately: `drop_at` guarded the inversion and `set_catalogs`
+    /// separately: `drop_at` guarded the inversion and the catalog sync
     /// reintroduced it, so `:view -x` followed by dropping the exclusion
     /// selected exactly what had been excluded.
     fn normalise(&mut self) {
@@ -248,40 +260,16 @@ impl Stack {
         }
     }
 
-    /// Replace the catalog terms, keeping whatever was typed.
-    ///
-    /// **`active_catalogs = ["general", "dance"]` is `general or dance`**, and
-    /// this is the translation. Which catalogs are selected stopped being a
-    /// property of the catalogs the moment the operator left the noun; view 6
-    /// still toggles them, and what it toggles is these terms.
-    ///
-    /// They go on the front, because a selection sets what you are in and a
-    /// predicate narrows it. That is the order the two nouns had when they
-    /// were two nouns, and it is the order somebody typing `:view dance
-    /// &year>=2015` writes.
-    pub fn set_catalogs<I: IntoIterator<Item = String>>(&mut self, names: I) {
-        // **Everything that is not a catalog survives**, not just predicates.
-        // This kept `Where` terms and dropped the rest, which was invisible
-        // while a catalog and a filter were the only two kinds of term — and
-        // silently threw away `in=` and `saved=` the moment they existed
-        // (#119). The catalog noun being special-cased here is the last of it.
-        let typed: Vec<Term> = self
-            .terms
-            .iter()
-            .filter(|t| !matches!(t.what, What::Catalog(_)))
-            .cloned()
-            .collect();
-
-        self.terms = names
-            .into_iter()
-            .map(|name| Term {
-                op: Op::Or,
-                what: What::Catalog(name),
-            })
-            .collect();
-        self.terms.extend(typed);
-        self.normalise();
-    }
+    // **`set_catalogs` lived here and is gone** (#119).
+    //
+    // It rewrote the front of the stack from the active-catalog list on every
+    // rebuild, which is what made a catalog a second kind of term rather than
+    // a name for a stack. Its parting gift was a bug: it kept `Where` terms
+    // and dropped everything else, so `in=` and `saved=` were silently
+    // discarded the moment they existed.
+    //
+    // What replaced it is that a saved view is applied like anything else —
+    // `:view saved="dance"` is a term, and the stack is the only state.
 
     /// Read a stack back from its own label — the round trip a saved view
     /// depends on, since what is stored is the text.
@@ -330,7 +318,6 @@ impl Stack {
     pub fn resolve(
         &self,
         librarian: &dyn Listing,
-        catalogs: &crate::catalog::Catalogs,
         defs: &dyn Definitions,
         env: crate::filter::Env<'_>,
     ) -> Resolved {
@@ -350,7 +337,6 @@ impl Stack {
             let theirs = self.select(
                 &term.what,
                 librarian,
-                catalogs,
                 defs,
                 &all,
                 env,
@@ -380,7 +366,6 @@ impl Stack {
         &self,
         what: &What,
         librarian: &dyn Listing,
-        catalogs: &crate::catalog::Catalogs,
         defs: &dyn Definitions,
         all: &[CopyId],
         env: crate::filter::Env<'_>,
@@ -389,10 +374,6 @@ impl Stack {
     ) -> Rows {
         match what {
             What::Everything => Rows::of_query(recordings(librarian, all)),
-            What::Catalog(name) => {
-                let held = catalogs.named(name, librarian, all, env);
-                Rows::of_query(recordings(librarian, &held))
-            }
             What::Where(f) => {
                 let matches = f.compile(env);
                 let held: Vec<CopyId> = all
@@ -433,9 +414,8 @@ impl Stack {
                 entering.push(name.clone());
                 let mut rows: Option<Rows> = None;
                 for term in &inner.terms {
-                    let theirs = self.select(
-                        &term.what, librarian, catalogs, defs, all, env, entering, problems,
-                    );
+                    let theirs =
+                        self.select(&term.what, librarian, defs, all, env, entering, problems);
                     rows = Some(match rows {
                         None => theirs,
                         Some(mine) => mine.combine(term.op, &theirs).rows,
@@ -474,7 +454,6 @@ pub fn written(what: &What) -> String {
 fn name_of(what: &What) -> String {
     match what {
         What::Everything => "all".to_string(),
-        What::Catalog(n) => n.clone(),
         What::Where(f) => f.source.clone(),
         What::Collection(name) => format!("in={name:?}"),
         What::Saved(name) => format!("saved={name:?}"),
@@ -579,14 +558,7 @@ mod tests {
     }
 
     fn count(s: &Stack, l: &Librarian) -> usize {
-        s.resolve(
-            l,
-            &crate::catalog::Catalogs::default(),
-            &NoDefinitions,
-            env(),
-        )
-        .rows
-        .len()
+        s.resolve(l, &NoDefinitions, env()).rows.len()
     }
 
     /// An empty stack is the whole library, which is what "no catalog and no
@@ -690,12 +662,7 @@ mod tests {
         s.set(What::Collection(dance.clone()));
         s.push(Op::And, where_(r#"genre="Techno""#));
 
-        let out = s.resolve(
-            &l,
-            &crate::catalog::Catalogs::default(),
-            &NoDefinitions,
-            env(),
-        );
+        let out = s.resolve(&l, &NoDefinitions, env());
         assert!(
             out.rows.is_sequence(),
             "the list lost its order to a narrowing"
@@ -755,7 +722,7 @@ mod tests {
 
         let mut s = Stack::default();
         s.set(What::Saved("crate".into()));
-        let out = s.resolve(&l, &crate::catalog::Catalogs::default(), &defs, env());
+        let out = s.resolve(&l, &defs, env());
         assert!(out.problems.is_empty(), "{:?}", out.problems);
         assert_eq!(out.rows.len(), 2, "the definition was not inlined");
     }
@@ -771,12 +738,7 @@ mod tests {
         let mut s = Stack::default();
         s.set(What::Saved("vanished".into()));
 
-        let out = s.resolve(
-            &l,
-            &crate::catalog::Catalogs::default(),
-            &NoDefinitions,
-            env(),
-        );
+        let out = s.resolve(&l, &NoDefinitions, env());
         assert_eq!(out.problems, [Problem::Missing("vanished".into())]);
         assert_eq!(out.rows.len(), 0);
     }
@@ -794,7 +756,7 @@ mod tests {
 
         let mut s = Stack::default();
         s.set(What::Saved("a".into()));
-        let out = s.resolve(&l, &crate::catalog::Catalogs::default(), &defs, env());
+        let out = s.resolve(&l, &defs, env());
         assert_eq!(
             out.problems,
             [Problem::Cycle(vec![
@@ -815,7 +777,7 @@ mod tests {
         let defs = Defs::of(&[("me", r#"saved="me""#)]);
         let mut s = Stack::default();
         s.set(What::Saved("me".into()));
-        let out = s.resolve(&l, &crate::catalog::Catalogs::default(), &defs, env());
+        let out = s.resolve(&l, &defs, env());
         assert_eq!(
             out.problems,
             [Problem::Cycle(vec!["me".into(), "me".into()])]
@@ -830,12 +792,7 @@ mod tests {
         s.set(What::Collection(dance.clone()));
         s.push(Op::Or, where_(r#"genre="Folk""#));
 
-        let out = s.resolve(
-            &l,
-            &crate::catalog::Catalogs::default(),
-            &NoDefinitions,
-            env(),
-        );
+        let out = s.resolve(&l, &NoDefinitions, env());
         assert!(!out.rows.is_sequence());
         assert_eq!(out.demoted_at, [1], "nobody was told which term did it");
     }
@@ -844,9 +801,12 @@ mod tests {
     #[test]
     fn the_stack_reads_back_as_it_was_written() {
         let mut s = Stack::default();
-        s.set(What::Catalog("dance".into()));
+        s.set(What::Saved("dance".into()));
         s.push(Op::And, where_("year>=2015"));
         s.push(Op::AndNot, where_(r#"genre="*christmas*""#));
-        assert_eq!(s.label(), r#"dance &year>=2015 -genre="*christmas*""#);
+        assert_eq!(
+            s.label(),
+            r#"saved="dance" &year>=2015 -genre="*christmas*""#
+        );
     }
 }

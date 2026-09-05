@@ -408,7 +408,8 @@ pub struct Ui {
     /// The library projection. Owned rather than borrowed, because changing
     /// the active catalogs — or `smart_artist_sort` — rebuilds it.
     pub library: Shelf,
-    pub catalogs: crate::catalog::Catalogs,
+    // **`catalogs` lived here and is gone** (#119). What is selected is the
+    // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
     /// What went wrong resolving the composed view, if anything.
@@ -531,7 +532,6 @@ impl Ui {
             track_line: crate::format::Template::parse("{track:2}  {display_title}  {duration}")
                 .expect("a literal template"),
             library,
-            catalogs: crate::catalog::Catalogs::default(),
             composed: crate::view::Stack::default(),
             continue_playing: true,
             album_headers: true,
@@ -582,12 +582,8 @@ impl Ui {
 
     pub fn completion_world(&self) -> crate::cmd::complete::World {
         crate::cmd::complete::World {
-            catalogs: self
-                .catalogs
-                .defined()
-                .iter()
-                .map(|c| c.name.clone())
-                .collect(),
+            // Completion over saved views, which is what `saved="…"` takes.
+            catalogs: saved_views(self).into_iter().map(|(n, _)| n).collect(),
             playlists: known_playlists(self),
             bound: bind::sorted(&self.bindings)
                 .into_iter()
@@ -1994,13 +1990,15 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 open_playlist(ui, ctx, &row.name);
                 ui.playlist_pane = Pane::Tracks;
             }
-            // Enter makes this the only catalog — the common case, and one
-            // keypress rather than clearing the others by hand.
+            // Enter makes this the only term — the common case, and one
+            // keypress rather than dropping the others by hand.
             View::Filters => {
                 let Some(name) = catalog_under_cursor(ui) else {
                     return;
                 };
-                apply_catalog_spec(ui, ctx, crate::catalog::Spec::Only(vec![name]));
+                ui.composed.set(crate::view::What::Saved(name));
+                rebuild_library(ui, ctx);
+                say_view(ui);
             }
             // Enter *confirms*: it opens or closes a node, and on a track —
             // where there is nothing left to descend into — it plays. That is
@@ -2294,16 +2292,6 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 ui.notify(format!("{label} ({} tracks)", ui.library.len()));
             }
         }
-        Command::Catalog(spec) => match ui.catalogs.apply(spec) {
-            Ok(()) => {
-                rebuild_library(ui, ctx);
-                match ui.catalogs.label() {
-                    Some(label) => ui.notify(format!("catalog: {label}")),
-                    None => ui.notify("catalog: all"),
-                }
-            }
-            Err(e) => ui.notify(e),
-        },
         Command::Help => show_help(ui),
         Command::Quit => ui.quit = true,
     }
@@ -2314,34 +2302,73 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
 /// Called whenever membership or ordering changes — a catalog switch, or
 /// `smart_artist_sort`. The cursors have to be clamped: the row they pointed at
 /// may not exist any more.
-fn catalog_under_cursor(ui: &Ui) -> Option<String> {
-    ui.catalogs
-        .defined()
-        .get(ui.catalog_sel)
-        .map(|c| c.name.clone())
+/// Every saved view, by name and source, sorted.
+///
+/// **Asked of the fold, not of a config table** (#119). A saved view is a fact
+/// now, so this is a question the library answers — which is why view 6 lists
+/// something that syncs.
+fn saved_views(ui: &Ui) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = ui
+        .listened
+        .views
+        .values()
+        .map(|v| (v.name.clone(), v.source.clone()))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
+/// Whether the composed view names this one.
+fn view_is_active(ui: &Ui, name: &str) -> bool {
+    ui.composed
+        .terms()
+        .iter()
+        .any(|t| matches!(&t.what, crate::view::What::Saved(n) if n == name))
+}
+
+fn catalog_under_cursor(ui: &Ui) -> Option<String> {
+    saved_views(ui).get(ui.catalog_sel).map(|(n, _)| n.clone())
+}
+
+/// Space on view 6: widen the stack by this view, or take it back out.
+///
+/// **`+` and drop, which is what toggling always was** (#94). A catalog list
+/// with checkboxes was `active_catalogs`, and `active_catalogs = ["a", "b"]`
+/// is `a or b` — so the checkbox is a term being pushed or dropped, and there
+/// is no second state to keep in step with the stack.
 fn toggle_catalog_under_cursor(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(name) = catalog_under_cursor(ui) else {
         return;
     };
-    // `Spec::Adjust` already expands "all" to every name before applying the
-    // delta, so turning one off while everything is active does the right
-    // thing without a special case here — an earlier version had one, and a
-    // mutation showed it was doing nothing.
-    let add = !ui.catalogs.is_active(&name);
-    apply_catalog_spec(ui, ctx, crate::catalog::Spec::Adjust(vec![(add, name)]));
+    if let Some(at) = ui
+        .composed
+        .terms()
+        .iter()
+        .position(|t| matches!(&t.what, crate::view::What::Saved(n) if *n == name))
+    {
+        ui.composed.drop_at(at);
+    } else {
+        ui.composed.push(
+            crate::model::view::Op::Or,
+            crate::view::What::Saved(name.clone()),
+        );
+    }
+    rebuild_library(ui, ctx);
+    say_view(ui);
 }
 
-fn apply_catalog_spec(ui: &mut Ui, ctx: &Context<'_>, spec: crate::catalog::Spec) {
-    match ui.catalogs.apply(spec) {
-        Ok(()) => {
-            rebuild_library(ui, ctx);
-            let label = ui.catalogs.label().unwrap_or_else(|| "all".into());
-            ui.notify(format!("catalogs: {label} ({} tracks)", ui.library.len()));
-        }
-        Err(e) => ui.notify(e),
+/// What the view is now, or what is wrong with it.
+fn say_view(ui: &mut Ui) {
+    if let Some(problem) = ui.view_problem.clone() {
+        ui.notify(problem);
+        return;
     }
+    let said = if ui.composed.is_empty() {
+        "view: all".to_string()
+    } else {
+        format!("view: {}", ui.composed.label())
+    };
+    ui.notify(format!("{said} ({} tracks)", ui.library.len()));
 }
 
 /// Why an edit to view 3 was refused.
@@ -3055,36 +3082,6 @@ fn refresh_smart(ui: &mut Ui, ctx: &Context<'_>) {
     ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
 }
 
-/// Put the selected catalogs into the composed view.
-///
-/// **`active_catalogs = ["general", "dance"]` is `general or dance`** (#94).
-/// What changed is that the selection is terms in a stack rather than a set
-/// beside a filter, so a narrowing has somewhere to live and the fold is one
-/// path with three operators.
-///
-/// `Active::All` is no terms at all, because an empty stack is the whole
-/// library — the same thing "no catalog active" has always meant.
-///
-/// ## Where the boundary still is, and it is worth naming
-///
-/// `Active` remains the **truth** for which catalogs are selected: view 6
-/// toggles it, the config names it, the cache remembers it across a restart.
-/// The stack holds a projection of that plus the terms somebody typed.
-///
-/// So this runs on every rebuild rather than only when `:catalog` is executed
-/// — two sources that could disagree is the shape this project removes, and a
-/// test that drove `Catalogs` directly found the drift immediately. Moving the
-/// selection itself into the stack is the rest of #94 and wants #98's saved
-/// views to land with it, since a stack that survives a restart is a saved
-/// view by another name.
-fn sync_catalog_terms(ui: &mut Ui) {
-    let names: Vec<String> = match ui.catalogs.active() {
-        crate::catalog::Active::All => Vec::new(),
-        crate::catalog::Active::Only(names) => names.iter().cloned().collect(),
-    };
-    ui.composed.set_catalogs(names);
-}
-
 /// `:export <path>` — write what view 3 holds as an `.m3u8`.
 ///
 /// **The only thing m3u is for** (#118). It was the playlist's storage, which
@@ -3226,8 +3223,7 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
             listened: Some(&ui.listened),
             now: crate::history::now(),
         };
-        ui.composed
-            .resolve(ctx.library, &ui.catalogs, &ui.listened, env)
+        ui.composed.resolve(ctx.library, &ui.listened, env)
     };
     let ordered = resolved.rows.is_sequence();
     let members: Vec<_> = resolved.rows.iter().collect();
@@ -3285,8 +3281,6 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // §7's rule: active catalogs union, the transient filter intersects.
     // "Which bodies of music am I in" is a selection; "what am I looking for"
     // is a restriction.
-    // Before anything is folded, so the stack and the selection cannot drift.
-    sync_catalog_terms(ui);
     let (members, order_lost, problems) = {
         // Scoped so the borrows of `history` and `filter` end before the
         // library is replaced below.
@@ -3297,9 +3291,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         // **One fold over one stack** (#94). This used to union the active
         // catalogs and then intersect the filter, with both operators baked
         // into their nouns — so `-` had nowhere to live.
-        let resolved = ui
-            .composed
-            .resolve(ctx.library, &ui.catalogs, &ui.listened, env);
+        let resolved = ui.composed.resolve(ctx.library, &ui.listened, env);
         // §2: `+` on a hand-made list has no defensible order, so it gives
         // the order up — and says which term did it rather than leaving
         // somebody to notice.
@@ -3712,7 +3704,7 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
         // The whole projection, not just the queued part: the cursor ranges
         // over what would play next, and only the edits are confined.
         View::Queue => up_next(ui, ctx).len(),
-        View::Filters => ui.catalogs.defined().len(),
+        View::Filters => saved_views(ui).len(),
         View::Guide => match ui.guide_pane {
             Pane::Tree => crate::guides::GUIDES.len(),
             // Scrolling *is* moving a cursor down the text, so the pane's
@@ -3883,7 +3875,7 @@ fn draw_playlists(frame: &mut Frame, area: Rect, ui: &Ui) {
 
 fn draw_catalogs(frame: &mut Frame, area: Rect, ui: &Ui) {
     let theme = &ui.theme;
-    let defined = ui.catalogs.defined();
+    let defined = saved_views(ui);
 
     let mut lines: Vec<Line> = Vec::new();
     if !ui.composed.is_empty() {
@@ -3896,13 +3888,13 @@ fn draw_catalogs(frame: &mut Frame, area: Rect, ui: &Ui) {
 
     if defined.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  no catalogs defined — see [catalogs] in the config",
+            "  no saved views — compose one and `:view save <name>`",
             theme.get(theme::Role::StatusDim),
         )));
     }
 
-    for (i, catalog) in defined.iter().enumerate() {
-        let on = ui.catalogs.is_active(&catalog.name);
+    for (i, (name, source)) in defined.iter().enumerate() {
+        let on = view_is_active(ui, name);
         let selected = i == ui.catalog_sel;
         let body = if selected {
             theme.get(theme::Role::SelectionFocused)
@@ -3920,14 +3912,15 @@ fn draw_catalogs(frame: &mut Frame, area: Rect, ui: &Ui) {
                     theme::Role::StatusDim
                 }),
             ),
-            Span::styled(format!("{:<14}", catalog.name), body),
-            Span::styled(catalog.rule_label(), theme.get(theme::Role::StatusDim)),
+            Span::styled(format!("{name:<14}"), body),
+            Span::styled(source.clone(), theme.get(theme::Role::StatusDim)),
         ]));
     }
 
-    let title = match ui.catalogs.label() {
-        Some(l) => format!("catalogs — {l}"),
-        None => "catalogs — all".to_string(),
+    let title = if ui.composed.is_empty() {
+        "views — all".to_string()
+    } else {
+        format!("views — {}", ui.composed.label())
     };
     frame.render_widget(
         Paragraph::new(lines).block(pane_block(theme, &title, true)),
@@ -4497,7 +4490,7 @@ fn draw_completions(frame: &mut Frame, area: Rect, ui: &Ui, prompt: &Prompt) {
 fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
     if ui.library.is_empty() {
         let dim = ui.theme.get(theme::Role::StatusDim);
-        let lines = if ui.catalogs.defined().is_empty() {
+        let lines = if ui.composed.is_empty() {
             vec![
                 Line::from(""),
                 Line::from(Span::styled("  no library yet", dim)),
@@ -4509,8 +4502,8 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         } else {
             vec![
                 Line::from(""),
-                Line::from(Span::styled("  nothing in the active catalogs", dim)),
-                Line::from(Span::styled("  :catalog all  shows everything", dim)),
+                Line::from(Span::styled("  nothing in this view", dim)),
+                Line::from(Span::styled("  :view  shows everything", dim)),
             ]
         };
         frame.render_widget(
@@ -7260,25 +7253,34 @@ mod tests {
     }
     // ---- catalogs --------------------------------------------------------
 
-    use crate::catalog::{Catalogs, Spec};
-
-    /// A fixture split into two catalogs by album.
+    /// A fixture with two saved views.
     ///
-    /// It used to split by directory, which is what #94 took away: a catalog
-    /// is a collection, a filter, or both, and never a folder.
+    /// It split by directory once (#94 took that away), then by catalog table
+    /// in the config. Both are gone: a catalog was a saved view with a second
+    /// name, and a saved view is a fact (#119).
     fn catalog_ui(store: &Scan) -> Ui {
-        let filter = |src: &str| Some(crate::filter::Filter::parse(src).expect("a fixture filter"));
-        let mut catalogs = Catalogs::default();
-        catalogs.define("paak", None, filter(r#"album="Malibu""#));
-        catalogs.define("va", None, filter(r#"album="YouTube Sessions""#));
-        let l = lib_of(store);
-        let mut ui = Ui::new(Shelf::from_members(
-            l,
-            catalogs.members(l, &Listing::rows(l), crate::filter::Env::default()),
-            true,
-        ));
-        ui.catalogs = catalogs;
+        let mut ui = ui_with_history(store, "views");
+        for (name, source) in [
+            ("paak", r#"album="Malibu""#),
+            ("va", r#"album="YouTube Sessions""#),
+        ] {
+            let id = crate::model::id::Id::<crate::model::entity::View>::of_name(name);
+            record(&mut ui, 100, |log| log.save_view(100, id, name, source));
+        }
         ui
+    }
+
+    /// `:view saved="<name>"` — what `:catalog <name>` used to be.
+    fn select_view(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+        execute(
+            ui,
+            ctx,
+            Command::Compose(crate::cmd::ViewTerm::Compose(
+                crate::model::view::Op::Or,
+                Box::new(crate::view::What::Saved(name.to_string())),
+                true,
+            )),
+        );
     }
 
     /// **#28's missing cell, from the line.**
@@ -7351,11 +7353,7 @@ mod tests {
         let mut ui = catalog_ui(&store);
         let everything = ui.library.len();
 
-        execute(
-            &mut ui,
-            &ctx,
-            Command::Catalog(Spec::Only(vec!["paak".into()])),
-        );
+        select_view(&mut ui, &ctx, "paak");
         assert!(ui.library.len() < everything, "library did not narrow");
         for at in ui
             .library
@@ -7375,11 +7373,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = catalog_ui(&store);
-        execute(
-            &mut ui,
-            &ctx,
-            Command::Catalog(Spec::Only(vec!["paak".into()])),
-        );
+        select_view(&mut ui, &ctx, "paak");
 
         ui.playback.shuffle = true;
         ui.playback.repeat = true;
@@ -7410,11 +7404,7 @@ mod tests {
             .find(|id| Listing::playable(l, *id).is_some_and(|p| p.locator.starts_with("/m/va")))
             .unwrap();
         ui.playlist.push(va);
-        execute(
-            &mut ui,
-            &ctx,
-            Command::Catalog(Spec::Only(vec!["paak".into()])),
-        );
+        select_view(&mut ui, &ctx, "paak");
 
         assert_eq!(ui.playlist.len(), 1, "the playlist was filtered");
         ui.view = View::Playlist;
@@ -7438,11 +7428,7 @@ mod tests {
             .find(|id| Listing::playable(l, *id).is_some_and(|p| p.locator.starts_with("/m/va")))
             .unwrap();
         ui.queue.push_back(va);
-        execute(
-            &mut ui,
-            &ctx,
-            Command::Catalog(Spec::Only(vec!["paak".into()])),
-        );
+        select_view(&mut ui, &ctx, "paak");
         assert_eq!(ui.queue.len(), 1);
 
         ui.playback.current = ui.library.sorted().first().copied();
@@ -7450,34 +7436,39 @@ mod tests {
         assert_eq!(ui.playback.current, Some(va), "the queue was skipped");
     }
 
+    /// **A name nothing defines applies and reports, where a catalog name was
+    /// refused** — and the change is the point, not a regression.
+    ///
+    /// A catalog was a closed set in the config, so a bad name could be
+    /// checked at the moment it was typed. A saved view is **late bound**: it
+    /// may be defined by the time you look again, and refusing the term would
+    /// mean the reference could never be repaired from the line. So the term
+    /// goes on, the result is empty, and the *reason* is said — which is the
+    /// one thing an empty library cannot say for itself.
     #[test]
-    fn an_unknown_catalog_name_is_reported() {
+    fn an_unknown_view_name_is_reported_rather_than_refused() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = catalog_ui(&store);
-        let before = ui.library.len();
-        execute(
-            &mut ui,
-            &ctx,
-            Command::Catalog(Spec::Only(vec!["nosuch".into()])),
-        );
+        select_view(&mut ui, &ctx, "nosuch");
         assert!(ui.status.contains("nosuch"), "{}", ui.status);
-        assert_eq!(ui.library.len(), before, "a bad name changed the library");
+        assert!(
+            !ui.status.contains("0 tracks"),
+            "the count said what only the reason can: {}",
+            ui.status
+        );
+        assert_eq!(ui.library.len(), 0);
     }
 
     #[test]
-    fn the_status_line_says_which_catalogs_are_active() {
+    fn the_status_line_says_what_the_view_is() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = catalog_ui(&store);
-        execute(
-            &mut ui,
-            &ctx,
-            Command::Catalog(Spec::Only(vec!["paak".into()])),
-        );
+        select_view(&mut ui, &ctx, "paak");
         ui.status.clear();
         let out = render(&ui, &ctx, 110, 10);
-        assert!(out.contains("[paak]"), "{out}");
+        assert!(out.contains(r#"saved="paak""#), "{out}");
     }
 
     #[test]
@@ -7488,11 +7479,7 @@ mod tests {
         ui.view = View::Sorted;
         ui.sorted = ui.library.sorted().len() - 1;
 
-        execute(
-            &mut ui,
-            &ctx,
-            Command::Catalog(Spec::Only(vec!["paak".into()])),
-        );
+        select_view(&mut ui, &ctx, "paak");
         // The old row may not exist any more; leaving the cursor there would
         // index past the end.
         assert_eq!(ui.sorted, 0);
@@ -8466,121 +8453,77 @@ mod tests {
         assert_eq!(ui.library.len(), before, "a bad filter changed the library");
     }
 
-    /// A catalog can be defined by an expression rather than by roots, and
-    /// membership is roots AND where when both are given.
+    /// **Saved views union, which is what `+` is** — the rule §7 settled and
+    /// the reason `:catalog folk pop` gave you both rather than nothing.
+    ///
+    /// It was `active_catalogs` once. #94 dissolved the operator, #119 the
+    /// noun, and what is left is one term joined to another.
     #[test]
-    fn a_catalog_can_be_defined_by_a_filter() {
+    fn saved_views_union() {
         let store = fixture();
         let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-        let all = ui.library.len();
+        let mut ui = ui_with_history(&store, "union");
+        for (name, source) in [("none", "year>9999"), ("all_of_them", "duration>=0")] {
+            let id = crate::model::id::Id::<crate::model::entity::View>::of_name(name);
+            record(&mut ui, 100, |log| log.save_view(100, id, name, source));
+        }
 
-        let loaded = crate::config::parse_text(
-            r#"
-            [catalogs.recent]
-            where = "duration>100"
-            [catalogs.nothing]
-            where = "year>9999"
-            "#,
-        );
-        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        select_view(&mut ui, &ctx, "none");
+        assert_eq!(ui.library.len(), 0, "a predicate view should apply");
 
-        ui.catalogs = loaded.catalogs;
-        ui.catalogs
-            .apply(crate::catalog::Spec::Only(vec!["nothing".into()]))
-            .unwrap();
-        rebuild_library(&mut ui, &ctx);
-        assert_eq!(ui.library.len(), 0, "a where-only catalog should apply");
-
-        ui.catalogs
-            .apply(crate::catalog::Spec::Only(vec!["recent".into()]))
-            .unwrap();
-        rebuild_library(&mut ui, &ctx);
-        assert!(!ui.library.is_empty() && ui.library.len() <= all);
-    }
-
-    /// Active catalogs union — the rule §7 settled, and the reason
-    /// `:catalog folk pop` gives you both rather than nothing.
-    #[test]
-    fn active_catalogs_union() {
-        let store = fixture();
-        let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-
-        let loaded = crate::config::parse_text(
-            r#"
-            [catalogs.none]
-            where = "year>9999"
-            [catalogs.all_of_them]
-            where = "duration>=0"
-            "#,
-        );
-        ui.catalogs = loaded.catalogs;
-        ui.catalogs
-            .apply(crate::catalog::Spec::Only(vec![
-                "none".into(),
-                "all_of_them".into(),
-            ]))
-            .unwrap();
-        rebuild_library(&mut ui, &ctx);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view +saved="all_of_them""#);
         assert!(
             !ui.library.is_empty(),
-            "a union with an empty catalog should not empty the library"
+            "a union with an empty view should not empty the library"
         );
     }
 
-    /// A bad expression names the catalog it came from, and the catalog is
-    /// dropped rather than silently matching everything.
+    /// View 6 lists the **saved views**, shows which are in the stack, and
+    /// toggles them.
+    ///
+    /// The checkbox was `active_catalogs` once, and it is a term now: space
+    /// pushes `+saved="x"` or drops it, so there is no second state to keep in
+    /// step with the composed view (#119).
     #[test]
-    fn a_bad_catalog_expression_names_the_catalog() {
-        let loaded = crate::config::parse_text(
-            r#"
-            [catalogs.broken]
-            where = "nosuchfield=1"
-            "#,
-        );
-        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
-        assert_eq!(loaded.errors[0].where_, "catalogs.broken.where");
-        assert!(loaded.catalogs.defined().is_empty());
-    }
-
-    #[test]
-    fn a_catalog_with_neither_roots_nor_where_is_rejected() {
-        let loaded = crate::config::parse_text(
-            "[catalogs.empty]
-",
-        );
-        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
-        assert!(loaded.errors[0].message.contains("neither"));
-    }
-
-    /// View 6 lists the catalogs, shows which are on, and toggles them.
-    #[test]
-    fn view_six_lists_and_toggles_catalogs() {
+    fn view_six_lists_and_toggles_saved_views() {
         let store = fixture();
         let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
-        ui.catalogs.define("alpha", Some("Alpha".into()), None);
-        ui.catalogs.define("beta", Some("Beta".into()), None);
+        let mut ui = ui_with_history(&store, "view6");
+        for (name, source) in [("alpha", "duration>=0"), ("beta", "duration>=0")] {
+            let id = crate::model::id::Id::<crate::model::entity::View>::of_name(name);
+            record(&mut ui, 100, |log| log.save_view(100, id, name, source));
+        }
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 6");
         assert_eq!(ui.view, View::Filters);
         let out = render(&ui, &ctx, 100, 20);
         assert!(out.contains("alpha") && out.contains("beta"), "{out}");
-        assert!(out.contains("[x]"), "nothing shown as active:\n{out}");
 
-        // Space turns the one under the cursor off. Everything was active, so
-        // this has to name the others rather than collapsing to nothing.
+        // Space adds the one under the cursor to the stack.
         press(&mut ui, &ctx, "o");
-        assert!(!ui.catalogs.is_active("alpha"), "space did not toggle");
-        assert!(ui.catalogs.is_active("beta"), "it turned off the wrong one");
+        assert!(view_is_active(&ui, "alpha"), "space did not add it");
+        assert!(!view_is_active(&ui, "beta"));
+        assert!(
+            render(&ui, &ctx, 100, 20).contains("[x]"),
+            "not shown as on"
+        );
 
-        // Enter makes the one under the cursor the only one.
+        // And again takes it back out — one state, not two.
+        press(&mut ui, &ctx, "o");
+        assert!(!view_is_active(&ui, "alpha"), "space did not remove it");
+
+        // Enter makes the one under the cursor the only term.
         press(&mut ui, &ctx, "j");
         press(&mut ui, &ctx, "enter");
-        assert!(ui.catalogs.is_active("beta"));
-        assert!(!ui.catalogs.is_active("alpha"));
+        assert!(view_is_active(&ui, "beta"));
+        assert!(!view_is_active(&ui, "alpha"));
+        assert_eq!(
+            ui.composed.terms().len(),
+            1,
+            "enter should replace, not add"
+        );
     }
 
     /// A play is counted once, however long the track is left running, and
@@ -8946,15 +8889,13 @@ mod tests {
         type_line(&mut ui, &ctx, "view");
         assert_eq!(ui.library.len(), everything, "the view did not clear");
 
-        ui.catalogs.define("paak", Some("Paak".into()), None);
-        ui.catalogs
-            .apply(crate::catalog::Spec::Only(vec!["paak".into()]))
-            .unwrap();
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Paak""#);
         refresh_library(&mut ui, &ctx);
         assert_eq!(
             ui.library.len(),
             wanted,
-            "the catalog did not hold what was collected into it"
+            "the collection did not hold what was collected into it"
         );
     }
 

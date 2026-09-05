@@ -13,7 +13,6 @@ mod audio_id;
 mod audit;
 mod bridge;
 mod cache;
-mod catalog;
 mod cli;
 mod cmd;
 mod config;
@@ -57,7 +56,8 @@ struct App {
     store: Holdings,
     roots: Vec<PathBuf>,
     cache_path: Option<PathBuf>,
-    catalogs: catalog::Catalogs,
+    /// The view in force, as its source line.
+    view: Option<String>,
     /// Files recognised at a new path by a scan, when one ran.
     ///
     /// Carried here because the scan runs before the history is loaded, and
@@ -158,12 +158,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (!args.no_cache).then(|| args.cache.clone().unwrap_or_else(cache::default_path));
 
     // Load the cached library, then reconcile it with the roots we were given.
-    let (store, cached_roots, cached_active) = match cache_path.as_deref().map(cache::load) {
-        Some(Ok(cache::Outcome::Loaded {
-            store,
-            roots,
-            active,
-        })) => (store, roots, Some(active)),
+    let (store, cached_roots, cached_view) = match cache_path.as_deref().map(cache::load) {
+        Some(Ok(cache::Outcome::Loaded { store, roots, view })) => (store, roots, view),
         Some(Ok(cache::Outcome::Discarded)) => {
             // Costs a rescan, so say so. Silently starting from nothing is how
             // a library appears to vanish.
@@ -176,21 +172,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => (Holdings::new(), Vec::new(), None),
     };
-    // Catalogs come from the config. `--library` says where to look, which is
-    // no longer a catalog's business (#94) — but a user who configures no
-    // catalog still needs one, so the implicit "default" is defined here.
-    let mut catalogs = loaded.catalogs.clone();
-    let config_chose_catalogs = loaded.active_specified;
-    if !args.library.is_empty() {
-        catalogs.define(catalog::DEFAULT, None, None);
-    }
-    // A remembered choice wins over the config default, unless the config
-    // names one explicitly — otherwise picking a catalog would not stick.
-    if let Some(active) = cached_active
-        && !config_chose_catalogs
-    {
-        catalogs.set_active(active);
-    }
+    // **The view in force**, which is one source line rather than a set of
+    // names (#119). The config's `view =` wins where it speaks; otherwise the
+    // last session's is restored, so a chosen view sticks.
+    let view = loaded.view.clone().or(cached_view);
 
     // **Where the music is, which is `library` and nothing else** (#94). A
     // catalog used to carry roots too, so what a catalog *held* and where the
@@ -215,7 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         store,
         roots,
         cache_path,
-        catalogs,
+        view,
         moves: Vec::new(),
         unreadable: Vec::new(),
     };
@@ -481,15 +466,24 @@ fn run_tui(
     // **Membership is asked of the same seam the rows come from** (#86), so
     // the two cannot disagree about what exists — which is what made the
     // `file_by_tag` fallback reachable and is why it is gone.
-    let all = crate::model::rows::Listing::rows(&library_view);
-    let members = app.catalogs.members(
-        &library_view,
-        &all,
-        crate::filter::Env {
-            listened: Some(&listened),
-            now,
-        },
-    );
+    //
+    // One fold over one stack (#94, #119): a view is the only thing that says
+    // what is in scope, and an empty one is the whole library.
+    let composed = app
+        .view
+        .as_deref()
+        .and_then(|src| view::Stack::parse(src).ok())
+        .unwrap_or_default();
+    let members = composed
+        .resolve(
+            &library_view,
+            &listened,
+            crate::filter::Env {
+                listened: Some(&listened),
+                now,
+            },
+        )
+        .copies(&library_view);
 
     // **Grouped by what the model says, not by what the tags carry** (#84).
     // The librarian has to exist first, which is why this sits below rather
@@ -503,7 +497,6 @@ fn run_tui(
         remote: server.as_ref(),
     };
     let mut state = ui::Ui::new(library);
-    state.catalogs = app.catalogs.clone();
     state.playlists = loaded.playlists.clone();
 
     // Opened before the terminal is taken over, so a failure is visible.
@@ -514,9 +507,9 @@ fn run_tui(
                 audit.line(
                     "library",
                     &format!(
-                        "{} tracks, catalogs: {}",
+                        "{} tracks, view: {}",
                         app.store.len(),
-                        app.catalogs.label().unwrap_or_else(|| "all".into())
+                        app.view.as_deref().unwrap_or("all")
                     ),
                 );
                 println!("logging to {}", path.display());
@@ -721,7 +714,7 @@ fn save_cache(app: &App) {
         return;
     }
     if let Some(path) = &app.cache_path
-        && let Err(e) = cache::save(path, &app.store, &app.roots, app.catalogs.active())
+        && let Err(e) = cache::save(path, &app.store, &app.roots, app.view.as_deref())
     {
         eprintln!("cache: {e}");
     }

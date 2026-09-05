@@ -130,10 +130,10 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
 /// the common case stays quiet.
 fn modes(ui: &Ui) -> String {
     let mut out = Vec::new();
-    // Which catalogs are in force comes first: without it, "half my music is
-    // missing" is a puzzle rather than a glance.
-    if let Some(label) = ui.catalogs.label() {
-        out.push(format!("[{label}]"));
+    // What the view is comes first: without it, "half my music is missing" is
+    // a puzzle rather than a glance.
+    if !ui.composed.is_empty() {
+        out.push(format!("[{}]", ui.composed.label()));
     }
     out.push(format!("[{}]", ui.playback.aaa_mode.label()));
     if ui.playback.shuffle {

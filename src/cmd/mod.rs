@@ -702,7 +702,7 @@ pub enum Command {
     /// `12G`; bare, it means halfway.
     SeekPercent,
     ViewLast,
-    Catalog(crate::catalog::Spec),
+
     Playlist(PlaylistSpec),
     /// Turn the loaded smart playlist into an ordinary, editable one.
     ///

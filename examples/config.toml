@@ -31,28 +31,23 @@ aaa_mode = "all"            # all | artist | album
 resample_quality = "balanced" # fast | balanced | high
 which_key_delay = 300       # ms before a prefix shows what can follow it; 0 is instant
 
-# Catalogs are separate bodies of music. Browsing and shuffle stay inside the
-# active ones; playlists and the queue cross them freely. Everything is scanned
-# whatever is active, so switching is instant.
+# Views are how you switch what is in scope. Browsing and shuffle stay inside
+# whichever is in force; playlists and the queue cross it freely.
 #
-# A catalog is a collection, a filter, or both — never a folder. Membership by
-# path meant that moving a file changed what it belonged to, and that the same
-# config on another machine selected nothing.
+# A view is one source line, and it lives in the **library** rather than here —
+# so it syncs, merges, and is the same thing on another machine:
 #
-# `collection` names a collection you have filed things into; `where` is a
-# filter expression. Tracks in no catalog at all still appear when everything
-# is active.
+#   :view in="Dance"          what a collection holds
+#   :view genre="techno"      a predicate
+#   :view in="Dance" &year>=2015
+#   :view save dance          name it, as a fact
+#   :view saved="dance"       recall it
+#   :view 6                   list what you have saved
 #
-# [catalogs.dance]
-# collection = "Dance"
+# There is no [catalogs] table. A catalog was a saved view with a second name.
 #
-# [catalogs.electronica]
-# where = 'genre="electronic"'
-#
-# The complement of a catalog is not another catalog: type `:view -dance` for
-# "everything except", which is a term you can drop again.
-#
-# active_catalogs = ["dance"]     # omit, or ["all"], for everything
+# view = 'saved="dance"'      the view in force at startup; omit for everything
+
 
 # Where everything *you* have decided about your music lives: ratings, play
 # history, and playlists. This is the half worth backing up, so it is a setting

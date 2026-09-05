@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn a_single_match_gains_a_trailing_space() {
         // The next thing you type is an argument, so the space is free.
-        assert_eq!(line_of("cata"), "catalog ");
+        assert_eq!(line_of("resc"), "rescan ");
     }
 
     #[test]

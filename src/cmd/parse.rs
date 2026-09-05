@@ -46,7 +46,6 @@ pub const VERBS: &[&str] = &[
     "add-queue",
     "bind",
     "bottom",
-    "catalog",
     "collect",
     "down",
     "export",
@@ -300,7 +299,6 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "search-next" => Command::SearchNext,
         "search-prev" => Command::SearchPrev,
         "rate" => Command::Rate(rate_spec(rest)?),
-        "catalog" => Command::Catalog(catalog_spec(rest)?),
         "playlist" => Command::Playlist(playlist_spec(rest)?),
         "export" => {
             if rest.is_empty() {
@@ -447,41 +445,6 @@ fn quoted_value(expr: &str, key: &str) -> Option<String> {
             None => rest.to_string(),
         },
     )
-}
-
-fn catalog_spec(rest: &str) -> Result<crate::catalog::Spec, ParseError> {
-    let words: Vec<&str> = rest.split_whitespace().collect();
-    if words.is_empty() {
-        return Err(ParseError::Missing {
-            cmd: "catalog",
-            what: "a catalog name, a list, +name/-name, or `all`",
-        });
-    }
-    if words.len() == 1 && words[0] == "all" {
-        return Ok(crate::catalog::Spec::All);
-    }
-
-    let adjusting = words.iter().any(|w| w.starts_with(['+', '-']));
-    let bare = words.iter().any(|w| !w.starts_with(['+', '-']));
-    if adjusting && bare {
-        return Err(ParseError::Bad(
-            rest.into(),
-            "catalog list — use either names or +/- adjustments, not both",
-        ));
-    }
-
-    if adjusting {
-        Ok(crate::catalog::Spec::Adjust(
-            words
-                .iter()
-                .map(|w| (w.starts_with('+'), w[1..].to_string()))
-                .collect(),
-        ))
-    } else {
-        Ok(crate::catalog::Spec::Only(
-            words.iter().map(|w| w.to_string()).collect(),
-        ))
-    }
 }
 
 /// Take the key field, which may be a quoted sequence (`"g g"`) or a single
@@ -785,18 +748,6 @@ pub fn format(cmd: &Command) -> String {
         Command::Compose(crate::cmd::ViewTerm::Save(name)) => format!("view save {name}"),
         Command::Filter(None) => "filter".into(),
         Command::Filter(Some(f)) => format!("filter {}", f.source),
-        Command::Catalog(spec) => match spec {
-            crate::catalog::Spec::All => "catalog all".into(),
-            crate::catalog::Spec::Only(names) => format!("catalog {}", names.join(" ")),
-            crate::catalog::Spec::Adjust(deltas) => format!(
-                "catalog {}",
-                deltas
-                    .iter()
-                    .map(|(add, n)| format!("{}{n}", if *add { "+" } else { "-" }))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-        },
         Command::Search { pattern, dir } => match dir {
             SearchDir::Forward => format!("search {pattern}"),
             SearchDir::Backward => format!("rsearch {pattern}"),
@@ -1151,7 +1102,6 @@ mod tests {
                 "bind" => "bind common x quit".to_string(),
                 "unbind" => "unbind common x".to_string(),
                 "view" => "view 1".to_string(),
-                "catalog" => format!("{verb} all"),
                 "collect" => "collect Dance".to_string(),
                 "export" => "export /tmp/x.m3u8".to_string(),
                 "playlist" => "playlist open fresh".to_string(),

@@ -75,12 +75,24 @@ pub struct Config {
     /// Commands run once at startup, after everything else is applied.
     #[serde(default)]
     pub startup_commands: Vec<String>,
-    /// `[catalogs.general] roots = [...]`.
+    /// `[catalogs.general]` — **gone, and kept only to say so** (#119).
+    ///
+    /// A catalog was a saved view with a second name, and it lived in the
+    /// config where it could not sync, merge or carry provenance. Parsed here
+    /// purely so an old config produces a migration message instead of
+    /// silently doing nothing.
     #[serde(default)]
-    pub catalogs: HashMap<String, CatalogTable>,
-    /// Which catalogs start active. Omit, or `["all"]`, for everything.
+    pub catalogs: HashMap<String, toml::Value>,
+    /// Also gone. Same reason, same message.
     #[serde(default)]
     pub active_catalogs: Vec<String>,
+    /// `view = 'in="Dance"'` — the view in force at startup.
+    ///
+    /// One source line, because that is all a view is. Wins over what the
+    /// last session remembered, which is the same rule every other setting
+    /// follows: the config speaks, the session fills the rest.
+    #[serde(default)]
+    pub view: Option<String>,
     /// `[playlists.fresh] where = "days_since_added<30"` — smart playlists.
     ///
     /// Beside the catalogs because both are named expressions living in the
@@ -114,24 +126,6 @@ pub struct Config {
     /// lost on an upgrade.
     #[serde(default)]
     pub library: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CatalogTable {
-    /// `collection = "Dance"` — the catalog is what that collection holds.
-    ///
-    /// **A catalog no longer has roots** (#94). Membership by folder meant a
-    /// file changed what it belonged to by being moved, and the rule meant
-    /// nothing on a second machine. Where the files are is `library`; what a
-    /// catalog holds is a collection, a filter, or both.
-    #[serde(default)]
-    pub collection: Option<String>,
-    /// `where = "genre=\"jazz\""` — a §7 filter expression. Combines with
-    /// `collection` when both are given. `where` is a Rust keyword, hence the
-    /// rename.
-    #[serde(default, rename = "where")]
-    pub filter: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -192,7 +186,8 @@ pub struct Loaded {
     /// Where the music is, from `library`. **The only source of scan roots**
     /// now that a catalog has none (#94).
     pub library: Vec<PathBuf>,
-    pub catalogs: crate::catalog::Catalogs,
+    /// The view in force at startup, as its source line (#119).
+    pub view: Option<String>,
     pub playlists: crate::smart::SmartPlaylists,
     /// Resolved: the config's `data_dir` with `~` expanded, or the default.
     pub data_dir: PathBuf,
@@ -201,13 +196,10 @@ pub struct Loaded {
     /// `Option` only so `Loaded` can derive `Default`; `parse_text` and `load`
     /// both fill it in, so nothing downstream sees `None`.
     pub leader: Option<crate::cmd::keys::Key>,
-    /// Whether the config named `active_catalogs` at all.
-    ///
-    /// Kept separate from its *value*, because `["all"]` is a legitimate
-    /// explicit choice and is indistinguishable from the default if you only
-    /// look at the resulting `Active`. Without this, writing `["all"]` would
-    /// silently lose to whatever was remembered from the last session.
-    pub active_specified: bool,
+    // **`active_specified` lived here and is gone** (#119). It existed
+    // because `["all"]` was an explicit choice indistinguishable from the
+    // default once folded into an `Active`. A source line has no such
+    // ambiguity: `Some("")` is not `None`.
     pub errors: Vec<ConfigError>,
 }
 
@@ -331,44 +323,19 @@ pub fn parse_text(text: &str) -> Loaded {
     }
 
     out.library = config.library.iter().map(|r| expand_tilde(r)).collect();
-    if !out.library.is_empty() {
-        // The catalog every row is in: no collection and no filter, so it
-        // holds whatever the library holds.
-        out.catalogs.define(crate::catalog::DEFAULT, None, None);
-    }
 
-    let mut defined: Vec<(String, Option<String>, Option<String>)> = config
-        .catalogs
-        .iter()
-        .map(|(name, table)| (name.clone(), table.collection.clone(), table.filter.clone()))
-        .collect();
-    // HashMap order is arbitrary; the label reads better
-    // in a stable one.
-    defined.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, collection, filter_source) in defined {
-        if collection.is_none() && filter_source.is_none() {
-            out.errors.push(ConfigError {
-                where_: format!("catalogs.{name}"),
-                message: "has neither collection nor where".into(),
-            });
-            continue;
-        }
-        // Parsed here, at the boundary: a bad expression names the catalog it
-        // came from rather than failing somewhere in a redraw.
-        let filter = match filter_source {
-            Some(src) => match crate::filter::Filter::parse(&src) {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    out.errors.push(ConfigError {
-                        where_: format!("catalogs.{name}.where"),
-                        message: e.to_string(),
-                    });
-                    continue;
-                }
-            },
-            None => None,
-        };
-        out.catalogs.define(&name, collection, filter);
+    // **A config written the old way says so** (#119). Silently ignoring a
+    // `[catalogs.*]` table would leave somebody with an empty view 6 and no
+    // idea why.
+    let mut old: Vec<&String> = config.catalogs.keys().collect();
+    old.sort();
+    for name in old {
+        out.errors.push(ConfigError {
+            where_: format!("catalogs.{name}"),
+            message: "catalogs moved into the library — compose the view and \
+                      `:view save <name>`, then use `view = 'saved=\"<name>\"'`"
+                .into(),
+        });
     }
 
     // Resolved here, at the boundary: nothing downstream sees a `~` or has to
@@ -395,20 +362,13 @@ pub fn parse_text(text: &str) -> Loaded {
         },
     });
 
-    out.active_specified = !config.active_catalogs.is_empty();
     if !config.active_catalogs.is_empty() {
-        let spec = if config.active_catalogs.iter().any(|n| n == "all") {
-            crate::catalog::Spec::All
-        } else {
-            crate::catalog::Spec::Only(config.active_catalogs.clone())
-        };
-        if let Err(e) = out.catalogs.apply(spec) {
-            out.errors.push(ConfigError {
-                where_: "active_catalogs".into(),
-                message: e,
-            });
-        }
+        out.errors.push(ConfigError {
+            where_: "active_catalogs".into(),
+            message: "replaced by `view` — one source line, e.g. view = 'saved=\"dance\"'".into(),
+        });
     }
+    out.view = config.view.clone();
 
     // Smart playlists. Sorted for the same reason catalogs are: a HashMap's
     // order is arbitrary and completion reads better in a stable one.
@@ -797,100 +757,44 @@ mod tests {
         );
     }
 
-    /// `["all"]` is an explicit choice, not an absence of one.
+    /// **A config written the old way says so rather than doing nothing**
+    /// (#119).
     ///
-    /// The two were told apart by inspecting the resulting `Active`, which
-    /// cannot distinguish them — so writing `["all"]` silently lost to
-    /// whatever the last session had remembered.
+    /// Silently ignoring `[catalogs.*]` would leave somebody with an empty
+    /// view 6 and no idea why — and both keys have a direct replacement, so
+    /// the message can name it.
     #[test]
-    fn choosing_all_explicitly_is_recorded_as_a_choice() {
-        let named = parse_text(
-            r#"
-            active_catalogs = ["all"]
-            [catalogs.a]
-            collection = "A"
-            "#,
-        );
-        assert!(
-            named.active_specified,
-            "explicit [\"all\"] must be a choice"
-        );
-        assert_eq!(named.catalogs.active(), &crate::catalog::Active::All);
-
-        let silent = parse_text(
-            r#"
-            [catalogs.a]
-            roots = ["/a"]
-            "#,
-        );
-        assert!(!silent.active_specified, "an absent key is not a choice");
-        // Same resulting value, which is exactly why the flag has to be
-        // separate from it.
-        assert_eq!(silent.catalogs.active(), &crate::catalog::Active::All);
-    }
-
-    #[test]
-    fn a_named_subset_is_also_a_choice() {
+    fn the_old_catalog_keys_say_where_they_went() {
         let loaded = parse_text(
             r#"
             active_catalogs = ["a"]
             [catalogs.a]
             collection = "A"
-            [catalogs.b]
-            collection = "B"
             "#,
         );
-        assert!(loaded.active_specified);
-        assert_eq!(loaded.catalogs.active_names(), vec!["a"]);
-    }
-
-    /// Top-level keys must precede tables in TOML. Worth a test because the
-    /// failure is confusing: the key silently joins the preceding table.
-    #[test]
-    fn a_top_level_key_after_a_table_is_rejected_clearly() {
-        let loaded = parse_text(
-            r#"
-            [catalogs.a]
-            roots = ["/a"]
-            active_catalogs = ["a"]
-            "#,
-        );
-        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
-        assert!(
-            loaded.errors[0].message.contains("active_catalogs"),
-            "{:?}",
-            loaded.errors[0]
-        );
-    }
-
-    #[test]
-    fn library_says_where_the_music_is_and_gets_a_default_catalog() {
-        let loaded = parse_text(r#"library = ["/music"]"#);
-        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
-        assert_eq!(loaded.library, vec![PathBuf::from("/music")]);
-        assert_eq!(loaded.catalogs.defined().len(), 1);
-        assert_eq!(loaded.catalogs.defined()[0].name, crate::catalog::DEFAULT);
-        // **And it holds everything**, rather than everything under `/music`:
-        // where the files are is not what a catalog is for (#94).
-        assert!(loaded.catalogs.defined()[0].collection.is_none());
-    }
-
-    /// A catalog cannot be defined by a folder any more (#94).
-    #[test]
-    fn roots_on_a_catalog_is_rejected_rather_than_ignored() {
-        let loaded = parse_text(
-            r#"
-            [catalogs.dance]
-            roots = ["~/MusicLibrary/Dance"]
-            "#,
-        );
-        assert!(
+        let said = |what: &str| {
             loaded
                 .errors
                 .iter()
-                .any(|e| e.message.contains("unknown field `roots`")),
-            "a config written the old way must say so: {:?}",
-            loaded.errors
-        );
+                .find(|e| e.where_ == what)
+                .unwrap_or_else(|| panic!("{what} said nothing: {:?}", loaded.errors))
+        };
+        assert!(said("catalogs.a").message.contains(":view save"));
+        assert!(said("active_catalogs").message.contains("`view`"));
+    }
+
+    /// The view in force is one source line, and the config's wins.
+    #[test]
+    fn the_config_names_the_view_in_force() {
+        let loaded = parse_text("view = 'saved=\"dance\"'");
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.view.as_deref(), Some(r#"saved="dance""#));
+    }
+
+    #[test]
+    fn library_says_where_the_music_is() {
+        let loaded = parse_text(r#"library = ["/music"]"#);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.library, vec![PathBuf::from("/music")]);
     }
 }

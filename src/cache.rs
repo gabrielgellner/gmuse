@@ -22,10 +22,13 @@ struct Envelope {
     version: u32,
     roots: Vec<PathBuf>,
     store: Holdings,
-    /// Which catalogs were active. Persisted so a choice survives a restart;
-    /// the *definitions* come from the config, not from here.
+    /// The view that was in force, as its source line (#119).
+    ///
+    /// Persisted so a choice survives a restart. Was a list of active catalog
+    /// names; a catalog is a saved view with a second name, so what is
+    /// remembered is the one thing that says what is in scope.
     #[serde(default)]
-    active: crate::catalog::Active,
+    view: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -60,7 +63,7 @@ pub enum Outcome {
     Loaded {
         store: Holdings,
         roots: Vec<PathBuf>,
-        active: crate::catalog::Active,
+        view: Option<String>,
     },
 }
 
@@ -86,7 +89,7 @@ pub fn load(path: &Path) -> Result<Outcome, CacheError> {
             // comes off disk is already what is wanted (#86).
             store: env.store,
             roots: env.roots,
-            active: env.active,
+            view: env.view,
         }),
         // Wrong version or unparseable: not an error, just a rescan.
         Ok(_) | Err(_) => Ok(Outcome::Discarded),
@@ -101,7 +104,7 @@ pub fn save(
     path: &Path,
     store: &Holdings,
     roots: &[PathBuf],
-    active: &crate::catalog::Active,
+    view: Option<&str>,
 ) -> Result<(), CacheError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -111,7 +114,7 @@ pub fn save(
         version: FORMAT_VERSION,
         roots: roots.to_vec(),
         store: store.clone(),
-        active: active.clone(),
+        view: view.map(str::to_string),
     };
 
     let mut bytes = MAGIC.to_vec();
@@ -164,7 +167,7 @@ mod tests {
 
         let store = sample_store();
         let roots = vec![PathBuf::from("/m")];
-        save(&path, &store, &roots, &crate::catalog::Active::All).unwrap();
+        save(&path, &store, &roots, None).unwrap();
 
         let Outcome::Loaded {
             store: loaded,
@@ -215,7 +218,7 @@ mod tests {
         ));
         assert_eq!(store.len(), 2, "two files");
 
-        save(&path, &store, &[], &crate::catalog::Active::All).unwrap();
+        save(&path, &store, &[], None).unwrap();
         let Outcome::Loaded { store: back, .. } = load(&path).unwrap() else {
             panic!("should have loaded")
         };
@@ -234,24 +237,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A catalog choice must survive a restart, or picking one would be a
+    /// The view in force must survive a restart, or choosing one would be a
     /// per-session chore.
+    ///
+    /// **One source line**, where this used to be a set of catalog names
+    /// (#119). A catalog was a saved view with a second name, and what is
+    /// remembered is the one thing that says what is in scope.
     #[test]
-    fn the_active_set_round_trips() {
-        let dir = std::env::temp_dir().join("gmuse-cache-test-active");
+    fn the_view_in_force_round_trips() {
+        let dir = std::env::temp_dir().join("gmuse-cache-test-view");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("library.postcard");
 
-        let active = crate::catalog::Active::Only(
-            ["jazz".to_string(), "classical".to_string()]
-                .into_iter()
-                .collect(),
-        );
-        save(&path, &sample_store(), &[], &active).unwrap();
-        let Outcome::Loaded { active: back, .. } = load(&path).unwrap() else {
+        let view = r#"saved="jazz" +saved="classical""#;
+        save(&path, &sample_store(), &[], Some(view)).unwrap();
+        let Outcome::Loaded { view: back, .. } = load(&path).unwrap() else {
             panic!("should have loaded")
         };
-        assert_eq!(back, active);
+        assert_eq!(back.as_deref(), Some(view));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -276,7 +279,7 @@ mod tests {
         // Ours, but truncated mid-record.
         let truncated = dir.join("truncated");
         let store = sample_store();
-        save(&truncated, &store, &[], &crate::catalog::Active::All).unwrap();
+        save(&truncated, &store, &[], None).unwrap();
         let bytes = std::fs::read(&truncated).unwrap();
         std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
         // Discarded, not Missing: the user is about to pay for a rescan and
@@ -299,7 +302,7 @@ mod tests {
 
         let mut store = sample_store();
         store.remove(Path::new("/m/a.mp3"));
-        save(&path, &store, &[], &crate::catalog::Active::All).unwrap();
+        save(&path, &store, &[], None).unwrap();
 
         let Outcome::Loaded { store: loaded, .. } = load(&path).unwrap() else {
             panic!("should have loaded")

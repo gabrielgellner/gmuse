@@ -3343,6 +3343,39 @@ Append here as decisions are made. Format: date, decision, rationale.
   provably a saved view with a second name, and removing it touches config, the session, the cache and view 6. Kept
   separate so the mechanism lands proven rather than mid-rewrite.
 
+- **2026-09-05** **The catalog is deleted: it was a saved view with a second name (#119).** #94 dissolved the _operator_
+  — `active_catalogs = ["a", "b"]` became `a or b` — and left the _noun_ standing, because deleting it was not on that
+  checklist. Going through what a catalog actually added over a saved view: several active at once is `+`, membership
+  from a rule is a predicate, a rule and a collection together is `&`, switching by name is `saved=`. The only residue
+  was "which are on persists across sessions", which is **one remembered source line**.
+
+  The config made it worse than it looked. `[catalogs.jazz] collection = "Jazz"` was **two independent strings for one
+  thing, free to drift** — the exact failure #90 talked us out of one layer down, reintroduced a layer up. And it sat in
+  `config.toml`, which §13's own `data_dir` entry says is the wrong place: a decision about your music beside the colour
+  scheme does not sync, does not merge, has no provenance, and is invisible to the library everything else routes
+  through.
+
+  Gone: `src/catalog.rs` entirely (569 lines), `Catalogs`, `Active`, `Spec`, `Catalog`, `CatalogTable`, `Ui::catalogs`,
+  `Loaded::catalogs`, `Loaded::active_specified`, `Command::Catalog`, the `:catalog` verb, `What::Catalog`,
+  `Stack::set_catalogs`, and `sync_catalog_terms`.
+
+  **What replaced each piece.** View 6 lists saved views and its checkbox pushes or drops a term, so there is no second
+  state to keep in step with the stack — `active_catalogs` was always the stack said another way. `active_catalogs`
+  becomes `view = 'saved="dance"'`, one line. The cache remembers that line instead of a set of names, and
+  `active_specified` is gone with it: it existed because `["all"]` was an explicit choice indistinguishable from the
+  default once folded into an `Active`, and a source line has no such ambiguity — `Some("")` is not `None`.
+
+  **One behaviour deliberately changed.** A catalog name that named nothing was _refused_, on the rule that a bad name
+  must not half-apply. A saved view that names nothing now **applies and reports**. The difference is late binding: a
+  catalog was a closed set in the config and could be checked as it was typed, where a saved view may be defined by the
+  time you look again — and refusing the term would mean the reference could never be repaired from the line. So the
+  term goes on, the result is empty, and the _reason_ is said, which is the one thing an empty library cannot say for
+  itself.
+
+  **An old config says where its keys went** rather than doing nothing. `[catalogs.*]` and `active_catalogs` are still
+  parsed, for the sole purpose of producing a migration message that names the replacement — silently ignoring them
+  would leave somebody with an empty view 6 and no idea why.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
