@@ -60,6 +60,7 @@ fn album() -> Vec<Scanned> {
         released: None,
         first_released: None,
         label: None,
+        levels: Default::default(),
         sample_rate: Some(44_100),
         channels: Some(2),
     };

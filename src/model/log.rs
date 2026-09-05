@@ -318,6 +318,22 @@ pub enum Fact {
         track: Id<Track>,
     },
 
+    /// **ReplayGain, as the tags claim it.**
+    ///
+    /// A sibling of `EncodingDescribed` rather than a field on it, for the
+    /// reason `EncodingMeasured` is separate: that one says what the bytes
+    /// *are*, and this is what a tagger *said about* them. The two move
+    /// independently — writing ReplayGain across this library changed every
+    /// file's mtime in an afternoon and not one sample of audio.
+    ///
+    /// Every one of the 6,500 files here carries both a track and an album
+    /// value, so a librarian that could not say them could not hand a fader
+    /// what to apply (#86).
+    EncodingLevelled {
+        encoding: Id<Encoding>,
+        levels: crate::model::encoding::Levels,
+    },
+
     /// An imprint exists, and what it is called.
     ///
     /// The concept before the reference, as `GenreCatalogued` comes before
@@ -612,6 +628,8 @@ pub struct Catalogue {
     pub genre_names: BTreeMap<Id<Genre>, String>,
     /// What each imprint is called.
     pub label_names: BTreeMap<Id<Label>, String>,
+    /// ReplayGain per encoding, as the tags claim it.
+    pub levels: BTreeMap<Id<Encoding>, crate::model::encoding::Levels>,
     /// Which version each recording is, **one row per asserter**, keyed and
     /// folded exactly as [`Catalogue::genres`] is.
     pub qualifiers: BTreeMap<(Id<Recording>, Id<Qualifier>, Source), Confidence>,
@@ -986,6 +1004,12 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             }
             Fact::EncodingPlaced { encoding, track } => {
                 cat.placed.insert(*encoding, *track);
+            }
+            Fact::EncodingLevelled { encoding, levels } => {
+                // Last writer wins: re-tagging a file is a correction, and
+                // there is nothing to reconcile between two claims about one
+                // encoding's loudness.
+                cat.levels.insert(*encoding, *levels);
             }
             Fact::LabelNamed { label, name } => {
                 cat.label_names.insert(*label, name.clone());

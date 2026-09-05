@@ -160,6 +160,12 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // things: `DATE` is this pressing, `ORIGINALDATE` the album. They
         // disagree for 820 files in this library.
         label: Some(get(ItemKey::Label)).filter(|s| !s.is_empty()),
+        levels: crate::model::encoding::Levels {
+            track_cdb: cdb(&get(ItemKey::ReplayGainTrackGain)),
+            track_peak_e4: peak_e4(&get(ItemKey::ReplayGainTrackPeak)),
+            album_cdb: cdb(&get(ItemKey::ReplayGainAlbumGain)),
+            album_peak_e4: peak_e4(&get(ItemKey::ReplayGainAlbumPeak)),
+        },
         released: PartialDate::parse(&get(ItemKey::RecordingDate)),
         first_released: PartialDate::parse(&get(ItemKey::OriginalReleaseDate)),
         sample_rate: tagged.properties().sample_rate(),
@@ -334,6 +340,29 @@ pub fn confidence_of(scan: &Scanned, matches_known_name: bool) -> Confidence {
     }
 }
 
+/// A ReplayGain value, as hundredths of a decibel.
+///
+/// Tags write it as `-7.28 dB`, sometimes with the unit and sometimes
+/// without, and occasionally with a `+`. Anything that will not parse is
+/// absent rather than zero — nought decibels is a claim that a file needs no
+/// correction, and "nobody said" is not.
+fn cdb(raw: &str) -> Option<i32> {
+    let text = raw
+        .trim()
+        .trim_end_matches(|c: char| c.is_alphabetic() || c.is_whitespace());
+    let db: f32 = text.trim().parse().ok()?;
+    db.is_finite().then(|| (db * 100.0).round() as i32)
+}
+
+/// A ReplayGain peak, as ten-thousandths of full scale.
+///
+/// Linear rather than logarithmic, so it has its own unit — see
+/// [`crate::model::encoding::Levels`]. A negative peak is not a peak.
+fn peak_e4(raw: &str) -> Option<u32> {
+    let peak: f32 = raw.trim().parse().ok()?;
+    (peak.is_finite() && peak >= 0.0).then(|| (peak * 10_000.0).round() as u32)
+}
+
 /// A name reduced to what a match should ignore.
 ///
 /// Deliberately shallow — case and whitespace, nothing more. A matcher that
@@ -437,6 +466,26 @@ mod tests {
     /// **The pressing and the album are different dates**, and reading one for
     /// the other is the reissue trap (#59). They disagree for 820 files here:
     /// `Tri Repetae++` is a 1996 pressing of a 1995 record.
+    /// **Levels are read as integers, and a unit is not a number.**
+    ///
+    /// Tags write `-7.28 dB` with the unit, without it, and occasionally with
+    /// a `+`. Nought decibels is a claim that a file needs no correction, so
+    /// anything unparseable is **absent** rather than zero.
+    #[test]
+    fn replay_gain_is_read_as_hundredths_and_a_bad_value_is_absent() {
+        assert_eq!(cdb("-7.28 dB"), Some(-728));
+        assert_eq!(cdb("-7.28"), Some(-728));
+        assert_eq!(cdb("+3.5 dB"), Some(350));
+        assert_eq!(cdb("0.00 dB"), Some(0), "no correction is a claim");
+        assert_eq!(cdb(""), None, "and nobody saying so is not");
+        assert_eq!(cdb("loud"), None);
+
+        assert_eq!(peak_e4("0.988525"), Some(9885));
+        assert_eq!(peak_e4("1.0"), Some(10_000));
+        assert_eq!(peak_e4("-1"), None, "a negative peak is not a peak");
+        assert_eq!(peak_e4("nan"), None);
+    }
+
     #[test]
     fn the_pressing_and_the_album_are_read_separately() {
         let d = dir("dated");
@@ -475,6 +524,10 @@ mod tests {
         // The shape of the audio, read off the same properties the bitrate
         // is. The fixture is 44.1 kHz stereo by construction — see `wav`.
         assert_eq!(s.sample_rate, Some(44_100), "the rate was not read");
+        // Every file in this library carries ReplayGain, and it is what a
+        // fader applies — not `Encoding::gain`, which is what an analyser
+        // found.
+        assert!(s.levels.is_empty(), "the fixture writes no ReplayGain");
         assert_eq!(s.channels, Some(2), "the channel count was not read");
         assert_eq!(
             s.identity,

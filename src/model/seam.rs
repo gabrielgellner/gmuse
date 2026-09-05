@@ -382,6 +382,7 @@ impl Librarian {
                         }
                     }),
                     gain: None,
+                    levels: cat.levels.get(id).copied().unwrap_or_default(),
                     encoder_delay: None,
                 },
             );

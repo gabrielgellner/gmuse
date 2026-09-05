@@ -71,6 +71,49 @@ pub struct Gain {
     pub peak_cdb: i32,
 }
 
+/// ReplayGain **as a tagger wrote it**, in integers.
+///
+/// Distinct from [`Gain`], which is what an *analyser* measured. This is a
+/// claim in the file's tags, and every one of the 6,500 files here carries
+/// both a track and an album value.
+///
+/// Integers for the reason `Gain` and `Bpm` are: a level that compares
+/// approximately cannot be `Eq`, and a `Fact` must be — records are
+/// deduplicated by wire form and two devices reading one file have to agree
+/// exactly.
+///
+/// **Gain is hundredths of a decibel; peak is ten-thousandths of unity.** The
+/// units differ because the quantities do — a gain is logarithmic and a peak
+/// is a fraction of full scale — and 1e-4 of full scale is far below anything
+/// the clipping guard can act on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Levels {
+    pub track_cdb: Option<i32>,
+    pub track_peak_e4: Option<u32>,
+    pub album_cdb: Option<i32>,
+    pub album_peak_e4: Option<u32>,
+}
+
+impl Levels {
+    pub fn is_empty(&self) -> bool {
+        *self == Levels::default()
+    }
+
+    /// Back into the floats a fader wants.
+    pub fn track_db(&self) -> Option<f32> {
+        self.track_cdb.map(|c| c as f32 / 100.0)
+    }
+    pub fn album_db(&self) -> Option<f32> {
+        self.album_cdb.map(|c| c as f32 / 100.0)
+    }
+    pub fn track_peak(&self) -> Option<f32> {
+        self.track_peak_e4.map(|p| p as f32 / 10_000.0)
+    }
+    pub fn album_peak(&self) -> Option<f32> {
+        self.album_peak_e4.map(|p| p as f32 / 10_000.0)
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -144,6 +187,9 @@ pub struct Encoding {
     pub length: std::time::Duration,
     pub cutoff_hz: Option<Measured<u32>>,
     pub gain: Option<Measured<Gain>>,
+    /// ReplayGain as the tags claim it — what a fader applies. Not
+    /// [`Encoding::gain`], which is what an analyser found.
+    pub levels: Levels,
     /// Encoder delay and padding, for correcting a cue point across encodings
     /// of one source. The canonical timeline is the decoded signal with this
     /// removed.
@@ -363,6 +409,7 @@ mod tests {
             length: std::time::Duration::from_secs(200),
             cutoff_hz: cutoff.map(Measured::now),
             gain: None,
+            levels: Levels::default(),
             encoder_delay: None,
         }
     }

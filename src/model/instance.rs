@@ -87,6 +87,8 @@ pub struct Scanned {
     /// The imprint, from `TPUB` / `ORGANIZATION` / `LABEL`. 5,786 of 6,500
     /// files here carry one.
     pub label: Option<String>,
+    /// ReplayGain as the tags claim it. Every file here carries some.
+    pub levels: crate::model::encoding::Levels,
     /// The release group id, where the tags carry one — what makes two devices
     /// agree on an *album* without meeting.
     pub mb_release_group: Option<uuid::Uuid>,
@@ -398,6 +400,15 @@ impl Instance {
                 );
             }
 
+            if !s.levels.is_empty() {
+                self.append(
+                    now,
+                    Fact::EncodingLevelled {
+                        encoding,
+                        levels: s.levels,
+                    },
+                );
+            }
             self.append(
                 now,
                 Fact::EncodingDescribed {
@@ -1012,6 +1023,7 @@ mod containment_tests {
             released: None,
             first_released: None,
             label: None,
+            levels: Default::default(),
             sample_rate: Some(44_100),
             channels: Some(2),
         }
@@ -1195,6 +1207,7 @@ mod credit_tests {
             released: None,
             first_released: None,
             label: None,
+            levels: Default::default(),
             sample_rate: Some(44_100),
             channels: Some(2),
         }

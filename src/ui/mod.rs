@@ -1312,7 +1312,6 @@ fn source_for(
     id: TrackId,
 ) -> Option<(crate::audio::TrackSource, Option<Id<Encoding>>)> {
     let files: &dyn Listing = ctx.store;
-    let gain = replay_gain(ui, files.playable(id).and_then(|p| p.gain));
 
     // The library first: it picks per device, honours a pin, and refuses what
     // this machine cannot reach. A file it cannot place still plays — the same
@@ -1320,7 +1319,24 @@ fn source_for(
     // catalogued.
     let chosen = recording_of(ctx, id)
         .and_then(|r| ctx.library.open(r, &[ui.log.device()], &[]))
-        .map(|(e, locator)| (locator.to_string(), Some(e.id)));
+        .map(|(e, locator)| (locator.to_string(), Some(e.id), e.levels));
+    // **How loud comes from the library too** (#109). It is per *copy* — two
+    // rips of one recording are mastered differently and carry different
+    // values — so it has to come from the copy that was chosen, not from
+    // whichever file happens to be in front of us.
+    let gain = replay_gain(
+        ui,
+        chosen
+            .as_ref()
+            .map(|(_, _, levels)| crate::model::rows::Loudness {
+                track_db: levels.track_db(),
+                track_peak: levels.track_peak(),
+                album_db: levels.album_db(),
+                album_peak: levels.album_peak(),
+            })
+            .or_else(|| files.playable(id).and_then(|p| p.gain)),
+    );
+    let chosen = chosen.map(|(locator, encoding, _)| (locator, encoding));
     let (locator, encoding) = match chosen {
         Some(both) => both,
         None => (files.playable(id)?.locator.to_string(), None),

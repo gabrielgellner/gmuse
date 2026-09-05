@@ -79,6 +79,17 @@ fn scanned(store: &Store) -> Vec<Scanned> {
                     .map(|y| crate::model::spine::PartialDate::year(y as i16)),
                 first_released: None,
                 label: t.label.clone(),
+                // The plank reads a `Track`, which keeps the floats the tags
+                // carried; the model keeps integers, for the reason `Gain`
+                // does.
+                levels: t.replaygain.map_or_else(Default::default, |g| {
+                    crate::model::encoding::Levels {
+                        track_cdb: g.track_gain.map(|d| (d * 100.0).round() as i32),
+                        track_peak_e4: g.track_peak.map(|p| (p * 10_000.0).round() as u32),
+                        album_cdb: g.album_gain.map(|d| (d * 100.0).round() as i32),
+                        album_peak_e4: g.album_peak.map(|p| (p * 10_000.0).round() as u32),
+                    }
+                }),
                 length_ms: t.duration.as_millis() as u32,
                 format: format_of(t),
                 bitrate: t.bitrate.unwrap_or(0),
@@ -465,6 +476,40 @@ mod opening {
             Id::<crate::model::entity::Label>::of_name("  herzblut  "),
             "two sleeves spelling it differently must be one imprint"
         );
+    }
+
+    /// **How loud a copy should play is a fact about that copy** — #109.
+    ///
+    /// Two rips of one recording are mastered differently and carry different
+    /// ReplayGain, so it belongs to the copy rather than to the performance.
+    /// It was read off whichever file happened to be open, which was right by
+    /// accident and stopped being right the moment the library chose a copy.
+    #[test]
+    fn a_copy_carries_the_loudness_its_tags_claim() {
+        let device = Id::<Device>::derived(b"laptop");
+        let mut store = Store::default();
+        store.upsert(Track {
+            path: std::path::PathBuf::from("/m/callisto.mp3"),
+            title: Some("Callisto".into()),
+            artist: Some("Bodzin".into()),
+            audio_id: Some(AudioId { scheme: 1, hash: 7 }),
+            replaygain: Some(crate::store::ReplayGain {
+                track_gain: Some(-7.28),
+                track_peak: Some(0.9885),
+                album_gain: Some(-8.10),
+                album_peak: Some(1.0),
+            }),
+            ..Default::default()
+        });
+        let l = librarian(&store, &BTreeSet::new(), device, 100);
+
+        let recording = l.recordings().next().expect("a recording");
+        let copy = l.encodings.of(recording)[0];
+        assert_eq!(copy.levels.track_cdb, Some(-728));
+        assert_eq!(copy.levels.album_cdb, Some(-810));
+        // And back out as the float a fader wants.
+        assert_eq!(copy.levels.track_db(), Some(-7.28));
+        assert_eq!(copy.levels.album_peak(), Some(1.0));
     }
 
     /// **A copy knows its own shape** — issue #86.
