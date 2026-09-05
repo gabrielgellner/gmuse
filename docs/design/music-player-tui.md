@@ -3577,10 +3577,19 @@ Append here as decisions are made. Format: date, decision, rationale.
   the quantifier is about how many of its values must satisfy the test. The parser reads it after unwrapping the
   brackets, which is what makes both spellings of the field name work.
 
-  **What is still not done.** Dotted paths — `any(encoding).verdict = suspect`, `credit[role=remixer].artist`,
-  `genre.basis = discogs` — need the evaluator to reach the _librarian_, where closure needed only the _catalogue_ and
-  the catalogue was already on `Env` as `listened`. That difference is why closure landed and paths did not: one was a
-  method on a channel that existed, the other is a new channel.
+  **Measured, and it was slow.** #93 asked for this before it was discovered, and it was right to: a closure pass over
+  20k rows at depth 12 took **60 ms**, against §2's 0.92 ms for the flat language. Sixty times, for something that runs
+  on every keystroke.
+
+  The fix is a memo owned by the **compiled filter**, because the cost is per _label_ rather than per row — a library
+  has a few hundred distinct genres over thousands of tracks, so the second occurrence is a hash lookup. **7.5 ms**
+  after, and the perf test's bound is six times that: loose enough not to fail on a loaded machine, tight enough that
+  losing the memo fails there rather than in somebody's hands.
+
+  The memo lives as long as the filter is in use and cannot go stale against a refold, because a refold compiles a new
+  filter.
+
+  **What is still not done.** Dotted paths
 
 ## 14. Prior art worth reading
 

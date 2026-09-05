@@ -431,14 +431,27 @@ impl Expr {
     /// Build the predicate once. **Do not re-interpret the AST per track** —
     /// this runs over the whole library on every keystroke in view 6.
     pub fn compile<'a>(&'a self, env: Env<'a>) -> impl Fn(&Subject<'_>) -> bool + 'a {
-        move |subject| self.eval(subject, &env)
+        // **The memo belongs to the compiled filter, not to a row** (#93).
+        //
+        // Closure costs a hierarchy walk, and measured it was 60 ms over 20k
+        // rows at depth 12 — sixty times the flat language and far too slow
+        // for a filter that runs on every keystroke. The cost is per *label*
+        // rather than per row, and a library has a few hundred distinct
+        // genres over thousands of tracks, so the second occurrence of a
+        // genre is a hash lookup.
+        //
+        // Owned by the closure, so it lives exactly as long as the filter is
+        // in use and cannot go stale against a refold: a new fold compiles a
+        // new filter.
+        let memo = Memo::default();
+        move |subject| self.eval(subject, &env, &memo)
     }
 
-    fn eval(&self, t: &Subject<'_>, env: &Env) -> bool {
+    fn eval(&self, t: &Subject<'_>, env: &Env, memo: &Memo) -> bool {
         match self {
-            Expr::And(a, b) => a.eval(t, env) && b.eval(t, env),
-            Expr::Or(a, b) => a.eval(t, env) || b.eval(t, env),
-            Expr::Not(e) => !e.eval(t, env),
+            Expr::And(a, b) => a.eval(t, env, memo) && b.eval(t, env, memo),
+            Expr::Or(a, b) => a.eval(t, env, memo) || b.eval(t, env, memo),
+            Expr::Not(e) => !e.eval(t, env, memo),
             Expr::Present(Selector::Field(_, _, f)) => present(*f, t),
             Expr::Present(Selector::Any) => true,
             Expr::Present(Selector::History(h)) => history_number(*h, t, env).is_some(),
@@ -446,7 +459,7 @@ impl Expr {
                 selector,
                 op,
                 value,
-            } => compare(*selector, *op, value, t, env),
+            } => compare(*selector, *op, value, t, env, memo),
         }
     }
 }
@@ -508,7 +521,22 @@ fn days_since(then: i64, now: i64) -> i64 {
     (now - then).max(0) / 86_400
 }
 
-fn compare(selector: Selector, op: Op, value: &Value, t: &Subject<'_>, env: &Env) -> bool {
+/// What a closure walk already answered, for the life of one compiled filter.
+///
+/// Keyed by the row's value, because that is what the walk starts from: the
+/// pattern and the reach are fixed for a given comparison, so the label is the
+/// whole question.
+#[derive(Default)]
+struct Memo(std::cell::RefCell<std::collections::HashMap<String, bool>>);
+
+fn compare(
+    selector: Selector,
+    op: Op,
+    value: &Value,
+    t: &Subject<'_>,
+    env: &Env,
+    memo: &Memo,
+) -> bool {
     match (selector, value) {
         (Selector::History(h), Value::Number(n)) => match history_number(h, t, env) {
             Some(v) => match op {
@@ -545,13 +573,18 @@ fn compare(selector: Selector, op: Op, value: &Value, t: &Subject<'_>, env: &Env
                 // thousands of descendants.
                 let hit = |v: &String| match reach {
                     Reach::Exact => glob.matches(v),
-                    Reach::OrNarrower | Reach::Narrower => {
-                        (reach == Reach::OrNarrower && glob.matches(v))
-                            || env.listened.is_some_and(|l| {
-                                l.broader(f.name().as_str(), v)
-                                    .iter()
-                                    .any(|up| glob.matches(up))
-                            })
+                    Reach::OrNarrower if glob.matches(v) => true,
+                    _ => {
+                        if let Some(known) = memo.0.borrow().get(v) {
+                            return *known;
+                        }
+                        let reached = env.listened.is_some_and(|l| {
+                            l.broader(f.name().as_str(), v)
+                                .iter()
+                                .any(|up| glob.matches(up))
+                        });
+                        memo.0.borrow_mut().insert(v.clone(), reached);
+                        reached
                     }
                 };
                 // The unsaid quantifier is the operator's default: `=` asks
@@ -1792,6 +1825,93 @@ mod tests {
         assert!(
             Glob::new("*loffler*").matches("Christian LÖFFLER"),
             "no capital typed, so neither case nor the mark matters"
+        );
+    }
+}
+
+#[cfg(test)]
+mod perf {
+    use super::*;
+    use crate::model::entity::{Device, Hierarchy, Recording};
+    use crate::model::id::Id;
+    use crate::model::instance::Instance;
+    use std::time::Instant;
+
+    /// **What closure costs, measured before somebody discovers it** — #93.
+    ///
+    /// The issue's worry was that "negation with closure is where a naive
+    /// lowering gets slow". There is no lowering to be naive about — a filter
+    /// compiles to a closure and runs per row — but the worry was right about
+    /// the cost, and measuring found it rather than reasoning about it did.
+    ///
+    /// **60 ms over 20k rows at depth 12**, against §2's 0.92 ms for the flat
+    /// language. Sixty times, for something that runs on every keystroke.
+    /// Memoising the walk per compiled filter took it to **7.5 ms**, because
+    /// the cost is per *label* and a library has a few hundred distinct genres
+    /// over thousands of tracks.
+    ///
+    /// The bound below is roughly six times the measured figure: loose enough
+    /// not to fail on a loaded machine, tight enough that losing the memo
+    /// fails here rather than in somebody's hands.
+    #[test]
+    fn a_closure_pass_over_the_whole_library_is_free() {
+        // A deep chain, because depth is what closure pays for.
+        let chain: Vec<String> = (0..12).map(|n| format!("Genre{n}")).collect();
+        let mut i = Instance::new(Id::<Device>::derived(b"perf"));
+        let h = Id::<Hierarchy>::derived(b"browse");
+        let subject = crate::model::facet::Described::Recording(Id::<Recording>::derived(b"one"));
+        for label in &chain {
+            i.assert_concept(
+                0,
+                subject,
+                crate::model::facet::GENRE,
+                label,
+                crate::model::reference::Source::Manual,
+                crate::model::ingest::Confidence::Confirmed,
+            );
+        }
+        for pair in chain.windows(2) {
+            i.narrows(0, h, crate::model::facet::GENRE, &pair[0], &pair[1]);
+        }
+        let cat = i.catalogue();
+        let env = Env {
+            listened: Some(&cat),
+            now: 0,
+        };
+
+        // The deepest concept, so every row walks the whole chain.
+        let mut t = crate::fixture::Tagged {
+            genres: vec![chain.last().unwrap().clone()],
+            ..Default::default()
+        };
+        t.title = Some("A Song".into());
+        let drawn = t.drawn();
+        let subject = Subject {
+            row: drawn.listed(),
+            locator: None,
+            recording: Some(Id::derived(b"one")),
+        };
+
+        const ROWS: usize = 20_000;
+        let expr = Expr::parse(r#"genre*="Genre0""#).expect("parses");
+        let matches = expr.compile(env);
+        let started = Instant::now();
+        let mut hits = 0usize;
+        for _ in 0..ROWS {
+            if matches(&subject) {
+                hits += 1;
+            }
+        }
+        let took = started.elapsed();
+        assert_eq!(hits, ROWS, "the closure did not reach the root");
+        println!(
+            "closure: {ROWS} rows, depth {} in {:.2} ms",
+            chain.len(),
+            took.as_secs_f64() * 1000.0
+        );
+        assert!(
+            took.as_millis() < 50,
+            "a whole-library closure pass took {took:?} — it runs on every keystroke"
         );
     }
 }
