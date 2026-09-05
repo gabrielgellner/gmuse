@@ -60,4 +60,5 @@ pub mod seam;
 pub mod sortkey;
 pub mod spine;
 pub mod tree;
+pub mod view;
 pub mod vocabulary;
