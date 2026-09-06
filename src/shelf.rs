@@ -40,6 +40,15 @@ pub struct Shelf {
     /// answer the simplest one.
     artist_names: BTreeMap<SortKey, String>,
     album_names: BTreeMap<(SortKey, SortKey), String>,
+    /// **How many tracks the record has, where the row is short of them** —
+    /// #137. Absent when the album is complete, when nothing counted it, or
+    /// when the group's copies come off more than one pressing.
+    album_totals: BTreeMap<(SortKey, SortKey), u16>,
+    /// Which pressing a tree node's copies come off, or `None` where they come
+    /// off more than one — #137. A group spanning editions has no single
+    /// count, and saying one would print halves that do not belong together.
+    album_pressing:
+        BTreeMap<(SortKey, SortKey), Option<crate::model::id::Id<crate::model::entity::Release>>>,
     sorted: Vec<CopyId>,
     /// Which two fields this was grouped by (#97).
     levels: Levels,
@@ -239,6 +248,22 @@ impl Shelf {
                     lib.album_names
                         .entry((artist_key.clone(), album_key.clone()))
                         .or_insert_with(|| album.title.clone());
+                    // **Which pressing this group's copies come off** (#137).
+                    // A tree node is a release *group* — the album across its
+                    // editions — and the count is a fact about one pressing.
+                    // Copies off two of them have no single answer, so the
+                    // group is marked mixed and says nothing rather than
+                    // printing halves that do not belong together.
+                    let seen = librarian.release_of(librarian.placed_at(here));
+                    lib.album_pressing
+                        .entry((artist_key.clone(), album_key.clone()))
+                        .and_modify(|known| {
+                            if *known != seen {
+                                *known = None;
+                            }
+                        })
+                        .or_insert(seen);
+
                     let into = lib
                         .tree
                         .entry(artist_key.clone())
@@ -260,6 +285,19 @@ impl Shelf {
         // seam the rows come from, so a row the model cannot place is not a
         // row. What is left of the case it covered is a track on no album,
         // and the tree files that under a stand-in rather than dropping it.
+        // **The counts, once the pressings are settled** (#137). Only where
+        // the record is short: `12 of 12` would be noise on 5,577 of the
+        // 6,485 files here, and an uncounted record has nothing to be short
+        // of.
+        for (key, pressing) in &lib.album_pressing {
+            if let Some(release) = pressing
+                && librarian.held_of(*release) == crate::model::seam::Held::Partial
+                && let Some((_, total)) = librarian.counted_of(*release)
+            {
+                lib.album_totals.insert(key.clone(), total);
+            }
+        }
+
         lib.sorted = lib
             .tree
             .values()
@@ -296,6 +334,13 @@ impl Shelf {
             .get(&(artist.clone(), album.clone()))
             .map(String::as_str)
             .unwrap_or_else(|| album.as_str())
+    }
+
+    /// How many tracks the record has, when the row is short of them — #137.
+    pub fn album_total(&self, artist: &SortKey, album: &SortKey) -> Option<u16> {
+        self.album_totals
+            .get(&(artist.clone(), album.clone()))
+            .copied()
     }
 
     pub fn artists(&self) -> impl Iterator<Item = (&SortKey, &BTreeMap<SortKey, Vec<CopyId>>)> {
@@ -1021,6 +1066,11 @@ mod perf {
                     genres: vec![GENRES[a % GENRES.len()].to_string()],
                     disc: Some(1),
                     track: Some(track),
+                    // **The totals, because the real library carries them**
+                    // (#134): 88% of it does, and a bench whose releases
+                    // cannot be counted never runs the counting.
+                    track_total: Some(10),
+                    disc_total: Some(1),
                     length_ms: 200_000,
                     ..Default::default()
                 });

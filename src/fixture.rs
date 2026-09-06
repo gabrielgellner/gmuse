@@ -62,6 +62,10 @@ pub struct Tagged {
     pub audio_id: Option<crate::audio_id::AudioId>,
     pub levels: crate::model::encoding::Levels,
     pub mb_recording: Option<uuid::Uuid>,
+    /// Which **pressing** this file came off. Two values under one album title
+    /// are two releases in one group — the shape a test about editions needs
+    /// (#137), and the only way to mint a second pressing.
+    pub mb_release: Option<uuid::Uuid>,
     /// What kind of release the album is — #133. `Album` unless a test says
     /// otherwise, which is what a file with no tag reads as.
     pub release_kind: crate::model::spine::ReleaseType,
@@ -116,6 +120,7 @@ impl Tagged {
                 identity: self
                     .mb_recording
                     .map(crate::model::basis::Basis::MusicBrainz),
+                mb_release: self.mb_release,
                 levels: self.levels,
                 format: format_of(&self.path),
                 bitrate: self.bitrate.unwrap_or(0),

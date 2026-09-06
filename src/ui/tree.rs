@@ -31,6 +31,14 @@ pub enum Row {
         display: String,
         tracks: usize,
         expanded: bool,
+        /// **How long the record is, when this is short of it** — #137.
+        ///
+        /// `None` when the album is whole, when nothing counted it, or when
+        /// the group's copies come off more than one pressing. Absent is the
+        /// common case by a long way: 5,577 of 6,485 files here sit on records
+        /// held complete, and a row reading `12 of 12` would be noise on all
+        /// of them.
+        of: Option<u16>,
     },
     Track {
         artist: SortKey,
@@ -58,8 +66,18 @@ impl Row {
                 display, expanded, ..
             } => format!("{} {display}", if *expanded { "▾" } else { "▸" }),
             Row::Album {
-                display, expanded, ..
-            } => format!("  {} {display}", if *expanded { "▾" } else { "▸" }),
+                display,
+                expanded,
+                tracks,
+                of,
+                ..
+            } => {
+                let mark = if *expanded { "▾" } else { "▸" };
+                match of {
+                    Some(total) => format!("  {mark} {display}  {tracks} of {total}"),
+                    None => format!("  {mark} {display}"),
+                }
+            }
             // **At the album's indent when it stands in for one**, so the
             // artist's children stay in one column whether they are albums or
             // the tracks that replaced them.
@@ -163,6 +181,7 @@ impl TreeState {
                     display,
                     tracks: tracks.len(),
                     expanded: open,
+                    of: lib.album_total(artist_key, album_key),
                 });
                 if !open {
                     continue;
@@ -688,8 +707,19 @@ pub fn stands_for(lib: &Shelf, row: &Row, title: &str) -> Option<String> {
         return None;
     };
     let name = lib.album_name(artist, album);
+    // **The count comes even when the name does not** (#137). One track of
+    // twelve is exactly the row somebody wants flagged, and it is the row
+    // #135 took the album header away from.
+    let short = lib
+        .album_total(artist, album)
+        .map(|total| format!("1 of {total}"));
     let already = title.to_lowercase().starts_with(&name.to_lowercase());
-    (!name.is_empty() && !already).then(|| name.to_string())
+    match (name.is_empty() || already, short) {
+        (true, None) => None,
+        (true, Some(count)) => Some(count),
+        (false, None) => Some(name.to_string()),
+        (false, Some(count)) => Some(format!("{name}  {count}")),
+    }
 }
 
 #[cfg(test)]
@@ -777,6 +807,143 @@ mod tests {
         assert!(
             both.iter().any(|r| matches!(r, Row::Track { .. })),
             "the first artist's tracks closed when the second opened"
+        );
+    }
+
+    /// **A record you have part of says so, and a whole one does not** —
+    /// #137.
+    ///
+    /// `12 of 12` would be noise on 5,577 of the 6,485 files here. The number
+    /// is worth a row only where it is short.
+    #[test]
+    fn an_album_says_how_much_of_it_is_here_only_when_it_is_short() {
+        let some_of = |held: u32, total: u16| {
+            let mut s = Scan::new();
+            for n in 1..=held {
+                s.upsert(Track {
+                    path: PathBuf::from(format!("/m/Band/Record/{n}.mp3")),
+                    artist: Some("Band".into()),
+                    album: Some("Record".into()),
+                    title: Some(format!("Track {n}")),
+                    tracknumber: Some(n),
+                    track_total: Some(total),
+                    disc_total: Some(1),
+                    ..Default::default()
+                });
+            }
+            let lib = Shelf::rebuild(&crate::fixture::from_holdings(&s), true);
+            let mut state = TreeState::default();
+            state.open_everything(&lib);
+            state
+                .rows(&lib)
+                .iter()
+                .map(Row::label)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        assert!(
+            some_of(2, 5).contains("Record  2 of 5"),
+            "a record held in part did not say so: {}",
+            some_of(2, 5)
+        );
+        assert!(
+            !some_of(3, 3).contains(" of "),
+            "a whole record counted itself: {}",
+            some_of(3, 3)
+        );
+
+        // Nothing counted it, so there is nothing to be short of.
+        let mut quiet = Scan::new();
+        for n in 1..=2u32 {
+            quiet.upsert(Track {
+                path: PathBuf::from(format!("/m/Band/Other/{n}.mp3")),
+                artist: Some("Band".into()),
+                album: Some("Other".into()),
+                title: Some(format!("Track {n}")),
+                tracknumber: Some(n),
+                ..Default::default()
+            });
+        }
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&quiet), true);
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+        assert!(
+            !state
+                .rows(&lib)
+                .iter()
+                .any(|r| Row::label(r).contains(" of ")),
+            "an uncounted record claimed a total"
+        );
+    }
+
+    /// **A group whose copies come off two pressings says nothing** — #137.
+    ///
+    /// A tree node is a release *group*, and the count is a fact about one
+    /// pressing. Printing one pressing's total beside a count of copies from
+    /// both would be halves that do not belong together — and can read as
+    /// more tracks held than the record has.
+    #[test]
+    fn an_album_spanning_two_pressings_does_not_count_itself() {
+        let mut s = Scan::new();
+        // Same album title, two editions — the reissue has more tracks. The
+        // fixture separates them by MusicBrainz release id, which is what
+        // mints two pressings under one group.
+        for (n, release, total) in [(1u32, 1u128, 10u16), (2, 2, 12)] {
+            s.upsert(Track {
+                path: PathBuf::from(format!("/m/Band/Record/{n}.mp3")),
+                artist: Some("Band".into()),
+                album: Some("Record".into()),
+                title: Some(format!("Track {n}")),
+                tracknumber: Some(n),
+                track_total: Some(total),
+                disc_total: Some(1),
+                mb_release: Some(uuid::Uuid::from_u128(release)),
+                ..Default::default()
+            });
+        }
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&s), true);
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+        assert!(
+            !state
+                .rows(&lib)
+                .iter()
+                .any(|r| Row::label(r).contains(" of ")),
+            "a group spanning two pressings printed one of their totals: {:?}",
+            state.rows(&lib).iter().map(Row::label).collect::<Vec<_>>()
+        );
+    }
+
+    /// **The one-track case still says it** — #137 meeting #135.
+    ///
+    /// A row that is 1 of 12 is exactly what somebody wants flagged, and it is
+    /// the row whose album header was taken away.
+    #[test]
+    fn a_collapsed_row_still_says_how_short_it_is() {
+        let mut s = Scan::new();
+        s.upsert(Track {
+            path: PathBuf::from("/m/The Bug/London Zoo/1.mp3"),
+            artist: Some("The Bug".into()),
+            album: Some("London Zoo".into()),
+            title: Some("Poison Dart".into()),
+            tracknumber: Some(3),
+            track_total: Some(12),
+            disc_total: Some(1),
+            ..Default::default()
+        });
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&s), true);
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+        let rows = state.rows(&lib);
+        let row = rows
+            .iter()
+            .find(|r| matches!(r, Row::Track { .. }))
+            .expect("the track that replaced its album");
+        assert_eq!(
+            stands_for(&lib, row, "Poison Dart").as_deref(),
+            Some("London Zoo  1 of 12"),
+            "the collapsed row lost the count with the header"
         );
     }
 

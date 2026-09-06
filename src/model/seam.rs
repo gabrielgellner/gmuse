@@ -110,6 +110,13 @@ pub struct Librarian {
     pub merged: Vec<(Id<Recording>, Id<Recording>)>,
     /// Which files were made out of which — `(source, derived)`, #132.
     pub encoding_derived: Vec<(Id<Encoding>, Id<Encoding>)>,
+    /// **How much of each pressing is here, worked out once** — #134, #137.
+    ///
+    /// It was a scan of the whole spine, per row, and the fold went from
+    /// 27 ms to 124 ms the moment the library carried counts to scan. Same
+    /// shape as #121 and #123: the answer is per release and the question was
+    /// being asked per copy.
+    pub held: std::collections::BTreeMap<Id<crate::model::entity::Release>, Counted>,
     /// The log, kept so the info panel can say when something became true and
     /// on which machine — #128.
     ///
@@ -262,6 +269,7 @@ impl Librarian {
             identified: Default::default(),
             merged: Default::default(),
             encoding_derived: Default::default(),
+            held: Default::default(),
             records: Default::default(),
             collected: Default::default(),
             placed: Default::default(),
@@ -567,6 +575,7 @@ impl Librarian {
         }
 
         l.placed = cat.placed.clone();
+        l.held = held_index(&l.spine);
 
         // Names are a register: whatever the fold settled on is the label.
         for (id, name) in &cat.artist_names {
@@ -1100,50 +1109,35 @@ impl Librarian {
 
     /// **How much of this pressing is here** — #134.
     ///
-    /// Two counts have to agree for "complete", and the second is the one a
-    /// naive version forgets: a release whose second disc has never been seen
-    /// has **no medium row at all**, so counting held tracks against the discs
-    /// present answers "all of them" for half a record. The disc count is what
-    /// closes that.
-    ///
-    /// Either count missing is [`Held::Unknown`] — for the whole release, not
-    /// just the disc that was quiet, because a release is complete only if all
-    /// of it is and an unknown part makes the whole unknown.
+    /// A lookup, because the walk behind it is done once per fold (#137). See
+    /// [`held_index`] for what "complete" has to mean.
     pub fn held_of(&self, release: Id<crate::model::entity::Release>) -> Held {
-        let Some(pressing) = self.spine.releases.get(&release) else {
-            return Held::Unknown;
-        };
-        let media: Vec<_> = self
-            .spine
-            .media
-            .values()
-            .filter(|m| m.release.id() == release)
-            .collect();
+        self.held
+            .get(&release)
+            .map(|c| c.answer)
+            .unwrap_or_default()
+    }
 
-        // **The discs nobody has seen.** Fewer rows than the pressing says it
-        // has means at least one disc is missing entirely.
-        let Some(discs) = pressing.media else {
-            return Held::Unknown;
-        };
-        if usize::from(discs) > media.len() {
-            return Held::Partial;
-        }
+    /// **How many of how many** — the numbers behind [`Self::held_of`], #137.
+    ///
+    /// `None` when the total is not known, which is the same 440-file case
+    /// `Held::Unknown` covers: there is no denominator to print.
+    pub fn counted_of(&self, release: Id<crate::model::entity::Release>) -> Option<(usize, u16)> {
+        let c = self.held.get(&release)?;
+        Some((c.here, c.total?))
+    }
 
-        for medium in media {
-            let Some(total) = medium.tracks else {
-                return Held::Unknown;
-            };
-            let here = self
-                .spine
-                .tracks
-                .values()
-                .filter(|t| t.medium.id() == medium.id)
-                .count();
-            if here < usize::from(total) {
-                return Held::Partial;
-            }
-        }
-        Held::Complete
+    /// The slot a copy sits in, if it sits in one.
+    pub fn placed_at(&self, copy: Id<Encoding>) -> Option<Id<Track>> {
+        self.placed.get(&copy).copied()
+    }
+
+    /// The pressing a copy's slot sits on. Asked of a slot for the reason
+    /// [`Librarian::files_under`] is: a recording is on every release that
+    /// holds it, and only the slot says which one this copy came off.
+    pub fn release_of(&self, slot: Option<Id<Track>>) -> Option<Id<crate::model::entity::Release>> {
+        let track = self.spine.tracks.get(&slot?)?;
+        Some(self.spine.media.get(&track.medium.id())?.release.id())
     }
 
     /// The album a recording sits on, if any.
@@ -1405,6 +1399,109 @@ impl Held {
     }
 }
 
+/// **How much of every pressing is here** — #134, worked out in one pass.
+///
+/// Two counts have to agree for "complete", and the second is the one a naive
+/// version forgets: a release whose second disc has never been seen has **no
+/// medium row at all**, so counting held tracks against the discs present
+/// answers "all of them" for half a record. The pressing's own disc count is
+/// what closes that.
+///
+/// Either count missing is [`Held::Unknown`] — for the whole release, not just
+/// the disc that was quiet, because a release is complete only if all of it is
+/// and an unknown part makes the whole unknown.
+///
+/// **One pass, not one per row.** Asking this per copy was a scan of the spine
+/// per copy, and it cost 97 ms of a 124 ms fold on a 6,500-row library.
+fn held_index(
+    spine: &crate::model::spine::Spine,
+) -> std::collections::BTreeMap<Id<crate::model::entity::Release>, Counted> {
+    let mut on_medium: std::collections::BTreeMap<Id<crate::model::entity::Medium>, usize> =
+        Default::default();
+    for track in spine.tracks.values() {
+        *on_medium.entry(track.medium.id()).or_default() += 1;
+    }
+
+    // Per release: how many discs are here, and whether every one of them is
+    // full. `short` is set by a disc that is missing tracks, `quiet` by a disc
+    // that never said how many it has.
+    struct Tally {
+        discs: usize,
+        here: usize,
+        /// The sum across discs, and `None` the moment one disc is quiet — a
+        /// total missing a disc is not a total.
+        total: Option<u16>,
+        short: bool,
+        quiet: bool,
+    }
+    let mut tally: std::collections::BTreeMap<Id<crate::model::entity::Release>, Tally> =
+        Default::default();
+    for medium in spine.media.values() {
+        let t = tally.entry(medium.release.id()).or_insert(Tally {
+            discs: 0,
+            here: 0,
+            total: Some(0),
+            short: false,
+            quiet: false,
+        });
+        t.discs += 1;
+        let here = on_medium.get(&medium.id).copied().unwrap_or(0);
+        t.here += here;
+        match medium.tracks {
+            None => {
+                t.quiet = true;
+                t.total = None;
+            }
+            Some(total) => {
+                t.short |= here < usize::from(total);
+                t.total = t.total.map(|sum| sum.saturating_add(total));
+            }
+        }
+    }
+
+    spine
+        .releases
+        .values()
+        .map(|release| {
+            let tallied = tally.get(&release.id);
+            let answer = match (release.media, tallied) {
+                // No disc count, so an unseen disc cannot be ruled out.
+                (None, _) | (_, None) => Held::Unknown,
+                // A disc that is not here at all. Known short before anything
+                // else is asked, which is why this comes before `quiet`.
+                (Some(discs), Some(t)) if usize::from(discs) > t.discs => Held::Partial,
+                (Some(_), Some(t)) if t.short => Held::Partial,
+                (Some(_), Some(t)) if t.quiet => Held::Unknown,
+                _ => Held::Complete,
+            };
+            (
+                release.id,
+                Counted {
+                    answer,
+                    here: tallied.map(|t| t.here).unwrap_or(0),
+                    // **No total when a disc is missing entirely**, because
+                    // the discs that are here do not add up to the record.
+                    total: tallied.and_then(|t| t.total).filter(|_| {
+                        release
+                            .media
+                            .is_some_and(|d| usize::from(d) <= tallied.map_or(0, |t| t.discs))
+                    }),
+                },
+            )
+        })
+        .collect()
+}
+
+/// How much of one pressing is here, and out of how many — #134, #137.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counted {
+    pub answer: Held,
+    /// Tracks of this pressing the library holds.
+    pub here: usize,
+    /// Tracks the pressing has, when every disc said and every disc is here.
+    pub total: Option<u16>,
+}
+
 /// What is shown when nothing names the artist.
 pub const UNKNOWN_ARTIST: &str = "Unknown Artist";
 
@@ -1497,6 +1594,9 @@ mod tests {
                     );
                 }
             }
+            // The index, which is where the logic lives now (#137) — the
+            // librarian's `held_of` is a lookup into exactly this.
+            l.held = held_index(&l.spine);
             l.held_of(release)
         };
 
@@ -2630,6 +2730,11 @@ mod perf {
                     genres: vec![GENRES[a % GENRES.len()].to_string()],
                     disc: Some(1),
                     track: Some(track),
+                    // **Countable, because the real library is** (#134): 88%
+                    // of it carries both totals, and a fixture that carries
+                    // neither never runs the counting this measures.
+                    track_total: Some(10),
+                    disc_total: Some(1),
                     length_ms: 200_000,
                     ..Default::default()
                 });

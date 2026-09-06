@@ -39,6 +39,26 @@ enqueueing one queues each track once, and going to what is playing highlights e
 `h` on something **already closed** closes its parent and moves there. So pressing `h` repeatedly walks you up and out —
 from a track, to its album, to its artist — without needing a key for "collapse this level".
 
+## Records you have part of
+
+An album row says how much of it is here, when that is less than all of it:
+
+    ▾ Beirut
+      ▸ Gulag Orkestar
+      ▸ Lon Gisland          4 of 5
+    ▾ The Bug
+        London Zoo  1 of 12 — 03 Poison Dart
+
+**Only when it is short.** `12 of 12` would be on 5,577 of the 6,485 files here, which is a number that stops meaning
+anything. A record nothing counted says nothing either — the tags carry the length of a record, and 440 files here have
+tags that do not.
+
+It counts discs. A two-disc set whose second disc you have never seen is short by a whole disc, and the row says so
+rather than reading complete against the one disc it can see.
+
+An album that spans two editions — some tracks off the original, some off the reissue — says nothing, because the two
+have different lengths and there is no single answer to print.
+
 ## A group of one is not a level
 
 An album holding one track does not get a row. The track sits where the album row would have been:

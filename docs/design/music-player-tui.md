@@ -4163,6 +4163,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   **What it does not do is display.** An album row reading `(3 of 12)` is the obvious payoff and a separate design
   question — whether partial albums sort, fold or draw differently is its own issue, now that they are countable.
 
+- **2026-09-06** **A record held in part says so, and the counting moved out of the row (#137).**
+
+  **The measurement came first and it found a regression I had just written.** #134 asked `held_of` per drawn row, and
+  `held_of` scanned the spine — so the fold went from **27 ms to 124 ms** the moment the bench fixture carried counts to
+  scan. It had not shown up because the fixture had no totals, which is the same blindness as a bench that never runs
+  the path. The fixtures now carry totals, because 88% of the real library does. Indexed per release in one pass at fold
+  time, `from_catalogue` is **20 ms** — under where it started — and `held_of` is a lookup. Third time this shape has
+  bitten: #121, #123, now this.
+
+  **Drawn only where it is short.** `12 of 12` would be on 5,577 of 6,485 files, and a number that is always there stops
+  being read. An uncounted record draws nothing rather than `?`: 440 files sit on those, and 7% of rows carrying a mark
+  for "no answer" is a worse trade than the silence.
+
+  **A tree node is a release group; the count is about a pressing.** Copies off two editions have no single answer — the
+  original and the reissue are different lengths — so a group spanning pressings is marked mixed and says nothing.
+  Printing one pressing's total beside a count of copies from both can read as more tracks held than the record has.
+
+  **#135's collapsed row keeps the count.** One track of twelve is precisely the row worth flagging, and it is the row
+  whose album header was taken away — so `stands_for` carries `London Zoo  1 of 12` where it used to carry the name
+  alone. What is drawn stays what is searched.
+
+  Not done here, and deliberately: whether a _release group_ is complete across its pressings. `Held` is answered per
+  pressing on purpose (#134), and "I have the album but not the deluxe edition's bonus disc" is a different question.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
