@@ -312,6 +312,22 @@ pub struct Ui {
     /// puts you back if you cancel. Only `Enter` commits. Without this an
     /// abandoned search is an unintentional jump.
     search_origin: Option<usize>,
+    /// The rows a search runs over, and their folded text — #131.
+    ///
+    /// **A pure function of the shelf**, because `all_rows` ignores the folds
+    /// by definition. So it is built once and dropped when the shelf is —
+    /// `refresh_library`, the door every other projection goes through (#84).
+    ///
+    /// Without it, `incsearch` rebuilt 7,178 rows and folded 6,485 haystacks
+    /// on every keystroke: 8.6ms a letter, where searching the visible rows
+    /// had been free.
+    searchable: std::cell::RefCell<Option<(Vec<tree::Row>, Vec<crate::text::Haystack>)>>,
+    /// The folds in force when the search began — #131.
+    ///
+    /// A full-library search opens the way to what it finds, so abandoning one
+    /// has to put them back: otherwise `/` is a way to unfold the library by
+    /// accident and `<Esc>` a way to find out afterwards.
+    search_folds: Option<crate::ui::fold::Expansion<crate::shelf::SortKey>>,
     /// Keys typed so far that have not resolved to a binding, and the count
     /// prefix in front of them.
     /// Which keymap the keyboard is in (#33). Not persisted across a restart —
@@ -584,6 +600,8 @@ impl Ui {
             last_search: None,
             highlight: None,
             search_origin: None,
+            searchable: std::cell::RefCell::new(None),
+            search_folds: None,
             mode: crate::cmd::Mode::default(),
             pending: Vec::new(),
             pending_since: None,
@@ -1672,6 +1690,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
         }
         KeyCode::Char('/') => {
             ui.search_origin = Some(current_cursor(ui));
+            ui.search_folds = Some(ui.tree.folds());
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Search(SearchDir::Forward),
                 buffer: String::new(),
@@ -1682,6 +1701,7 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
         }
         KeyCode::Char('?') => {
             ui.search_origin = Some(current_cursor(ui));
+            ui.search_folds = Some(ui.tree.folds());
             ui.prompt = Some(Prompt {
                 kind: PromptKind::Search(SearchDir::Backward),
                 buffer: String::new(),
@@ -3798,6 +3818,7 @@ pub fn refresh_library(ui: &mut Ui, ctx: &Context<'_>) {
     // the door every projection goes through after a refold — so the cache is
     // dropped here rather than in each of the places that cause one.
     ui.about.replace(None);
+    ui.searchable.replace(None);
     rebuild_library(ui, ctx);
     refresh_playlist_rows(ui);
     refresh_smart(ui, ctx);
@@ -4432,6 +4453,9 @@ fn incsearch(ui: &mut Ui, ctx: &Context<'_>) {
         return;
     };
     let pattern = prompt.buffer.clone();
+    if let Some(folds) = ui.search_folds.clone() {
+        ui.tree.set_folds(folds);
+    }
     if let Some(origin) = ui.search_origin {
         set_cursor(ui, origin);
     }
@@ -4454,6 +4478,9 @@ fn incsearch(ui: &mut Ui, ctx: &Context<'_>) {
 /// how you go to the next one, which is the whole reason `n` exists.
 fn commit_search(ui: &mut Ui, pattern: String, dir: SearchDir) {
     ui.search_origin = None;
+    // Committed: whatever was opened to show the match stays open, as vim's
+    // `foldopen+=search` leaves it.
+    ui.search_folds = None;
     if pattern.is_empty() {
         return;
     }
@@ -4464,6 +4491,12 @@ fn commit_search(ui: &mut Ui, pattern: String, dir: SearchDir) {
 /// `Esc`, or backspacing past the sigil: put the cursor back and stop
 /// highlighting. The search never happened.
 fn abandon_search(ui: &mut Ui) {
+    // **The folds go back too.** "The search never happened" has to include
+    // what it opened, or `/` becomes a way to accidentally unfold the library
+    // and `<Esc>` a way to notice afterwards (#131).
+    if let Some(folds) = ui.search_folds.take() {
+        ui.tree.set_folds(folds);
+    }
     if let Some(origin) = ui.search_origin.take() {
         set_cursor(ui, origin);
     }
@@ -4473,25 +4506,123 @@ fn abandon_search(ui: &mut Ui) {
 /// Move the cursor to the next row matching `pattern`, wrapping once.
 fn run_search(ui: &mut Ui, ctx: &Context<'_>, pattern: &str, dir: SearchDir) {
     let needle = crate::text::Needle::new(pattern);
-    let haystack = search_rows(ui, ctx);
-    if haystack.is_empty() {
-        return;
-    }
-    let len = haystack.len();
-    let start = current_cursor(ui);
+    let start = search_cursor(ui, ctx);
 
-    // Start one past the cursor so repeating a search advances.
-    for offset in 1..=len {
-        let index = match dir {
+    // **The tree's haystack is lent, not handed over.** It is every row in the
+    // library (#131), and copying it to look at it once would put the cost
+    // back that caching it took away.
+    let found = if in_the_tree(ui) {
+        with_searchable(ui, ctx, |_, hay| hunt(hay, &needle, start, dir))
+    } else {
+        hunt(&search_rows(ui, ctx), &needle, start, dir)
+    };
+    match found {
+        Some(index) => place_search(ui, ctx, index),
+        None => ui.notify(format!("no match for {pattern:?}")),
+    }
+}
+
+/// The index of the next row matching, wrapping once.
+///
+/// **From one past the cursor**, so repeating a search advances rather than
+/// finding where you already are.
+fn hunt(
+    haystack: &[crate::text::Haystack],
+    needle: &crate::text::Needle,
+    start: usize,
+    dir: SearchDir,
+) -> Option<usize> {
+    let len = haystack.len();
+    if len == 0 {
+        return None;
+    }
+    (1..=len)
+        .map(|offset| match dir {
             SearchDir::Forward => (start + offset) % len,
             SearchDir::Backward => (start + len - (offset % len)) % len,
-        };
-        if haystack[index].contains(&needle) {
-            set_cursor(ui, index);
-            return;
-        }
+        })
+        .find(|index| haystack[*index].contains(needle))
+}
+
+/// Whether the current view is the folded tree, which is the one that searches
+/// rows it is not showing.
+fn in_the_tree(ui: &Ui) -> bool {
+    ui.view == View::Tree && !ui.levels.is_flat()
+}
+
+/// The tree's rows and their folded text, built once per shelf — #131.
+///
+/// Cloned out rather than lent, because the callers need `&mut ui` to move the
+/// cursor and a borrow of the cache would outlive that. The clone is of a list
+/// that is already built; what it saves is the *building*, which is the
+/// expensive half.
+fn with_searchable<R>(
+    ui: &Ui,
+    ctx: &Context<'_>,
+    read: impl FnOnce(&[tree::Row], &[crate::text::Haystack]) -> R,
+) -> R {
+    if ui.searchable.borrow().is_none() {
+        build_searchable(ui, ctx);
     }
-    ui.notify(format!("no match for {pattern:?}"));
+    let held = ui.searchable.borrow();
+    let (rows, hay) = held.as_ref().expect("built just above");
+    read(rows, hay)
+}
+
+fn build_searchable(ui: &Ui, ctx: &Context<'_>) {
+    let rows: &dyn Listing = ctx.library;
+    let all = ui.tree.all_rows(&ui.library);
+    let hay: Vec<crate::text::Haystack> = all
+        .iter()
+        .map(|row| match row {
+            tree::Row::Track { id, .. } => rows
+                .listed(*id)
+                .map(|r| {
+                    crate::text::Haystack::of(&format!("{} {} {}", r.file_under, r.album, r.title))
+                })
+                .unwrap_or_else(|| crate::text::Haystack::of("")),
+            other => crate::text::Haystack::of(&other.label()),
+        })
+        .collect();
+    *ui.searchable.borrow_mut() = Some((all, hay));
+}
+
+/// Where the cursor is, in the coordinates the search runs in — #131.
+///
+/// The tree searches every row and the cursor counts visible ones, so without
+/// this the search would start from an index into a different list.
+fn search_cursor(ui: &Ui, ctx: &Context<'_>) -> usize {
+    if !in_the_tree(ui) {
+        return current_cursor(ui);
+    }
+    let Some(want) = ui
+        .tree
+        .rows(&ui.library)
+        .get(ui.tree.selected)
+        .map(tree::mark_of)
+    else {
+        return 0;
+    };
+    with_searchable(ui, ctx, |rows, _| {
+        rows.iter()
+            .position(|r| tree::mark_of(r) == want)
+            .unwrap_or(0)
+    })
+}
+
+/// Put the cursor on the row a search found, opening the way to it — #131.
+fn place_search(ui: &mut Ui, ctx: &Context<'_>, at: usize) {
+    if in_the_tree(ui) {
+        // One row out of the cache, not the whole list.
+        let row = with_searchable(ui, ctx, |rows, _| rows.get(at).cloned());
+        if let Some(row) = row {
+            let lib = std::mem::take(&mut ui.library);
+            ui.tree.reveal_row(&lib, &row);
+            ui.library = lib;
+        }
+        return;
+    }
+    set_cursor(ui, at);
 }
 
 /// Folded text for each row of the current view, for searching. Folded here
@@ -4510,15 +4641,11 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
         View::Tree if ui.levels.is_flat() => ui.library.sorted().iter().map(describe).collect(),
         // Artists, albums and tracks are all rows now, so `/` searches the
         // lot — which is what a single buffer should do.
-        View::Tree => ui
-            .tree
-            .rows(&ui.library)
-            .iter()
-            .map(|row| match row {
-                tree::Row::Track { id, .. } => describe(id),
-                other => crate::text::Haystack::of(&other.label()),
-            })
-            .collect(),
+        // **The tree does not come through here** (#131). Its haystack is
+        // every row in the library, cached and lent by `with_searchable`
+        // rather than built and handed over — this returns owned lists, and
+        // for 7,178 rows that copy is the cost the cache exists to avoid.
+        View::Tree => Vec::new(),
         View::Playlist => ui.playlist.entries().iter().map(describe).collect(),
         View::Queue => ui.queue.entries().map(describe).collect(),
         View::Guide | View::Info => Vec::new(),
@@ -10286,10 +10413,6 @@ mod tests {
         );
     }
 
-    /// **`:info <thing>` reaches past the cursor** — #129.
-    ///
-    /// Half of what the panel can show is not a row, and without this they are
-    /// reachable only by finding a track that happens to link to one.
     #[test]
     fn info_reaches_a_thing_by_name() {
         let store = fixture();
@@ -10490,6 +10613,103 @@ mod tests {
         );
         press(&mut ui, &ctx, "escape");
         assert_eq!(painted(&ui), 0, "`<Esc>` should have cleared it");
+    }
+
+    /// **`/` searches the whole library and opens the way to what it finds** —
+    /// #131.
+    ///
+    /// A closed fold still holds its rows, exactly as a closed fold in vim
+    /// still holds its lines. `/malibu` with the artists shut used to report
+    /// no match, because the album row it wanted did not exist yet.
+    #[test]
+    fn search_finds_what_a_fold_was_hiding_and_opens_it() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let shown = |ui: &Ui| {
+            ui.tree
+                .rows(&ui.library)
+                .iter()
+                .map(|r| r.label().trim().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            !shown(&ui).iter().any(|r| r.contains("Malibu")),
+            "the fixture should start with the albums shut"
+        );
+
+        press(&mut ui, &ctx, "/");
+        for c in "malibu".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        press(&mut ui, &ctx, "enter");
+
+        assert!(
+            shown(&ui).iter().any(|r| r.contains("Malibu")),
+            "the fold was not opened: {:?}",
+            shown(&ui)
+        );
+        assert!(
+            shown(&ui)[ui.tree.selected].contains("Malibu"),
+            "the cursor is not on the match: {:?}",
+            shown(&ui)
+        );
+    }
+
+    /// **Abandoning puts the folds back too.** "The search never happened"
+    /// has to include what it opened, or `/` is a way to unfold the library
+    /// by accident and `<Esc>` a way to find out afterwards.
+    #[test]
+    fn abandoning_a_search_closes_what_it_opened() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let before = ui.tree.rows(&ui.library).len();
+
+        press(&mut ui, &ctx, "/");
+        for c in "malibu".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        assert!(
+            ui.tree.rows(&ui.library).len() > before,
+            "the preview did not open anything"
+        );
+
+        press(&mut ui, &ctx, "escape");
+        assert_eq!(
+            ui.tree.rows(&ui.library).len(),
+            before,
+            "the folds stayed open after the search was abandoned"
+        );
+    }
+
+    /// **The tree is three levels whatever it groups by** (#97), so revealing
+    /// is the same operation for `[genre, album]` as for `[artist, album]`.
+    #[test]
+    fn search_reveals_under_whatever_the_levels_are() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels genre,album");
+
+        press(&mut ui, &ctx, "/");
+        for c in "malibu".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        press(&mut ui, &ctx, "enter");
+
+        let shown: Vec<String> = ui
+            .tree
+            .rows(&ui.library)
+            .iter()
+            .map(|r| r.label().trim().to_string())
+            .collect();
+        assert!(
+            shown.iter().any(|r| r.contains("Malibu")),
+            "grouped by genre, the fold was not opened: {shown:?}"
+        );
     }
 
     /// **`escape` leaves it the way you came in.**

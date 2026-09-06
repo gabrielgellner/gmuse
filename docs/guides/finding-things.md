@@ -40,6 +40,10 @@ takes you there.
     n  N         the next match, and the previous
     escape       stop painting the matches
 
+**`/` searches the whole library, not only what is open.** A closed fold still holds its rows, exactly as a closed fold
+in vim still holds its lines — so `/malibu` with every artist shut finds the album and opens the way to it. Abandoning
+with `escape` closes again whatever the search opened: the search never happened, and that includes what it revealed.
+
 The list follows as you type — vim's `incsearch` — and every match is painted where it matched. **Nothing is committed
 until `Enter`**: `escape` puts the cursor back exactly where the search started, so an abandoned search is not an
 accidental jump. Each keystroke refines one search from that origin rather than starting a new one from wherever the

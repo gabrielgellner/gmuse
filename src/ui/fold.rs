@@ -22,7 +22,7 @@ use std::collections::HashSet;
 /// One step in a node's identity, from the root down.
 pub type Path<K> = Vec<K>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Expansion<K> {
     /// Everything **shallower** than this is open. `0` closes everything;
     /// `1` opens the top level; and so on.

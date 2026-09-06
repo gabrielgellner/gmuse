@@ -97,10 +97,25 @@ impl TreeState {
     /// Display names come from the first track under each node, since §4 keeps
     /// display strings on the `Track` and only sort keys in the tree.
     pub fn rows(&self, lib: &Shelf) -> Vec<Row> {
+        self.flatten(lib, false)
+    }
+
+    /// Every row, as if nothing were folded — #131.
+    ///
+    /// **What `/` searches.** A closed fold still holds its rows, exactly as a
+    /// closed fold in vim still holds its lines: `/malibu` with the artists
+    /// shut found nothing at all, because the album row it wanted did not
+    /// exist yet. The search looks here and the reveal opens the way to what
+    /// it found.
+    pub fn all_rows(&self, lib: &Shelf) -> Vec<Row> {
+        self.flatten(lib, true)
+    }
+
+    fn flatten(&self, lib: &Shelf, unfolded: bool) -> Vec<Row> {
         let mut rows = Vec::new();
         for (artist_key, albums) in lib.artists() {
             let display = lib.artist_name(artist_key).to_string();
-            let expanded = self.folds.is_open(std::slice::from_ref(artist_key));
+            let expanded = unfolded || self.folds.is_open(std::slice::from_ref(artist_key));
             rows.push(Row::Artist {
                 key: artist_key.clone(),
                 display,
@@ -112,7 +127,7 @@ impl TreeState {
             }
             for (album_key, tracks) in albums {
                 let display = lib.album_name(artist_key, album_key).to_string();
-                let open = self.folds.is_open(&[artist_key.clone(), album_key.clone()]);
+                let open = unfolded || self.folds.is_open(&[artist_key.clone(), album_key.clone()]);
                 rows.push(Row::Album {
                     artist: artist_key.clone(),
                     key: album_key.clone(),
@@ -133,6 +148,44 @@ impl TreeState {
             }
         }
         rows
+    }
+
+    /// **Open the way to a row and put the cursor on it** — #131.
+    ///
+    /// What a search needs, and different from [`Self::reveal`], which finds a
+    /// *track* by its id. This is handed a row it already found in the
+    /// unfolded list and has only to make it visible.
+    ///
+    /// The tree is three levels whatever `levels` groups by, so this is the
+    /// same operation for `[artist, album]` and for `[genre, album]`.
+    pub fn reveal_row(&mut self, lib: &Shelf, row: &Row) {
+        match row {
+            Row::Artist { .. } => {}
+            Row::Album { artist, .. } => self.folds.open(std::slice::from_ref(artist)),
+            Row::Track { artist, album, .. } => {
+                self.folds.open(std::slice::from_ref(artist));
+                self.folds.open(&[artist.clone(), album.clone()]);
+            }
+        }
+        // **Found again by mark, not by equality**: a `Row` carries whether it
+        // is expanded, and that is exactly what has just changed.
+        let want = Self::mark_of_inner(row);
+        if let Some(at) = self
+            .rows(lib)
+            .iter()
+            .position(|r| Self::mark_of_inner(r) == want)
+        {
+            self.selected = at;
+        }
+    }
+
+    /// The fold state, to put back if a search is abandoned — #131.
+    pub fn folds(&self) -> Expansion<SortKey> {
+        self.folds.clone()
+    }
+
+    pub fn set_folds(&mut self, folds: Expansion<SortKey>) {
+        self.folds = folds;
     }
 
     /// The path of a row that can be opened. A track has none — it is a leaf.
@@ -425,12 +478,16 @@ impl TreeState {
             return;
         };
         let opens = Self::ancestors_of(row);
-        let want = Self::mark_of(row);
+        let want = Self::mark_of_inner(row);
 
         self.folds.set_level(0);
         self.folds.open_all(opens);
 
-        if let Some(at) = self.rows(lib).iter().position(|r| Self::mark_of(r) == want) {
+        if let Some(at) = self
+            .rows(lib)
+            .iter()
+            .position(|r| Self::mark_of_inner(r) == want)
+        {
             self.selected = at;
         }
     }
@@ -466,7 +523,7 @@ impl TreeState {
     /// What identifies a row across a fold change: a track by its id, a
     /// container by its path. Not the `Row` itself — that carries whether it is
     /// expanded, which is precisely what a fold change alters.
-    fn mark_of(row: &Row) -> (Vec<SortKey>, Option<CopyId>) {
+    fn mark_of_inner(row: &Row) -> (Vec<SortKey>, Option<CopyId>) {
         match row {
             Row::Track { id, .. } => (Self::seat_of(row), Some(*id)),
             _ => (Self::seat_of(row), None),
@@ -551,6 +608,14 @@ impl TreeState {
         }
         true
     }
+}
+
+/// What identifies a row across a fold change — see `TreeState::mark_of_inner`.
+///
+/// Free rather than associated so a caller comparing a row from the unfolded
+/// list with one from the folded list does not need a `TreeState` in hand.
+pub fn mark_of(row: &Row) -> (Vec<SortKey>, Option<CopyId>) {
+    TreeState::mark_of_inner(row)
 }
 
 #[cfg(test)]

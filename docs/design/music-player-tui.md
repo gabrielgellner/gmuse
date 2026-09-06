@@ -3980,6 +3980,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   matched only the row the search had just moved to therefore proved nothing — worth knowing before writing the next
   one.
 
+- **`/` searches the whole library and opens the way to what it finds** (#131). It searched the _visible_ rows, because
+  `Tree::rows` is the drawn list and `search_rows` used it — so `/malibu` with the artists shut reported no match, and
+  you had to have already opened the thing you were looking for. A closed fold still holds its rows, exactly as a closed
+  fold in vim still holds its lines and `foldopen+=search` opens them.
+
+  The comment above that arm already said `/` searches "the lot — which is what a single buffer should do", and the
+  guide had been promising it for as long as it existed.
+
+  **Revealing is one operation whatever the levels are.** The tree is three deep whether it groups by `[artist, album]`
+  or `[genre, album]` (#97), so opening the way to a row is the same two folds either way — which is the payment for
+  levels being a value.
+
+  **Abandoning closes what the search opened.** `<Esc>` already put the cursor back; "the search never happened" has to
+  include the folds, or `/` becomes a way to unfold the library by accident.
+
+  **And it needed a cache, measured rather than assumed.** Searching 190 visible rows was free; searching 7,178 and
+  folding 6,485 haystacks on every keystroke of `incsearch` was **8.6ms a letter**. The rows and their haystacks are a
+  pure function of the shelf — `all_rows` ignores the folds by definition — so they are built once and dropped in
+  `refresh_library`, the door every other projection goes through. Lent rather than cloned out, because copying 7,178
+  rows to read them once put half the cost back: 8.6ms → 3.1ms → **1.5ms**.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
