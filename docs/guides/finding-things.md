@@ -108,6 +108,20 @@ and each answers to all three.
 **A file whose tags say nothing is an album.** Almost everything is, so that is the cheapest wrong answer available; it
 also means `release_type="album"` is "an album, or nothing said", which is not the same as a claim that somebody made.
 
+## What key it is in
+
+    :filter key="Am"           A minor
+    :filter key="F#m"          F sharp minor
+    :filter !key?              nothing said
+
+Keys are read from the tags at import and stored **one way**, whichever way the tagger wrote them. This library carries
+the same key three notations deep — `Cmin` on some files, open-key `4m` on others, and one file's `TKEY` says `4m` while
+its own comment says `F#m`. They are spellings of one thing, so `Cmin`, `8A` and `Am` do not become three different
+keys. Ask for it by its conventional name.
+
+**It is a claim, not a reading.** Two key detectors disagree about a track as readily as two taggers disagree about a
+genre, so a key carries who said it and can be corrected without the next import undoing you.
+
 ## How much of a record you have
 
     :filter release_held="partial"     records you have some of

@@ -4187,6 +4187,35 @@ Append here as decisions are made. Format: date, decision, rationale.
   Not done here, and deliberately: whether a _release group_ is complete across its pressings. `Held` is answered per
   pressing on purpose (#134), and "I have the album but not the deluxe edition's bonus disc" is a different question.
 
+- **2026-09-06** **A key is a claim on an axis, and it is stored as a position on the circle of fifths (#136).**
+
+  **Claim, not field**, and the exclusion in `facet.rs` — "a measurement stays a field" — does not catch it. That rule
+  is about tempo and bitrate: continuous, answering to `<` and `>`. A key is one of twenty-four names and answers to
+  neither. What decides it is that **key detectors disagree**, which is the defining property of a claim here and the
+  same reason genre is one. As a field it would be last-write-wins and a rescan would silently overwrite a correction,
+  which is the failure `library-is-the-truth` exists to name.
+
+  It cost one line in `facet::ALL`, exactly as that list promises, and `key="Am"`, `!key?` and the info panel's
+  who-said-it all came with it.
+
+  **Stored as a wheel position, not a note name.** `Key` is a number 1–12 and a mode — the Camelot coordinate — because
+  that turns the question it exists for into arithmetic: compatible keys are the same number in the other mode and one
+  step either way, so `compatible()` is `n ± 1` rather than a table nobody can check. The circle of fifths stays a
+  **function**; writing it as hierarchy edges would fill a store built for contestable claims with rows nobody could
+  ever retract.
+
+  **Three notations, one value, parsed at the boundary.** The tags carry musical (`Cmin`), Camelot (`8A`) and open key
+  (`4m`) — one file's `TKEY` says `4m` while its own comment says `F#m`. All 39 distinct spellings across the 592-file
+  dance collection parse, and the enharmonics agree, so `A#m` and `Bbm` cannot become two concepts for one key. What
+  reaches the log is the conventional spelling.
+
+  **Musical notation on screen.** Camelot is `camelot()` away and open key `open_key()`; a setting to prefer one can
+  arrive with the harmonic surface that wants it, rather than as a switch nothing yet reads.
+
+  Detection is not here, and that is why `key` is optional rather than required. Noted alongside: `Recording::bpm` has
+  existed since the spine was written and nothing has ever set it — the same unwired state `ReleaseType` was in before
+  #133.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

@@ -93,6 +93,9 @@ pub struct Scanned {
     /// zero — 12% of this library carries neither.
     pub track_total: Option<u16>,
     pub disc_total: Option<u16>,
+    /// What key the tags say this is in — #136. Typed here, so a notation
+    /// never travels past the boundary that read it.
+    pub key: Option<crate::model::key::Key>,
     /// When **this pressing** came out, and when the **album** first did.
     ///
     /// Two dates because the tags carry two and they disagree for 820 files
@@ -315,6 +318,19 @@ impl Instance {
                     Described::Recording(recording),
                     facet::GENRE,
                     name,
+                    Source::TagVariant,
+                    Confidence::Provisional,
+                );
+            }
+
+            // The key, at the same rung and for the same reason: a detector
+            // wrote it, another detector would disagree, and a curated pass
+            // outranks both (#136).
+            if let Some(key) = s.key {
+                self.assign_key(
+                    now,
+                    recording,
+                    key,
                     Source::TagVariant,
                     Confidence::Provisional,
                 );
@@ -574,6 +590,30 @@ impl Instance {
         confidence: Confidence,
     ) {
         self.assert_concept(now, subject, facet::GENRE, name, basis, confidence);
+    }
+
+    /// Say what key a recording is in — #136.
+    ///
+    /// **Typed in, written out canonically.** Every notation a tag uses parses
+    /// to one [`Key`] at the boundary, so what reaches the log is the
+    /// conventional spelling and `Cmin`, `8A` and `Am` cannot become three
+    /// concepts for one key.
+    pub fn assign_key(
+        &mut self,
+        now: i64,
+        recording: Id<Recording>,
+        key: crate::model::key::Key,
+        basis: Source,
+        confidence: Confidence,
+    ) {
+        self.assert_concept(
+            now,
+            Described::Recording(recording),
+            facet::KEY,
+            key.written(),
+            basis,
+            confidence,
+        );
     }
 
     /// Say which version of a song a recording is.
@@ -1414,6 +1454,7 @@ mod containment_tests {
             label: None,
             levels: Default::default(),
             release_kind: Default::default(),
+            key: None,
             track_total: None,
             disc_total: None,
             release_secondary: Default::default(),
@@ -1602,6 +1643,7 @@ mod credit_tests {
             label: None,
             levels: Default::default(),
             release_kind: Default::default(),
+            key: None,
             track_total: None,
             disc_total: None,
             release_secondary: Default::default(),

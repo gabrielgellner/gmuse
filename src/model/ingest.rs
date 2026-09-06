@@ -199,6 +199,10 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // takes the second; where the format carries them apart, both read
         // the whole value. Zero is nobody saying rather than a disc of no
         // tracks, which is not a thing (#134).
+        // **Whatever notation the tagger used** (#136). `TKEY` carries the
+        // musical spelling on some files and open key on others, and both
+        // parse to one value here so nothing downstream sees a notation.
+        key: crate::model::key::Key::parse(&get(ItemKey::InitialKey)),
         track_total: total(&get(ItemKey::TrackTotal), &get(ItemKey::TrackNumber)),
         disc_total: total(&get(ItemKey::DiscTotal), &get(ItemKey::DiscNumber)),
         mb_release_group: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzReleaseGroupId)).ok(),
@@ -568,6 +572,21 @@ mod tests {
         assert_eq!(peak_e4("nan"), None);
     }
 
+    /// Writes an `InitialKey` (`TKEY`) in whatever notation is asked for.
+    fn tag_keyed(path: &Path, value: &str) {
+        use lofty::config::WriteOptions;
+        use lofty::id3::v2::Id3v2Tag;
+        use lofty::prelude::{ItemKey, TagExt};
+        use lofty::tag::{ItemValue, Tag, TagItem};
+
+        let mut tag: Tag = Id3v2Tag::default().into();
+        tag.insert(TagItem::new(
+            ItemKey::InitialKey,
+            ItemValue::Text(value.into()),
+        ));
+        tag.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
     /// Writes `MusicBrainz Album Type` the way Picard does — `/`-joined.
     fn tag_typed(path: &Path, value: &str) {
         use lofty::config::WriteOptions;
@@ -581,6 +600,40 @@ mod tests {
             ItemValue::Text(value.into()),
         ));
         tag.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    /// **A key is read from the tag and becomes a claim** — #136.
+    ///
+    /// Whatever notation the tagger used: this library carries `Cmin` on some
+    /// files and open-key `4m` on others, and a file whose `TKEY` says `4m`
+    /// has `F#m` written in its own comment.
+    #[test]
+    fn a_key_is_read_whatever_notation_the_tagger_used() {
+        use crate::model::key::Key;
+        let d = dir("key");
+        let read_key = |name: &str, tagged: &str| {
+            let p = d.join(format!("{name}.wav"));
+            wav(&p, 4410);
+            tag_keyed(&p, tagged);
+            read(&p).expect("reads").key
+        };
+
+        assert_eq!(read_key("musical", "Am"), Key::parse("Am"));
+        assert_eq!(read_key("spelled", "Cmin"), Key::parse("Cm"));
+        assert_eq!(
+            read_key("openkey", "4m"),
+            Key::parse("F#m"),
+            "open key, which is what this library's dance files carry"
+        );
+        assert_eq!(read_key("camelot", "8A"), Key::parse("Am"));
+
+        // Unreadable is nobody saying. Inventing one would put a claim in the
+        // log that no tag ever made.
+        assert_eq!(read_key("junk", "banana"), None);
+
+        let p = d.join("bare.wav");
+        wav(&p, 4410);
+        assert_eq!(read(&p).expect("reads").key, None, "no tag, no claim");
     }
 
     /// **The totals are the second half of `3/12`** — #134.

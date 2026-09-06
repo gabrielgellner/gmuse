@@ -120,6 +120,22 @@ pub const VERSION: &str = "version";
 /// (#90): a facet is a collection development policy, not the holdings.
 pub const FUNCTION: &str = "function";
 
+/// What key a recording is in — `Am`, `C#m`, `F` (#136).
+///
+/// **A claim, not a measurement**, and the distinction the exclusion list
+/// above turns on is not "was it detected". Tempo is continuous and answers to
+/// `<` and `>`; a key is one of twenty-four names and answers to neither. What
+/// decides it is that **key detectors disagree** — two tools give two answers
+/// about one file, which is the defining property of a claim here and the same
+/// reason genre is one. As a field it would be last-write-wins, and a rescan
+/// would silently overwrite somebody's correction.
+///
+/// The terms on it are closed and uncurated, so this axis has no hierarchy and
+/// wants none: which keys mix is arithmetic on the circle of fifths
+/// ([`crate::model::key`]), and writing that as edges would fill a store built
+/// for contestable claims with rows nobody could ever retract.
+pub const KEY: &str = "key";
+
 /// Every axis, and what to call it.
 ///
 /// **A closed list, where concepts on an axis are open**, and the promotion
@@ -137,6 +153,7 @@ pub const ALL: &[(&str, &str)] = &[
     (GENRE, "Genre"),
     (VERSION, "Version"),
     (FUNCTION, "Function"),
+    (KEY, "Key"),
 ];
 
 /// The axis this name refers to, if any names it.

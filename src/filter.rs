@@ -1397,6 +1397,61 @@ mod tests {
             .compile(Env::default())(&subject)
     }
 
+    /// **A key is a claim on an axis, so the query language already has it**
+    /// — #136. A new axis costs one line in `facet::ALL`; this is what that
+    /// line buys.
+    #[test]
+    fn a_recording_is_found_by_the_key_it_is_in() {
+        use crate::model::ingest::Confidence;
+        use crate::model::key::Key;
+        use crate::model::reference::Source;
+
+        let mut s = crate::scan::Holdings::new();
+        s.upsert(crate::fixture::Tagged {
+            path: "/m/Band/Record/1.mp3".into(),
+            artist: Some("Band".into()),
+            album: Some("Record".into()),
+            title: Some("Track".into()),
+            audio_id: Some(crate::audio_id::AudioId { scheme: 1, hash: 7 }),
+            ..Default::default()
+        });
+        let mut log = crate::model::instance::Instance::new(crate::fixture::device());
+        let held: Vec<_> = s.iter().map(|h| h.seen.clone()).collect();
+        log.ingest(100, &held);
+        let l = crate::fixture::from_holdings(&s);
+        let recording =
+            crate::model::rows::Listing::recording_of(&l, crate::model::rows::Listing::rows(&l)[0])
+                .expect("a fixture row is a recording");
+        // The tag said open key; what reaches the log is the canonical
+        // spelling, which is the point of parsing at the boundary.
+        log.assign_key(
+            110,
+            recording,
+            Key::parse("4m").expect("open key"),
+            Source::TagVariant,
+            Confidence::Provisional,
+        );
+        let l = crate::fixture::from_holdings_and(&s, log.records());
+        let id = crate::model::rows::Listing::rows(&l)[0];
+        let drawn = crate::model::rows::Listing::listed(&l, id)
+            .expect("draws")
+            .owned();
+        let subject = Subject {
+            row: drawn.listed(),
+            locator: None,
+            recording: Some(recording),
+        };
+        let asks = |q: &str| Expr::parse(q).expect("parses").compile(Env::default())(&subject);
+
+        assert!(asks(r#"key="F#m""#), "the key it was told, canonically");
+        assert!(asks("key?"), "and it has one");
+        assert!(!asks(r#"key="Am""#));
+        assert!(
+            !asks(r#"key="4m""#),
+            "the notation does not survive the boundary, which is why it is a value"
+        );
+    }
+
     /// **A partly held album is askable** — #134, which is the whole issue:
     /// the library knew every track it held and had no idea whether that was
     /// all of them.

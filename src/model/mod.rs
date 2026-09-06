@@ -47,6 +47,7 @@ pub mod focus;
 pub mod id;
 pub mod ingest;
 pub mod instance;
+pub mod key;
 pub mod log;
 pub mod merge;
 pub mod migrate;
