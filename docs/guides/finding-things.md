@@ -82,6 +82,46 @@ Catalogs are named and persistent, and they **union**: turn on jazz and blues an
 
 `6` — or `<leader>fg` — opens a picker over what you have saved, and `enter` makes it the view.
 
+## Grouping by a level of the genre hierarchy
+
+    :view levels genre,album      by genre, then album
+    :view levels genre@1,genre@2  by the broad term, then the specific one
+
+`genre@1` is the broadest ancestor, `genre@2` the one under it. That is what the `Broad; Style` tag convention was
+imitating in a string: with the hierarchy in the library, `Techno` and `House` collapse into one `Electronic` node at
+level 1 and stay two at level 2.
+
+A genre with no parent stands for itself rather than dropping out of the tree, so a half-curated hierarchy still draws
+every row.
+
+**If the axis has no hierarchy yet, it says so** rather than drawing the same tree twice:
+
+    genre has no hierarchy yet — nothing to group a level of
+
+## Counts under a multi-valued level do not sum
+
+A track with three genres is under three nodes. So the count in the status line reads as _groups a track is under_, and
+never as a partition of the library:
+
+    levels: genre,album (14 groups, a track may be in several — they do not sum)
+
+This is not a defect to be fixed by picking one genre. Picking one is how `label` ended up inside `albumartist`.
+
+## Versions — what a recording was made out of
+
+    derived[]                       it came out of something
+    derived[kind=remix]             it is a remix of something
+    derived[depth<=2]               a remix of a remix, and no further
+    derived[kind=edit & depth=1]    an edit, directly
+    work_derived[kind=arrangement]  the other traversal, one level up
+
+The bracket is **correlated**, the same as `genre[…]`: one edge has to satisfy every clause. So a track that is a remix
+one hop back and an edit two hops back does not match `derived[kind=remix & depth=2]` — there is no single hop that is
+both.
+
+The walk is bounded at 16 hops whatever you ask. Edges union across machines, so two of them can produce a loop neither
+one authored, and a render has to answer rather than hang.
+
 ## Three tiers, one language
 
 Simple things inline; composed things in an editor.

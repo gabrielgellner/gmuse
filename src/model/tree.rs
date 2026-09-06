@@ -90,7 +90,12 @@ pub struct Tree {
 /// A missing value gets a stand-in rather than being dropped: a track with no
 /// genre is still a track you hold, and filing it nowhere is how a library
 /// grows holes nobody notices.
-fn values_of(field: Field, subject: &crate::model::rows::Subject<'_>) -> Vec<String> {
+fn values_of(
+    l: &Librarian,
+    level: crate::shelf::Level,
+    subject: &crate::model::rows::Subject<'_>,
+) -> Vec<String> {
+    let field = level.field;
     // **Two fields ask the model rather than the tags, and the tree wants the
     // model's answer** (#84). `album=` in a filter deliberately asks what the
     // *tag* says — `!album?` has to stay meaningful — but a tree grouping by
@@ -100,7 +105,18 @@ fn values_of(field: Field, subject: &crate::model::rows::Subject<'_>) -> Vec<Str
     if held.is_empty() {
         return vec![stand_in(field)];
     }
-    held
+    // **A depth turns each value into its ancestor at that level** (#79).
+    // Deduplicated, because two genres under one broad term are one node: a
+    // row tagged `Techno; House` belongs under `Electronic` once.
+    let Some(at) = level.at else { return held };
+    let mut out: Vec<String> = Vec::new();
+    for value in held {
+        let up = l.vocabulary.at_level(&value, at);
+        if !out.contains(&up) {
+            out.push(up);
+        }
+    }
+    out
 }
 
 /// What to show where a level has no value.
@@ -133,7 +149,11 @@ impl Tree {
     /// counting has to be distinct, enqueueing has to dedup, and revealing
     /// has to highlight every place it sits. Without that "a subtree reports
     /// 42 tracks and enqueues 37".
-    pub fn grouped(l: &Librarian, levels: (Field, Field), smart_artist_sort: bool) -> Self {
+    pub fn grouped(
+        l: &Librarian,
+        levels: (crate::shelf::Level, crate::shelf::Level),
+        smart_artist_sort: bool,
+    ) -> Self {
         let mut by_outer: BTreeMap<SortKey, BTreeMap<SortKey, Album>> = BTreeMap::new();
         let mut outer_names: BTreeMap<SortKey, String> = BTreeMap::new();
 
@@ -150,7 +170,7 @@ impl Tree {
                 else {
                     continue;
                 };
-                let inner_values = values_of(levels.1, &subject);
+                let inner_values = values_of(l, levels.1, &subject);
                 // The inner level takes the first value it has: a sub-node is
                 // a place *within* a group, and splitting one row across two
                 // sub-nodes of the same group would be a duplicate nobody
@@ -160,8 +180,11 @@ impl Tree {
 
                 // **Every value, at the outer level.** This is where the
                 // multi-valued case lives, and it is deliberate.
-                for value in values_of(levels.0, &subject) {
-                    let key = sort_key(&value, smart_artist_sort && levels.0 == Field::FileUnder);
+                for value in values_of(l, levels.0, &subject) {
+                    let key = sort_key(
+                        &value,
+                        smart_artist_sort && levels.0.field == Field::FileUnder,
+                    );
                     outer_names.entry(key.clone()).or_insert(value);
                     by_outer
                         .entry(key)
@@ -279,6 +302,7 @@ mod tests {
     use super::*;
     use crate::model::instance::{Instance, Scanned};
     use crate::model::populate::read_library;
+    use crate::shelf::Level;
 
     /// The tree flattened — artist, then album, then disc and track.
     ///
@@ -316,7 +340,11 @@ mod tests {
         let mut i = Instance::new(Id::derived(b"laptop"));
         i.ingest(100, scan);
         let l = Librarian::from_catalogue(&i.catalogue());
-        let t = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
+        let t = Tree::grouped(
+            &l,
+            (Level::of(Field::FileUnder), Level::of(Field::Album)),
+            false,
+        );
         (l, t)
     }
 
@@ -573,7 +601,11 @@ mod tests {
             }));
         }
 
-        let tree = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
+        let tree = Tree::grouped(
+            &l,
+            (Level::of(Field::FileUnder), Level::of(Field::Album)),
+            false,
+        );
         let artist = sort_key("Laurie Anderson", false);
         let by_date: Vec<_> = tree
             .albums_by_date(&artist)
@@ -613,7 +645,11 @@ mod tests {
             ],
         );
         let l = Librarian::from_catalogue(&i.catalogue());
-        let tree = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
+        let tree = Tree::grouped(
+            &l,
+            (Level::of(Field::FileUnder), Level::of(Field::Album)),
+            false,
+        );
 
         let titles: Vec<_> = tree
             .albums_by_date(&sort_key("Laurie Anderson", false))
@@ -648,7 +684,11 @@ mod tests {
                 g.first_released = Some(PartialDate::year(1970));
             }
         }
-        let tree = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
+        let tree = Tree::grouped(
+            &l,
+            (Level::of(Field::FileUnder), Level::of(Field::Album)),
+            false,
+        );
         let titles: Vec<_> = tree
             .albums_by_date(&sort_key("Laurie Anderson", false))
             .iter()
@@ -712,7 +752,11 @@ mod tests {
         let (instance, report) = read_library("laptop", &[PathBuf::from(&dir)], 100);
         assert_eq!(report.ingested, 2);
         let l = Librarian::from_catalogue(&instance.catalogue());
-        let tree = Tree::grouped(&l, (Field::FileUnder, Field::Album), false);
+        let tree = Tree::grouped(
+            &l,
+            (Level::of(Field::FileUnder), Level::of(Field::Album)),
+            false,
+        );
 
         assert_eq!(tree.artists().count(), 1);
         assert_eq!(flat(&tree).len(), 2);

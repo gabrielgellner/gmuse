@@ -2509,6 +2509,17 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 // and it is on the *view*, which is why `:view levels genre`
                 // is a thing to say at all.
                 ViewTerm::Levels(levels) => {
+                    // **A depth on an axis with nothing to climb draws the
+                    // same tree as no depth at all** (#79), so it is refused
+                    // by name rather than accepted and inert. The hierarchy is
+                    // curated separately from the concepts, so "asked for a
+                    // level before there is one" is the ordinary mistake.
+                    if let Some(axis) = unplaced_level(ui, ctx, levels) {
+                        ui.notify(format!(
+                            "{axis} has no hierarchy yet — nothing to group a level of"
+                        ));
+                        return;
+                    }
                     ui.levels = levels;
                     // **The drawing follows the value, never the other way**
                     // (#97). Views 1 and 2 are one set drawn two ways, so
@@ -2523,8 +2534,15 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                             "levels: {} ({} {})",
                             levels.written(),
                             ui.library.artist_count(),
+                            // **Many-valued dimensions do not sum**
+                            // (`domain-model.md` §5, #79). A row with three
+                            // genres is under three nodes, so this count reads
+                            // as "groups a track is under" and never as a
+                            // partition of the library — said here because the
+                            // number is the thing somebody would otherwise add
+                            // up.
                             if levels.outer_is_multi() {
-                                "groups, a track may be in several"
+                                "groups, a track may be in several — they do not sum"
                             } else {
                                 "groups"
                             }
@@ -4013,6 +4031,21 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
             ui.notify(format!("{} {}", write.names(), songs.len()));
         }
     }
+}
+
+/// The axis a level asks to climb, when there is nothing there to climb.
+///
+/// `None` means every level in the spec is answerable — either it names no
+/// depth, or the facet it names has narrower-of edges to walk.
+fn unplaced_level(_ui: &Ui, ctx: &Context<'_>, levels: crate::shelf::Levels) -> Option<String> {
+    let (outer, inner) = levels.pair()?;
+    [outer, inner].into_iter().find_map(|level| {
+        let crate::format::Field::Facet(facet) = level.field else {
+            return None;
+        };
+        level.at?;
+        (!crate::model::rows::Listing::places(ctx.library, facet)).then(|| level.field.name())
+    })
 }
 
 /// What adding to a view would write — the fact, not the list.
@@ -9519,6 +9552,41 @@ mod tests {
             "the affordance named a fact and wrote nothing: {}",
             ui.status
         );
+    }
+
+    /// **A level with nothing to climb is refused by name** — #79.
+    ///
+    /// The hierarchy is curated separately from the concepts, so asking for
+    /// `genre@1` before any narrower-of edge exists is the ordinary mistake —
+    /// and it would draw *exactly* the tree `genre` draws. A grouping that
+    /// silently does nothing is the failure this project keeps naming.
+    #[test]
+    fn a_hierarchy_level_with_no_hierarchy_says_so() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels genre@1,album");
+        assert!(ui.status.contains("no hierarchy yet"), "{}", ui.status);
+        assert_eq!(
+            ui.levels,
+            crate::shelf::Levels::default(),
+            "it was applied anyway"
+        );
+    }
+
+    /// **Many-valued dimensions do not sum, and the count says so** —
+    /// `domain-model.md` §5, #79.
+    #[test]
+    fn a_multi_valued_grouping_says_its_count_is_not_a_partition() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels genre,album");
+        assert!(ui.status.contains("do not sum"), "{}", ui.status);
     }
 
     /// **`:edit` stops the loop rather than shelling out under the draw** —

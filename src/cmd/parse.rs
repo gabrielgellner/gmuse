@@ -552,8 +552,6 @@ fn seek_spec(rest: &str) -> Result<SeekSpec, ParseError> {
 /// tree back rather than being an error, because that is what somebody means
 /// by it.
 fn levels_spec(rest: &str) -> Result<crate::shelf::Levels, ParseError> {
-    use crate::format::Field;
-
     if rest.is_empty() {
         return Ok(crate::shelf::Levels::default());
     }
@@ -562,13 +560,44 @@ fn levels_spec(rest: &str) -> Result<crate::shelf::Levels, ParseError> {
         return Ok(crate::shelf::Levels::Flat);
     }
     let (outer, inner) = rest.split_once(',').unwrap_or((rest, "album"));
-    let field = |name: &str| {
-        Field::parse(name.trim()).ok_or_else(|| ParseError::Bad(name.trim().into(), "field"))
-    };
     Ok(crate::shelf::Levels::By {
-        outer: field(outer)?,
-        inner: field(inner)?,
+        outer: level(outer)?,
+        inner: level(inner)?,
     })
+}
+
+/// One level: a field, optionally at a depth in its hierarchy (#79).
+///
+/// `genre@1` is the broad term and `genre@2` the specific one — what the
+/// `Broad; Style` tag convention imitates. **A depth is only meaningful on a
+/// facet**, because nothing else in the model has a hierarchy to climb, and
+/// `year@2` is refused rather than silently ignored.
+fn level(spec: &str) -> Result<crate::shelf::Level, ParseError> {
+    use crate::format::Field;
+
+    let spec = spec.trim();
+    let (name, at) = match spec.split_once('@') {
+        None => (spec, None),
+        Some((name, depth)) => {
+            let n = depth
+                .trim()
+                .parse::<u8>()
+                .ok()
+                .filter(|n| *n >= 1)
+                .ok_or_else(|| {
+                    ParseError::Bad(depth.trim().into(), "hierarchy level, 1 or more")
+                })?;
+            (name.trim(), Some(n))
+        }
+    };
+    let field = Field::parse(name).ok_or_else(|| ParseError::Bad(name.into(), "field"))?;
+    if at.is_some() && !matches!(field, Field::Facet(_)) {
+        return Err(ParseError::Bad(
+            spec.into(),
+            "level on a field with no hierarchy",
+        ));
+    }
+    Ok(crate::shelf::Level { field, at })
 }
 
 /// Which picker: the library, or the groups you have made.
@@ -857,6 +886,33 @@ pub fn format(cmd: &Command) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// **`genre@1` parses and writes itself back** — #79's spelling, and the
+    /// round trip `:view levels` rests on.
+    #[test]
+    fn a_level_may_name_a_depth_in_the_hierarchy() {
+        let parsed = |s: &str| match super::compose_term(s) {
+            Ok(crate::cmd::ViewTerm::Levels(l)) => Ok(l),
+            Ok(other) => panic!("not a levels term: {other:?}"),
+            Err(e) => Err(e),
+        };
+
+        let both = parsed("levels genre@1,genre@2").expect("it parses");
+        assert_eq!(both.written(), "genre@1,genre@2", "it did not write back");
+        assert!(both.outer_is_multi(), "a facet level is still multi-valued");
+
+        assert_eq!(
+            parsed("levels genre,album").expect("plain").written(),
+            "genre,album",
+            "a level with no depth is unchanged"
+        );
+
+        // **A depth on something with no hierarchy is refused at the parse**,
+        // not silently ignored: nothing in the model climbs a year.
+        assert!(parsed("levels year@2,album").is_err());
+        // And a level number has to be one or more — `@0` names nothing.
+        assert!(parsed("levels genre@0,album").is_err());
+    }
+
     use super::*;
     use ratatui::crossterm::event::KeyCode;
 

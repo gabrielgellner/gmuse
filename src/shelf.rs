@@ -62,24 +62,55 @@ pub enum Levels {
     Flat,
     /// Grouped by two fields. `[artist, album]` is the tree as it has always
     /// been, said out loud rather than hardcoded.
-    By {
-        outer: crate::format::Field,
-        inner: crate::format::Field,
-    },
+    By { outer: Level, inner: Level },
+}
+
+/// One level of the tree: a field, and optionally where in its hierarchy.
+///
+/// **`genre@1` is what the `Broad; Style` tag convention imitates** — issue
+/// #79, `domain-model.md` §5. The convention exists because a view could not
+/// say "group by the broad term, then by the specific one"; a level that can
+/// name a depth is that sentence, and the compound string stops being
+/// load-bearing.
+///
+/// Depth is **1-based from the top**, as the issue writes it: `genre@1` is the
+/// broadest ancestor, `genre@2` the one under it. A concept shallower than the
+/// level asked for stands for itself rather than vanishing — the ragged case,
+/// and a row that dropped out of the tree because its genre had no parent
+/// would be a worse answer than a repeated one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Level {
+    pub field: crate::format::Field,
+    /// `None` is the value itself — every level before #79 was this.
+    pub at: Option<u8>,
+}
+
+impl Level {
+    pub fn of(field: crate::format::Field) -> Self {
+        Level { field, at: None }
+    }
+
+    /// How it would be typed, so `:view levels …` round-trips.
+    pub fn written(self) -> String {
+        match self.at {
+            None => self.field.name(),
+            Some(n) => format!("{}@{n}", self.field.name()),
+        }
+    }
 }
 
 impl Default for Levels {
     fn default() -> Self {
         Levels::By {
-            outer: crate::format::Field::FileUnder,
-            inner: crate::format::Field::Album,
+            outer: Level::of(crate::format::Field::FileUnder),
+            inner: Level::of(crate::format::Field::Album),
         }
     }
 }
 
 impl Levels {
     /// The pair to group by, or `None` when flat.
-    pub fn pair(self) -> Option<(crate::format::Field, crate::format::Field)> {
+    pub fn pair(self) -> Option<(Level, Level)> {
         match self {
             Levels::Flat => None,
             Levels::By { outer, inner } => Some((outer, inner)),
@@ -94,7 +125,7 @@ impl Levels {
     pub fn written(self) -> String {
         match self {
             Levels::Flat => "flat".to_string(),
-            Levels::By { outer, inner } => format!("{},{}", outer.name(), inner.name()),
+            Levels::By { outer, inner } => format!("{},{}", outer.written(), inner.written()),
         }
     }
     /// Whether the outer level can put one row in more than one node.
@@ -106,7 +137,10 @@ impl Levels {
         matches!(
             self,
             Levels::By {
-                outer: crate::format::Field::Facet(_),
+                outer: Level {
+                    field: crate::format::Field::Facet(_),
+                    ..
+                },
                 ..
             }
         )
@@ -633,8 +667,8 @@ mod projection {
             &l,
             members,
             Levels::By {
-                outer: genre,
-                inner: crate::format::Field::Album,
+                outer: Level::of(genre),
+                inner: Level::of(crate::format::Field::Album),
             },
             false,
         );
@@ -643,6 +677,65 @@ mod projection {
             .map(|(k, _)| by_genre.artist_name(k))
             .collect();
         assert_eq!(names, ["Folk", "Techno"], "not grouped by genre");
+    }
+
+    /// **`genre@1` groups by the broad term** — #79, and the sentence the
+    /// `Broad; Style` tag convention was imitating in a string.
+    ///
+    /// Two rows tagged `Techno` and `House`, both narrower-of `Electronic`,
+    /// are one node at level 1 and two at level 2. That is the whole shape
+    /// `domain-model.md` §5 said a view could not express.
+    #[test]
+    fn a_level_can_name_a_depth_in_the_genre_hierarchy() {
+        let mut techno = scan("Callisto", "Bodzin", Some("Bodzin"), "Luna");
+        techno.genres = vec!["Techno".into()];
+        let mut house = scan("The Sea", "Ferrell", Some("Ferrell"), "Long Time Coming");
+        house.genres = vec!["House".into()];
+
+        let mut i = Instance::new(crate::fixture::device());
+        i.ingest(100, &[techno.clone(), house.clone()]);
+        i.assert_holdings(
+            100,
+            [&techno, &house]
+                .iter()
+                .map(|s| {
+                    (
+                        crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&s.audio),
+                        format!("/m/{}.mp3", s.title),
+                    )
+                })
+                .collect(),
+        );
+        // The hierarchy is curated, not read off the tags — which is the point:
+        // once it exists, the compound string stops being load-bearing.
+        let h = crate::model::id::Id::<crate::model::entity::Hierarchy>::derived(b"browse");
+        i.narrows(100, h, crate::model::facet::GENRE, "Electronic", "Techno");
+        i.narrows(100, h, crate::model::facet::GENRE, "Electronic", "House");
+
+        let mut l = Librarian::from_catalogue(&i.catalogue());
+        l.here(crate::fixture::device());
+        let members: HashSet<CopyId> = Listing::rows(&l).into_iter().collect();
+
+        let genre = crate::format::Field::parse("genre").unwrap();
+        let names = |at: Option<u8>| {
+            let shelf = Shelf::grouped(
+                &l,
+                members.clone(),
+                Levels::By {
+                    outer: Level { field: genre, at },
+                    inner: Level::of(crate::format::Field::Album),
+                },
+                false,
+            );
+            shelf
+                .artists()
+                .map(|(k, _)| shelf.artist_name(k).to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(names(Some(1)), ["Electronic"], "the broad term is one node");
+        assert_eq!(names(Some(2)), ["House", "Techno"], "and level 2 is both");
+        assert_eq!(names(None), ["House", "Techno"], "no depth is the value");
     }
 
     /// **A multi-valued level files one copy under several nodes, and every
@@ -672,8 +765,8 @@ mod projection {
         let id = *members.iter().next().unwrap();
 
         let levels = Levels::By {
-            outer: crate::format::Field::parse("genre").unwrap(),
-            inner: crate::format::Field::Album,
+            outer: Level::of(crate::format::Field::parse("genre").unwrap()),
+            inner: Level::of(crate::format::Field::Album),
         };
         assert!(levels.outer_is_multi(), "genre must declare itself multi");
         let lib = Shelf::grouped(&l, members, levels, false);

@@ -267,25 +267,21 @@ pub struct MixEntry {
     pub at: Option<Duration>,
 }
 
-#[expect(
-    dead_code,
-    reason = "the derivation model, proposed in domain-model.md; nothing mints one"
-)]
 /// Compositional acts — a new work made out of an old one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum WorkDerivationKind {
     Arrangement,
     Medley,
     Quotation,
 }
 
-#[expect(
-    dead_code,
-    reason = "the derivation model, proposed in domain-model.md; nothing mints one"
-)]
 /// A version of a version. **A cover is not here**: it realises the existing
 /// work, as a performance does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum RecordingDerivationKind {
     Remix,
     Edit,

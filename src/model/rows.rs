@@ -317,6 +317,15 @@ pub trait Listing {
         })
     }
 
+    /// Does this facet have a hierarchy to climb? — #79.
+    ///
+    /// **So `levels genre@1` can refuse rather than look identical.** A depth
+    /// on a facet with no narrower-of edges leaves every concept standing for
+    /// itself, which draws exactly the same tree as no depth at all — a
+    /// control that quietly does nothing, and the failure this project keeps
+    /// naming. The caller asks first and says so.
+    fn places(&self, facet: crate::model::id::Id<crate::model::entity::Facet>) -> bool;
+
     /// Where to find it, and how loud the tags say it is.
     ///
     /// Separate from [`Listing::listed`] because they are asked at different

@@ -919,7 +919,10 @@ A `Level` groups. These are the shapes the model must support.
 | **hierarchy inside a vocabulary** | genre broad → genre specific                  | **traversal within the enumeration**               |
 | **graph**                         | derivations, a remix of a remix               | transitive closure with a depth bound              |
 
-The last two are what the current view design cannot express, and both are already being faked.
+The last two are what the view design could not express, and both were being faked. **Both are built now** (#79):
+`levels genre@1,genre@2` addresses a level of a vocabulary, and `derived[kind=remix & depth<=2]` is the bounded
+traversal. What neither has yet is a producer — no import path builds a genre hierarchy or a derivation edge, so the
+shapes are expressible and the data is curation still to come.
 
 ### The vocabulary hierarchy is currently a string
 

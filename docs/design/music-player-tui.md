@@ -3670,6 +3670,46 @@ Append here as decisions are made. Format: date, decision, rationale.
   The loop returns `Stop::Edit` rather than shelling out under the draw, which is the door `Stop::Refold` already
   opened: the terminal belongs to the loop, so anything that wants it runs where the loop is not.
 
+- **The two shapes a view could not express are `genre@1` and `derived[…]`** (#79, `domain-model.md` §5). Both were
+  being faked: the `Broad; Style` tag convention exists because a level could not name a place in a vocabulary, and the
+  derivation relations sat in `spine.rs` as types nothing minted.
+
+  **A level is a field and optionally a depth.** `genre@1` is the broadest ancestor, `genre@2` the one under it —
+  1-based from the top, as the issue writes it. A concept shallower than the level asked for **stands for itself**
+  rather than vanishing, which is Kimball's answer for a ragged hierarchy and the only one that keeps every row in the
+  tree. A depth on a field with no hierarchy is refused at the parse, and a depth on an axis whose hierarchy is _empty_
+  is refused at the command — it would otherwise draw exactly the tree `genre` draws, which is a control that quietly
+  does nothing.
+
+  **`derived[…]` is #93's correlated bracket applied to the second relation.** One _edge_ must satisfy every clause, so
+  "a remix at most two hops back" cannot be answered by a remix somewhere and something two hops away. A kind is
+  compared for equality and a depth is ordered, which is the difference from the claims bracket and the reason it has
+  its own parser. The walk is bounded at 16 whatever is asked: edges are rows and rows union, so two devices can author
+  a cycle neither meant, and a render must answer rather than hang.
+
+  **The two traversals do not reach into each other.** Recording derivations answer "which versions", work derivations
+  answer "which arrangements". A cover is in neither: it realises the existing work, as a performance does.
+
+  Three gaps closed on the way, each found by making the feature work rather than by looking for them:
+
+  - **`narrows` catalogued no concepts.** An edge named two ids that no fact resolved, so `at_level` had an ancestor it
+    could not put a name on and silently drew the specific term as the broad one. It now catalogues both, the rule
+    `assert_concept` already followed. The visible consequence is that a broad term no hierarchy places is a backlog
+    item like any other, which it should always have been.
+  - **The librarian carried the hierarchy's edges but not its terms.** #116 brought the edges across so `depth` could
+    walk; the labels stayed behind, and nothing noticed until something needed to _name_ an ancestor rather than count
+    hops to one.
+  - **`#[expect(dead_code)]` on the two derivation kinds retired itself** the moment a log fact used them, which is what
+    #113 chose `expect` over `allow` for.
+
+  **Many-valued dimensions do not sum, and the status line says so.** A track with three genres is under three nodes, so
+  the count reads as "groups a track is under" and never as a partition. Only a facet declares itself multi-valued —
+  artist is one value on a row in this model, so the issue's three-credited-artists example does not apply yet and the
+  message does not claim it does.
+
+  **Neither shape has a producer.** Nothing imports a genre hierarchy or a derivation edge, so both are the model ahead
+  of its callers — the established shape here, and stated rather than left to be discovered.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

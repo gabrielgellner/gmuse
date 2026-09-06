@@ -470,6 +470,19 @@ impl Librarian {
                 },
             );
         }
+        // **And the terms, which it left behind the same way** (#79). Edges
+        // without labels let `depth` walk but gave `at_level` an ancestor it
+        // could only name by falling back to the concept it started from — so
+        // `levels genre@1` silently drew the specific term as the broad one.
+        for (id, record) in &cat.concepts {
+            l.vocabulary.genres.insert(
+                *id,
+                crate::model::vocabulary::Term {
+                    id: *id,
+                    name: record.label.clone(),
+                },
+            );
+        }
         for (hierarchy, parent, child) in &cat.narrows {
             l.vocabulary
                 .edges
@@ -776,6 +789,28 @@ impl Librarian {
 impl crate::model::rows::Listing for Librarian {
     fn entries_of(&self, collection: Id<Collection>) -> Vec<Id<Recording>> {
         self.collection_entries(collection)
+    }
+
+    /// Whether any narrower-of edge places a concept on this axis.
+    ///
+    /// Asked of the child, because an edge is only useful for climbing if the
+    /// thing being climbed from is on the axis in question — a version
+    /// hierarchy must not make `levels genre@1` claim it has somewhere to go
+    /// (#117 keeps the axes apart, and this is where that matters).
+    fn places(&self, facet: Id<crate::model::entity::Facet>) -> bool {
+        // **The id says which axis it is on**, because it was minted from the
+        // facet key and the label (#117). So re-deriving from the term's name
+        // and comparing is the membership test, and no second map is needed to
+        // answer it.
+        let on_axis = |id: Id<crate::model::entity::Concept>| {
+            self.vocabulary.genres.get(&id).is_some_and(|term| {
+                crate::model::facet::ALL.iter().any(|(key, _)| {
+                    Id::<crate::model::entity::Facet>::of_key(key) == facet
+                        && Id::<crate::model::entity::Concept>::in_facet(key, &term.name) == id
+                })
+            })
+        };
+        self.vocabulary.edges.iter().any(|e| on_axis(e.child.id()))
     }
 
     fn listed(&self, id: Id<Encoding>) -> Option<crate::model::rows::Listed<'_>> {

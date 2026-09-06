@@ -67,6 +67,26 @@ pub trait Listened {
     /// three independent sets.
     fn claims(&self, recording: Id<Recording>, facet_key: &str) -> Vec<(String, String, String)>;
 
+    /// What this recording was **derived from**, bounded — #79.
+    ///
+    /// One tuple per edge on the way up, `(kind, depth)`, where depth is hops
+    /// from this recording: a remix of it is 1, a remix of that remix is 2.
+    /// Correlated for the same reason [`Self::claims`] is — "a remix at most
+    /// two hops back" is one edge satisfying both, not two independent tests.
+    ///
+    /// **The bound is not optional.** Edges are rows and rows union, so two
+    /// devices can produce a cycle neither authored, and an unbounded walk
+    /// hangs a render rather than drawing a wrong one.
+    fn derived_from(&self, recording: Id<Recording>) -> Vec<(String, i64)>;
+
+    /// The same walk over **works** rather than recordings — the other
+    /// traversal, one level up.
+    ///
+    /// Separate and it does not reach into the other: recording derivations
+    /// answer "which versions", work derivations answer "which arrangements",
+    /// and a query crossing between them would answer a question nobody asked.
+    fn work_derived_from(&self, recording: Id<Recording>) -> Vec<(String, i64)>;
+
     /// Every concept **broader than** this one, on this axis — #93's closure.
     ///
     /// Walking *up* rather than down is what makes closure cheap: a row has a
@@ -410,6 +430,36 @@ pub enum Claim {
     Confidence,
 }
 
+/// What a derivation bracket can ask about one hop — #79.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Derived {
+    /// `derived[kind=remix]` — what sort of derivation it was.
+    Kind,
+    /// `derived[depth<=2]` — how many hops back, a remix of a remix being 2.
+    ///
+    /// **The bound the model already enforces, said as a question.** A walk is
+    /// capped at 16 whatever anyone asks, because edges union and two devices
+    /// can author a cycle neither meant.
+    Depth,
+}
+
+impl Derived {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "kind" => Derived::Kind,
+            "depth" => Derived::Depth,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> String {
+        match self {
+            Derived::Kind => "kind".to_string(),
+            Derived::Depth => "depth".to_string(),
+        }
+    }
+}
+
 impl Claim {
     fn parse(name: &str) -> Option<Self> {
         Some(match name {
@@ -444,6 +494,21 @@ pub enum Expr {
     Claims {
         facet: &'static str,
         of: Vec<(Claim, Op, Value)>,
+    },
+    /// `derived[kind=remix & depth<=2]` — a bounded walk up a derivation
+    /// graph, #79 and `domain-model.md` §5.
+    ///
+    /// **The same correlated bracket as [`Expr::Claims`]**, applied to the
+    /// second relation the model has: one *edge* must satisfy every clause, so
+    /// "a remix at most two hops back" cannot be answered by a remix somewhere
+    /// and something two hops away.
+    ///
+    /// An empty bracket is "derived from anything", which is the question
+    /// `domain-model.md` writes as `derived_from(rec)`.
+    Derivation {
+        /// Works rather than recordings — the other traversal, one level up.
+        works: bool,
+        of: Vec<(Derived, Op, Value)>,
     },
     Cmp {
         selector: Selector,
@@ -562,6 +627,28 @@ impl Expr {
                 op,
                 value,
             } => compare(*selector, *op, value, t, env, memo),
+            Expr::Derivation { works, of } => {
+                let (Some(recording), Some(listened)) = (t.recording, env.listened) else {
+                    return false;
+                };
+                let edges = if *works {
+                    listened.work_derived_from(recording)
+                } else {
+                    listened.derived_from(recording)
+                };
+                edges.iter().any(|(kind, depth)| {
+                    of.iter().all(|(what, op, value)| match (what, value) {
+                        (Derived::Kind, Value::Text(glob)) => {
+                            let hit = glob.matches(kind);
+                            if *op == Op::Ne { !hit } else { hit }
+                        }
+                        (Derived::Depth, Value::Number(n)) => compare_numbers(*op, *depth, *n),
+                        // A kind is a word and a depth is a number; the parser
+                        // refuses the other pairings, so nothing reaches here.
+                        _ => false,
+                    })
+                })
+            }
             Expr::Claims { facet, of } => {
                 let (Some(recording), Some(listened)) = (t.recording, env.listened) else {
                     return false;
@@ -643,6 +730,18 @@ fn history_number(f: HistoryField, s: &Subject<'_>, env: &Env) -> Option<i64> {
     })
 }
 
+/// One numeric comparison, the six operators.
+fn compare_numbers(op: Op, held: i64, want: i64) -> bool {
+    match op {
+        Op::Eq => held == want,
+        Op::Ne => held != want,
+        Op::Lt => held < want,
+        Op::Le => held <= want,
+        Op::Gt => held > want,
+        Op::Ge => held >= want,
+    }
+}
+
 fn days_since(then: i64, now: i64) -> i64 {
     (now - then).max(0) / 86_400
 }
@@ -654,6 +753,58 @@ impl Parser {
     /// `genre[a] | genre[b]` says everything `genre[a | b]` would — where
     /// ∃x(P∧Q) does *not* distribute, which is the entire reason the bracket
     /// exists. Refusing it keeps one way to write each meaning.
+    /// The inside of a `derived[…]` — #79.
+    ///
+    /// Its own parser rather than [`Self::claims`]'s because the two brackets
+    /// admit different things: a claim is compared for equality only, and a
+    /// **depth is ordered** — `depth<=2` is the whole point of the bound being
+    /// expressible. An empty bracket is "derived from anything".
+    fn derivation(&mut self, works: bool) -> Result<Expr, FilterError> {
+        let what = if works { "work_derived" } else { "derived" };
+        let mut of = Vec::new();
+        if self.peek() == Some(&Token::CloseBracket) {
+            self.next();
+            return Ok(Expr::Derivation { works, of });
+        }
+        loop {
+            let name = match self.next() {
+                Some(Token::Word(w)) => w,
+                _ => return Err(FilterError::EmptyBracket { facet: what }),
+            };
+            let clause = Derived::parse(&name).ok_or(FilterError::NotAClaim { name })?;
+            let op = match self.next() {
+                Some(Token::Op(op)) => op,
+                _ => return Err(FilterError::ExpectedOperator(clause.name())),
+            };
+            // A kind is a word, so ordering it means nothing; a depth is a
+            // number, and ordering it is the reason the clause exists.
+            if clause == Derived::Kind && !matches!(op, Op::Eq | Op::Ne) {
+                return Err(FilterError::NotOrderable {
+                    field: clause.name(),
+                    op: "an ordering",
+                });
+            }
+            let value = match (clause, self.next()) {
+                (Derived::Depth, Some(Token::Word(w))) => match w.parse::<i64>() {
+                    Ok(n) => Value::Number(n),
+                    Err(_) => return Err(FilterError::NotANumber(w)),
+                },
+                (Derived::Kind, Some(Token::Word(w) | Token::Quoted(w))) => {
+                    Value::Text(Glob::new(&w))
+                }
+                _ => return Err(FilterError::ExpectedOperator(clause.name())),
+            };
+            of.push((clause, op, value));
+            match self.next() {
+                Some(Token::CloseBracket) => break,
+                Some(Token::And) => {}
+                Some(Token::Or) => return Err(FilterError::OrInBracket),
+                _ => return Err(FilterError::UnclosedBracket { facet: what }),
+            }
+        }
+        Ok(Expr::Derivation { works, of })
+    }
+
     fn claims(&mut self, facet: &'static str) -> Result<Expr, FilterError> {
         let mut of = Vec::new();
         loop {
@@ -1080,6 +1231,17 @@ impl Parser {
         // changes what the word means: `genre` is a value on the row and
         // `genre[…]` is a question about the assertions behind it.
         if self.peek() == Some(&Token::OpenBracket) {
+            // **The second relation the model has** (#79). Same bracket, and
+            // deliberately not a facet: a derivation is an edge between
+            // recordings, not a concept asserted about one.
+            if let Some(works) = match name.as_str() {
+                "derived" => Some(false),
+                "work_derived" => Some(true),
+                _ => None,
+            } {
+                self.next();
+                return self.derivation(works);
+            }
             let Some(facet) = crate::model::facet::key_of(&name) else {
                 return Err(FilterError::NotAnAxis { name });
             };
@@ -1229,6 +1391,77 @@ mod tests {
         Expr::parse(expr)
             .expect("should parse")
             .compile(Env::default())(&subject)
+    }
+
+    /// **`derived[…]` is a bounded walk up the derivation graph** — #79 and
+    /// `domain-model.md` §5, and the same correlated bracket #93 built for
+    /// claims applied to the second relation the model has.
+    #[test]
+    fn a_derivation_is_asked_about_by_kind_and_by_depth() {
+        let t = track();
+        // A remix one hop back, and an edit of that remix two hops back.
+        let h = Fake {
+            derived: vec![("remix".into(), 1), ("edit".into(), 2)],
+            ..Default::default()
+        };
+
+        assert!(matches_env("derived[]", &t, &h, 0), "derived from anything");
+        assert!(matches_env("derived[kind=remix]", &t, &h, 0));
+        assert!(!matches_env("derived[kind=dub]", &t, &h, 0));
+        assert!(matches_env("derived[depth<=2]", &t, &h, 0));
+        assert!(!matches_env("derived[depth>2]", &t, &h, 0));
+
+        // **Correlated, which is what the bracket is for.** There is a remix
+        // and there is something two hops back, but the remix is *one* hop —
+        // so no single edge is both, and two independent tests would have said
+        // yes.
+        assert!(
+            !matches_env("derived[kind=remix & depth=2]", &t, &h, 0),
+            "the bracket lost the correlation"
+        );
+        assert!(matches_env("derived[kind=edit & depth=2]", &t, &h, 0));
+    }
+
+    /// **Nothing derived answers no**, rather than an empty walk reading as a
+    /// match — the same rule a missing field follows.
+    #[test]
+    fn a_recording_derived_from_nothing_matches_nothing() {
+        let t = track();
+        let h = Fake::default();
+        assert!(!matches_env("derived[]", &t, &h, 0));
+        assert!(!matches_env("derived[kind=remix]", &t, &h, 0));
+    }
+
+    /// **The two traversals do not reach into each other.** Recording
+    /// derivations answer "which versions"; work derivations answer "which
+    /// arrangements", and a query crossing between them would answer a
+    /// question nobody asked.
+    #[test]
+    fn work_derivations_are_a_separate_traversal() {
+        let t = track();
+        let h = Fake {
+            work_derived: vec![("arrangement".into(), 1)],
+            ..Default::default()
+        };
+        assert!(matches_env("work_derived[kind=arrangement]", &t, &h, 0));
+        assert!(
+            !matches_env("derived[kind=arrangement]", &t, &h, 0),
+            "a work derivation answered a recording question"
+        );
+    }
+
+    /// A kind is a word, so ordering it means nothing and is refused — the
+    /// same rule the claims bracket follows. A depth is a number and ordering
+    /// it is the entire point.
+    #[test]
+    fn a_kind_cannot_be_ordered_and_a_depth_can() {
+        assert!(Filter::parse("derived[kind>remix]").is_err());
+        assert!(Filter::parse("derived[depth<=2]").is_ok());
+        assert!(Filter::parse("derived[depth=x]").is_err());
+        assert!(Filter::parse("derived[nonsense=1]").is_err());
+        // `|` inside a bracket is refused here for the reason it is refused
+        // there: ∃x(P∨Q) distributes, so it says nothing the outer `|` cannot.
+        assert!(Filter::parse("derived[kind=remix | kind=edit]").is_err());
     }
 
     /// **Every axis is queryable, and a new one costs a line** — #117.
@@ -1747,6 +1980,9 @@ mod tests {
         broader: Vec<String>,
         /// `(label, basis, confidence)` per claim, as the fold holds them.
         claims: Vec<(String, String, String)>,
+        /// `(kind, depth)` per derivation edge, as the bounded climb returns.
+        derived: Vec<(String, i64)>,
+        work_derived: Vec<(String, i64)>,
     }
 
     impl Listened for Fake {
@@ -1764,6 +2000,12 @@ mod tests {
         }
         fn claims(&self, _: Id<Recording>, _: &str) -> Vec<(String, String, String)> {
             self.claims.clone()
+        }
+        fn derived_from(&self, _: Id<Recording>) -> Vec<(String, i64)> {
+            self.derived.clone()
+        }
+        fn work_derived_from(&self, _: Id<Recording>) -> Vec<(String, i64)> {
+            self.work_derived.clone()
         }
         fn broader(&self, _: &str, label: &str) -> Vec<String> {
             // The fixture's chain, from wherever the label sits upward.
@@ -1786,6 +2028,8 @@ mod tests {
             collected: 0,
             broader: Vec::new(),
             claims: Vec::new(),
+            derived: Vec::new(),
+            work_derived: Vec::new(),
         }
     }
 

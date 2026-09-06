@@ -940,7 +940,82 @@ impl Instance {
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
     )]
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — nothing imports derivation relations, and `derived[…]` reads the fold rather than writing it"
+    )]
+    /// Say one recording was made out of another — a remix, an edit, a dub
+    /// (#79).
+    ///
+    /// **`from` is the original.** Reading the fact as "`to` is derived from
+    /// `from`" is the only order that makes `derived[depth<=2]` mean what
+    /// `domain-model.md` §5 says: two hops back toward the thing it came out
+    /// of, not two hops forward into what came out of it.
+    pub fn derives(
+        &mut self,
+        now: i64,
+        from: Id<Recording>,
+        to: Id<Recording>,
+        kind: crate::model::spine::RecordingDerivationKind,
+    ) {
+        self.append(now, Fact::RecordingDerived { from, to, kind });
+    }
+
+    /// Take a derivation back. Shadows rather than deletes, for the reason
+    /// every retraction here does: a stale replica would resurrect it.
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — nothing imports derivation relations, and `derived[…]` reads the fold rather than writing it"
+    )]
+    pub fn retract_derivation(
+        &mut self,
+        now: i64,
+        from: Id<Recording>,
+        to: Id<Recording>,
+        kind: crate::model::spine::RecordingDerivationKind,
+    ) {
+        self.append(now, Fact::RecordingDerivationRetracted { from, to, kind });
+    }
+
+    /// The other traversal, one level up: one work made out of another.
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — nothing imports derivation relations, and `derived[…]` reads the fold rather than writing it"
+    )]
+    pub fn work_derives(
+        &mut self,
+        now: i64,
+        from: Id<crate::model::entity::Work>,
+        to: Id<crate::model::entity::Work>,
+        kind: crate::model::spine::WorkDerivationKind,
+    ) {
+        self.append(now, Fact::WorkDerived { from, to, kind });
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — nothing imports derivation relations, and `derived[…]` reads the fold rather than writing it"
+    )]
+    pub fn retract_work_derivation(
+        &mut self,
+        now: i64,
+        from: Id<crate::model::entity::Work>,
+        to: Id<crate::model::entity::Work>,
+        kind: crate::model::spine::WorkDerivationKind,
+    ) {
+        self.append(now, Fact::WorkDerivationRetracted { from, to, kind });
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the genre hierarchy is curated and no import path builds one"
+    )]
     /// Say that one concept is narrower than another, inside one hierarchy.
+    ///
+    /// **Both concepts are catalogued first**, the same rule
+    /// [`Self::assert_concept`] follows: an id that no fact resolves is an id
+    /// nobody can render, and an edge naming two of them would give
+    /// `levels genre@1` an ancestor it could not put a name on (#79).
     pub fn narrows(
         &mut self,
         now: i64,
@@ -949,6 +1024,18 @@ impl Instance {
         parent: &str,
         child: &str,
     ) {
+        let facet = Id::<crate::model::entity::Facet>::of_key(facet_key);
+        for label in [parent, child] {
+            self.append(
+                now,
+                Fact::ConceptCatalogued {
+                    facet,
+                    concept: Id::<Concept>::in_facet(facet_key, label),
+                    label: label.trim().to_string(),
+                    node_label: false,
+                },
+            );
+        }
         self.append(
             now,
             Fact::HierarchyNarrowed {

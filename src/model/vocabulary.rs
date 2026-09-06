@@ -165,6 +165,50 @@ impl Vocabulary {
         MAX_DEPTH
     }
 
+    /// The label of this concept's ancestor at level `at`, 1-based from the
+    /// top — `domain-model.md` §5's `genre@1`, issue #79.
+    ///
+    /// `genre@1` is the broadest term and `genre@2` the one under it, which is
+    /// what the `Broad; Style` tag convention imitates in a string.
+    ///
+    /// **A concept shallower than the level asked for stands for itself.** The
+    /// ragged case, and the alternative is a row dropping out of the tree
+    /// because its genre happened to have no parent — a worse answer than a
+    /// repeated one, and the same choice Kimball makes for a ragged hierarchy.
+    ///
+    /// A label the vocabulary has never heard of is also itself. Genres reach
+    /// the tree from tags today and the hierarchy is curated separately, so
+    /// "not in the codelist" is the ordinary case rather than an error.
+    pub fn at_level(&self, label: &str, at: u8) -> String {
+        let id = Id::<Concept>::in_facet(facet::GENRE, label);
+        // `depth` counts hops *up* to a root, so a concept at depth d sits at
+        // level d+1 counting down from the top. Climbing `d + 1 - at` hops
+        // lands on the ancestor the level names.
+        let depth = self.depth(id);
+        let Some(climb) = (depth + 1).checked_sub(at as usize) else {
+            return label.to_string();
+        };
+        let mut here = id;
+        for _ in 0..climb {
+            // **The shortest way up**, the same reading `depth` takes: a
+            // concept may be narrower-of two things, and one slot wants the
+            // broadest.
+            let Some(parent) = self
+                .edges
+                .iter()
+                .filter(|e| e.child.id() == here)
+                .map(|e| e.parent.id())
+                .min_by_key(|p| self.depth(*p))
+            else {
+                break;
+            };
+            here = parent;
+        }
+        self.genres
+            .get(&here)
+            .map_or_else(|| label.to_string(), |g| g.name.clone())
+    }
+
     pub fn under(&self, hierarchy: Id<Hierarchy>, root: Id<Concept>) -> BTreeSet<Id<Concept>> {
         let mut seen = BTreeSet::from([root]);
         let mut frontier = vec![root];
@@ -864,8 +908,15 @@ mod hierarchy_retraction_tests {
                 browse(),
                 Id::<crate::model::entity::Facet>::of_key(facet::GENRE)
             ),
-            [Id::<Concept>::in_facet(facet::GENRE, "Techno")]
+            // **Both**, and `Electronic` is there because `narrows` catalogues
+            // the concepts it names now (#79). It was absent before only
+            // because nothing had ever declared it — an edge that named a
+            // concept no fact resolved, which is what left `levels genre@1`
+            // with an ancestor it could not put a name on. A broad term that
+            // no hierarchy places is a backlog item like any other.
+            ["Electronic", "Techno"]
                 .into_iter()
+                .map(|g| Id::<Concept>::in_facet(facet::GENRE, g))
                 .collect(),
             "the concept is unreachable by closure and nothing said so"
         );

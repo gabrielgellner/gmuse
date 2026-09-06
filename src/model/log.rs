@@ -262,6 +262,46 @@ pub enum Fact {
         name: String,
     },
 
+    /// **One recording is derived from another** — `domain-model.md` §5, #79.
+    ///
+    /// A remix, an edit, a dub. Row existence, so it unions across devices for
+    /// the same reason `narrows` does: there is no `Recording.derivations`
+    /// array for two curators to collide over.
+    ///
+    /// **A cover is not here.** It realises the existing work, as a
+    /// performance does, and putting it here would make "which versions of
+    /// this recording" answer with things that were never made out of it.
+    RecordingDerived {
+        /// The original — the thing the new one was made out of.
+        from: Id<Recording>,
+        to: Id<Recording>,
+        kind: crate::model::spine::RecordingDerivationKind,
+    },
+    /// Withdraw a recording derivation, for the reason every retraction here
+    /// exists: a stale replica re-delivering the edge would resurrect it.
+    RecordingDerivationRetracted {
+        from: Id<Recording>,
+        to: Id<Recording>,
+        kind: crate::model::spine::RecordingDerivationKind,
+    },
+    /// **One work is derived from another** — an arrangement, a medley, a
+    /// quotation. The other traversal, one level up.
+    ///
+    /// Separate from the recording relation and it does not reach into it:
+    /// recording derivations answer "which versions", work derivations answer
+    /// "which arrangements", and a query that crossed between them would be
+    /// answering a question nobody asked.
+    WorkDerived {
+        from: Id<crate::model::entity::Work>,
+        to: Id<crate::model::entity::Work>,
+        kind: crate::model::spine::WorkDerivationKind,
+    },
+    WorkDerivationRetracted {
+        from: Id<crate::model::entity::Work>,
+        to: Id<crate::model::entity::Work>,
+        kind: crate::model::spine::WorkDerivationKind,
+    },
+
     /// One narrower-of edge, in one hierarchy.
     ///
     /// Row existence, so it unions across devices and there is no
@@ -799,6 +839,29 @@ pub struct Catalogue {
     /// [`Catalogue::assertions_retracted`] is: a decision and a silence are
     /// different answers, and only a row can tell them apart.
     pub narrows_retracted: BTreeSet<(Id<Hierarchy>, Id<Concept>, Id<Concept>)>,
+    /// Every recording-derived-from edge. Row existence, so curation unions
+    /// exactly as `narrows` does (#79).
+    pub derived: BTreeSet<(
+        Id<Recording>,
+        Id<Recording>,
+        crate::model::spine::RecordingDerivationKind,
+    )>,
+    pub derived_retracted: BTreeSet<(
+        Id<Recording>,
+        Id<Recording>,
+        crate::model::spine::RecordingDerivationKind,
+    )>,
+    /// The other traversal, one level up: work-derived-from-work.
+    pub work_derived: BTreeSet<(
+        Id<crate::model::entity::Work>,
+        Id<crate::model::entity::Work>,
+        crate::model::spine::WorkDerivationKind,
+    )>,
+    pub work_derived_retracted: BTreeSet<(
+        Id<crate::model::entity::Work>,
+        Id<crate::model::entity::Work>,
+        crate::model::spine::WorkDerivationKind,
+    )>,
     pub plays: BTreeMap<Id<Recording>, u32>,
     /// What each recording's identity was derived from.
     pub identified: BTreeMap<Id<Recording>, crate::model::basis::Basis>,
@@ -1135,6 +1198,26 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             } => {
                 cat.hierarchies.insert(*hierarchy, (*facet, name.clone()));
             }
+            Fact::RecordingDerived { from, to, kind } => assert_edge(
+                &mut cat.derived,
+                &mut cat.derived_retracted,
+                (*from, *to, *kind),
+            ),
+            Fact::RecordingDerivationRetracted { from, to, kind } => retract_edge(
+                &mut cat.derived,
+                &mut cat.derived_retracted,
+                (*from, *to, *kind),
+            ),
+            Fact::WorkDerived { from, to, kind } => assert_edge(
+                &mut cat.work_derived,
+                &mut cat.work_derived_retracted,
+                (*from, *to, *kind),
+            ),
+            Fact::WorkDerivationRetracted { from, to, kind } => retract_edge(
+                &mut cat.work_derived,
+                &mut cat.work_derived_retracted,
+                (*from, *to, *kind),
+            ),
             Fact::HierarchyNarrowed {
                 hierarchy,
                 parent,
@@ -1574,6 +1657,44 @@ impl Ord for Record {
 /// One impl rather than a wrapper type, because the fold already *is* the
 /// answer — plays counted, the latest rating decided, the earliest acquisition
 /// taken. Anything in between would be a second place for these to be wrong.
+/// Walk a derivation graph upward from one node, bounded — #79.
+///
+/// Breadth-first, so `depth` is the shortest way back to each ancestor, and
+/// `seen` is what stops a cycle rather than the bound. **The bound is the
+/// backstop**: edges are rows and rows union, so two devices can author a
+/// cycle neither of them meant, and a render must answer rather than hang.
+///
+/// Returns `(kind, depth)` per edge taken, which is what makes the bracket
+/// correlated: the kind and the depth come from the same hop.
+fn climb<T: Ord + Copy, F>(start: T, parents: F) -> Vec<(String, i64)>
+where
+    F: Fn(T) -> Vec<(T, String)>,
+{
+    /// Sixteen, as everywhere else here: deeper than any real chain of
+    /// remixes, shallower than a loop can hide in.
+    const MAX_DEPTH: i64 = 16;
+
+    let mut seen = std::collections::BTreeSet::from([start]);
+    let mut here = vec![start];
+    let mut out = Vec::new();
+    for depth in 1..=MAX_DEPTH {
+        let mut next = Vec::new();
+        for node in here.drain(..) {
+            for (parent, kind) in parents(node) {
+                if seen.insert(parent) {
+                    out.push((kind, depth));
+                    next.push(parent);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        here = next;
+    }
+    out
+}
+
 impl crate::filter::Listened for Catalogue {
     fn plays(&self, recording: Id<Recording>) -> u32 {
         self.plays.get(&recording).copied().unwrap_or(0)
@@ -1589,6 +1710,38 @@ impl crate::filter::Listened for Catalogue {
 
     fn rating(&self, recording: Id<Recording>) -> Option<u8> {
         self.ratings.get(&recording).copied()
+    }
+
+    fn derived_from(&self, recording: Id<Recording>) -> Vec<(String, i64)> {
+        climb(recording, |here| {
+            self.derived
+                .iter()
+                .filter(move |e| e.1 == here && !self.derived_retracted.contains(e))
+                .map(|(from, _, kind)| (*from, format!("{kind:?}").to_lowercase()))
+                .collect()
+        })
+    }
+
+    fn work_derived_from(&self, recording: Id<Recording>) -> Vec<(String, i64)> {
+        // **Through the work the recording performs.** A row is a recording,
+        // and the other traversal is one level up — so it is reached rather
+        // than merged into the recording graph.
+        let mut out = Vec::new();
+        for work in self
+            .performances
+            .iter()
+            .filter(|(r, _)| *r == recording)
+            .map(|(_, w)| *w)
+        {
+            out.extend(climb(work, |here| {
+                self.work_derived
+                    .iter()
+                    .filter(move |e| e.1 == here && !self.work_derived_retracted.contains(e))
+                    .map(|(from, _, kind)| (*from, format!("{kind:?}").to_lowercase()))
+                    .collect()
+            }));
+        }
+        out
     }
 
     fn claims(&self, recording: Id<Recording>, facet_key: &str) -> Vec<(String, String, String)> {
@@ -1680,6 +1833,60 @@ mod closure_tests {
             i.narrows(100, h, crate::model::facet::GENRE, parent, child);
         }
         i.catalogue()
+    }
+
+    /// **The derivation walk is bounded and cycle-safe** — #79, and the one
+    /// thing `domain-model.md` §5 says is not optional.
+    ///
+    /// Edges are rows and rows union, so one device saying `A derives B` while
+    /// another says `B derives A` produces a cycle neither authored. An
+    /// unbounded walk hangs the render; this answers.
+    #[test]
+    fn a_derivation_cycle_answers_rather_than_hanging() {
+        use crate::filter::Listened;
+        use crate::model::spine::RecordingDerivationKind::Remix;
+
+        let song = |n: u8| Id::<Recording>::derived(&[n]);
+        let mut i = crate::model::instance::Instance::new(Id::derived(b"laptop"));
+        // A chain that closes on itself: 1 → 2 → 3 → 1.
+        i.derives(100, song(1), song(2), Remix);
+        i.derives(100, song(2), song(3), Remix);
+        i.derives(100, song(3), song(1), Remix);
+
+        let cat = i.catalogue();
+        let up = cat.derived_from(song(3));
+        assert_eq!(
+            up.len(),
+            2,
+            "each ancestor is reached once, and the loop did not repeat them: {up:?}"
+        );
+        assert!(up.iter().all(|(_, depth)| *depth <= 16), "{up:?}");
+    }
+
+    /// **The depth is the shortest way back**, and a retraction takes an edge
+    /// out of the walk without deleting the fact.
+    #[test]
+    fn a_derivation_walk_reports_hops_and_respects_a_retraction() {
+        use crate::filter::Listened;
+        use crate::model::spine::RecordingDerivationKind::{Edit, Remix};
+
+        let song = |n: u8| Id::<Recording>::derived(&[n]);
+        let mut i = crate::model::instance::Instance::new(Id::derived(b"laptop"));
+        // 1 is the original, 2 is a remix of it, 3 is an edit of the remix.
+        i.derives(100, song(1), song(2), Remix);
+        i.derives(100, song(2), song(3), Edit);
+
+        let cat = i.catalogue();
+        let mut up = cat.derived_from(song(3));
+        up.sort();
+        assert_eq!(up, [("edit".to_string(), 1), ("remix".to_string(), 2)]);
+
+        i.retract_derivation(200, song(1), song(2), Remix);
+        assert_eq!(
+            i.catalogue().derived_from(song(3)),
+            [("edit".to_string(), 1)],
+            "a retracted edge was still walked"
+        );
     }
 
     /// **Closure walks up, at any depth** — #93.
