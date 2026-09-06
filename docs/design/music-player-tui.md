@@ -3746,6 +3746,23 @@ Append here as decisions are made. Format: date, decision, rationale.
   dimension whose counts already do not sum, so both is the consistent answer. It also returns the _vocabulary's_
   spelling rather than the tag's, because asking for a level is asking for the codelist's terms.
 
+- **The two-instance round trip covers every fact family now, not two of them** (#69). The acceptance test for the
+  no-coordinator bet was written when the model had a rename, a genre and a play in it. Everything added since has its
+  own merge rule, and a merge test that exercises two of them proves very little — the live log is 40% collection
+  entries, and not one crossed a sync in a test.
+
+  One assertion carries it: the two folds are **byte-identical** after merging both ways. Collection entries, a
+  collection's name, a saved view, a rating, a hierarchy edge and a derivation now all go through it, plus #96's
+  precedence — a tag re-import on one device against a person's retraction on the other, which has to come out the same
+  whichever direction the sync ran.
+
+  **Two findings about ordered collections, and they are different.** Filing one track into an _unordered_ crate on two
+  devices is one row: every entry takes `OrdKey::first()`, so the key is the recording and the rows union. Appending to
+  an _ordered_ one is not: a fractional index is computed from what the device can see, so two machines each holding a
+  different track compute different positions for the same new one and it lands twice. The copies still agree — this is
+  not a convergence failure — but "append the same track on both laptops" gives a playlist holding it twice. Pinned by a
+  test so it is a known shape rather than a surprise.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

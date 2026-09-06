@@ -185,6 +185,212 @@ fn two_instances_one_album_and_a_full_round_trip() {
     assert_eq!(one.plays[&callisto], 2, "neither play replaced the other");
 }
 
+/// **Both folds agree, whatever kind of fact was written** — the half of #69
+/// that only became testable as the model grew.
+///
+/// The original round trip covered a rename, a genre and two plays. Every
+/// fact family added since has its own merge rule, and the bet is that each of
+/// them converges without coordination: collection entries and hierarchy edges
+/// union as rows, a saved view and a rating are last-write-wins registers,
+/// plays are counted, and a retraction shadows rather than deletes.
+///
+/// **One assertion carries it**: the two folds are byte-identical. If any of
+/// those rules were order-dependent this would fail, and it would fail without
+/// having to guess which field to look at.
+#[test]
+fn every_fact_family_converges_without_coordination() {
+    use crate::model::entity::{Collection, Hierarchy};
+    use crate::model::ord::OrdKey;
+    use crate::model::spine::RecordingDerivationKind::Remix;
+
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let (_, callisto, _) = ids(&scan);
+    let other = Id::<Recording>::of_basis(scan[1].identity.as_ref().expect("bound fixture"));
+    m1.ingest(100, &scan);
+    m2.ingest(100, &scan);
+
+    let crate_ = Id::<Collection>::of_name("Dance");
+    let browse = Id::<Hierarchy>::derived(b"browse");
+
+    // A files one track into a crate, names a view, and rates.
+    m1.name_collection(200, crate_, "Dance", false);
+    m1.add_to_collection(210, crate_, callisto, OrdKey::first());
+    let mornings = Id::<crate::model::entity::View>::of_name("mornings");
+    m1.save_view(220, mornings, "mornings", r#"in="Dance" &rating>=4"#);
+    m1.rate(230, callisto, Some(4));
+
+    // B files the *other* track into the same crate, curates the hierarchy,
+    // and records a derivation — none of it knowing A exists.
+    m2.add_to_collection(240, crate_, other, OrdKey::first());
+    m2.narrows(250, browse, facet::GENRE, "Electronic", "Techno");
+    m2.derives(260, callisto, other, Remix);
+
+    cross_merge(&mut m1, &mut m2, 400);
+    let (one, two) = (m1.catalogue(), m2.catalogue());
+    assert_eq!(
+        postcard::to_allocvec(&one).unwrap(),
+        postcard::to_allocvec(&two).unwrap(),
+        "a fact family merged in an order-dependent way"
+    );
+
+    // And each family actually arrived, so a fold that agreed by dropping
+    // everything would not pass.
+    assert_eq!(
+        one.entries.len(),
+        2,
+        "the crate holds both devices' entries"
+    );
+    assert_eq!(one.collections[&crate_].name, "Dance");
+    assert_eq!(one.views[&mornings].source, r#"in="Dance" &rating>=4"#);
+    assert_eq!(one.ratings[&callisto], 4);
+    assert_eq!(one.narrows.len(), 1, "the hierarchy edge crossed");
+    assert_eq!(one.derived.len(), 1, "the derivation crossed");
+}
+
+/// **A retraction beats the import it shadows, whichever way the sync ran** —
+/// #96's precedence, under the only condition that matters.
+///
+/// One device re-imports a genre from tags while the other rules it out by
+/// hand. The person's decision has to survive, and it has to survive
+/// *symmetrically*: if the answer depended on merge direction there would be
+/// no such thing as "the library says", only "this copy says".
+#[test]
+fn a_persons_retraction_survives_a_sync_in_either_direction() {
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let (_, callisto, _) = ids(&scan);
+    m1.ingest(100, &scan);
+    m2.ingest(100, &scan);
+
+    // A reads the tag again. B has decided it is wrong.
+    m1.assign_genre(
+        200,
+        Described::Recording(callisto),
+        "Techno",
+        Source::TagVariant,
+        Confidence::Confirmed,
+    );
+    m2.retract_concept(
+        210,
+        Described::Recording(callisto),
+        facet::GENRE,
+        "Techno",
+        Source::Manual,
+    );
+
+    cross_merge(&mut m1, &mut m2, 400);
+    let (one, two) = (m1.catalogue(), m2.catalogue());
+    assert_eq!(
+        postcard::to_allocvec(&one).unwrap(),
+        postcard::to_allocvec(&two).unwrap(),
+        "the two copies disagree about what was ruled out"
+    );
+
+    let techno = Id::<Concept>::in_facet(facet::GENRE, "Techno");
+    assert_eq!(
+        one.assertions_retracted
+            .get(&(Described::Recording(callisto), techno)),
+        Some(&Source::Manual),
+        "a tag undid what a person ruled out"
+    );
+}
+
+/// **Two devices filing one track into one crate is one row, not two.**
+///
+/// The entry key is `(collection, position, recording)`, and a fractional
+/// index is computed locally — so two devices adding the same track to the
+/// same empty crate compute the same first position and the row unions. If
+/// they did not, a crate synced between two machines would quietly hold every
+/// independently-filed track twice, which is the failure a set cannot express
+/// and nobody would notice until they counted.
+#[test]
+fn filing_one_track_twice_on_two_devices_is_one_entry() {
+    use crate::model::entity::Collection;
+    use crate::model::ord::OrdKey;
+
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let (_, callisto, _) = ids(&scan);
+    m1.ingest(100, &scan);
+    m2.ingest(100, &scan);
+
+    let crate_ = Id::<Collection>::of_name("Dance");
+    m1.name_collection(200, crate_, "Dance", false);
+    m2.name_collection(200, crate_, "Dance", false);
+    m1.add_to_collection(210, crate_, callisto, OrdKey::first());
+    m2.add_to_collection(220, crate_, callisto, OrdKey::first());
+
+    cross_merge(&mut m1, &mut m2, 400);
+    let one = m1.catalogue();
+    assert_eq!(
+        postcard::to_allocvec(&one).unwrap(),
+        postcard::to_allocvec(&m2.catalogue()).unwrap()
+    );
+    assert_eq!(
+        one.entries.len(),
+        1,
+        "the same track filed on two machines became two rows: {:?}",
+        one.entries
+    );
+}
+
+/// **An ordered crate appended on two devices does not converge, and that is
+/// the honest answer** — pinned here so it is a known shape rather than a
+/// surprise.
+///
+/// A fractional index is computed from what the device can see. Two machines
+/// each holding a different track and each appending the *same* new one
+/// compute different positions, so the entry key differs and the rows union to
+/// two. For a sequence that is defensible — `model::view` is explicit that a
+/// sequence admits duplicates and that duplicates are entries — but it means
+/// "append the same track on both laptops" gives a playlist with it twice.
+///
+/// Unordered crates do not have this: every entry takes `OrdKey::first()`, so
+/// the key is the recording and the row unions. That is the shape `:collect`
+/// writes for a set, and the one `:add-view` writes.
+#[test]
+fn appending_to_an_ordered_crate_on_two_devices_duplicates_the_entry() {
+    use crate::model::entity::Collection;
+    use crate::model::ord::OrdKey;
+
+    let (mut m1, mut m2) = (Instance::new(device(1)), Instance::new(device(2)));
+    let scan = album();
+    let (_, callisto, _) = ids(&scan);
+    let other = Id::<Recording>::of_basis(scan[1].identity.as_ref().expect("bound"));
+    m1.ingest(100, &scan);
+    m2.ingest(100, &scan);
+
+    let list = Id::<Collection>::of_name("A Playlist");
+    m1.name_collection(200, list, "A Playlist", true);
+    m2.name_collection(200, list, "A Playlist", true);
+
+    // Each device already holds a different track, so "the end" is a different
+    // place on each.
+    let a_first = OrdKey::between(None, None);
+    m1.add_to_collection(210, list, other, a_first.clone());
+    let b_first = OrdKey::between(None, None);
+    m2.add_to_collection(210, list, callisto, b_first.clone());
+
+    // Both now append the same track after what they can see.
+    m1.add_to_collection(220, list, callisto, OrdKey::between(Some(&a_first), None));
+    m2.add_to_collection(220, list, other, OrdKey::between(Some(&b_first), None));
+
+    cross_merge(&mut m1, &mut m2, 400);
+    let one = m1.catalogue();
+    assert_eq!(
+        postcard::to_allocvec(&one).unwrap(),
+        postcard::to_allocvec(&m2.catalogue()).unwrap(),
+        "the two copies must still agree, even about the duplicate"
+    );
+    assert_eq!(
+        one.entries.len(),
+        4,
+        "two tracks, each entered twice at different positions: {:?}",
+        one.entries
+    );
+}
+
 /// **The collision §11 actually describes**, now that unbound files converge
 /// on their bytes.
 ///
