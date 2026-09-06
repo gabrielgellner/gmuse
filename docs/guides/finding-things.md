@@ -45,7 +45,13 @@ until `Enter`**: `escape` puts the cursor back exactly where the search started,
 accidental jump. Each keystroke refines one search from that origin rather than starting a new one from wherever the
 last landed, which is why backspacing walks back precisely where typing went.
 
+**`Enter` accepts the match you are looking at**, it does not move on to the next one. The list already followed you
+there while you typed; `n` is how you go to the one after it.
+
 `escape` afterwards stops the painting without losing the search — vim's `:nohlsearch` — so `n` still works.
+
+The match under the cursor is not painted, because the cursor line is painted end to end and would cover it. The other
+matches on screen show where else the word appears.
 
 `/` searches the artist, the album and the title together, and paints whatever part of the match the row actually shows.
 A row that matched on its artist is still where the cursor goes, even in a list that only displays titles.

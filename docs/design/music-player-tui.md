@@ -3963,6 +3963,23 @@ Append here as decisions are made. Format: date, decision, rationale.
   and these are not rows. Reading part of the input as a filter would silently drop it, so for this source the whole
   line is the name.
 
+- **`Enter` accepts the match, and the tree paints them.** Two search bugs, both of which the code already claimed not
+  to have.
+
+  `incsearch` moves the cursor to the match while you type, and `Enter` then ran the search _again_ from where it had
+  landed — so `/bur` previewed the first Burial and `Enter` jumped to the second. The comment at that line already read
+  "the preview is over; where it landed is where we stay". It records the search and keeps the cursor now, which is what
+  vim does and what the comment said.
+
+  And `list::highlighted` says of itself that it is one helper "so the tree and the flat lists highlight" — the tree was
+  the one that never called it, so `/` in the library view moved the cursor and painted nothing. The guide had been
+  promising "every match is painted where it matched" for as long as it has existed.
+
+  **A match under the cursor is not painted, and that is not a third bug.** ratatui's `highlight_style` paints the
+  selected row end to end and wins over any span style, which the helper's doc has always said. A test whose needle
+  matched only the row the search had just moved to therefore proved nothing — worth knowing before writing the next
+  one.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

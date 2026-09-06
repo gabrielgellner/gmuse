@@ -2092,18 +2092,7 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
                     Ok(None) => {}
                     Err(e) => ui.notify(e.to_string()),
                 },
-                PromptKind::Search(dir) => {
-                    // The preview is over; where it landed is where we stay.
-                    ui.search_origin = None;
-                    execute(
-                        ui,
-                        ctx,
-                        Command::Search {
-                            pattern: prompt.buffer,
-                            dir,
-                        },
-                    );
-                }
+                PromptKind::Search(dir) => commit_search(ui, prompt.buffer, dir),
             }
         }
         _ => {}
@@ -4454,6 +4443,24 @@ fn incsearch(ui: &mut Ui, ctx: &Context<'_>) {
     run_search(ui, ctx, &pattern, dir);
 }
 
+/// `Enter`: the preview is over, and **where it landed is where we stay**.
+///
+/// It used to run the search again here, from the cursor `incsearch` had
+/// already moved — so `/bur` previewed the first Burial and `Enter` jumped
+/// past it to the second. The comment said the right thing and the code did
+/// not: in vim, `<CR>` accepts the match you are looking at.
+///
+/// So this records the search and keeps the highlight without moving. `n` is
+/// how you go to the next one, which is the whole reason `n` exists.
+fn commit_search(ui: &mut Ui, pattern: String, dir: SearchDir) {
+    ui.search_origin = None;
+    if pattern.is_empty() {
+        return;
+    }
+    ui.highlight = Some(crate::text::Needle::new(&pattern));
+    ui.last_search = Some((pattern, dir));
+}
+
 /// `Esc`, or backspacing past the sigil: put the cursor back and stop
 /// highlighting. The search never happened.
 fn abandon_search(ui: &mut Ui) {
@@ -5796,6 +5803,12 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
                     ui.theme.get(theme::Role::Gutter),
                 ));
             }
+            // **The tree highlights what a search matched, like every other
+            // list.** `list::highlighted` says in its own doc that it is one
+            // helper "so the tree and the flat lists highlight" — and the tree
+            // was the one that never called it, so `/` moved the cursor and
+            // left you to work out why.
+            let needle = ui.highlight.as_ref();
             match row {
                 tree::Row::Track { id, .. } => {
                     let style = if ui.playback.current == Some(*id) {
@@ -5809,9 +5822,17 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
                         .listed(*id)
                         .map(|row| ui.track_line.render(&row))
                         .unwrap_or_default();
-                    spans.push(Span::styled(text, style));
+                    // The rendered line, not the haystack: a search matches an
+                    // album the template does not show, and painting a range
+                    // of text nobody can see would be a lie about where.
+                    spans.extend(list::highlighted(&text, style, needle, &ui.theme));
                 }
-                _ => spans.push(Span::raw(row.label())),
+                _ => spans.extend(list::highlighted(
+                    &row.label(),
+                    Style::default(),
+                    needle,
+                    &ui.theme,
+                )),
             }
             ListItem::new(Line::from(spans))
         })
@@ -10390,6 +10411,85 @@ mod tests {
             ui.focus.last(),
             Some(crate::model::focus::Focus::Recording(_))
         ));
+    }
+
+    /// **Enter accepts the match you are looking at**, as in vim.
+    ///
+    /// `incsearch` has already moved the cursor to it, and running the search
+    /// again from there jumped one past — so `/bur` previewed the first Burial
+    /// and `Enter` took you to the second. `n` is how you go to the next one.
+    #[test]
+    fn enter_keeps_the_match_the_preview_landed_on() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+
+        press(&mut ui, &ctx, "/");
+        for c in "the".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        let previewed = current_cursor(&ui);
+        press(&mut ui, &ctx, "enter");
+        assert_eq!(
+            current_cursor(&ui),
+            previewed,
+            "enter jumped past the match it was showing"
+        );
+
+        // And the search is remembered, so `n` still goes to the next.
+        press(&mut ui, &ctx, "n");
+        assert_ne!(current_cursor(&ui), previewed, "`n` did not advance");
+    }
+
+    /// **The tree paints what a search matched**, like every other list.
+    ///
+    /// `list::highlighted` says in its own doc that it is one helper "so the
+    /// tree and the flat lists highlight", and the tree was the one that never
+    /// called it — so `/` moved the cursor and left you to work out why.
+    #[test]
+    fn the_tree_paints_the_match() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // An artist row, so the match is on the tree's own label rather than
+        // on a track line — which is the half that was never painted.
+        //
+        // **A needle matching more than one row**, because the selected row is
+        // painted end to end by the selection style and its match cannot show
+        // through — which `list::highlighted` says of itself. One match, on
+        // the row the cursor just moved to, would paint nothing and prove
+        // nothing.
+        press(&mut ui, &ctx, "/");
+        for c in "artist".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        press(&mut ui, &ctx, "enter");
+
+        let painted = |ui: &Ui| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12))
+                .expect("a terminal");
+            term.draw(|f| draw(f, ui, &ctx)).expect("a frame");
+            let buf = term.backend().buffer().clone();
+            (0..12u16)
+                .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+                // **Yellow *and* bold**, which is what `SearchMatch` is.
+                // Yellow alone also means a status notice, and the `/` sigil
+                // is one — so the looser test counted the prompt.
+                .filter(|(x, y)| {
+                    let style = buf[(*x, *y)].style();
+                    style.fg == Some(ratatui::style::Color::Yellow)
+                        && style.add_modifier.contains(ratatui::style::Modifier::BOLD)
+                })
+                .count()
+        };
+        assert!(
+            painted(&ui) >= "artist".len(),
+            "the tree did not paint the match"
+        );
+        press(&mut ui, &ctx, "escape");
+        assert_eq!(painted(&ui), 0, "`<Esc>` should have cleared it");
     }
 
     /// **`escape` leaves it the way you came in.**
