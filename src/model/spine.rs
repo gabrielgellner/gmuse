@@ -349,6 +349,8 @@ pub struct Release {
     /// not.
     pub label: Option<Ref<Label>>,
     pub catalogue_number: Option<String>,
+    /// How many discs this pressing has, where anything said — #134.
+    pub media: Option<u16>,
 }
 
 /// A disc or a side.
@@ -358,6 +360,8 @@ pub struct Medium {
     pub release: Ref<Release>,
     pub position: u16,
     pub format: Option<String>,
+    /// How many tracks this disc has, where anything said — #134.
+    pub tracks: Option<u16>,
 }
 
 /// A recording's slot on a medium.
@@ -655,6 +659,7 @@ mod tests {
                     released: Some(PartialDate::year(year)),
                     label: None,
                     catalogue_number: None,
+                    media: Some(1),
                 },
             );
             let m = Id::<Medium>::derived(title.as_bytes());
@@ -665,6 +670,7 @@ mod tests {
                     release: Ref::to(r),
                     position: 1,
                     format: Some("CD".into()),
+                    tracks: None,
                 },
             );
             let t = Id::<Track>::derived(format!("{title}-track").as_bytes());
@@ -799,6 +805,7 @@ mod tests {
                 released: Some(PartialDate::year(2015)),
                 label: None,
                 catalogue_number: Some("NON-2015".into()),
+                media: Some(1),
             },
         );
 

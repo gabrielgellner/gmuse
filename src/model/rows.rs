@@ -109,6 +109,8 @@ pub struct Listed<'a> {
     pub label: Option<&'a str>,
     /// Album, single, EP — the one answer (#133).
     pub release_type: crate::model::spine::ReleaseType,
+    /// How much of the pressing this row sits on is here (#134).
+    pub release_held: crate::model::seam::Held,
     /// And what else it also is. Empty almost always.
     pub release_secondary: &'a std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
     pub year: Option<i32>,
@@ -142,6 +144,7 @@ pub struct Drawn {
     pub concepts: std::collections::BTreeMap<Id<Facet>, Vec<String>>,
     pub label: Option<String>,
     pub release_type: crate::model::spine::ReleaseType,
+    pub release_held: crate::model::seam::Held,
     pub release_secondary: std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
     pub year: Option<i32>,
     pub bitrate: Option<u32>,
@@ -189,6 +192,7 @@ impl Listed<'_> {
             concepts: self.concepts.clone(),
             label: self.label.map(str::to_string),
             release_type: self.release_type,
+            release_held: self.release_held,
             release_secondary: self.release_secondary.clone(),
             year: self.year,
             bitrate: self.bitrate,
@@ -235,6 +239,7 @@ impl Drawn {
             concepts: &self.concepts,
             label: self.label.as_deref(),
             release_type: self.release_type,
+            release_held: self.release_held,
             release_secondary: &self.release_secondary,
             year: self.year,
             bitrate: self.bitrate,
@@ -437,6 +442,7 @@ mod tests {
             label: Some("Warp".into()),
             // Not the defaults, so a round trip that dropped them would show.
             release_type: crate::model::spine::ReleaseType::Ep,
+            release_held: crate::model::seam::Held::Partial,
             release_secondary: [crate::model::spine::ReleaseSecondary::Live]
                 .into_iter()
                 .collect(),

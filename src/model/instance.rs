@@ -85,6 +85,14 @@ pub struct Scanned {
     /// checkable and this library has media whose numbering does not add up.
     pub disc: Option<u16>,
     pub track: Option<u16>,
+    /// **How many tracks the disc has, and how many discs the pressing has**
+    /// — #134, the denominator a partial album needs.
+    ///
+    /// Claims, like the positions above: they come from the tags and they can
+    /// be wrong. `None` is nobody saying, which is a third answer and not a
+    /// zero — 12% of this library carries neither.
+    pub track_total: Option<u16>,
+    pub disc_total: Option<u16>,
     /// When **this pressing** came out, and when the **album** first did.
     ///
     /// Two dates because the tags carry two and they disagree for 820 files
@@ -401,6 +409,7 @@ impl Instance {
                         title: album.clone(),
                         released: s.released,
                         label,
+                        media: s.disc_total,
                     },
                 );
                 let disc = s.disc.unwrap_or(1);
@@ -412,6 +421,7 @@ impl Instance {
                         release,
                         position: disc,
                         format: None,
+                        tracks: s.track_total,
                     },
                 );
                 let slot = Id::<Track>::of_track(medium, recording);
@@ -1404,6 +1414,8 @@ mod containment_tests {
             label: None,
             levels: Default::default(),
             release_kind: Default::default(),
+            track_total: None,
+            disc_total: None,
             release_secondary: Default::default(),
             sample_rate: Some(44_100),
             channels: Some(2),
@@ -1590,6 +1602,8 @@ mod credit_tests {
             label: None,
             levels: Default::default(),
             release_kind: Default::default(),
+            track_total: None,
+            disc_total: None,
             release_secondary: Default::default(),
             sample_rate: Some(44_100),
             channels: Some(2),

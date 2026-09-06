@@ -50,6 +50,13 @@ pub enum Field {
     /// derivation kind. Two meanings for one word in two scopes is how a
     /// reader stops trusting either.
     ReleaseType,
+    /// **How much of the release this row's copy sits on is here** — #134.
+    ///
+    /// `complete`, `partial`, or `unknown`. The third is not a hedge: 12% of
+    /// this library carries no track total and a release nothing identified
+    /// never will, and reading that as "I have them all" is the wrong answer
+    /// that this field exists to stop.
+    ReleaseHeld,
     Duration,
     Bitrate,
     SampleRate,
@@ -79,6 +86,7 @@ impl Field {
             | Field::Facet(_)
             | Field::Label
             | Field::ReleaseType
+            | Field::ReleaseHeld
             | Field::Path
             | Field::FileName => Kind::Text,
             Field::Track
@@ -109,6 +117,7 @@ impl Field {
             }
             "label" => Field::Label,
             "release_type" => Field::ReleaseType,
+            "release_held" => Field::ReleaseHeld,
             "duration" => Field::Duration,
             "bitrate" => Field::Bitrate,
             "samplerate" => Field::SampleRate,
@@ -174,6 +183,10 @@ impl Field {
             | Field::Year
             | Field::Label
             | Field::ReleaseType => Authorship::Correctable,
+            // **Nothing to correct here**: it is counted, not claimed —
+            // `Observed`, like a duration. The track and disc totals behind it
+            // are what a person would fix.
+            Field::ReleaseHeld => Authorship::Observed,
         }
     }
 }
@@ -201,6 +214,7 @@ impl Field {
             Field::Year => "year",
             Field::Label => "label",
             Field::ReleaseType => "release_type",
+            Field::ReleaseHeld => "release_held",
             Field::Duration => "duration",
             Field::Bitrate => "bitrate",
             Field::SampleRate => "samplerate",
@@ -281,6 +295,7 @@ impl Field {
             // Primary first, then whatever else it is — the order the tag
             // writes them in, so what shows is what the file says.
             Field::ReleaseType => r.release_types().join("; "),
+            Field::ReleaseHeld => r.release_held.written().to_string(),
             Field::Duration => {
                 let secs = r.duration.as_secs();
                 format!("{}:{:02}", secs / 60, secs % 60)

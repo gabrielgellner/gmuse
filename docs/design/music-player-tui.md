@@ -4138,6 +4138,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   still shut; its **seat is the artist**, so a cursor falling out of a fold lands there; and the motions walk it like
   any other row — `deep_fixture` now holds two collapsed rows on purpose so `][` meets one.
 
+- **2026-09-06** **A partial album needs a denominator, and there are two of them (#134).** The library knew every track
+  it held and had no idea whether that was all of them: `Medium` carried `position` and `format` and no count, so
+  "records I only have part of" was not a question the filter language lacked a verb for — there was no number to
+  compare against.
+
+  **Two counts, because one is not enough.** `Medium::tracks` is the obvious half. The half a naive version misses is
+  `Release::media`: a two-disc set whose second disc has never been seen has **no medium row at all**, so counting held
+  tracks against the discs _present_ answers "all of them" for half a record. On this library that is _All Eyez on Me_ —
+  19 tracks held, complete against what it can see, partial against what the pressing says it is.
+
+  **`Held` is three answers and the third is the point.** `Unknown` when either count is missing, for the whole release
+  rather than the quiet disc, because a release is complete only if all of it is. 440 of 6,485 files here sit on records
+  nothing counted; 468 on records held in part; 5,577 complete. Reading unknown as complete is the one wrong answer
+  worth engineering against, since it is the one that stops you noticing what is missing.
+
+  **Read from the tags, both shapes.** ID3 writes `3/12` in one frame and Vorbis writes the halves apart, so `total`
+  takes the second half of whichever carries a pair. A `0` from a tagger that fills every field is nobody saying, not a
+  claim that the record is empty.
+
+  Asked as `release_held="partial"`. `Observed` authorship rather than `Correctable`: it is counted, not claimed, and
+  the totals behind it are what a person would fix.
+
+  **What it does not do is display.** An album row reading `(3 of 12)` is the obvious payoff and a separate design
+  question — whether partial albums sort, fold or draw differently is its own issue, now that they are countable.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

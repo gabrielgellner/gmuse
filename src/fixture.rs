@@ -66,6 +66,11 @@ pub struct Tagged {
     /// otherwise, which is what a file with no tag reads as.
     pub release_kind: crate::model::spine::ReleaseType,
     pub release_secondary: std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
+    /// How many tracks the disc has and how many discs the pressing has —
+    /// #134. `None` is nobody saying, which a test about a partial album has
+    /// to be able to say too.
+    pub track_total: Option<u16>,
+    pub disc_total: Option<u16>,
 }
 
 impl Tagged {
@@ -90,6 +95,8 @@ impl Tagged {
             size: self.size,
             seen: Scanned {
                 release_kind: self.release_kind,
+                track_total: self.track_total,
+                disc_total: self.disc_total,
                 release_secondary: self.release_secondary.clone(),
                 audio,
                 title: self

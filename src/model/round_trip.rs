@@ -69,6 +69,10 @@ fn album() -> Vec<Scanned> {
         label: None,
         levels: Default::default(),
         release_kind: Default::default(),
+        // The album is two tracks long and both are here, so the round trip
+        // has a `Held::Complete` to agree about (#134).
+        track_total: Some(2),
+        disc_total: Some(1),
         sample_rate: Some(44_100),
         channels: Some(2),
     };

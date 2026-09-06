@@ -194,6 +194,13 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
             .collect(),
         disc: number(&get(ItemKey::DiscNumber)),
         track: number(&get(ItemKey::TrackNumber)),
+        // **The totals, and they are the last half of `3/12`.** Where a tag
+        // writes both in one frame, `number` above takes the first and this
+        // takes the second; where the format carries them apart, both read
+        // the whole value. Zero is nobody saying rather than a disc of no
+        // tracks, which is not a thing (#134).
+        track_total: total(&get(ItemKey::TrackTotal), &get(ItemKey::TrackNumber)),
+        disc_total: total(&get(ItemKey::DiscTotal), &get(ItemKey::DiscNumber)),
         mb_release_group: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzReleaseGroupId)).ok(),
         mb_release: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzReleaseId)).ok(),
         format: format_of(&tagged),
@@ -259,6 +266,25 @@ fn some(s: Option<String>) -> Option<String> {
 /// absent rather than zero, because zero is a position and "no idea" is not.
 fn number(s: &str) -> Option<u16> {
     s.split(['/', '-']).next()?.trim().parse().ok()
+}
+
+/// The **total**, out of a tag that may carry it beside the position — #134.
+///
+/// `total` is what the format says outright; `beside` is the position field,
+/// which in ID3 is a single `3/12` frame holding both. Whichever names a
+/// second half wins, and a bare number in the total field is the total.
+///
+/// **Zero is nobody saying.** A disc of no tracks is not a thing, and a `0`
+/// written by a tagger that fills every field must not read as a claim that
+/// the album is empty — which would make every track on it look surplus.
+fn total(total: &str, beside: &str) -> Option<u16> {
+    let after_slash = |s: &str| s.split_once('/').map(|(_, n)| n.trim().to_string());
+    after_slash(total)
+        .or_else(|| after_slash(beside))
+        .unwrap_or_else(|| total.trim().to_string())
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
 }
 
 /// How confidently this file names a recording, before anything is minted.
@@ -555,6 +581,25 @@ mod tests {
             ItemValue::Text(value.into()),
         ));
         tag.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    /// **The totals are the second half of `3/12`** — #134.
+    ///
+    /// ID3 writes the position and the total in one frame; Vorbis writes them
+    /// apart. Both have to read, and a `0` written by a tagger that fills
+    /// every field must not read as a claim that the album is empty.
+    #[test]
+    fn a_total_is_read_from_either_shape_and_zero_is_nobody_saying() {
+        assert_eq!(total("12", ""), Some(12), "written on its own");
+        assert_eq!(total("", "3/12"), Some(12), "the second half of the pair");
+        assert_eq!(total("3/12", "3/12"), Some(12), "both halves in one frame");
+        assert_eq!(total(" 12 ", ""), Some(12));
+
+        assert_eq!(total("", ""), None, "nobody said");
+        assert_eq!(total("", "3"), None, "a position is not a total");
+        assert_eq!(total("0", ""), None, "a disc of no tracks is not a thing");
+        assert_eq!(total("", "1/0"), None);
+        assert_eq!(total("many", ""), None);
     }
 
     /// **A release is one primary type and any number of secondary ones** —

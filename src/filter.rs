@@ -987,6 +987,7 @@ pub(crate) fn texts_of(f: Field, s: &Subject<'_>) -> Vec<String> {
         // Primary and secondaries alike, so `release_type="compilation"`
         // finds an `album/compilation` — #133.
         Field::ReleaseType => r.release_types(),
+        Field::ReleaseHeld => vec![r.release_held.written().to_string()],
         // The two that need the file's whereabouts, asked at the moment of
         // matching and not kept.
         Field::Path => one(s.locator),
@@ -1394,6 +1395,62 @@ mod tests {
         Expr::parse(expr)
             .expect("should parse")
             .compile(Env::default())(&subject)
+    }
+
+    /// **A partly held album is askable** — #134, which is the whole issue:
+    /// the library knew every track it held and had no idea whether that was
+    /// all of them.
+    #[test]
+    fn a_partly_held_album_can_be_asked_for() {
+        let drawn_of = |s: &crate::scan::Holdings| {
+            let l = crate::fixture::from_holdings(s);
+            let id = crate::model::rows::Listing::rows(&l)[0];
+            crate::model::rows::Listing::listed(&l, id)
+                .expect("a fixture row draws")
+                .owned()
+        };
+
+        // Two tracks of a record the tags say has three.
+        let mut short = crate::scan::Holdings::new();
+        for (n, title) in [(1u32, "One"), (2, "Two")] {
+            short.upsert(crate::fixture::Tagged {
+                path: format!("/m/Band/Record/{n}.mp3").into(),
+                artist: Some("Band".into()),
+                album: Some("Record".into()),
+                title: Some(title.into()),
+                tracknumber: Some(n),
+                track_total: Some(3),
+                disc_total: Some(1),
+                ..Default::default()
+            });
+        }
+        let drawn = drawn_of(&short);
+        let subject = Subject {
+            row: drawn.listed(),
+            locator: None,
+            recording: None,
+        };
+        let asks = |q: &str| Expr::parse(q).expect("parses").compile(Env::default())(&subject);
+        assert!(asks(r#"release_held="partial""#), "two of three is partial");
+        assert!(!asks(r#"release_held="complete""#));
+
+        // **The third answer shows itself.** Without a total the library
+        // cannot tell short from whole, and saying "complete" would be the one
+        // wrong answer that loses the question.
+        let mut quiet = crate::scan::Holdings::new();
+        quiet.upsert(crate::fixture::Tagged {
+            path: "/m/Band/Other/1.mp3".into(),
+            artist: Some("Band".into()),
+            album: Some("Other".into()),
+            title: Some("Alone".into()),
+            tracknumber: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(
+            drawn_of(&quiet).release_held,
+            crate::model::seam::Held::Unknown,
+            "nothing said how long the record is"
+        );
     }
 
     /// **`release_type` asks the primary type *or* any secondary** — #133.

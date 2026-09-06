@@ -108,6 +108,23 @@ and each answers to all three.
 **A file whose tags say nothing is an album.** Almost everything is, so that is the cheapest wrong answer available; it
 also means `release_type="album"` is "an album, or nothing said", which is not the same as a claim that somebody made.
 
+## How much of a record you have
+
+    :filter release_held="partial"     records you have some of
+    :filter release_held="complete"    records you have all of
+    :filter release_held="unknown"     records nothing counted
+
+The tags say how long a record is — `3/12` is track three of twelve — so the library can tell short from whole. Of the
+6,485 files here: 5,577 sit on records held complete, 468 on records held in part, and 440 on records nothing counted.
+
+**Unknown is a real answer and not a hedge.** A file whose tags carry no total, or a record nothing has identified,
+cannot be measured — and calling that "complete" would be the one wrong answer worth avoiding, because it is the one
+that stops you noticing what is missing.
+
+It counts discs too. A two-disc set whose second disc you have never seen has no disc to be short of; the pressing's own
+disc count is what catches it, which is why _All Eyez on Me_ reads partial at 19 tracks rather than complete at 19 of
+the 19 it can see.
+
 ## Catalogs — which bodies of music
 
 Catalogs are named and persistent, and they **union**: turn on jazz and blues and you get both. A filter then

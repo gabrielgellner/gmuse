@@ -536,6 +536,7 @@ impl Librarian {
                     title: r.title.clone(),
                     released: r.released,
                     label: r.label.map(crate::model::id::Ref::to),
+                    media: r.media,
                     catalogue_number: None,
                 },
             );
@@ -548,6 +549,7 @@ impl Librarian {
                     release: crate::model::id::Ref::to(m.release),
                     position: m.position,
                     format: m.format.clone(),
+                    tracks: m.tracks,
                 },
             );
         }
@@ -1068,6 +1070,10 @@ impl Librarian {
             // whether that record is a single is not something a pressing
             // changes. A row on no release is an album by default — the same
             // default a file with no tag gets (#133).
+            // **Asked of the pressing this copy sits on** (#134), which is
+            // the thing that has a track count. The release group is the album
+            // across its editions and a bonus disc belongs to one of them.
+            release_held: on_release.map(|r| self.held_of(r.id)).unwrap_or_default(),
             release_type: group
                 .and_then(|g| self.spine.groups.get(&g))
                 .map(|g| g.kind)
@@ -1090,6 +1096,54 @@ impl Librarian {
             sample_rate: encoding.sample_rate,
             channels: encoding.channels,
         })
+    }
+
+    /// **How much of this pressing is here** — #134.
+    ///
+    /// Two counts have to agree for "complete", and the second is the one a
+    /// naive version forgets: a release whose second disc has never been seen
+    /// has **no medium row at all**, so counting held tracks against the discs
+    /// present answers "all of them" for half a record. The disc count is what
+    /// closes that.
+    ///
+    /// Either count missing is [`Held::Unknown`] — for the whole release, not
+    /// just the disc that was quiet, because a release is complete only if all
+    /// of it is and an unknown part makes the whole unknown.
+    pub fn held_of(&self, release: Id<crate::model::entity::Release>) -> Held {
+        let Some(pressing) = self.spine.releases.get(&release) else {
+            return Held::Unknown;
+        };
+        let media: Vec<_> = self
+            .spine
+            .media
+            .values()
+            .filter(|m| m.release.id() == release)
+            .collect();
+
+        // **The discs nobody has seen.** Fewer rows than the pressing says it
+        // has means at least one disc is missing entirely.
+        let Some(discs) = pressing.media else {
+            return Held::Unknown;
+        };
+        if usize::from(discs) > media.len() {
+            return Held::Partial;
+        }
+
+        for medium in media {
+            let Some(total) = medium.tracks else {
+                return Held::Unknown;
+            };
+            let here = self
+                .spine
+                .tracks
+                .values()
+                .filter(|t| t.medium.id() == medium.id)
+                .count();
+            if here < usize::from(total) {
+                return Held::Partial;
+            }
+        }
+        Held::Complete
     }
 
     /// The album a recording sits on, if any.
@@ -1325,6 +1379,32 @@ pub struct Row {
     pub available: bool,
 }
 
+/// **How much of a release this library holds** — #134.
+///
+/// Three answers, and the third is the point. "I do not know how many there
+/// are" must not read as "I have them all": 12% of this library carries no
+/// total, and a release nothing identified never will.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Held {
+    /// Every disc it is known to have, and every track on each of them.
+    Complete,
+    /// Some of it, and the library knows there is more.
+    Partial,
+    /// Nobody said how many there are.
+    #[default]
+    Unknown,
+}
+
+impl Held {
+    pub const fn written(self) -> &'static str {
+        match self {
+            Held::Complete => "complete",
+            Held::Partial => "partial",
+            Held::Unknown => "unknown",
+        }
+    }
+}
+
 /// What is shown when nothing names the artist.
 pub const UNKNOWN_ARTIST: &str = "Unknown Artist";
 
@@ -1359,7 +1439,113 @@ mod tests {
     ///
     /// The librarian must not know there is a player. Nothing here reaches for
     /// a terminal, an audio device, or a key binding — and the day something
-    /// does, this fails rather than the seam quietly closing up.
+    /// does, this fails rather than the seam quietly closing up.    /// **A partial album needs a denominator, and the disc count is half of
+    /// it** — #134.
+    ///
+    /// Counting held tracks against the discs *present* answers "all of them"
+    /// for a two-disc set whose second disc has never been seen: there is no
+    /// medium row for it, so there is nothing to be short of. Only the
+    /// pressing's own disc count closes that.
+    #[test]
+    fn how_much_of_a_release_is_here() {
+        use crate::model::entity::{Medium, Release};
+        use crate::model::spine;
+
+        // One pressing, said to be two discs of two tracks each.
+        let release = Id::<Release>::derived(b"pressing");
+        let build = |discs: Option<u16>, media: &[(u16, Option<u16>, usize)]| {
+            let mut l = Librarian::default();
+            l.spine.releases.insert(
+                release,
+                spine::Release {
+                    id: release,
+                    group: crate::model::id::Ref::to(Id::derived(b"group")),
+                    title: "Two Discs".into(),
+                    released: None,
+                    label: None,
+                    catalogue_number: None,
+                    media: discs,
+                },
+            );
+            for (position, tracks, here) in media {
+                let m = Id::<Medium>::of_medium(release, *position);
+                l.spine.media.insert(
+                    m,
+                    spine::Medium {
+                        id: m,
+                        release: crate::model::id::Ref::to(release),
+                        position: *position,
+                        format: None,
+                        tracks: *tracks,
+                    },
+                );
+                for n in 0..*here {
+                    let id = Id::<crate::model::entity::Track>::derived(
+                        format!("{position}-{n}").as_bytes(),
+                    );
+                    l.spine.tracks.insert(
+                        id,
+                        spine::Track {
+                            id,
+                            medium: crate::model::id::Ref::to(m),
+                            recording: crate::model::id::Ref::to(Id::derived(
+                                format!("r{position}-{n}").as_bytes(),
+                            )),
+                            position: n as u16 + 1,
+                            title_on_release: None,
+                        },
+                    );
+                }
+            }
+            l.held_of(release)
+        };
+
+        assert_eq!(
+            build(Some(2), &[(1, Some(2), 2), (2, Some(2), 2)]),
+            Held::Complete,
+            "both discs, both full"
+        );
+        assert_eq!(
+            build(Some(2), &[(1, Some(2), 1), (2, Some(2), 2)]),
+            Held::Partial,
+            "a track short on the first disc"
+        );
+
+        // **The trap.** Disc two was never seen, so it has no medium row and
+        // nothing to be short of. Counting only what is present says complete.
+        assert_eq!(
+            build(Some(2), &[(1, Some(2), 2)]),
+            Held::Partial,
+            "a whole disc missing read as complete — the reason `media` exists"
+        );
+
+        // **Unknown is a third answer, not a hedge.** 12% of this library
+        // carries no total, and reading that as "I have them all" is the
+        // wrong answer this field exists to stop.
+        assert_eq!(
+            build(None, &[(1, Some(2), 2)]),
+            Held::Unknown,
+            "no disc count, so an unseen disc cannot be ruled out"
+        );
+        assert_eq!(
+            build(Some(1), &[(1, None, 2)]),
+            Held::Unknown,
+            "no track count on the disc that is here"
+        );
+        assert_eq!(
+            build(Some(2), &[(1, Some(2), 2), (2, None, 2)]),
+            Held::Unknown,
+            "one disc quiet makes the release unknown, not complete"
+        );
+
+        // A release the library does not hold at all.
+        assert_eq!(
+            Librarian::default().held_of(release),
+            Held::Unknown,
+            "nothing known about a release nothing holds"
+        );
+    }
+
     #[test]
     fn the_model_does_not_know_the_player_exists() {
         let forbidden = [

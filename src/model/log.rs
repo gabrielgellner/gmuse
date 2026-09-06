@@ -574,6 +574,13 @@ pub enum Fact {
         /// is what a reissue changes: the record is the same and the imprint
         /// is not.
         label: Option<Id<Label>>,
+        /// **How many discs this pressing has** — #134.
+        ///
+        /// Without it, a release whose second disc has never been seen has no
+        /// medium row at all, and "do I hold all of it" answers yes. That is
+        /// the one wrong answer this field exists to prevent.
+        #[serde(default)]
+        media: Option<u16>,
     },
 
     /// A disc or a side of a release.
@@ -586,6 +593,12 @@ pub enum Fact {
         /// here because a medium without one is a disc nobody can describe,
         /// and adding the field later means a migration.
         format: Option<String>,
+        /// **How many tracks this disc has** — #134, and the denominator the
+        /// library never had. `None` is "nobody said", which must stay
+        /// distinct from "I have them all": 12% of this library carries no
+        /// total at all.
+        #[serde(default)]
+        tracks: Option<u16>,
     },
 
     /// Where a recording sits **on a medium**.
@@ -979,6 +992,8 @@ pub struct Released {
     pub title: String,
     pub released: Option<PartialDate>,
     pub label: Option<Id<Label>>,
+    #[serde(default)]
+    pub media: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -986,6 +1001,8 @@ pub struct Pressed {
     pub release: Id<Release>,
     pub position: u16,
     pub format: Option<String>,
+    #[serde(default)]
+    pub tracks: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1404,6 +1421,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 title,
                 released,
                 label,
+                media,
             } => {
                 cat.releases.insert(
                     *release,
@@ -1412,6 +1430,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         title: title.clone(),
                         released: *released,
                         label: *label,
+                        media: *media,
                     },
                 );
             }
@@ -1420,6 +1439,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 release,
                 position,
                 format,
+                tracks,
             } => {
                 cat.media.insert(
                     *medium,
@@ -1427,6 +1447,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         release: *release,
                         position: *position,
                         format: format.clone(),
+                        tracks: *tracks,
                     },
                 );
             }
