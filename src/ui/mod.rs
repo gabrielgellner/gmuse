@@ -10114,9 +10114,13 @@ mod tests {
         // The same audio, renumbered on disk — which is exactly what stranded
         // a four-star rating when history was keyed by path.
         let mut renamed = crate::scan::Holdings::new();
-        let mut moved = store.get(&moved_from).expect("the file").clone();
-        moved.at = moved_from.with_file_name("99 renumbered.mp3");
-        renamed.insert(moved);
+        let moved = store.get(&moved_from).expect("the file").clone();
+        renamed.take(
+            moved_from.with_file_name("99 renumbered.mp3"),
+            moved.mtime,
+            moved.size,
+            store.tag_at(&moved_from).expect("its tags").clone(),
+        );
 
         // **Same audio, same row.** The id is derived from the bytes, so the
         // rename does not even produce a different one to follow.

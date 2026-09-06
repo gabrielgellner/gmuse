@@ -95,7 +95,7 @@ pub fn librarian(
         .iter()
         .map(|h| {
             (
-                Id::<Encoding>::of_audio(&h.seen.audio),
+                Id::<Encoding>::of_audio(&h.audio),
                 h.at.to_string_lossy().into_owned(),
             )
         })
@@ -131,8 +131,7 @@ pub fn imported(
 ) -> Librarian {
     let mut log = Instance::new(device);
     log.merge(now, records);
-    let seen: Vec<Scanned> = held.iter().map(|h| h.seen.clone()).collect();
-    log.ingest(now, &seen);
+    log.ingest(now, &held.tags());
     librarian(held, log.records(), device, now)
 }
 
@@ -189,12 +188,12 @@ mod forget_and_relink {
         // The scan now sees the same audio with different tags — somebody
         // retagged it, or a tool did.
         let mut held = crate::scan::Holdings::new();
-        held.insert(crate::scan::Held {
-            at: std::path::PathBuf::from("/m/Luna/01 Callisto.flac"),
-            mtime: 0,
-            size: 0,
-            seen: imported_as("Something Else Entirely"),
-        });
+        held.take(
+            std::path::PathBuf::from("/m/Luna/01 Callisto.flac"),
+            0,
+            0,
+            imported_as("Something Else Entirely"),
+        );
 
         let l = librarian(&held, log.records(), device(), 200);
         let titles: Vec<String> = crate::model::rows::Listing::rows(&l)
@@ -215,18 +214,18 @@ mod forget_and_relink {
     #[test]
     fn a_file_on_disk_that_nothing_imported_is_not_in_the_library() {
         let mut held = crate::scan::Holdings::new();
-        held.insert(crate::scan::Held {
-            at: std::path::PathBuf::from("/m/Stranger.flac"),
-            mtime: 0,
-            size: 0,
-            seen: crate::model::instance::Scanned {
+        held.take(
+            std::path::PathBuf::from("/m/Stranger.flac"),
+            0,
+            0,
+            crate::model::instance::Scanned {
                 audio: crate::audio_id::AudioId { scheme: 1, hash: 9 },
                 title: "Stranger".into(),
                 artist: "Nobody".into(),
                 length_ms: 1000,
                 ..Default::default()
             },
-        });
+        );
 
         let bare = librarian(&held, &BTreeSet::new(), device(), 100);
         assert_eq!(
@@ -246,14 +245,15 @@ mod forget_and_relink {
     use crate::model::encoding::Format;
     use crate::model::log::Fact;
     use crate::model::spine::Recording;
-    use crate::scan::{Held, Holdings};
+    use crate::scan::Holdings;
 
-    fn file(path: &str, hash: u128) -> Held {
-        Held {
-            at: std::path::PathBuf::from(path),
-            mtime: 100,
-            size: 4_000_000,
-            seen: Scanned {
+    /// **A file, as the tags a fixture means** — #141. A holding carries the
+    /// audio id alone now, so what a test says about a file is a `Scanned` and
+    /// the store is built by declaring them.
+    fn file(path: &str, hash: u128) -> (std::path::PathBuf, Scanned) {
+        (
+            std::path::PathBuf::from(path),
+            Scanned {
                 audio: AudioId { scheme: 1, hash },
                 title: "Callisto".into(),
                 artist: "Bodzin".into(),
@@ -261,13 +261,13 @@ mod forget_and_relink {
                 album_artist: Some("Bodzin".into()),
                 ..Default::default()
             },
-        }
+        )
     }
 
-    fn store_of(files: &[Held]) -> Holdings {
+    fn store_of(files: &[(std::path::PathBuf, Scanned)]) -> Holdings {
         let mut s = Holdings::new();
-        for f in files {
-            s.insert(f.clone());
+        for (at, seen) in files {
+            s.take(at.clone(), 100, 4_000_000, seen.clone());
         }
         s
     }
@@ -342,9 +342,9 @@ mod forget_and_relink {
     fn a_re_buy_of_a_named_recording_is_a_second_encoding() {
         let mbid = uuid::Uuid::from_u128(0xca11);
         let mut mp3 = file("/m/callisto.mp3", 7);
-        mp3.seen.identity = Some(Basis::MusicBrainz(mbid));
+        mp3.1.identity = Some(Basis::MusicBrainz(mbid));
         let mut flac = file("/m/callisto.flac", 8);
-        flac.seen.identity = Some(Basis::MusicBrainz(mbid));
+        flac.1.identity = Some(Basis::MusicBrainz(mbid));
 
         let l = imported(&store_of(&[mp3, flac]), &BTreeSet::new(), device(), 100);
         assert_eq!(l.recordings().count(), 1, "a re-buy split the recording");
@@ -401,13 +401,13 @@ mod forget_and_relink {
     fn a_re_rip_in_place_replaces_the_copy_and_keeps_the_song() {
         let mbid = uuid::Uuid::from_u128(0xca11);
         let mut first = file("/m/callisto.mp3", 7);
-        first.seen.identity = Some(Basis::MusicBrainz(mbid));
+        first.1.identity = Some(Basis::MusicBrainz(mbid));
         let before = imported(&store_of(&[first]), &BTreeSet::new(), device(), 100);
         let recording = before.recordings().next().expect("a recording");
         let old = before.encodings.of(recording)[0].id;
 
         let mut better = file("/m/callisto.mp3", 9);
-        better.seen.identity = Some(Basis::MusicBrainz(mbid));
+        better.1.identity = Some(Basis::MusicBrainz(mbid));
         let after = imported(&store_of(&[better]), &BTreeSet::new(), device(), 200);
 
         assert_eq!(
@@ -468,21 +468,21 @@ mod opening {
     use crate::model::basis::Basis;
     use crate::model::encoding::Format;
     use crate::model::spine::Recording;
-    use crate::scan::{Held, Holdings};
+    use crate::scan::Holdings;
 
     fn store_with(path: &str, hash: u128) -> Holdings {
         let mut s = Holdings::new();
-        s.insert(Held {
-            at: std::path::PathBuf::from(path),
-            mtime: 100,
-            size: 4_000_000,
-            seen: Scanned {
+        s.take(
+            std::path::PathBuf::from(path),
+            100,
+            4_000_000,
+            Scanned {
                 audio: AudioId { scheme: 1, hash },
                 title: "Callisto".into(),
                 artist: "Bodzin".into(),
                 ..Default::default()
             },
-        });
+        );
         s
     }
 
@@ -518,11 +518,11 @@ mod opening {
     fn a_pressing_names_the_imprint_that_issued_it() {
         let device = Id::<Device>::derived(b"laptop");
         let mut store = Holdings::new();
-        store.insert(Held {
-            at: std::path::PathBuf::from("/m/callisto.mp3"),
-            mtime: 100,
-            size: 4_000_000,
-            seen: Scanned {
+        store.take(
+            std::path::PathBuf::from("/m/callisto.mp3"),
+            100,
+            4_000_000,
+            Scanned {
                 audio: AudioId { scheme: 1, hash: 7 },
                 title: "Callisto".into(),
                 artist: "Bodzin".into(),
@@ -531,7 +531,7 @@ mod opening {
                 label: Some("Herzblut".into()),
                 ..Default::default()
             },
-        });
+        );
         let l = imported(&store, &BTreeSet::new(), device, 100);
 
         let release = l.spine.releases.values().next().expect("a pressing");
@@ -558,11 +558,11 @@ mod opening {
     fn a_copy_carries_the_loudness_its_tags_claim() {
         let device = Id::<Device>::derived(b"laptop");
         let mut store = Holdings::new();
-        store.insert(Held {
-            at: std::path::PathBuf::from("/m/callisto.mp3"),
-            mtime: 100,
-            size: 4_000_000,
-            seen: Scanned {
+        store.take(
+            std::path::PathBuf::from("/m/callisto.mp3"),
+            100,
+            4_000_000,
+            Scanned {
                 audio: AudioId { scheme: 1, hash: 7 },
                 title: "Callisto".into(),
                 artist: "Bodzin".into(),
@@ -574,7 +574,7 @@ mod opening {
                 },
                 ..Default::default()
             },
-        });
+        );
         let l = imported(&store, &BTreeSet::new(), device, 100);
 
         let recording = l.recordings().next().expect("a recording");
@@ -598,11 +598,11 @@ mod opening {
     fn a_copy_carries_its_sample_rate_and_channels() {
         let device = Id::<Device>::derived(b"laptop");
         let mut store = Holdings::new();
-        store.insert(Held {
-            at: std::path::PathBuf::from("/m/callisto.mp3"),
-            mtime: 100,
-            size: 4_000_000,
-            seen: Scanned {
+        store.take(
+            std::path::PathBuf::from("/m/callisto.mp3"),
+            100,
+            4_000_000,
+            Scanned {
                 audio: AudioId { scheme: 1, hash: 7 },
                 title: "Callisto".into(),
                 artist: "Bodzin".into(),
@@ -610,7 +610,7 @@ mod opening {
                 channels: Some(2),
                 ..Default::default()
             },
-        });
+        );
         let l = imported(&store, &BTreeSet::new(), device, 100);
 
         let recording = l.recordings().next().expect("a recording");
@@ -706,15 +706,13 @@ mod tests {
     use crate::model::basis::Basis;
     use crate::model::encoding::Format;
     use crate::model::entity::Recording;
-    use crate::scan::{Held, Holdings};
+    use crate::scan::Holdings;
     use std::path::PathBuf;
 
-    fn track(path: &str, title: &str, artist: &str, hash: u128) -> Held {
-        Held {
-            at: PathBuf::from(path),
-            mtime: 100,
-            size: 4_000_000,
-            seen: Scanned {
+    fn track(path: &str, title: &str, artist: &str, hash: u128) -> (PathBuf, Scanned) {
+        (
+            PathBuf::from(path),
+            Scanned {
                 audio: AudioId { scheme: 1, hash },
                 artist: artist.into(),
                 album_artist: Some(artist.into()),
@@ -726,7 +724,7 @@ mod tests {
                 format: Some(Format::Mp3),
                 ..Default::default()
             },
-        }
+        )
     }
 
     fn device() -> Id<Device> {
@@ -737,7 +735,10 @@ mod tests {
     #[test]
     fn a_scanned_file_becomes_a_row() {
         let mut store = Holdings::new();
-        store.insert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
+        {
+            let (at, seen) = track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1);
+            store.take(at, 100, 4_000_000, seen);
+        }
         let l = imported(&store, &BTreeSet::new(), device(), 1_000);
 
         let recording = l.recordings().next().expect("one recording");
@@ -756,7 +757,10 @@ mod tests {
     #[test]
     fn the_log_supplies_what_the_disk_cannot() {
         let mut store = Holdings::new();
-        store.insert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
+        {
+            let (at, seen) = track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1);
+            store.take(at, 100, 4_000_000, seen);
+        }
 
         // What the recording will be, derived the same way the ladder does.
         let scratch_l = imported(&store, &BTreeSet::new(), device(), 1_000);
@@ -788,9 +792,10 @@ mod tests {
 
         // One recording, one copy here, and it is the short one.
         let mut partial = track("/m/partial.mp3", "Callisto", "Stephan Bodzin", 2);
-        partial.seen.identity = Some(Basis::MusicBrainz(mbid));
-        partial.seen.length_ms = 12_000;
-        store.insert(partial);
+        partial.1.identity = Some(Basis::MusicBrainz(mbid));
+        partial.1.length_ms = 12_000;
+        let (at, seen) = partial;
+        store.take(at, 100, 4_000_000, seen);
 
         let l = imported(&store, &BTreeSet::new(), device(), 1_000);
         let recording = l.recordings().next().expect("one recording");
@@ -832,13 +837,14 @@ mod tests {
     #[test]
     fn one_recording_however_many_copies() {
         let mut store = Holdings::new();
-        store.insert(track("/m/01 Callisto.mp3", "Callisto", "Stephan Bodzin", 1));
-        store.insert(track(
-            "/m/1 - Callisto.mp3",
-            "Callisto",
-            "Stephan Bodzin",
-            1,
-        ));
+        {
+            let (at, seen) = track("/m/01 Callisto.mp3", "Callisto", "Stephan Bodzin", 1);
+            store.take(at, 100, 4_000_000, seen);
+        }
+        {
+            let (at, seen) = track("/m/1 - Callisto.mp3", "Callisto", "Stephan Bodzin", 1);
+            store.take(at, 100, 4_000_000, seen);
+        }
 
         let l = imported(&store, &BTreeSet::new(), device(), 1_000);
         assert_eq!(

@@ -83,7 +83,12 @@ impl Tagged {
     /// **The audio id is derived from the path** unless the fixture names one,
     /// because distinct paths in a test mean distinct files — and a test about
     /// two copies of one recording says so by giving them the same id.
-    pub fn held(&self) -> crate::scan::Held {
+    /// The `Scanned` this file's tags describe.
+    ///
+    /// **Where a fixture's tags live now** (#141): a holding carries the audio
+    /// id alone, so what a test *means* by "this file has these tags" is this,
+    /// and it reaches the library the way a real one does — through `import`.
+    pub fn scanned(&self) -> Scanned {
         let audio = self.audio_id.unwrap_or(crate::audio_id::AudioId {
             scheme: 1,
             hash: u128::from(
@@ -93,42 +98,47 @@ impl Tagged {
                     .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(u64::from(b))),
             ),
         });
+        Scanned {
+            release_kind: self.release_kind,
+            track_total: self.track_total,
+            disc_total: self.disc_total,
+            release_secondary: self.release_secondary.clone(),
+            audio,
+            title: self
+                .title
+                .clone()
+                .unwrap_or_else(|| stem(&self.path).to_string()),
+            artist: self.artist.clone().unwrap_or_default(),
+            album: self.album.clone(),
+            album_artist: self.albumartist.clone(),
+            disc: self.discnumber.map(|n| n as u16),
+            track: self.tracknumber.map(|n| n as u16),
+            genres: self.genres.clone(),
+            label: self.label.clone(),
+            released: self
+                .date
+                .map(|y| crate::model::spine::PartialDate::year(y as i16)),
+            identity: self
+                .mb_recording
+                .map(crate::model::basis::Basis::MusicBrainz),
+            mb_release: self.mb_release,
+            levels: self.levels,
+            format: format_of(&self.path),
+            bitrate: self.bitrate.unwrap_or(0),
+            sample_rate: self.samplerate,
+            channels: self.channels,
+            length_ms: self.duration.as_millis() as u32,
+            ..Default::default()
+        }
+    }
+
+    pub fn held(&self) -> crate::scan::Held {
+        let seen = self.scanned();
         crate::scan::Held {
             at: self.path.clone(),
             mtime: self.mtime,
             size: self.size,
-            seen: Scanned {
-                release_kind: self.release_kind,
-                track_total: self.track_total,
-                disc_total: self.disc_total,
-                release_secondary: self.release_secondary.clone(),
-                audio,
-                title: self
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| stem(&self.path).to_string()),
-                artist: self.artist.clone().unwrap_or_default(),
-                album: self.album.clone(),
-                album_artist: self.albumartist.clone(),
-                disc: self.discnumber.map(|n| n as u16),
-                track: self.tracknumber.map(|n| n as u16),
-                genres: self.genres.clone(),
-                label: self.label.clone(),
-                released: self
-                    .date
-                    .map(|y| crate::model::spine::PartialDate::year(y as i16)),
-                identity: self
-                    .mb_recording
-                    .map(crate::model::basis::Basis::MusicBrainz),
-                mb_release: self.mb_release,
-                levels: self.levels,
-                format: format_of(&self.path),
-                bitrate: self.bitrate.unwrap_or(0),
-                sample_rate: self.samplerate,
-                channels: self.channels,
-                length_ms: self.duration.as_millis() as u32,
-                ..Default::default()
-            },
+            audio: seen.audio,
         }
     }
 }
@@ -157,9 +167,9 @@ fn format_of(path: &std::path::Path) -> Option<Format> {
 impl crate::scan::Holdings {
     /// Take in a fixture file. **Tests only.**
     pub fn upsert(&mut self, tagged: Tagged) -> crate::model::rows::CopyId {
-        let held = tagged.held();
-        let id = Id::<Encoding>::of_audio(&held.seen.audio);
-        self.insert(held);
+        let seen = tagged.scanned();
+        let id = Id::<Encoding>::of_audio(&seen.audio);
+        self.take(tagged.path.clone(), tagged.mtime, tagged.size, seen);
         id
     }
 }
@@ -187,8 +197,7 @@ pub fn from_holdings_and(
     // `gmuse shelf import`.
     let mut log = crate::model::instance::Instance::new(device());
     log.merge(100, records);
-    let seen: Vec<_> = held.iter().map(|h| h.seen.clone()).collect();
-    log.ingest(100, &seen);
+    log.ingest(100, &held.tags());
     crate::bridge::librarian(held, log.records(), device(), 100)
 }
 
@@ -199,9 +208,9 @@ impl Tagged {
     /// fixture cannot assert a row the library could not produce.
     pub fn drawn(&self) -> crate::model::rows::Drawn {
         let mut h = crate::scan::Holdings::new();
-        h.insert(self.held());
+        h.upsert(self.clone());
         let l = from_holdings(&h);
-        let id = Id::<Encoding>::of_audio(&self.held().seen.audio);
+        let id = Id::<Encoding>::of_audio(&self.held().audio);
         crate::model::rows::Listing::listed(&l, id)
             .expect("a fixture file draws a row")
             .owned()

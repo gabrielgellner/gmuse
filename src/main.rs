@@ -552,7 +552,7 @@ fn run_tui(
     let strangers = app
         .store
         .iter()
-        .filter(|h| !library_view.holds_encoding(crate::model::id::Id::of_audio(&h.seen.audio)))
+        .filter(|h| !library_view.holds_encoding(crate::model::id::Id::of_audio(&h.audio)))
         .count();
     if strangers > 0 {
         println!(

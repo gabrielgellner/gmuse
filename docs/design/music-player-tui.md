@@ -4261,6 +4261,29 @@ Append here as decisions are made. Format: date, decision, rationale.
   is taken. Nothing reads those tags any more, so the cost is a cold scan's and not the library's, and
   `populate::reconcile` (#62) is the shape that stops paying it.
 
+- **2026-09-06** **A holding is its audio id, and the tags cannot be reached from one (#141).** `Held` carried a whole
+  `Scanned` — title, artist, album, genres, key, every tag the boundary reads. After #140 the only field anything read
+  was `seen.audio`; the rest was read off disk for every changed file and discarded.
+
+  **The reason to narrow it was not the 1.7 seconds.** Measured over 6,500 files: hashing alone 16.5 s, hashing plus
+  tags 18.3 s, and a full rescan went 6.81 s → 6.09 s. The reason is that "tags are read once, at `import`" was enforced
+  by nothing but the absence of a caller — the tags sat on every holding at every launch, so the next thing wanting an
+  artist name in the scan layer would have found one, and #140's retag-is-invisible property would have quietly stopped
+  being true. It is enforced by the type now.
+
+  **The tags moved to `Holdings`, not to a `cfg(test)` field on `Held`.** The first attempt put them on `Held` behind
+  `#[cfg(test)]`, which immediately asked _production_ to fill a field it no longer has. A synthetic fixture still has
+  to carry what it means by "this file has these tags", so `Holdings` keeps them — in a test build, `#[serde(skip)]`,
+  written only by `take` — and a fixture reaches the library the way a real file does, through `import`.
+
+  **What a scan can still promise.** `a_file_whose_tags_will_not_parse_is_still_held` used to assert such a file got a
+  title. It cannot now, and the promise it makes instead is the one a holding is _for_: the audio read, so the file has
+  an identity and a rescan can skip it. Ingest being total is asserted where ingest happens.
+
+  `scan::Report::identified` is gone with it. It counted files carrying a MusicBrainz id by reading `seen.identity`, and
+  a scan that reads no tags cannot answer it — nor should it, since the log knows what has been identified and
+  `shelf query --unidentified` is where to ask.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

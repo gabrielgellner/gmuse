@@ -42,8 +42,17 @@ pub struct Held {
     /// signal available for recognising a *moved* file whose bytes are
     /// unchanged and whose path is not (#25).
     pub size: u64,
-    /// What the tags said, in the model's own boundary shape.
-    pub seen: crate::model::instance::Scanned,
+    /// **The identity of its audio, and nothing else** — #141.
+    ///
+    /// This carried a whole `Scanned` — title, artist, album, genres, key,
+    /// every tag the boundary reads. Since #140 nothing read any of it but the
+    /// hash: the log is the catalogue and tags are read once, at `import`.
+    ///
+    /// Narrowing the field is what makes that a rule rather than a habit. The
+    /// tags were sitting on every holding at every launch, so the next thing
+    /// wanting an artist name in the scan layer would have found one — and
+    /// "a retag is invisible" would have quietly stopped being true.
+    pub audio: crate::audio_id::AudioId,
 }
 
 /// What this device holds, keyed by where it is.
@@ -57,11 +66,56 @@ pub struct Held {
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Holdings {
     files: std::collections::BTreeMap<PathBuf, Held>,
+    /// **Tests only**: what a fixture said each file's tags were — #141.
+    ///
+    /// A holding carries the audio's identity and nothing else, because a scan
+    /// reads no tags. A synthetic fixture has no file to read, so the tags it
+    /// *means* have to travel somehow, and they travel here — in a test build,
+    /// where `import` is what a test is standing in for.
+    ///
+    /// Not on `Held`, which production constructs and could then be asked to
+    /// fill with something it does not have.
+    #[cfg(test)]
+    #[serde(skip)]
+    tagged: std::collections::BTreeMap<PathBuf, crate::model::instance::Scanned>,
 }
 
 impl Holdings {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Take in a file as a fixture means it — **tests only**, #141.
+    ///
+    /// The holding gets the hash off the tags rather than being handed one
+    /// separately, so a fixture cannot say one thing and hold another.
+    #[cfg(test)]
+    pub fn take(
+        &mut self,
+        at: PathBuf,
+        mtime: i64,
+        size: u64,
+        seen: crate::model::instance::Scanned,
+    ) {
+        self.insert(Held {
+            at: at.clone(),
+            mtime,
+            size,
+            audio: seen.audio,
+        });
+        self.tagged.insert(at, seen);
+    }
+
+    /// What the fixture said the tags were — **tests only**.
+    #[cfg(test)]
+    pub fn tags(&self) -> Vec<crate::model::instance::Scanned> {
+        self.tagged.values().cloned().collect()
+    }
+
+    /// The tags a fixture gave one file — **tests only**.
+    #[cfg(test)]
+    pub fn tag_at(&self, at: &Path) -> Option<&crate::model::instance::Scanned> {
+        self.tagged.get(at)
     }
 
     pub fn get(&self, at: &Path) -> Option<&Held> {
@@ -112,13 +166,6 @@ pub struct ScanReport {
     pub moves: Vec<Move>,
     /// Files that looked like audio but could not be read.
     pub errors: Vec<(PathBuf, String)>,
-    /// How many tracks have an identity that survives being moved.
-    ///
-    /// Reported because it is the number that decides how much of the library
-    /// is safe from the failure that stranded a four-star rating: a track with
-    /// a key keeps its history through a rename, a renumber and a retag, and a
-    /// track without one is still living on its path.
-    pub identified: usize,
     pub elapsed: Duration,
 }
 
@@ -207,14 +254,14 @@ pub fn scan(held: &mut Holdings, roots: &[PathBuf]) -> ScanReport {
         }
     }
 
-    for (path, mtime, size, existed, seen) in read_all(to_read) {
-        match seen {
-            Ok(seen) => {
+    for (path, mtime, size, existed, audio) in read_all(to_read) {
+        match audio {
+            Ok(audio) => {
                 held.insert(Held {
                     at: path.clone(),
                     mtime,
                     size,
-                    seen,
+                    audio,
                 });
                 if existed {
                     report.updated += 1;
@@ -247,10 +294,11 @@ pub fn scan(held: &mut Holdings, roots: &[PathBuf]) -> ScanReport {
         report.removed += 1;
     }
 
-    // **What has an identity that survives being moved.** Every holding has
-    // an audio id by construction now, so this counts the stronger rung: a
-    // file an authority has named, which survives a re-encode as well.
-    report.identified = held.iter().filter(|h| h.seen.identity.is_some()).count();
+    // **The count of authority-named files is gone from here** (#141). It read
+    // `seen.identity`, which was the last thing on a holding that came from a
+    // tag. A scan does not read tags, so it cannot answer it — and it is a
+    // library question anyway: the log knows what has been identified, and
+    // `shelf query --unidentified` is where to ask.
     report.elapsed = start.elapsed();
     report
 }
@@ -265,7 +313,7 @@ type Reading = (
     i64,
     u64,
     bool,
-    Result<crate::model::instance::Scanned, crate::model::ingest::IngestError>,
+    Result<crate::audio_id::AudioId, crate::audio_id::AudioIdError>,
 );
 
 /// Read every file that changed, over as many threads as there are cores.
@@ -290,8 +338,8 @@ fn read_all(work: Vec<Candidate>) -> Vec<Reading> {
 
     let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let one = |(path, mtime, size, existed): Candidate| {
-        let seen = crate::model::ingest::read(&path);
-        (path, mtime, size, existed, seen)
+        let audio = crate::audio_id::of(&path);
+        (path, mtime, size, existed, audio)
     };
     if threads < 2 || work.len() < WORTH_SPREADING {
         return work.into_iter().map(one).collect();
@@ -313,8 +361,8 @@ fn read_all(work: Vec<Candidate>) -> Vec<Reading> {
             scope.spawn(move || {
                 for (at, slot) in lane {
                     let (path, mtime, size, existed) = &work[at];
-                    let seen = crate::model::ingest::read(path);
-                    *slot = Some((path.clone(), *mtime, *size, *existed, seen));
+                    let audio = crate::audio_id::of(path);
+                    *slot = Some((path.clone(), *mtime, *size, *existed, audio));
                 }
             });
         }
@@ -339,7 +387,7 @@ fn read_all(work: Vec<Candidate>) -> Vec<Reading> {
 /// row, and nothing to play. So the weak half is gone, and what is left cannot
 /// be broken by a tagger — the id is computed from the packets.
 fn key(h: &Held) -> crate::audio_id::AudioId {
-    h.seen.audio
+    h.audio
 }
 
 /// Pair departures with arrivals.
@@ -470,24 +518,6 @@ mod tests {
     /// MusicBrainz recording id or an audio hash, so every one keeps its
     /// history through a rename, a renumber and a retag once the key flips.
     ///
-    /// Run with `cargo test --release how_much -- --ignored --nocapture`.
-    #[test]
-    #[ignore = "needs the real library"]
-    fn how_much_of_the_library_has_a_durable_identity() {
-        let root = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("MusicLibrary");
-        if !root.exists() {
-            return;
-        }
-        let mut store = Holdings::new();
-        let r = scan(&mut store, &[root]);
-        eprintln!(
-            "{} of {} tracks identified ({:.1}%)",
-            r.identified,
-            store.len(),
-            100.0 * r.identified as f32 / store.len() as f32
-        );
-    }
-
     use super::*;
     use crate::model::instance::Scanned;
     use lofty::prelude::ItemKey;
@@ -706,12 +736,10 @@ mod tests {
     /// — size, duration and the tags — which is what made a retag-and-move
     /// break it. Every holding has an id (#86), so what a test says is which
     /// files hold the same bytes.
-    fn held(at: &str, audio: u128, title: &str) -> Held {
-        Held {
-            at: PathBuf::from(at),
-            mtime: 1000,
-            size: 5_000_000,
-            seen: Scanned {
+    fn held(at: &str, audio: u128, title: &str) -> (PathBuf, Scanned) {
+        (
+            PathBuf::from(at),
+            Scanned {
                 audio: crate::audio_id::AudioId {
                     scheme: 1,
                     hash: audio,
@@ -726,13 +754,13 @@ mod tests {
                 channels: Some(2),
                 ..Default::default()
             },
-        }
+        )
     }
 
-    fn holdings(files: Vec<Held>) -> Holdings {
+    fn holdings(files: Vec<(PathBuf, Scanned)>) -> Holdings {
         let mut h = Holdings::new();
-        for f in files {
-            h.insert(f);
+        for (at, seen) in files {
+            h.take(at, 1000, 5_000_000, seen);
         }
         h
     }
@@ -763,9 +791,9 @@ mod tests {
     /// exactly the reorganisations worth surviving.
     #[test]
     fn a_move_that_reset_the_mtime_is_still_a_move() {
-        let mut arrived = held("/m/new/a.mp3", 1, "Song");
-        arrived.mtime = 9_999_999;
-        let h = holdings(vec![held("/m/old/a.mp3", 1, "Song"), arrived]);
+        let mut h = holdings(vec![held("/m/old/a.mp3", 1, "Song")]);
+        let (at, seen) = held("/m/new/a.mp3", 1, "Song");
+        h.take(at, 9_999_999, 5_000_000, seen);
         assert_eq!(moved(&h, "/m/old/a.mp3", "/m/new/a.mp3").len(), 1);
     }
 
@@ -879,13 +907,13 @@ mod tests {
         assert!(r.to_string().contains("2 tracks moved"), "{r}");
     }
 
-    /// **A file whose tags will not parse is still ingested** (#86).
+    /// **A file whose tags will not parse is still held** (#86, #141).
     ///
-    /// `from_path_alone` used to build the fallback record by hand: named by
-    /// its file, filed under "Unknown Artist", with whatever the properties
-    /// recovered. `model::ingest::read` is the one tag reader now and it keeps
-    /// the promise — **ingest is total** — so what this asserts is the promise
-    /// rather than the second implementation of it.
+    /// It used to assert that such a file still got a title, because the scan
+    /// read tags and ingest is total. The scan reads no tags now (#141), so
+    /// the promise it can still make is the one a holding is *for*: the audio
+    /// read, so the file has an identity and a rescan can skip it. Ingest
+    /// being total is asserted where ingest happens.
     #[test]
     fn a_file_whose_tags_will_not_parse_is_still_held() {
         let d = scan_dir("tagless");
@@ -898,9 +926,10 @@ mod tests {
         assert_eq!(report.errors, vec![], "readable audio is never an error");
         assert_eq!(store.len(), 1, "it is held");
         let held = store.get(&path).expect("at its own path");
-        assert!(
-            !held.seen.title.trim().is_empty(),
-            "named by something, so it can be found rather than being a hole"
+        assert_eq!(
+            held.audio,
+            crate::audio_id::of(&path).expect("the audio reads"),
+            "held under an identity its bytes give it, tags or no tags"
         );
         assert!(held.mtime > 0, "and a rescan can skip it");
     }
@@ -985,12 +1014,7 @@ mod tests {
         let l = crate::bridge::imported(
             &{
                 let mut h = Holdings::new();
-                h.insert(Held {
-                    at: path.clone(),
-                    mtime: 0,
-                    size: 0,
-                    seen: seen.clone(),
-                });
+                h.take(path.clone(), 0, 0, seen.clone());
                 h
             },
             &std::collections::BTreeSet::new(),

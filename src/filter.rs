@@ -1379,9 +1379,9 @@ mod tests {
     fn subject_of(t: &Track) -> (crate::model::rows::Drawn, Option<Id<Recording>>) {
         use crate::model::rows::Listing;
         let mut h = crate::scan::Holdings::new();
-        h.insert(t.held());
+        h.upsert(t.clone());
         let l = crate::fixture::from_holdings(&h);
-        let id = crate::model::id::Id::of_audio(&t.held().seen.audio);
+        let id = crate::model::id::Id::of_audio(&t.held().audio);
         (t.drawn(), l.recording_of(id))
     }
 
@@ -1416,8 +1416,7 @@ mod tests {
             ..Default::default()
         });
         let mut log = crate::model::instance::Instance::new(crate::fixture::device());
-        let held: Vec<_> = s.iter().map(|h| h.seen.clone()).collect();
-        log.ingest(100, &held);
+        log.ingest(100, &s.tags());
         let l = crate::fixture::from_holdings(&s);
         let recording =
             crate::model::rows::Listing::recording_of(&l, crate::model::rows::Listing::rows(&l)[0])
@@ -1639,9 +1638,9 @@ mod tests {
         // recording is for dancing, so this is asserted the way a curation
         // pass would assert it.
         let mut held = crate::scan::Holdings::new();
-        held.insert(instrumental.held());
+        held.upsert(instrumental.clone());
         let bare = crate::fixture::from_holdings(&held);
-        let copy = crate::model::id::Id::of_audio(&instrumental.held().seen.audio);
+        let copy = crate::model::id::Id::of_audio(&instrumental.held().audio);
         let recording = crate::model::rows::Listing::recording_of(&bare, copy).expect("scanned");
 
         let mut i = crate::model::instance::Instance::new(crate::fixture::device());

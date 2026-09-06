@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::scan::Holdings;
 
 /// Bump on any change to `Held`, `Holdings`, `Scanned`, or this envelope.
-const FORMAT_VERSION: u32 = 8;
+const FORMAT_VERSION: u32 = 9;
 const MAGIC: &[u8; 5] = b"gmuse";
 
 #[derive(Serialize, Deserialize)]
@@ -131,23 +131,20 @@ pub fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::instance::Scanned;
     use crate::scan::Held;
 
     fn held(at: &str, title: &str, artist: &str, mtime: i64, audio: u128) -> Held {
+        // **A holding is its audio and where it is** (#141) — the title and
+        // artist a caller passes are what a fixture *means*, and nothing on
+        // disk carries them any more.
+        let _ = (title, artist);
         Held {
             at: PathBuf::from(at),
             mtime,
             size: 4_000_000,
-            seen: Scanned {
-                audio: crate::audio_id::AudioId {
-                    scheme: 1,
-                    hash: audio,
-                },
-                title: title.into(),
-                artist: artist.into(),
-                length_ms: 154_000,
-                ..Default::default()
+            audio: crate::audio_id::AudioId {
+                scheme: 1,
+                hash: audio,
             },
         }
     }
@@ -182,8 +179,10 @@ mod tests {
         let back = loaded
             .get(Path::new("/m/a.mp3"))
             .expect("the file came back");
-        assert_eq!(back.seen.artist, "Burial");
-        assert_eq!(back.seen.title, "Night Bus");
+        assert_eq!(
+            back.audio.hash, 1,
+            "the audio id is what a cached holding is for"
+        );
         assert_eq!(back.mtime, 42, "and what a rescan needs to skip it");
 
         let _ = std::fs::remove_dir_all(&dir);
