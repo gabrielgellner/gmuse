@@ -196,8 +196,13 @@ rather than a second playlist.
 
 ## Leaving
 
-`q` quits. There is no confirmation and nothing is lost: the view you were on, the queue, the open playlist, the current
-track and its position all come back next time.
+    :q
+
+There is no confirmation and nothing is lost: the view you were on, the queue, the open playlist, the current track and
+its position all come back next time.
+
+**Quitting is not a keystroke.** cmus binds `q`, and a single unmodified letter sitting beside `n` and `p` is one slip
+from ending a session — the one action here with nothing behind it to undo. `:q` is the same cost vim charges.
 
 ## Numbers down the side
 

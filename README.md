@@ -110,7 +110,7 @@ gmuse [OPTIONS] [FILE]
 
 The TUI opens on the library tree. Views are nvim-style tabs: `gt`/`gT` step, `3gt` jumps to view 3, and `g<Tab>`
 returns to the last one. `j`/`k` move and take counts (`3j`), `gg`/`G` go to top/bottom, `12G` to a row. `l` opens the
-node under the cursor and `h` closes it, `zM` closes everything, `tab` swaps pane in view 3, `q` quits.
+node under the cursor and `h` closes it, `zM` closes everything, `tab` swaps pane in view 3, `:q` quits.
 
 **View 1 is one pane holding all three levels** — artists, their albums, and the tracks of whichever albums you have
 open. Several artists and several of their albums can be open at once, and the whole thing reads as one buffer: `j`,

@@ -879,7 +879,8 @@ Append here as decisions are made. Format: date, decision, rationale.
   lookups. `Key` holds a code plus ctrl/alt, and **shift is folded into the character**: the terminal reports `J` with
   SHIFT set, and treating that as distinct from a bound `J` would mean no capital binding ever fired.
 - **2026-08-27** **`:`, `/` and `?` are UI modes, not commands.** They open a prompt; there is nothing to execute until
-  a line has been typed. The prompt swallows every key while open, which is what stops `q` quitting mid-command.
+  a line has been typed. The prompt swallows every key while open, which is what stopped `q` quitting mid-command while
+  `q` was still bound to it.
 - **2026-08-27** The rc file reports a bad line by number and **keeps loading**. One typo in a config should not cost
   every binding after it.
 - **2026-08-27** Added `WinExpandAll`/`WinCollapseAll` beyond §6's list, bound to `M-e`/`M-c` — §6's table gives `E` and
@@ -3835,6 +3836,14 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   `just bench-fold` prints ingest, catalogue and from_catalogue separately, beside `just bench-shelf`. The fold had no
   measurement, which is why nobody noticed.
+
+- **Quitting is `:q` and not a key.** cmus binds `q`, and this did too. A single unmodified letter sitting between `n`
+  and `p` is one slip from ending a listening session — and it is the one action here with nothing behind it to undo.
+  The session is restored on the next launch, so nothing is _lost_, but "nothing is lost" is not the same as "nothing
+  happened". Two keystrokes and a colon is what vim charges for the same thing, and `:q` was already an alias.
+
+  `q` is left unbound rather than given to something else: a key somebody's fingers know as _quit_ should not quietly
+  become a key that does a different thing.
 
 ## 14. Prior art worth reading
 

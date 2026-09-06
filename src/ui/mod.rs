@@ -7019,7 +7019,10 @@ mod tests {
         let rows = ui.help.as_ref().expect("no help popup");
 
         // The view's own bindings and common's, which is what is reachable.
-        assert!(rows.iter().any(|r| r.contains("quit")), "{rows:?}");
+        // **`undo` stands for common here.** It was `quit`, until quitting
+        // stopped being a key at all — a proxy for "common is present" has to
+        // be a binding that exists.
+        assert!(rows.iter().any(|r| r.contains("undo")), "{rows:?}");
         assert!(rows.iter().any(|r| r.starts_with("j ")), "{rows:?}");
 
         // It is drawn, not merely stored.
@@ -7041,7 +7044,7 @@ mod tests {
         press(&mut ui, &ctx, "?");
         let rows = ui.help.as_ref().expect("no help popup");
 
-        assert!(rows.iter().any(|r| r.contains("quit")), "common is missing");
+        assert!(rows.iter().any(|r| r.contains("undo")), "common is missing");
         assert!(
             rows.iter().any(|r| r.starts_with("l ")),
             "the common bindings are missing: {rows:?}"
@@ -9587,6 +9590,31 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view levels genre,album");
         assert!(ui.status.contains("do not sum"), "{}", ui.status);
+    }
+
+    /// **`q` does not quit; `:q` does.**
+    ///
+    /// cmus binds `q`, and a single unmodified letter beside `n` and `p` is
+    /// one slip from ending a session. The session is restored next launch so
+    /// nothing is lost, but that is not the same as nothing having happened.
+    #[test]
+    fn quitting_takes_a_colon() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "q");
+        assert!(!ui.quit, "a single keystroke ended the session");
+
+        // And in transport, whose keymap is closed and where `q` also was.
+        press(&mut ui, &ctx, "i");
+        press(&mut ui, &ctx, "q");
+        assert!(!ui.quit, "transport still quits on a keystroke");
+        press(&mut ui, &ctx, "escape");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "q");
+        assert!(ui.quit, "`:q` did not quit");
     }
 
     /// **`:edit` stops the loop rather than shelling out under the draw** —

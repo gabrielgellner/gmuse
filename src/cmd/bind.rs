@@ -200,8 +200,9 @@ pub const DEFAULTS: &[&str] = &[
     "bind transport C toggle continue",
     "bind transport m toggle aaa_mode",
     // A closed keymap has to carry its own way out and its own way to ask.
+    // Out of the *mode* is `escape`; out of the *player* is `:q`, and it is
+    // deliberately not a keystroke — see the note beside the search bindings.
     "bind transport ? help",
-    "bind transport q quit",
     // modes
     "bind common s toggle shuffle",
     "bind common r toggle repeat",
@@ -228,7 +229,10 @@ pub const DEFAULTS: &[&str] = &[
     "bind common escape nohlsearch",
     "bind common n search-next",
     "bind common N search-prev",
-    "bind common q quit",
+    // **Quitting is `:q`, and not a key.** cmus binds `q`, and a single
+    // unmodified letter beside `n` and `p` is one slip from ending a listening
+    // session — the one action here with nothing behind it to undo. Two
+    // keystrokes and a colon is the cost, and vim charges the same.
     // The leader's first tenant, and the reason it exists: `?` is reverse
     // search, as in vim, so help needed somewhere else to live.
     "bind common \"<leader> ?\" help",
