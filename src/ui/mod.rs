@@ -63,6 +63,13 @@ pub enum View {
     /// Prose: how to do the things, as against which key does what — plus the
     /// generated index of every binding, which is what view 7 used to be (#47).
     Guide = 7,
+    /// What the library says about one thing, and who said it — #126.
+    ///
+    /// A view rather than an overlay because it needs the room and it will
+    /// hold a navigation stack (#127); `Guide` is the precedent for a content
+    /// view with its own scroll. Anyone who wants the list beside it has
+    /// `^w v`.
+    Info = 8,
 }
 
 impl View {
@@ -72,6 +79,7 @@ impl View {
             View::Playlist => "playlist",
             View::Queue => "queue",
             View::Guide => "guide",
+            View::Info => "info",
         }
     }
 
@@ -85,6 +93,7 @@ impl View {
             ViewId::Queue => View::Queue,
             ViewId::Filters => View::Tree,
             ViewId::Guide => View::Guide,
+            ViewId::Info => View::Info,
         }
     }
 
@@ -102,7 +111,13 @@ impl View {
         all[(i + all.len() - 1) % all.len()]
     }
 
-    pub const ALL: &'static [View] = &[View::Tree, View::Playlist, View::Queue, View::Guide];
+    pub const ALL: &'static [View] = &[
+        View::Tree,
+        View::Playlist,
+        View::Queue,
+        View::Guide,
+        View::Info,
+    ];
 
     pub fn context(self) -> crate::cmd::Context {
         use crate::cmd::Context as C;
@@ -111,6 +126,7 @@ impl View {
             View::Playlist => C::Playlist,
             View::Queue => C::Queue,
             View::Guide => C::Guide,
+            View::Info => C::Info,
         }
     }
 }
@@ -439,6 +455,20 @@ pub struct Ui {
     pub levels: crate::shelf::Levels,
     /// The fuzzy picker, while it is open (#54).
     pub picker: Option<crate::ui::picker::Picker>,
+    /// What the info panel is looking at — #126.
+    ///
+    /// `None` is "nothing chosen yet", which is what `gt` into the view finds
+    /// before anything has been looked up. It says so rather than drawing an
+    /// empty page that reads as a thing nothing is known about.
+    pub focused: Option<crate::model::focus::Focus>,
+    pub info_sel: usize,
+    pub info_scroll: Scroll,
+    /// Sections the reader has folded away, by title.
+    ///
+    /// **Keyed by title rather than by position**, so a fold survives
+    /// following a link (#127): "I never want to see the fact log" is a
+    /// standing preference, not a fact about the page you happened to be on.
+    pub info_folded: std::collections::BTreeSet<String>,
     /// What went wrong resolving the composed view, if anything.
     ///
     /// Set by every fold, so a caller that has something better to say than
@@ -499,6 +529,10 @@ impl Ui {
             split: None,
             levels: crate::shelf::Levels::default(),
             picker: None,
+            focused: None,
+            info_sel: 0,
+            info_scroll: Scroll::default(),
+            info_folded: Default::default(),
             view_problem: None,
             view: View::Tree,
             tree: TreeState::default(),
@@ -707,7 +741,9 @@ impl Ui {
                 .or_else(|| self.tree.tracks_for(&self.library).first().copied()),
             View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
             View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
-            View::Guide => None,
+            // Neither draws a list of tracks, so neither has one under a
+            // cursor. The info panel's own rows are links, not tracks.
+            View::Guide | View::Info => None,
         }
     }
 }
@@ -2487,6 +2523,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // the draw loop may take the terminal, so this asks `main` to do it —
         // the same door `:collect` uses to get a refold (#120).
         Command::Edit => ui.stop = Some(Stop::Edit),
+        Command::Info => open_info(ui, ctx),
         Command::Compose(term) => {
             use crate::cmd::ViewTerm;
             match term {
@@ -4287,6 +4324,7 @@ fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
         View::Tree => &ui.tree_scroll,
         View::Playlist if ui.playlist_pane == Pane::Tracks => &ui.playlist_scroll,
         View::Queue => &ui.queue_scroll,
+        View::Info => &ui.info_scroll,
         View::Guide if ui.guide_pane == Pane::Tree => &ui.guides_scroll,
         View::Playlist | View::Guide => return None,
     })
@@ -4419,8 +4457,50 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
             .collect(),
         View::Playlist => ui.playlist.entries().iter().map(describe).collect(),
         View::Queue => ui.queue.entries().map(describe).collect(),
-        View::Guide => Vec::new(),
+        View::Guide | View::Info => Vec::new(),
     }
+}
+
+/// One drawable line of the info panel — #126.
+///
+/// **Sections and rows in one list**, because that is what the cursor moves
+/// through: a header is a thing you land on and fold, not a decoration between
+/// the things you land on.
+pub enum InfoLine<'a> {
+    Header {
+        title: &'a str,
+        folded: bool,
+        rows: usize,
+    },
+    Row(&'a crate::model::about::Row),
+}
+
+/// The panel's lines, folds applied.
+///
+/// Computed rather than cached: `about` is 66µs on the real library (#125),
+/// which is nothing beside a keystroke, and a cache would be a second place
+/// for the panel's contents to be wrong.
+pub fn info_lines<'a>(ui: &Ui, about: &'a crate::model::about::About) -> Vec<InfoLine<'a>> {
+    let mut out = Vec::new();
+    for section in &about.sections {
+        let folded = ui.info_folded.contains(section.title);
+        out.push(InfoLine::Header {
+            title: section.title,
+            folded,
+            rows: section.rows.len(),
+        });
+        if !folded {
+            out.extend(section.rows.iter().map(InfoLine::Row));
+        }
+    }
+    out
+}
+
+/// What the panel is showing, or nothing if it has not been pointed at
+/// anything yet.
+pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<crate::model::about::About> {
+    ui.focused
+        .map(|focus| crate::model::rows::Listing::about(ctx.library, focus))
 }
 
 fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
@@ -4445,6 +4525,7 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
                 lines.saturating_sub(height) + 1
             }
         },
+        View::Info => info_about(ui, ctx).map_or(0, |a| info_lines(ui, &a).len()),
     }
 }
 
@@ -4461,11 +4542,13 @@ fn current_cursor(ui: &Ui) -> usize {
             Pane::Tree => ui.guide_sel,
             Pane::Tracks => ui.guide_scroll,
         },
+        View::Info => ui.info_sel,
     }
 }
 
 fn set_cursor(ui: &mut Ui, next: usize) {
     match ui.view {
+        View::Info => ui.info_sel = next,
         View::Tree if ui.levels.is_flat() => ui.sorted = next,
         View::Tree => ui.tree.selected = next,
         View::Playlist => match ui.playlist_pane {
@@ -4809,6 +4892,7 @@ fn draw_body(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, view: Vi
             )
         }
         View::Guide => draw_guides(frame, body, ui),
+        View::Info => draw_info(frame, body, ui, ctx, focused),
     }
 }
 
@@ -4821,6 +4905,167 @@ fn clip(s: &str, width: usize) -> String {
         return s.to_string();
     }
     s.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
+}
+
+/// Open the panel on the row under the cursor — #126.
+///
+/// **On its recording**, not on the copy. The row is an `Id<Encoding>`, the
+/// bytes, and almost everything worth reading is about the performance — so
+/// opening on the encoding would put the useful screen one hop away every
+/// time. The copy is listed under `copies`, one keystroke away, and the
+/// section is named for what it is rather than hiding the distinction.
+fn open_info(ui: &mut Ui, ctx: &Context<'_>) {
+    // Already in the panel: `K` again is a no-op rather than a re-open, so it
+    // cannot quietly throw away where you have navigated to (#127).
+    if ui.view == View::Info {
+        return;
+    }
+    let Some(copy) = ui.selected_track(ctx) else {
+        ui.notify("nothing under the cursor to look up");
+        return;
+    };
+    // **A row with no recording says so.** A file nothing has identified is an
+    // ordinary row (§1) and it has no performance to describe; opening an
+    // empty page would read as "nothing is known", which is a different claim.
+    let Some(recording) = crate::model::rows::Listing::recording_of(ctx.library, copy) else {
+        ui.notify("this row names no recording — nothing to say about it");
+        return;
+    };
+    ui.focused = Some(crate::model::focus::Focus::Recording(recording));
+    ui.info_sel = 0;
+    switch_view(ui, View::Info);
+}
+
+/// The info panel — #126, `info-panel.md`.
+///
+/// Three columns of text, not a table widget: a label, a value, and what the
+/// row *is*. A claim's third column is who said it and how sure, which is the
+/// whole reason this panel exists — every other player shows the value, and
+/// this one can show why the value is what it is.
+fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused: bool) {
+    use crate::model::about::Row;
+    let theme = &ui.theme;
+
+    let Some(about) = info_about(ui, ctx) else {
+        let empty = Paragraph::new(ratatui::text::Text::from(vec![
+            Line::default(),
+            Line::from(Span::styled(
+                "  nothing in focus",
+                theme.get(theme::Role::StatusText),
+            )),
+            Line::from(Span::styled(
+                "  press K over a row, or `:info`",
+                theme.get(theme::Role::StatusDim),
+            )),
+        ]))
+        .block(pane_block(theme, "info", focused));
+        frame.render_widget(empty, body);
+        return;
+    };
+
+    let dim = theme.get(theme::Role::StatusDim);
+    let text = theme.get(theme::Role::StatusText);
+    let head = theme.get(theme::Role::AlbumHeader);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    // The head: what it is, and what it is called.
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(format!("  {}", about.title), head),
+        Span::styled(format!("   {}", about.kind), dim),
+    ])));
+    if let Some(subtitle) = &about.subtitle {
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  {subtitle}"),
+            dim,
+        ))));
+    }
+    items.push(ListItem::new(Line::default()));
+    // Everything above the sections is unselectable, so the cursor's index has
+    // to be offset by it — kept here rather than in `info_lines`, which is
+    // about the model and should not know how tall a header is drawn.
+    let above = items.len();
+
+    for line in info_lines(ui, &about) {
+        items.push(ListItem::new(match line {
+            InfoLine::Header {
+                title,
+                folded,
+                rows,
+            } => Line::from(vec![
+                Span::styled(
+                    format!("  {} {title}", if folded { "▸" } else { "▾" }),
+                    head,
+                ),
+                Span::styled(format!(" ({rows})"), dim),
+            ]),
+            InfoLine::Row(row) => match row {
+                Row::Link { label, name, .. } => Line::from(vec![
+                    Span::styled(format!("    {label:<14}"), dim),
+                    Span::styled(name.clone(), text),
+                    Span::styled(" →", dim),
+                ]),
+                // **Struck, not omitted.** A claim somebody ruled out and a
+                // claim nobody made are different answers (#96), and only a
+                // visible row can say the first.
+                Row::Claim {
+                    label,
+                    value,
+                    said,
+                    retracted,
+                    ..
+                } => Line::from(vec![
+                    Span::styled(format!("    {label:<14}"), dim),
+                    // **Padded, so the third column lines up.** Who said it
+                    // is the column being compared down the page — four
+                    // genres from one tagger and one from a person read as
+                    // different things only if the eye can find them.
+                    Span::styled(
+                        format!("{value:<22}"),
+                        match retracted {
+                            Some(_) => dim.add_modifier(ratatui::style::Modifier::CROSSED_OUT),
+                            None => text,
+                        },
+                    ),
+                    Span::styled(
+                        match (said, retracted) {
+                            (_, Some(by)) => format!(" ruled out · {}", by.written()),
+                            (Some((basis, sure)), None) => {
+                                format!(" {} · {}", basis.written(), sure.written())
+                            }
+                            (None, None) => String::new(),
+                        },
+                        dim,
+                    ),
+                ]),
+                Row::Fact { label, value } => Line::from(vec![
+                    Span::styled(format!("    {label:<14}"), dim),
+                    Span::styled(value.clone(), text),
+                ]),
+                Row::Many {
+                    label,
+                    count,
+                    query,
+                } => Line::from(vec![
+                    Span::styled(format!("    {label:<14}"), dim),
+                    Span::styled(format!("{count}"), text),
+                    Span::styled(format!("   {query}"), dim),
+                ]),
+            },
+        }));
+    }
+
+    let mut state =
+        ui.info_scroll
+            .state_within(Some(ui.info_sel + above), items.len(), view_height(body));
+    pad_to_view(&mut items, theme, body, state.offset());
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(pane_block(theme, "info", focused))
+            .highlight_style(highlight(theme, focused)),
+        body,
+        &mut state,
+    );
+    ui.info_scroll.remember(&state);
 }
 
 fn draw_picker(frame: &mut Frame, body: Rect, ui: &Ui, picker: &crate::ui::picker::Picker) {
@@ -7762,6 +8007,7 @@ mod tests {
                     crate::cmd::Context::Playlist => ViewId::Playlist,
                     crate::cmd::Context::Queue => ViewId::Queue,
                     crate::cmd::Context::Guide => ViewId::Guide,
+                    crate::cmd::Context::Info => ViewId::Info,
                     crate::cmd::Context::Common | crate::cmd::Context::Transport => {
                         unreachable!()
                     }
@@ -9615,6 +9861,102 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "q");
         assert!(ui.quit, "`:q` did not quit");
+    }
+
+    /// **`K` over a row opens the panel on its recording** — #126.
+    ///
+    /// Not on the copy. The row is the bytes, and almost everything worth
+    /// reading is about the performance.
+    #[test]
+    fn k_looks_up_the_row_under_the_cursor() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+
+        let copy = ui.selected_track(&ctx).expect("a row under the cursor");
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info);
+        assert_eq!(
+            ui.focused,
+            Some(crate::model::focus::Focus::Recording(
+                crate::model::rows::Listing::recording_of(ctx.library, copy).expect("a recording")
+            )),
+            "it opened on the copy rather than the performance"
+        );
+
+        // And it draws what the library says, not an empty frame.
+        let out = render(&ui, &ctx, 90, 24);
+        assert!(out.contains("recording"), "{out}");
+        assert!(
+            out.contains("said about it") || out.contains("where it sits"),
+            "{out}"
+        );
+    }
+
+    /// **`escape` leaves it the way you came in.**
+    #[test]
+    fn escape_returns_to_the_view_you_were_on() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info);
+        press(&mut ui, &ctx, "escape");
+        assert_eq!(ui.view, View::Tree, "escape did not go back");
+    }
+
+    /// **The panel reached with no focus says how to point it at something**,
+    /// rather than drawing an empty page that reads as "nothing is known".
+    #[test]
+    fn the_panel_with_nothing_in_focus_says_so() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        switch_view(&mut ui, View::Info);
+
+        let out = render(&ui, &ctx, 90, 24);
+        assert!(out.contains("nothing in focus"), "{out}");
+    }
+
+    /// **A section folds, and the fold is remembered by name** — so it
+    /// survives following a link (#127) rather than resetting per page.
+    #[test]
+    fn a_section_folds_away_and_takes_its_rows_with_it() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "K");
+
+        let about = info_about(&ui, &ctx).expect("a focus");
+        let open = info_lines(&ui, &about).len();
+        ui.info_folded.insert("where it sits".to_string());
+        let shut = info_lines(&ui, &about).len();
+        assert!(
+            shut < open,
+            "folding a section changed nothing: {open} -> {shut}"
+        );
+    }
+
+    /// **`K` inside the panel does not re-open it**, so it cannot quietly
+    /// throw away where you have navigated to (#127).
+    #[test]
+    fn looking_up_again_from_inside_the_panel_does_nothing() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "K");
+
+        let was = ui.focused;
+        ui.focused = Some(crate::model::focus::Focus::Artist(
+            crate::model::id::Id::from_uuid(uuid::Uuid::from_u128(7)),
+        ));
+        press(&mut ui, &ctx, "K");
+        assert_ne!(ui.focused, was, "K re-opened and lost where the reader was");
     }
 
     /// **`:edit` stops the loop rather than shelling out under the draw** —

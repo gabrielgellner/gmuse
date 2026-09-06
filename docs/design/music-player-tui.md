@@ -3866,6 +3866,28 @@ Append here as decisions are made. Format: date, decision, rationale.
   `reference::Credit` drops it at the fold. Carrying it means changing a serialized type, so it is recorded here rather
   than smuggled into this issue.
 
+- **The info panel is view 8, and `K` opens it** (#126). vim's `K` is "look up the thing under the cursor", which is
+  exactly what this is, and it was unbound. Provisional on purpose: the issue said to decide once the panel exists and
+  can be lived with, and a week of using it is worth more than an argument now.
+
+  **It opens on the recording, not the copy.** The row under the cursor is an `Id<Encoding>` — the bytes — and almost
+  everything worth reading is about the performance, so opening on the encoding would put the useful screen one hop away
+  every time. The copy is under `copies`, one keystroke away, and the section is named for what it is rather than hiding
+  that a row is three things.
+
+  **`escape` is `view-last`.** Leaving the panel is going back to where you came from, and that mechanism already
+  existed — a second one would be a second thing to keep in step.
+
+  **Folds are keyed by section title, not by position**, so they survive following a link (#127): "I never want to see
+  the fact log" is a standing preference, not a fact about the page you happened to be on.
+
+  The panel joins `current_len`/`current_cursor`/`set_cursor`, so `j`, `k`, `gg` and `G` work in it without a line of
+  motion code — which is the payment for views being a value rather than a special case.
+
+  **A row with no recording says so.** A file nothing has identified is ordinary (§1) and has no performance to
+  describe; an empty page would read as "nothing is known", which is a different claim from "there is nothing here to
+  know it about".
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

@@ -54,6 +54,10 @@ pub const GUIDES: &[Guide] = &[
         body: Body::Text(include_str!("../docs/guides/saved-rules.md")),
     },
     Guide {
+        title: "What the library says",
+        body: Body::Text(include_str!("../docs/guides/what-the-library-says.md")),
+    },
+    Guide {
         title: "Writing the lines",
         body: Body::Text(include_str!("../docs/guides/format-strings.md")),
     },

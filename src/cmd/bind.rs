@@ -233,9 +233,17 @@ pub const DEFAULTS: &[&str] = &[
     // unmodified letter beside `n` and `p` is one slip from ending a listening
     // session — the one action here with nothing behind it to undo. Two
     // keystrokes and a colon is the cost, and vim charges the same.
+    // **`K` is vim's "look up the thing under the cursor"**, which is exactly
+    // what this is, and it was unbound. Provisional: #126 says to decide once
+    // the panel exists and can be lived with, and a week of using it is worth
+    // more than an argument now.
+    "bind common K info",
     // The leader's first tenant, and the reason it exists: `?` is reverse
     // search, as in vim, so help needed somewhere else to live.
     "bind common \"<leader> ?\" help",
+    // The info panel's own keymap. `escape` leaves it the way you came in —
+    // `view-last` *is* "where you were", so there is no second mechanism.
+    "bind info escape view-last",
 ];
 
 /// Build the default table.

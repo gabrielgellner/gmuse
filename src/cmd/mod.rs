@@ -27,6 +27,8 @@ pub enum Context {
     Queue,
     /// View 7, the guides.
     Guide,
+    /// View 8, the info panel (#126).
+    Info,
     /// Transport mode's keymap (#33). Not a view — a *mode*, so it is the one
     /// context that does not fall through to `Common`.
     Transport,
@@ -40,6 +42,7 @@ impl Context {
             Context::Playlist => "playlist",
             Context::Queue => "queue",
             Context::Guide => "guide",
+            Context::Info => "info",
             Context::Transport => "transport",
         }
     }
@@ -51,6 +54,7 @@ impl Context {
             "playlist" => Context::Playlist,
             "queue" => Context::Queue,
             "guide" => Context::Guide,
+            "info" => Context::Info,
             "transport" => Context::Transport,
             _ => return None,
         })
@@ -110,11 +114,14 @@ pub enum ViewId {
     // filesystem, and the digit is left unbound rather than renumbering 6 and 7.
     Filters = 6,
     Guide = 7,
+    /// The info panel (#126).
+    Info = 8,
 }
 
 impl ViewId {
     pub fn from_number(n: u8) -> Option<Self> {
         Some(match n {
+            8 => ViewId::Info,
             1 => ViewId::Library,
             2 => ViewId::Sorted,
             3 => ViewId::Playlist,
@@ -767,6 +774,8 @@ pub enum Command {
     /// a persistent *narrowing*, which a catalog could not be because a
     /// catalog unions.
     Compose(ViewTerm),
+    /// `:info` — what the library says about the row under the cursor (#126).
+    Info,
     /// `:edit` — the composed query in `$EDITOR` (#99).
     ///
     /// The third tier of one language: simple things inline, composed things

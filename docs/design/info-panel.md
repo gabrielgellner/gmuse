@@ -175,8 +175,8 @@ what they are.
 
 ### It is a view
 
-`View::Info`, beside `Guide`. It needs the room and it needs to hold a stack, and the Guide is the precedent for a
-content view with its own navigation. Anyone who wants the list beside it has `^w v` already.
+`View::Info` — **view 8**, beside `Guide`. It needs the room and it needs to hold a stack, and the Guide is the
+precedent for a content view with its own navigation. Anyone who wants the list beside it has `^w v` already.
 
 ---
 

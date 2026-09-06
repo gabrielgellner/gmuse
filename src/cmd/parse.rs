@@ -61,6 +61,7 @@ pub const VERBS: &[&str] = &[
     "go",
     "place",
     "help",
+    "info",
     "freeze",
     "in",
     "next",
@@ -353,6 +354,9 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         }),
         "help" => Command::Help,
         "quit" | "q" => Command::Quit,
+        // No argument yet: what it shows is the row under the cursor. Naming
+        // a thing — `:info artist="Bodzin"` — is #129 and needs the library.
+        "info" => Command::Info,
 
         other => return Err(ParseError::UnknownCommand(other.to_string())),
     })
@@ -756,6 +760,7 @@ pub fn format(cmd: &Command) -> String {
     match cmd {
         Command::Up => "up".into(),
         Command::Edit => "edit".into(),
+        Command::Info => "info".into(),
         Command::Down => "down".into(),
         Command::Mode(m) => format!("mode {}", m.name()),
         Command::SeekPercent => "seek-percent".into(),
