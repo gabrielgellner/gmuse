@@ -166,12 +166,21 @@ what they are.
 
 ### Navigation is a stack
 
-- `enter` follows the link under the cursor — pushes.
-- `^o` goes back — pops. (`^i` forward, as in vim, if it earns itself.)
-- `escape` closes the panel and returns to where you were.
-- A breadcrumb along the bottom shows the path: `recording ▸ release group ▸ artist ▸ (here)`.
+- `enter` follows the link under the cursor — pushes. On a section header it folds instead; on a row with nowhere to go
+  it says so, because a row that silently did nothing would read as a broken link.
+- `^o` goes back — pops. Past the beginning it leaves the panel: the way in is the way out. (`^i` forward, as in vim, if
+  it earns itself. It has not yet.)
+- `escape` leaves the panel, which is `view-last` rather than a second mechanism.
+- A breadcrumb along the bottom shows the path: `Callisto ▸ Luna ▸ Stephan Bodzin`. **The stack, not a rendering of
+  one** — if the two could disagree, one of them is lying about where the reader is. Elided in the middle past four
+  steps, keeping the first and the last.
 
-`^o`/`^i` rather than `h`/`l` because this is a jump list, not a tree, and vim already spells that.
+`^o` rather than `h` because this is a jump list, not a tree, and vim already spells that. An artist can be arrived at
+from a recording, a release group or a concept; `h` would promise a parent that does not exist.
+
+**A cycle is ordinary.** A recording leads to a genre which leads back to the recording, and nothing prevents it because
+nothing is wrong with it. What is bounded is the _path_: 32 steps, and the oldest is forgotten, as vim's jumplist does.
+That is a memory bound rather than cycle detection, and it must not be mistaken for one.
 
 ### It is a view
 

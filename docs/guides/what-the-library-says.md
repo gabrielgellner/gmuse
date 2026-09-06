@@ -2,7 +2,9 @@
 
     K          look up the row under the cursor
     :info      the same thing, typed
-    escape     back to where you were
+    enter      follow the link under the cursor
+    ^o         back
+    escape     leave the panel
 
 `K` is vim's "look up the thing under the cursor", and that is what this is. It opens view 8 on the **recording** the
 row holds — the performance, not the file — and everything else is one hop from there.
@@ -36,6 +38,25 @@ That is the whole reason this panel exists. The tags in your files are a seriali
 | filed in      | the crates it is in                                    |
 
 A section with nothing in it is not drawn. Empty headings would say the library knows less than it does.
+
+## Following a link
+
+Rows ending in `→` go somewhere. `enter` follows one; `^o` comes back. The trail along the bottom is where you have
+been:
+
+    Callisto ▸ Luna ▸ Stephan Bodzin
+
+`^o` rather than `h`, because this is **a jump list and not a tree**. You can arrive at an artist from a recording, from
+a release group or from a concept, and there is no parent to climb to — `h` would promise one. vim spells the same
+distinction the same way.
+
+`^o` past the beginning leaves the panel: the way in is the way out.
+
+`enter` on a section header folds it instead, and a fold is remembered by name — so hiding the parts you never read
+stays hidden as you walk around, rather than resetting on every page.
+
+Going in a circle is fine. A recording leads to a genre, which leads back to the recording; nothing prevents it, because
+there is nothing wrong with it.
 
 ## A count instead of a list
 

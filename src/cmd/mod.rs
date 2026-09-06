@@ -776,6 +776,8 @@ pub enum Command {
     Compose(ViewTerm),
     /// `:info` — what the library says about the row under the cursor (#126).
     Info,
+    /// Back to where the info panel came from — #127. vim's `^o`.
+    Back,
     /// `:edit` — the composed query in `$EDITOR` (#99).
     ///
     /// The third tier of one language: simple things inline, composed things

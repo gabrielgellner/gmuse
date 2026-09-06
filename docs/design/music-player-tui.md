@@ -3888,6 +3888,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   describe; an empty page would read as "nothing is known", which is a different claim from "there is nothing here to
   know it about".
 
+- **The info panel is a browser: `enter` follows, `^o` comes back** (#127). The graph is traversed rather than depicted
+  (`info-panel.md` §1), and traversal needs somewhere to have come from.
+
+  **`^o` rather than `h`, because this is a jump list and not a tree.** An artist can be arrived at from a recording,
+  from a release group or from a concept, and there is no parent to climb to — `h` would promise one. vim already spells
+  that distinction and borrowing the spelling is cheaper than inventing one.
+
+  **The breadcrumb is the stack, not a rendering of one.** If the two could disagree, one of them is lying about where
+  the reader is. Elided in the middle past four steps, keeping the first and the last: where you started and where you
+  are are the two that matter.
+
+  **A cycle is ordinary and is not prevented.** A recording leads to a genre which leads back to the recording; there is
+  nothing wrong with that path and nothing stops it. What is bounded is the path's _length_ — 32, oldest forgotten, as
+  vim's jumplist does — and that is a memory bound rather than cycle detection. Confusing the two would refuse a walk
+  somebody meant to take.
+
+  `enter` on a header folds instead of following, and a fold is keyed by section title, so hiding the parts you never
+  read holds as you walk rather than resetting on every page. A row with nowhere to go says so: silence would read as a
+  broken link rather than as a fact.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

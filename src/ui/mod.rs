@@ -455,12 +455,17 @@ pub struct Ui {
     pub levels: crate::shelf::Levels,
     /// The fuzzy picker, while it is open (#54).
     pub picker: Option<crate::ui::picker::Picker>,
-    /// What the info panel is looking at — #126.
+    /// The path the info panel has taken — #126, made a stack by #127.
     ///
-    /// `None` is "nothing chosen yet", which is what `gt` into the view finds
-    /// before anything has been looked up. It says so rather than drawing an
-    /// empty page that reads as a thing nothing is known about.
-    pub focused: Option<crate::model::focus::Focus>,
+    /// The **last is what is on screen**, and the rest is how the reader got
+    /// there. Empty is "nothing chosen yet", which is what `gt` into the view
+    /// finds before anything has been looked up.
+    ///
+    /// **A jump list, not a tree.** You can arrive at an artist from a
+    /// recording, from a release group or from a concept, and there is no
+    /// parent to climb to — so this remembers the route rather than a
+    /// position, which is why `^o` spells it and `h` does not.
+    pub focus: Vec<crate::model::focus::Focus>,
     pub info_sel: usize,
     pub info_scroll: Scroll,
     /// Sections the reader has folded away, by title.
@@ -529,7 +534,7 @@ impl Ui {
             split: None,
             levels: crate::shelf::Levels::default(),
             picker: None,
-            focused: None,
+            focus: Vec::new(),
             info_sel: 0,
             info_scroll: Scroll::default(),
             info_folded: Default::default(),
@@ -2224,6 +2229,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             ui.playlist_pane = focused;
         }
         Command::Activate => match ui.view {
+            // Enter follows the link under the cursor, or folds the section
+            // header it is on — both are "act on this row", which is what
+            // Enter means in every other view here.
+            View::Info => follow_link(ui, ctx),
             // The list picks; Enter moves into what you picked, which is the
             // same thing it does everywhere else.
             View::Guide => ui.guide_pane = Pane::Tracks,
@@ -2524,6 +2533,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // the same door `:collect` uses to get a refold (#120).
         Command::Edit => ui.stop = Some(Stop::Edit),
         Command::Info => open_info(ui, ctx),
+        Command::Back => go_back(ui, ctx),
         Command::Compose(term) => {
             use crate::cmd::ViewTerm;
             match term {
@@ -4499,8 +4509,9 @@ pub fn info_lines<'a>(ui: &Ui, about: &'a crate::model::about::About) -> Vec<Inf
 /// What the panel is showing, or nothing if it has not been pointed at
 /// anything yet.
 pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<crate::model::about::About> {
-    ui.focused
-        .map(|focus| crate::model::rows::Listing::about(ctx.library, focus))
+    ui.focus
+        .last()
+        .map(|focus| crate::model::rows::Listing::about(ctx.library, *focus))
 }
 
 fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
@@ -4907,6 +4918,97 @@ fn clip(s: &str, width: usize) -> String {
     s.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
 }
 
+/// The path taken, as the panel shows it — #127.
+///
+/// **Elided in the middle**, keeping the first and the last: where the reader
+/// started and where they are are the two that matter, and the steps between
+/// are what a one-line trail has no room for.
+fn breadcrumb(ui: &Ui, ctx: &Context<'_>) -> String {
+    /// Beyond this the middle is replaced by how many were dropped.
+    const SHOWN: usize = 4;
+
+    let name = |focus: &crate::model::focus::Focus| {
+        crate::model::rows::Listing::about(ctx.library, *focus).title
+    };
+    let steps: Vec<String> = match ui.focus.len() {
+        0 => return String::new(),
+        n if n <= SHOWN => ui.focus.iter().map(name).collect(),
+        n => {
+            let mut out = vec![name(&ui.focus[0]), format!("… {} more", n - (SHOWN - 1))];
+            out.extend(ui.focus[n - (SHOWN - 2)..].iter().map(name));
+            out
+        }
+    };
+    steps.join(" ▸ ")
+}
+
+/// **How deep a path may go before the oldest step is forgotten** — #127.
+///
+/// A jump list, bounded like every other walk in this model (#79, #93). A
+/// cycle is *ordinary* here — recording → concept → back to the same recording
+/// is a real path somebody may want to take — so this is not cycle detection
+/// and must not be: it is the bound that stops an unbounded one costing
+/// memory. The oldest step goes, as vim's jumplist does.
+const DEEPEST: usize = 32;
+
+/// Follow the link under the cursor, or fold the section it is on — #127.
+fn follow_link(ui: &mut Ui, ctx: &Context<'_>) {
+    use crate::model::about::Row;
+    let Some(about) = info_about(ui, ctx) else {
+        return;
+    };
+    let lines = info_lines(ui, &about);
+    let Some(line) = lines.get(ui.info_sel) else {
+        return;
+    };
+    let to = match line {
+        InfoLine::Header { title, .. } => {
+            let title = (*title).to_string();
+            drop(lines);
+            if !ui.info_folded.remove(&title) {
+                ui.info_folded.insert(title);
+            }
+            // The cursor stays on the header it just folded, which is where
+            // the reader is looking.
+            return;
+        }
+        InfoLine::Row(Row::Link { to, .. }) => Some(*to),
+        InfoLine::Row(Row::Claim { to, .. }) => *to,
+        // **Nothing to follow, and it says so.** A row that silently did
+        // nothing would read as a broken link rather than as a fact.
+        InfoLine::Row(Row::Fact { .. }) => None,
+        InfoLine::Row(Row::Many { query, .. }) => {
+            let query = query.clone();
+            drop(lines);
+            ui.notify(format!("{query} — :view it to see them"));
+            return;
+        }
+    };
+    drop(lines);
+    let Some(to) = to else {
+        ui.notify("nothing to follow here");
+        return;
+    };
+    ui.focus.push(to);
+    if ui.focus.len() > DEEPEST {
+        ui.focus.remove(0);
+    }
+    ui.info_sel = 0;
+}
+
+/// Back to where the reader came from — #127.
+///
+/// **Popping past the bottom leaves the panel**, because the way in is the way
+/// out: the step before the first focus is the view `K` was pressed in.
+fn go_back(ui: &mut Ui, ctx: &Context<'_>) {
+    ui.focus.pop();
+    ui.info_sel = 0;
+    if ui.focus.is_empty() {
+        let _ = ctx;
+        switch_view(ui, ui.previous_view);
+    }
+}
+
 /// Open the panel on the row under the cursor — #126.
 ///
 /// **On its recording**, not on the copy. The row is an `Id<Encoding>`, the
@@ -4931,7 +5033,9 @@ fn open_info(ui: &mut Ui, ctx: &Context<'_>) {
         ui.notify("this row names no recording — nothing to say about it");
         return;
     };
-    ui.focused = Some(crate::model::focus::Focus::Recording(recording));
+    // A fresh look-up starts a fresh path: `K` from the library is a new
+    // question, not a step in the one before it.
+    ui.focus = vec![crate::model::focus::Focus::Recording(recording)];
     ui.info_sel = 0;
     switch_view(ui, View::Info);
 }
@@ -5053,6 +5157,17 @@ fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused:
             },
         }));
     }
+
+    // **The path, and it is the stack rather than a rendering of one.** If the
+    // two could disagree, one of them is lying about where the reader is.
+    let [body, trail] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(body);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {}", breadcrumb(ui, ctx)),
+            dim,
+        ))),
+        trail,
+    );
 
     let mut state =
         ui.info_scroll
@@ -9878,7 +9993,7 @@ mod tests {
         press(&mut ui, &ctx, "K");
         assert_eq!(ui.view, View::Info);
         assert_eq!(
-            ui.focused,
+            ui.focus.last().copied(),
             Some(crate::model::focus::Focus::Recording(
                 crate::model::rows::Listing::recording_of(ctx.library, copy).expect("a recording")
             )),
@@ -9891,6 +10006,121 @@ mod tests {
         assert!(
             out.contains("said about it") || out.contains("where it sits"),
             "{out}"
+        );
+    }
+
+    /// **Enter follows, `^o` comes back, and the trail says where you are** —
+    /// #127. The step that makes it a browser rather than a page.
+    #[test]
+    fn following_a_link_pushes_and_coming_back_pops() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "K");
+        let started = ui.focus.clone();
+        assert_eq!(started.len(), 1);
+
+        // Down to the first row that goes somewhere, and follow it.
+        let about = info_about(&ui, &ctx).expect("a focus");
+        let at = info_lines(&ui, &about)
+            .iter()
+            .position(|l| matches!(l, InfoLine::Row(crate::model::about::Row::Link { .. })))
+            .expect("no link on the page");
+        ui.info_sel = at;
+        press(&mut ui, &ctx, "enter");
+        assert_eq!(ui.focus.len(), 2, "enter did not follow");
+        assert_eq!(
+            ui.info_sel, 0,
+            "the cursor kept a position from the last page"
+        );
+
+        press(&mut ui, &ctx, "^o");
+        assert_eq!(ui.focus, started, "^o did not come back");
+    }
+
+    /// **`^o` past the beginning leaves the panel** — the way in is the way
+    /// out.
+    #[test]
+    fn coming_back_past_the_first_step_closes_the_panel() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info);
+
+        press(&mut ui, &ctx, "^o");
+        assert_eq!(ui.view, View::Tree, "it stayed on an empty panel");
+        assert!(ui.focus.is_empty());
+    }
+
+    /// **A row with nothing to follow says so**, rather than reading as a
+    /// broken link.
+    #[test]
+    fn enter_on_a_fact_says_there_is_nothing_to_follow() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "K");
+
+        let about = info_about(&ui, &ctx).expect("a focus");
+        let at = info_lines(&ui, &about)
+            .iter()
+            .position(|l| matches!(l, InfoLine::Row(crate::model::about::Row::Fact { .. })))
+            .expect("no fact on the page");
+        ui.info_sel = at;
+        let deep = ui.focus.len();
+        press(&mut ui, &ctx, "enter");
+        assert_eq!(ui.focus.len(), deep, "a fact was followed");
+        assert!(ui.status.contains("nothing to follow"), "{}", ui.status);
+    }
+
+    /// **Enter on a header folds it**, and the fold is by name — so it holds
+    /// as the reader walks around rather than resetting per page.
+    #[test]
+    fn enter_on_a_section_header_folds_it() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "K");
+
+        ui.info_sel = 0;
+        let about = info_about(&ui, &ctx).expect("a focus");
+        let open = info_lines(&ui, &about).len();
+        press(&mut ui, &ctx, "enter");
+        assert!(!ui.info_folded.is_empty(), "nothing folded");
+        assert!(info_lines(&ui, &about).len() < open);
+        press(&mut ui, &ctx, "enter");
+        assert!(ui.info_folded.is_empty(), "it did not unfold again");
+    }
+
+    /// **A cycle is ordinary and must be survivable, not prevented** — a
+    /// recording leads to a genre which leads back to the recording, and
+    /// there is nothing wrong with that.
+    #[test]
+    fn walking_in_a_circle_is_allowed_and_bounded() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "K");
+        let here = *ui.focus.last().expect("a focus");
+
+        for _ in 0..(DEEPEST * 2) {
+            ui.focus.push(here);
+            if ui.focus.len() > DEEPEST {
+                ui.focus.remove(0);
+            }
+        }
+        assert!(ui.focus.len() <= DEEPEST, "the path grew without bound");
+        // And the trail still says something rather than running off the line.
+        let trail = breadcrumb(&ui, &ctx);
+        assert!(
+            trail.contains("more"),
+            "a long path was not elided: {trail}"
         );
     }
 
@@ -9951,12 +10181,12 @@ mod tests {
         flat_view(&mut ui);
         press(&mut ui, &ctx, "K");
 
-        let was = ui.focused;
-        ui.focused = Some(crate::model::focus::Focus::Artist(
+        let was = ui.focus.clone();
+        ui.focus.push(crate::model::focus::Focus::Artist(
             crate::model::id::Id::from_uuid(uuid::Uuid::from_u128(7)),
         ));
         press(&mut ui, &ctx, "K");
-        assert_ne!(ui.focused, was, "K re-opened and lost where the reader was");
+        assert_ne!(ui.focus, was, "K re-opened and lost where the reader was");
     }
 
     /// **`:edit` stops the loop rather than shelling out under the draw** —

@@ -244,6 +244,10 @@ pub const DEFAULTS: &[&str] = &[
     // The info panel's own keymap. `escape` leaves it the way you came in —
     // `view-last` *is* "where you were", so there is no second mechanism.
     "bind info escape view-last",
+    // **`^o` is vim's jump-back**, and this is a jump list rather than a tree:
+    // an artist can be arrived at from a recording, a release group or a
+    // concept, and there is no parent to climb to. `h` would promise one.
+    "bind info ^o back",
 ];
 
 /// Build the default table.
