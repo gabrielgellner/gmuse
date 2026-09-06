@@ -3787,6 +3787,28 @@ Append here as decisions are made. Format: date, decision, rationale.
   single end-to-end number would have hidden which one went wrong. It asserts a **generous** bound: what it has to catch
   is not a 20% drift but the shape of this bug, where narrowing cost what drawing everything did.
 
+- **A cold scan is disk-bound, and now it says so at 3.2 GiB/s instead of 1.7** (#122). The first scan of this library
+  took 24.7 s for 6,500 files; the second takes 27 ms, because the mtime fast path was never the problem. What costs is
+  reading a file that changed, and there is one reason: `audio_id::of` demuxes and hashes **every audio packet**, which
+  is the durable identity and not negotiable without re-minting the library. The tag read beside it is 24 ms against 1.3
+  s.
+
+  So it is I/O over 42 GiB, and it was single-threaded on a ten-core machine. The walk now decides what to read and the
+  reading fans out over `std::thread::scope` — no dependency, because §12 says threads and channels and the work is
+  known before it starts. **24.7 s → 13.1 s.**
+
+  **That is the disk, not the threads.** 42.1 GiB in 13.1 s is 3.2 GiB/s, which is an NVMe at full tilt; the serial
+  version managed 1.7 GiB/s because one request at a time does not fill the queue. More threads would buy nothing, and
+  the only remaining lever is hashing less — which means a new `AudioId` scheme and re-minting every id in the library.
+  Worth writing down so the next person does not go looking.
+
+  **Lanes are strided, not chunked.** A library is not evenly expensive: an album of FLACs sits together in the walk, so
+  contiguous chunks hand one worker every large file on the record while the rest finish early.
+
+  **The order out is the order in**, because `arrived` feeds move detection and the report is something a person reads.
+  Each worker writes into its own slot rather than pushing to a shared vec, so nothing depends on which thread finished
+  first — pinned by a test with more files than the parallel threshold.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

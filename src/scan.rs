@@ -168,6 +168,14 @@ pub fn scan(held: &mut Holdings, roots: &[PathBuf]) -> ScanReport {
     // detection needs; the other half is what went away.
     let mut arrived: Vec<PathBuf> = Vec::new();
 
+    // **The walk decides what to read; the reading happens after** (#122).
+    //
+    // Split because they cost nothing alike: deciding is a `stat` per file and
+    // the mtime fast path, and reading is every audio packet of every changed
+    // file — 24.7s of a 24.7s first scan on a 6,500-file library. Collected
+    // first so the expensive half can be spread over the cores that were
+    // watching it happen.
+    let mut to_read: Vec<Candidate> = Vec::new();
     for root in roots {
         for entry in walkdir::WalkDir::new(root)
             .follow_links(false)
@@ -194,25 +202,28 @@ pub fn scan(held: &mut Holdings, roots: &[PathBuf]) -> ScanReport {
                 report.unchanged += 1;
                 continue;
             }
-
             let existed = held.get(&path).is_some();
-            match crate::model::ingest::read(&path) {
-                Ok(seen) => {
-                    held.insert(Held {
-                        at: path.clone(),
-                        mtime,
-                        size,
-                        seen,
-                    });
-                    if existed {
-                        report.updated += 1;
-                    } else {
-                        arrived.push(path.clone());
-                        report.added += 1;
-                    }
+            to_read.push((path, mtime, size, existed));
+        }
+    }
+
+    for (path, mtime, size, existed, seen) in read_all(to_read) {
+        match seen {
+            Ok(seen) => {
+                held.insert(Held {
+                    at: path.clone(),
+                    mtime,
+                    size,
+                    seen,
+                });
+                if existed {
+                    report.updated += 1;
+                } else {
+                    arrived.push(path);
+                    report.added += 1;
                 }
-                Err(e) => report.errors.push((path, e.to_string())),
             }
+            Err(e) => report.errors.push((path, e.to_string())),
         }
     }
 
@@ -242,6 +253,76 @@ pub fn scan(held: &mut Holdings, roots: &[PathBuf]) -> ScanReport {
     report.identified = held.iter().filter(|h| h.seen.identity.is_some()).count();
     report.elapsed = start.elapsed();
     report
+}
+
+/// A file the walk decided needs reading: where it is, what the filesystem
+/// says about it, and whether the library had already heard of it.
+type Candidate = (PathBuf, i64, u64, bool);
+
+/// A [`Candidate`] and what reading it produced.
+type Reading = (
+    PathBuf,
+    i64,
+    u64,
+    bool,
+    Result<crate::model::instance::Scanned, crate::model::ingest::IngestError>,
+);
+
+/// Read every file that changed, over as many threads as there are cores.
+///
+/// **Embarrassingly parallel and it always was**: each file is independent,
+/// the only shared state was the map being written into, and the expensive
+/// part is `audio_id::of` demuxing and hashing every packet — I/O, which an
+/// SSD serves better several requests at a time than one.
+///
+/// **The order out is the order in.** `arrived` feeds `detect_moves`, and the
+/// report is something a person reads; neither may depend on which thread
+/// finished first. Each worker takes a strided slice and writes into its own
+/// slot, so the result is the input order whatever the scheduling did.
+///
+/// `std::thread::scope` rather than a work-stealing pool: §12 says threads and
+/// channels, the work is known before it starts, and a dependency for a
+/// twenty-line fan-out would be one to record and justify.
+fn read_all(work: Vec<Candidate>) -> Vec<Reading> {
+    // Below this the threads cost more than they save, and a library of a
+    // dozen files is a real case — a test fixture is one.
+    const WORTH_SPREADING: usize = 32;
+
+    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let one = |(path, mtime, size, existed): Candidate| {
+        let seen = crate::model::ingest::read(&path);
+        (path, mtime, size, existed, seen)
+    };
+    if threads < 2 || work.len() < WORTH_SPREADING {
+        return work.into_iter().map(one).collect();
+    }
+
+    let mut out: Vec<Option<Reading>> = (0..work.len()).map(|_| None).collect();
+    // **Strided, not chunked**, because a library is not evenly expensive: an
+    // album of FLACs sits together in the walk, so contiguous chunks would
+    // hand one worker every large file on the record and leave the rest idle.
+    let mut lanes: Vec<Vec<(usize, &mut Option<Reading>)>> =
+        (0..threads).map(|_| Vec::new()).collect();
+    for (at, slot) in out.iter_mut().enumerate() {
+        lanes[at % threads].push((at, slot));
+    }
+
+    std::thread::scope(|scope| {
+        for lane in lanes {
+            let work = &work;
+            scope.spawn(move || {
+                for (at, slot) in lane {
+                    let (path, mtime, size, existed) = &work[at];
+                    let seen = crate::model::ingest::read(path);
+                    *slot = Some((path.clone(), *mtime, *size, *existed, seen));
+                }
+            });
+        }
+    });
+
+    out.into_iter()
+        .map(|slot| slot.expect("every index is in exactly one lane"))
+        .collect()
 }
 
 /// **What a departure and an arrival are matched on: the audio.**
@@ -441,6 +522,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// **What comes back is in the order it went in**, whatever the threads
+    /// did — #122.
+    ///
+    /// `arrived` feeds `detect_moves` and the report is something a person
+    /// reads, so neither may depend on which worker finished first. Enough
+    /// files to cross `WORTH_SPREADING`, and each one a different length so a
+    /// misordering cannot look like a match.
+    #[test]
+    fn a_parallel_read_comes_back_in_the_order_it_was_asked_for() {
+        let d = scan_dir("parallel-order");
+        let mut want = Vec::new();
+        for n in 0..64u32 {
+            let path = d.join(format!("{n:03}.wav"));
+            write_wav(&path, 1000 + n * 7);
+            want.push(path);
+        }
+
+        let work: Vec<Candidate> = want.iter().map(|p| (p.clone(), 0, 0, false)).collect();
+        let out = read_all(work);
+
+        assert_eq!(out.len(), want.len());
+        let got: Vec<_> = out.iter().map(|(p, ..)| p.clone()).collect();
+        assert_eq!(got, want, "the fan-out shuffled its results");
+        // And every one of them actually read, so an ordering that survived by
+        // returning nothing would not pass.
+        assert!(
+            out.iter().all(|(_, _, _, _, seen)| seen.is_ok()),
+            "a worker dropped a file"
+        );
+    }
+
+    /// A library too small to be worth spreading is read on this thread, and
+    /// gets the same answers — a fixture is a real case of this.
+    #[test]
+    fn a_small_library_takes_the_serial_path_and_agrees() {
+        let d = scan_dir("parallel-small");
+        let paths: Vec<PathBuf> = (0..3u32)
+            .map(|n| {
+                let path = d.join(format!("{n}.wav"));
+                write_wav(&path, 1000 + n);
+                path
+            })
+            .collect();
+        let work: Vec<Candidate> = paths.iter().map(|p| (p.clone(), 0, 0, false)).collect();
+        let out = read_all(work);
+        assert_eq!(
+            out.iter().map(|(p, ..)| p.clone()).collect::<Vec<_>>(),
+            paths
+        );
     }
 
     /// The wiring, not just the helper: `scan` itself must prune, or every
