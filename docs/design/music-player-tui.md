@@ -4284,6 +4284,29 @@ Append here as decisions are made. Format: date, decision, rationale.
   a scan that reads no tags cannot answer it — nor should it, since the log knows what has been identified and
   `shelf query --unidentified` is where to ask.
 
+- **2026-09-06** **The content-addressed store is withdrawn; one readable tree instead (#132).** `storage-layout.md`
+  specified a `Store/` keyed by encoding id with a hardlinked `Browse/` over it. Asked what that bought over copying two
+  folders, the answer did not survive the question.
+
+  **The store was protection against rename churn** — rendered paths move files whose bytes never changed, and #132
+  called that "exactly the event #62 exists because we cannot reliably infer". **It is inferred now.** Identity is the
+  audio hash (#35), the scan matches by hash and the locator follows (#141), history hangs off the recording (#81); a
+  file renamed _and_ moved keeps its row, its rating and its plays, and there is a test named for it.
+
+  So the store defended against an event that had become free, and charged an unreadable tree, a second tree to
+  compensate, link machinery, and a NAS copy that is either unreadable or needs a third mechanism. That the design
+  survived #141 by a day is the lesson: a decision outlives the constraint that produced it unless something asks.
+
+  **What it did buy is now a render-time check** — Unicode normalisation, case-insensitive collisions, reserved names,
+  the 255-byte cap. Those were `Browse/`'s problem, where being wrong was free; they are the real tree's problem now,
+  and the renderer verifies before it writes and reports rather than mangling.
+
+  **The NAS copy is `rsync`**, which is what prompted the question: 42 GB of audio and 46 MB of log, readable from any
+  machine, because it is the same tree. The log is copied rather than hosted — local-first means an unmounted NAS is a
+  degraded library, not an empty one.
+
+  Non-audio assets stop being a problem with it: art and rip logs sit beside the album, where every other tool looks.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

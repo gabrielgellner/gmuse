@@ -30,9 +30,10 @@ on is that a claim is never a value.
 [`docs/design/domain-model.md`](docs/design/domain-model.md) is a **proposal**, not built: what a library entry is
 versus what a file is. Read it before touching `Store`, `scan.rs` or anything keyed by a path.
 
-[`docs/design/storage-layout.md`](docs/design/storage-layout.md) is **settled design, not built**: where an ingested
-file goes and why it never moves again. One content-addressed store, a rendered `Browse/` that is never written through,
-and a stated policy for how a file leaves. Read it before writing anything that puts a file somewhere.
+[`docs/design/storage-layout.md`](docs/design/storage-layout.md) is **settled design, partly built**: where a file goes
+on disk. **One readable tree**, rendered from the library, which may be rearranged freely because identity is the audio
+and a move loses nothing. The content-addressed store it first proposed is withdrawn — §1 says why. Read it before
+writing anything that puts a file somewhere.
 
 ## Workflow
 

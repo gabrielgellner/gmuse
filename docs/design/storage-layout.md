@@ -1,132 +1,119 @@
-# The storage layout: where a file goes, and why it never moves again
+# The storage layout: one readable tree, and why it may be rearranged freely
 
-**Status: settled design, not built.** This is the layout half of #132 — the conventions, decided, so that the mover has
-a specification rather than a direction. What builds it is #62's mutation API, and nothing here can land before it.
+**Status: settled design, partly built.** The layout half of #132.
 
 `library-api.md` is the contract this serves: **nothing is implicit.** The filesystem is storage and the log is the
 database, so no directory may carry a fact and no path may be the only place something is recorded.
 
 ---
 
-## 1. Three trees, and only one of them matters
+## 1. The content-addressed store is withdrawn
+
+An earlier version of this document specified three trees: a `Store/` addressed by encoding id, a rendered `Browse/` of
+hardlinks over it, and a `Derived/`. That is withdrawn, and the reason it existed is worth stating, because it is the
+reason it no longer needs to.
+
+**The store was protection against rename churn.** #132's argument was that rendered paths move files whose bytes never
+changed — acquire disc 2 and every file on disc 1 is renamed, acquire album B and `%aunique` renames album A — and that
+each of those was _"exactly the event #62 exists because we cannot reliably infer"_.
+
+**It is inferred now, exactly and cheaply.** A file is identified by hashing its audio packets (#35), the scan matches
+by hash and the locator follows (#141), and history hangs off the recording rather than the file (#81). A file renamed
+_and_ moved to another folder keeps its row, its identity, its rating and its plays — asserted by
+`moving_a_file_costs_nothing_because_identity_is_the_audio`.
+
+So the store defended against an event that has become free, and it charged for the defence: an unreadable tree, a
+second rendered tree to compensate, link machinery to build it, and a NAS copy that is either unreadable or needs a
+third mechanism. **One readable tree instead.**
+
+What content addressing would still have bought is freedom from filename collisions and length limits. §5 is what that
+costs instead — a cost paid at render time, where it can be reported, rather than paid in readability every day.
+
+---
+
+## 2. One tree, and its shape
 
 ```
-Store/     addressed by encoding id. Immutable. What ingest writes. The only tree scanned.
-Browse/    hardlinks, rendered from the library. Regenerable, disposable, never scanned, never written through.
-Derived/   transcodes, made from the store. Regenerable. Their existence is a fact, not a directory.
+MusicLibrary/
+  .gmuse/                             the log, and it is the database
+  Dance/    Stephan Bodzin/ Luna/ 01 Triton.flac
+  General/  Beirut/ Lon Gisland/ 02 Elephant Gun.mp3
 ```
 
-**The store is the library on disk. The other two are renderings**, and a rendering can be deleted at any moment without
-asking anyone. That is the whole shape, and everything below follows from it.
+**No `Albums/`, `Classical/` or `Singles/` roots.** That argument stands whatever addresses the files:
 
-### Why not the drafted spec's three roots
-
-The spec proposed `Albums/`, `Classical/`, `Singles/` and argued the split was structural. #132 rejected it and the
-library has since proved the point twice over:
-
-- **`Singles/` is not a shape.** 591 of 592 files in the dance collection carry an album tag; 466 of their releases are
-  held as exactly one track. A single is a small release, not a missing one, and #133 made that a fact (`release_type`)
+- **`Singles/` is not a shape.** 591 of 592 files in the dance collection carry an album tag, and 466 of their releases
+  are held as exactly one track. A single is a small release, not a missing one — #133 made that a fact (`release_type`)
   and #135 made it a display rule. Neither needed a directory.
-- **`Classical/` routes on a hand-set flag**, which is a fact about the music encoded in a place that cannot hold facts.
-  `Work → Recording` already carries it for everything.
+- **`Classical/` routes on a hand-set flag**, which is a fact about the music kept where facts cannot live.
+  `Work → Recording` already carries it, for everything.
 
-One store, one shape.
-
----
-
-## 2. A path in the store is derived from the encoding id
-
-```
-Store/8f/b0/8fb0dcfb-f145-dfff-6649-784265da0229.flac
-```
-
-- **Two levels of hex fanout** from the id's first bytes, so no directory holds more than a few hundred entries at the
-  scale this will reach. 6,485 files today; the fanout is for the tens of thousands it will not be surprising to have.
-- **The extension is the format's**, so every external tool that opens files by extension still works. Five formats in
-  this library: `mp3`, `ogg`, `m4a`, `flac`, `opus`.
-- **Nothing else is in the name.** No artist, no title, no year — those are what change, and a name that holds them is a
-  rename waiting to happen.
-
-### Why content-addressed, and what it costs
-
-The alternative — beets-style rendered paths — churns, and the drafted spec's own rules are the churn: omit the disc
-prefix for single-disc releases and acquiring disc 2 renames every file on disc 1; `%aunique{}` means acquiring album B
-renames album A. **Every one of those is a rename of a file whose bytes did not change**, which is exactly the event #62
-exists because we cannot reliably infer.
-
-The cost is real and worth saying plainly: **a directory of hashes is not readable.** `Browse/` is the answer, and if
-`Browse/` turns out not to be enough in practice then this decision is the one to revisit — not by adding meaning to
-store paths, but by admitting the rendering did not work.
-
-**Recovery without gmuse is possible and is a stated requirement.** The log is a plain append-only file; it maps every
-id to its title, artist, release and holdings. A store with no log is a pile of hashes, so the log is what must be
-backed up first — before the audio, which can at least be re-ripped.
+**The top level is a catalog**, and today there are exactly two: `Dance` holds 761 recordings and `General` the rest. A
+catalog is a `Collection` in the model, so this is the one level rendering something the library owns rather than
+something the tags say. §4 says what happens when that stops having a single answer.
 
 ---
 
-## 3. `Browse/` is a rendering, and is never written through
-
-Hardlinks, rendered from the library — not from the tags — into whatever layout reads well:
+## 3. The path is rendered from the library
 
 ```
-Browse/Stephan Bodzin & Marc Romboy/Luna (2019)/01 Triton.flac
+{catalog}/{file_under}/{album}/{disc-}{track} {title}.{ext}
 ```
 
-**Hardlinks rather than symlinks**, decided this way round:
+- **`file_under`, not `artist`.** The album-level credit where there is one, so a guest credit does not split an album
+  off from the artist it belongs to (#84).
+- **`album` is the release group's title**, so two pressings of one record land together and a reissue does not make a
+  second folder.
+- **The disc prefix only when the release has more than one medium** — knowable now that a release carries its disc
+  count (#134). If a second disc arrives later the first disc's files are renamed, which is free.
+- **The extension is the format's**, so every tool that opens files by extension still works.
 
-- A hardlink **is** a real file to every tool, including Finder, which copies a symlink as a link rather than as its
-  contents.
-- The scanner sets `follow_links(false)` already, so symlinks would be free to ignore — but the scan root is `Store/`
-  anyway, so neither tree is walked twice and the argument does not decide anything.
-- Where `Browse/` is on another filesystem — an external drive, a share — a hardlink is impossible and it falls back to
-  a symlink. That is a degradation, not a second design.
-
-**Never written through, and this is not a convention but a constraint.** Almost every tag writer, `lofty` included,
-writes to a temporary file and renames it into place. That replaces the _directory entry_, so a write through a browse
-path leaves a divergent regular file and an untouched store copy — silently, and identically for hardlinks and symlinks.
-Writing tags is a declared export (`library-api.md`) and it goes to the store path. Re-rendering `Browse/` replaces it
-wholesale, which is what makes a stray divergent file harmless.
-
-**This is where §7 of the drafted spec goes.** Unicode normalisation, reserved Windows names, case collisions, the
-255-byte cap — all of it applies only here, where being wrong is free to fix by re-rendering. Those same rules over a
-master tree are how a library corrupts itself on sync.
+**Rendered from the library, not from the tags**, which is the whole difference from beets. The library knows the
+release-group credit rather than a guessed album artist, knows a merge happened, and carries a basis and a confidence
+for every claim — and it survives a retag, which the tags by definition do not.
 
 ---
 
-## 4. `Derived/` holds what can be made again
+## 4. Rearranging is free, and that is the point
 
-A transcode is the same performance, different bytes. #132 built the edge that says so — `EncodingDerived` — and the
-rule it turns on:
+Change the template, correct an artist's name, merge two recordings: the files move and **nothing is lost**. The scan
+recognises each of them by its audio and updates the locator. What used to be the danger is now the ordinary case.
 
-- **Derive only from lossless, and only where the saving earns a second copy.** For a 320 kbps MP3 the small copy should
-  _be_ the file, hardlinked, because transcoding lossy to lossy loses twice for nothing.
-- **`from` must be an encoding this library holds.** No edge means "not known to be regenerable", which is the safe
-  default: a file whose source is gone is not disposable, whatever its format.
-- **Nothing is filed here by format.** A purchased 320 kbps MP3 is a master and lives in the store.
-  Lossless-versus-lossy does not answer disposability, which is why the edge exists — and this library holds lossless
-  files that were upsampled from lossy ones, which is why `Verdict::Suspect` exists.
+**A move is not an operation.** #62 asked for `add`/`remove`/`move`/`replace` and three of them dissolved; this is why
+`move` was one.
+
+**Re-rendering costs a re-hash.** Files at new paths are unknown until the next scan hashes them: 16.5 s for 6,500
+files, proportionally less for one album. Correctness is unaffected; only time.
+
+**A recording in two catalogs has no single path.** None is today — the two are disjoint — but nothing prevents it, and
+the render must **report it rather than pick one**. Choosing a primary member is the collapse rejected for genre (#93),
+and a folder that decided it would be a fact living where facts cannot.
 
 ---
 
-## 5. Ingest is one declared operation
+## 5. The rendering rules now apply to the real tree
 
-Today files arrive wherever they arrive and a scan reconciles afterwards. Under this layout, importing a file is #62's
-declaration: **the bytes move into the store and the holding is recorded in one operation**, not a copy followed by a
-scan that guesses what happened.
+This is the honest cost of dropping the store. These were `Browse/`'s problem, where being wrong was free to fix; they
+are the master tree's problem now:
 
-**Nothing about storage gates on how much is known about a file.** The drafted spec's §11 checklist — MusicBrainz ids,
-sort tags, ReplayGain, artwork — is a _report_, never a gate. 7.3% of this library has no MusicBrainz id and some of it
-never will; a row nothing has identified is ordinary, and a store that refused it would be refusing music you own.
+- **Unicode normalisation.** macOS and Linux disagree about composed and decomposed forms; normalise to NFC on write.
+- **Case-insensitive collisions.** APFS and SMB are case-insensitive, so two artists differing only in case are one
+  directory.
+- **Reserved names and characters**, for a tree read over SMB from Windows: `CON`, `PRN`, `:`, `?`, `*`.
+- **The 255-byte component cap**, which a long classical title reaches.
+
+**Every one is checkable before the write, and a collision is a report rather than an overwrite.** The renderer proposes
+a path, verifies it is free and legal, and refuses the file to a review list if it is not. Silently mangling a name is
+how a library develops files nobody can find.
 
 ---
 
 ## 6. How a file leaves
 
-**The store never deletes on its own.** A store that only ever grows needs a stated policy before it is built, and this
-is it:
+**Nothing is deleted on its own.** Stated before the mover exists, because a tree that only grows needs a policy first:
 
 1. `remove` writes a tombstone (#62). The library stops offering the row.
-2. The bytes move to `Store/.departed/`, still content-addressed, still readable.
+2. The bytes move to `MusicLibrary/.departed/`, keeping their rendered path beneath it.
 3. Only an explicit, separate purge deletes them.
 
 Two steps, because the first is reversible and the second is not — and the error this project prefers is the repairable
@@ -134,58 +121,87 @@ one. A tombstoned file that turns out to be wanted is one undo away; a deleted o
 
 ---
 
-## 7. The archive is a device, not a tree
+## 7. Derived copies
 
-The NAS holding everything needs no new concept. `Holding` is `(device, encoding) -> locator`, so **the archive is the
-device whose holdings are complete**; laptops and phones hold subsets. #38's Local / Remote / Absent already describes
-it and #39's bundles are how the facts travel beside the bytes.
+A transcode is the same performance, different bytes, and #132 built the edge that says so: `EncodingDerived`.
 
-That also collapses the drafted spec's `Sync/`: it is not a root, it is a browse tree whose query happens to select the
-small copies.
+- **Derive only from lossless, and only where the saving earns a second copy.** For a 320 kbps MP3 the small copy should
+  _be_ the file, because transcoding lossy to lossy loses twice for nothing.
+- **`from` must be an encoding this library holds.** No edge means "not known to be regenerable", the safe default: a
+  file whose source is gone is not disposable, whatever its format.
+- **Not filed by format.** A purchased 320 kbps MP3 is a master and lives in the tree like everything else.
+  Lossless-versus-lossy does not answer disposability — this library holds lossless files upsampled from lossy ones,
+  which is why `Verdict::Suspect` exists.
 
-**The archive does not hold derived copies.** They are regenerable by definition, and storing what can be remade is what
-the derivation edge exists to let us stop doing. Expressible as a per-device policy now that derivation is a fact; the
-default is that an archive holds masters.
-
----
-
-## 8. What is taken from the drafted spec wholesale
-
-The practical half is good and hard-won, and none of it conflicts with anything here — it is about the bytes, and the
-bytes are the one thing the filesystem is genuinely responsible for:
-
-FLAC padding on rip (`--padding=262144`), ReplayGain 2.0 track _and_ album gain, exactly one embedded cover at ≤800px
-with the full-resolution copy external, `flac -t` verification against the STREAMINFO MD5, never transcoding lossy to
-lossy, keeping `rip.log` and the cue sheet.
-
-97% of this library already carries embedded art, so that half is mostly satisfied. The external full-resolution copy is
-not: 30 JPEGs across 495 albums.
+Derived copies live outside the library tree, because they are output rather than holdings: a `Sync/` for a phone is a
+rendering of a _query_, made where it is used.
 
 ---
 
-## 9. What this does not settle
+## 8. The archive is a device, and the NAS copy is a copy
 
-**Non-audio assets have no home yet, and that is deliberate.** Cover art, `rip.log`, cue sheets are per-_release_, and a
-store addressed by encoding id has nowhere natural to put them. Today it barely matters — 41 non-audio files against
-6,485 audio — but ripping FLAC changes that, because a rip log and a cue sheet arrive with every disc.
+`Holding` is `(device, encoding) -> locator`, so **the archive is the device whose holdings are complete**; laptops and
+phones hold subsets. #38's Local / Remote / Absent already describes it.
 
-The shape that would fit is the one everything else here follows: **content-address the asset too, and make its
-attachment to a release a fact.** A directory holding art beside an album is a fact in a place that cannot hold one, and
-it dies the moment the album's files are addressed by hash. That needs an entity and a fact family, so it is #139 rather
-than a paragraph here.
+Concretely, that is now what it sounds like:
 
-**Migration is blocked on #62.** Moving the 6,485 files in `~/MusicLibrary/{General,Dance}` into a store is exactly the
-mutation #62 exists to declare.
+```sh
+rsync -a --delete ~/MusicLibrary/General ~/MusicLibrary/Dance /Volumes/Media/GMuseLibrary/
+rsync -a ~/MusicLibrary/.gmuse/ /Volumes/Media/GMuseLibrary/.gmuse/
+```
 
-And one hazard worth naming before that migration runs: **the paths carry facts nothing has recorded.** A file called
-`GemsOnVHS Field Recordings - Jeremie Albino, "Rollin'".mp3` has the series in its filename and nowhere else; the dance
-collection encodes era, genre and BPM band in directories. Migration is the last moment those paths exist. Read them for
-facts, propose them, _then_ move the bytes.
+42 GB of audio and 46 MB of log, readable in Finder, on a phone, from any machine — because it is the same tree rather
+than an opaque one. **The log is copied, not hosted**: §1 of the design doc makes local-first non-negotiable, and a data
+directory on a share means an unmounted NAS is an empty library rather than a degraded one.
+
+The log's own layout is already the sync design — one file per device, append-only, read as a union, stamps that cannot
+collide — so copying the directory _is_ the merge. #39 is this with manifests, vintages and tombstones, and it is worth
+building when two machines actually disagree.
 
 ---
 
-## 10. Related
+## 9. Non-audio assets stop being a problem
 
-#132 (the issue this settles) · #62 (the mutation API that builds it) · #26 (the folder tree's three jobs) · #37 (path
-is local state) · #38 (Local / Remote / Absent) · #39 (bundles) · #133 (release type, so a single needs no folder) ·
-#134 (partial holdings) · #135 (the tree that made `Singles/` unnecessary)
+Cover art, `rip.log` and a cue sheet are per-_release_, and a store keyed by encoding id had nowhere to put them. A
+folder tree does: **beside the album, where every other tool already looks.**
+
+```
+General/Beirut/Lon Gisland/cover.jpg
+General/Beirut/Lon Gisland/rip.log
+```
+
+A convention rather than a fact, and the rule holds: nothing may be recorded _only_ there. If which image is the front
+cover ever needs to be a claim it becomes one — but a file sitting beside its album needs no model to be found.
+
+---
+
+## 10. What is taken from the drafted spec wholesale
+
+The practical half is good and hard-won, and it is about the bytes, which is the one thing the filesystem is genuinely
+responsible for: FLAC padding on rip (`--padding=262144`), ReplayGain 2.0 track _and_ album gain, exactly one embedded
+cover at ≤800px with the full-resolution copy external, `flac -t` verification against the STREAMINFO MD5, never
+transcoding lossy to lossy, keeping `rip.log` and the cue sheet.
+
+97% of this library already carries embedded art; the external full-resolution copy is nearly absent, at 30 JPEGs across
+495 albums.
+
+---
+
+## 11. What is left to build
+
+- **The renderer**: propose a path from the library, check it against §5, move the file, record the holding. One
+  component, and the only one #132 still needs.
+- **Ingest puts a file where it belongs**, as part of #62's declaration, rather than cataloguing it where it landed.
+- **Migration**, which is now a re-render of 6,485 files in place rather than a move into a new scheme.
+
+**One hazard before any of that.** The paths carry facts nothing has recorded: the dance collection encodes era, genre
+and BPM band in directories, and one file has its series only in its filename. A re-render is the last moment those
+paths exist. Read them for facts, propose them, _then_ move the bytes.
+
+---
+
+## 12. Related
+
+#132 (the issue this settles) · #62 (`import`, the declaration) · #26 (the folder tree's three jobs) · #35, #141
+(identity is the audio, which is what makes this safe) · #38 (Local / Remote / Absent) · #39 (bundles) · #133 (release
+type) · #134 (disc counts, which decide the disc prefix) · #135 (the tree that made `Singles/` unnecessary)
