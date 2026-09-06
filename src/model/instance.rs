@@ -938,6 +938,27 @@ impl Instance {
 
     #[allow(
         dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — nothing makes derived copies until the storage layer does (#132)"
+    )]
+    /// Say one file's bytes were made out of another's — #132.
+    ///
+    /// A transcode, and the claim that matters about it: `to` can be made
+    /// again from `from`, so it need not be kept safe. `from` must be an
+    /// encoding this library holds, or the claim is not true of anybody here.
+    pub fn derives_encoding(&mut self, now: i64, from: Id<Encoding>, to: Id<Encoding>) {
+        self.append(now, Fact::EncodingDerived { from, to });
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — nothing makes derived copies until the storage layer does (#132)"
+    )]
+    pub fn retract_encoding_derivation(&mut self, now: i64, from: Id<Encoding>, to: Id<Encoding>) {
+        self.append(now, Fact::EncodingDerivationRetracted { from, to });
+    }
+
+    #[allow(
+        dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
     )]
     #[allow(

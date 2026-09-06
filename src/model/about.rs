@@ -320,7 +320,12 @@ fn recording(l: &Librarian, id: Id<Recording>, about: &mut About) {
             } else {
                 "elsewhere".to_string()
             },
-            name: label_of(l, Focus::Encoding(e.id)),
+            name: match l.derived_from(e.id) {
+                // Said on the row, because "which of these am I keeping" is
+                // the question somebody scanning a list of copies has.
+                Some(_) => format!("{} · derived", label_of(l, Focus::Encoding(e.id))),
+                None => label_of(l, Focus::Encoding(e.id)),
+            },
             to: Focus::Encoding(e.id),
         })
         .collect();
@@ -387,7 +392,34 @@ fn encoding(l: &Librarian, id: Id<Encoding>, about: &mut About) {
         }
     }
     is.push(fact("verdict", format!("{:?}", e.verdict())));
+    // **Whether this can be made again** (#132). The claim disposability
+    // rests on, and the only one that answers it: a format cannot, because a
+    // purchased 320 kbps MP3 looks exactly like one somebody transcoded.
+    is.push(fact(
+        "keep",
+        match l.derived_from(id) {
+            Some(_) => "no — it can be made again",
+            None => "yes — nothing here can remake it",
+        },
+    ));
     about.sections.push(section("what it is", is));
+
+    let mut made = Vec::new();
+    if let Some(from) = l.derived_from(id) {
+        made.push(Row::Link {
+            label: "made from".into(),
+            name: label_of(l, Focus::Encoding(from)),
+            to: Focus::Encoding(from),
+        });
+    }
+    for copy in l.derived_copies(id) {
+        made.push(Row::Link {
+            label: "made".into(),
+            name: label_of(l, Focus::Encoding(copy)),
+            to: Focus::Encoding(copy),
+        });
+    }
+    about.sections.push(section("derived", made));
 
     about.sections.push(section(
         "held",
@@ -807,6 +839,99 @@ mod tests {
         assert!(
             without.sections.iter().any(|s| s.title == FACTS),
             "the heading went with it, leaving no way to open it"
+        );
+    }
+
+    /// **A derived copy says it can be made again; an acquired one says it
+    /// cannot** — #132, and the distinction storage rests on.
+    ///
+    /// Not lossless-versus-lossy: a purchased 320 kbps MP3 is a master, and
+    /// this library holds lossless files upsampled from lossy ones. Only
+    /// provenance answers it.
+    #[test]
+    fn a_derived_copy_knows_it_can_be_remade() {
+        // Two copies of one performance: the file that was acquired, and one
+        // made out of it.
+        let mut held = crate::scan::Holdings::new();
+        for path in [
+            "/m/Dance/Luna/01 Callisto.flac",
+            "/m/Dance/Luna/01 Callisto.opus",
+        ] {
+            held.upsert(crate::fixture::Tagged {
+                path: path.into(),
+                title: Some("Callisto".into()),
+                artist: Some("Stephan Bodzin".into()),
+                album: Some("Luna".into()),
+                tracknumber: Some(1),
+                ..Default::default()
+            });
+        }
+        let mut l = crate::fixture::from_holdings(&held);
+        let by_suffix = |l: &Librarian, ext: &str| {
+            Listing::rows(l)
+                .into_iter()
+                .find(|c| l.where_held(*c).is_some_and(|at| at.ends_with(ext)))
+                .expect("the fixture holds both copies")
+        };
+        let (flac, opus) = (by_suffix(&l, ".flac"), by_suffix(&l, ".opus"));
+        l.encoding_derived.push((flac, opus));
+
+        let keep = |about: &About| {
+            rows(about, "what it is")
+                .iter()
+                .find_map(|r| match r {
+                    Row::Fact { label, value } if label == "keep" => Some(value.clone()),
+                    _ => None,
+                })
+                .expect("no keep row")
+        };
+
+        let source = l.about(Focus::Encoding(flac), false);
+        assert!(
+            keep(&source).starts_with("yes"),
+            "the acquired file read as disposable: {}",
+            keep(&source)
+        );
+        assert_eq!(
+            rows(&source, "derived").iter().find_map(|r| match r {
+                Row::Link { to, label, .. } if label == "made" => Some(*to),
+                _ => None,
+            }),
+            Some(Focus::Encoding(opus)),
+            "the original does not name what was made from it"
+        );
+
+        let made = l.about(Focus::Encoding(opus), false);
+        assert!(
+            keep(&made).starts_with("no"),
+            "the derived copy read as irreplaceable: {}",
+            keep(&made)
+        );
+        assert_eq!(
+            rows(&made, "derived").iter().find_map(|r| match r {
+                Row::Link { to, label, .. } if label == "made from" => Some(*to),
+                _ => None,
+            }),
+            Some(Focus::Encoding(flac)),
+            "the derived copy does not name its source"
+        );
+    }
+
+    /// **No edge means keep it**, which is the answer that has to be safe to
+    /// act on: a file somebody else derived, and one whose source has been
+    /// forgotten, look the same from here and both need keeping.
+    #[test]
+    fn a_file_with_no_source_is_kept() {
+        let (l, _) = library();
+        let only = crate::model::rows::Listing::rows(&l)[0];
+        let about = l.about(Focus::Encoding(only), false);
+        assert!(rows(&about, "what it is").iter().any(|r| matches!(
+            r,
+            Row::Fact { label, value } if label == "keep" && value.starts_with("yes")
+        )));
+        assert!(
+            about.sections.iter().all(|s| s.title != "derived"),
+            "an empty derived section was drawn"
         );
     }
 

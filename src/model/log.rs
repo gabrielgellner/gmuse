@@ -262,6 +262,38 @@ pub enum Fact {
         name: String,
     },
 
+    /// **These bytes were made out of those bytes** — #132.
+    ///
+    /// A transcode: the *same performance*, encoded again. Not
+    /// [`Fact::RecordingDerived`], which is a musical act — a remix is a
+    /// different performance, and this is not.
+    ///
+    /// **What it is for is disposability.** A derived copy can be made again
+    /// from the thing it came from, so it need not be backed up; an acquired
+    /// one cannot, whatever its format. Lossless-versus-lossy does not answer
+    /// that — a purchased 320 kbps MP3 is a master, and this library holds
+    /// lossless files that were upsampled from lossy ones, which is why
+    /// `Verdict::Suspect` exists. Only provenance answers it, so it is
+    /// recorded rather than inferred from a format or a folder.
+    ///
+    /// **`from` is an encoding this library holds**, which is the whole
+    /// point: a file the seller derived from a master you have never seen is
+    /// not regenerable by you, and no edge should claim it is. No edge means
+    /// "not known to be regenerable", which is the safe default.
+    ///
+    /// Nothing records *how*. What came out is already described — its format,
+    /// its bitrate, its length — and the recipe belongs to whatever policy
+    /// makes derived copies, not to the claim that one was made.
+    EncodingDerived {
+        from: Id<Encoding>,
+        to: Id<Encoding>,
+    },
+    /// Withdraw one, for the reason every retraction here exists.
+    EncodingDerivationRetracted {
+        from: Id<Encoding>,
+        to: Id<Encoding>,
+    },
+
     /// **One recording is derived from another** — `domain-model.md` §5, #79.
     ///
     /// A remix, an edit, a dub. Row existence, so it unions across devices for
@@ -839,6 +871,9 @@ pub struct Catalogue {
     /// [`Catalogue::assertions_retracted`] is: a decision and a silence are
     /// different answers, and only a row can tell them apart.
     pub narrows_retracted: BTreeSet<(Id<Hierarchy>, Id<Concept>, Id<Concept>)>,
+    /// Every bytes-came-from-bytes edge — #132. Row existence, like the rest.
+    pub encoding_derived: BTreeSet<(Id<Encoding>, Id<Encoding>)>,
+    pub encoding_derived_retracted: BTreeSet<(Id<Encoding>, Id<Encoding>)>,
     /// Every recording-derived-from edge. Row existence, so curation unions
     /// exactly as `narrows` does (#79).
     pub derived: BTreeSet<(
@@ -1198,6 +1233,16 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             } => {
                 cat.hierarchies.insert(*hierarchy, (*facet, name.clone()));
             }
+            Fact::EncodingDerived { from, to } => assert_edge(
+                &mut cat.encoding_derived,
+                &mut cat.encoding_derived_retracted,
+                (*from, *to),
+            ),
+            Fact::EncodingDerivationRetracted { from, to } => retract_edge(
+                &mut cat.encoding_derived,
+                &mut cat.encoding_derived_retracted,
+                (*from, *to),
+            ),
             Fact::RecordingDerived { from, to, kind } => assert_edge(
                 &mut cat.derived,
                 &mut cat.derived_retracted,

@@ -225,6 +225,13 @@ fn every_fact_family_converges_without_coordination() {
     m2.add_to_collection(240, crate_, other, OrdKey::first());
     m2.narrows(250, browse, facet::GENRE, "Electronic", "Techno");
     m2.derives(260, callisto, other, Remix);
+    // And says the second file was transcoded out of the first — #132, the
+    // edge that makes "disposable" a fact rather than a directory.
+    let (first, second) = (
+        Id::<Encoding>::of_audio(&scan[0].audio),
+        Id::<Encoding>::of_audio(&scan[1].audio),
+    );
+    m2.derives_encoding(270, first, second);
 
     cross_merge(&mut m1, &mut m2, 400);
     let (one, two) = (m1.catalogue(), m2.catalogue());
@@ -246,6 +253,7 @@ fn every_fact_family_converges_without_coordination() {
     assert_eq!(one.ratings[&callisto], 4);
     assert_eq!(one.narrows.len(), 1, "the hierarchy edge crossed");
     assert_eq!(one.derived.len(), 1, "the derivation crossed");
+    assert_eq!(one.encoding_derived.len(), 1, "the transcode edge crossed");
 }
 
 /// **A retraction beats the import it shadows, whichever way the sync ran** —

@@ -68,6 +68,20 @@ That is the whole reason this panel exists. The tags in your files are a seriali
 
 A section with nothing in it is not drawn. Empty headings would say the library knows less than it does.
 
+## Which copies matter
+
+A copy's page says whether it has to be kept:
+
+    keep          no — it can be made again
+
+**That is provenance, not format.** A 320 kbps MP3 bought from a shop is a master — nothing here can produce it again —
+and a FLAC transcoded out of one is disposable however lossless it is. The library only says "made again" when something
+told it which file this one came out of; **silence means keep it**, because a copy whose history was never recorded and
+one that was acquired look identical from here.
+
+The copy it was made from is a link, and the original names what was made from it. In a recording's **copies** section
+the derived ones say so on the row, so "which of these am I backing up" is answerable without opening each.
+
 ## Following a link
 
 Rows ending in `→` go somewhere. `enter` follows one; `^o` comes back. The trail along the bottom is where you have

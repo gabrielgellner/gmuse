@@ -108,6 +108,8 @@ pub struct Librarian {
     pub identified: BTreeMap<Id<Recording>, crate::model::basis::Basis>,
     /// Which recordings were folded into which — `(was, is now)`.
     pub merged: Vec<(Id<Recording>, Id<Recording>)>,
+    /// Which files were made out of which — `(source, derived)`, #132.
+    pub encoding_derived: Vec<(Id<Encoding>, Id<Encoding>)>,
     /// The log, kept so the info panel can say when something became true and
     /// on which machine — #128.
     ///
@@ -259,6 +261,7 @@ impl Librarian {
             claims: Default::default(),
             identified: Default::default(),
             merged: Default::default(),
+            encoding_derived: Default::default(),
             records: Default::default(),
             collected: Default::default(),
             placed: Default::default(),
@@ -605,6 +608,7 @@ impl Librarian {
         l.ratings = cat.ratings.clone();
         l.identified = cat.identified.clone();
         l.merged = cat.merges.redirects().collect();
+        l.encoding_derived = cat.encoding_derived.iter().copied().collect();
         l.plays = cat.plays.clone();
         l.collections = cat.collections.clone();
         l.collected = cat.entries.clone();
@@ -826,6 +830,27 @@ impl Librarian {
         self.claims
             .get(&(subject, facet))
             .map_or(&[][..], Vec::as_slice)
+    }
+
+    /// What this file was made out of, if anything here was — #132.
+    ///
+    /// `None` means **not known to be regenerable**, which is the answer that
+    /// must be safe to act on: an acquired file and one whose source has been
+    /// forgotten look the same from here, and both need keeping.
+    pub fn derived_from(&self, copy: Id<Encoding>) -> Option<Id<Encoding>> {
+        self.encoding_derived
+            .iter()
+            .find(|(_, to)| *to == copy)
+            .map(|(from, _)| *from)
+    }
+
+    /// What was made out of this file.
+    pub fn derived_copies(&self, copy: Id<Encoding>) -> Vec<Id<Encoding>> {
+        self.encoding_derived
+            .iter()
+            .filter(|(from, _)| *from == copy)
+            .map(|(_, to)| *to)
+            .collect()
     }
 
     /// What a recording's identity rests on, said as a person would read it.

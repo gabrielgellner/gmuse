@@ -4028,6 +4028,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   and a cursor. The guides are prose and scroll, so `/` there would want to search _within_ a document — a different
   motion, and not this one.
 
+- **2026-09-06** **Disposability is a fact, not a format or a folder (#132).** `EncodingDerived { from, to }` says these
+  bytes were made out of those. It is deliberately not `RecordingDerived`, which is a musical act — a remix is a
+  different performance, and a transcode is the same one encoded again.
+
+  **The question it answers is what has to be backed up.** A derived copy can be made again from the thing it came from;
+  an acquired one cannot, whatever its format. Lossless-versus-lossy does not answer that and the spec that proposed it
+  was wrong to try: a purchased 320 kbps MP3 is a master, and this library holds lossless files that were upsampled from
+  lossy ones — which is why `Verdict::Suspect` exists at all. Only provenance answers it, so provenance is recorded.
+
+  **`from` must be an encoding this library holds**, checked when the proposal is applied. A file the seller derived
+  from a master nobody here has ever seen is not regenerable by anybody here, and an edge claiming otherwise would make
+  a file that needs keeping look disposable — the one direction in which being wrong loses music. **No edge means "not
+  known to be regenerable"**, which is the safe default and the answer an unimported history gives.
+
+  Nothing records _how_. What came out is already described — its format, its bitrate, its length — and the recipe
+  belongs to whatever policy makes derived copies rather than to the claim that one was made.
+
+  The encoding page says `keep  yes — nothing here can remake it` or `no — it can be made again`, and a copy in a
+  recording's list is marked `· derived`. That is the whole user-facing surface: the storage layer #132 designs is what
+  will act on it.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

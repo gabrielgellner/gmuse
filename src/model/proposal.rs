@@ -159,6 +159,19 @@ pub enum Proposal {
         broader: String,
         narrower: String,
     },
+    /// **A file that was made out of another file** — #132.
+    ///
+    /// The route the thing that *makes* a derived copy uses to say so. A
+    /// transcode is a fact somebody performed, and nothing downstream can
+    /// infer it: the bytes do not say where they came from, and a format does
+    /// not either — a purchased 320 kbps MP3 looks exactly like one you made.
+    ///
+    /// Both are encodings, by id, because a tool that made a file knows the
+    /// file it made it from. Neither is a name to be resolved.
+    Derived {
+        from: Id<Encoding>,
+        to: Id<Encoding>,
+    },
     /// **Withdraw a hierarchy edge** — the other half, and not optional.
     ///
     /// The log is append-only, so a curation pass that revises itself leaves
@@ -248,6 +261,10 @@ impl Proposal {
             | Proposal::Rated { recording, .. }
             | Proposal::CollectedInto { recording, .. } => Subject::Recording(*recording),
             Proposal::Narrowed { .. } | Proposal::NarrowingRetracted { .. } => Subject::Vocabulary,
+            // **The thing it is about is the derived file.** The source is
+            // checked below, where a missing one is a reason to refuse rather
+            // than a subject the library has not heard of.
+            Proposal::Derived { to, .. } => Subject::Encoding(*to),
         }
     }
 }
@@ -479,6 +496,20 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 parent: Id::<Concept>::in_facet(facet::GENRE, &broader),
                 child: Id::<Concept>::in_facet(facet::GENRE, &narrower),
             }]
+        }
+        // **Both ends must be held**, because the claim is that `to` can be
+        // remade from `from` — and a source this library does not have is a
+        // promise it cannot keep.
+        Proposal::Derived { from, to } => {
+            if from == to {
+                return Err("a file is not derived from itself".to_string());
+            }
+            if !library.holds(Subject::Encoding(from)) {
+                return Err(format!(
+                    "nothing here holds {from}, so nothing can be remade from it"
+                ));
+            }
+            vec![Fact::EncodingDerived { from, to }]
         }
         Proposal::GenreAssigned {
             recording,
@@ -752,6 +783,61 @@ pub(crate) mod tests {
     /// **A term is not narrower than itself**, and an empty one names nothing.
     ///
     /// A self-edge is a cycle of one: the bounded walk would spend its entire
+    /// **A transcode is a fact the maker declares** — #132, and the only
+    /// route to it: the bytes do not say where they came from, and a format
+    /// does not either.
+    #[test]
+    fn a_derived_copy_names_the_file_it_was_made_from() {
+        let line = r#"{"fact":"derived","from":"00000000-0000-0000-0000-000000000001","to":"00000000-0000-0000-0000-000000000002"}"#;
+        let (records, report) = parse(line, dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+        let facts: Vec<_> = records.iter().map(|r| r.fact.clone()).collect();
+        assert!(
+            matches!(&facts[..], [Fact::EncodingDerived { from, to }] if *from == enc(1) && *to == enc(2)),
+            "{facts:?}"
+        );
+    }
+
+    /// **A source this library does not hold is a promise it cannot keep.**
+    ///
+    /// The edge means "`to` can be made again from `from`". If `from` is not
+    /// here, it cannot, and an edge saying otherwise would make a file that
+    /// needs backing up look disposable — the one direction in which being
+    /// wrong loses music.
+    #[test]
+    fn a_derivation_refuses_a_source_nothing_holds() {
+        let unheld = uuid::Uuid::from_u128(9);
+        let line = format!(
+            r#"{{"fact":"derived","from":"{unheld}","to":"00000000-0000-0000-0000-000000000002"}}"#
+        );
+        let (records, report) = parse(&line, dev(), 100, HELD);
+        assert_eq!(report.applied, 0, "{report}");
+        assert!(records.is_empty());
+        assert_eq!(report.refused.len(), 1, "{report}");
+
+        // And the other end: a derived file nothing here holds is not a
+        // subject this library has heard of, which is `unknown` rather than
+        // refused — the same answer every other proposal gives.
+        let line = format!(
+            r#"{{"fact":"derived","from":"00000000-0000-0000-0000-000000000001","to":"{unheld}"}}"#
+        );
+        let (_, report) = parse(&line, dev(), 100, HELD);
+        assert_eq!(report.applied, 0, "{report}");
+        assert_eq!(
+            report.unknown,
+            vec![Subject::Encoding(Id::from_uuid(unheld))]
+        );
+    }
+
+    /// A file is not made out of itself, and an edge saying so would make it
+    /// its own reason for being disposable.
+    #[test]
+    fn a_derivation_refuses_a_loop_of_one() {
+        let line = r#"{"fact":"derived","from":"00000000-0000-0000-0000-000000000002","to":"00000000-0000-0000-0000-000000000002"}"#;
+        let (_, report) = parse(line, dev(), 100, HELD);
+        assert_eq!(report.applied, 0, "{report}");
+    }
+
     /// budget on it, and `genre@1` would climb to where it started.
     #[test]
     fn a_hierarchy_edge_refuses_a_loop_of_one() {
