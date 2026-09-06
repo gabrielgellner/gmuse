@@ -95,6 +95,19 @@ pub struct Librarian {
     held_at: std::collections::BTreeMap<String, Id<Encoding>>,
     /// What each collection is called.
     pub collections: BTreeMap<Id<Collection>, Collected>,
+    /// **Every claim, with who made it and how sure** — #125.
+    ///
+    /// `concepts` above is the collapsed form: distinct labels, best first,
+    /// which is what a row needs. It drops the basis and the confidence, and
+    /// those are exactly what the info panel exists to show — #96 made a
+    /// retraction shadow rather than delete precisely so that "somebody ruled
+    /// this out" stays a different answer from "nobody said it", and a
+    /// collapsed list cannot express either.
+    pub claims: BTreeMap<(Described, Id<crate::model::entity::Facet>), Vec<Claimed>>,
+    /// What each recording's identity rests on, where an authority named it.
+    pub identified: BTreeMap<Id<Recording>, crate::model::basis::Basis>,
+    /// Which recordings were folded into which — `(was, is now)`.
+    pub merged: Vec<(Id<Recording>, Id<Recording>)>,
     /// Every collection entry, in list order — see [`Catalogue::entries`].
     collected: BTreeSet<(Id<Collection>, OrdKey, Id<Recording>)>,
     /// Which slot each copy sits in — issue #78.
@@ -109,6 +122,32 @@ impl Default for Librarian {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// One claim about a subject: what was said, by whom, and how sure — #125.
+///
+/// **Retracted ones are kept.** `assertions_retracted` records the strongest
+/// basis that ruled a concept out (#96), and dropping the row here would make
+/// "somebody decided against this" indistinguishable from "nobody ever said
+/// it" — which is the whole reason the retraction is a row rather than a
+/// delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claimed {
+    pub label: String,
+    /// Who said it, and how sure.
+    ///
+    /// **`None` when only the retraction is left.** The fold *removes* the
+    /// shadowed rows — `retract` sweeps every asserter of the pair — so a
+    /// concept somebody ruled out has a retraction and no assertion behind it.
+    /// Saying `manual` asserted it would be a lie; saying nothing at all would
+    /// lose the fact that it was ruled out. The log still holds the assertion
+    /// that was shadowed, and #128's facts section is where it shows.
+    pub said: Option<(
+        crate::model::reference::Source,
+        crate::model::ingest::Confidence,
+    )>,
+    /// The basis that ruled it out, if one did.
+    pub retracted: Option<crate::model::reference::Source>,
 }
 
 /// How the two questions drawing a row asks get answered — issue #123.
@@ -182,6 +221,9 @@ impl Librarian {
             locators: Default::default(),
             held_at: Default::default(),
             collections: Default::default(),
+            claims: Default::default(),
+            identified: Default::default(),
+            merged: Default::default(),
             collected: Default::default(),
             placed: Default::default(),
         }
@@ -525,6 +567,8 @@ impl Librarian {
             }
         }
         l.ratings = cat.ratings.clone();
+        l.identified = cat.identified.clone();
+        l.merged = cat.merges.redirects().collect();
         l.plays = cat.plays.clone();
         l.collections = cat.collections.clone();
         l.collected = cat.entries.clone();
@@ -576,13 +620,25 @@ impl Librarian {
         let mut depths: BTreeMap<Id<crate::model::entity::Concept>, usize> = BTreeMap::new();
         let mut best: BTreeMap<(Described, Id<crate::model::entity::Facet>), Ranked<'_>> =
             BTreeMap::new();
-        for ((subject, concept, _), confidence) in &cat.assertions {
-            if cat.assertions_retracted.contains_key(&(*subject, *concept)) {
-                continue;
-            }
+        for ((subject, concept, basis), confidence) in &cat.assertions {
+            let retracted = cat.assertions_retracted.get(&(*subject, *concept)).copied();
             let Some(record) = cat.concepts.get(concept).filter(|c| !c.node_label) else {
                 continue;
             };
+            // **Every claim crosses, retracted or not** (#125). The collapsed
+            // `concepts` below is what a row draws; this is what the info
+            // panel reads, and it is the only place the basis survives.
+            l.claims
+                .entry((*subject, record.facet))
+                .or_default()
+                .push(Claimed {
+                    label: record.label.clone(),
+                    said: Some((*basis, *confidence)),
+                    retracted,
+                });
+            if retracted.is_some() {
+                continue;
+            }
             let name = &record.label;
             // **Memoised, because a vocabulary is small and the assertions
             // are not** (#123). `depth` walks the edge set once per hop, and
@@ -598,6 +654,24 @@ impl Librarian {
                 None => seen.push((*confidence, depth, name.as_str())),
             }
         }
+        // **What was ruled out, and nothing asserts any more** (#125). The
+        // fold sweeps a shadowed assertion out of `assertions` entirely, so
+        // these have no row above to carry them — and leaving them out would
+        // make "somebody decided against this" look like "nobody said it".
+        for ((subject, concept), by) in &cat.assertions_retracted {
+            let Some(record) = cat.concepts.get(concept) else {
+                continue;
+            };
+            let held = l.claims.entry((*subject, record.facet)).or_default();
+            if !held.iter().any(|c| c.label == record.label) {
+                held.push(Claimed {
+                    label: record.label.clone(),
+                    said: None,
+                    retracted: Some(*by),
+                });
+            }
+        }
+
         l.concepts = best
             .into_iter()
             .map(|(subject, mut names)| {
@@ -626,6 +700,121 @@ impl Librarian {
 
         l.draw();
         l
+    }
+
+    /// The questions the info panel asks about one focus — #125.
+    ///
+    /// **Scans, and that is right here.** #121 and #123 were the same mistake
+    /// twice: a linear walk, correct for one question, run once per row. These
+    /// answer about *one* thing when a panel opens, so walking is the cheap
+    /// way and an index would be the expensive one.
+    pub fn claims_on(
+        &self,
+        subject: Described,
+        facet: Id<crate::model::entity::Facet>,
+    ) -> &[Claimed] {
+        self.claims
+            .get(&(subject, facet))
+            .map_or(&[][..], Vec::as_slice)
+    }
+
+    /// What a recording's identity rests on, said as a person would read it.
+    pub fn identified_by(&self, recording: Id<Recording>) -> Option<String> {
+        self.identified.get(&recording).map(|b| format!("{b:?}"))
+    }
+
+    /// What was folded into this recording.
+    pub fn merged_into(&self, recording: Id<Recording>) -> Vec<Id<Recording>> {
+        self.merged
+            .iter()
+            .filter(|(_, now)| *now == recording)
+            .map(|(was, _)| *was)
+            .collect()
+    }
+
+    /// What a credit's role is called.
+    pub fn role_of(&self, role: Id<crate::model::entity::Role>) -> String {
+        self.reference
+            .roles
+            .get(&role)
+            .map_or_else(|| "credit".to_string(), |r| r.name.clone())
+    }
+
+    /// Where this recording sits on a pressing, if anywhere.
+    pub fn slots_of(&self, recording: Id<Recording>) -> Vec<&crate::model::spine::Track> {
+        self.spine
+            .tracks
+            .values()
+            .filter(|t| t.recording.id() == recording)
+            .collect()
+    }
+
+    /// Where this copy is on *this* device, if it is here at all.
+    pub fn where_held(&self, copy: Id<Encoding>) -> Option<String> {
+        self.locators.get(&copy).cloned()
+    }
+
+    /// Every device holding this copy, and where.
+    pub fn holdings_of(&self, copy: Id<Encoding>) -> Vec<(String, String)> {
+        self.encodings
+            .holdings
+            .iter()
+            .filter(|h| h.encoding.id() == copy)
+            .map(|h| (h.device.id().to_string(), h.locator.clone()))
+            .collect()
+    }
+
+    /// The collections holding this recording.
+    pub fn crates_holding(&self, recording: Id<Recording>) -> Vec<Id<Collection>> {
+        let mut out: Vec<_> = self
+            .collected
+            .iter()
+            .filter(|(_, _, r)| *r == recording)
+            .map(|(c, _, _)| *c)
+            .collect();
+        out.dedup();
+        out
+    }
+
+    /// How many subjects this concept is asserted of.
+    pub fn asserting(&self, concept: Id<crate::model::entity::Concept>) -> usize {
+        let name = self
+            .vocabulary
+            .genres
+            .get(&concept)
+            .map(|g| g.name.as_str())
+            .unwrap_or_default();
+        self.claims
+            .values()
+            .filter(|claims| {
+                claims
+                    .iter()
+                    .any(|c| c.label == name && c.retracted.is_none())
+            })
+            .count()
+    }
+
+    /// The concepts directly broader than this one.
+    pub fn broader_than(
+        &self,
+        concept: Id<crate::model::entity::Concept>,
+    ) -> Vec<Id<crate::model::entity::Concept>> {
+        self.vocabulary
+            .edges
+            .iter()
+            .filter(|e| e.child.id() == concept)
+            .map(|e| e.parent.id())
+            .collect()
+    }
+
+    /// The recordings that realise this work.
+    pub fn performances_of(&self, work: Id<crate::model::entity::Work>) -> Vec<Id<Recording>> {
+        self.spine
+            .recordings
+            .values()
+            .filter(|r| r.work.map(|w| w.id()) == Some(work))
+            .map(|r| r.id)
+            .collect()
     }
 
     /// Say which device this is, so rows know where they can be opened.
@@ -867,6 +1056,10 @@ impl Librarian {
 impl crate::model::rows::Listing for Librarian {
     fn entries_of(&self, collection: Id<Collection>) -> Vec<Id<Recording>> {
         self.collection_entries(collection)
+    }
+
+    fn about(&self, focus: crate::model::focus::Focus) -> crate::model::about::About {
+        crate::model::about::of(self, focus)
     }
 
     /// Whether any narrower-of edge places a concept on this axis.

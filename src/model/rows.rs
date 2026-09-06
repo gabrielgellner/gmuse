@@ -317,6 +317,17 @@ pub trait Listing {
         })
     }
 
+    /// What the library says about one thing — #125, `info-panel.md`.
+    ///
+    /// **On the seam because the panel reads through it**, like every other
+    /// view (`layers.md`). What comes back is already shaped for drawing:
+    /// sections of links, claims and facts, with the basis on every claim.
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — #126 is the panel that asks it"
+    )]
+    fn about(&self, focus: crate::model::focus::Focus) -> crate::model::about::About;
+
     /// Does this facet have a hierarchy to climb? — #79.
     ///
     /// **So `levels genre@1` can refuse rather than look identical.** A depth

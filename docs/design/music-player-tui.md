@@ -3845,6 +3845,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   `q` is left unbound rather than given to something else: a key somebody's fingers know as _quit_ should not quietly
   become a key that does a different thing.
 
+- **A claim's basis does not survive the seam, and the info panel is what noticed** (#125). `Librarian::concepts` is the
+  collapsed form — distinct labels, best first — which is what a row draws and which drops the basis and the confidence.
+  Those are exactly what #96 made the model keep, so the panel carries `Librarian::claims` beside it: every assertion,
+  retracted ones included and marked.
+
+  **A retracted claim has no asserter behind it.** The fold's `retract` sweeps every asserter of a pair out of
+  `assertions`, so a concept somebody ruled out leaves a retraction and nothing else. Saying `manual` asserted it would
+  be a lie; dropping the row would lose that anybody decided. `said: Option<(Source, Confidence)>` is the third answer,
+  and the shadowed assertion is still in the log where the facts section will show it — the claims section is the state,
+  the facts section is the history.
+
+  **Scanning is right here, and that is not a contradiction of #121 and #123.** Those were the same mistake twice: a
+  linear walk, correct for one question, run once per row. `about` answers about _one_ focus when a panel opens, so
+  walking the credits and the entries is the cheap way and an index would be the expensive one. Measured rather than
+  assumed — 66µs for a recording on the real library, 175µs on a synthetic 6,500-row one — and guarded by a test, since
+  "this one is fine to scan" is exactly the sentence that stops being true.
+
+  **Credits are links, not claims, and that is a gap rather than a decision.** `Catalogue::credits` is keyed by source;
+  `reference::Credit` drops it at the fold. Carrying it means changing a serialized type, so it is recorded here rather
+  than smuggled into this issue.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

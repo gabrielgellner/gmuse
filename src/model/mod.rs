@@ -35,6 +35,7 @@
 //! a blanket over the other fifteen would hide exactly what this change
 //! exists to expose.
 
+pub mod about;
 pub mod arena;
 pub mod basis;
 pub mod clock;

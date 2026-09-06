@@ -130,14 +130,26 @@ struct Section { title: &'static str, rows: Vec<Row> }
 enum Row {
     /// A structural edge. Enter follows it.
     Link { label: String, name: String, to: Focus },
-    /// A claim, with who said it and how sure. May be a link too — a genre is
-    /// a concept, and concepts have their own page.
-    Claim { label: String, value: String, basis: Source, confidence: Confidence,
+    /// A claim, and who made it. `said` is `None` when the assertion has been
+    /// swept and only the retraction is left — see below.
+    Claim { label: String, value: String, said: Option<(Source, Confidence)>,
             retracted: Option<Source>, to: Option<Focus> },
-    /// Something the file or the fold simply is. No asserter.
+    /// Something the fold simply is. No asserter.
     Fact { label: String, value: String },
+    /// Too many to list: how many, and the query that finds them.
+    Many { label: String, count: usize, query: String },
 }
 ```
+
+`Many` is a fourth row and **not a fourth edge kind**: it is a fan-out summarised. An artist with four hundred
+recordings cannot list them, so it says how many and hands over the query — which makes the panel a way _into_ the query
+language rather than a competitor to it.
+
+**A retracted claim has no basis behind it, and the type says so** (#125). `Catalogue::retract` sweeps every asserter of
+a pair out of `assertions`, so a concept somebody ruled out leaves a retraction and no assertion. Printing `manual` as
+the asserter would be a lie and dropping the row would lose that anybody decided; `said: None` is the third answer. The
+assertion that was shadowed is still in the log, and §5's facts section is where it shows — which is a clean division:
+the claims section is the state, the facts section is the history.
 
 **The three row kinds are the three edge kinds**, which is the point: the distinction is in the type rather than in how
 the drawing code happens to format things.
