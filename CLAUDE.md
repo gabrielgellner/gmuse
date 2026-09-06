@@ -9,8 +9,12 @@ except for a bundled, statically linked libopus.
 
 **Read [`docs/design/music-player-tui.md`](docs/design/music-player-tui.md) before making design decisions.** It is the
 project brief and it is authoritative. Sections marked **INVARIANT** are not to be revised without recording an explicit
-decision in its Decision Log (§13). Anything in the §1 "out of scope" list stays out, even when a crate makes it trivial
-— scope creep is the named failure mode for this project.
+decision in its Decision Log (§13).
+
+§1's "decided out" list is a set of decisions, and a decision can be reopened — with a Decision Log entry, not on a
+whim. **Do not argue against a direction on scope-creep grounds**; this is a library manager as much as a player and its
+scope is meant to grow. Argue about whether the design is right. §1 names the directions already decided in — musical
+key, harmonic recommendation, embeddings and fingerprinting held by the library model.
 
 [`docs/design/library-api.md`](docs/design/library-api.md) is the contract: **nothing is implicit.** Import, relink and
 forget are named operations; a scan reconciles holdings and reads no tags; the UI edits library metadata and writing

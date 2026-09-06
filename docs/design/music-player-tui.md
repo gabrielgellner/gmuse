@@ -38,7 +38,7 @@ front of you. When a feature is arguable, the question is whether it makes actin
 - Configurable keybindings via an rc file, `:bind` at runtime
 - A remote control socket (`cmus-remote` equivalent) for media keys and status bars
 
-### Out of scope — do not implement, do not add dependencies for
+### Decided out — revisit deliberately, not by accident
 
 - Album art in any form (no sixel, no ueberzug, no kitty graphics, no `image`)
 - Visualizers, spectrum displays
@@ -47,8 +47,35 @@ front of you. When a feature is arguable, the question is whether it makes actin
 - Commercial and scraped streaming services: no Spotify, no YouTube, no yt-dlp
 - Any async runtime. No `tokio`, no `async-std`. Threads and channels.
 
-Dropping these is a deliberate scope decision, not an oversight. They are the reason comparable projects carry 40+
-dependencies.
+These are decisions, not an oversight, and they are the reason comparable projects carry 40+ dependencies. **A decision
+can be revisited.** What this list asks for is that reopening one is an explicit act with a Decision Log entry behind it
+— not something that happens because a crate made it easy one afternoon.
+
+The async rule is different in kind from the rest: it is a **code-style invariant** (§12), not a feature decision, and
+it does not move.
+
+### Where the scope is meant to grow — decided 2026-09-06
+
+**This is a library manager as much as a player, and its scope is explorative.** An earlier version of this document
+named scope creep as the project's failure mode and told every reader to refuse on sight. That rule cost more than it
+saved: it turned "does this belong here" into a reflex rather than a question, and the questions it was suppressing —
+what is a claim, what is a copy, what is derived from what — turned out to be the substance of the project.
+
+The named directions, so they are on the record rather than argued from scratch each time:
+
+- **Musical key on a recording**, alongside `bpm`. The tags already carry it — 94% of the dance library — and it is a
+  fact about the music like any other.
+- **Harmonic and tempo-aware recommendation** — circle-of-fifths compatibility, BPM-adjacent suggestion. Wanted.
+- **Embeddings and audio fingerprinting**, feeding a suggestion engine, and **held by the library model** rather than
+  bolted beside it. The model is the thing being hardened so that this can rest on it.
+
+Two constraints survive and they are the ones that were ever load-bearing:
+
+1. **Local first, always.** These are computed here, from files you hold. §1's "no recommendations from anyone else's
+   server" is untouched — the objection was ever to a service deciding what you hear, never to your own library being
+   able to answer the question.
+2. **Every dependency is recorded in the Decision Log with a rationale** (§12), which is the mechanism that actually
+   kept the tree small. That did the work the slogan was taking credit for.
 
 ### Local first, and one's own server — amended 2026-08-29
 
@@ -4048,6 +4075,22 @@ Append here as decisions are made. Format: date, decision, rationale.
   The encoding page says `keep  yes — nothing here can remake it` or `no — it can be made again`, and a copy in a
   recording's list is marked `· derived`. That is the whole user-facing surface: the storage layer #132 designs is what
   will act on it.
+
+- **2026-09-06** **The scope-creep doctrine is withdrawn; §1 is a list of decisions, not a wall.** The old rule — "scope
+  creep is the named failure mode, anything on the out-of-scope list stays out even when a crate makes it trivial" — was
+  costing more than it saved. It turned "does this belong here" into a reflex, and the questions it was suppressing
+  turned out to be the substance of the project: what a claim is, what a copy is, what is derived from what.
+
+  **This is a library manager as much as a player and its scope is explorative.** Named in as directions: musical key
+  beside `bpm`; harmonic and tempo-aware recommendation; embeddings and audio fingerprinting for suggestion, held by the
+  library model rather than bolted beside it.
+
+  What survives is what was ever load-bearing: **local first**, and **every dependency recorded here with a rationale**.
+  The second is the mechanism that actually kept the tree small — the slogan was taking credit for it. The no-async rule
+  stays, and is unaffected, because it is a code-style invariant rather than a feature decision.
+
+  §1's "no recommendations from anyone else's server" is untouched. The objection was to a _service_ deciding what you
+  hear, never to your own library being able to answer the question from files you hold.
 
 ## 14. Prior art worth reading
 
