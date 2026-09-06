@@ -36,6 +36,15 @@ pub enum Row {
         artist: SortKey,
         album: SortKey,
         id: CopyId,
+        /// **This track is the whole of its group, so the group is not drawn**
+        /// — #135. It sits where its album row would have been.
+        ///
+        /// The album still exists in the model; what it does not get is a row
+        /// of its own, because a row that opens to reveal exactly one thing
+        /// costs a keystroke and tells you nothing. In a well-formed library
+        /// this is rare — 3 of 495 albums here. In a library of singles it is
+        /// nearly all of them: 466 of 490.
+        alone: bool,
     },
 }
 
@@ -51,7 +60,10 @@ impl Row {
             Row::Album {
                 display, expanded, ..
             } => format!("  {} {display}", if *expanded { "▾" } else { "▸" }),
-            Row::Track { .. } => "      ".to_string(),
+            // **At the album's indent when it stands in for one**, so the
+            // artist's children stay in one column whether they are albums or
+            // the tracks that replaced them.
+            Row::Track { alone, .. } => if *alone { "    " } else { "      " }.to_string(),
         }
     }
 
@@ -126,6 +138,23 @@ impl TreeState {
                 continue;
             }
             for (album_key, tracks) in albums {
+                // **A group of one is not a level** (#135). The album row
+                // would open onto exactly this track, so the track takes its
+                // place — and there is no fold, because there is nothing left
+                // to open.
+                //
+                // Applied in both listings, unfolded included: a level that is
+                // not drawn does not exist to be revealed, and a search that
+                // found one could not put the cursor anywhere.
+                if let [only] = tracks[..] {
+                    rows.push(Row::Track {
+                        artist: artist_key.clone(),
+                        album: album_key.clone(),
+                        id: only,
+                        alone: true,
+                    });
+                    continue;
+                }
                 let display = lib.album_name(artist_key, album_key).to_string();
                 let open = unfolded || self.folds.is_open(&[artist_key.clone(), album_key.clone()]);
                 rows.push(Row::Album {
@@ -143,6 +172,7 @@ impl TreeState {
                         artist: artist_key.clone(),
                         album: album_key.clone(),
                         id: *id,
+                        alone: false,
                     });
                 }
             }
@@ -162,6 +192,12 @@ impl TreeState {
         match row {
             Row::Artist { .. } => {}
             Row::Album { artist, .. } => self.folds.open(std::slice::from_ref(artist)),
+            // A track standing in for its group has only the artist above it.
+            Row::Track {
+                artist,
+                alone: true,
+                ..
+            } => self.folds.open(std::slice::from_ref(artist)),
             Row::Track { artist, album, .. } => {
                 self.folds.open(std::slice::from_ref(artist));
                 self.folds.open(&[artist.clone(), album.clone()]);
@@ -204,6 +240,14 @@ impl TreeState {
         match row {
             Row::Artist { key, .. } => vec![key.clone()],
             Row::Album { artist, key, .. } => vec![artist.clone(), key.clone()],
+            // **Where the cursor falls back to** — the artist, for a track
+            // that replaced its album row, because that album's fold is not a
+            // place any more (#135).
+            Row::Track {
+                artist,
+                alone: true,
+                ..
+            } => vec![artist.clone()],
             Row::Track { artist, album, .. } => vec![artist.clone(), album.clone()],
         }
     }
@@ -543,8 +587,12 @@ impl TreeState {
             .find(|(k, _)| *k == artist)
             .map(|(_, albums)| {
                 albums
-                    .keys()
-                    .map(|album| vec![artist.clone(), album.clone()])
+                    .iter()
+                    // **A group of one has no fold to open** (#135). Reporting
+                    // one would make `zR` believe there was something still
+                    // shut, on a row that is not drawn.
+                    .filter(|(_, tracks)| tracks.len() > 1)
+                    .map(|(album, _)| vec![artist.clone(), album.clone()])
                     .collect()
             })
             .unwrap_or_default()
@@ -618,6 +666,32 @@ pub fn mark_of(row: &Row) -> (Vec<SortKey>, Option<CopyId>) {
     TreeState::mark_of_inner(row)
 }
 
+/// **The album name a collapsed row has to carry** — #135.
+///
+/// A group of one is not drawn, so the album name that used to be on the row
+/// above is nowhere. This puts it back on the row that replaced it — unless
+/// the title already begins with it, which is the shape a release named after
+/// its own lead track has: `Fake I.D` holding `Fake I.D (Original Mix)`.
+/// Printing both would be the noise this issue is about.
+///
+/// **One answer, asked by both the drawing and the search**, so what matches
+/// is what somebody can see. A haystack holding text nobody drew is the bug
+/// #131 fixed and this would otherwise reintroduce.
+pub fn stands_for(lib: &Shelf, row: &Row, title: &str) -> Option<String> {
+    let Row::Track {
+        artist,
+        album,
+        alone: true,
+        ..
+    } = row
+    else {
+        return None;
+    };
+    let name = lib.album_name(artist, album);
+    let already = title.to_lowercase().starts_with(&name.to_lowercase());
+    (!name.is_empty() && !already).then(|| name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,7 +718,12 @@ mod tests {
             ("/m/b1.mp3", "Burial", "Untrue", "Archangel"),
             ("/m/b2.mp3", "Burial", "Untrue", "Shell of Light"),
             ("/m/b3.mp3", "Burial", "Burial", "Night Bus"),
+            // **Two tracks apiece, because these tests are about folds** and a
+            // group of one is not drawn any more (#135). A one-track album
+            // here would have no fold to test.
+            ("/m/b4.mp3", "Burial", "Burial", "Distant Lights"),
             ("/m/o1.mp3", "Mr. Oizo", "The Church", "Ham"),
+            ("/m/o2.mp3", "Mr. Oizo", "The Church", "Bear Biscuit"),
         ]);
         let lib = Shelf::rebuild(&crate::fixture::from_holdings(&store), true);
         (store, lib)
@@ -701,6 +780,145 @@ mod tests {
         );
     }
 
+    /// **A group of one is not a level** — #135, and the whole issue.
+    ///
+    /// An album row that opens onto exactly one track costs a keystroke and
+    /// tells you nothing. On a library of singles that is nearly every row:
+    /// 434 artists, 367 of them one track deep, three levels of navigation to
+    /// reach one file.
+    #[test]
+    fn an_album_of_one_track_is_not_drawn() {
+        let store = store_with(&[
+            ("/m/1.mp3", "Riton", "Fake I.D", "Fake I.D (Original Mix)"),
+            ("/m/2.mp3", "Burial", "Untrue", "Archangel"),
+            ("/m/3.mp3", "Burial", "Untrue", "Shell of Light"),
+        ]);
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&store), true);
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+
+        let rows = state.rows(&lib);
+        let labels: Vec<_> = rows.iter().map(Row::label).collect();
+        assert_eq!(
+            labels.iter().filter(|l| l.contains("Fake I.D")).count(),
+            0,
+            "the one-track album still has a row of its own: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("Untrue")),
+            "an album with two tracks lost its row: {labels:?}"
+        );
+
+        // The track is there, at the album's indent, and it is a leaf with no
+        // fold — because there is nothing left to open.
+        let alone = rows
+            .iter()
+            .find(|r| matches!(r, Row::Track { alone: true, .. }))
+            .expect("the track that replaced its album");
+        assert_eq!(alone.label(), "    ");
+        assert!(alone.is_leaf());
+        assert!(!alone.is_expanded());
+    }
+
+    /// **What the collapsed row stands in for still shows** — #135.
+    ///
+    /// Holding one track of an album is not the same as holding a single, and
+    /// the row has to say which. `London Zoo` is information; `Fake I.D` in
+    /// front of `Fake I.D (Original Mix)` is the noise being removed.
+    #[test]
+    fn a_collapsed_row_names_the_album_only_when_that_says_something() {
+        let store = store_with(&[
+            (
+                "/m/1.mp3",
+                "The Bug",
+                "London Zoo",
+                "Poison Dart (Original Mix)",
+            ),
+            ("/m/2.mp3", "Riton", "Fake I.D", "Fake I.D (Original Mix)"),
+        ]);
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&store), true);
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+        let rows = state.rows(&lib);
+
+        // Asked of one artist's row, since `stands_for` is answered per row
+        // and both artists here hold exactly one track.
+        let of = |who: &str, title: &str| {
+            rows.iter()
+                .find(|r| match r {
+                    Row::Track { artist, .. } => lib.artist_name(artist) == who,
+                    _ => false,
+                })
+                .and_then(|r| stands_for(&lib, r, title))
+        };
+        assert_eq!(
+            of("The Bug", "Poison Dart (Original Mix)").as_deref(),
+            Some("London Zoo"),
+            "one track of an album, and the album has nowhere else to be said"
+        );
+        assert_eq!(
+            of("Riton", "Fake I.D (Original Mix)"),
+            None,
+            "the title already begins with it"
+        );
+
+        // An album that *is* drawn says its own name; nothing repeats it.
+        let both = store_with(&[
+            ("/m/3.mp3", "Burial", "Untrue", "Archangel"),
+            ("/m/4.mp3", "Burial", "Untrue", "Shell of Light"),
+        ]);
+        let two = Shelf::rebuild(&crate::fixture::from_holdings(&both), true);
+        let mut open = TreeState::default();
+        open.open_everything(&two);
+        assert!(
+            open.rows(&two)
+                .iter()
+                .all(|r| stands_for(&two, r, "Archangel").is_none()),
+            "a track under a drawn album row named it twice"
+        );
+    }
+
+    /// **A collapsed album is reachable, and the cursor lands on it** — #135
+    /// meeting #131. The album row a search would have found is gone, so the
+    /// track that replaced it has to answer for it.
+    #[test]
+    fn a_search_still_reaches_an_album_that_is_not_drawn() {
+        let store = store_with(&[
+            (
+                "/m/1.mp3",
+                "The Bug",
+                "London Zoo",
+                "Poison Dart (Original Mix)",
+            ),
+            ("/m/2.mp3", "Burial", "Untrue", "Archangel"),
+            ("/m/3.mp3", "Burial", "Untrue", "Shell of Light"),
+        ]);
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&store), true);
+        let state = TreeState::default();
+
+        // Closed, as a search starts: the artists and nothing else.
+        assert_eq!(state.rows(&lib).len(), 2);
+
+        let all = state.all_rows(&lib);
+        let found = all
+            .iter()
+            .find(|r| {
+                matches!(r, Row::Track { .. })
+                    && stands_for(&lib, r, "Poison Dart (Original Mix)").as_deref()
+                        == Some("London Zoo")
+            })
+            .expect("nothing in the unfolded rows carries the album name");
+
+        let mut state = state;
+        state.reveal_row(&lib, found);
+        let rows = state.rows(&lib);
+        assert_eq!(
+            mark_of(&rows[state.selected]),
+            mark_of(found),
+            "the cursor did not land on the row the search found"
+        );
+    }
+
     #[test]
     fn selecting_an_album_narrows_the_track_pane() {
         let (_store, lib) = fixture();
@@ -709,11 +927,11 @@ mod tests {
 
         // Artist row selected: everything by that artist.
         state.selected = 0;
-        assert_eq!(state.tracks_for(&lib).len(), 3);
+        assert_eq!(state.tracks_for(&lib).len(), 4);
 
-        // "Burial" the album: one track.
+        // "Burial" the album: its two.
         state.selected = 1;
-        assert_eq!(state.tracks_for(&lib).len(), 1);
+        assert_eq!(state.tracks_for(&lib).len(), 2);
 
         // "Untrue": two.
         state.selected = 2;
@@ -764,7 +982,7 @@ mod tests {
         assert_eq!(state.rows(&lib).len(), 5, "+ 3 albums");
 
         state.more(&lib);
-        assert_eq!(state.rows(&lib).len(), 9, "+ 4 tracks");
+        assert_eq!(state.rows(&lib).len(), 11, "+ 6 tracks");
 
         state.less(&lib);
         assert_eq!(state.rows(&lib).len(), 5);
@@ -791,7 +1009,7 @@ mod tests {
         let (_store, lib) = fixture();
         let mut state = TreeState::default();
         state.open_everything(&lib);
-        assert_eq!(state.rows(&lib).len(), 9);
+        assert_eq!(state.rows(&lib).len(), 11);
         state.close_everything(&lib);
         assert_eq!(state.rows(&lib).len(), 2);
     }
@@ -887,8 +1105,8 @@ mod tests {
         state.open_deep(&lib);
         assert_eq!(
             state.rows(&lib).len(),
-            7,
-            "Burial, its 2 albums and their 3 tracks, plus Mr. Oizo"
+            8,
+            "Burial, its 2 albums and their 4 tracks, plus Mr. Oizo"
         );
     }
 
@@ -1094,8 +1312,9 @@ mod tests {
 
         state.go(&lib, Motion::NextSectionEnd, 1);
         assert_eq!(
-            state.selected, 10,
-            "a second `][` should reach `six`, the end of the next artist"
+            state.selected, 9,
+            "a second `][` should reach `six`, the end of the next artist — \
+             row 9, because Bruno's one-track album is not a row (#135)"
         );
 
         state.go(&lib, Motion::PrevSectionEnd, 1);
@@ -1147,10 +1366,15 @@ mod tests {
         (store, lib)
     }
 
-    /// Rows 0..10, all open:
+    /// Rows 0..11, all open:
     ///
     ///     0 Anna  1 First  2 one  3 two  4 three  5 Second  6 four  7 five
-    ///     8 Bruno  9 Third  10 six  11 Cleo  12 Fourth  13 seven
+    ///     8 Bruno  9 six  10 Cleo  11 seven
+    ///
+    /// **Bruno and Cleo hold one album of one track each, so neither album is
+    /// drawn** (#135) — their tracks sit where the album rows were. That is
+    /// deliberate here: the motions have to walk a collapsed row like any
+    /// other, and this fixture is where they meet one.
     fn opened(lib: &Shelf) -> TreeState {
         let mut state = TreeState::default();
         state.open_everything(lib);

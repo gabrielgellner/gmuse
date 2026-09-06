@@ -4117,6 +4117,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   **`Album` stays the default and is a default, not a claim.** Almost everything is an album, so it is the cheapest
   wrong answer there is; `release_type="album"` therefore means "an album, or nothing said".
 
+- **2026-09-06** **A level that groups one thing is not drawn (#135).** An album row that opens onto exactly one track
+  is a keystroke that reveals nothing. The track takes its place, at its indent, with no fold — because there is nothing
+  left to open.
+
+  **Always on, and the libraries settle it.** 3 of 495 albums here hold one track; on the dance collection it is 466 of
+  490, where the tree was 434 artists, 367 of them one track deep, three levels of navigation to reach one file. A
+  setting would have to be evaluated by somebody who had already seen both, and the well-formed case barely moves.
+
+  **The collapsed row carries the album name when the name says something.** Holding one track of _London Zoo_ is not
+  the same as holding a single and the row has to say which; a release named after its own lead track — `Fake I.D`
+  holding `Fake I.D (Original Mix)` — does not, because the title already begins with it. That prefix test is a
+  _display_ question, about whether text is already on screen, and not a fact standing in for a fact.
+
+  **One answer, asked by the drawing and by the search alike.** #131 established that a haystack is drawn text, so a
+  match always paints; a collapsed album whose name was searchable but invisible would put that straight back. Both call
+  `stands_for`.
+
+  The open questions from the issue, answered: a collapsed level has **no fold**, so `zR` does not count it as something
+  still shut; its **seat is the artist**, so a cursor falling out of a fold lands there; and the motions walk it like
+  any other row — `deep_fixture` now holds two collapsed rows on purpose so `][` meets one.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

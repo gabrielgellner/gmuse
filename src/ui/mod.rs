@@ -4586,9 +4586,21 @@ fn build_searchable(ui: &Ui, ctx: &Context<'_>) {
             // It also settles the painting: every haystack is now drawn text,
             // so a match always paints. A row that matched invisibly was the
             // shape of that problem.
+            // **And its album, when the album has no row of its own** (#135).
+            // The rule above is "do not search what is written on the row
+            // above"; a group of one is not drawn, so nothing is written
+            // there, and `/london zoo` would find nothing at all.
+            // **And the album it stands in for, when it draws one** (#135).
+            // The rule above is "do not search what is written on the row
+            // above"; a group of one has no row above, so the name is written
+            // here instead — and searched here, because a haystack that is not
+            // drawn text is a match that paints nothing.
             tree::Row::Track { id, .. } => rows
                 .listed(*id)
-                .map(|r| crate::text::Haystack::of(r.title))
+                .map(|r| match tree::stands_for(&ui.library, row, r.title) {
+                    Some(album) => crate::text::Haystack::of(&format!("{album} — {}", r.title)),
+                    None => crate::text::Haystack::of(r.title),
+                })
                 .unwrap_or_else(|| crate::text::Haystack::of("")),
             other => crate::text::Haystack::of(&other.label()),
         })
@@ -5988,7 +6000,17 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
                     let files: &dyn Listing = ctx.library;
                     let text = files
                         .listed(*id)
-                        .map(|row| ui.track_line.render(&row))
+                        .map(|listed| {
+                            let line = ui.track_line.render(&listed);
+                            // **The album it stands in for, drawn here because
+                            // it has nowhere else to be** (#135). A collapsed
+                            // group has no row above to carry its name, and a
+                            // name nobody drew is a name nobody can search.
+                            match tree::stands_for(&ui.library, row, listed.title) {
+                                Some(album) => format!("{album} — {line}"),
+                                None => line,
+                            }
+                        })
                         .unwrap_or_default();
                     // The rendered line, not the haystack: a search matches an
                     // album the template does not show, and painting a range

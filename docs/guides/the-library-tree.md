@@ -39,6 +39,27 @@ enqueueing one queues each track once, and going to what is playing highlights e
 `h` on something **already closed** closes its parent and moves there. So pressing `h` repeatedly walks you up and out —
 from a track, to its album, to its artist — without needing a key for "collapse this level".
 
+## A group of one is not a level
+
+An album holding one track does not get a row. The track sits where the album row would have been:
+
+    ▾ Burial
+        Untrue
+          Archangel
+          Shell of Light
+    ▾ The Bug
+        London Zoo — 01 Poison Dart
+
+A row you open to reveal exactly one thing costs a keystroke and tells you nothing. In a library of albums this is rare
+— 3 of 495 here. In a library of singles it is nearly everything, and it is the difference between two rows and three
+for every file you own.
+
+**The album still says its name when the name says something.** One track of _London Zoo_ is not the same as a single,
+so the row carries it. A release named after its own track — `Fake I.D` holding `Fake I.D (Original Mix)` — does not,
+because it is already written there.
+
+`/` finds either one. What is drawn is what is searched, so a match always shows you where it matched.
+
 ## Folds, by the level
 
 These are vim's fold keys, and they do here what they do there.
