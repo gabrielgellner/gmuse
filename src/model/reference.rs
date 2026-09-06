@@ -263,7 +263,34 @@ impl Reference {
     /// Display reads `as_credited ?? name`; grouping and search always resolve
     /// through the reference, so a printed form never fragments the artist
     /// dimension.
+    /// Every credit, grouped by what it is on and ordered by position.
+    ///
+    /// **Built once, because `credits_on` is a linear scan** (#123). It reads
+    /// well and costs nothing when something asks about one album; `draw`
+    /// asks about every row in the library, and on 6,500 rows against 13,000
+    /// credits that was 6,500 full passes — 333 ms of a 397 ms fold, and the
+    /// single largest cost in rebuilding the librarian.
+    pub fn by_subject(&self) -> std::collections::BTreeMap<CreditOn, Vec<&Credit>> {
+        let mut out: std::collections::BTreeMap<CreditOn, Vec<&Credit>> = Default::default();
+        for credit in &self.credits {
+            out.entry(credit.subject).or_default().push(credit);
+        }
+        for found in out.values_mut() {
+            found.sort_by_key(|c| c.position);
+        }
+        out
+    }
+
     pub fn credited_as(&self, subject: CreditOn) -> String {
+        self.line_of(&self.credits_on(subject))
+    }
+
+    /// The printed line, given the credits already found.
+    ///
+    /// Split from [`Self::credited_as`] so a caller holding an index can skip
+    /// the scan — and so there is still exactly one place that decides how a
+    /// credit line reads.
+    pub fn line_of(&self, credits: &[&Credit]) -> String {
         // **A credit with no name is not a credit.** An artist the catalogue
         // has no name for resolved to an empty string and still took its join
         // phrase with it, so `Emmylou Harris with The Band` came out as
@@ -276,9 +303,8 @@ impl Reference {
         // and a Trio listed twice under two spellings of its own line. The
         // first by position wins, which is the one the credit is ordered by.
         let mut seen = std::collections::BTreeSet::new();
-        let named: Vec<_> = self
-            .credits_on(subject)
-            .into_iter()
+        let named: Vec<_> = credits
+            .iter()
             .filter(|c| seen.insert(c.artist.id()))
             .filter_map(|c| {
                 let name = c.as_credited.clone().unwrap_or_else(|| {

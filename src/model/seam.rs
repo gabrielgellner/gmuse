@@ -111,6 +111,62 @@ impl Default for Librarian {
     }
 }
 
+/// How the two questions drawing a row asks get answered — issue #123.
+///
+/// **The same answer, found two ways, because the workloads are opposite.**
+/// `Reference::credits_on` and `Encodings::of` each walk their whole
+/// collection. For one row that is right: a scan of 13,000 credits beats
+/// building a map of them to ask once. `draw` asks about *every* row, and
+/// there the scan was four passes over the credits and one over the encodings
+/// per row — 333 ms of a 397 ms fold.
+///
+/// So the choice is made at the call site and named, rather than one strategy
+/// being imposed on both. What is *not* duplicated is the answer: `line_of`
+/// remains the only place that decides how a credit line reads.
+enum Lookup<'a> {
+    /// Ask the collections directly. For a caller drawing one row.
+    Direct(&'a Librarian),
+    /// Built once for a pass over the library.
+    Built {
+        l: &'a Librarian,
+        credits: BTreeMap<CreditOn, Vec<&'a crate::model::reference::Credit>>,
+        encodings: BTreeMap<Id<Recording>, Vec<&'a crate::model::encoding::Encoding>>,
+    },
+}
+
+impl<'a> Lookup<'a> {
+    /// The index `draw` uses, built once.
+    fn built(l: &'a Librarian) -> Self {
+        Lookup::Built {
+            l,
+            credits: l.reference.by_subject(),
+            encodings: l.encodings.by_recording(),
+        }
+    }
+
+    /// The credit line for a subject, as printed.
+    ///
+    /// Both arms end at `line_of`, which stays the only place that decides how
+    /// a credit line reads. What differs is only how the credits were found.
+    fn line(&self, subject: CreditOn) -> String {
+        match self {
+            Lookup::Direct(l) => l.reference.credited_as(subject),
+            Lookup::Built { l, credits, .. } => credits
+                .get(&subject)
+                .map(|found| l.reference.line_of(found))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Whether the library holds any encoding of this recording.
+    fn holds(&self, recording: Id<Recording>) -> bool {
+        match self {
+            Lookup::Direct(l) => !l.encodings.of(recording).is_empty(),
+            Lookup::Built { encodings, .. } => encodings.contains_key(&recording),
+        }
+    }
+}
+
 impl Librarian {
     pub fn new() -> Self {
         Librarian {
@@ -154,13 +210,23 @@ impl Librarian {
     /// `row` is this with the canonical copy filled in, which makes the
     /// answer a *rule* rather than whichever placement sorted first.
     pub fn row_of(&self, recording: Id<Recording>, copy: Option<Id<Encoding>>) -> Option<Row> {
+        self.row_of_via(recording, copy, &Lookup::Direct(self))
+    }
+
+    /// [`Self::row_of`], against a credit index the caller already built.
+    fn row_of_via(
+        &self,
+        recording: Id<Recording>,
+        copy: Option<Id<Encoding>>,
+        by: &Lookup<'_>,
+    ) -> Option<Row> {
         let rec = self.spine.recordings.get(&recording)?;
         let canonical = copy.and_then(|id| self.encodings.encodings.get(&id));
         let slot = copy.and_then(|id| self.placed.get(&id).copied());
         Some(Row {
             recording,
             title: rec.title.clone(),
-            file_under: self.files_under(recording, slot),
+            file_under: self.files_under(recording, slot, by),
             album: self.album_of(slot),
             // **The length of the copy this would open**, not of the
             // recording — a recording has no single length. An edit, a radio
@@ -176,7 +242,7 @@ impl Librarian {
             format: canonical.map(|e| e.format),
             bitrate: canonical.map(|e| e.bitrate),
             verdict: canonical.map(|e| e.verdict()),
-            available: !self.encodings.of(recording).is_empty(),
+            available: by.holds(recording),
         })
     }
 
@@ -191,18 +257,24 @@ impl Librarian {
     /// it — so a song on a compilation and its original album filed under
     /// whichever sorted first. On this library that split `Luna` across two
     /// artists with every tag on the album identical (#84).
-    fn files_under(&self, recording: Id<Recording>, slot: Option<Id<Track>>) -> String {
+    fn files_under(
+        &self,
+        recording: Id<Recording>,
+        slot: Option<Id<Track>>,
+        by: &Lookup<'_>,
+    ) -> String {
         let on_release = slot
             .and_then(|s| self.spine.tracks.get(&s))
             .and_then(|t| self.spine.media.get(&t.medium.id()))
             .and_then(|m| self.spine.releases.get(&m.release.id()))
             .map(|r| CreditOn::ReleaseGroup(r.group.id()));
 
+        let line = |subject: CreditOn| by.line(subject);
         on_release
-            .map(|subject| self.reference.credited_as(subject))
+            .map(line)
             .filter(|s| !s.is_empty())
             .or_else(|| {
-                let by_recording = self.reference.credited_as(CreditOn::Recording(recording));
+                let by_recording = line(CreditOn::Recording(recording));
                 (!by_recording.is_empty()).then_some(by_recording)
             })
             .unwrap_or_else(|| UNKNOWN_ARTIST.to_string())
@@ -501,6 +573,7 @@ impl Librarian {
         // `facet::ALL` crosses the seam with nothing written here. A node
         // label is left out: ISO 25964's rule is that a term put into an array
         // to organise it does not take part in retrieval.
+        let mut depths: BTreeMap<Id<crate::model::entity::Concept>, usize> = BTreeMap::new();
         let mut best: BTreeMap<(Described, Id<crate::model::entity::Facet>), Ranked<'_>> =
             BTreeMap::new();
         for ((subject, concept, _), confidence) in &cat.assertions {
@@ -511,7 +584,13 @@ impl Librarian {
                 continue;
             };
             let name = &record.label;
-            let depth = l.vocabulary.depth(*concept);
+            // **Memoised, because a vocabulary is small and the assertions
+            // are not** (#123). `depth` walks the edge set once per hop, and
+            // this library asks it 26,490 times about roughly 250 distinct
+            // concepts.
+            let depth = *depths
+                .entry(*concept)
+                .or_insert_with(|| l.vocabulary.depth(*concept));
             let seen = best.entry((*subject, record.facet)).or_default();
             match seen.iter_mut().find(|(_, _, held)| *held == name.as_str()) {
                 Some(entry) if entry.0 < *confidence => entry.0 = *confidence,
@@ -573,20 +652,23 @@ impl Librarian {
     /// hundreds of times a second for a library that changed between none of
     /// them.
     fn draw(&mut self) {
+        // **Built once for the whole library** (#123). `credits_on` is a
+        // linear scan, and asking it per row was 6,500 full passes over 13,000
+        // credits — 333ms of a 397ms fold.
+        let by = Lookup::built(self);
         let ids: Vec<Id<Encoding>> = self.encodings.encodings.keys().copied().collect();
-        for id in ids {
-            let Some(drawn) = self.drawn_of(id) else {
-                continue;
-            };
-            self.rows.insert(id, drawn);
-        }
+        let drawn: Vec<(Id<Encoding>, Drawn)> = ids
+            .into_iter()
+            .filter_map(|id| Some((id, self.drawn_of(id, &by)?)))
+            .collect();
+        self.rows.extend(drawn);
     }
 
     /// Assemble one row out of the entities behind it.
-    fn drawn_of(&self, copy: Id<Encoding>) -> Option<Drawn> {
+    fn drawn_of(&self, copy: Id<Encoding>, by: &Lookup<'_>) -> Option<Drawn> {
         let encoding = self.encodings.encodings.get(&copy)?;
         let recording = encoding.recording?.id();
-        let row = self.row_of(recording, Some(copy))?;
+        let row = self.row_of_via(recording, Some(copy), by)?;
         let slot = self.placed.get(&copy).copied();
         let (disc, track) = self.place_of(slot);
         let group = self.group_of(slot);
@@ -623,6 +705,11 @@ impl Librarian {
             .and_then(|t| self.spine.media.get(&t.medium.id()))
             .and_then(|m| self.spine.releases.get(&m.release.id()));
 
+        // **Through the same lookup as everything else here** (#123). These
+        // two were the rest of the per-row scan: `files_under` above and these
+        // below are four passes over every credit in the library, per row.
+        let line = |subject: CreditOn| by.line(subject);
+
         Some(Drawn {
             file_under: row.file_under,
             album: row
@@ -637,10 +724,10 @@ impl Librarian {
             title: row.title.clone(),
             duration: row.length,
             artist: {
-                let credited = self.reference.credited_as(CreditOn::Recording(recording));
+                let credited = line(CreditOn::Recording(recording));
                 (!credited.is_empty()).then_some(credited)
             },
-            album_artist: group.map(|g| self.reference.credited_as(CreditOn::ReleaseGroup(g))),
+            album_artist: group.map(|g| line(CreditOn::ReleaseGroup(g))),
             // The model's title *is* the tagged one, normalised. There is no
             // file name to fall back to here, which is the point: a row holds
             // no location, so it cannot borrow one for a label.
@@ -1959,5 +2046,91 @@ mod collections {
         i.name_collection(100, list(), "Odds and ends", false);
         let l = Librarian::from_catalogue(&i.catalogue());
         assert!(!l.collections()[&list()].ordered);
+    }
+}
+
+#[cfg(test)]
+mod perf {
+    //! What it costs to rebuild the librarian — issue #123.
+    //!
+    //! `just bench-fold`. `Stop::Refold` runs this after `:collect` and
+    //! `:add-view`, and on a 6,500-row library it was **467 ms** — four fifths
+    //! of it inside `draw`, which asked four linear scans of the whole credit
+    //! list per row.
+    //!
+    //! The phases are printed separately because they fail differently, and a
+    //! single number would have hidden which one went wrong. Same reason as
+    //! `shelf::perf`, and the same lesson: the fold had no measurement, so
+    //! nothing said it had gone bad.
+
+    use std::time::Instant;
+
+    use super::*;
+    use crate::model::instance::{Instance, Scanned};
+
+    /// A library of `albums` albums, ten tracks each, over `artists` artists —
+    /// with credits and genres, because those are what the scans were over.
+    fn scan_of(artists: usize, albums: usize) -> Vec<Scanned> {
+        const GENRES: [&str; 6] = ["Techno", "House", "Folk", "Rock", "Jazz", "Ambient"];
+        let mut scan = Vec::new();
+        for a in 0..albums {
+            for track in 1..=10u16 {
+                let artist = format!("Artist {:04}", a % artists);
+                scan.push(Scanned {
+                    audio: crate::audio_id::AudioId {
+                        scheme: 1,
+                        hash: (a as u128) * 1000 + u128::from(track),
+                    },
+                    title: format!("Track {track:02} of {a:04}"),
+                    artist: artist.clone(),
+                    album: Some(format!("Album {a:04}")),
+                    album_artist: Some(artist),
+                    genres: vec![GENRES[a % GENRES.len()].to_string()],
+                    disc: Some(1),
+                    track: Some(track),
+                    length_ms: 200_000,
+                    ..Default::default()
+                });
+            }
+        }
+        scan
+    }
+
+    /// The table, and the bound that makes it a test rather than a report.
+    ///
+    /// **Generous on purpose**, like `shelf::perf`. What it has to catch is a
+    /// per-row scan reappearing, which costs a factor of ten or more, not a
+    /// 20% drift on a busy machine.
+    #[test]
+    fn rebuilding_the_librarian_does_not_scan_per_row() {
+        let device = crate::fixture::device();
+        let scan = scan_of(200, 650);
+
+        let t = Instant::now();
+        let mut log = Instance::new(device);
+        log.ingest(100, &scan);
+        let ingest = t.elapsed();
+
+        let t = Instant::now();
+        let cat = log.catalogue();
+        let folded = t.elapsed();
+
+        let t = Instant::now();
+        let mut l = Librarian::from_catalogue(&cat);
+        let built = t.elapsed();
+        l.here(device);
+
+        let rows = crate::model::rows::Listing::rows(&l).len();
+        eprintln!(
+            "\n{rows} rows, {} records\n  ingest          {ingest:>9.1?}\n  \
+             catalogue()     {folded:>9.1?}\n  from_catalogue  {built:>9.1?}",
+            log.records().len()
+        );
+
+        assert!(rows > 6000, "the bench needs a library to measure");
+        assert!(
+            built < std::time::Duration::from_millis(400),
+            "from_catalogue took {built:?} — something is scanning once per row again"
+        );
     }
 }

@@ -92,6 +92,10 @@ test:
 bench-shelf:
     cargo test --release drawing_a_view -- --nocapture
 
+# Show what it costs to rebuild the librarian (#123). Runs in `ci` too.
+bench-fold:
+    cargo test --release rebuilding_the_librarian -- --nocapture
+
 # Show the resampler benchmark table (not part of `ci` — it takes ~30s)
 [group('test')]
 bench:

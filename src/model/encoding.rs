@@ -316,6 +316,25 @@ pub struct Encodings {
 
 impl Encodings {
     /// Every encoding of a recording.
+    /// Every encoding, grouped by the recording it holds.
+    ///
+    /// **Built once, because [`Self::of`] is a linear scan** (#123). One
+    /// question about one recording is fine; `draw` asks about every row, and
+    /// on 6,500 encodings that is 6,500 full passes — and each one allocated a
+    /// `Vec` and sorted it to answer "is this empty".
+    pub fn by_recording(&self) -> std::collections::BTreeMap<Id<Recording>, Vec<&Encoding>> {
+        let mut out: std::collections::BTreeMap<Id<Recording>, Vec<&Encoding>> = Default::default();
+        for encoding in self.encodings.values() {
+            if let Some(recording) = encoding.recording.map(|r| r.id()) {
+                out.entry(recording).or_default().push(encoding);
+            }
+        }
+        for found in out.values_mut() {
+            found.sort_by_key(|e| e.id);
+        }
+        out
+    }
+
     pub fn of(&self, recording: Id<Recording>) -> Vec<&Encoding> {
         let mut found: Vec<_> = self
             .encodings

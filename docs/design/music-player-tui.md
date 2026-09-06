@@ -3809,6 +3809,33 @@ Append here as decisions are made. Format: date, decision, rationale.
   Each worker writes into its own slot rather than pushing to a shared vec, so nothing depends on which thread finished
   first — pinned by a test with more files than the parallel threshold.
 
+- **Rebuilding the librarian was 467 ms, and four fifths of it was one mistake made five times** (#123). `Stop::Refold`
+  runs after `:collect` and `:add-view`; `Librarian::draw` materialises every row once at the end of the fold so a view
+  can borrow rather than compute (#86). Drawing one row asked five questions and four of them were **linear scans of a
+  whole collection**:
+
+  - `Reference::credits_on` filters a `Vec<Credit>` by subject, and `drawn_of` reached it **four times per row** — once
+    or twice through `files_under`, then again for `artist` and for `album_artist`.
+  - `Encodings::of` filters every encoding by recording, allocates a `Vec` and sorts it — once per row, only to ask
+    `!is_empty()`.
+  - `Vocabulary::depth` walks the edge set per hop, called once per assertion: 26,490 calls about ~250 concepts.
+
+  **467 ms → 95 ms**, and `draw` itself 333 ms → 21 ms.
+
+  **The fix is not "index it".** A scan is the right answer for one row: building a map of 13,000 credits to ask about
+  one album is worse than walking them. So `Lookup` names the choice — `Direct` for a caller drawing one row, `Built`
+  for a pass over the library — and the call site picks. Both arms end at `line_of`, which stays the only place that
+  decides how a credit line reads, so what differs is how the credits were _found_ and never what they say. Measured
+  after: a single `row()` is 43 µs, unchanged.
+
+  Two attempts got this wrong before it was right, and both were caught by measuring rather than by reading. The first
+  indexed only `files_under` and moved nothing, because three of the four scans were further down in the `Drawn`
+  construction. The second made the single-row path build the index — correct, and a regression on the UI path, where
+  `row()` is called per frame.
+
+  `just bench-fold` prints ingest, catalogue and from_catalogue separately, beside `just bench-shelf`. The fold had no
+  measurement, which is why nobody noticed.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
