@@ -19,6 +19,10 @@ tags is a separate export. There is no tag editor.
 [`docs/design/layers.md`](docs/design/layers.md) says which system may talk to which — the librarian, the player, the
 scanner and the `tools/` scripts. Read it before adding a caller in either direction.
 
+[`docs/design/info-panel.md`](docs/design/info-panel.md) is a **proposal**, not built: the surface that shows what the
+library says about one thing and who said it. Read it before adding anything that displays metadata — the rule it turns
+on is that a claim is never a value.
+
 [`docs/design/domain-model.md`](docs/design/domain-model.md) is a **proposal**, not built: what a library entry is
 versus what a file is. Read it before touching `Store`, `scan.rs` or anything keyed by a path.
 
