@@ -468,6 +468,19 @@ pub struct Ui {
     pub focus: Vec<crate::model::focus::Focus>,
     pub info_sel: usize,
     pub info_scroll: Scroll,
+    /// The page last built, and what it was built for — #128.
+    ///
+    /// **A frame redraws every 200ms whether or not anything moved**, and
+    /// building the page is a filter over every record once the fact log is
+    /// open: 8.8ms a frame for a screen that is not changing.
+    ///
+    /// What makes a cache safe here is that the page is a pure function of
+    /// `(focus, history, the library)`. The first two are the key, so they
+    /// cannot go stale; the third changes only on a refold, and
+    /// `refresh_library` clears this — the one place, and the same door every
+    /// other projection goes through (#84).
+    pub about:
+        std::cell::RefCell<Option<(crate::model::focus::Focus, bool, crate::model::about::About)>>,
     /// Sections the reader has folded away, by title.
     ///
     /// **Keyed by title rather than by position**, so a fold survives
@@ -537,7 +550,13 @@ impl Ui {
             focus: Vec::new(),
             info_sel: 0,
             info_scroll: Scroll::default(),
-            info_folded: Default::default(),
+            // **The fact log starts folded** (#128). Eleven facts is fine
+            // and eleven hundred is not, and what a reader opened the panel
+            // for is almost never the log. One keystroke opens it.
+            about: std::cell::RefCell::new(None),
+            info_folded: [crate::model::about::FACTS.to_string()]
+                .into_iter()
+                .collect(),
             view_problem: None,
             view: View::Tree,
             tree: TreeState::default(),
@@ -3762,6 +3781,10 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
 /// a second way (#84). The playlist rows go too: what a playlist holds is a
 /// fold of the log, and the whole point of a refold is that the fold changed.
 pub fn refresh_library(ui: &mut Ui, ctx: &Context<'_>) {
+    // **The page is a projection of the librarian too** (#128), and this is
+    // the door every projection goes through after a refold — so the cache is
+    // dropped here rather than in each of the places that cause one.
+    ui.about.replace(None);
     rebuild_library(ui, ctx);
     refresh_playlist_rows(ui);
     refresh_smart(ui, ctx);
@@ -4509,9 +4532,17 @@ pub fn info_lines<'a>(ui: &Ui, about: &'a crate::model::about::About) -> Vec<Inf
 /// What the panel is showing, or nothing if it has not been pointed at
 /// anything yet.
 pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<crate::model::about::About> {
-    ui.focus
-        .last()
-        .map(|focus| crate::model::rows::Listing::about(ctx.library, *focus))
+    let focus = *ui.focus.last()?;
+    let history = !ui.info_folded.contains(crate::model::about::FACTS);
+    if let Some((was, asked, about)) = ui.about.borrow().as_ref()
+        && *was == focus
+        && *asked == history
+    {
+        return Some(about.clone());
+    }
+    let about = crate::model::rows::Listing::about(ctx.library, focus, history);
+    *ui.about.borrow_mut() = Some((focus, history, about.clone()));
+    Some(about)
 }
 
 fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
@@ -4918,6 +4949,14 @@ fn clip(s: &str, width: usize) -> String {
     s.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
 }
 
+/// A device id, short enough to sit in a column.
+///
+/// The whole uuid is what a log holds and is unreadable in a line; the leading
+/// hex is enough to tell two machines apart, which is what the column is for.
+fn short(device: &str) -> String {
+    device.chars().take(8).collect()
+}
+
 /// The path taken, as the panel shows it — #127.
 ///
 /// **Elided in the middle**, keeping the first and the last: where the reader
@@ -4927,8 +4966,10 @@ fn breadcrumb(ui: &Ui, ctx: &Context<'_>) -> String {
     /// Beyond this the middle is replaced by how many were dropped.
     const SHOWN: usize = 4;
 
+    // **A name, not a page.** Asking `about` for each step built the whole
+    // thing — the fact log included — once per step, per frame.
     let name = |focus: &crate::model::focus::Focus| {
-        crate::model::rows::Listing::about(ctx.library, *focus).title
+        crate::model::rows::Listing::label_of(ctx.library, *focus)
     };
     let steps: Vec<String> = match ui.focus.len() {
         0 => return String::new(),
@@ -4975,8 +5016,9 @@ fn follow_link(ui: &mut Ui, ctx: &Context<'_>) {
         InfoLine::Row(Row::Link { to, .. }) => Some(*to),
         InfoLine::Row(Row::Claim { to, .. }) => *to,
         // **Nothing to follow, and it says so.** A row that silently did
-        // nothing would read as a broken link rather than as a fact.
-        InfoLine::Row(Row::Fact { .. }) => None,
+        // nothing would read as a broken link rather than as a fact. A
+        // recorded fact is the same: it is a thing that happened, not a place.
+        InfoLine::Row(Row::Fact { .. } | Row::Happened { .. }) => None,
         InfoLine::Row(Row::Many { query, .. }) => {
             let query = query.clone();
             drop(lines);
@@ -5153,6 +5195,26 @@ fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused:
                     Span::styled(format!("    {label:<14}"), dim),
                     Span::styled(format!("{count}"), text),
                     Span::styled(format!("   {query}"), dim),
+                ]),
+                // **When, and on which machine.** A withdrawal is marked
+                // rather than reading as one more thing somebody said.
+                Row::Happened {
+                    at,
+                    device,
+                    name,
+                    detail,
+                    withdrawal,
+                } => Line::from(vec![
+                    Span::styled(
+                        format!("    {:<12}", crate::text::ago(*at, crate::history::now())),
+                        dim,
+                    ),
+                    Span::styled(format!("{:<10}", short(device)), dim),
+                    Span::styled(
+                        format!("{}{name:<26}", if *withdrawal { "⊘ " } else { "  " }),
+                        if *withdrawal { dim } else { text },
+                    ),
+                    Span::styled(detail.clone(), dim),
                 ]),
             },
         }));
@@ -10089,12 +10151,18 @@ mod tests {
 
         ui.info_sel = 0;
         let about = info_about(&ui, &ctx).expect("a focus");
+        let first = about.sections[0].title.to_string();
         let open = info_lines(&ui, &about).len();
+
         press(&mut ui, &ctx, "enter");
-        assert!(!ui.info_folded.is_empty(), "nothing folded");
+        assert!(ui.info_folded.contains(&first), "nothing folded");
         assert!(info_lines(&ui, &about).len() < open);
+
         press(&mut ui, &ctx, "enter");
-        assert!(ui.info_folded.is_empty(), "it did not unfold again");
+        assert!(!ui.info_folded.contains(&first), "it did not unfold again");
+        // **The fact log stays folded**, because it started that way (#128) —
+        // this is about the section under the cursor, not about the set.
+        assert!(ui.info_folded.contains(crate::model::about::FACTS));
     }
 
     /// **A cycle is ordinary and must be survivable, not prevented** — a

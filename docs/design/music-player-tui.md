@@ -3908,6 +3908,28 @@ Append here as decisions are made. Format: date, decision, rationale.
   read holds as you walk rather than resetting on every page. A row with nowhere to go says so: silence would read as a
   broken link rather than as a fact.
 
+- **The fact log, filtered to one thing — and the filter has no per-variant match** (#128). A claim's basis says who; a
+  fact says when and on which machine. Whether a record names a focus is answered against **the fact's own wire form**:
+  it mentions the id or it does not. That is true of every variant there is and every variant there will be, which is
+  #106's rule for a stale reader applied to a reader of the log — and it is why there is no list here to fall out of
+  step. Ids inside a fact are resolved to names the same way: a lookup, not a match.
+
+  **What is kept is what was recorded, not what a scan re-derives.** Ingesting 6,500 files mints some 160,000 facts
+  every launch with this launch's stamps; showing those beside the handful somebody wrote would drown the interesting
+  ones in noise that says only "the disk was walked".
+
+  **Withdrawals are recognised by their names, and that is a stated limit.** They spell themselves three ways —
+  `Retracted`, `Removed`, `Dropped` — and a fourth would go unmarked. The cost is cosmetic: an unmarked withdrawal still
+  shows, under its own name, which reads as one to a person. A hand-kept list of variants would go stale in the same
+  place and fail worse.
+
+  **Building a hidden section cost 8% of a core.** The panel redraws every 200ms whether or not anything moved, and the
+  page was rebuilt each time — including the fact log, which is folded away by default. Three fixes, each measured: the
+  breadcrumb asked `about` for every step when it wanted only a name (17ms → 8.8ms), the history became something the
+  caller asks for rather than something always built (→ 0.16ms folded), and the page is cached on `(focus, history)` and
+  dropped in `refresh_library` (→ 1.2ms open). Safe because the page is a pure function of those two and the library,
+  and the library changes only on a refold — which is the door every other projection already goes through (#84).
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

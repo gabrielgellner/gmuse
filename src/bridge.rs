@@ -94,6 +94,12 @@ pub fn librarian(
     scratch.assert_holdings(now, holdings);
 
     let mut l = Librarian::from_catalogue(&scratch.catalogue());
+    // **What was recorded, not what the scan re-derived** (#128). `scratch`
+    // now holds both: the log's facts and the ~160,000 the ingest above minted
+    // from 6,500 files, all stamped this launch. Only the first are things
+    // somebody or something *decided*, and they are what the info panel's
+    // history is about.
+    l.records = records.clone();
     // Which device this is, so a row knows where it can be opened. The
     // librarian holds every holding; which of them is reachable *now* is a
     // fact about the machine, and this is the only place that knows it.

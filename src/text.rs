@@ -512,3 +512,51 @@ mod tests {
         assert_eq!(expanded("Beyoncé"), None);
     }
 }
+
+/// How long ago something happened, for a column that has to be narrow.
+///
+/// **Days rather than a date, because there is no date library here** and
+/// adding one to print a column would be a dependency to justify (§12). It is
+/// also the idiom the rest of the player already uses — `days_since_played` is
+/// how the filter language asks about time — and for the question a fact log
+/// answers, *how recently did this change*, it reads better than a calendar.
+///
+/// `then` is milliseconds, as a stamp holds it; `now` is seconds, as the
+/// player's clock hands it out. Mixing those two up is the kind of thing that
+/// shows as "19741 days ago", so they are named in the signature.
+pub fn ago(then_ms: i64, now_secs: i64) -> String {
+    let days = (now_secs - then_ms / 1000).max(0) / 86_400;
+    match days {
+        0 => "today".to_string(),
+        1 => "yesterday".to_string(),
+        d if d < 28 => format!("{d}d ago"),
+        d if d < 365 => format!("{}w ago", d / 7),
+        d => format!("{}y ago", d / 365),
+    }
+}
+
+#[cfg(test)]
+mod ago_tests {
+    use super::ago;
+
+    /// **Milliseconds in, seconds beside it.** Reading the stamp as seconds
+    /// puts every fact fifty years in the past, which looks like data rot
+    /// rather than a unit slip.
+    #[test]
+    fn a_stamp_in_milliseconds_reads_against_a_clock_in_seconds() {
+        let now = 1_700_000_000;
+        assert_eq!(ago(now * 1000, now), "today");
+        assert_eq!(ago((now - 86_400) * 1000, now), "yesterday");
+        assert_eq!(ago((now - 3 * 86_400) * 1000, now), "3d ago");
+        assert_eq!(ago((now - 60 * 86_400) * 1000, now), "8w ago");
+        assert_eq!(ago((now - 800 * 86_400) * 1000, now), "2y ago");
+    }
+
+    /// A stamp from a machine whose clock is ahead reads as today rather than
+    /// as a negative number of days.
+    #[test]
+    fn a_clock_that_ran_ahead_does_not_go_backwards() {
+        let now = 1_700_000_000;
+        assert_eq!(ago((now + 86_400) * 1000, now), "today");
+    }
+}

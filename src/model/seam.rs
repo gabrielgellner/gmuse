@@ -108,6 +108,14 @@ pub struct Librarian {
     pub identified: BTreeMap<Id<Recording>, crate::model::basis::Basis>,
     /// Which recordings were folded into which — `(was, is now)`.
     pub merged: Vec<(Id<Recording>, Id<Recording>)>,
+    /// The log, kept so the info panel can say when something became true and
+    /// on which machine — #128.
+    ///
+    /// **What was recorded, not what a scan re-derives.** Ingesting 6,500
+    /// files mints some 160,000 facts every launch, with this launch's stamps;
+    /// showing those beside the handful somebody actually wrote would drown
+    /// the ones worth reading in noise that says only "the disk was walked".
+    pub records: std::collections::BTreeSet<crate::model::log::Record>,
     /// Every collection entry, in list order — see [`Catalogue::entries`].
     collected: BTreeSet<(Id<Collection>, OrdKey, Id<Recording>)>,
     /// Which slot each copy sits in — issue #78.
@@ -122,6 +130,33 @@ impl Default for Librarian {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// One recorded fact, as the info panel shows it — #128.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Happened {
+    /// Wall clock, seconds.
+    pub at: i64,
+    pub device: String,
+    /// The fact's own name, from its wire form.
+    pub name: String,
+    pub detail: String,
+    /// Whether this took something back rather than saying it.
+    pub withdrawal: bool,
+}
+
+/// Whether a fact's name says it withdraws something.
+///
+/// **By the naming convention, and that is a stated limit.** The withdrawals
+/// spell themselves three ways — `Retracted`, `Removed`, `Dropped` — and a
+/// fourth spelling would go unmarked here. The cost of that is cosmetic: an
+/// unmarked withdrawal still shows, with its own name, which reads as a
+/// withdrawal to a person. A hand-kept list of variants would go stale in the
+/// same place and fail silently in a worse one.
+fn is_withdrawal(name: &str) -> bool {
+    ["Retracted", "Removed", "Dropped"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
 }
 
 /// One claim about a subject: what was said, by whom, and how sure — #125.
@@ -224,6 +259,7 @@ impl Librarian {
             claims: Default::default(),
             identified: Default::default(),
             merged: Default::default(),
+            records: Default::default(),
             collected: Default::default(),
             placed: Default::default(),
         }
@@ -702,6 +738,80 @@ impl Librarian {
         l
     }
 
+    /// Every recorded fact naming this thing, newest first — #128.
+    ///
+    /// **Filtered on the fact's own serialization**, which is why there is no
+    /// per-variant match here to fall out of step. A fact mentions a focus if
+    /// its wire form carries that id, and that is true of every variant there
+    /// is and every variant there will be — which is the same rule #106 asks a
+    /// stale *reader* to follow, applied to a reader of the log.
+    pub fn facts_about(&self, focus: crate::model::focus::Focus) -> Vec<Happened> {
+        let id = focus.uuid().to_string();
+        let mut out: Vec<Happened> = self
+            .records
+            .iter()
+            .filter_map(|r| {
+                let wire = serde_json::to_value(&r.fact).ok()?;
+                let (name, fields) = wire.as_object()?.iter().next()?;
+                if !wire.to_string().contains(&id) {
+                    return None;
+                }
+                Some(Happened {
+                    at: r.stamp.wall,
+                    device: r.stamp.device.to_string(),
+                    name: name.clone(),
+                    detail: self.detail_of(fields),
+                    withdrawal: is_withdrawal(name),
+                })
+            })
+            .collect();
+        // Newest first: what changed recently is what somebody is looking for.
+        out.sort_by_key(|h| std::cmp::Reverse(h.at));
+        out
+    }
+
+    /// One fact's fields, with ids resolved to names where the library can.
+    ///
+    /// **No per-variant knowledge, only a lookup.** Any uuid the library can
+    /// put a name to becomes that name; anything else is printed as it is. A
+    /// fact this build has never heard of still reads.
+    fn detail_of(&self, fields: &serde_json::Value) -> String {
+        let Some(fields) = fields.as_object() else {
+            return fields.to_string();
+        };
+        fields
+            .iter()
+            .map(|(key, value)| {
+                let shown = match value.as_str().and_then(|s| s.parse::<uuid::Uuid>().ok()) {
+                    Some(id) => self.name_of(id).unwrap_or_else(|| value.to_string()),
+                    None => match value {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    },
+                };
+                format!("{key}={shown}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// What the library calls this id, whatever kind it turns out to be.
+    fn name_of(&self, id: uuid::Uuid) -> Option<String> {
+        use crate::model::focus::Focus;
+        [
+            Focus::Recording(Id::from_uuid(id)),
+            Focus::Concept(Id::from_uuid(id)),
+            Focus::Artist(Id::from_uuid(id)),
+            Focus::Collection(Id::from_uuid(id)),
+            Focus::ReleaseGroup(Id::from_uuid(id)),
+            Focus::Release(Id::from_uuid(id)),
+            Focus::Work(Id::from_uuid(id)),
+        ]
+        .into_iter()
+        .map(|focus| crate::model::about::label_of(self, focus))
+        .find(|name| name != "(not in the library)")
+    }
+
     /// The questions the info panel asks about one focus — #125.
     ///
     /// **Scans, and that is right here.** #121 and #123 were the same mistake
@@ -1058,8 +1168,16 @@ impl crate::model::rows::Listing for Librarian {
         self.collection_entries(collection)
     }
 
-    fn about(&self, focus: crate::model::focus::Focus) -> crate::model::about::About {
-        crate::model::about::of(self, focus)
+    fn label_of(&self, focus: crate::model::focus::Focus) -> String {
+        crate::model::about::label_of(self, focus)
+    }
+
+    fn about(
+        &self,
+        focus: crate::model::focus::Focus,
+        history: bool,
+    ) -> crate::model::about::About {
+        crate::model::about::of(self, focus, history)
     }
 
     /// Whether any narrower-of edge places a concept on this axis.

@@ -66,6 +66,27 @@ An artist with four hundred recordings does not get four hundred rows. It gets t
 
 The library view is what is good at showing four hundred things. The panel points at it rather than competing with it.
 
+## The facts behind it
+
+The last section is the log itself — folded away, because it is long and it is rarely what you came for. `enter` on the
+heading opens it:
+
+    ▾ facts (4)
+      today       7405e4cd   CollectionEntryAdded    collection=General ord=a0 recording=I'll Be Waiting
+      yesterday   7405e4cd   RecordingIdentified     basis=musicbrainz dd2d2073…
+      3d ago      7405e4cd   ConceptAsserted         concept=Techno basis=discogs
+      3d ago      7405e4cd   ⊘ ConceptRetracted      concept=Ambient basis=manual
+
+A claim's basis says **who**. This says **when**, and **on which machine** — the column after the date is the device.
+Something you decided on the laptop and something a tool decided last week read differently, and only the log can tell
+you which.
+
+`⊘` marks a withdrawal: somebody took something back rather than saying it.
+
+This does not replace grepping the log — it is a plain file on disk for exactly that reason. What it adds is the same
+records already filtered to one thing, which grep can only do if you already know the id, and the id is what you do not
+have when you are looking at a row on a screen.
+
 ## A row with nothing behind it
 
 Some files have no recording the library can name — that is ordinary, not an error. `K` on one says so rather than

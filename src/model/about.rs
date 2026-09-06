@@ -92,7 +92,25 @@ pub enum Row {
         count: usize,
         query: String,
     },
+    /// **A recorded fact** — the third edge kind, #128.
+    ///
+    /// A claim's basis says *who*; this says *when* and *on which machine*,
+    /// and a withdrawal says somebody changed their mind.
+    Happened {
+        at: i64,
+        device: String,
+        name: String,
+        detail: String,
+        withdrawal: bool,
+    },
 }
+
+/// The section the fact log goes in.
+///
+/// **Named as a constant** because the panel folds it away by default and has
+/// to know which one it is — two spellings of one section title is how a fold
+/// silently stops working.
+pub const FACTS: &str = "facts";
 
 /// Beyond this a section says how many rather than listing them.
 ///
@@ -102,7 +120,13 @@ pub enum Row {
 const AT_MOST: usize = 24;
 
 /// What the library says about a focus.
-pub fn of(l: &Librarian, focus: Focus) -> About {
+///
+/// `history` asks for the fact log too. **Off by default and asked for**,
+/// because it is the expensive part — a filter over every record, 3.6ms on
+/// this library against 66µs for the rest — and the panel folds it away until
+/// somebody opens it. Building what is hidden, on every frame, is how a static
+/// screen comes to cost 8% of a core.
+pub fn of(l: &Librarian, focus: Focus, history: bool) -> About {
     let mut about = About {
         kind: focus.kind(),
         title: label_of(l, focus),
@@ -119,7 +143,28 @@ pub fn of(l: &Librarian, focus: Focus) -> About {
         Focus::Collection(id) => collection(l, id, &mut about),
         Focus::Work(id) => work(l, id, &mut about),
     }
+    // **Every focus gets its history**, not only a recording: a concept
+    // somebody catalogued and a crate somebody named were both decided, and
+    // when is a fair question about either.
+    let facts: Vec<Row> = if history {
+        l.facts_about(focus)
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .map(|h| Row::Happened {
+        at: h.at,
+        device: h.device,
+        name: h.name,
+        detail: h.detail,
+        withdrawal: h.withdrawal,
+    })
+    .collect();
     about.sections.retain(|s| !s.rows.is_empty());
+    // **The header stays even with nothing under it**, unlike every other
+    // section: it is folded by default, and a heading that vanished when shut
+    // would leave no way to open it.
+    about.sections.push(section(FACTS, facts));
     about
 }
 
@@ -567,7 +612,7 @@ mod tests {
     #[test]
     fn a_claim_says_who_made_it_and_how_sure() {
         let (l, recording) = library();
-        let about = l.about(Focus::Recording(recording));
+        let about = l.about(Focus::Recording(recording), true);
         assert_eq!(about.kind, "recording");
         assert_eq!(about.title, "Callisto");
 
@@ -604,7 +649,7 @@ mod tests {
     #[test]
     fn a_retracted_claim_is_shown_struck_rather_than_dropped() {
         let (l, recording) = library();
-        let about = l.about(Focus::Recording(recording));
+        let about = l.about(Focus::Recording(recording), true);
         let ambient = rows(&about, "said about it")
             .iter()
             .find(|r| matches!(r, Row::Claim { value, .. } if value == "Ambient"))
@@ -625,7 +670,7 @@ mod tests {
     #[test]
     fn a_claim_leads_to_the_concept_it_names() {
         let (l, recording) = library();
-        let about = l.about(Focus::Recording(recording));
+        let about = l.about(Focus::Recording(recording), true);
         let to = rows(&about, "said about it")
             .iter()
             .find_map(|r| match r {
@@ -640,14 +685,14 @@ mod tests {
                 "Techno"
             ))
         );
-        assert_eq!(l.about(to).title, "Techno");
+        assert_eq!(l.about(to, true).title, "Techno");
     }
 
     /// The copies section reaches the bytes, and the bytes reach back.
     #[test]
     fn a_recording_and_its_copy_link_to_each_other() {
         let (l, recording) = library();
-        let about = l.about(Focus::Recording(recording));
+        let about = l.about(Focus::Recording(recording), true);
         let copy = rows(&about, "copies")
             .iter()
             .find_map(|r| match r {
@@ -657,7 +702,7 @@ mod tests {
             .expect("no copy listed");
         assert!(matches!(copy, Focus::Encoding(_)));
 
-        let back = l.about(copy);
+        let back = l.about(copy, true);
         assert_eq!(back.kind, "encoding");
         assert_eq!(
             rows(&back, "of").iter().find_map(|r| match r {
@@ -669,12 +714,108 @@ mod tests {
         );
     }
 
+    /// **The facts say when, and on which machine** — #128.
+    ///
+    /// A claim's basis says who; this is the other half.
+    #[test]
+    fn the_facts_say_when_and_where() {
+        let (l, recording) = library();
+        let about = l.about(Focus::Recording(recording), true);
+        let facts = rows(&about, FACTS);
+        assert!(
+            !facts.is_empty(),
+            "no history for a recording with four facts"
+        );
+
+        // Newest first: what changed recently is what somebody is looking for.
+        let stamps: Vec<i64> = facts
+            .iter()
+            .filter_map(|r| match r {
+                Row::Happened { at, .. } => Some(*at),
+                _ => None,
+            })
+            .collect();
+        let mut sorted = stamps.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(stamps, sorted, "the log is not newest first");
+
+        assert!(
+            facts
+                .iter()
+                .all(|r| matches!(r, Row::Happened { device, .. } if !device.is_empty())),
+            "a fact with no machine behind it"
+        );
+    }
+
+    /// **A retraction reads as a retraction**, not as one more thing somebody
+    /// said. Otherwise the log says a genre was asserted twice and never that
+    /// anybody took it back.
+    #[test]
+    fn a_withdrawal_is_marked_as_one() {
+        let (l, recording) = library();
+        let about = l.about(Focus::Recording(recording), true);
+        assert!(
+            rows(&about, FACTS).iter().any(|r| matches!(
+                r,
+                Row::Happened {
+                    withdrawal: true,
+                    ..
+                }
+            )),
+            "the retraction reads as an assertion: {:?}",
+            rows(&about, FACTS)
+        );
+    }
+
+    /// **A fact's name and fields come from its own wire form**, so a variant
+    /// this code has never been told about still shows what it is and when —
+    /// #106's rule for a stale reader, applied to a reader of the log.
+    #[test]
+    fn a_fact_shows_itself_without_being_taught_how() {
+        let (l, recording) = library();
+        let about = l.about(Focus::Recording(recording), true);
+        let named: Vec<&String> = rows(&about, FACTS)
+            .iter()
+            .filter_map(|r| match r {
+                Row::Happened { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            named.iter().any(|n| n.as_str() == "ConceptAsserted"),
+            "{named:?}"
+        );
+        // And an id in a fact is resolved to what the library calls it, which
+        // is a lookup rather than a per-variant match.
+        assert!(
+            rows(&about, FACTS).iter().any(|r| matches!(
+                r,
+                Row::Happened { detail, .. } if detail.contains("Techno")
+            )),
+            "an id was left as a uuid: {:?}",
+            rows(&about, FACTS)
+        );
+    }
+
+    /// **Asking for no history costs nothing**, and the section is still there
+    /// to be opened.
+    #[test]
+    fn the_history_is_built_only_when_it_is_asked_for() {
+        let (l, recording) = library();
+        let without = l.about(Focus::Recording(recording), false);
+        assert!(rows(&without, FACTS).is_empty(), "it was built anyway");
+        assert!(
+            without.sections.iter().any(|s| s.title == FACTS),
+            "the heading went with it, leaving no way to open it"
+        );
+    }
+
     /// **An empty section is not drawn.** A panel of headings with nothing
     /// under them says the library knows less than it does.
     #[test]
     fn a_section_with_nothing_in_it_is_left_out() {
         let (l, recording) = library();
-        let about = l.about(Focus::Recording(recording));
+        let about = l.about(Focus::Recording(recording), true);
         assert!(
             about.sections.iter().all(|s| !s.rows.is_empty()),
             "{:?}",
@@ -693,7 +834,7 @@ mod tests {
     fn a_focus_the_library_does_not_hold_says_so() {
         let (l, _) = library();
         let nowhere = Focus::Recording(Id::from_uuid(uuid::Uuid::from_u128(0xdead)));
-        let about = l.about(nowhere);
+        let about = l.about(nowhere, true);
         assert_eq!(about.title, "(not in the library)");
     }
 }
@@ -756,7 +897,7 @@ mod perf {
             .into_iter()
             .map(|focus| {
                 let t = std::time::Instant::now();
-                let about = l.about(focus);
+                let about = l.about(focus, true);
                 let took = t.elapsed();
                 eprintln!(
                     "  {:<12} {took:>9.1?}  ({} sections)",

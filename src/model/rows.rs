@@ -326,7 +326,14 @@ pub trait Listing {
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — #126 is the panel that asks it"
     )]
-    fn about(&self, focus: crate::model::focus::Focus) -> crate::model::about::About;
+    /// What to call one thing, without building the page about it — #128.
+    ///
+    /// Its own question because a breadcrumb wants five names and no pages,
+    /// and `about` is the expensive one.
+    fn label_of(&self, focus: crate::model::focus::Focus) -> String;
+
+    fn about(&self, focus: crate::model::focus::Focus, history: bool)
+    -> crate::model::about::About;
 
     /// Does this facet have a hierarchy to climb? — #79.
     ///
