@@ -6551,7 +6551,7 @@ mod tests {
     /// process is about to end, and the alternative is threading a second
     /// local through every call site in a ten-thousand-line file.
     fn lib_of(store: &Scan) -> &'static crate::model::seam::Librarian {
-        Box::leak(Box::new(crate::bridge::librarian(
+        Box::leak(Box::new(crate::bridge::imported(
             store,
             &std::collections::BTreeSet::new(),
             crate::model::id::Id::derived(b"test"),
@@ -6566,7 +6566,7 @@ mod tests {
     /// patience and nothing here is long-lived enough for it to matter.
     fn refolded(store: &Scan, ui: &Ui) -> Context<'static> {
         Context {
-            library: Box::leak(Box::new(crate::bridge::librarian(
+            library: Box::leak(Box::new(crate::bridge::imported(
                 store,
                 ui.log.records(),
                 crate::model::id::Id::derived(b"test"),
@@ -11656,7 +11656,7 @@ mod tests {
         })
         .collect();
 
-        let library: &'static _ = Box::leak(Box::new(crate::bridge::librarian(
+        let library: &'static _ = Box::leak(Box::new(crate::bridge::imported(
             &store,
             &relink,
             crate::model::id::Id::derived(b"test"),

@@ -535,11 +535,31 @@ fn run_tui(
     // same pass is what keeps them from disagreeing.
     let assembling = std::time::Instant::now();
     let library_view = crate::bridge::librarian(&app.store, log.records(), device, now_ms);
+    let known = library_view.recordings().count();
     println!(
-        "librarian: {} recordings in {:.1}s",
-        library_view.recordings().count(),
+        "librarian: {known} recordings in {:.1}s",
         assembling.elapsed().as_secs_f64()
     );
+
+    // **A scan no longer catalogues what it walks past** (#140), so files on
+    // disk that nobody imported are not rows — and an empty library with a
+    // full disk needs saying out loud rather than being left to look like a
+    // bug. `import` is the declaration; this is where it is offered.
+    //
+    // **Counted in encodings, not recordings.** Two copies of one track are
+    // two files and one recording, so subtracting the second from the first
+    // reported 175 strangers on a library that had none.
+    let strangers = app
+        .store
+        .iter()
+        .filter(|h| !library_view.holds_encoding(crate::model::id::Id::of_audio(&h.seen.audio)))
+        .count();
+    if strangers > 0 {
+        println!(
+            "library: {strangers} file(s) on disk are not in the library yet — \n\
+             `gmuse shelf import` to see them, `--write` to take them in"
+        );
+    }
 
     // **Membership is asked of the same seam the rows come from** (#86), so
     // the two cannot disagree about what exists — which is what made the

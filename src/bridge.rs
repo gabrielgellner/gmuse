@@ -38,7 +38,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::entity::{Device, Encoding};
 use crate::model::id::Id;
-use crate::model::instance::{Instance, Scanned};
+use crate::model::instance::Instance;
+#[cfg(test)]
+use crate::model::instance::Scanned;
 use crate::model::log::Record;
 use crate::model::seam::Librarian;
 
@@ -68,12 +70,19 @@ pub fn librarian(
     device: Id<Device>,
     now: i64,
 ) -> Librarian {
-    // The log first: `ingest` will not mint over a binding it can see, and a
-    // scan into an empty instance can see none. See `query::rows`.
+    // **The log is the catalogue, and this no longer re-derives it** (#140).
+    //
+    // Until `import` existed, a launch ingested the whole scan into this
+    // scratch instance — 160,000 facts minted from 6,500 files, folded once
+    // and dropped. It filled a real gap and it made §2's "a file's tags
+    // change → nothing" false of every launch: a retag outside gmuse became
+    // the library's answer at the next scan.
+    //
+    // Now `import` puts description in the log, and a scan contributes
+    // holdings and nothing else. What a file *claims about itself* is read
+    // once, when somebody declares it belongs here.
     let mut scratch = Instance::new(device);
     scratch.merge(now, records);
-    let seen: Vec<Scanned> = held.iter().map(|h| h.seen.clone()).collect();
-    scratch.ingest(now, &seen);
 
     // **What this device can actually open** — issue #85.
     //
@@ -107,8 +116,29 @@ pub fn librarian(
     l
 }
 
+/// A librarian over files that have been **imported**, for a test that means
+/// "these are in the library" — #140.
+///
+/// A launch no longer catalogues what a scan walks past, so a test that wants
+/// rows has to declare them the way a person does. This is `import` followed
+/// by the fold, in one call.
+#[cfg(test)]
+pub fn imported(
+    held: &crate::scan::Holdings,
+    records: &BTreeSet<Record>,
+    device: Id<Device>,
+    now: i64,
+) -> Librarian {
+    let mut log = Instance::new(device);
+    log.merge(now, records);
+    let seen: Vec<Scanned> = held.iter().map(|h| h.seen.clone()).collect();
+    log.ingest(now, &seen);
+    librarian(held, log.records(), device, now)
+}
+
 #[cfg(test)]
 mod forget_and_relink {
+
     //! **What happens when a file stops being the file** — issue #88.
     //!
     //! `library-api.md` names `forget` and `relink` as operations that must be
@@ -131,6 +161,84 @@ mod forget_and_relink {
     //! **collection** decision, and it is #28's exclusion and #87's
     //! quarantine, not a third mechanism.
 
+    /// **A retag outside gmuse changes nothing** — #140, and the property the
+    /// whole inversion is for.
+    ///
+    /// A launch used to ingest the entire scan into a scratch instance, so a
+    /// tool that rewrote a title made that title the library's answer at the
+    /// next scan. `library-api.md` §2 says a file whose tags change causes
+    /// gmuse to do *nothing*, and until now that was true of no launch.
+    #[test]
+    fn a_launch_reads_the_log_and_not_the_tags() {
+        let imported_as = |title: &str| crate::model::instance::Scanned {
+            audio: crate::audio_id::AudioId {
+                scheme: 1,
+                hash: 42,
+            },
+            title: title.into(),
+            artist: "Stephan Bodzin".into(),
+            album: Some("Luna".into()),
+            length_ms: 200_000,
+            ..Default::default()
+        };
+
+        // Imported once, under the title it had then.
+        let mut log = Instance::new(device());
+        log.ingest(100, &[imported_as("Callisto")]);
+
+        // The scan now sees the same audio with different tags — somebody
+        // retagged it, or a tool did.
+        let mut held = crate::scan::Holdings::new();
+        held.insert(crate::scan::Held {
+            at: std::path::PathBuf::from("/m/Luna/01 Callisto.flac"),
+            mtime: 0,
+            size: 0,
+            seen: imported_as("Something Else Entirely"),
+        });
+
+        let l = librarian(&held, log.records(), device(), 200);
+        let titles: Vec<String> = crate::model::rows::Listing::rows(&l)
+            .into_iter()
+            .filter_map(|id| crate::model::rows::Listing::listed(&l, id))
+            .map(|r| r.title.to_string())
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["Callisto".to_string()],
+            "a launch read a tag it was told never to read again"
+        );
+    }
+
+    /// **A file nobody imported is not a row**, however plainly it is on the
+    /// disk — #140. The offer a scan makes is `unknown`, and taking it up is
+    /// `import`.
+    #[test]
+    fn a_file_on_disk_that_nothing_imported_is_not_in_the_library() {
+        let mut held = crate::scan::Holdings::new();
+        held.insert(crate::scan::Held {
+            at: std::path::PathBuf::from("/m/Stranger.flac"),
+            mtime: 0,
+            size: 0,
+            seen: crate::model::instance::Scanned {
+                audio: crate::audio_id::AudioId { scheme: 1, hash: 9 },
+                title: "Stranger".into(),
+                artist: "Nobody".into(),
+                length_ms: 1000,
+                ..Default::default()
+            },
+        });
+
+        let bare = librarian(&held, &BTreeSet::new(), device(), 100);
+        assert_eq!(
+            crate::model::rows::Listing::rows(&bare).len(),
+            0,
+            "a scan catalogued a file nobody declared"
+        );
+
+        // And declaring it is what puts it there.
+        let declared = imported(&held, &BTreeSet::new(), device(), 100);
+        assert_eq!(crate::model::rows::Listing::rows(&declared).len(), 1);
+    }
     use super::*;
     use crate::audio_id::AudioId;
     use crate::model::basis::Basis;
@@ -178,7 +286,7 @@ mod forget_and_relink {
     #[test]
     fn a_file_that_goes_away_needs_no_command() {
         let gone = file("/m/callisto.mp3", 7);
-        let before = librarian(
+        let before = imported(
             &store_of(std::slice::from_ref(&gone)),
             &BTreeSet::new(),
             device(),
@@ -205,7 +313,7 @@ mod forget_and_relink {
             fact,
         })
         .collect();
-        let after = librarian(&store_of(&[]), &history, device(), 200);
+        let after = imported(&store_of(&[]), &history, device(), 200);
 
         assert!(
             after.open(recording, &[device()], &[]).is_none(),
@@ -238,7 +346,7 @@ mod forget_and_relink {
         let mut flac = file("/m/callisto.flac", 8);
         flac.seen.identity = Some(Basis::MusicBrainz(mbid));
 
-        let l = librarian(&store_of(&[mp3, flac]), &BTreeSet::new(), device(), 100);
+        let l = imported(&store_of(&[mp3, flac]), &BTreeSet::new(), device(), 100);
         assert_eq!(l.recordings().count(), 1, "a re-buy split the recording");
         let recording = l.recordings().next().unwrap();
         assert_eq!(l.encodings.of(recording).len(), 2, "one copy was dropped");
@@ -258,7 +366,7 @@ mod forget_and_relink {
     #[test]
     fn a_re_buy_of_an_unnamed_recording_splits_and_a_merge_repairs_it() {
         let store = store_of(&[file("/m/callisto.mp3", 7), file("/m/callisto.flac", 8)]);
-        let split = librarian(&store, &BTreeSet::new(), device(), 100);
+        let split = imported(&store, &BTreeSet::new(), device(), 100);
         assert_eq!(split.recordings().count(), 2, "the bytes are all there is");
 
         let mut ids = split.recordings();
@@ -273,7 +381,7 @@ mod forget_and_relink {
         })
         .collect();
 
-        let l = librarian(&store, &repair, device(), 300);
+        let l = imported(&store, &repair, device(), 300);
         assert_eq!(l.recordings().count(), 1, "the merge did not join them");
         assert_eq!(
             l.encodings.of(b).len(),
@@ -294,13 +402,13 @@ mod forget_and_relink {
         let mbid = uuid::Uuid::from_u128(0xca11);
         let mut first = file("/m/callisto.mp3", 7);
         first.seen.identity = Some(Basis::MusicBrainz(mbid));
-        let before = librarian(&store_of(&[first]), &BTreeSet::new(), device(), 100);
+        let before = imported(&store_of(&[first]), &BTreeSet::new(), device(), 100);
         let recording = before.recordings().next().expect("a recording");
         let old = before.encodings.of(recording)[0].id;
 
         let mut better = file("/m/callisto.mp3", 9);
         better.seen.identity = Some(Basis::MusicBrainz(mbid));
-        let after = librarian(&store_of(&[better]), &BTreeSet::new(), device(), 200);
+        let after = imported(&store_of(&[better]), &BTreeSet::new(), device(), 200);
 
         assert_eq!(
             after.recordings().next(),
@@ -341,7 +449,7 @@ mod forget_and_relink {
         })
         .collect();
 
-        let l = librarian(&store_of(&[]), &records, device(), 200);
+        let l = imported(&store_of(&[]), &records, device(), 200);
         assert_eq!(
             l.ratings.get(&b),
             Some(&4),
@@ -386,7 +494,7 @@ mod opening {
     fn the_library_can_open_what_this_device_holds() {
         let device = Id::<Device>::derived(b"laptop");
         let store = store_with("/m/callisto.mp3", 7);
-        let l = librarian(&store, &BTreeSet::new(), device, 100);
+        let l = imported(&store, &BTreeSet::new(), device, 100);
 
         let recording = l.recordings().next().expect("a recording");
         let (encoding, locator) = l
@@ -424,7 +532,7 @@ mod opening {
                 ..Default::default()
             },
         });
-        let l = librarian(&store, &BTreeSet::new(), device, 100);
+        let l = imported(&store, &BTreeSet::new(), device, 100);
 
         let release = l.spine.releases.values().next().expect("a pressing");
         let label = release.label.expect("the pressing named no imprint").id();
@@ -467,7 +575,7 @@ mod opening {
                 ..Default::default()
             },
         });
-        let l = librarian(&store, &BTreeSet::new(), device, 100);
+        let l = imported(&store, &BTreeSet::new(), device, 100);
 
         let recording = l.recordings().next().expect("a recording");
         let copy = l.encodings.of(recording)[0];
@@ -503,7 +611,7 @@ mod opening {
                 ..Default::default()
             },
         });
-        let l = librarian(&store, &BTreeSet::new(), device, 100);
+        let l = imported(&store, &BTreeSet::new(), device, 100);
 
         let recording = l.recordings().next().expect("a recording");
         let copy = l.encodings.of(recording)[0];
@@ -561,7 +669,7 @@ mod opening {
         })
         .collect();
 
-        let l = librarian(&store, &records, mine, 200);
+        let l = imported(&store, &records, mine, 200);
         assert_eq!(
             l.encodings.canonical(recording).map(|e| e.id),
             Some(elsewhere),
@@ -583,7 +691,7 @@ mod opening {
         let mine = Id::<Device>::derived(b"laptop");
         let theirs = Id::<Device>::derived(b"asnas");
         let store = store_with("/m/callisto.mp3", 7);
-        let l = librarian(&store, &BTreeSet::new(), mine, 100);
+        let l = imported(&store, &BTreeSet::new(), mine, 100);
 
         let recording = l.recordings().next().expect("a recording");
         assert!(l.open(recording, &[theirs], &[]).is_none());
@@ -630,7 +738,7 @@ mod tests {
     fn a_scanned_file_becomes_a_row() {
         let mut store = Holdings::new();
         store.insert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
-        let l = librarian(&store, &BTreeSet::new(), device(), 1_000);
+        let l = imported(&store, &BTreeSet::new(), device(), 1_000);
 
         let recording = l.recordings().next().expect("one recording");
         let row = l.row(recording).expect("a row");
@@ -651,7 +759,7 @@ mod tests {
         store.insert(track("/m/a.mp3", "Callisto", "Stephan Bodzin", 1));
 
         // What the recording will be, derived the same way the ladder does.
-        let scratch_l = librarian(&store, &BTreeSet::new(), device(), 1_000);
+        let scratch_l = imported(&store, &BTreeSet::new(), device(), 1_000);
         let recording: Id<Recording> = scratch_l.recordings().next().unwrap();
         assert_eq!(scratch_l.row(recording).unwrap().rating, None);
 
@@ -659,7 +767,7 @@ mod tests {
         writer.rate(2_000, recording, Some(4));
         writer.play(2_100, recording, Id::derived(b"whatever"));
 
-        let l = librarian(&store, writer.records(), device(), 3_000);
+        let l = imported(&store, writer.records(), device(), 3_000);
         let row = l.row(recording).expect("still a row");
         assert_eq!(row.rating, Some(4), "the rating did not survive the fold");
         assert_eq!(row.plays, 1);
@@ -684,7 +792,7 @@ mod tests {
         partial.seen.length_ms = 12_000;
         store.insert(partial);
 
-        let l = librarian(&store, &BTreeSet::new(), device(), 1_000);
+        let l = imported(&store, &BTreeSet::new(), device(), 1_000);
         let recording = l.recordings().next().expect("one recording");
         assert_eq!(
             l.row(recording).unwrap().length,
@@ -713,7 +821,7 @@ mod tests {
         assert_eq!(store.len(), 0, "it is not a holding");
         assert_eq!(report.errors.len(), 1, "and it is named, not dropped");
 
-        let l = librarian(&store, &BTreeSet::new(), device(), 1_000);
+        let l = imported(&store, &BTreeSet::new(), device(), 1_000);
         assert_eq!(l.recordings().count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -732,7 +840,7 @@ mod tests {
             1,
         ));
 
-        let l = librarian(&store, &BTreeSet::new(), device(), 1_000);
+        let l = imported(&store, &BTreeSet::new(), device(), 1_000);
         assert_eq!(
             l.recordings().count(),
             1,

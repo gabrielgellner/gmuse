@@ -967,7 +967,7 @@ mod the_two_projections {
         let mut held = crate::scan::Holdings::new();
         let report = crate::scan::scan(&mut held, std::slice::from_ref(&root));
         assert_eq!(report.errors.len(), 0);
-        let l = crate::bridge::librarian(
+        let l = crate::bridge::imported(
             &held,
             &std::collections::BTreeSet::new(),
             crate::model::id::Id::derived(b"compare"),

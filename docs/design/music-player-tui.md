@@ -4236,6 +4236,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   is what makes finishing it possible: it is the operation that puts description into the log. Filed as its own issue,
   because it changes what the player shows on the first launch after it lands.
 
+- **2026-09-06** **The log is the catalogue, and a launch reads no tags (#140).** `library-api.md` §2 has said since it
+  was written that a file whose _tags_ change causes gmuse to do nothing. That was true of no launch:
+  `bridge::librarian` ingested the whole scan into a scratch instance, so a retag outside gmuse became the library's
+  answer at the next scan. Now it merges the log and asserts holdings, and nothing else.
+
+  **The evidence for how far off it was.** Before this, the log held 15,633 records in **11 fact kinds** — acquisitions,
+  plays, ratings, identifications, merges, the genre hierarchy — and no `EncodingCatalogued`, no `ArtistNamed`, no
+  `ConceptAsserted`. Every genre in the library came from a tag, re-read at every launch. The log held _decisions_; the
+  tags held _description_.
+
+  **The migration is one import and it was measured.** 6,500 files, 6,047 confirmed, **164,328 facts** in 37 s, taking
+  the log to 179,962 records. The librarian then folds in **0.1 s** — the fold was never the cost; re-deriving was.
+
+  **A fixture now imports rather than merely holding.** `fixture::from_holdings` means "these files are in the library",
+  which is a declaration, so it makes one. That is the whole reason the change touched a hundred tests and none of their
+  assertions.
+
+  **The launch offers what it does not know**, counted in **encodings and not recordings** — two copies of one track are
+  two files and one recording, and subtracting the second from the first reported 175 strangers on a library that had
+  none.
+
+  What this does not yet do: `scan::scan` still reads tags into `Holdings::seen`, because that is where the audio hash
+  is taken. Nothing reads those tags any more, so the cost is a cold scan's and not the library's, and
+  `populate::reconcile` (#62) is the shape that stops paying it.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

@@ -982,7 +982,7 @@ mod tests {
         // And the label must not leak into what the tree files it under. That
         // is the librarian's answer now rather than a `Track` method, which is
         // the point of there being one place it is decided.
-        let l = crate::bridge::librarian(
+        let l = crate::bridge::imported(
             &{
                 let mut h = Holdings::new();
                 h.insert(Held {

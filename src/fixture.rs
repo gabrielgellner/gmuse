@@ -170,7 +170,7 @@ impl crate::scan::Holdings {
 /// this folds them the way a real launch does, so what a test reads is what
 /// the player would.
 pub fn from_holdings(held: &crate::scan::Holdings) -> Librarian {
-    crate::bridge::librarian(held, &std::collections::BTreeSet::new(), device(), 100)
+    from_holdings_and(held, &std::collections::BTreeSet::new())
 }
 
 /// The same, with a log — for a test about something only facts can say.
@@ -181,7 +181,15 @@ pub fn from_holdings_and(
     held: &crate::scan::Holdings,
     records: &std::collections::BTreeSet<crate::model::log::Record>,
 ) -> Librarian {
-    crate::bridge::librarian(held, records, device(), 100)
+    // **Imported, not merely present** (#140). A scan no longer catalogues
+    // what it walks past, so a fixture that means "these files are in the
+    // library" has to say so — which is what a person does with
+    // `gmuse shelf import`.
+    let mut log = crate::model::instance::Instance::new(device());
+    log.merge(100, records);
+    let seen: Vec<_> = held.iter().map(|h| h.seen.clone()).collect();
+    log.ingest(100, &seen);
+    crate::bridge::librarian(held, log.records(), device(), 100)
 }
 
 impl Tagged {

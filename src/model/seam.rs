@@ -896,6 +896,14 @@ impl Librarian {
             .collect()
     }
 
+    /// **Whether the library knows these bytes at all** — #140.
+    ///
+    /// A scan asks it of everything it walked past: what the library does not
+    /// know is not a row, it is an offer to `import`.
+    pub fn holds_encoding(&self, copy: Id<Encoding>) -> bool {
+        self.encodings.encodings.contains_key(&copy)
+    }
+
     /// Where this copy is on *this* device, if it is here at all.
     pub fn where_held(&self, copy: Id<Encoding>) -> Option<String> {
         self.locators.get(&copy).cloned()
