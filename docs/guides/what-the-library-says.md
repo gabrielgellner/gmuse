@@ -9,6 +9,26 @@
 `K` is vim's "look up the thing under the cursor", and that is what this is. It opens view 8 on the **recording** the
 row holds — the performance, not the file — and everything else is one hop from there.
 
+## Reaching things that are not rows
+
+Half of what the panel shows is not a track: an artist, a release group, a genre, a crate. `:info` names one, in the
+same grammar the rest of the `:` line uses:
+
+    :info artist="Bodzin"      an artist
+    :info in="Dance"           a crate
+    :info genre="Techno"       a genre, on its axis
+    :info version="live"       any other axis, the same way
+
+Part of a name is enough. If several answer to it, **it says which rather than picking one**:
+
+    4 match: Stephan Bodzin, Stephan Bodzin & Marc Romboy, Luna Semara, …
+
+and if none do, it says what it was looking for:
+
+    no artist called "Ozric Tentacles"
+
+`saved="…"` is not something to look up. A saved view is a **definition**; what it names has a page, the name does not.
+
 ## It shows claims, not values
 
 Every other player prints `genre: Techno, Minimal`. This one keeps who said each, because the library keeps who said

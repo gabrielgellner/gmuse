@@ -1168,6 +1168,10 @@ impl crate::model::rows::Listing for Librarian {
         self.collection_entries(collection)
     }
 
+    fn find(&self, of: crate::model::about::Kind, name: &str) -> crate::model::about::Found {
+        crate::model::about::find(self, of, name)
+    }
+
     fn label_of(&self, focus: crate::model::focus::Focus) -> String {
         crate::model::about::label_of(self, focus)
     }

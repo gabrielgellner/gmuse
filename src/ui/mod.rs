@@ -2551,7 +2551,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // the draw loop may take the terminal, so this asks `main` to do it —
         // the same door `:collect` uses to get a refold (#120).
         Command::Edit => ui.stop = Some(Stop::Edit),
-        Command::Info => open_info(ui, ctx),
+        Command::Info(what) => open_info(ui, ctx, what),
         Command::Back => go_back(ui, ctx),
         Command::Compose(term) => {
             use crate::cmd::ViewTerm;
@@ -5058,7 +5058,44 @@ fn go_back(ui: &mut Ui, ctx: &Context<'_>) {
 /// opening on the encoding would put the useful screen one hop away every
 /// time. The copy is listed under `copies`, one keystroke away, and the
 /// section is named for what it is rather than hiding the distinction.
-fn open_info(ui: &mut Ui, ctx: &Context<'_>) {
+fn open_info(ui: &mut Ui, ctx: &Context<'_>, what: Option<crate::cmd::Named>) {
+    use crate::model::about::Found;
+
+    // **A named thing reaches past the cursor** (#129). Half of what the panel
+    // can show is not a row — a release group, an artist, a concept, a crate —
+    // and without this they are reachable only by finding a track that happens
+    // to link to one and walking there.
+    if let Some(named) = what {
+        let (found, asked) = match &named {
+            crate::cmd::Named::Exactly(focus) => (Found::One(*focus), focus.kind().to_string()),
+            crate::cmd::Named::Called(kind, name) => (
+                crate::model::rows::Listing::find(ctx.library, *kind, name),
+                format!("{} called {name:?}", kind.word()),
+            ),
+        };
+        match found {
+            Found::One(focus) => {
+                ui.focus = vec![focus];
+                ui.info_sel = 0;
+                switch_view(ui, View::Info);
+            }
+            // **It does not choose** — the same rule a bare word follows
+            // (#119), and the same shape of answer: say what was found.
+            Found::Several(names) => ui.notify(format!(
+                "{} match: {}",
+                names.len(),
+                names
+                    .iter()
+                    .take(4)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Found::Nothing => ui.notify(format!("no {asked}")),
+        }
+        return;
+    }
+
     // Already in the panel: `K` again is a no-op rather than a re-open, so it
     // cannot quietly throw away where you have navigated to (#127).
     if ui.view == View::Info {
@@ -10190,6 +10227,84 @@ mod tests {
             trail.contains("more"),
             "a long path was not elided: {trail}"
         );
+    }
+
+    /// **`:info <thing>` reaches past the cursor** — #129.
+    ///
+    /// Half of what the panel can show is not a row, and without this they are
+    /// reachable only by finding a track that happens to link to one.
+    #[test]
+    fn info_reaches_a_thing_by_name() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // An artist, by part of the name — nobody types the whole credit.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"info artist="Ferrell""#);
+        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert!(
+            matches!(ui.focus.last(), Some(crate::model::focus::Focus::Artist(_))),
+            "{:?}",
+            ui.focus
+        );
+        let out = render(&ui, &ctx, 90, 20);
+        assert!(out.contains("Ferrell"), "{out}");
+    }
+
+    /// **It does not choose between several** — #119's rule, same shape of
+    /// answer: say what was found.
+    #[test]
+    fn a_name_matching_several_says_which() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // Every fixture artist contains an "a" somewhere.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"info artist="a""#);
+        assert_ne!(ui.view, View::Info, "it picked one");
+        assert!(ui.status.contains("match"), "{}", ui.status);
+    }
+
+    /// A name nothing answers to says so rather than opening an empty page.
+    #[test]
+    fn a_name_nothing_matches_says_nothing_by_that_name() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"info artist="Ozric Tentacles""#);
+        assert!(ui.status.contains("no artist called"), "{}", ui.status);
+        assert_ne!(ui.view, View::Info);
+    }
+
+    /// **A saved view is a definition, not a thing** — what it names has a
+    /// page; the name does not. #96 said the same about adding to one.
+    #[test]
+    fn a_saved_view_is_not_something_to_look_up() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"info saved="mornings""#);
+        assert!(ui.status.contains("definition"), "{}", ui.status);
+    }
+
+    /// `:info` with no argument is the row under the cursor — what `K` does.
+    #[test]
+    fn info_with_no_argument_is_the_row_under_the_cursor() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "info");
+        assert_eq!(ui.view, View::Info);
+        assert!(matches!(
+            ui.focus.last(),
+            Some(crate::model::focus::Focus::Recording(_))
+        ));
     }
 
     /// **`escape` leaves it the way you came in.**

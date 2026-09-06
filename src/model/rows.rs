@@ -326,6 +326,9 @@ pub trait Listing {
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — #126 is the panel that asks it"
     )]
+    /// Resolve a name to a thing — #129.
+    fn find(&self, of: crate::model::about::Kind, name: &str) -> crate::model::about::Found;
+
     /// What to call one thing, without building the page about it — #128.
     ///
     /// Its own question because a breadcrumb wants five names and no pages,

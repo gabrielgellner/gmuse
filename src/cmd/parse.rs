@@ -355,9 +355,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         }),
         "help" => Command::Help,
         "quit" | "q" => Command::Quit,
-        // No argument yet: what it shows is the row under the cursor. Naming
-        // a thing — `:info artist="Bodzin"` — is #129 and needs the library.
-        "info" => Command::Info,
+        "info" => Command::Info(info_spec(rest)?),
         "back" => Command::Back,
 
         other => return Err(ParseError::UnknownCommand(other.to_string())),
@@ -443,6 +441,56 @@ fn compose_term(rest: &str) -> Result<crate::cmd::ViewTerm, ParseError> {
         _ => (Op::Or, rest, true),
     };
     Ok(ViewTerm::Compose(op, Box::new(source(expr.trim())?), first))
+}
+
+/// What `:info` was pointed at — #129.
+///
+/// **Through the grammar the `:` line already has.** `in=` and a facet key are
+/// what a view term spells, and reusing [`source`] is what stops this becoming
+/// a second dialect that has to be kept in step with the first.
+fn info_spec(rest: &str) -> Result<Option<crate::cmd::Named>, ParseError> {
+    use crate::cmd::Named;
+    use crate::model::about::Kind;
+    use crate::view::What;
+
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    // The exact form first: `recording:0192…` is not a filter term and would
+    // only confuse the one below.
+    if let Some(focus) = crate::model::focus::Focus::parse(rest) {
+        return Ok(Some(Named::Exactly(focus)));
+    }
+    if let Some(name) = quoted_value(rest, "artist") {
+        return Ok(Some(Named::Called(Kind::Artist, name)));
+    }
+    Ok(Some(match source(rest)? {
+        What::Collection(name) => Named::Called(Kind::Collection, name),
+        // A facet, on its own axis. `genre="Techno"` and `version="live"` are
+        // the same shape and always were (#117).
+        What::Where(filter) => {
+            let (key, label) = facet_term(&filter.source)
+                .ok_or_else(|| ParseError::Bad(rest.into(), "a thing to look up"))?;
+            Named::Called(Kind::Concept(key), label)
+        }
+        // **A saved view is a definition, not a thing** — #96 said the same of
+        // adding to one. What it *names* has a page; the name does not.
+        What::Saved(name) => {
+            return Err(ParseError::Bad(name, "a definition rather than a thing"));
+        }
+        What::Everything | What::Group(_) => {
+            return Err(ParseError::Bad(rest.into(), "a thing to look up"));
+        }
+    }))
+}
+
+/// `genre="Techno"` split into its axis and its label.
+fn facet_term(source: &str) -> Option<(&'static str, String)> {
+    let (field, _) = source.split_once('=')?;
+    let key = crate::model::facet::key_of(field.trim())?;
+    let value = quoted_value(source, field.trim())?;
+    (!value.is_empty()).then_some((key, value))
 }
 
 /// One term's source: a collection, a saved view, or a predicate.
@@ -762,7 +810,17 @@ pub fn format(cmd: &Command) -> String {
     match cmd {
         Command::Up => "up".into(),
         Command::Edit => "edit".into(),
-        Command::Info => "info".into(),
+        Command::Info(None) => "info".into(),
+        Command::Info(Some(crate::cmd::Named::Exactly(focus))) => format!("info {focus}"),
+        Command::Info(Some(crate::cmd::Named::Called(kind, name))) => {
+            use crate::model::about::Kind;
+            let field = match kind {
+                Kind::Artist => "artist",
+                Kind::Collection => "in",
+                Kind::Concept(key) => key,
+            };
+            format!("info {field}={name:?}")
+        }
         Command::Back => "back".into(),
         Command::Down => "down".into(),
         Command::Mode(m) => format!("mode {}", m.name()),

@@ -915,3 +915,89 @@ mod perf {
         );
     }
 }
+
+/// What naming a thing found — #129.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Found {
+    One(Focus),
+    /// Nothing by that name.
+    Nothing,
+    /// **Several, and it does not choose.** Guessing which artist somebody
+    /// meant is the same mistake as guessing whether a bare word is a genre or
+    /// a crate (#119), and the repair is the same: say what was found.
+    Several(Vec<String>),
+}
+
+/// Resolve a name to a thing — #129.
+///
+/// **Exact first, then containment.** An id is minted from the exact credited
+/// string, so `artist="Stephan Bodzin"` lands without a search; but nobody
+/// types that, and `artist="Bodzin"` has to work. Case is ignored in both,
+/// because a name is not a password.
+pub fn find(l: &Librarian, of: Kind, name: &str) -> Found {
+    let wanted = name.trim().to_lowercase();
+    if wanted.is_empty() {
+        return Found::Nothing;
+    }
+    let named: Vec<(Focus, &str)> = match of {
+        Kind::Artist => l
+            .reference
+            .artists
+            .iter()
+            .map(|(id, a)| (Focus::Artist(*id), a.name.as_str()))
+            .collect(),
+        Kind::Collection => l
+            .collections
+            .iter()
+            .map(|(id, c)| (Focus::Collection(*id), c.name.as_str()))
+            .collect(),
+        Kind::Concept(key) => l
+            .vocabulary
+            .genres
+            .iter()
+            .filter(|(id, term)| Id::<Concept>::in_facet(key, &term.name) == **id)
+            .map(|(id, term)| (Focus::Concept(*id), term.name.as_str()))
+            .collect(),
+    };
+
+    if let Some((focus, _)) = named.iter().find(|(_, n)| n.to_lowercase() == wanted) {
+        return Found::One(*focus);
+    }
+    let near: Vec<(Focus, &str)> = named
+        .into_iter()
+        .filter(|(_, n)| n.to_lowercase().contains(&wanted))
+        .collect();
+    match near.as_slice() {
+        [] => Found::Nothing,
+        [(focus, _)] => Found::One(*focus),
+        several => Found::Several(several.iter().map(|(_, n)| (*n).to_string()).collect()),
+    }
+}
+
+/// What a name is a name *of*.
+///
+/// The three the `:` line can spell — `artist=`, `in=`, and any facet key.
+/// A recording is deliberately absent: titles are not unique and the row under
+/// the cursor is how you name one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Artist,
+    Collection,
+    Concept(&'static str),
+}
+
+impl Kind {
+    /// What to call this when nothing answers to a name.
+    ///
+    /// **The kind is in the message**, because "nothing by that name" leaves
+    /// the reader wondering whether they typed the wrong name or asked the
+    /// wrong question — and the field they wrote already says which one this
+    /// was looking for.
+    pub fn word(self) -> &'static str {
+        match self {
+            Kind::Artist => "artist",
+            Kind::Collection => "collection",
+            Kind::Concept(key) => key,
+        }
+    }
+}

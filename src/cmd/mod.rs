@@ -585,6 +585,19 @@ impl Fold {
     ];
 }
 
+/// A thing named on the `:` line — #129.
+///
+/// **The shape is parsed at the boundary and the name resolved later** (§12).
+/// Which field was written is a fact about the text and settles here; *which*
+/// artist it means is a fact about the library and cannot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Named {
+    /// The exact form, `recording:0192…` — no library needed.
+    Exactly(crate::model::focus::Focus),
+    /// `artist="Bodzin"`, `in="Dance"`, `genre="Techno"`.
+    Called(crate::model::about::Kind, String),
+}
+
 /// What `:view` was asked to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewTerm {
@@ -774,8 +787,10 @@ pub enum Command {
     /// a persistent *narrowing*, which a catalog could not be because a
     /// catalog unions.
     Compose(ViewTerm),
-    /// `:info` — what the library says about the row under the cursor (#126).
-    Info,
+    /// `:info` — what the library says about a thing (#126, #129).
+    ///
+    /// `None` is the row under the cursor, which is what the key does.
+    Info(Option<Named>),
     /// Back to where the info panel came from — #127. vim's `^o`.
     Back,
     /// `:edit` — the composed query in `$EDITOR` (#99).

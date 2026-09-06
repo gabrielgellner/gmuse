@@ -3930,6 +3930,24 @@ Append here as decisions are made. Format: date, decision, rationale.
   dropped in `refresh_library` (→ 1.2ms open). Safe because the page is a pure function of those two and the library,
   and the library changes only on a refold — which is the door every other projection already goes through (#84).
 
+- **`:info` names a thing in the grammar the line already has** (#129). `in=` and a facet key are what a view term
+  spells, so this reuses `source` rather than growing a second dialect to keep in step. The shape settles at the
+  boundary and the _name_ is resolved later, which is §12's rule split at the right place: which field was written is a
+  fact about the text, and which artist it means is a fact about the library.
+
+  **Exact first, then containment.** An id is minted from the exact credited string, so `artist="Stephan Bodzin"` lands
+  without a search — but nobody types that, and `artist="Bodzin"` has to work.
+
+  **It does not choose between several.** Four artists contain "Bodzin" on this library and it names them rather than
+  picking; that is #119's rule with the same shape of answer. The issue wanted the picker offered here, and the picker
+  cannot do it yet: it has no artist source, and its `Chosen` has no focus variant. Saying which is the affordance for
+  now, and it is what a shell does for an ambiguous completion.
+
+  **`Chosen` and `Focus` should not be one type**, which the issue asked to check. `Chosen::Saved` is a _definition to
+  apply_, not a thing to describe — #96 already ruled that a saved view is edited by editing what it names — so merging
+  would force `Focus` to grow a variant with no page. They answer different questions: what to do with what you picked,
+  against what to say about a thing.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
