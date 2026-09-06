@@ -165,11 +165,18 @@ impl Vocabulary {
         MAX_DEPTH
     }
 
-    /// The label of this concept's ancestor at level `at`, 1-based from the
+    /// The labels of this concept's ancestors at level `at`, 1-based from the
     /// top — `domain-model.md` §5's `genre@1`, issue #79.
     ///
     /// `genre@1` is the broadest term and `genre@2` the one under it, which is
     /// what the `Broad; Style` tag convention imitates in a string.
+    ///
+    /// **Every ancestor at that level, not one.** A concept may be narrower-of
+    /// two things — `Bossa Nova` is Jazz *and* Latin, `Country Folk` is both of
+    /// those — and picking one would be an arbitrary tie-break that decides
+    /// which node a row appears under. Genre is a many-valued dimension whose
+    /// counts already do not sum, so appearing under both is the consistent
+    /// answer and the true one.
     ///
     /// **A concept shallower than the level asked for stands for itself.** The
     /// ragged case, and the alternative is a row dropping out of the tree
@@ -179,34 +186,43 @@ impl Vocabulary {
     /// A label the vocabulary has never heard of is also itself. Genres reach
     /// the tree from tags today and the hierarchy is curated separately, so
     /// "not in the codelist" is the ordinary case rather than an error.
-    pub fn at_level(&self, label: &str, at: u8) -> String {
+    pub fn at_level(&self, label: &str, at: u8) -> Vec<String> {
         let id = Id::<Concept>::in_facet(facet::GENRE, label);
         // `depth` counts hops *up* to a root, so a concept at depth d sits at
         // level d+1 counting down from the top. Climbing `d + 1 - at` hops
-        // lands on the ancestor the level names.
+        // lands on the ancestors the level names.
         let depth = self.depth(id);
-        let Some(climb) = (depth + 1).checked_sub(at as usize) else {
-            return label.to_string();
+        let named = |id: &Id<Concept>| {
+            self.genres
+                .get(id)
+                .map_or_else(|| label.to_string(), |g| g.name.clone())
         };
-        let mut here = id;
+        // **The vocabulary's spelling, not the tag's.** Asking for a level is
+        // asking for the codelist's terms, and `in_facet` normalises — so
+        // `Hip-hop` and `Hip Hop` are one concept that would otherwise draw two
+        // nodes side by side, differing only in a hyphen.
+        let Some(climb) = (depth + 1).checked_sub(at as usize) else {
+            return vec![named(&id)];
+        };
+        let mut here = BTreeSet::from([id]);
         for _ in 0..climb {
-            // **The shortest way up**, the same reading `depth` takes: a
-            // concept may be narrower-of two things, and one slot wants the
-            // broadest.
-            let Some(parent) = self
+            let up: BTreeSet<Id<Concept>> = self
                 .edges
                 .iter()
-                .filter(|e| e.child.id() == here)
+                .filter(|e| here.contains(&e.child.id()))
                 .map(|e| e.parent.id())
-                .min_by_key(|p| self.depth(*p))
-            else {
+                .collect();
+            // A concept with no parent has arrived: it is as broad as it gets,
+            // and it stands for itself rather than disappearing mid-climb.
+            if up.is_empty() {
                 break;
-            };
-            here = parent;
+            }
+            here = up;
         }
-        self.genres
-            .get(&here)
-            .map_or_else(|| label.to_string(), |g| g.name.clone())
+        let mut out: Vec<String> = here.iter().map(named).collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     pub fn under(&self, hierarchy: Id<Hierarchy>, root: Id<Concept>) -> BTreeSet<Id<Concept>> {

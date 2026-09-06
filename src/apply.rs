@@ -63,6 +63,11 @@ impl proposal::Holdings for Shelf {
             // the `||` would have been two ways to answer one question with
             // only one of them load-bearing.
             Subject::Recording(id) => self.disk.recordings.contains_key(&id),
+            // **The vocabulary is always held** (#79). A hierarchy edge is
+            // curation of the codelist, not a claim about the disk, and the
+            // term a hierarchy is built ahead of is precisely the one nothing
+            // is tagged with yet.
+            Subject::Vocabulary => true,
         }
     }
 
@@ -110,6 +115,35 @@ impl std::fmt::Display for Outcome {
         } else {
             write!(f, "\n{} appended", self.written)
         }
+    }
+}
+
+/// The edge in a hierarchy fact, and whether it asserts or withdraws.
+///
+/// **The two facts that come in a pair.** Row-existence claims fold to a set,
+/// so what matters is the state after the last word about a pair — not whether
+/// some record once said it. Everything else here is either idempotent in the
+/// fold or, like a play, counted, and keeps the plain replay guard.
+type PairKey = (
+    Id<crate::model::entity::Hierarchy>,
+    Id<crate::model::entity::Concept>,
+    Id<crate::model::entity::Concept>,
+);
+
+fn paired(fact: &crate::model::log::Fact) -> Option<(PairKey, bool)> {
+    use crate::model::log::Fact;
+    match fact {
+        Fact::HierarchyNarrowed {
+            hierarchy,
+            parent,
+            child,
+        } => Some(((*hierarchy, *parent, *child), true)),
+        Fact::HierarchyNarrowRetracted {
+            hierarchy,
+            parent,
+            child,
+        } => Some(((*hierarchy, *parent, *child), false)),
+        _ => None,
     }
 }
 
@@ -174,9 +208,41 @@ pub fn run(
         .iter()
         .filter_map(|r| serde_json::to_string(&r.fact).ok())
         .collect();
+
+    // **A paired fact is judged against the state, not against the history.**
+    // "Already in the log" is not "still true": these come in assert/retract
+    // pairs, so a record may be there *and* have been taken back — two lines
+    // up in this same file, or a week ago. Judging by presence leaves whichever
+    // came first as the last word, which is how curation quietly unwound on
+    // this library: a pass that meant to move an edge dropped its
+    // re-assertion as a duplicate and kept the retraction.
+    //
+    // Within the batch, only the **last** word about a pair matters, because
+    // the fold is a set insert or a set removal and everything before it is
+    // overwritten.
+    let cat = log.catalogue();
+    let mut last_for_pair: std::collections::BTreeMap<PairKey, bool> = Default::default();
+    for fact in proposed.iter().map(|r| &r.fact) {
+        if let Some((pair, asserting)) = paired(fact) {
+            last_for_pair.insert(pair, asserting);
+        }
+    }
+    let redundant = |fact: &crate::model::log::Fact| match paired(fact) {
+        None => false,
+        Some((pair, asserting)) => {
+            // Superseded within this file, or the state already says it.
+            last_for_pair.get(&pair) != Some(&asserting) || cat.narrows.contains(&pair) == asserting
+        }
+    };
+
     let fresh: BTreeSet<_> = proposed
         .iter()
-        .filter(|r| serde_json::to_string(&r.fact).is_ok_and(|encoded| !seen.contains(&encoded)))
+        .filter(|r| {
+            if paired(&r.fact).is_some() {
+                return !redundant(&r.fact);
+            }
+            serde_json::to_string(&r.fact).is_ok_and(|encoded| !seen.contains(&encoded))
+        })
         .cloned()
         .collect();
     let already = proposed.len() - fresh.len();
@@ -218,6 +284,64 @@ mod tests {
     use crate::model::proposal::{Holdings, Subject};
 
     use super::Shelf;
+
+    /// **A re-assertion is not a replay** — the bug that silently unwound
+    /// curation on the real library.
+    ///
+    /// Facts already in the log are skipped so that replaying a file does not
+    /// count a play twice. But "already in the log" is not "still true": a
+    /// retraction may sit after it, either two lines up in the same file or a
+    /// week ago in the history. Skipping the assertion in either case leaves
+    /// the retraction as the last word, and the edge quietly stays gone.
+    ///
+    /// Both directions here, because they failed one after the other.
+    #[test]
+    fn an_edge_taken_back_can_be_asserted_again() {
+        use crate::model::entity::{Concept, Facet};
+        use crate::model::facet::GENRE;
+
+        let dir = std::env::temp_dir().join("gmuse-apply-readd");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let device = Id::<Device>::derived(b"laptop");
+        let array = Id::<Facet>::array(GENRE);
+        let pair = (
+            array,
+            Id::<Concept>::in_facet(GENRE, "Electronic"),
+            Id::<Concept>::in_facet(GENRE, "Techno"),
+        );
+        let edge = r#"{"fact":"narrowed","broader":"Electronic","narrower":"Techno"}"#;
+        let undo = r#"{"fact":"narrowing_retracted","broader":"Electronic","narrower":"Techno"}"#;
+        let file = dir.join("edges.jsonl");
+        let live = |dir: &std::path::Path| {
+            let (log, _) = Instance::open(dir, device, 0);
+            log.catalogue().narrows.contains(&pair)
+        };
+
+        std::fs::write(&file, format!("{edge}\n")).unwrap();
+        super::run(&file, &dir, &[], device, 100, true).expect("applies");
+        assert!(live(&dir), "the edge did not land");
+
+        // **In the same file**, which is what a curation pass emits when a
+        // term moves and moves back.
+        std::fs::write(&file, format!("{undo}\n{edge}\n")).unwrap();
+        super::run(&file, &dir, &[], device, 200, true).expect("applies");
+        assert!(live(&dir), "a retraction two lines up swallowed the edge");
+
+        // **And across runs**, where the retraction is history rather than
+        // batch — the shape that actually bit.
+        std::fs::write(&file, format!("{undo}\n")).unwrap();
+        super::run(&file, &dir, &[], device, 300, true).expect("applies");
+        assert!(!live(&dir), "the retraction did not take");
+
+        std::fs::write(&file, format!("{edge}\n")).unwrap();
+        super::run(&file, &dir, &[], device, 400, true).expect("applies");
+        assert!(
+            live(&dir),
+            "a fact retracted last week read as already known"
+        );
+    }
 
     /// A file on disk, and a log that has since identified it as something
     /// else — which is what a relink is.

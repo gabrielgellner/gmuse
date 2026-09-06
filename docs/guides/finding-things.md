@@ -98,6 +98,10 @@ every row.
 
     genre has no hierarchy yet — nothing to group a level of
 
+The hierarchy is curated outside the player — `gmuse-tools genre hierarchy`, then `gmuse shelf apply`. On this library
+239 genre terms collapse to 27 at level 1, and the ones that stay are the ones nobody has decided: `Gospel` is Folk and
+Blues and Funk depending on the record.
+
 ## Counts under a multi-valued level do not sum
 
 A track with three genres is under three nodes. So the count in the status line reads as _groups a track is under_, and

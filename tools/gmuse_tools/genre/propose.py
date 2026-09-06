@@ -21,117 +21,24 @@ from typing import Final
 
 import typer
 
+from gmuse_tools.genre import hierarchy
 from gmuse_tools.genre.common import album_key, fix_case, out_path, tags_of, walk, write_tsv
 
-#: The terms this library treats as broad — Discogs' 15 Genres, **after**
-#: `RENAME`. Both spellings are in here on purpose: a source says
-#: `Folk, World, & Country` and the library says `Folk`, and if only the
-#: source's spelling were listed then a value already renamed would not be
-#: recognised as broad. That bug put `Folk` in twice — once from `IMPLIES`,
-#: once from the term itself — on every folk record in the library.
-BROAD: Final[frozenset[str]] = frozenset(
-    {
-        "Electronic",
-        "Rock",
-        "Pop",
-        "Jazz",
-        "Blues",
-        "Classical",
-        "Hip Hop",
-        "Funk / Soul",
-        "Funk",
-        "Folk, World, & Country",
-        "Folk",
-        "Reggae",
-        "Latin",
-        "Stage & Screen",
-        "Non-Music",
-        "Brass & Military",
-        "Children's",
-        # Not Discogs genres, but this library's own broad-first vocabulary uses
-        # them and they must not be given a second broad term on top.
-        "Country",
-        "R&B",
-        "Americana",
-    }
-)
-#: This library's spellings, where they differ from Discogs'.
-RENAME: Final[dict[str, str]] = {
-    "Funk / Soul": "Funk",
-    "Folk, World, & Country": "Folk",
-    # A source term that is a category, not a genre.
-    "General Country": "Country",
-}
+#: Re-exported from `hierarchy`, which owns the vocabulary (#79).
+BROAD: Final[frozenset[str]] = hierarchy.BROAD
 
-#: Terms that are not genres at all. `Other` says nothing, and an **artist name
-#: in a genre field** is a tagger's mistake — dropped by rule rather than by
-#: list, since the rule generalises and a list of artist names never would.
-DROP: Final[frozenset[str]] = frozenset({"other", "unknown", "misc", "miscellaneous", "none"})
+#: Re-exported from `hierarchy`, which owns the vocabulary (#79).
+RENAME: Final[dict[str, str]] = hierarchy.RENAME
+DROP: Final[frozenset[str]] = hierarchy.DROP
+
 #: Bare values already in the library that are styles, not genres. These are the
 #: files that need a broad term *added* rather than replaced.
-IMPLIES: Final[dict[str, str]] = {
-    # ── rock ──────────────────────────────────────────────────────────────
-    "Alternative Rock": "Rock",
-    "Alternative": "Rock",
-    "Hard Rock": "Rock",
-    "Grunge": "Rock",
-    "Thrash Metal": "Rock",
-    "Doom Metal": "Rock",
-    "Heavy Metal": "Rock",
-    "Indie": "Rock",
-    "Punk": "Rock",
-    "Post-punk": "Rock",
-    "Art Rock": "Rock",
-    "Psychedelic Rock": "Rock",
-    # ── folk ──────────────────────────────────────────────────────────────
-    "Bluegrass": "Folk",
-    "Anti-folk": "Folk",
-    "Indie Folk": "Folk",
-    "Celtic": "Folk",
-    "Singer-songwriter": "Folk",
-    "Folk Rock": "Folk",
-    # ── country ───────────────────────────────────────────────────────────
-    "Alternative Country": "Country",
-    "Country Rock": "Country",
-    # ── pop ───────────────────────────────────────────────────────────────
-    # New Age is deliberately **not** Electronic. Discogs files Enya there, but
-    # much of it is acoustic — and her own self-titled record already reads
-    # `Pop; Folk; New Age`, so Pop is what this library already says.
-    "New Age": "Pop",
-    "Christmas Music": "Pop",
-    "French Pop": "Pop",
-    "Ballad": "Pop",
-    "Synth-pop": "Pop",
-    "Indie Pop": "Pop",
-    # ── the rest ──────────────────────────────────────────────────────────
-    "Ska": "Reggae",
-    "Dub": "Reggae",
-    "Contemporary Jazz": "Jazz",
-    "Jazz-rock": "Jazz",
-    "Free Jazz": "Jazz",
-    "Contemporary R&B": "R&B",
-    "Neo Soul": "R&B",
-    "Gangsta": "Hip Hop",
-    "Gangsta Rap": "Hip Hop",
-    "Alternative Dance": "Electronic",
-    "Dance": "Electronic",
-    "House": "Electronic",
-    "Techno": "Electronic",
-    "Breakbeat": "Electronic",
-    "IDM": "Electronic",
-    "Leftfield": "Electronic",
-    "Downtempo": "Electronic",
-    "Dubstep": "Electronic",
-    "Breaks": "Electronic",
-    "Tech House": "Electronic",
-    "Big Beat": "Electronic",
-    "Trance": "Electronic",
-    "Electronica": "Electronic",
-    "Drum & Bass": "Electronic",
-    "Melodic House & Techno": "Electronic",
-    "Ambient": "Electronic",
-    "Minimal": "Electronic",
-}
+#:
+#: **Derived from `hierarchy.NARROWER`, not kept beside it** (#79). The same
+#: judgement was written twice — once to compose a tag string, once to place a
+#: concept in the model — and two copies of one judgement drift. A `; ` value
+#: has room for one broad term, so this takes the first parent listed there.
+IMPLIES: Final[dict[str, str]] = hierarchy.implies()
 COMPILATION: Final = "compilation — per track, skipped"
 
 
@@ -145,17 +52,8 @@ class Album:
     mbid: str = ""
 
 
-def split_terms(value: str) -> list[str]:
-    """Parse any of the three dialects in the library into a term list.
-
-    The library holds ``A; B`` (the convention), ``A/B/C`` (a Discogs export)
-    and bare single words, so the separator is whichever is present.
-    """
-    if not value:
-        return []
-    separator = ";" if ";" in value else ("/" if "/" in value else None)
-    parts = value.split(separator) if separator else [value]
-    return [fix_case(p.strip()) for p in parts if p.strip()]
+#: Re-exported from `hierarchy` (#79).
+split_terms = hierarchy.split_terms
 
 
 def compose(terms: list[str], *, reorder: bool, artist: str = "") -> str:

@@ -7,7 +7,7 @@ survey`. Grouped here instead:
 ```
 gmuse-tools identify fetch|propose      what a recording is
 gmuse-tools quality  survey|propose     what the bytes are
-gmuse-tools genre    fetch|propose|apply|snapshot
+gmuse-tools genre    fetch|propose|hierarchy|apply|snapshot
 gmuse-tools cache    stats|prune        what an authority said
 gmuse-tools audit    library|dj|duplicates  what is wrong
 gmuse-tools tags     normalise
@@ -42,6 +42,7 @@ from gmuse_tools import audit_dj, audit_library, bronze, duplicates, identify, i
 from gmuse_tools import credits as credits_pass
 from gmuse_tools.genre import apply as genre_apply
 from gmuse_tools.genre import fetch as genre_fetch
+from gmuse_tools.genre import hierarchy as genre_hierarchy
 from gmuse_tools.genre import propose as genre_propose
 from gmuse_tools.genre import snapshot as genre_snapshot
 
@@ -76,6 +77,7 @@ audit_dj.register(audit_app)
 duplicates.register(audit_app)
 genre_fetch.register(genre_app)
 genre_propose.register(genre_app)
+genre_hierarchy.register(genre_app)
 genre_apply.register(genre_app)
 genre_snapshot.register(genre_app)
 

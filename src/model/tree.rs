@@ -111,9 +111,14 @@ fn values_of(
     let Some(at) = level.at else { return held };
     let mut out: Vec<String> = Vec::new();
     for value in held {
-        let up = l.vocabulary.at_level(&value, at);
-        if !out.contains(&up) {
-            out.push(up);
+        // **Every ancestor at that level, deduplicated.** Two genres under one
+        // broad term are one node — a row tagged `Techno; House` belongs under
+        // `Electronic` once — and one genre under two broad terms is two,
+        // because the dimension is many-valued and its counts do not sum.
+        for up in l.vocabulary.at_level(&value, at) {
+            if !out.contains(&up) {
+                out.push(up);
+            }
         }
     }
     out

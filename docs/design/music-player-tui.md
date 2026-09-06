@@ -3710,6 +3710,42 @@ Append here as decisions are made. Format: date, decision, rationale.
   **Neither shape has a producer.** Nothing imports a genre hierarchy or a derivation edge, so both are the model ahead
   of its callers — the established shape here, and stated rather than left to be discovered.
 
+- **Curating the genre hierarchy, and the three bugs only real data found.** #79 made `levels genre@1` expressible;
+  nothing produced an edge, so on this library it drew exactly the tree `genre` drew. `Proposal::Narrowed` and
+  `NarrowingRetracted` are the producer's route in, and `gmuse-tools genre hierarchy` is the pass. On 6,485 rows the
+  library's 239 genre terms collapse to **27** at level 1: sixteen broad terms, the no-genre stand-in, and ten terms
+  deliberately held back for review.
+
+  The curation itself was already half-written — `propose.IMPLIES` mapped a style to a broad term so a tag string could
+  carry the hierarchy. `IMPLIES` is **derived** from the taxonomy now rather than kept beside it: the same judgement
+  written twice drifts, and the term a tag gets and the term the model climbs to have to be one.
+
+  **A term nobody has placed goes to a review file, not to a guess.** Eleven survive there and each is a real judgement
+  — `Gospel` is Folk and Blues and Funk depending on the record, `Lo-fi` is a production aesthetic rather than a place
+  in a taxonomy, `Tom Waits` is an artist name in a genre field. Writing down _why_ a term is unplaced is what stops a
+  later pass rediscovering it as an oversight and picking one.
+
+  Three bugs, none of which any test would have found, because each needed a taxonomy with real shape:
+
+  - **A self-edge reached the log.** `in_facet` normalises a label before minting, so `Non-Music` and `Non-music` are
+    one concept — and the guard compared _strings_. It compares ids now. The mirror of it also bit: the tool's
+    punctuation-stripping key treated `Hip Hop` and `Hip-hop` as one concept when gmuse does not, so a real edge was
+    dropped as a self-edge and `Hip-hop` sat unplaced at level 1. Two identity questions, and they are not the same
+    question.
+  - **A shortcut edge breaks level numbering.** `Stoner Rock` named both `Metal` and `Rock`; `Metal` is already under
+    `Rock`, so the shortcut put `Stoner Rock` one hop from the top and `genre@1` reported `Metal` as a broad term. A
+    second parent is for a genuinely second lineage, never for restating the first.
+  - **"Already in the log" is not "still true".** The apply skipped facts already present so that replaying a file could
+    not count a play twice. But assert/retract pairs fold to a set: a record may be there _and_ have been taken back —
+    two lines up in the same file, or a week ago in the history. Judging by presence left whichever came first as the
+    last word, and a pass that meant to move an edge silently lost it. Paired facts are judged against the **fold** now,
+    with only the last word about a pair in a batch surviving.
+
+  **`at_level` returns every ancestor, not one.** A concept may be narrower-of two things — `Bossa Nova` is Jazz and
+  Latin — and picking one is an arbitrary tie-break that decides which node a row appears under. Genre is a many-valued
+  dimension whose counts already do not sum, so both is the consistent answer. It also returns the _vocabulary's_
+  spelling rather than the tag's, because asking for a level is asking for the codelist's terms.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

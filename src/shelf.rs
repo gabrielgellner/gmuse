@@ -734,6 +734,33 @@ mod projection {
         };
 
         assert_eq!(names(Some(1)), ["Electronic"], "the broad term is one node");
+        // **Two parents put the row under both**, because genre is many-valued
+        // and picking one would be an arbitrary tie-break deciding where a row
+        // appears. `Techno` is filed under `Rock` as well, absurdly but
+        // decisively — and level 1 now says so rather than choosing.
+        i.narrows(100, h, crate::model::facet::GENRE, "Rock", "Techno");
+        let mut l2 = Librarian::from_catalogue(&i.catalogue());
+        l2.here(crate::fixture::device());
+        let members2: HashSet<CopyId> = Listing::rows(&l2).into_iter().collect();
+        let shelf = Shelf::grouped(
+            &l2,
+            members2,
+            Levels::By {
+                outer: Level {
+                    field: genre,
+                    at: Some(1),
+                },
+                inner: Level::of(crate::format::Field::Album),
+            },
+            false,
+        );
+        let mut both: Vec<String> = shelf
+            .artists()
+            .map(|(k, _)| shelf.artist_name(k).to_string())
+            .collect();
+        both.sort();
+        assert_eq!(both, ["Electronic", "Rock"], "a second parent was dropped");
+
         assert_eq!(names(Some(2)), ["House", "Techno"], "and level 2 is both");
         assert_eq!(names(None), ["House", "Techno"], "no depth is the value");
     }

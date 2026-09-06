@@ -138,6 +138,39 @@ pub enum Proposal {
         #[serde(default)]
         ordered: bool,
     },
+    /// **One genre is narrower than another** — the hierarchy #79 can group by
+    /// and #93 can close over, but that nothing produced.
+    ///
+    /// The curation the library was already doing in a tag string. Its
+    /// `Broad; Style` convention exists because a view could not name a level
+    /// of a vocabulary; putting the edges in the model is what lets the
+    /// compound string stop being load-bearing.
+    ///
+    /// **Both terms are labels, not ids**, for the same reason a genre and a
+    /// collection are: a tool has no way to mint one and should not, and a
+    /// label is what a person reviewing the file can read.
+    ///
+    /// The edge goes into the facet's canonical array — `Id::<Facet>::array`.
+    /// A vocabulary may carry several hierarchies, but nothing yet has a
+    /// second one to propose into, and a name nobody uses is a field to get
+    /// wrong.
+    Narrowed {
+        /// The broader term. `Electronic`, for a child of `Techno`.
+        broader: String,
+        narrower: String,
+    },
+    /// **Withdraw a hierarchy edge** — the other half, and not optional.
+    ///
+    /// The log is append-only, so a curation pass that revises itself leaves
+    /// its first draft standing and the two union. That is not academic: this
+    /// library's first pass put `Doom Metal` under `Rock`, the second put it
+    /// under `Metal`, and after both it was directly under *both* — so
+    /// `genre@1` reported `Metal` as a broad term because the shortcut edge
+    /// made it one hop from the top.
+    ///
+    /// Shadows rather than deletes, like every retraction here: a stale
+    /// replica re-delivering the edge would otherwise resurrect it.
+    NarrowingRetracted { broader: String, narrower: String },
     /// A rating. Included because it is the simplest possible proposal and
     /// therefore the one worth testing the format against.
     Rated {
@@ -190,11 +223,18 @@ pub trait Holdings {
     fn identified(&self, recording: Id<Recording>) -> Option<Basis>;
 }
 
-/// What a proposal is about — one of the two things a tool may name.
+/// What a proposal is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subject {
     Encoding(Id<Encoding>),
     Recording(Id<Recording>),
+    /// **The vocabulary itself**, which the library always has (#79).
+    ///
+    /// A hierarchy edge names two concepts and no holding. Gating it on "does
+    /// the library hold this" would be asking the wrong question: curation of
+    /// the codelist is not about what is on the disk, and a term nothing is
+    /// tagged with yet is exactly the one a hierarchy is being built ahead of.
+    Vocabulary,
 }
 
 impl Proposal {
@@ -207,6 +247,7 @@ impl Proposal {
             | Proposal::QualifierAssigned { recording, .. }
             | Proposal::Rated { recording, .. }
             | Proposal::CollectedInto { recording, .. } => Subject::Recording(*recording),
+            Proposal::Narrowed { .. } | Proposal::NarrowingRetracted { .. } => Subject::Vocabulary,
         }
     }
 }
@@ -387,6 +428,58 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
         // and that `..` threw away the basis and the confidence the tool had
         // gone to the trouble of establishing — so a Discogs guess and a typed
         // answer landed in the log as the same fact.
+        // **Both concepts are catalogued before the edge**, the rule
+        // `Instance::narrows` follows and for the same reason: an edge naming
+        // an id no fact resolves is an ancestor nothing can put a name on.
+        Proposal::Narrowed { broader, narrower } => {
+            let facet = Id::<Facet>::of_key(facet::GENRE);
+            let concept = |label: &str| Id::<Concept>::in_facet(facet::GENRE, label);
+            if broader.trim().is_empty() || narrower.trim().is_empty() {
+                return Err("a hierarchy edge needs two terms".to_string());
+            }
+            // **A term is not narrower than itself.** A self-edge is a cycle
+            // of one, and the walk would spend its whole bound on it.
+            //
+            // Compared by **id, not by spelling**: `in_facet` normalises, so
+            // `Non-Music` and `Non-music` are one concept and a string test
+            // waves the edge through. It did — that self-edge reached this
+            // library's log before the check was written this way.
+            if concept(&broader) == concept(&narrower) {
+                return Err(format!("{broader:?} cannot be narrower than itself"));
+            }
+            vec![
+                Fact::ConceptCatalogued {
+                    facet,
+                    concept: concept(&broader),
+                    label: broader.trim().to_string(),
+                    node_label: false,
+                },
+                Fact::ConceptCatalogued {
+                    facet,
+                    concept: concept(&narrower),
+                    label: narrower.trim().to_string(),
+                    node_label: false,
+                },
+                Fact::HierarchyNarrowed {
+                    hierarchy: Id::<Facet>::array(facet::GENRE),
+                    parent: concept(&broader),
+                    child: concept(&narrower),
+                },
+            ]
+        }
+        // Nothing is catalogued here: withdrawing an edge says nothing about
+        // whether either concept should still exist, and a retraction that
+        // quietly re-declared them would be doing two things.
+        Proposal::NarrowingRetracted { broader, narrower } => {
+            if broader.trim().is_empty() || narrower.trim().is_empty() {
+                return Err("a hierarchy edge needs two terms".to_string());
+            }
+            vec![Fact::HierarchyNarrowRetracted {
+                hierarchy: Id::<Facet>::array(facet::GENRE),
+                parent: Id::<Concept>::in_facet(facet::GENRE, &broader),
+                child: Id::<Concept>::in_facet(facet::GENRE, &narrower),
+            }]
+        }
         Proposal::GenreAssigned {
             recording,
             genre,
@@ -553,6 +646,7 @@ pub(crate) mod tests {
             match s {
                 Subject::Encoding(e) => e == enc(1) || e == enc(2) || e == enc(3),
                 Subject::Recording(r) => r == rec(1) || r == rec(2),
+                Subject::Vocabulary => true,
             }
         }
 
@@ -627,6 +721,51 @@ pub(crate) mod tests {
             1,
             "a genre with no stated basis is not a fact this library will take"
         );
+    }
+
+    /// **A hierarchy edge is curation, not a claim about the disk** — #79.
+    ///
+    /// Both concepts are catalogued before the edge, so nothing names an id no
+    /// fact resolves. And it is gated on nothing the library holds: a term the
+    /// hierarchy is being built ahead of is exactly the one nothing is tagged
+    /// with yet.
+    #[test]
+    fn a_hierarchy_edge_catalogues_both_terms_and_needs_no_holding() {
+        let line = r#"{"fact":"narrowed","broader":"Electronic","narrower":"Techno"}"#;
+        let (records, report) = parse(line, dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+
+        let facts: Vec<_> = records.iter().map(|r| r.fact.clone()).collect();
+        assert_eq!(facts.len(), 3, "{facts:?}");
+        assert!(
+            matches!(&facts[2], Fact::HierarchyNarrowed { .. }),
+            "the edge is written last, after what it names: {facts:?}"
+        );
+        assert!(
+            facts[..2]
+                .iter()
+                .all(|f| matches!(f, Fact::ConceptCatalogued { .. })),
+            "an edge named a concept nothing catalogued: {facts:?}"
+        );
+    }
+
+    /// **A term is not narrower than itself**, and an empty one names nothing.
+    ///
+    /// A self-edge is a cycle of one: the bounded walk would spend its entire
+    /// budget on it, and `genre@1` would climb to where it started.
+    #[test]
+    fn a_hierarchy_edge_refuses_a_loop_of_one() {
+        for bad in [
+            r#"{"fact":"narrowed","broader":"Techno","narrower":"Techno"}"#,
+            // **Two spellings of one concept.** `in_facet` normalises, so this
+            // is the same self-edge wearing different capitals — and a string
+            // comparison waves it through.
+            r#"{"fact":"narrowed","broader":"Non-Music","narrower":"non-music"}"#,
+            r#"{"fact":"narrowed","broader":"","narrower":"Techno"}"#,
+        ] {
+            let (_, report) = parse(bad, dev(), 100, HELD);
+            assert_eq!(report.applied, 0, "{bad} was applied");
+        }
     }
 
     /// **A subject the library does not hold is reported, never invented.**

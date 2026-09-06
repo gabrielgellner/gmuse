@@ -30,7 +30,7 @@ uv run gmuse-tools audit duplicates work.jsonl   # needs fpcalc
 | ---------- | ------------------------------------------------------- | ----------------------- |
 | `identify` | `fetch` `propose`                                       | what a **recording** is |
 | `quality`  | `survey` `albums` `propose` `quarantine` `unquarantine` | what the **bytes** are  |
-| `genre`    | `fetch` `propose` `apply` `snapshot`                    | the vocabulary          |
+| `genre`    | `fetch` `propose` `hierarchy` `apply` `snapshot`        | the vocabulary          |
 | `cache`    | `stats` `prune`                                         | what an authority said  |
 | `audit`    | `library` `dj` `duplicates`                             | what is wrong           |
 | `credits`  | `scan` `apply` `restore`                                | who did what            |
@@ -213,6 +213,7 @@ record. Half the library was bare single words and a fifth was a Discogs slash-e
 | `genre.propose`           | cache + current tags → `review.tsv`. Writes no tags.                                                                                 |
 | **you edit `review.tsv`** | change `proposed`, or clear `apply` to skip a row                                                                                    |
 | `genre.apply`             | `review.tsv` → tags. **Dry run unless given `--write`.**                                                                             |
+| `genre.hierarchy`         | the curated taxonomy → `genre-hierarchy.jsonl`, for `gmuse shelf apply`. **Dry run unless given `--write`.**                         |
 | `genre.snapshot`          | every file's genre _before_ a change, so the apply can be undone                                                                     |
 
 `apply` edits in place and keeps no record of what was there, so take a snapshot first and keep it until you are happy:
@@ -244,6 +245,36 @@ which is a different id and the one genres actually hang off. Conflating those t
 once: querying the release found almost no genres, and the group had them all along.
 
 To override a proposal, edit `proposed`. To reject one, clear `apply`.
+
+### `genre hierarchy` — the taxonomy stops being a string
+
+The `Broad; Style` convention exists because a view could not name a level of a vocabulary. gmuse can now
+(`:view levels genre@1,genre@2`, `genre*="Electronic"`), so the edges belong in the library rather than in the tag:
+
+```sh
+uv run gmuse-tools genre hierarchy ~/MusicLibrary          # dry run, writes the review file
+uv run gmuse-tools genre hierarchy ~/MusicLibrary --write  # writes genre-hierarchy.jsonl
+gmuse shelf apply tools/out/genre-hierarchy.jsonl --write
+```
+
+`hierarchy.NARROWER` is the curation and `propose.IMPLIES` is **derived from it**, so the broad term a tag string gets
+and the term the model climbs to cannot drift apart. A child may have several parents — `Bossa Nova` is Jazz and Latin —
+and the first listed is the one the tag gets, because a `; ` value has room for one.
+
+Where curation has not reached, Discogs' own split decides: it separates fourteen _genres_ from hundreds of _styles_, so
+a release naming exactly one genre teaches an edge for every style on it. Releases naming two teach nothing, because
+which style belongs to which genre is exactly what they do not say.
+
+**What is left goes to `genre-hierarchy-review.tsv` rather than being guessed.** On this library that is eleven terms,
+and every one is a real judgement: `Gospel` is Folk and Blues and Funk depending on the record, `Lo-fi` is a production
+aesthetic rather than a place in a taxonomy, and `Tom Waits` is an artist name somebody typed into a genre field.
+
+Two rules learned by getting them wrong:
+
+- **No shortcut past a parent that already reaches the top.** `Metal` is under `Rock`; also naming `Rock` on
+  `Stoner Rock` made it one hop from the top, and `genre@1` then reported `Metal` as a broad term.
+- **The log is append-only, so a revision is not a replacement.** A pass that moves an edge has to withdraw the old one
+  or both stand. `hierarchy` diffs against its own last output and emits the retractions.
 
 ### `Folk, World, & Country` is one genre, not three
 
