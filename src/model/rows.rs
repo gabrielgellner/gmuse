@@ -107,6 +107,10 @@ pub struct Listed<'a> {
     /// The imprint. Its own field because a label sampler's `album_artist` is
     /// "Various Artists" and the label has nowhere else to go.
     pub label: Option<&'a str>,
+    /// Album, single, EP — the one answer (#133).
+    pub release_type: crate::model::spine::ReleaseType,
+    /// And what else it also is. Empty almost always.
+    pub release_secondary: &'a std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
     pub year: Option<i32>,
     pub bitrate: Option<u32>,
     pub sample_rate: Option<u32>,
@@ -137,10 +141,30 @@ pub struct Drawn {
     pub album_if_named: Option<String>,
     pub concepts: std::collections::BTreeMap<Id<Facet>, Vec<String>>,
     pub label: Option<String>,
+    pub release_type: crate::model::spine::ReleaseType,
+    pub release_secondary: std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
     pub year: Option<i32>,
     pub bitrate: Option<u32>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
+}
+
+impl Listed<'_> {
+    /// What kind of release this sits on, as words — #133.
+    ///
+    /// **The primary type and every secondary together**, because both answer
+    /// the same question. Somebody asking for compilations means an
+    /// `album/compilation` too, and a filter that only read the primary would
+    /// answer "album" and find none of them.
+    pub fn release_types(&self) -> Vec<String> {
+        std::iter::once(self.release_type.written().to_string())
+            .chain(
+                self.release_secondary
+                    .iter()
+                    .map(|s| s.written().to_string()),
+            )
+            .collect()
+    }
 }
 
 impl Listed<'_> {
@@ -164,6 +188,8 @@ impl Listed<'_> {
             album_if_named: self.album_if_named.map(str::to_string),
             concepts: self.concepts.clone(),
             label: self.label.map(str::to_string),
+            release_type: self.release_type,
+            release_secondary: self.release_secondary.clone(),
             year: self.year,
             bitrate: self.bitrate,
             sample_rate: self.sample_rate,
@@ -208,6 +234,8 @@ impl Drawn {
             album_if_named: self.album_if_named.as_deref(),
             concepts: &self.concepts,
             label: self.label.as_deref(),
+            release_type: self.release_type,
+            release_secondary: &self.release_secondary,
             year: self.year,
             bitrate: self.bitrate,
             sample_rate: self.sample_rate,
@@ -407,6 +435,11 @@ mod tests {
                 vec!["Electronic".into(), "IDM".into()],
             )]),
             label: Some("Warp".into()),
+            // Not the defaults, so a round trip that dropped them would show.
+            release_type: crate::model::spine::ReleaseType::Ep,
+            release_secondary: [crate::model::spine::ReleaseSecondary::Live]
+                .into_iter()
+                .collect(),
             year: Some(1998),
             bitrate: Some(320),
             sample_rate: Some(44_100),

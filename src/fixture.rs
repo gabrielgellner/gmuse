@@ -62,6 +62,10 @@ pub struct Tagged {
     pub audio_id: Option<crate::audio_id::AudioId>,
     pub levels: crate::model::encoding::Levels,
     pub mb_recording: Option<uuid::Uuid>,
+    /// What kind of release the album is — #133. `Album` unless a test says
+    /// otherwise, which is what a file with no tag reads as.
+    pub release_kind: crate::model::spine::ReleaseType,
+    pub release_secondary: std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
 }
 
 impl Tagged {
@@ -85,6 +89,8 @@ impl Tagged {
             mtime: self.mtime,
             size: self.size,
             seen: Scanned {
+                release_kind: self.release_kind,
+                release_secondary: self.release_secondary.clone(),
                 audio,
                 title: self
                     .title

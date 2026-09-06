@@ -984,6 +984,9 @@ pub(crate) fn texts_of(f: Field, s: &Subject<'_>) -> Vec<String> {
         Field::DisplayTitle => vec![r.title.to_string()],
         Field::Facet(f) => s.row.on(f).to_vec(),
         Field::Label => one(r.label),
+        // Primary and secondaries alike, so `release_type="compilation"`
+        // finds an `album/compilation` — #133.
+        Field::ReleaseType => r.release_types(),
         // The two that need the file's whereabouts, asked at the moment of
         // matching and not kept.
         Field::Path => one(s.locator),
@@ -1391,6 +1394,44 @@ mod tests {
         Expr::parse(expr)
             .expect("should parse")
             .compile(Env::default())(&subject)
+    }
+
+    /// **`release_type` asks the primary type *or* any secondary** — #133.
+    ///
+    /// Somebody asking for their compilations means an `album/compilation`
+    /// too. A filter that read only the primary would answer "album" for every
+    /// one of them and find none.
+    #[test]
+    fn a_release_is_found_by_its_type_and_by_what_else_it_is() {
+        use crate::model::spine::{ReleaseSecondary, ReleaseType};
+
+        let mut single = track();
+        single.release_kind = ReleaseType::Single;
+        assert!(matches(r#"release_type="single""#, &single));
+        assert!(
+            !matches(r#"release_type="album""#, &single),
+            "a single is not an album"
+        );
+
+        // The case a flat enum cannot hold: an album that is also a
+        // compilation and a DJ mix, all three true at once.
+        let mut mixed = track();
+        mixed.release_secondary = [ReleaseSecondary::Compilation, ReleaseSecondary::DjMix]
+            .into_iter()
+            .collect();
+        for asked in ["album", "compilation", "dj-mix"] {
+            assert!(
+                matches(&format!(r#"release_type="{asked}""#), &mixed),
+                "{asked} did not match a release that is one"
+            );
+        }
+        assert!(!matches(r#"release_type="live""#, &mixed));
+
+        // **The default answers, so nothing is invisible.** A file whose tags
+        // say nothing about the release is an album, which is what `album`
+        // meaning "the default" has to imply.
+        assert!(matches(r#"release_type="album""#, &track()));
+        assert!(matches(r#"release_type?"#, &track()));
     }
 
     /// **`derived[…]` is a bounded walk up the derivation graph** — #79 and

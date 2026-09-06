@@ -511,7 +511,8 @@ impl Librarian {
                     id: *group,
                     title: g.title.clone(),
                     first_released: g.first_released,
-                    kind: crate::model::spine::ReleaseType::Album,
+                    kind: g.kind,
+                    secondary: g.secondary.clone(),
                 },
             );
             l.reference.artists.entry(g.artist).or_insert_with(|| {
@@ -1062,6 +1063,19 @@ impl Librarian {
                 .and_then(|r| r.label)
                 .and_then(|l| self.reference.labels.get(&l.id()))
                 .map(|l| l.name.clone()),
+            // **Asked of the release group**, which is where the kind lives:
+            // a reissue is a different pressing of the same record, and
+            // whether that record is a single is not something a pressing
+            // changes. A row on no release is an album by default — the same
+            // default a file with no tag gets (#133).
+            release_type: group
+                .and_then(|g| self.spine.groups.get(&g))
+                .map(|g| g.kind)
+                .unwrap_or_default(),
+            release_secondary: group
+                .and_then(|g| self.spine.groups.get(&g))
+                .map(|g| g.secondary.clone())
+                .unwrap_or_default(),
             // The album's first release where the tags say so, else this
             // pressing's. `OriginalReleaseDate` is the #59-correct answer — a
             // 2015 pressing of a 1982 album is 1982 — and 98% of this library
@@ -1585,6 +1599,8 @@ mod tests {
                 title: "Luna".into(),
                 artist: Id::derived(b"bodzin"),
                 first_released: None,
+                kind: Default::default(),
+                secondary: Default::default(),
             },
         );
 

@@ -185,32 +185,155 @@ pub struct ReleaseGroup {
     /// When the album first appeared — **not** when this pressing did. Sorting
     /// an artist's albums wants this one (#59).
     pub first_released: Option<PartialDate>,
+    /// Album, single, EP — the one answer.
     pub kind: ReleaseType,
+    /// And whatever else it also is. Usually empty.
+    pub secondary: std::collections::BTreeSet<ReleaseSecondary>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum ReleaseType {
-    #[default]
-    Album,
-    Single,
-    Ep,
-    Compilation,
-    Live,
-    Other,
-}
-
-impl ReleaseType {
-    #[expect(
-        dead_code,
-        reason = "the #74 rule that a compilation's genre loses to an album's is not wired up"
-    )]
+impl ReleaseGroup {
     /// Whether a genre assigned here should be inherited by its recordings.
     ///
     /// A rock song on _80s Hits_ is reached through two release groups, and the
     /// naive union files it under the compilation's `Pop`. #74 prefers
     /// non-compilations for exactly this.
-    pub const fn is_compilation(self) -> bool {
-        matches!(self, ReleaseType::Compilation)
+    ///
+    /// **Asked of the secondary set**, because that is where MusicBrainz puts
+    /// it: an `album/compilation` is both, and a flat enum that had to choose
+    /// would answer "album" and lose the rule (#133).
+    #[expect(
+        dead_code,
+        reason = "the #74 rule that a compilation's genre loses to an album's is not wired up"
+    )]
+    pub fn is_compilation(&self) -> bool {
+        self.secondary.contains(&ReleaseSecondary::Compilation)
+    }
+}
+
+/// **What kind of release this is** — MusicBrainz's *primary* type (#133).
+///
+/// One of these, always. It answers "is this an album or a single", which is a
+/// question with one answer.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ReleaseType {
+    /// **The default, and it is a default rather than a claim.** Nothing said
+    /// otherwise; almost everything is an album, so this is the cheapest wrong
+    /// answer available and the one a missing tag deserves.
+    #[default]
+    Album,
+    Single,
+    Ep,
+    Broadcast,
+    Other,
+}
+
+/// **The other things a release also is** — MusicBrainz's *secondary* types.
+///
+/// Several at once, which is why this is a set and why it is not folded into
+/// [`ReleaseType`]. The tags in this library carry `album/compilation/dj-mix`
+/// on real files: one release that is an album, a compilation and a DJ mix
+/// together. A single flat enum has to pick one of the three and throw the
+/// rest away.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum ReleaseSecondary {
+    Compilation,
+    Soundtrack,
+    Spokenword,
+    Interview,
+    Audiobook,
+    AudioDrama,
+    Live,
+    Remix,
+    DjMix,
+    Mixtape,
+    Demo,
+    FieldRecording,
+}
+
+impl ReleaseType {
+    /// How it is written — in the query language, and as MusicBrainz spells it.
+    ///
+    /// **One spelling, used for both**, because a second list is a second
+    /// thing to keep in step. `kind="single"` matches what the tag says.
+    pub const fn written(self) -> &'static str {
+        match self {
+            ReleaseType::Album => "album",
+            ReleaseType::Single => "single",
+            ReleaseType::Ep => "ep",
+            ReleaseType::Broadcast => "broadcast",
+            ReleaseType::Other => "other",
+        }
+    }
+
+    /// Read one back, from a tag or from the `:` line. Case-insensitive,
+    /// because a tag is written by whatever wrote it.
+    pub fn parse(text: &str) -> Option<Self> {
+        let t = text.trim().to_ascii_lowercase();
+        [
+            ReleaseType::Album,
+            ReleaseType::Single,
+            ReleaseType::Ep,
+            ReleaseType::Broadcast,
+            ReleaseType::Other,
+        ]
+        .into_iter()
+        .find(|k| k.written() == t)
+    }
+}
+
+impl ReleaseSecondary {
+    pub const fn written(self) -> &'static str {
+        match self {
+            ReleaseSecondary::Compilation => "compilation",
+            ReleaseSecondary::Soundtrack => "soundtrack",
+            ReleaseSecondary::Spokenword => "spokenword",
+            ReleaseSecondary::Interview => "interview",
+            ReleaseSecondary::Audiobook => "audiobook",
+            ReleaseSecondary::AudioDrama => "audio drama",
+            ReleaseSecondary::Live => "live",
+            ReleaseSecondary::Remix => "remix",
+            ReleaseSecondary::DjMix => "dj-mix",
+            ReleaseSecondary::Mixtape => "mixtape",
+            ReleaseSecondary::Demo => "demo",
+            ReleaseSecondary::FieldRecording => "field recording",
+        }
+    }
+
+    /// Every one, so a list is never typed out twice.
+    pub const ALL: [ReleaseSecondary; 12] = [
+        ReleaseSecondary::Compilation,
+        ReleaseSecondary::Soundtrack,
+        ReleaseSecondary::Spokenword,
+        ReleaseSecondary::Interview,
+        ReleaseSecondary::Audiobook,
+        ReleaseSecondary::AudioDrama,
+        ReleaseSecondary::Live,
+        ReleaseSecondary::Remix,
+        ReleaseSecondary::DjMix,
+        ReleaseSecondary::Mixtape,
+        ReleaseSecondary::Demo,
+        ReleaseSecondary::FieldRecording,
+    ];
+
+    /// Read one back. `mixtape/street` is MusicBrainz's own spelling of the
+    /// type this calls `mixtape`, so both find it.
+    pub fn parse(text: &str) -> Option<Self> {
+        let t = text.trim().to_ascii_lowercase();
+        let t = if t == "mixtape/street" { "mixtape" } else { &t };
+        Self::ALL.into_iter().find(|s| s.written() == t)
     }
 }
 
@@ -511,10 +634,14 @@ mod tests {
                     id: g,
                     title: title.into(),
                     first_released: Some(PartialDate::year(year)),
-                    kind: if n == 1 {
-                        ReleaseType::Compilation
+                    kind: ReleaseType::Album,
+                    // An album that is *also* a compilation, which is what
+                    // MusicBrainz says and what the tags in this library
+                    // carry: `album/compilation` (#133).
+                    secondary: if n == 1 {
+                        [ReleaseSecondary::Compilation].into_iter().collect()
                     } else {
-                        ReleaseType::Album
+                        Default::default()
                     },
                 },
             );

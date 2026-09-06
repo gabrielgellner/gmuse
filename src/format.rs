@@ -40,6 +40,16 @@ pub enum Field {
     /// The record label (`TPUB`), which is where a label sampler's imprint
     /// belongs — not in `albumartist`, where it looks like an artist.
     Label,
+    /// **Album, single, EP — and whatever else the release also is** (#133).
+    ///
+    /// Matches the primary type *or* any secondary, so
+    /// `release_type="compilation"` finds an `album/compilation` — which is
+    /// what somebody asking for their compilations means.
+    ///
+    /// **Not `kind`**, which `derived[kind=remix]` already spends on the
+    /// derivation kind. Two meanings for one word in two scopes is how a
+    /// reader stops trusting either.
+    ReleaseType,
     Duration,
     Bitrate,
     SampleRate,
@@ -68,6 +78,7 @@ impl Field {
             | Field::DisplayTitle
             | Field::Facet(_)
             | Field::Label
+            | Field::ReleaseType
             | Field::Path
             | Field::FileName => Kind::Text,
             Field::Track
@@ -97,6 +108,7 @@ impl Field {
                 Field::Facet(crate::model::id::Id::of_key(name))
             }
             "label" => Field::Label,
+            "release_type" => Field::ReleaseType,
             "duration" => Field::Duration,
             "bitrate" => Field::Bitrate,
             "samplerate" => Field::SampleRate,
@@ -160,7 +172,8 @@ impl Field {
             | Field::Track
             | Field::Disc
             | Field::Year
-            | Field::Label => Authorship::Correctable,
+            | Field::Label
+            | Field::ReleaseType => Authorship::Correctable,
         }
     }
 }
@@ -187,6 +200,7 @@ impl Field {
             Field::Disc => "disc",
             Field::Year => "year",
             Field::Label => "label",
+            Field::ReleaseType => "release_type",
             Field::Duration => "duration",
             Field::Bitrate => "bitrate",
             Field::SampleRate => "samplerate",
@@ -264,6 +278,9 @@ impl Field {
                 held.join("; ")
             }
             Field::Label => r.label?.to_string(),
+            // Primary first, then whatever else it is — the order the tag
+            // writes them in, so what shows is what the file says.
+            Field::ReleaseType => r.release_types().join("; "),
             Field::Duration => {
                 let secs = r.duration.as_secs();
                 format!("{}:{:02}", secs / 60, secs % 60)

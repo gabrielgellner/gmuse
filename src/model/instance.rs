@@ -72,6 +72,15 @@ pub struct Scanned {
     /// Who the *album* is credited to, which is not always who the track is.
     /// A guest credit must not split an album off from its artist.
     pub album_artist: Option<String>,
+    /// **What kind of release it is**, where the tags say — #133.
+    ///
+    /// Picard writes MusicBrainz's release-group type into
+    /// `MusicBrainz Album Type` as a `/`-joined list: `album`,
+    /// `album/compilation`, `album/compilation/dj-mix`. The first is the
+    /// primary type and the rest are secondary, which is exactly the shape the
+    /// spine holds.
+    pub release_kind: crate::model::spine::ReleaseType,
+    pub release_secondary: std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
     /// Where on the album, as the tags claim. Claims, because they are
     /// checkable and this library has media whose numbering does not add up.
     pub disc: Option<u16>,
@@ -349,6 +358,8 @@ impl Instance {
                         title: album.clone(),
                         artist: group_artist,
                         first_released: s.first_released,
+                        kind: s.release_kind,
+                        secondary: s.release_secondary.clone(),
                     },
                 );
                 // The album-level credit, which is what `file_under` asks for
@@ -1392,6 +1403,8 @@ mod containment_tests {
             genres: Vec::new(),
             label: None,
             levels: Default::default(),
+            release_kind: Default::default(),
+            release_secondary: Default::default(),
             sample_rate: Some(44_100),
             channels: Some(2),
         }
@@ -1576,6 +1589,8 @@ mod credit_tests {
             genres: Vec::new(),
             label: None,
             levels: Default::default(),
+            release_kind: Default::default(),
+            release_secondary: Default::default(),
             sample_rate: Some(44_100),
             channels: Some(2),
         }

@@ -92,6 +92,22 @@ because titles have those and nobody ever wanted "exactly one character" from a 
 
 `any="*live*"` searches every text field at once.
 
+## Albums, singles, EPs — and what a release also is
+
+    :filter release_type="single"        the singles
+    :filter release_type="compilation"   the compilations
+    :filter !release_type="album"        everything that is not a plain album
+
+A release has **one** kind — album, single, EP, broadcast — and then any number of other things it also is: a
+compilation, live, a soundtrack, a remix album, a DJ mix. Both answer to `release_type`, because somebody asking for
+their compilations means an `album/compilation` too, and there are 1,084 of those here.
+
+Twenty-eight records in this library are three things at once — `album/compilation/live`, `album/compilation/dj-mix` —
+and each answers to all three.
+
+**A file whose tags say nothing is an album.** Almost everything is, so that is the cheapest wrong answer available; it
+also means `release_type="album"` is "an album, or nothing said", which is not the same as a claim that somebody made.
+
 ## Catalogs — which bodies of music
 
 Catalogs are named and persistent, and they **union**: turn on jazz and blues and you get both. A filter then

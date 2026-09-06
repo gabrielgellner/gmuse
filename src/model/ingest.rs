@@ -92,6 +92,22 @@ pub enum IngestError {
 /// A file whose tags will not parse still comes back: `lofty` abandons a whole
 /// file over one malformed APEv2 item — five files here do exactly that — and
 /// losing the track over it would be the rejection this module refuses. The
+/// Every word in `MusicBrainz Album Type`, in order — #133.
+///
+/// **Two shapes, one answer.** Picard `/`-joins them into one value and other
+/// taggers write a frame each; splitting every value on `/` reads both, and
+/// the primary type is whichever comes first.
+fn types(tag: Option<&lofty::tag::Tag>) -> Vec<String> {
+    tag.map(|t| {
+        t.get_strings(ItemKey::MusicBrainzReleaseType)
+            .flat_map(|v| v.split('/'))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 /// title falls back to the file stem, which is a playable, sortable row rather
 /// than a hole.
 pub fn read(path: &Path) -> Result<Scanned, IngestError> {
@@ -159,6 +175,23 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // Album artist first, because a guest credit on one track must not
         // split the album off from the artist it files under.
         album_artist: some(Some(get(ItemKey::AlbumArtist))),
+        // **The release-group type, primary first** (#133). Picard writes it
+        // `/`-joined — `album`, `album/compilation`, `album/compilation/dj-mix`
+        // — and some taggers write one value per frame instead, so both are
+        // read: every value the tag carries, split on `/`.
+        //
+        // A word this build has never heard of is **dropped rather than
+        // guessed at**. `Other` in a set says nothing a query could use, and
+        // the file still carries the word for a later build to read.
+        release_kind: types(tag)
+            .first()
+            .and_then(|v| crate::model::spine::ReleaseType::parse(v))
+            .unwrap_or_default(),
+        release_secondary: types(tag)
+            .iter()
+            .skip(1)
+            .filter_map(|v| crate::model::spine::ReleaseSecondary::parse(v))
+            .collect(),
         disc: number(&get(ItemKey::DiscNumber)),
         track: number(&get(ItemKey::TrackNumber)),
         mb_release_group: uuid::Uuid::parse_str(&get(ItemKey::MusicBrainzReleaseGroupId)).ok(),
@@ -507,6 +540,93 @@ mod tests {
         assert_eq!(peak_e4("1.0"), Some(10_000));
         assert_eq!(peak_e4("-1"), None, "a negative peak is not a peak");
         assert_eq!(peak_e4("nan"), None);
+    }
+
+    /// Writes `MusicBrainz Album Type` the way Picard does — `/`-joined.
+    fn tag_typed(path: &Path, value: &str) {
+        use lofty::config::WriteOptions;
+        use lofty::id3::v2::Id3v2Tag;
+        use lofty::prelude::{ItemKey, TagExt};
+        use lofty::tag::{ItemValue, Tag, TagItem};
+
+        let mut tag: Tag = Id3v2Tag::default().into();
+        tag.insert(TagItem::new(
+            ItemKey::MusicBrainzReleaseType,
+            ItemValue::Text(value.into()),
+        ));
+        tag.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    /// **A release is one primary type and any number of secondary ones** —
+    /// #133, and the shape the tags in this library actually carry.
+    ///
+    /// `album/compilation/dj-mix` is on real files here. A single flat enum
+    /// has to pick one of those three and throw the other two away.
+    #[test]
+    fn a_release_type_is_a_primary_and_a_set_of_secondaries() {
+        use crate::model::spine::{ReleaseSecondary, ReleaseType};
+        let d = dir("albumtype");
+
+        let read_type = |name: &str, tagged: &str| {
+            let p = d.join(format!("{name}.wav"));
+            wav(&p, 4410);
+            tag_typed(&p, tagged);
+            let s = read(&p).expect("reads");
+            (s.release_kind, s.release_secondary)
+        };
+
+        assert_eq!(
+            read_type("plain", "album"),
+            (ReleaseType::Album, Default::default())
+        );
+        assert_eq!(
+            read_type("single", "single"),
+            (ReleaseType::Single, Default::default()),
+            "the type #133 is about"
+        );
+        assert_eq!(
+            read_type("comp", "album/compilation"),
+            (
+                ReleaseType::Album,
+                [ReleaseSecondary::Compilation].into_iter().collect()
+            )
+        );
+        assert_eq!(
+            read_type("three", "album/compilation/dj-mix"),
+            (
+                ReleaseType::Album,
+                [ReleaseSecondary::Compilation, ReleaseSecondary::DjMix]
+                    .into_iter()
+                    .collect()
+            ),
+            "a flat enum would have to drop two of these"
+        );
+        assert_eq!(
+            read_type("cased", "EP/Live"),
+            (
+                ReleaseType::Ep,
+                [ReleaseSecondary::Live].into_iter().collect()
+            ),
+            "a tag is written by whatever wrote it"
+        );
+
+        // **A word nothing here knows is dropped, not guessed at.** `Other` in
+        // a set says nothing a query could act on, and the file still carries
+        // the word for a build that learns it.
+        assert_eq!(
+            read_type("unknown", "album/sandwich"),
+            (ReleaseType::Album, Default::default())
+        );
+
+        // **No tag is the default, and the default is a default.** Almost
+        // everything is an album, so it is the cheapest wrong answer there is.
+        let p = d.join("bare.wav");
+        wav(&p, 4410);
+        let s = read(&p).expect("reads");
+        assert_eq!(
+            (s.release_kind, s.release_secondary),
+            (ReleaseType::Album, Default::default())
+        );
     }
 
     #[test]

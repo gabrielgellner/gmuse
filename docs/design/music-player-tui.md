@@ -4092,6 +4092,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   §1's "no recommendations from anyone else's server" is untouched. The objection was to a _service_ deciding what you
   hear, never to your own library being able to answer the question from files you hold.
 
+- **2026-09-06** **A release is one primary type and a set of secondary ones (#133).** `ReleaseType` had `Album`,
+  `Single`, `Ep`, `Compilation`, `Live`, `Other` and no way to be written — every release group in the library claimed
+  to be an album, and `is_compilation` was `dead_code` because nothing could ever be one.
+
+  **The flat enum was wrong, and the tags say so.** Reading all 6,500 files: 1,084 carry `album/compilation`, 231
+  `album/live`, and 28 carry three at once — `album/compilation/live`, `album/compilation/dj-mix`. A single enum has to
+  pick one of those three and throw the other two away. So `ReleaseType` is now the primary type alone
+  (`Album`/`Single`/`Ep`/`Broadcast`/`Other`) and `ReleaseSecondary` is a `BTreeSet` beside it, which is exactly how
+  MusicBrainz models it and exactly what Picard writes.
+
+  A **`BTreeSet` rather than a `Vec`**, because two devices reading the same tag must write the same record: ordered, it
+  converges without comparing.
+
+  **A word this build does not know is dropped rather than guessed at.** `Other` inside a set says nothing a query can
+  act on, and the file still carries the word for a build that learns it. Nothing in this library hit that path — all
+  6,500 files parsed to known types.
+
+  **The field is `release_type`, not `kind`**, which `derived[kind=remix]` already spends on the derivation kind. Two
+  meanings for one word in two scopes is how a reader stops trusting either. It matches the primary type _or_ any
+  secondary, because somebody asking for their compilations means an `album/compilation` too — a filter reading only the
+  primary would answer "album" for all 1,084 and find none of them.
+
+  **`Album` stays the default and is a default, not a claim.** Almost everything is an album, so it is the cheapest
+  wrong answer there is; `release_type="album"` therefore means "an album, or nothing said".
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

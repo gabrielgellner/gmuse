@@ -421,6 +421,20 @@ pub enum Fact {
         /// files here. Without it, ordering an artist's albums by date files a
         /// 1996 reissue of a 1995 record after everything from 1995 (#59).
         first_released: Option<PartialDate>,
+        /// **Album, single or EP** — #133.
+        ///
+        /// A field rather than a guess. Every release group used to be an
+        /// album because `ReleaseType` had no way in, so a single held
+        /// complete and an album held one track of were the same row.
+        #[serde(default)]
+        kind: crate::model::spine::ReleaseType,
+        /// And what else it also is — usually nothing.
+        ///
+        /// **A set, because the tags carry a set**: real files here say
+        /// `album/compilation/dj-mix`. Ordered, so two devices that read the
+        /// same tag write the same record and converge without comparing.
+        #[serde(default)]
+        secondary: std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
     },
 
     /// Two recordings are one, and this is the name it keeps.
@@ -1011,6 +1025,10 @@ pub struct Grouped {
     pub title: String,
     pub artist: Id<Artist>,
     pub first_released: Option<PartialDate>,
+    #[serde(default)]
+    pub kind: crate::model::spine::ReleaseType,
+    #[serde(default)]
+    pub secondary: std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1327,6 +1345,8 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 title,
                 artist,
                 first_released,
+                kind,
+                secondary,
             } => {
                 cat.groups.insert(
                     *group,
@@ -1334,6 +1354,8 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         title: title.clone(),
                         artist: *artist,
                         first_released: *first_released,
+                        kind: *kind,
+                        secondary: secondary.clone(),
                     },
                 );
             }

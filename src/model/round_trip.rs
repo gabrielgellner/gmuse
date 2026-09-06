@@ -57,12 +57,18 @@ fn album() -> Vec<Scanned> {
         mb_release: Some(uuid::Uuid::from_u128(
             0x5e1e_0000_0000_4000_8000_0000_0000_00bb,
         )),
+        // An album that is also a compilation, so the set crosses a sync and
+        // not just the primary type (#133).
+        release_secondary: [crate::model::spine::ReleaseSecondary::Compilation]
+            .into_iter()
+            .collect(),
         format: Some(crate::model::encoding::Format::Mp3),
         bitrate: 320,
         released: None,
         first_released: None,
         label: None,
         levels: Default::default(),
+        release_kind: Default::default(),
         sample_rate: Some(44_100),
         channels: Some(2),
     };
@@ -254,6 +260,14 @@ fn every_fact_family_converges_without_coordination() {
     assert_eq!(one.narrows.len(), 1, "the hierarchy edge crossed");
     assert_eq!(one.derived.len(), 1, "the derivation crossed");
     assert_eq!(one.encoding_derived.len(), 1, "the transcode edge crossed");
+    let group = one.groups.values().next().expect("the album crossed");
+    assert_eq!(
+        group.secondary,
+        [crate::model::spine::ReleaseSecondary::Compilation]
+            .into_iter()
+            .collect(),
+        "the release-group type crossed"
+    );
 }
 
 /// **A retraction beats the import it shadows, whichever way the sync ran** —
