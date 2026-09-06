@@ -100,10 +100,14 @@ navigation stack holds and what `:info` parses.
 Not all twenty-one kinds at once. The ones reachable from a row, first:
 
 ```
-Recording · Encoding · Holding · ReleaseGroup · Release · Artist · Concept · Collection · Work
+Recording · Encoding · ReleaseGroup · Release · Artist · Concept · Collection · Work
 ```
 
 `Facet`, `Hierarchy`, `Role`, `Label`, `Device`, `View` follow when something links to them.
+
+**`Holding` was on this list and is not a focus** (#124). A holding is `(device, encoding) -> locator` and no id is ever
+minted for one, so there is nothing to address it by — and what a holding page would show, where a copy is and on which
+machine, is what the _encoding_ page shows a row of. Eight kinds, and every one has an id of its own in the fold.
 
 **Named `Focus` rather than `Subject`**, which `model::proposal` already uses for what a proposal is about, and rather
 than `Described`, which `model::facet` uses for the two things a concept can be asserted of. Three near-synonyms in one
