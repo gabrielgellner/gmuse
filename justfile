@@ -88,6 +88,10 @@ lint:
 test:
     cargo test --release
 
+# Show what it costs to draw a view (#121). Runs in `ci` too — it is fast.
+bench-shelf:
+    cargo test --release drawing_a_view -- --nocapture
+
 # Show the resampler benchmark table (not part of `ci` — it takes ~30s)
 [group('test')]
 bench:

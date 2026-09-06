@@ -3763,6 +3763,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   not a convergence failure — but "append the same track on both laptops" gives a playlist holding it twice. Pinned by a
   test so it is a known shape rather than a surprise.
 
+- **`:view` was 1.3 seconds and none of it was the query** (#121). `Shelf::grouped` built the tree over the _whole_
+  library and filtered afterwards, so narrowing to 786 rows cost exactly what drawing all 6,485 did — and every `:view`,
+  `:filter` and `:view drop N` paid it again. On this library `in="Dance"` now takes **1.2 ms**, a thousandfold less,
+  and `all` takes 8.9 ms rather than 1.26 s.
+
+  Three causes, and measuring first said which order to fix them in — the whole point of the measurement rule. The build
+  loop was 236 ms and the sort was **1.03 s**, four fifths of the cost, so the sort came first:
+
+  - **`sort_by` asks for the key once per comparison.** `sort_within` called `row_of` inside the comparator, and
+    `row_of` builds a whole `Row` — cloning the title, resolving the album and who the recording files under — then
+    `to_lowercase` allocates again. `sort_by_cached_key` asks once per row.
+  - **The key used one field of the `Row` it built.** Taking the title straight off the spine is what turned a 116 ms
+    narrowed draw into 1.2 ms; the rest of `row_of`'s work was never wanted.
+  - **The tree walked the library rather than the members.** It asked `listings` per recording, allocating a `Vec` each,
+    before anything was tested for membership — a ~100 ms floor no amount of narrowing could get under. It takes the
+    member set now, and a member _is_ a copy, so the listing is built rather than looked up. `Librarian::listings` had
+    no other caller and is gone.
+
+  **A benchmark is part of the fix, not a nicety.** The resampler has had one since the beginning; the library path had
+  none, so the only signal that drawing a view had become slow was somebody noticing that it felt slow.
+  `just bench-shelf` prints resolve, copies and shelf separately — kept apart because they fail differently, and a
+  single end-to-end number would have hidden which one went wrong. It asserts a **generous** bound: what it has to catch
+  is not a 20% drift but the shape of this bug, where narrowing cost what drawing everything did.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

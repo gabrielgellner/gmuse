@@ -154,19 +154,44 @@ impl Tree {
     /// counting has to be distinct, enqueueing has to dedup, and revealing
     /// has to highlight every place it sits. Without that "a subtree reports
     /// 42 tracks and enqueues 37".
+    /// ## It groups what it was given, not what the library holds
+    ///
+    /// **`members` is the set being drawn** (#121). This used to build the
+    /// whole library and let the caller filter afterwards, so narrowing to 786
+    /// rows cost exactly what drawing all 6,485 did — every `:view` paid for
+    /// the whole shelf regardless of what matched. A recording with no copy is
+    /// not in any member set, which is the same answer the caller's filter
+    /// gave.
     pub fn grouped(
         l: &Librarian,
         levels: (crate::shelf::Level, crate::shelf::Level),
         smart_artist_sort: bool,
+        members: &std::collections::HashSet<crate::model::rows::CopyId>,
     ) -> Self {
         let mut by_outer: BTreeMap<SortKey, BTreeMap<SortKey, Album>> = BTreeMap::new();
         let mut outer_names: BTreeMap<SortKey, String> = BTreeMap::new();
 
-        for recording in l.recordings() {
-            for listing in l.listings(recording) {
-                if l.row_of(recording, listing.copy).is_none() {
-                    continue;
-                }
+        // **Iterate what is being drawn, not the library.** Walking every
+        // recording and asking `listings` for each allocated a `Vec` per
+        // recording whether or not any of it was wanted — a floor of ~100ms on
+        // 6,485 rows that no amount of narrowing could get under. A member is
+        // a copy, and a copy names its recording, so the listing is built
+        // rather than looked up.
+        for copy in members {
+            let Some(recording) = crate::model::rows::Listing::recording_of(l, *copy) else {
+                continue;
+            };
+            // The same question `row_of` was being called to answer — and it
+            // built and threw away a whole `Row`, title clone included, to
+            // say so.
+            if !l.spine.recordings.contains_key(&recording) {
+                continue;
+            }
+            {
+                let listing = Listing {
+                    recording,
+                    copy: Some(*copy),
+                };
                 let slot = l.slot_of(listing.copy);
                 let group = l.group_of(slot);
                 let Some(subject) = listing
@@ -235,15 +260,24 @@ fn sort_within(l: &Librarian, by_outer: &mut BTreeMap<SortKey, BTreeMap<SortKey,
                 // Left to position alone the two orderings that existed here
                 // disagreed about twelve rows, which is a library that looks
                 // different depending on which projection drew it.
-                album.tracks.sort_by(|a, b| {
-                    let key = |c: &Listing| {
-                        let title = l
-                            .row_of(c.recording, c.copy)
-                            .map(|r| r.title.to_lowercase())
-                            .unwrap_or_default();
-                        (l.place_of(l.slot_of(c.copy)), title, c.copy)
-                    };
-                    key(a).cmp(&key(b))
+                // **Cached, because the key is expensive and `sort_by` asks
+                // for it once per comparison** (#121). `row_of` builds a whole
+                // `Row` — cloning the title, resolving the album and who it
+                // files under — and lowercasing allocates again. Called
+                // O(n log n) times that was 1.03s of a 1.26s tree build on a
+                // 6,485-row library, four fifths of the cost of drawing it.
+                // `sort_by_cached_key` asks once per row.
+                album.tracks.sort_by_cached_key(|c| {
+                    // **The title straight off the spine.** `row_of` returns
+                    // it, and also resolves the album and who the recording
+                    // files under — none of which this key uses.
+                    let title = l
+                        .spine
+                        .recordings
+                        .get(&c.recording)
+                        .map(|r| r.title.to_lowercase())
+                        .unwrap_or_default();
+                    (l.place_of(l.slot_of(c.copy)), title, c.copy)
                 });
             }
         }
@@ -306,6 +340,12 @@ impl Tree {
 mod tests {
     use super::*;
     use crate::model::instance::{Instance, Scanned};
+
+    /// Every row the library holds — what these tests group, said out loud
+    /// now that the tree takes the set rather than assuming it (#121).
+    fn everything(l: &Librarian) -> std::collections::HashSet<crate::model::rows::CopyId> {
+        crate::model::rows::Listing::rows(l).into_iter().collect()
+    }
     use crate::model::populate::read_library;
     use crate::shelf::Level;
 
@@ -349,6 +389,7 @@ mod tests {
             &l,
             (Level::of(Field::FileUnder), Level::of(Field::Album)),
             false,
+            &everything(&l),
         );
         (l, t)
     }
@@ -610,6 +651,7 @@ mod tests {
             &l,
             (Level::of(Field::FileUnder), Level::of(Field::Album)),
             false,
+            &everything(&l),
         );
         let artist = sort_key("Laurie Anderson", false);
         let by_date: Vec<_> = tree
@@ -654,6 +696,7 @@ mod tests {
             &l,
             (Level::of(Field::FileUnder), Level::of(Field::Album)),
             false,
+            &everything(&l),
         );
 
         let titles: Vec<_> = tree
@@ -693,6 +736,7 @@ mod tests {
             &l,
             (Level::of(Field::FileUnder), Level::of(Field::Album)),
             false,
+            &everything(&l),
         );
         let titles: Vec<_> = tree
             .albums_by_date(&sort_key("Laurie Anderson", false))
@@ -761,6 +805,7 @@ mod tests {
             &l,
             (Level::of(Field::FileUnder), Level::of(Field::Album)),
             false,
+            &everything(&l),
         );
 
         assert_eq!(tree.artists().count(), 1);

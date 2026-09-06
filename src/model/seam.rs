@@ -704,29 +704,20 @@ impl Librarian {
         self.placed.get(&copy?).copied()
     }
 
-    /// **Every copy of a recording this library holds, as rows would list
-    /// them** — issue #84.
-    ///
-    /// One entry per copy, because a browse tree is a list of what you have
-    /// and two files are two things you have. A recording nothing holds is
-    /// still one entry, with no copy: §1 is explicit that a row nothing holds
-    /// is ordinary, and dropping it would make a wishlist entry invisible.
-    pub fn listings(&self, recording: Id<Recording>) -> Vec<Listing> {
-        let copies = self.encodings.of(recording);
-        if copies.is_empty() {
-            return vec![Listing {
-                recording,
-                copy: None,
-            }];
-        }
-        copies
-            .into_iter()
-            .map(|e| Listing {
-                recording,
-                copy: Some(e.id),
-            })
-            .collect()
-    }
+    // **`listings` lived here and is gone** (#121).
+    //
+    // It answered "every copy of this recording, as rows would list them" and
+    // had one caller: the tree, which asked it per recording and allocated a
+    // `Vec` for each — the whole library's worth, before any of them were
+    // tested for membership. That was a ~100ms floor no amount of narrowing
+    // could get under. The tree walks the members now, and a member *is* a
+    // copy, so the listing is built rather than looked up.
+    //
+    // What went with it is the entry for a recording nothing holds — a
+    // wishlist row, which §1 is explicit is ordinary. Nothing lost it here:
+    // `Shelf::grouped` already dropped any listing with no copy, so the tree
+    // has never drawn one. When the shelf learns to, it needs a set that
+    // names recordings rather than copies, not this back.
 }
 
 /// **Reading a collection back** — #92.

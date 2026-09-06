@@ -221,12 +221,16 @@ impl Shelf {
             .pair()
             .or_else(|| Levels::default().pair())
             .expect("the default is grouped");
-        let tree = crate::model::tree::Tree::grouped(librarian, pair, smart_artist_sort);
+        // **The tree is built over the members** (#121). It used to be built
+        // over the whole library and filtered here, so narrowing to 786 rows
+        // cost what drawing all 6,485 did — and every `:view` paid it again.
+        let tree =
+            crate::model::tree::Tree::grouped(librarian, pair, smart_artist_sort, &lib.members);
         let mut placed: HashSet<CopyId> = HashSet::new();
         for (artist_key, albums) in tree.artists() {
             for (album_key, album) in albums {
                 for listing in &album.tracks {
-                    let Some(here) = listing.copy.filter(|c| lib.members.contains(c)) else {
+                    let Some(here) = listing.copy else {
                         continue;
                     };
                     lib.artist_names
@@ -969,5 +973,123 @@ mod the_two_projections {
             );
         }
         assert_eq!(differ, 0, "the two projections order rows differently");
+    }
+}
+
+#[cfg(test)]
+mod perf {
+    //! What it costs to draw a view — issue #121.
+    //!
+    //! `just bench-shelf`. The resampler has had a bench since the beginning
+    //! and the library path had none, so the only signal that drawing a view
+    //! had become slow was somebody noticing that it felt slow. It had: on a
+    //! 6,485-row library `:view in="Dance"` spent **1.3 seconds** in
+    //! `Shelf::grouped`, and the cost did not depend on how many rows matched.
+    //!
+    //! Synthetic rather than the machine's own library, because the numbers
+    //! have to mean the same thing on two machines a week apart.
+    //!
+    //! Three phases, kept apart because they fail differently: **resolve** is
+    //! the filter, **copies** turns recordings into rows, and **shelf** groups
+    //! them into the tree. The one that went wrong was the third, and a single
+    //! end-to-end number would have hidden which.
+
+    use std::collections::HashSet;
+    use std::time::Instant;
+
+    use super::*;
+    use crate::model::instance::{Instance, Scanned};
+
+    const GENRES: [&str; 6] = ["Techno", "House", "Folk", "Rock", "Jazz", "Ambient"];
+
+    /// `albums` albums of ten tracks over `artists` artists — the shape of a
+    /// real library at the size the slowness showed up at.
+    fn library(artists: usize, albums: usize) -> Librarian {
+        let mut scan = Vec::new();
+        for a in 0..albums {
+            for track in 1..=10u16 {
+                let artist = format!("Artist {:04}", a % artists);
+                scan.push(Scanned {
+                    audio: crate::audio_id::AudioId {
+                        scheme: 1,
+                        hash: (a as u128) * 1000 + u128::from(track),
+                    },
+                    title: format!("Track {track:02} of {a:04}"),
+                    artist: artist.clone(),
+                    album: Some(format!("Album {a:04}")),
+                    album_artist: Some(artist),
+                    genres: vec![GENRES[a % GENRES.len()].to_string()],
+                    disc: Some(1),
+                    track: Some(track),
+                    length_ms: 200_000,
+                    ..Default::default()
+                });
+            }
+        }
+        let mut log = Instance::new(crate::fixture::device());
+        log.ingest(100, &scan);
+        let mut l = Librarian::from_catalogue(&log.catalogue());
+        l.here(crate::fixture::device());
+        l
+    }
+
+    /// The table, and the bound that makes it a test rather than a report.
+    ///
+    /// **Generous on purpose.** A tight budget on a shared machine is a flaky
+    /// test, and what this has to catch is not a 20% drift — it is the shape
+    /// of the bug it was written for, where narrowing to a tenth of the
+    /// library cost what drawing all of it did. Fifty milliseconds is roughly
+    /// forty times what a narrowed view takes now and still a fiftieth of what
+    /// it took before the fix.
+    #[test]
+    fn drawing_a_view_scales_with_what_it_drew() {
+        let l = library(200, 650);
+        let rows = Listing::rows(&l).len();
+        let listened = crate::model::log::Catalogue::default();
+        let env = crate::filter::Env {
+            listened: Some(&listened),
+            now: 1_700_000_000,
+        };
+
+        eprintln!("\n{rows} rows\n");
+        eprintln!(
+            "{:<28} {:>9} {:>9} {:>9} {:>7}",
+            "query", "resolve", "copies", "shelf", "rows"
+        );
+        let mut narrowed = std::time::Duration::ZERO;
+        for src in [
+            "all",
+            r#"genre="Techno""#,
+            r#"artist="Artist 0001""#,
+            r#"genre="Techno" &artist="Artist 0001""#,
+        ] {
+            let stack = crate::view::Stack::parse(src).expect("the bench's own queries parse");
+
+            let t = Instant::now();
+            let resolved = stack.resolve(&l, &listened, env);
+            let resolve = t.elapsed();
+
+            let t = Instant::now();
+            let members: HashSet<CopyId> = resolved.copies(&l);
+            let copies = t.elapsed();
+            let n = members.len();
+
+            let t = Instant::now();
+            let shelf = Shelf::grouped(&l, members, Levels::default(), true);
+            let grouped = t.elapsed();
+
+            eprintln!(
+                "{src:<28} {resolve:>9.1?} {copies:>9.1?} {grouped:>9.1?} {:>7}",
+                shelf.len()
+            );
+            assert_eq!(shelf.len(), n, "the shelf lost rows the filter matched");
+            if n < rows {
+                narrowed = narrowed.max(grouped);
+            }
+        }
+        assert!(
+            narrowed < std::time::Duration::from_millis(50),
+            "drawing a narrowed view took {narrowed:?} — it is paying for rows it did not draw"
+        );
     }
 }
