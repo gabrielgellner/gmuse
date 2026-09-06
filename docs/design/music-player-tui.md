@@ -3948,6 +3948,21 @@ Append here as decisions are made. Format: date, decision, rationale.
   would force `Focus` to grow a variant with no page. They answer different questions: what to do with what you picked,
   against what to say about a thing.
 
+- **The picker offers the choice a name could not settle** (#130). `:info artist="Bodzin"` matches four things here and
+  will not choose; choosing between things is what a picker _is_, so it opens one over them.
+
+  **`Chosen::Look(Focus)` rather than making the two types one.** #129 checked and said no: `Chosen::Saved` is a
+  definition to _apply_ and has no page, so a merge would force `Focus` to grow a variant nothing could describe. The
+  picker learns to hand back a focus without becoming one — which is the smaller change and the truer one.
+
+  **A handed-over set is ranked, never re-sourced.** `Source::Among` holds its candidates rather than going and getting
+  them, because `find` already has them: a second search could disagree with the first, and then the list you were
+  offered would not be the list that was found. `Found::Several` carries the focus beside each name for the same reason.
+
+  **And it has no predicate half.** The picker's split — a filter that narrows, a needle that ranks — is about _rows_,
+  and these are not rows. Reading part of the input as a filter would silently drop it, so for this source the whole
+  line is the name.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

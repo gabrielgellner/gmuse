@@ -924,8 +924,12 @@ pub enum Found {
     Nothing,
     /// **Several, and it does not choose.** Guessing which artist somebody
     /// meant is the same mistake as guessing whether a bare word is a genre or
-    /// a crate (#119), and the repair is the same: say what was found.
-    Several(Vec<String>),
+    /// a crate (#119), and the repair is the same: hand them back.
+    ///
+    /// **Each with its focus**, so a caller can offer the choice rather than
+    /// only report it — the names alone would make the picker go and find them
+    /// again, which is a second search that could disagree with the first.
+    Several(Vec<(Focus, String)>),
 }
 
 /// Resolve a name to a thing — #129.
@@ -970,7 +974,12 @@ pub fn find(l: &Librarian, of: Kind, name: &str) -> Found {
     match near.as_slice() {
         [] => Found::Nothing,
         [(focus, _)] => Found::One(*focus),
-        several => Found::Several(several.iter().map(|(_, n)| (*n).to_string()).collect()),
+        several => Found::Several(
+            several
+                .iter()
+                .map(|(focus, n)| (*focus, (*n).to_string()))
+                .collect(),
+        ),
     }
 }
 

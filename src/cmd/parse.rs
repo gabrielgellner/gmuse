@@ -914,6 +914,10 @@ pub fn format(cmd: &Command) -> String {
         Command::Find(source) => match source {
             crate::ui::picker::Source::Tracks => "find".into(),
             crate::ui::picker::Source::Groups => "find groups".into(),
+            // **Not a `:find` anybody types.** A handed-over set is opened by
+            // `:info` finding several, so there is no line that produces one
+            // and nothing for this to write back.
+            crate::ui::picker::Source::Among(_) => "find".into(),
         },
         Command::Freeze(name) => format!("freeze {name}"),
         // Round-trips through `command`, which is what `:bind` shown in the

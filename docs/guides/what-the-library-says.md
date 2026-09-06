@@ -19,11 +19,20 @@ same grammar the rest of the `:` line uses:
     :info genre="Techno"       a genre, on its axis
     :info version="live"       any other axis, the same way
 
-Part of a name is enough. If several answer to it, **it says which rather than picking one**:
+Part of a name is enough. If several answer to it, **it offers the choice rather than picking one**:
 
-    4 match: Stephan Bodzin, Stephan Bodzin & Marc Romboy, Luna Semara, …
+    ┌ artist ──────────────────────────────────────────────┐
+    │  > █                                                 │
+    │                                                      │
+    │  > Stephan Bodzin                            artist  │
+    │    Stephan Bodzin & Marc Romboy              artist  │
+    │    Stephan Bodzin, Luna Semara               artist  │
+    └──────────────────────────────────────────────────────┘
 
-and if none do, it says what it was looking for:
+Keep typing to narrow it, `enter` to look at one. This is the same picker `<leader>ff` opens, over the things already
+found rather than over the library — so there is no filter half here, and everything you type is the name.
+
+If nothing answers, it says what it was looking for:
 
     no artist called "Ozric Tentacles"
 

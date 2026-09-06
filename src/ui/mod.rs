@@ -1786,13 +1786,30 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(picker) = ui.picker.as_mut() else {
         return;
     };
-    let (predicate, needle, bad) = crate::ui::picker::split(&picker.input);
+    let (predicate, needle, bad) = if picker.all_needle() {
+        (None, picker.input.trim().to_string(), None)
+    } else {
+        crate::ui::picker::split(&picker.input)
+    };
     picker.predicate = predicate.clone();
     picker.needle = needle.clone();
     picker.bad_predicate = bad;
 
     let source = picker.source;
+    // A handed-over set is ranked, never re-sourced: it is a choice between
+    // things somebody already found (#130).
+    if let Source::Among(_) = source {
+        let offered = picker.offered.clone();
+        let shown = crate::ui::picker::rank(offered, &needle);
+        let picker = ui.picker.as_mut().expect("still open");
+        picker.selected = picker.selected.min(shown.len().saturating_sub(1));
+        picker.shown = shown;
+        return;
+    }
     let candidates: Vec<Candidate> = match source {
+        // Returned above; the branch is here so adding a source is a compile
+        // error rather than an empty list.
+        Source::Among(_) => unreachable!("a handed-over set is ranked above"),
         Source::Tracks => {
             let rows: &dyn Listing = ctx.library;
             // **The predicate narrows before the needle ranks**, which is what
@@ -1935,6 +1952,13 @@ fn choose_from_picker(ui: &mut Ui, ctx: &Context<'_>) {
             ui.composed.set(crate::view::What::Saved(name));
             rebuild_library(ui, ctx);
             say_view(ui);
+        }
+        // **Picked to look at, not to go to** (#130). The others move the
+        // library under you; this opens the panel on what was picked.
+        Chosen::Look(focus) => {
+            ui.focus = vec![focus];
+            ui.info_sel = 0;
+            switch_view(ui, View::Info);
         }
     }
 }
@@ -5079,18 +5103,30 @@ fn open_info(ui: &mut Ui, ctx: &Context<'_>, what: Option<crate::cmd::Named>) {
                 ui.info_sel = 0;
                 switch_view(ui, View::Info);
             }
-            // **It does not choose** — the same rule a bare word follows
-            // (#119), and the same shape of answer: say what was found.
-            Found::Several(names) => ui.notify(format!(
-                "{} match: {}",
-                names.len(),
-                names
-                    .iter()
-                    .take(4)
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
+            // **It does not choose — it offers** (#130). Looking at a list of
+            // candidates and picking one is what a picker is for, and the
+            // candidates are already in hand: going back to the library for
+            // them would be a second search that could disagree with the
+            // first.
+            Found::Several(several) => {
+                let what = match &named {
+                    crate::cmd::Named::Called(kind, _) => kind.word(),
+                    crate::cmd::Named::Exactly(_) => "things",
+                };
+                ui.notify(format!("{} match — pick one", several.len()));
+                ui.picker = Some(crate::ui::picker::Picker::among(
+                    what,
+                    several
+                        .into_iter()
+                        .map(|(focus, name)| crate::ui::picker::Candidate {
+                            label: name,
+                            detail: focus.kind().to_string(),
+                            chosen: crate::ui::picker::Chosen::Look(focus),
+                        })
+                        .collect(),
+                ));
+                refresh_picker(ui, ctx);
+            }
             Found::Nothing => ui.notify(format!("no {asked}")),
         }
         return;
@@ -10252,10 +10288,11 @@ mod tests {
         assert!(out.contains("Ferrell"), "{out}");
     }
 
-    /// **It does not choose between several** — #119's rule, same shape of
-    /// answer: say what was found.
+    /// **It does not choose — it offers** (#130). Looking at candidates and
+    /// picking one is what a picker is, and #119's rule is that nothing
+    /// guesses on your behalf.
     #[test]
-    fn a_name_matching_several_says_which() {
+    fn a_name_matching_several_offers_the_choice() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
@@ -10264,7 +10301,55 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, r#"info artist="a""#);
         assert_ne!(ui.view, View::Info, "it picked one");
-        assert!(ui.status.contains("match"), "{}", ui.status);
+
+        let picker = ui.picker.as_ref().expect("no picker offered");
+        assert!(picker.shown.len() > 1, "{:?}", picker.shown);
+        assert!(
+            picker
+                .shown
+                .iter()
+                .all(|c| matches!(c.chosen, crate::ui::picker::Chosen::Look(_))),
+            "the candidates do not lead anywhere"
+        );
+        assert!(picker.title().contains("artist"), "{}", picker.title());
+    }
+
+    /// **Picking one opens the panel on it** — the point of offering.
+    #[test]
+    fn picking_from_the_offer_looks_at_what_was_picked() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"info artist="a""#);
+
+        let wanted = match ui.picker.as_ref().expect("a picker").shown[0].chosen {
+            crate::ui::picker::Chosen::Look(focus) => focus,
+            ref other => panic!("not a focus: {other:?}"),
+        };
+        press(&mut ui, &ctx, "enter");
+        assert!(ui.picker.is_none(), "the picker stayed open");
+        assert_eq!(ui.view, View::Info);
+        assert_eq!(ui.focus.last(), Some(&wanted));
+    }
+
+    /// **A handed-over set has no predicate half.** These are not rows, so
+    /// reading part of the input as a filter would silently drop it.
+    #[test]
+    fn typing_in_the_offer_narrows_by_name_alone() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"info artist="a""#);
+
+        let all = ui.picker.as_ref().expect("a picker").shown.len();
+        for c in "ferrell".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        let picker = ui.picker.as_ref().expect("still open");
+        assert!(picker.predicate.is_none(), "{:?}", picker.predicate);
+        assert!(picker.shown.len() < all, "typing narrowed nothing");
     }
 
     /// A name nothing answers to says so rather than opening an empty page.

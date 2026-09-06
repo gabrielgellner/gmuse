@@ -46,6 +46,12 @@ pub enum Source {
     Tracks,
     /// Collections and saved views.
     Groups,
+    /// **A set already found**, named by what kind of thing it holds — #130.
+    ///
+    /// The other two go and get their candidates; this one is handed them.
+    /// `:info artist="Bodzin"` matches four things and will not choose
+    /// between them, and choosing between things is what a picker is.
+    Among(&'static str),
 }
 
 /// What one row of the picker is, once chosen.
@@ -56,6 +62,13 @@ pub enum Chosen {
     Collection(String),
     /// `saved="<name>"` — a definition.
     Saved(String),
+    /// **Look at this thing** — #130, and the info panel opens on it.
+    ///
+    /// A variant rather than making `Chosen` and `Focus` one type (#129):
+    /// `Saved` is a definition to *apply* and has no page, so a merge would
+    /// force `Focus` to grow a variant nothing could describe. The picker
+    /// learns to hand back a focus without becoming one.
+    Look(crate::model::focus::Focus),
 }
 
 /// One candidate: what it looks like, what it is, and what to say about it.
@@ -87,6 +100,12 @@ pub struct Picker {
     /// A predicate that was typed and does not parse, so the title can say so
     /// rather than the list silently ignoring it.
     pub bad_predicate: Option<String>,
+    /// The candidates, when they were handed over rather than gone and got.
+    ///
+    /// **Ranked, never re-sourced.** A `Source::Among` picker is a choice
+    /// between things somebody already found, and going back to the library
+    /// for more would answer a different question than the one asked.
+    pub offered: Vec<Candidate>,
 }
 
 impl Picker {
@@ -99,7 +118,25 @@ impl Picker {
             predicate: None,
             needle: String::new(),
             bad_predicate: None,
+            offered: Vec::new(),
         }
+    }
+
+    /// A picker over a set already found — #130.
+    pub fn among(what: &'static str, candidates: Vec<Candidate>) -> Self {
+        Self {
+            offered: candidates,
+            ..Self::new(Source::Among(what))
+        }
+    }
+
+    /// Whether the whole input is a needle.
+    ///
+    /// **A handed-over set has no predicate half.** `genre="x"` narrows rows;
+    /// these are not rows, and reading part of the input as a filter would
+    /// silently drop it.
+    pub fn all_needle(&self) -> bool {
+        matches!(self.source, Source::Among(_))
     }
 
     /// What the title says it is doing.
@@ -110,6 +147,7 @@ impl Picker {
         let what = match self.source {
             Source::Tracks => "tracks",
             Source::Groups => "groups",
+            Source::Among(kind) => kind,
         };
         let mut parts = vec![what.to_string()];
         if let Some(bad) = &self.bad_predicate {
