@@ -4575,11 +4575,20 @@ fn build_searchable(ui: &Ui, ctx: &Context<'_>) {
     let hay: Vec<crate::text::Haystack> = all
         .iter()
         .map(|row| match row {
+            // **A track row searches its title, and nothing else** (#131).
+            //
+            // A flat list has to search the artist and the album too, because
+            // a row there is the only place they appear. The tree puts them on
+            // the rows *above*, so searching them here means `/malibu` matches
+            // the album row and every track under it — and `n` then walks ten
+            // rows that matched for a reason nothing on them shows.
+            //
+            // It also settles the painting: every haystack is now drawn text,
+            // so a match always paints. A row that matched invisibly was the
+            // shape of that problem.
             tree::Row::Track { id, .. } => rows
                 .listed(*id)
-                .map(|r| {
-                    crate::text::Haystack::of(&format!("{} {} {}", r.file_under, r.album, r.title))
-                })
+                .map(|r| crate::text::Haystack::of(r.title))
                 .unwrap_or_else(|| crate::text::Haystack::of("")),
             other => crate::text::Haystack::of(&other.label()),
         })
@@ -4648,7 +4657,39 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
         View::Tree => Vec::new(),
         View::Playlist => ui.playlist.entries().iter().map(describe).collect(),
         View::Queue => ui.queue.entries().map(describe).collect(),
-        View::Guide | View::Info => Vec::new(),
+        // **The panel searches its own lines** (#131). A fact log is exactly
+        // the sort of thing you want to search, and its rows are already a
+        // flat list with a cursor over them.
+        View::Info => info_about(ui, ctx).map_or_else(Vec::new, |about| {
+            info_lines(ui, &about)
+                .iter()
+                .map(|line| crate::text::Haystack::of(&info_text(line)))
+                .collect()
+        }),
+        // Prose, scrolled rather than stepped through: `/` here would want to
+        // search *within* a guide, which is a different motion than moving a
+        // cursor between rows.
+        View::Guide => Vec::new(),
+    }
+}
+
+/// One info line as text, for searching — the same words it is drawn with.
+fn info_text(line: &InfoLine<'_>) -> String {
+    use crate::model::about::Row;
+    match line {
+        InfoLine::Header { title, .. } => (*title).to_string(),
+        InfoLine::Row(row) => match row {
+            Row::Link { label, name, .. } => format!("{label} {name}"),
+            Row::Claim { label, value, .. } => format!("{label} {value}"),
+            Row::Fact { label, value } => format!("{label} {value}"),
+            Row::Many { label, query, .. } => format!("{label} {query}"),
+            Row::Happened {
+                name,
+                detail,
+                device,
+                ..
+            } => format!("{name} {detail} {device}"),
+        },
     }
 }
 
@@ -10710,6 +10751,95 @@ mod tests {
             shown.iter().any(|r| r.contains("Malibu")),
             "grouped by genre, the fold was not opened: {shown:?}"
         );
+    }
+
+    /// **In the tree a track is searched by its title alone** — #131.
+    ///
+    /// A flat list has to search the artist and album too, because a row there
+    /// is the only place they appear. The tree puts them on the rows *above*,
+    /// so searching them again means `/malibu` matches the album row and every
+    /// track under it, and `n` walks rows that matched for a reason nothing on
+    /// them shows.
+    #[test]
+    fn the_tree_searches_a_track_by_its_title() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "z");
+        press(&mut ui, &ctx, "R");
+
+        press(&mut ui, &ctx, "/");
+        for c in "malibu".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        press(&mut ui, &ctx, "enter");
+
+        let here = |ui: &Ui| {
+            ui.tree.rows(&ui.library)[ui.tree.selected]
+                .label()
+                .trim()
+                .to_string()
+        };
+        let landed = here(&ui);
+        assert!(landed.contains("Malibu"), "{landed}");
+
+        // The album's tracks are not matches: `n` comes back to the one row.
+        press(&mut ui, &ctx, "n");
+        assert_eq!(here(&ui), landed, "`n` walked into the album's tracks");
+
+        // And a title still finds its track.
+        press(&mut ui, &ctx, "/");
+        for c in "waters".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        press(&mut ui, &ctx, "enter");
+        assert!(
+            ui.status.is_empty(),
+            "a title should still be findable: {}",
+            ui.status
+        );
+    }
+
+    /// **A flat list still searches all three**, because a row there is the
+    /// only place the artist and the album appear.
+    #[test]
+    fn a_flat_list_still_searches_the_artist_and_album() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+
+        press(&mut ui, &ctx, "/");
+        for c in "malibu".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        press(&mut ui, &ctx, "enter");
+        assert!(
+            ui.status.is_empty(),
+            "an album should be findable in a flat list: {}",
+            ui.status
+        );
+    }
+
+    /// **`/` works in the info panel** — a fact log is exactly the sort of
+    /// thing you want to search.
+    #[test]
+    fn the_info_panel_can_be_searched() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info);
+
+        let before = ui.info_sel;
+        press(&mut ui, &ctx, "/");
+        for c in "copies".chars() {
+            press(&mut ui, &ctx, &c.to_string());
+        }
+        press(&mut ui, &ctx, "enter");
+        assert!(ui.status.is_empty(), "{}", ui.status);
+        assert_ne!(ui.info_sel, before, "the cursor did not move to the match");
     }
 
     /// **`escape` leaves it the way you came in.**

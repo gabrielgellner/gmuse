@@ -40,9 +40,16 @@ takes you there.
     n  N         the next match, and the previous
     escape       stop painting the matches
 
-**`/` searches the whole library, not only what is open.** A closed fold still holds its rows, exactly as a closed fold
-in vim still holds its lines — so `/malibu` with every artist shut finds the album and opens the way to it. Abandoning
-with `escape` closes again whatever the search opened: the search never happened, and that includes what it revealed.
+It works anywhere with rows and a cursor: the library tree, a flat list, a playlist, the queue, and the info panel. The
+guides are prose and scroll instead.
+
+**`/` searches the whole view, not only what is open.** A closed fold still holds its rows, exactly as a closed fold in
+vim still holds its lines — so `/malibu` with every artist shut finds the album and opens the way to it. Abandoning with
+`escape` closes again whatever the search opened: the search never happened, and that includes what it revealed.
+
+**The view is the scope.** `/` looks at whatever `:view` has left in front of you, so narrowing first is how you search
+within something — `:view in="Dance"` then `/burial` searches the crate. There is no separate "search only these",
+because there is already a better way to say it.
 
 The list follows as you type — vim's `incsearch` — and every match is painted where it matched. **Nothing is committed
 until `Enter`**: `escape` puts the cursor back exactly where the search started, so an abandoned search is not an
@@ -57,8 +64,12 @@ there while you typed; `n` is how you go to the one after it.
 The match under the cursor is not painted, because the cursor line is painted end to end and would cover it. The other
 matches on screen show where else the word appears.
 
-`/` searches the artist, the album and the title together, and paints whatever part of the match the row actually shows.
-A row that matched on its artist is still where the cursor goes, even in a list that only displays titles.
+**What `/` looks at depends on where the words are.** In a flat list — the sorted view, a playlist, the queue — a row is
+the only place its artist and album appear, so all three are searched. In the tree they have rows of their own, so a
+track is searched by its title alone: otherwise `/malibu` would match the album _and_ each of its ten tracks, and `n`
+would walk nine rows that matched for a reason nothing on them shows.
+
+One consequence worth having: in the tree every match is on a row that shows it, so a match is always painted.
 
 ## Filters — a question
 

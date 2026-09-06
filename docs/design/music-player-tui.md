@@ -4001,6 +4001,33 @@ Append here as decisions are made. Format: date, decision, rationale.
   `refresh_library`, the door every other projection goes through. Lent rather than cloned out, because copying 7,178
   rows to read them once put half the cost back: 8.6ms → 3.1ms → **1.5ms**.
 
+- **Which searches a library wants, decided** (#131). Five questions look like searching and only some of them are:
+
+  | question                   | how it is asked                                 |
+  | -------------------------- | ----------------------------------------------- |
+  | find it, wherever it is    | `/`, over the whole view, opening the way to it |
+  | find anything and go there | `<leader>ff`, fuzzy and ranked (#54)            |
+  | show me only these         | `:view`, `:filter` — membership, not a cursor   |
+  | find a thing to read about | `:info <name>` (#129)                           |
+
+  **"Search only what I can see" gets no key, and the reason is that `/` already searches a _view_ rather than the
+  library.** `ui.library` is the composed shelf, so `:view in="Dance"` then `/burial` searches the crate — narrowing
+  first is how you scope a search, and the query language says it better than a second key could. What is left over is
+  "search only the folds I happen to have opened", and fold state is a browsing convenience rather than a statement
+  about what you care about. Nobody means it as a scope.
+
+  **What `/` looks at depends on where the words are.** A flat list searches artist, album and title, because a row
+  there is the only place they appear. The tree searches a track by its **title alone**: artist and album have rows of
+  their own, so searching them again made `/malibu` match the album _and_ each of its ten tracks, and `n` walk nine rows
+  that matched for a reason nothing on them showed.
+
+  That also settles the painting question this raised: in the tree every haystack is now drawn text, so a match always
+  paints, and the "matched but invisible" case is gone rather than merely handled.
+
+  **`/` works in the info panel now.** A fact log is exactly the sort of thing to search, and the panel already had rows
+  and a cursor. The guides are prose and scroll, so `/` there would want to search _within_ a document — a different
+  motion, and not this one.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
