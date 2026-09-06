@@ -162,6 +162,26 @@ pub enum Shelf {
         #[arg(long)]
         unidentified: bool,
     },
+    /// **Catalogue this audio — the declaration a scan no longer makes** (#62).
+    ///
+    /// `library-api.md` §2: a file appearing in a watched root is noticed, not
+    /// catalogued. This is how it becomes part of the library, and it is a
+    /// person saying so rather than a walk inferring it.
+    ///
+    /// **A dry run unless given `--write`**, like `apply`, and for the same
+    /// reason: this one reads tags, and what it reads becomes claims in the
+    /// log.
+    ///
+    /// With no paths it imports everything the last scan reported as unknown,
+    /// which is the common case — "yes, those, I meant those".
+    Import {
+        /// Files or folders to catalogue. Empty means whatever the library
+        /// roots hold that is not known yet.
+        paths: Vec<PathBuf>,
+        /// Append the facts. Without this, nothing is written.
+        #[arg(long)]
+        write: bool,
+    },
     /// Propose filing whatever is in no collection, by the folder it sits in.
     ///
     /// **A proposal, printed, and never applied.** The folder is evidence a
@@ -215,6 +235,34 @@ mod tests {
 
     /// `--log` shipped broken because nothing here was tested: clap rejected
     /// the bare flag at runtime, which no compile or unit test could see.
+    /// **`import` is a dry run unless told otherwise** — #62, and the same
+    /// rule `apply` follows: this one reads tags, and what it reads becomes
+    /// claims in the log.
+    #[test]
+    fn import_writes_nothing_unless_asked() {
+        let bare = parse(&["shelf", "import", "/m/a.flac"]);
+        let Some(Command::Shelf(Shelf::Import { paths, write })) = bare.command else {
+            panic!("not an import: {:?}", bare.command)
+        };
+        assert_eq!(paths, vec![PathBuf::from("/m/a.flac")]);
+        assert!(!write, "a bare import would have written");
+
+        let asked = parse(&["shelf", "import", "--write", "/m/a.flac", "/m/b.flac"]);
+        let Some(Command::Shelf(Shelf::Import { paths, write })) = asked.command else {
+            panic!("not an import")
+        };
+        assert_eq!(paths.len(), 2);
+        assert!(write);
+
+        // **No paths is the common case**: import whatever the scan said it
+        // did not recognise, which is the answer to the offer it made.
+        let all = parse(&["shelf", "import"]);
+        let Some(Command::Shelf(Shelf::Import { paths, .. })) = all.command else {
+            panic!("not an import")
+        };
+        assert!(paths.is_empty());
+    }
+
     /// A shell expands `~`, but an env var does not — `GMUSE_LIBRARY=~/Music`
     /// arrives literally, and a literal `~/Music` silently walks nothing.
     #[test]

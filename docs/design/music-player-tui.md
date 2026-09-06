@@ -4216,6 +4216,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   existed since the spine was written and nothing has ever set it — the same unwired state `ReleaseType` was in before
   #133.
 
+- **2026-09-06** **`import` exists, and a scan can offer instead of assuming (#62).** The mutation API asked for
+  add/remove/move/replace. `library-api.md` §2.1 had already dissolved three of them by working the cases — a move
+  cannot lose anything because identity is the audio, a removal is not a holdings question, and a relink is `apply`.
+  What was left was `add`, which is `import`, and it is now a command.
+
+  `populate::reconcile` is the scan §3 describes: hash the audio, hold what the library knows, **report what it does
+  not**, and read no tags at all. Tested by the property that matters — retagging a file behind the library's back
+  changes nothing, where the old pass would have taken the new title as the truth.
+
+  **Library operations now run before the lock**, like the remote client. `gmuse shelf import` was refused while a
+  player was running, which is exactly when somebody would want it: it opens no device and writes only the log.
+
+  **The inversion is not finished, and the log says why.** This library's log holds 15,633 records in 11 fact kinds —
+  `RecordingAcquired`, plays, ratings, identifications, merges, the genre hierarchy — and **no `EncodingCatalogued`, no
+  `ArtistNamed`, no `ConceptAsserted`**. The catalogue is re-derived from tags at every launch by `bridge::librarian`,
+  which ingests the whole scan into a scratch instance. So the log holds _decisions_ and the tags still hold
+  _description_, and §2's "a file's tags change → nothing" is true of `reconcile` and not yet true of a launch. `import`
+  is what makes finishing it possible: it is the operation that puts description into the log. Filed as its own issue,
+  because it changes what the player shows on the first launch after it lands.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

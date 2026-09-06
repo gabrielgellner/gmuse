@@ -40,6 +40,16 @@ pub struct Report {
     /// Ingested with nothing to converge on — the residue §11 leaves to the
     /// collision.
     pub provisional: usize,
+    /// **Audio this library has never seen** — #62.
+    ///
+    /// Reported, never catalogued. A file appearing in a watched root is not
+    /// a declaration that it belongs here, and `library-api.md` §2 lists
+    /// exactly that inference among the ones that were wrong: cataloguing on
+    /// sight is how a quarantine folder becomes part of the library and how a
+    /// half-copied download becomes a row.
+    ///
+    /// `gmuse shelf import` is the declaration. This is the offer.
+    pub unknown: Vec<PathBuf>,
     /// Files whose bytes another file already had.
     ///
     /// **A scanner observation, not a library fact.** A holding answers "can
@@ -159,6 +169,60 @@ pub fn audio_files(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// Finishes by publishing this device's holdings **whole** (#71), which is what
 /// makes a file deleted since the last pass go away rather than being
 /// resurrected by a stale replica.
+/// **Reconcile what this device holds, and read no tags** — #62.
+///
+/// The scan `library-api.md` §3 describes, and the inversion this issue is
+/// about. A pass over the disk used to catalogue everything it found, which
+/// made "a file is in a watched root" mean "this is part of my library" —
+/// an inference, and one of the five §2 lists as wrong.
+///
+/// So: hash the audio, because that is what says *which* encoding a file is;
+/// hold what the library already knows; and **report what it does not**.
+/// Nothing is read from a tag, which is what "tags are a serialization" has
+/// to mean if it means anything — an external retag changes nothing here, and
+/// a rescan stops opening 6,500 files to ask what they claim about
+/// themselves.
+pub fn reconcile(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report {
+    let started = Instant::now();
+    let paths = audio_files(roots);
+    let mut report = Report {
+        files: paths.len(),
+        ..Default::default()
+    };
+    let known = instance.catalogue();
+    let mut held = BTreeMap::new();
+
+    for path in paths {
+        let audio = match crate::audio_id::of(&path) {
+            Ok(audio) => audio,
+            Err(e) => {
+                report.unreadable.push((path, e.to_string()));
+                continue;
+            }
+        };
+        let encoding = Id::<Encoding>::of_audio(&audio);
+        // **Known by its bytes, not by where it sits.** A file that moved is
+        // the same encoding at a new locator, which is why a move needs no
+        // operation and cannot lose anything (#62, `library-api.md` §2.1).
+        if !known.encodings.contains_key(&encoding) {
+            report.unknown.push(path);
+            continue;
+        }
+        if let Some(first) = held.insert(encoding, path.display().to_string()) {
+            report.duplicates.push((path, PathBuf::from(first)));
+        }
+        report.ingested += 1;
+    }
+
+    instance.assert_holdings(now, held);
+    report.elapsed = started.elapsed();
+    report
+}
+
+/// Read a disk into an instance's log, cataloguing whatever it finds.
+///
+/// **What `import` does, and no longer what a scan does** (#62). Given paths a
+/// person named, this is the declaration that they belong here.
 pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report {
     let started = Instant::now();
     let paths = audio_files(roots);
@@ -275,6 +339,140 @@ mod tests {
 
     use crate::model::round_trip::{write_tags, write_wav};
     use crate::model::seam::Librarian;
+
+    /// **A scan offers; it does not catalogue** — #62, and the inversion the
+    /// issue is about.
+    ///
+    /// A file appearing in a watched root is not a declaration that it belongs
+    /// here. `library-api.md` §2 lists cataloguing on sight among the
+    /// inferences that were wrong, and this is the one that made a quarantine
+    /// folder part of the library.
+    #[test]
+    fn a_scan_reports_audio_it_does_not_know_rather_than_taking_it_in() {
+        let root = std::env::temp_dir().join("gmuse-reconcile-unknown");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("An Artist").join("A Record");
+        std::fs::create_dir_all(&dir).unwrap();
+        let known = dir.join("01 Known.wav");
+        let stranger = dir.join("02 Stranger.wav");
+        write_wav(&known, 4410);
+        write_tags(&known, "Known", "An Artist", None);
+        write_wav(&stranger, 5510);
+        write_tags(&stranger, "Stranger", "An Artist", None);
+
+        // One of them is imported — declared — and the other is merely there.
+        let mut i = Instance::new(crate::fixture::device());
+        populate(&mut i, std::slice::from_ref(&known), 100);
+
+        let report = reconcile(&mut i, std::slice::from_ref(&root), 200);
+        assert_eq!(report.files, 2);
+        assert_eq!(
+            report.unknown,
+            vec![stranger.clone()],
+            "the file nobody declared was catalogued, or the declared one was not held"
+        );
+        assert_eq!(report.ingested, 1, "the known file is a holding");
+
+        let l = Librarian::from_catalogue(&i.catalogue());
+        let titles: BTreeSet<String> = crate::model::rows::Listing::rows(&l)
+            .into_iter()
+            .filter_map(|id| crate::model::rows::Listing::listed(&l, id))
+            .map(|r| r.title.to_string())
+            .collect();
+        assert_eq!(
+            titles,
+            BTreeSet::from(["Known".to_string()]),
+            "a scan put a row in the library that nobody imported"
+        );
+
+        // And importing it is the answer to the offer.
+        populate(&mut i, &report.unknown, 300);
+        let after = reconcile(&mut i, std::slice::from_ref(&root), 400);
+        assert!(after.unknown.is_empty(), "still unknown after an import");
+        assert_eq!(after.ingested, 2);
+    }
+
+    /// **An external retag changes nothing**, which is what "tags are a
+    /// serialization" has to mean if it means anything — #62, `library-api.md`
+    /// §3.
+    ///
+    /// The scan reads no tags, so a tool that rewrites every `TCON` in the
+    /// library is invisible to it. The old pass re-read them and would have
+    /// taken the new title as the truth.
+    #[test]
+    fn retagging_a_file_behind_the_librarys_back_changes_nothing() {
+        let root = std::env::temp_dir().join("gmuse-reconcile-retag");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let at = root.join("01 Callisto.wav");
+        write_wav(&at, 4410);
+        write_tags(&at, "Callisto", "Stephan Bodzin", None);
+
+        let mut i = Instance::new(crate::fixture::device());
+        populate(&mut i, std::slice::from_ref(&root), 100);
+
+        // Somebody else rewrites the tags. The audio is untouched.
+        write_tags(&at, "Something Else Entirely", "Not Bodzin", None);
+        let report = reconcile(&mut i, std::slice::from_ref(&root), 200);
+        assert!(
+            report.unknown.is_empty(),
+            "a retag made the file a stranger — the audio did not change"
+        );
+
+        let l = Librarian::from_catalogue(&i.catalogue());
+        let titles: Vec<String> = crate::model::rows::Listing::rows(&l)
+            .into_iter()
+            .filter_map(|id| crate::model::rows::Listing::listed(&l, id))
+            .map(|r| r.title.to_string())
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["Callisto".to_string()],
+            "the library read a tag it was told never to read again"
+        );
+    }
+
+    /// **A file that moved is the same file**, so a move needs no operation —
+    /// #62, and the case `library-api.md` §2.1 dissolved rather than built.
+    ///
+    /// Identity is the audio, and the locator is republished whole every scan.
+    #[test]
+    fn moving_a_file_costs_nothing_because_identity_is_the_audio() {
+        let root = std::env::temp_dir().join("gmuse-reconcile-move");
+        let _ = std::fs::remove_dir_all(&root);
+        let from = root.join("before");
+        let to = root.join("after");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        let was = from.join("01 Callisto.wav");
+        write_wav(&was, 4410);
+        write_tags(&was, "Callisto", "Stephan Bodzin", None);
+
+        let mut i = Instance::new(crate::fixture::device());
+        populate(&mut i, std::slice::from_ref(&root), 100);
+        let recording =
+            crate::model::rows::Listing::rows(&Librarian::from_catalogue(&i.catalogue()))[0];
+
+        let now = to.join("07 Renamed Entirely.wav");
+        std::fs::rename(&was, &now).unwrap();
+        let report = reconcile(&mut i, std::slice::from_ref(&root), 200);
+        assert!(report.unknown.is_empty(), "a moved file became a stranger");
+
+        let mut l = Librarian::from_catalogue(&i.catalogue());
+        // Locators are a fact about *this* machine, so the librarian has to be
+        // told which one it is before it can say where anything is.
+        l.here(crate::fixture::device());
+        assert_eq!(
+            crate::model::rows::Listing::rows(&l),
+            vec![recording],
+            "the row changed identity when the file changed place"
+        );
+        assert_eq!(
+            l.where_held(recording).as_deref(),
+            Some(now.display().to_string().as_str()),
+            "the locator did not follow the file"
+        );
+    }
 
     /// **The folder proposes; nothing files by it** — #119.
     ///

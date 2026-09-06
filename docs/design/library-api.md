@@ -36,10 +36,17 @@ inference can be wrong silently; a declaration cannot.
 So the operations that change what the library _is_ are named and invoked:
 
 ```
-gmuse library import <paths…>        this audio is new, catalogue it
-gmuse library apply <file.jsonl>     assert these facts
-gmuse library query <spec>           ask
+gmuse shelf import <paths…>          this audio is new, catalogue it
+gmuse shelf apply <file.jsonl>       assert these facts
+gmuse shelf query <spec>             ask
 ```
+
+`import` is built (#62). A dry run unless given `--write`, like `apply`, and for the same reason — it reads tags, and
+what it reads becomes claims. With no paths it takes whatever the scan reported as unknown, which is the answer to the
+offer the scan made.
+
+All three run **before the lock**: a library operation opens no device and writes only the log, so refusing one because
+a player is running would make `import` unusable exactly when you are listening to the library you are editing.
 
 ### 2.1 `relink` and `forget`, after working the cases
 

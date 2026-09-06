@@ -95,6 +95,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
+    // **A library operation is not a launch**, so it happens before anything a
+    // launch needs: no audio device, no cache, no store scan. `apply` does its
+    // own scan of exactly the roots it was given, and opening a device for a
+    // command that plays nothing was eighteen seconds and a hardware claim for
+    // no reason.
+    //
+    // **Before the lock, too** (#62), and for the reason the remote client is:
+    // it opens no device and writes only the log, so refusing it because a
+    // player is running would make `import` and `apply` unusable exactly when
+    // somebody is listening to the library they are editing.
+    if let Some(cli::Command::Shelf(op)) = &args.command {
+        let loaded = if args.no_config {
+            config::Loaded::default()
+        } else {
+            config::load(&args.config.clone().unwrap_or_else(config::default_path))
+        };
+        let roots = if args.library.is_empty() {
+            loaded.library.clone()
+        } else {
+            args.library_roots()
+        };
+        return run_library(op, &loaded, &roots);
+    }
+
     // Before the device is opened, so a refused second instance never makes a
     // sound and never touches state. Held for the whole of `main`: the binding
     // must outlive the player, and the kernel drops it whichever way we exit.
@@ -124,25 +148,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
-
-    // **A library operation is not a launch**, so it happens before anything a
-    // launch needs: no audio device, no cache, no store scan. `apply` does its
-    // own scan of exactly the roots it was given, and opening a device for a
-    // command that plays nothing was eighteen seconds and a hardware claim for
-    // no reason.
-    if let Some(cli::Command::Shelf(op)) = &args.command {
-        let loaded = if args.no_config {
-            config::Loaded::default()
-        } else {
-            config::load(&args.config.clone().unwrap_or_else(config::default_path))
-        };
-        let roots = if args.library.is_empty() {
-            loaded.library.clone()
-        } else {
-            args.library_roots()
-        };
-        return run_library(op, &loaded, &roots);
-    }
 
     let player = PlayerHandle::new(args.player_config())?;
     println!("gmuse — device at {} Hz", player.device_rate());
@@ -316,6 +321,49 @@ fn run_library(
                 "{lines} proposal(s) across {} folder(s) — review, then `gmuse shelf apply --write <file>`",
                 report.unfiled.len()
             );
+        }
+        cli::Shelf::Import { paths, write } => {
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            // **Named paths, or whatever a scan found that nothing knows.**
+            // The second is the common case and the reason this can be run
+            // with no arguments: the scan already said which files it did not
+            // recognise, and importing them is the answer to that offer.
+            let targets: Vec<std::path::PathBuf> = if paths.is_empty() {
+                crate::model::populate::reconcile(&mut log, roots, crate::history::now_ms()).unknown
+            } else {
+                paths.clone()
+            };
+            if targets.is_empty() {
+                eprintln!("nothing to import: every audio file under the roots is already known");
+                return Ok(());
+            }
+
+            let before = log.records().len();
+            let report =
+                crate::model::populate::populate(&mut log, &targets, crate::history::now_ms());
+            for (path, recording) in &report.identified {
+                println!("{recording}\t{}", path.display());
+            }
+            for (path, why) in &report.unreadable {
+                eprintln!("unreadable: {} — {why}", path.display());
+            }
+            eprintln!(
+                "{} file(s), {} confirmed, {} resting on their bytes, {} fact(s)",
+                report.ingested,
+                report.confirmed,
+                report.provisional,
+                log.records().len() - before
+            );
+            if *write {
+                let n = log.flush(&loaded.data_dir)?;
+                eprintln!("{n} record(s) written");
+            } else {
+                eprintln!("dry run — nothing written. Add --write.");
+            }
         }
         cli::Shelf::Query { unidentified } => {
             let (log, _) = crate::model::instance::Instance::open(
