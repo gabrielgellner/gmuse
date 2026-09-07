@@ -579,11 +579,24 @@ impl Librarian {
         l.held = held_index(&l.spine);
 
         // Names are a register: whatever the fold settled on is the label.
+        //
+        // **Inserted, not merely renamed** — #152. An artist entered this map
+        // only as a recording's or a group's *primary* artist, so one that
+        // appears only in a **credit** had no entry and `line_of` resolved its
+        // name to nothing. A credit line is built from names, so the whole
+        // line came out empty and `file_under` fell back to `Unknown Artist`:
+        // splitting the joined album credits on this library proposed moving
+        // 288 files there, which is how this was found.
         for (id, name) in &cat.artist_names {
-            if let Some(a) = l.reference.artists.get_mut(id) {
-                a.name = name.clone();
-                a.sort_name = name.clone();
-            }
+            let a = l.reference.artists.entry(*id).or_insert_with(|| {
+                crate::model::reference::ArtistRecord {
+                    id: *id,
+                    name: String::new(),
+                    sort_name: String::new(),
+                }
+            });
+            a.name = name.clone();
+            a.sort_name = name.clone();
         }
         for (id, d) in &cat.encodings {
             l.encodings.encodings.insert(
@@ -2353,6 +2366,58 @@ mod tests {
         assert_eq!(row.rating, Some(4), "set on the laptop");
         assert_eq!(row.plays, 1, "played on the NAS");
         assert!(row.available);
+    }
+
+    /// **Splitting an album credit must not empty the line** — #152.
+    ///
+    /// Written after a dry run proposed moving 288 files into `Unknown
+    /// Artist`. `file_under` reads the release group's credit line, so a
+    /// repair that leaves it blank is worse than the joined name it replaced.
+    #[test]
+    fn splitting_an_album_credit_names_the_artists_it_split_into() {
+        use crate::model::instance::{Instance, Scanned};
+
+        let mut log = Instance::new(Id::<Device>::derived(b"laptop"));
+        log.ingest(
+            100,
+            &[Scanned {
+                audio: crate::audio_id::AudioId { scheme: 1, hash: 7 },
+                title: "Callisto".into(),
+                artist: "Stephan Bodzin & Marc Romboy".into(),
+                album: Some("Luna".into()),
+                album_artist: Some("Stephan Bodzin & Marc Romboy".into()),
+                ..Default::default()
+            }],
+        );
+        let cat = log.catalogue();
+        let rec = *cat.recordings.keys().next().unwrap();
+        let group = *cat.groups.keys().next().expect("an album makes a group");
+
+        let before = Librarian::from_catalogue(&cat).row(rec).expect("a row");
+        assert_eq!(before.file_under, "Stephan Bodzin & Marc Romboy");
+
+        // The repair: credit the two artists the joined string names, at a
+        // basis that supersedes the tag's reading.
+        for (at, who) in [(0u8, "Stephan Bodzin"), (1, "Marc Romboy")] {
+            let artist = Id::<crate::model::entity::Artist>::of_artist(None, who);
+            log.rename_artist(200, artist, who);
+            log.credit(
+                200,
+                CreditOn::ReleaseGroup(group),
+                artist,
+                "performer",
+                crate::model::reference::Source::MusicBrainz,
+                at,
+            );
+        }
+
+        let after = Librarian::from_catalogue(&log.catalogue())
+            .row(rec)
+            .expect("a row");
+        assert_eq!(
+            after.file_under, "Stephan Bodzin, Marc Romboy",
+            "the split names both, and never nobody"
+        );
     }
 
     /// A file with no title tag still shows something useful, and the row
