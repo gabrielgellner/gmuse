@@ -328,13 +328,39 @@ impl Reference {
         // `Source` is ordered from `TagVariant`, "the weakest thing a name can
         // be", to `Manual`, "someone typed it on purpose", so the strongest
         // basis present is the answer and the weaker ones stay evidence.
-        let Some(best) = credits.iter().map(|c| c.basis).max() else {
+        // **Only who performed it** — a production credit is not authorship.
+        //
+        // `line_of` answers "who is this by", and `file_under` is this line, so
+        // a remixer in it puts the record in the remixer's folder. Not
+        // hypothetical: `Slip Away (Olivier Giacomotto Remix)` is credited to
+        // `Cari Golden, Bambook, Mennie` and filed under Giacomotto, who
+        // arranged it.
+        //
+        // `featured` is `Performer` and stays, which is the point of the role
+        // existing (#89 §5): a guest is part of who a track is by. `remixer`,
+        // `producer` and `composer` are not — composer → work → performance is
+        // a view, per `storage-layout.md`, and never a folder.
+        //
+        // Where nothing performed it, the line is empty and `file_under`
+        // renders `Unknown Artist`. Borrowing the producer's name would be a
+        // worse kind of wrong than admitting the library does not know.
+        let performed = |c: &Credit| {
+            self.roles
+                .get(&c.role.id())
+                .is_some_and(|r| r.class == RoleClass::Performer)
+        };
+        let Some(best) = credits
+            .iter()
+            .filter(|c| performed(c))
+            .map(|c| c.basis)
+            .max()
+        else {
             return String::new();
         };
         let mut seen = std::collections::BTreeSet::new();
         let named: Vec<_> = credits
             .iter()
-            .filter(|c| c.basis == best)
+            .filter(|c| performed(c) && c.basis == best)
             .filter(|c| seen.insert(c.artist.id()))
             .filter_map(|c| {
                 let name = c.as_credited.clone().unwrap_or_else(|| {
@@ -496,6 +522,78 @@ mod tests {
             join_phrase: None,
             basis,
         });
+    }
+
+    /// **A remixer is not who the record is by.**
+    ///
+    /// `file_under` is this line, so a production credit in it files the
+    /// record in the producer's folder. `Slip Away (Olivier Giacomotto Remix)`
+    /// is credited to `Cari Golden, Bambook, Mennie` and landed under
+    /// Giacomotto, who arranged it.
+    #[test]
+    fn a_production_credit_is_not_part_of_who_it_is_by() {
+        let mut r = Reference::default();
+        let cari = artist(&mut r, "Cari Golden");
+        let olivier = artist(&mut r, "Olivier Giacomotto");
+        let rec = CreditOn::Recording(Id::derived(b"slip away"));
+
+        let performer = role(&mut r, "performer", RoleClass::Performer);
+        let remixer = role(&mut r, "remixer", RoleClass::Production);
+        for (who, what, at) in [(cari, performer, 0u8), (olivier, remixer, 1)] {
+            r.credits.push(Credit {
+                subject: rec,
+                artist: Ref::to(who),
+                role: Ref::to(what),
+                position: at,
+                as_credited: None,
+                join_phrase: None,
+                basis: Source::TagVariant,
+            });
+        }
+        assert_eq!(r.credited_as(rec), "Cari Golden");
+    }
+
+    /// A guest **is** part of who a track is by, which is why the role exists.
+    #[test]
+    fn a_featured_guest_stays_in_the_line() {
+        let mut r = Reference::default();
+        let pac = artist(&mut r, "2Pac");
+        let dogg = artist(&mut r, "Nate Dogg");
+        let rec = CreditOn::Recording(Id::derived(b"all bout u"));
+        let performer = role(&mut r, "performer", RoleClass::Performer);
+        let featured = role(&mut r, "featured", RoleClass::Performer);
+        for (who, what, at) in [(pac, performer, 0u8), (dogg, featured, 1)] {
+            r.credits.push(Credit {
+                subject: rec,
+                artist: Ref::to(who),
+                role: Ref::to(what),
+                position: at,
+                as_credited: None,
+                join_phrase: None,
+                basis: Source::TagVariant,
+            });
+        }
+        assert_eq!(r.credited_as(rec), "2Pac, Nate Dogg");
+    }
+
+    /// Nothing performed it, so the library says nothing rather than borrowing
+    /// the producer's name.
+    #[test]
+    fn a_subject_with_only_production_credits_has_no_line() {
+        let mut r = Reference::default();
+        let olivier = artist(&mut r, "Olivier Giacomotto");
+        let rec = CreditOn::Recording(Id::derived(b"only a remix"));
+        let remixer = role(&mut r, "remixer", RoleClass::Production);
+        r.credits.push(Credit {
+            subject: rec,
+            artist: Ref::to(olivier),
+            role: Ref::to(remixer),
+            position: 0,
+            as_credited: None,
+            join_phrase: None,
+            basis: Source::TagVariant,
+        });
+        assert_eq!(r.credited_as(rec), "");
     }
 
     /// **A correction replaces the line; it does not join it** — #152.
