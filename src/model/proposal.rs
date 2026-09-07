@@ -293,6 +293,22 @@ pub trait Holdings {
     /// authority already named is a different performance, and a file pointed
     /// at it is a relink with no merge in it.
     fn identified(&self, recording: Id<Recording>) -> Option<Basis>;
+    /// The slot this copy fills, and what that slot claims, where it fills one.
+    ///
+    /// **Two facts name a recording**, and a relink has to move both: a file
+    /// says which performance it holds (`EncodingBound`) and the slot it fills
+    /// says which performance sits there (`TrackPlaced`). Changing only the
+    /// first leaves the appearance naming the song the file used to be, so a
+    /// rating given to the row went to the old song.
+    fn slot(&self, encoding: Id<Encoding>) -> Option<Slot>;
+}
+
+/// Where a copy sits, as the library currently records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slot {
+    pub track: Id<crate::model::entity::Track>,
+    pub medium: Id<crate::model::entity::Medium>,
+    pub position: u16,
 }
 
 /// What a proposal is about.
@@ -742,6 +758,25 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 },
                 Fact::EncodingBound { encoding, from, to },
             ];
+            // **The appearance is re-pointed too** — #155. Two facts name a
+            // recording: the file says which performance it holds, and the
+            // slot it fills says which performance sits there. Moving only the
+            // first left the slot naming the song the file used to be, so a
+            // rating given to the row went to the old song — which is exactly
+            // what a relink is undoing.
+            //
+            // If the file was misidentified, so was the place it sits.
+            if let Some(slot) = library.slot(encoding) {
+                facts.push(Fact::TrackPlaced {
+                    track: slot.track,
+                    medium: slot.medium,
+                    recording: to,
+                    position: slot.position,
+                    // Not carried: what the sleeve printed is a fact about the
+                    // release, and this proposal says nothing about it.
+                    title_on_release: None,
+                });
+            }
             // **The history has to come too.**
             //
             // Naming a performance mints a new id, and every rating and play
@@ -818,6 +853,14 @@ pub(crate) mod tests {
 
         /// `rec(1)` rests on its bytes — nothing had named it — and the
         /// recording encoding 3 holds was named by MusicBrainz.
+        /// **The test double holds no releases**, so nothing it holds fills a
+        /// slot. A relink against it re-points a binding and nothing else,
+        /// which is what the `credited`/`merged` tests want; the slot half is
+        /// exercised where there is a spine to have one.
+        fn slot(&self, _encoding: Id<Encoding>) -> Option<Slot> {
+            None
+        }
+
         fn identified(&self, recording: Id<Recording>) -> Option<Basis> {
             if recording == rec(1) {
                 Some(Basis::Audio(crate::audio_id::AudioId {

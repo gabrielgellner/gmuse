@@ -250,7 +250,9 @@ mod tests {
         Candidate {
             label: label.to_string(),
             detail: String::new(),
-            chosen: Chosen::Track(CopyId::from_uuid(uuid::Uuid::from_u128(1))),
+            chosen: Chosen::Track(CopyId::On(crate::model::id::Id::from_uuid(
+                uuid::Uuid::from_u128(1),
+            ))),
         }
     }
 

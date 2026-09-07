@@ -165,8 +165,11 @@ fn format_of(path: &std::path::Path) -> Option<Format> {
 }
 
 impl crate::scan::Holdings {
-    /// Take in a fixture file. **Tests only.**
-    pub fn upsert(&mut self, tagged: Tagged) -> crate::model::rows::CopyId {
+    /// Take in a fixture file, and say which **copy** it became. **Tests only.**
+    ///
+    /// A copy rather than a row: a row is an appearance (#155) and this takes
+    /// in a file. [`row_of`] turns one into the other.
+    pub fn upsert(&mut self, tagged: Tagged) -> Id<Encoding> {
         let seen = tagged.scanned();
         let id = Id::<Encoding>::of_audio(&seen.audio);
         self.take(tagged.path.clone(), tagged.mtime, tagged.size, seen);
@@ -179,6 +182,14 @@ impl crate::scan::Holdings {
 /// The other half of [`Tagged`]: a fixture builds holdings in tag terms and
 /// this folds them the way a real launch does, so what a test reads is what
 /// the player would.
+/// The row a copy belongs to. **Tests only.**
+///
+/// A fixture mints a copy from its audio, and a row is an appearance where
+/// there is one and the recording where there is not (#155).
+pub fn row_of(l: &Librarian, copy: Id<Encoding>) -> Option<crate::model::rows::CopyId> {
+    l.row_of_copy(copy)
+}
+
 pub fn from_holdings(held: &crate::scan::Holdings) -> Librarian {
     from_holdings_and(held, &std::collections::BTreeSet::new())
 }
@@ -210,7 +221,7 @@ impl Tagged {
         let mut h = crate::scan::Holdings::new();
         h.upsert(self.clone());
         let l = from_holdings(&h);
-        let id = Id::<Encoding>::of_audio(&self.held().audio);
+        let id = row_of(&l, Id::<Encoding>::of_audio(&self.held().audio)).expect("a copy's row");
         crate::model::rows::Listing::listed(&l, id)
             .expect("a fixture file draws a row")
             .owned()

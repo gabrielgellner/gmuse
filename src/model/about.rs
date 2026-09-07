@@ -867,8 +867,10 @@ mod tests {
             });
         }
         let mut l = crate::fixture::from_holdings(&held);
+        // **Copies, not rows** (#155): this is about two *files*, one derived
+        // from the other, and a row is an appearance.
         let by_suffix = |l: &Librarian, ext: &str| {
-            Listing::rows(l)
+            l.every_copy()
                 .into_iter()
                 .find(|c| l.where_held(*c).is_some_and(|at| at.ends_with(ext)))
                 .expect("the fixture holds both copies")
@@ -923,7 +925,7 @@ mod tests {
     #[test]
     fn a_file_with_no_source_is_kept() {
         let (l, _) = library();
-        let only = crate::model::rows::Listing::rows(&l)[0];
+        let only = l.every_copy()[0];
         let about = l.about(Focus::Encoding(only), false);
         assert!(rows(&about, "what it is").iter().any(|r| matches!(
             r,
@@ -1016,9 +1018,10 @@ mod perf {
     fn opening_a_panel_costs_one_focus() {
         let l = library(200, 650);
         let rows = Listing::rows(&l);
-        let recording = Listing::recording_of(&l, rows[0]).expect("a row is a recording");
+        let recording = Listing::recording_of(&l, rows[0]).expect("a row names its recording");
+        let copy = l.shown_copy(rows[0]).expect("the fixture fills it");
 
-        let worst = [Focus::Recording(recording), Focus::Encoding(rows[0])]
+        let worst = [Focus::Recording(recording), Focus::Encoding(copy)]
             .into_iter()
             .map(|focus| {
                 let t = std::time::Instant::now();

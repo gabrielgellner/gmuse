@@ -177,8 +177,8 @@ impl Tree {
         // 6,485 rows that no amount of narrowing could get under. A member is
         // a copy, and a copy names its recording, so the listing is built
         // rather than looked up.
-        for copy in members {
-            let Some(recording) = crate::model::rows::Listing::recording_of(l, *copy) else {
+        for row in members {
+            let Some(recording) = crate::model::rows::Listing::recording_of(l, *row) else {
                 continue;
             };
             // The same question `row_of` was being called to answer — and it
@@ -190,14 +190,14 @@ impl Tree {
             {
                 let listing = Listing {
                     recording,
-                    copy: Some(*copy),
+                    row: *row,
+                    // **The copy filling this row**, which may be none (#155).
+                    copy: l.shown_copy(*row),
                 };
-                let slot = l.slot_of(listing.copy);
+                let slot = row.slot();
                 let group = l.group_of(slot);
-                let Some(subject) = listing
-                    .copy
-                    .and_then(|c| crate::model::rows::Listing::subject(l, c))
-                else {
+                // Asked of the **row**, which is the appearance.
+                let Some(subject) = crate::model::rows::Listing::subject(l, *row) else {
                     continue;
                 };
                 let inner_values = values_of(l, levels.1, &subject);
@@ -379,6 +379,147 @@ mod tests {
             track: Some(track),
             ..Default::default()
         }
+    }
+
+    /// **The three shapes a row can be** — #155, worked end to end.
+    ///
+    /// One recording on two release groups, a recording on none, and a slot
+    /// nothing fills. Each is drawn by a different arm of `CopyId`, and the
+    /// point of the test is that all three coexist in one library.
+    #[test]
+    fn a_row_is_an_appearance_where_there_is_one_and_a_recording_where_there_is_not() {
+        use crate::model::rows::CopyId;
+        use crate::model::rows::Listing as Rows;
+
+        // 1. One performance, two albums. Two files, because a rip from the
+        //    compilation is not byte-identical to the one from the album.
+        let mut on_album = scanned("Hells Bells", "AC/DC", Some("AC/DC"), 2);
+        on_album.album = Some("Back in Black".into());
+        on_album.identity = Some(crate::model::basis::Basis::MusicBrainz(
+            uuid::Uuid::from_u128(0xbe11),
+        ));
+        let mut on_anthology = on_album.clone();
+        on_anthology.album = Some("Who Made Who".into());
+        on_anthology.audio.hash += 1;
+
+        // 2. A recording on no release at all — a broadcast, an internet-only
+        //    track, a YouTube rip. MusicBrainz calls this a standalone
+        //    recording and does not require a release for it.
+        let mut loose = scanned("A Rip From The Internet", "Somebody", None, 0);
+        loose.album = None;
+
+        let mut i = Instance::new(Id::derived(b"laptop"));
+        i.ingest(
+            100,
+            &[on_album.clone(), on_anthology.clone(), loose.clone()],
+        );
+
+        // 3. A slot nothing fills: the library knows the track and holds no
+        //    file for it. Written directly, because no pass writes one yet —
+        //    that is the other half of #155.
+        let cat = i.catalogue();
+        let medium = *cat
+            .media
+            .iter()
+            .find(|(_, m)| {
+                cat.releases
+                    .get(&m.release)
+                    .and_then(|r| cat.groups.get(&r.group))
+                    .is_some_and(|g| g.title == "Back in Black")
+            })
+            .expect("the album has a medium")
+            .0;
+        let unheld = Id::<crate::model::entity::Recording>::derived(b"a track we do not own");
+        let slot = Id::<crate::model::entity::Track>::derived(b"slot 9 of back in black");
+        let mut clock = crate::model::clock::HybridClock::new(Id::derived(b"laptop"));
+        let unfilled: std::collections::BTreeSet<crate::model::log::Record> = [
+            crate::model::log::Fact::RecordingCatalogued {
+                recording: unheld,
+                title: "Rock and Roll Ain't Noise Pollution".into(),
+                artist: Id::derived(b"acdc"),
+            },
+            crate::model::log::Fact::TrackPlaced {
+                track: slot,
+                medium,
+                recording: unheld,
+                position: 9,
+                title_on_release: None,
+            },
+        ]
+        .into_iter()
+        .map(|fact| crate::model::log::Record {
+            stamp: clock.stamp(200),
+            fact,
+        })
+        .collect();
+        i.merge(200, &unfilled);
+
+        let l = Librarian::from_catalogue(&i.catalogue());
+        let rows = Rows::rows(&l);
+
+        // **One recording, two appearances.** Two rows, one per album.
+        let hells: Vec<CopyId> = rows
+            .iter()
+            .copied()
+            .filter(|r| Rows::listed(&l, *r).is_some_and(|row| row.title == "Hells Bells"))
+            .collect();
+        assert_eq!(
+            hells.len(),
+            2,
+            "a recording on two albums is two appearances"
+        );
+        let mut albums: Vec<&str> = hells
+            .iter()
+            .filter_map(|r| Rows::listed(&l, *r).map(|row| row.album))
+            .collect();
+        albums.sort_unstable();
+        assert_eq!(albums, vec!["Back in Black", "Who Made Who"]);
+        assert!(
+            hells.iter().all(|r| matches!(r, CopyId::On(_))),
+            "both are appearances"
+        );
+
+        // **The standalone recording is a row and is not an appearance.**
+        let stray = rows
+            .iter()
+            .copied()
+            .find(|r| {
+                Rows::listed(&l, *r).is_some_and(|row| row.title == "A Rip From The Internet")
+            })
+            .expect("a recording on no release is still a row");
+        assert!(
+            matches!(stray, CopyId::Loose(_)),
+            "it belongs to no medium, and none was invented for it"
+        );
+        // **A file backs it**, which is the claim worth making here. Whether
+        // *this device* can open it is `playable`, and no holding is published
+        // in this fixture — `ingest` catalogues and `reconcile` publishes
+        // (#145), so nothing here has a locator at all.
+        assert!(
+            l.shown_copy(stray).is_some(),
+            "a standalone recording still has a copy behind it"
+        );
+
+        // **The slot nothing fills is a row, and it does not play.**
+        let missing = rows
+            .iter()
+            .copied()
+            .find(|r| {
+                Rows::listed(&l, *r)
+                    .is_some_and(|row| row.title == "Rock and Roll Ain't Noise Pollution")
+            })
+            .expect("a track we do not own is still a row");
+        assert!(matches!(missing, CopyId::On(_)), "it is an appearance");
+        assert_eq!(
+            Rows::listed(&l, missing).map(|r| r.album),
+            Some("Back in Black"),
+            "and it knows which album to be greyed under"
+        );
+        assert!(
+            Rows::playable(&l, missing).is_none(),
+            "nothing fills it, so there is nothing to open"
+        );
+        assert!(l.shown_copy(missing).is_none());
     }
 
     fn tree_of(scan: &[Scanned]) -> (Librarian, Tree) {

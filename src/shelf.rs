@@ -239,9 +239,9 @@ impl Shelf {
         for (artist_key, albums) in tree.artists() {
             for (album_key, album) in albums {
                 for listing in &album.tracks {
-                    let Some(here) = listing.copy else {
-                        continue;
-                    };
+                    // **The row is the appearance** (#155); the copy filling
+                    // it is a property, and the pressing question is about it.
+                    let here = listing.row;
                     lib.artist_names
                         .entry(artist_key.clone())
                         .or_insert_with(|| tree.artist_name(artist_key).to_string());
@@ -254,7 +254,9 @@ impl Shelf {
                     // Copies off two of them have no single answer, so the
                     // group is marked mixed and says nothing rather than
                     // printing halves that do not belong together.
-                    let seen = librarian.release_of(librarian.placed_at(here));
+                    let seen = librarian
+                        .shown_copy(here)
+                        .and_then(|copy| librarian.release_of(librarian.placed_at(copy)));
                     lib.album_pressing
                         .entry((artist_key.clone(), album_key.clone()))
                         .and_modify(|known| {

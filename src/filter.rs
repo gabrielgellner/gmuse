@@ -1382,7 +1382,11 @@ mod tests {
         h.upsert(t.clone());
         let l = crate::fixture::from_holdings(&h);
         let id = crate::model::id::Id::of_audio(&t.held().audio);
-        (t.drawn(), l.recording_of(id))
+        // A copy's row names its recording (#155).
+        (
+            t.drawn(),
+            crate::fixture::row_of(&l, id).and_then(|r| l.recording_of(r)),
+        )
     }
 
     fn matches(expr: &str, t: &Track) -> bool {
@@ -1641,7 +1645,9 @@ mod tests {
         held.upsert(instrumental.clone());
         let bare = crate::fixture::from_holdings(&held);
         let copy = crate::model::id::Id::of_audio(&instrumental.held().audio);
-        let recording = crate::model::rows::Listing::recording_of(&bare, copy).expect("scanned");
+        let recording = crate::fixture::row_of(&bare, copy)
+            .and_then(|r| crate::model::rows::Listing::recording_of(&bare, r))
+            .expect("scanned");
 
         let mut i = crate::model::instance::Instance::new(crate::fixture::device());
         i.assert_concept(
@@ -1653,7 +1659,11 @@ mod tests {
             crate::model::ingest::Confidence::Confirmed,
         );
         let l = crate::fixture::from_holdings_and(&held, i.records());
-        let row = crate::model::rows::Listing::listed(&l, copy).expect("a row");
+        let row = crate::model::rows::Listing::listed(
+            &l,
+            crate::fixture::row_of(&l, copy).expect("a row id"),
+        )
+        .expect("a row");
         let subject = Subject {
             row,
             locator: instrumental.path.to_str(),

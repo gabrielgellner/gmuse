@@ -294,7 +294,14 @@ mod tests {
                 ..Default::default()
             }));
         }
-        (crate::fixture::from_holdings(&store), ids)
+        // **The rows, not the copies** (#155): a fixture takes in files, and a
+        // row is the appearance each one turned out to fill.
+        let l = crate::fixture::from_holdings(&store);
+        let rows = ids
+            .into_iter()
+            .filter_map(|copy| crate::fixture::row_of(&l, copy))
+            .collect();
+        (l, rows)
     }
 
     fn headers(rows: &[Row]) -> Vec<&str> {

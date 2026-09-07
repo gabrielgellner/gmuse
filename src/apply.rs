@@ -86,6 +86,27 @@ impl proposal::Holdings for Shelf {
             .copied()
             .or_else(|| self.disk.encodings.get(&encoding).and_then(|e| e.recording))
     }
+
+    fn slot(
+        &self,
+        encoding: Id<crate::model::entity::Encoding>,
+    ) -> Option<crate::model::proposal::Slot> {
+        let track = self
+            .log
+            .placed
+            .get(&encoding)
+            .or_else(|| self.disk.placed.get(&encoding))?;
+        let placed = self
+            .log
+            .tracks
+            .get(track)
+            .or_else(|| self.disk.tracks.get(track))?;
+        Some(crate::model::proposal::Slot {
+            track: *track,
+            medium: placed.medium,
+            position: placed.position,
+        })
+    }
 }
 
 /// What a run did, and what it declined to do.

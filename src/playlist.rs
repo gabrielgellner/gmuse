@@ -124,7 +124,7 @@ mod tests {
     use crate::model::rows::CopyId;
 
     fn id(n: u128) -> CopyId {
-        CopyId::from_uuid(uuid::Uuid::from_u128(n))
+        CopyId::On(crate::model::id::Id::from_uuid(uuid::Uuid::from_u128(n)))
     }
 
     /// **A playlist admits a repeat**, which is the difference between a

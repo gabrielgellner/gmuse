@@ -80,7 +80,7 @@ pub struct Librarian {
     /// album-level credit, `album` from the slot — so there is nothing to lend
     /// a view of unless it is kept. Built at the end of the fold and lent from
     /// there.
-    rows: std::collections::BTreeMap<Id<Encoding>, Drawn>,
+    rows: std::collections::BTreeMap<crate::model::rows::CopyId, Drawn>,
     /// Where this device can open each row, from the holdings it asserted.
     ///
     /// Empty until [`Librarian::here`] says which device this is. The
@@ -299,19 +299,25 @@ impl Librarian {
     /// `row` is this with the canonical copy filled in, which makes the
     /// answer a *rule* rather than whichever placement sorted first.
     pub fn row_of(&self, recording: Id<Recording>, copy: Option<Id<Encoding>>) -> Option<Row> {
-        self.row_of_via(recording, copy, &Lookup::Direct(self))
+        // Asked about a *file*, so the slot is the one that file fills.
+        let slot = copy.and_then(|id| self.placed.get(&id).copied());
+        self.row_of_via(recording, slot, copy, &Lookup::Direct(self))
     }
 
     /// [`Self::row_of`], against a credit index the caller already built.
     fn row_of_via(
         &self,
         recording: Id<Recording>,
+        // **The appearance, given rather than derived from the copy** (#155).
+        // It was read off `placed` for whichever file was in hand, so a slot
+        // nothing fills had no album — and a track you do not own would be
+        // drawn under `No Album` instead of the record it is missing from.
+        slot: Option<Id<Track>>,
         copy: Option<Id<Encoding>>,
         by: &Lookup<'_>,
     ) -> Option<Row> {
         let rec = self.spine.recordings.get(&recording)?;
         let canonical = copy.and_then(|id| self.encodings.encodings.get(&id));
-        let slot = copy.and_then(|id| self.placed.get(&id).copied());
         Some(Row {
             recording,
             title: rec.title.clone(),
@@ -1013,21 +1019,77 @@ impl Librarian {
         // **Built once for the whole library** (#123). `credits_on` is a
         // linear scan, and asking it per row was 6,500 full passes over 13,000
         // credits — 333ms of a 397ms fold.
+        use crate::model::rows::CopyId;
         let by = Lookup::built(self);
-        let ids: Vec<Id<Encoding>> = self.encodings.encodings.keys().copied().collect();
-        let drawn: Vec<(Id<Encoding>, Drawn)> = ids
+        // **One row per appearance, plus one per recording that has none** —
+        // #155. It was one per *encoding*, so an album held as FLAC and MP3
+        // drew every track twice, and a slot nothing fills could not be drawn.
+        //
+        // Both indexes are built once, for #123's reason: `draw` asks about
+        // every row, and scanning `placed` per row is a full pass each time.
+        let mut copies: std::collections::BTreeMap<Id<Track>, Vec<Id<Encoding>>> =
+            Default::default();
+        for (copy, slot) in &self.placed {
+            copies.entry(*slot).or_default().push(*copy);
+        }
+        let appears: std::collections::BTreeSet<Id<Recording>> = self
+            .spine
+            .tracks
+            .values()
+            .map(|t| t.recording.id())
+            .collect();
+
+        let ids: Vec<CopyId> = self
+            .spine
+            .tracks
+            .keys()
+            .map(|t| CopyId::On(*t))
+            // **A recording on no release is a row too**, which MusicBrainz
+            // calls a standalone recording and this library has one of. Minting
+            // it a release group to give it a home is what
+            // `Various Artists/YouTube Sessions` already is (#20).
+            .chain(
+                self.spine
+                    .recordings
+                    .keys()
+                    .filter(|r| !appears.contains(r))
+                    .map(|r| CopyId::Loose(*r)),
+            )
+            .collect();
+        let drawn: Vec<(CopyId, Drawn)> = ids
             .into_iter()
-            .filter_map(|id| Some((id, self.drawn_of(id, &by)?)))
+            .filter_map(|id| Some((id, self.drawn_of(id, &copies, &by)?)))
             .collect();
         self.rows.extend(drawn);
     }
 
     /// Assemble one row out of the entities behind it.
-    fn drawn_of(&self, copy: Id<Encoding>, by: &Lookup<'_>) -> Option<Drawn> {
-        let encoding = self.encodings.encodings.get(&copy)?;
-        let recording = encoding.recording?.id();
-        let row = self.row_of_via(recording, Some(copy), by)?;
-        let slot = self.placed.get(&copy).copied();
+    fn drawn_of(
+        &self,
+        id: crate::model::rows::CopyId,
+        copies: &std::collections::BTreeMap<Id<Track>, Vec<Id<Encoding>>>,
+        by: &Lookup<'_>,
+    ) -> Option<Drawn> {
+        use crate::model::rows::CopyId;
+        let (recording, slot) = match id {
+            CopyId::On(track) => (self.spine.tracks.get(&track)?.recording.id(), Some(track)),
+            CopyId::Loose(recording) => (recording, None),
+        };
+        // **The best copy of this appearance**, and `None` where nothing fills
+        // it: a slot the library knows about and holds no file for. A loose
+        // recording takes any copy of itself, since it has no appearance to be
+        // a copy *of*.
+        let shown = match slot {
+            Some(track) => copies
+                .get(&track)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| self.encodings.encodings.get(c))
+                .max_by_key(|e| crate::model::encoding::canonical_key(e)),
+            None => self.encodings.canonical(recording),
+        };
+        let copy = shown.map(|e| e.id);
+        let row = self.row_of_via(recording, slot, copy, by)?;
         let (disc, track) = self.place_of(slot);
         let group = self.group_of(slot);
 
@@ -1123,10 +1185,48 @@ impl Librarian {
                 .and_then(|g| g.first_released)
                 .or_else(|| on_release.and_then(|r| r.released))
                 .map(|d| i32::from(d.year)),
-            bitrate: Some(encoding.bitrate),
-            sample_rate: encoding.sample_rate,
-            channels: encoding.channels,
+            // **Of the copy this row shows**, absent where it shows none: a
+            // slot has no bitrate, a file does.
+            bitrate: shown.map(|e| e.bitrate),
+            sample_rate: shown.and_then(|e| e.sample_rate),
+            channels: shown.and_then(|e| e.channels),
         })
+    }
+
+    /// Every copy the library holds, whatever row shows it — #155.
+    ///
+    /// **Storage is copy-shaped and stays so.** A row is an appearance and an
+    /// appearance is not a file; `shelf render` places bytes, so it asks for
+    /// bytes.
+    pub fn every_copy(&self) -> Vec<Id<Encoding>> {
+        self.encodings.encodings.keys().copied().collect()
+    }
+
+    /// The row a copy belongs to — its appearance, or the loose recording it
+    /// holds where no release does.
+    pub fn row_of_copy(&self, copy: Id<Encoding>) -> Option<crate::model::rows::CopyId> {
+        use crate::model::rows::CopyId;
+        if let Some(track) = self.placed.get(&copy) {
+            return Some(CopyId::On(*track));
+        }
+        Some(CopyId::Loose(
+            self.encodings.encodings.get(&copy)?.recording?.id(),
+        ))
+    }
+
+    /// The copy a row shows, if anything fills it — #155.
+    pub fn shown_copy(&self, id: crate::model::rows::CopyId) -> Option<Id<Encoding>> {
+        use crate::model::rows::CopyId;
+        match id {
+            CopyId::On(track) => self
+                .placed
+                .iter()
+                .filter(|(_, on)| **on == track)
+                .filter_map(|(c, _)| self.encodings.encodings.get(c))
+                .max_by_key(|e| crate::model::encoding::canonical_key(e))
+                .map(|e| e.id),
+            CopyId::Loose(recording) => self.encodings.canonical(recording).map(|e| e.id),
+        }
     }
 
     /// **How much of this pressing is here** — #134.
@@ -1325,26 +1425,40 @@ impl crate::model::rows::Listing for Librarian {
         self.vocabulary.edges.iter().any(|e| on_axis(e.child.id()))
     }
 
-    fn listed(&self, id: Id<Encoding>) -> Option<crate::model::rows::Listed<'_>> {
+    fn listed(&self, id: crate::model::rows::CopyId) -> Option<crate::model::rows::Listed<'_>> {
         Some(self.rows.get(&id)?.listed())
     }
 
-    fn rows(&self) -> Vec<Id<Encoding>> {
+    fn rows(&self) -> Vec<crate::model::rows::CopyId> {
         self.rows.keys().copied().collect()
     }
 
-    /// **The binding the library holds**, which is what a relink changes.
-    fn recording_of(&self, id: Id<Encoding>) -> Option<Id<Recording>> {
-        Some(self.encodings.encodings.get(&id)?.recording?.id())
+    /// **Which performance this row is of.** It used to be the binding held
+    /// for a row's *file*, because a row was a file. A row is an appearance
+    /// now (#155) and the slot names its recording; a loose row is one.
+    fn recording_of(&self, id: crate::model::rows::CopyId) -> Option<Id<Recording>> {
+        use crate::model::rows::CopyId;
+        match id {
+            CopyId::On(track) => Some(self.spine.tracks.get(&track)?.recording.id()),
+            CopyId::Loose(recording) => self
+                .spine
+                .recordings
+                .contains_key(&recording)
+                .then_some(recording),
+        }
     }
 
-    fn playable(&self, id: Id<Encoding>) -> Option<crate::model::rows::Playable<'_>> {
-        let levels = &self.encodings.encodings.get(&id)?.levels;
+    fn playable(&self, id: crate::model::rows::CopyId) -> Option<crate::model::rows::Playable<'_>> {
+        // **Which copy would open.** A row is an appearance and an appearance
+        // has no locator; playing one is a question about a file, asked here
+        // rather than at listing time.
+        let copy = self.shown_copy(id)?;
+        let levels = &self.encodings.encodings.get(&copy)?.levels;
         Some(crate::model::rows::Playable {
             // Only a holding on *this* device. A row the library knows about
             // and this machine does not hold is an ordinary row and an
             // unplayable one, which is a different answer from "no such row".
-            locator: self.locators.get(&id)?,
+            locator: self.locators.get(&copy)?,
             gain: (!levels.is_empty()).then(|| crate::model::rows::Loudness {
                 track_db: levels.track_db(),
                 track_peak: levels.track_peak(),
@@ -1367,6 +1481,9 @@ type Ranked<'a> = Vec<(Confidence, usize, &'a str)>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Listing {
     pub recording: Id<Recording>,
+    /// **What this row is** — its own identity (#155).
+    pub row: crate::model::rows::CopyId,
+    /// The copy filling it, where anything does.
     pub copy: Option<Id<Encoding>>,
 }
 
@@ -2206,8 +2323,8 @@ mod tests {
         );
 
         let l = Librarian::from_catalogue(&i.catalogue());
-        let copy = *l.encodings.encodings.keys().next().expect("a copy");
-        let shown = l.listed(copy).expect("a row").genre().to_vec();
+        let row = *l.rows.keys().next().expect("a row");
+        let shown = l.listed(row).expect("a row").genre().to_vec();
 
         assert_eq!(
             shown,
@@ -2247,8 +2364,8 @@ mod tests {
         i.ingest(100, std::slice::from_ref(&loose));
         let l = Librarian::from_catalogue(&i.catalogue());
 
-        let copy = *l.encodings.encodings.keys().next().expect("one copy");
-        let row = l.listed(copy).expect("a row");
+        let row_id = *l.rows.keys().next().expect("one row");
+        let row = l.listed(row_id).expect("a row");
         assert_eq!(row.title, "A Loose Single", "it is still a row");
         assert_eq!(row.track, None, "a position needs something to be on");
         assert_eq!(row.disc, None);
@@ -2283,8 +2400,8 @@ mod tests {
         m.ingest(100, &scan);
         let l = Librarian::from_catalogue(&m.catalogue());
 
-        let copy = *l.encodings.encodings.keys().next().unwrap();
-        let row = l.listed(copy).expect("a row");
+        let row_id = *l.rows.keys().next().unwrap();
+        let row = l.listed(row_id).expect("a row");
         let mut shown: Vec<&str> = row.genre().iter().map(String::as_str).collect();
         shown.sort_unstable();
         assert_eq!(

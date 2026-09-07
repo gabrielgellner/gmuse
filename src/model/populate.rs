@@ -788,7 +788,9 @@ mod tests {
             "the row changed identity when the file changed place"
         );
         assert_eq!(
-            l.where_held(recording).as_deref(),
+            l.shown_copy(recording)
+                .and_then(|c| l.where_held(c))
+                .as_deref(),
             Some(now.display().to_string().as_str()),
             "the locator did not follow the file"
         );

@@ -185,8 +185,10 @@ fn check(part: &str) -> Result<(), Refused> {
 /// `None` for a copy the library cannot describe — it has no row, so there is
 /// nothing to render from.
 pub fn proposed(l: &Librarian, copy: Id<Encoding>) -> Option<Result<PathBuf, Refused>> {
-    let row = Listing::listed(l, copy)?;
+    // **A row is an appearance** (#155) and this renders a *file*, so the file
+    // names its row rather than being one.
     let format = l.encoding(copy)?.format;
+    let row = Listing::listed(l, l.row_of_copy(copy)?)?;
 
     let under = fit(&component(row.file_under), COMPONENT_LIMIT);
     // **`album_if_named`, not `album`.** The latter stands in `No Album` so a
@@ -245,7 +247,7 @@ pub struct Plan {
 /// is not a tie to be broken — moving one on top of the other's name is how a
 /// file disappears — so both stay put and both are reported.
 pub fn plan(l: &Librarian, root: &Path) -> Plan {
-    plan_of(l, root, &Listing::rows(l))
+    plan_of(l, root, &l.every_copy())
 }
 
 /// The same, over a chosen set — what an import plans for the files it just
@@ -438,7 +440,8 @@ mod tests {
     }
 
     fn only(l: &Librarian) -> Result<PathBuf, Refused> {
-        let copy = Listing::rows(l)[0];
+        // **Storage is copy-shaped** (#155): it renders a file, not a row.
+        let copy = l.every_copy()[0];
         proposed(l, copy).expect("a fixture row renders")
     }
 

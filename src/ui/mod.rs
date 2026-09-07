@@ -9787,8 +9787,9 @@ mod tests {
         let mut ui = ui_of(&store, true);
         let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
-        // A row id **is** the encoding id now, so there is nothing to derive.
-        ui.playback.playing = Some(id);
+        // **`current` is the row and `playing` is the file** (#155). A row is
+        // an appearance; what a decoder holds open is a copy of one.
+        ui.playback.playing = lib_of(&store).shown_copy(id);
         ui.queue.push_back(id);
 
         let saved = capture_session(&ui, &ctx);
@@ -11632,15 +11633,26 @@ mod tests {
         let store = fixture();
         let l = lib_of(&store);
         let id = Listing::rows(l)[0];
-        let audio = l.encodings.encodings[&id].audio;
-        // A row id **is** the encoding id (#86).
-        let encoding = id;
+        // **A row is an appearance** (#155), so the copy behind it is asked
+        // for — this test rebinds that copy, which is what a relink does.
+        let encoding = l.shown_copy(id).expect("the fixture fills it");
+        let audio = l.encodings.encodings[&encoding].audio;
         let was = crate::model::id::Id::<Recording>::of_basis(&Basis::Audio(audio));
         let now = crate::model::id::Id::<Recording>::of_basis(&Basis::MusicBrainz(
             uuid::Uuid::from_u128(0xca11),
         ));
 
         // Somebody identified it: the file holds a different recording now.
+        //
+        // **Three facts, because a relink moves the appearance too** (#155).
+        // The file says which performance it holds and the slot it fills says
+        // which performance sits there; moving only the first leaves the row
+        // naming the song the file used to be. `Proposal::Identified` emits
+        // all three, and this test builds them by hand, so it builds all three.
+        let slot = l
+            .slot_of(Some(encoding))
+            .expect("the fixture places its copy");
+        let placed = &l.spine.tracks[&slot];
         let mut clock = crate::model::clock::HybridClock::new(crate::model::id::Id::derived(b"t"));
         let relink: std::collections::BTreeSet<Record> = [
             Fact::RecordingIdentified {
@@ -11651,6 +11663,13 @@ mod tests {
                 encoding,
                 from: Some(was),
                 to: now,
+            },
+            Fact::TrackPlaced {
+                track: slot,
+                medium: placed.medium.id(),
+                recording: now,
+                position: placed.position,
+                title_on_release: None,
             },
         ]
         .into_iter()
