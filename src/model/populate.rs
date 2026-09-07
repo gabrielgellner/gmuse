@@ -65,6 +65,18 @@ pub struct Report {
     /// 6,500 files for an unrelated reason. Said here, at the moment it is
     /// seen, by the only thing that can see it.
     pub duplicates: Vec<(PathBuf, PathBuf)>,
+    /// Facts this pass actually added, once what the log already said was
+    /// dropped — #148. Zero for a re-import of unchanged files.
+    pub written: usize,
+    /// **Files refused because they contradict what the library records** —
+    /// #148. Known audio, saying it belongs somewhere else.
+    ///
+    /// Not imported, and not resolved by a rule either: first-wins, best-rung
+    /// and newest-wins are all guesses that are wrong sometimes and invisibly
+    /// so, and what they leave behind is an unreachable release group — an
+    /// entry nobody will ever fix, which is what `library-api.md` §7 refuses
+    /// to accumulate.
+    pub contradicts: Vec<(PathBuf, String)>,
     pub elapsed: Duration,
     /// What each scanned path turned out to be.
     ///
@@ -223,6 +235,30 @@ pub fn reconcile(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report
 ///
 /// **What `import` does, and no longer what a scan does** (#62). Given paths a
 /// person named, this is the declaration that they belong here.
+/// Where a file says it sits: the album, the disc and the track.
+type Placement = (Id<crate::model::entity::ReleaseGroup>, u16, u16);
+
+/// What this file says about where it sits, in the same terms.
+///
+/// **Derived exactly as `ingest` would derive it**, so the comparison is
+/// against the id that would actually be minted rather than against a string.
+fn claims(s: &crate::model::instance::Scanned) -> Option<Placement> {
+    let album = s.album.as_deref()?;
+    let credited = s.album_artist.as_deref().unwrap_or(&s.artist);
+    let group = match s.mb_release_group {
+        Some(mbid) => Id::<crate::model::entity::ReleaseGroup>::of_musicbrainz(mbid),
+        None => Id::<crate::model::entity::ReleaseGroup>::derived(
+            format!(
+                "{}\u{1f}{}",
+                crate::model::ingest::normalise(credited),
+                crate::model::ingest::normalise(album)
+            )
+            .as_bytes(),
+        ),
+    };
+    Some((group, s.disc.unwrap_or(1), s.track?))
+}
+
 pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report {
     let started = Instant::now();
     let paths = audio_files(roots);
@@ -231,6 +267,7 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
         ..Default::default()
     };
 
+    let mut paths_of = Vec::with_capacity(paths.len());
     let mut scanned = Vec::with_capacity(paths.len());
     let mut held = std::collections::BTreeMap::new();
     // Path to encoding, kept **per path** rather than read back out of
@@ -255,7 +292,8 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
                     // "which one do I delete" is answerable.
                     report.duplicates.push((path.clone(), PathBuf::from(first)));
                 }
-                minted.push((path, encoding));
+                minted.push((path.clone(), encoding));
+                paths_of.push(path);
                 scanned.push(s);
                 report.ingested += 1;
             }
@@ -263,7 +301,68 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
         }
     }
 
+    // **What the log already said, so a re-import can write nothing** (#148).
+    let before = instance.records().clone();
+    // **Two files, one set of bytes, two albums** — #148, and it is refused
+    // rather than resolved. Every rule for picking a winner is a guess that is
+    // wrong sometimes and invisibly so, and what it leaves behind is a release
+    // group nothing points at: an entry nobody will ever fix, which is what
+    // `library-api.md` §7 exists to stop accumulating.
+    //
+    // **Compared within this pass, not against the log**, and that is the
+    // whole difficulty. A recorded placement disagreeing with a file is
+    // usually the file being *better* than it was: it gained a MusicBrainz
+    // release-group id, or the id rule changed under it — #147 renumbered
+    // every fallback-minted album, and a check against the log called all 480
+    // of their files liars. Neither is a contradiction; both are updates.
+    //
+    // Two files in one pass claiming one encoding for two albums cannot be
+    // explained that way. Telling those apart *across* passes needs the log to
+    // record which file a placement came from, and it does not.
+    let mut wanted: BTreeMap<Id<Encoding>, (Placement, PathBuf)> = BTreeMap::new();
+    let mut refused: std::collections::HashSet<Id<Encoding>> = Default::default();
+    for (at, s) in paths_of.iter().zip(&scanned) {
+        let encoding = Id::<Encoding>::of_audio(&s.audio);
+        let Some(here) = claims(s) else { continue };
+        match wanted.get(&encoding) {
+            Some((there, first)) if *there != here => {
+                report.contradicts.push((
+                    at.clone(),
+                    format!(
+                        "the same audio is in {} as {}/{}-{}, and here as {}/{}-{}",
+                        first.display(),
+                        there.0,
+                        there.1,
+                        there.2,
+                        here.0,
+                        here.1,
+                        here.2
+                    ),
+                ));
+                refused.insert(encoding);
+            }
+            None => {
+                wanted.insert(encoding, (here, at.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    // **Both sides stay out.** Keeping whichever came first is the guess this
+    // refuses to make.
+    let mut keep = Vec::with_capacity(scanned.len());
+    for s in scanned {
+        if refused.contains(&Id::<Encoding>::of_audio(&s.audio)) {
+            report.ingested -= 1;
+        } else {
+            keep.push(s);
+        }
+    }
+    let scanned = keep;
+
     instance.ingest(now, &scanned);
+    instance.drop_repeats_since(&before);
+    report.written = instance.records().len() - before.len();
 
     // Which recording each file became, taken from the catalogue the ingest
     // just produced. Not recomputed: the ladder that chooses a recording id
@@ -348,6 +447,80 @@ mod tests {
 
     use crate::model::round_trip::{write_tags, write_wav};
     use crate::model::seam::Librarian;
+
+    /// **A re-import of unchanged files writes nothing** — #148.
+    ///
+    /// `apply` deduplicates against what the log already says and `import` did
+    /// not, so running it twice recorded every fact again under a new stamp.
+    /// On this library that was 111,879 repeats in 207,450 records — 54% of
+    /// the log — and it is what makes a re-import too expensive to be the
+    /// ordinary way to take in a correction.
+    #[test]
+    fn importing_the_same_files_again_writes_nothing() {
+        let dir = library("idempotent", &[("Callisto", None), ("Luna", None)]);
+        let mut i = Instance::new(Id::derived(b"laptop"));
+
+        let first = populate(&mut i, std::slice::from_ref(&dir), 100);
+        assert!(first.written > 0, "the first pass has to write something");
+        let after = i.records().len();
+
+        let again = populate(&mut i, std::slice::from_ref(&dir), 200);
+        assert_eq!(again.ingested, 2, "both files were still read");
+        assert_eq!(again.written, 0, "a second pass wrote facts the log had");
+        assert_eq!(i.records().len(), after, "the log grew on a no-op import");
+    }
+
+    /// **Two files, one set of bytes, two albums — both refused** — #148.
+    ///
+    /// Every rule for picking a winner is a guess that is wrong sometimes and
+    /// invisibly so, and what it leaves is a release group nothing points at.
+    ///
+    /// **Compared within the pass, not against the log**, which is the part
+    /// that took a wrong turn first: a recorded placement disagreeing with a
+    /// file is usually the file being *better* than it was — it gained a
+    /// MusicBrainz id, or the id rule changed under it. Checking against the
+    /// log called all 480 files of #147's renumbered albums liars.
+    #[test]
+    fn two_copies_claiming_two_albums_are_both_refused() {
+        let dir = std::env::temp_dir().join("gmuse-populate-contradiction");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("01 Callisto.wav");
+        let second = dir.join("Bodzin - Callisto.wav");
+        write_wav(&first, 4410);
+        std::fs::copy(&first, &second).unwrap();
+        write_placed(&first, "Callisto", "Luna");
+        write_placed(&second, "Callisto", "A Completely Different Album");
+
+        let mut i = Instance::new(Id::derived(b"laptop"));
+        let report = populate(&mut i, std::slice::from_ref(&dir), 100);
+
+        assert_eq!(report.contradicts.len(), 1, "{:?}", report.contradicts);
+        assert_eq!(
+            i.catalogue().groups.len(),
+            0,
+            "a second album was minted, which is the damage this prevents"
+        );
+        assert_eq!(report.written, 0, "a refused pair wrote facts anyway");
+    }
+
+    /// **A file the library already knows, saying the same thing, is not a
+    /// contradiction** — it is the ordinary re-import, and it writes nothing.
+    #[test]
+    fn re_reading_a_file_that_agrees_is_not_a_contradiction() {
+        let dir = std::env::temp_dir().join("gmuse-populate-agrees");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("01 Callisto.wav");
+        write_wav(&at, 4410);
+        write_placed(&at, "Callisto", "Luna");
+
+        let mut i = Instance::new(Id::derived(b"laptop"));
+        populate(&mut i, std::slice::from_ref(&dir), 100);
+        let again = populate(&mut i, std::slice::from_ref(&dir), 200);
+        assert_eq!(again.contradicts.len(), 0);
+        assert_eq!(again.written, 0);
+    }
 
     /// **Cataloguing some files does not unpublish the rest** — #145.
     ///
@@ -574,6 +747,33 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A title, an artist, an album and a track number — what a placement
+    /// needs, which `write_tags` deliberately does not carry.
+    fn write_placed(at: &Path, title: &str, album: &str) {
+        use lofty::config::WriteOptions;
+        use lofty::id3::v2::Id3v2Tag;
+        use lofty::prelude::{ItemKey, TagExt};
+        use lofty::tag::{Accessor, ItemValue, Tag, TagItem};
+
+        let mut id3 = Id3v2Tag::default();
+        id3.set_title(title.to_string());
+        id3.set_artist("An Artist".into());
+        let mut tag: Tag = id3.into();
+        tag.insert(TagItem::new(
+            ItemKey::AlbumTitle,
+            ItemValue::Text(album.into()),
+        ));
+        tag.insert(TagItem::new(
+            ItemKey::AlbumArtist,
+            ItemValue::Text("An Artist".into()),
+        ));
+        tag.insert(TagItem::new(
+            ItemKey::TrackNumber,
+            ItemValue::Text("1".into()),
+        ));
+        tag.save_to_path(at, WriteOptions::default()).unwrap();
     }
 
     fn library(name: &str, files: &[(&str, Option<&str>)]) -> PathBuf {

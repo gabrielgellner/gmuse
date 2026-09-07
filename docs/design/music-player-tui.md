@@ -4397,6 +4397,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   the folder settled it: 10 of 12 tracks byte-identical and deduped correctly, 2 genuinely different. That duplicate is
   #146; the minting defect was real anyway and is fixed here.
 
+- **2026-09-06** **Import is idempotent, and a contradiction is refused rather than resolved (#148).**
+
+  **Idempotent first, because it was not.** `apply` deduplicates against what the log already says and `import` did not,
+  so running it twice recorded every fact again under a new stamp: **111,879 repeats in 207,450 records, 54% of this
+  library's log**, written by re-importing a few times in one afternoon. Scoped to what one call added, deliberately — a
+  blanket rule would be wrong, because `RecordingPlayed` carries no timestamp and two plays of one track _are_ one fact
+  told apart by their stamps. An ingest produces no plays, which is what makes it safe there.
+
+  That is what makes the rest affordable: a file that agrees now writes nothing, so re-importing is the ordinary way to
+  take a correction in rather than something to avoid.
+
+  **A contradiction is two files, one set of bytes, two albums.** Both refused, neither imported. Every rule for picking
+  a winner — first, newest, best-sourced — is a guess that is wrong sometimes and invisibly so, and what it leaves
+  behind is a release group nothing points at. `Catalogue::placed` is one slot per encoding, so the loser's release,
+  medium and track are folded and unreachable. This is §7's rule rather than a new one: a library that accepts anything
+  and sorts it out later fills with entries nobody will ever fix.
+
+  **Compared within the pass, not against the log, and the first version got that wrong.** A recorded placement
+  disagreeing with a file is usually the file being _better_ than it was — it gained a MusicBrainz release-group id, or
+  the id rule changed under it. Checking against the log called **all 480 files** of #147's renumbered albums liars. Two
+  files in one pass claiming one encoding for two albums cannot be explained that way. Telling them apart _across_
+  passes would need the log to record which file a placement came from, and it does not.
+
+  On this library it refuses 14 files: the Early James duplicate, and a Thomas Brinkmann one the renderer could not see
+  because those copies share their encodings.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

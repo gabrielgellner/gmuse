@@ -343,7 +343,6 @@ fn run_library(
                 return Ok(());
             }
 
-            let before = log.records().len();
             let report =
                 crate::model::populate::populate(&mut log, &targets, crate::history::now_ms());
             for (path, recording) in &report.identified {
@@ -352,12 +351,19 @@ fn run_library(
             for (path, why) in &report.unreadable {
                 eprintln!("unreadable: {} — {why}", path.display());
             }
+            // **Refused, not resolved** (#148). A rule for picking a winner is
+            // a guess that is wrong sometimes and invisibly so, and what it
+            // leaves behind is a release group nothing points at.
+            for (path, why) in &report.contradicts {
+                eprintln!("contradicts the library: {}\n    {why}", path.display());
+            }
             eprintln!(
-                "{} file(s), {} confirmed, {} resting on their bytes, {} fact(s)",
+                "{} file(s), {} confirmed, {} resting on their bytes, {} refused, {} new fact(s)",
                 report.ingested,
                 report.confirmed,
                 report.provisional,
-                log.records().len() - before
+                report.contradicts.len(),
+                report.written
             );
             if *write {
                 // **Then republish what this device holds** (#145). `import`

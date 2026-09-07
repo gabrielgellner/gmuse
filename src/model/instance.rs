@@ -543,6 +543,33 @@ impl Instance {
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
     )]
+    /// **Drop records this pass added that the log already said** — #148.
+    ///
+    /// A re-import of an unchanged file should write nothing. It wrote
+    /// everything: 54% of this library's log — 111,879 of 207,450 records —
+    /// was one fact recorded again under a new stamp, because `import` had no
+    /// equivalent of `apply`'s "already in the log" check.
+    ///
+    /// **Scoped to what one call added, and that is not fussiness.** A blanket
+    /// rule would be wrong: `RecordingPlayed` carries no timestamp, so two
+    /// plays of one track *are* the same fact told apart only by their stamps,
+    /// and deduplicating those would count one play where there were two. An
+    /// ingest produces no plays, which is what makes this safe here.
+    pub fn drop_repeats_since(&mut self, before: &BTreeSet<Record>) {
+        let said: std::collections::HashSet<String> = before
+            .iter()
+            .filter_map(|r| serde_json::to_string(&r.fact).ok())
+            .collect();
+        self.records.retain(|r| {
+            before.contains(r)
+                || !serde_json::to_string(&r.fact).is_ok_and(|encoded| said.contains(&encoded))
+        });
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+    )]
     /// Drop this instance's superseded holdings assertions.
     ///
     /// Safe at any moment, because folding a compacted log gives exactly what
