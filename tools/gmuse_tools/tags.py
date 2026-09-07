@@ -27,6 +27,13 @@ where the two disagree the ID3 value is the newer one.
 
 The exception is lyrics, which is why this pass migrates before it deletes.
 
+**A malformed APE tag is removed by position** (#144). `ape_of` refuses one,
+which is right for reading and was wrong for removing: 64 blocks survived a
+full pass because the tool counted them as absent, and every one of them was
+unparseable — precisely the files this module exists for. `ape_span` finds the
+block by its own footer and `strip_ape_bytes` cuts it off, checking the audio
+is untouched afterwards.
+
     uv run python -m tags survey  ~/MusicLibrary          # -> out/tags-review.tsv
     uv run python -m tags apply   ~/MusicLibrary          # dry run
     uv run python -m tags apply   ~/MusicLibrary --write  # snapshots first
@@ -45,6 +52,7 @@ import typer
 from mutagen import MutagenError
 from mutagen.apev2 import APENoHeaderError, APEv2
 from mutagen.id3 import ID3, USLT, ID3NoHeaderError
+from mutagen.mp3 import MP3
 
 from gmuse_tools.genre.common import out_path, walk, write_tsv
 
@@ -66,12 +74,108 @@ GAIN_KEYS: Final = frozenset(
 TRUTHY: Final = frozenset({"y", "yes", "1"})
 MODERN: Final = (2, 4, 0)
 
+#: What an APEv2 tag looks like from the outside — #144. Found this way it can
+#: be removed without being understood.
+#:
+#: **Scanned rather than found at a fixed offset**, because the end of an mp3
+#: is a queue: mp3gain's APE, a 128-byte ID3v1 block, and on this library a
+#: Lyrics3v2 tag too, in whatever order the tools that wrote them chose. The
+#: first attempt looked only at the last 32 and 160 bytes and found nothing on
+#: files whose APE header sat 374 bytes from the end.
+APE_MAGIC: Final = b"APETAGEX"
+FOOTER_LEN: Final = 32
+APE_VERSIONS: Final = frozenset({1000, 2000})
+TAIL_SCAN: Final = 64 * 1024
+
 
 def ape_of(path: Path) -> APEv2 | None:
-    """The APEv2 tag, or None. A malformed one counts as absent."""
+    """The APEv2 tag, or None. A malformed one counts as absent.
+
+    Absent **for reading**, which is right — a tag that will not parse says
+    nothing. It is not absent from the file, and `ape_span` is what sees it.
+    """
     try:
         return APEv2(path)
     except (APENoHeaderError, MutagenError, OSError, ValueError):
+        return None
+
+
+def ape_span(path: Path) -> tuple[int, int] | None:
+    """Where the APEv2 tag sits in the file, found by position — issue #144.
+
+    **The one that reaches a malformed tag.** `ape_of` refuses those, so they
+    were passed over as already clean: of the 64 APE blocks left in this
+    library after a full pass, *every one* was unparseable. They are also
+    precisely the files this whole module exists for — a single bad item makes
+    `lofty` abandon the file, audio and all (gmuse #53).
+
+    The footer is 32 bytes and carries its own length, so the block can be cut
+    off without understanding a byte of its contents. It sits either at the
+    very end or just before a 128-byte ID3v1 block, which is the order mp3gain
+    writes.
+    """
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - TAIL_SCAN))
+        base = max(0, size - TAIL_SCAN)
+        tail = handle.read()
+
+    at = -1
+    while (at := tail.find(APE_MAGIC, at + 1)) >= 0:
+        block = tail[at : at + FOOTER_LEN]
+        if len(block) < FOOTER_LEN:
+            break
+        version = int.from_bytes(block[8:12], "little")
+        length = int.from_bytes(block[12:16], "little")
+        flags = int.from_bytes(block[20:24], "little")
+        if version not in APE_VERSIONS or not 0 < length < size:
+            continue
+        has_header = bool(flags & (1 << 31))
+        is_header = bool(flags & (1 << 29))
+        # A header sits before its items; a footer after them. Either one gives
+        # the whole span, which is what a strip needs.
+        start = base + at if is_header else base + at + FOOTER_LEN - length
+        end = start + length + (FOOTER_LEN if has_header else 0)
+        if 0 <= start < end <= size:
+            return start, end
+        # **A tag that runs past the end of the file** — one here, whose header
+        # claims 420 bytes with 98 present, holding two mp3gain keys. It was
+        # cut off by something. Nothing can follow a tag that never ends, so
+        # everything from the header to EOF is the tag, and truncating there is
+        # the only reading of it.
+        if is_header and 0 <= start < size < end:
+            return start, size
+    return None
+
+
+def strip_ape_bytes(path: Path) -> bool:
+    """Cut the APEv2 tag out by position. True if anything was removed.
+
+    **Verified against what the removal is for.** The audio must be untouched,
+    so the MPEG stream's duration is read before and after and must agree; if
+    it does not, the file is put back exactly as it was. Truncating a file is
+    destructive in a way rewriting a tag is not, and this is the one place in
+    this module that does it.
+    """
+    span = ape_span(path)
+    if span is None:
+        return False
+    start, end = span
+    before = mp3_seconds(path)
+    original = path.read_bytes()
+    path.write_bytes(original[:start] + original[end:])
+    if mp3_seconds(path) != before or ape_span(path) is not None:
+        path.write_bytes(original)
+        why = f"refused: cutting the APE tag changed {path.name}"
+        raise ValueError(why)
+    return True
+
+
+def mp3_seconds(path: Path) -> int | None:
+    """The audio's length in whole seconds, for checking nothing moved."""
+    try:
+        return int(MP3(path).info.length)
+    except (MutagenError, OSError, ValueError):
         return None
 
 
@@ -120,7 +224,10 @@ def plan(path: Path) -> dict[str, object] | None:
     lyrics = ape_lyrics(ape)
     salvage = bool(lyrics) and not has_uslt(id3)
 
-    drop_ape = ape is not None
+    # **By position, not by parse** (#144). `ape_of` refuses a malformed tag,
+    # so those files read as already clean and were passed over — and they are
+    # the ones this module exists for.
+    drop_ape = ape is not None or ape_span(path) is not None
     drop_v1 = has_id3v1(path)
     upgrade = id3 is not None and id3.version < MODERN
 
@@ -128,6 +235,7 @@ def plan(path: Path) -> dict[str, object] | None:
         return None
 
     extra = sorted(k for k in (ape or {}) if k.lower() not in GAIN_KEYS and k.lower() != "lyrics")
+    unreadable = drop_ape and ape is None
     return {
         "apply": "y",
         "id3": version,
@@ -135,7 +243,7 @@ def plan(path: Path) -> dict[str, object] | None:
         "drop_ape": "y" if drop_ape else "",
         "drop_id3v1": "y" if drop_v1 else "",
         "salvage_lyrics": f"{len(lyrics)} chars" if salvage else "",
-        "ape_other": "; ".join(extra),
+        "ape_other": "unreadable — stripped by position" if unreadable else "; ".join(extra),
         "path": str(path),
     }
 
@@ -195,6 +303,9 @@ def normalise(path: Path, *, write: bool) -> str:
 
     if ape is not None:
         ape.delete(path)
+    elif strip_ape_bytes(path):
+        # A tag mutagen would not parse, cut off by its own length (#144).
+        return "unreadable APE stripped by position"
 
     return "lyrics migrated, normalised" if moved else "normalised"
 
