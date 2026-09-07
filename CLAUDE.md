@@ -79,6 +79,17 @@ fast-forward merges with squash always on, and source branches delete themselves
 
 Because merges are fast-forward, an MR that has fallen behind `main` needs a rebase before it can merge.
 
+**The MR title must itself be a Conventional Commit**, because squash-on-merge uses the _title_ and throws the commit
+body away. A well-typed commit under a bare title lands on `main` untyped, and `filter_unconventional` then drops it
+from the changelog without a word — the same silent failure the section above describes, arriving by a different door.
+It has happened once (`8b84fd3`, the #151 fix), and it is not repairable through an MR: rewriting a merged commit is a
+force-push by definition, and `main` is protected precisely so that cannot happen. **So the title is the last moment
+this is fixable, and after the merge the entry is simply gone.**
+
+That is a cost worth accepting rather than working around. The initial commit is already filtered out for the same
+reason, and a `cliff.toml` preprocessor special-casing one subject line would be a permanent wart describing a
+historical accident.
+
 ### Configuration and theming
 
 `config.toml` holds **settings** and **theme** as TOML, and **key bindings as command strings** — one command language
