@@ -32,6 +32,7 @@ ingest, then genre, then rsgain, and `--next` prints it.
 from __future__ import annotations
 
 import collections
+import contextlib
 import csv
 import re
 import shutil
@@ -148,6 +149,68 @@ def named_release(mbid: str, ours: list[str]) -> Match | None:
     titles = [t["title"] for m in full.get("media", []) for t in m.get("tracks", [])]
     _, share = tracklist_match(ours, titles)
     return Match(full, "named", share)
+
+
+def missing_tracks(folder: Path) -> list[str]:
+    """Where this folder holds fewer tracks than its own tags say the album has.
+
+    **A fragment declares itself.** `Adele/21 (Bonus Tracks - HN826CDE)` holds
+    two files numbered `12/13` and `13/13`: the tags say the album has thirteen
+    tracks and the folder has two, so this is part of a record that lives
+    somewhere else — the other sixteen tracks of *21* are in two sibling
+    folders, and no folder-shaped search can ever match the whole.
+
+    Checked from the tags rather than from folder names. A rule about names is
+    how `Studio 1 - Variationen` came to be held twice; `12/13` is not a guess.
+
+    Counted **per disc**, because a two-disc album has two tracks numbered 1 and
+    each side declares its own total.
+
+    Returns a line per short disc, empty when the folder is whole (or says
+    nothing about how whole it should be).
+    """
+    per_disc: dict[str, tuple[int, set[int]]] = {}
+    for path in folder.iterdir():
+        if path.suffix.lower() not in AUDIO:
+            continue
+        tags = File(path, easy=True)
+        if tags is None:
+            continue
+        number = (tags.get("tracknumber") or [""])[0]
+        disc = ((tags.get("discnumber") or [""])[0].split("/")[0]) or "1"
+        total = 0
+        if "/" in number:
+            total = int(number.split("/")[1] or 0)
+        elif tags.get("tracktotal"):
+            total = int((tags["tracktotal"] or ["0"])[0] or 0)
+        held, seen = per_disc.get(disc, (0, set()))
+        with contextlib.suppress(ValueError):
+            seen.add(int(number.split("/")[0]))
+        per_disc[disc] = (max(held, total), seen)
+
+    return [
+        f"disc {disc}: {len(seen)} of {total} tracks — missing {sorted(set(range(1, total + 1)) - seen)}"
+        for disc, (total, seen) in sorted(per_disc.items())
+        if total and len(seen) < total
+    ]
+
+
+def whole_album(folder: Path) -> bool:
+    """Whether this folder is a record rather than a piece of one, and say so.
+
+    **Refused before the search, not after.** A fragment scores weak against
+    the release it belongs to and can score *exact* against a wrong small one:
+    a two-track folder will find some two-track single, and that match is
+    confident and useless.
+    """
+    short = missing_tracks(folder)
+    if not short:
+        return True
+    print(f"  {folder.name} is part of an album, not an album:")
+    for line in short:
+        print(f"    {line}")
+    print("  Nothing written. Bring the whole record together, or pass --release yourself.")
+    return False
 
 
 def identify(artist: str, album: str, ours: list[str]) -> Match | None:
@@ -385,6 +448,8 @@ def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> No
     if not pairs:
         print(f"  no audio in {folder}")
         return
+    if not whole_album(folder):
+        return
     ours = [t for _, t in pairs]
     match = (
         named_release(wanted.release, ours)
@@ -464,6 +529,20 @@ def survey(root: Path, out: Path) -> None:
         artist, _, album = rel.partition("/")
         ours = [t for _, t in our_titles(d)]
         print(f"  {i}/{len(albums)} {rel}", file=sys.stderr)
+        if short := missing_tracks(d):
+            rows.append(
+                {
+                    "accept": "",
+                    "verdict": "part of an album",
+                    "share": "",
+                    "ours": len(ours),
+                    "theirs": "",
+                    "album": rel,
+                    "release": "",
+                    "differs": "; ".join(short),
+                }
+            )
+            continue
         try:
             match = identify(artist, album, ours)
         except Exception as e:  # noqa: BLE001 - one album must not end the survey
