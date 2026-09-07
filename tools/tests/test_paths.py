@@ -164,3 +164,24 @@ def test_the_mastering_marker_is_shared_with_the_quality_pass() -> None:
     assert processed(Path("/x/A - B (Radio edit)_pn.mp3")) is True
     assert processed(Path("/x/A - B.mp3")) is False
     assert processed(Path("/x/openpn.mp3")) is False, "a suffix, not a substring"
+
+
+def test_departed_is_not_walked(tmp_path: Path) -> None:
+    """A retired file is kept so a mistake is reversible, not so a pass edits it.
+
+    `storage-layout.md` §6: `remove` moves the bytes to `.departed` and only an
+    explicit purge deletes them. A survey that lists them asks you to identify
+    records you removed on purpose; a retag that touches them edits the copy you
+    kept precisely so it would stay as it was.
+    """
+    from gmuse_tools.genre.common import walk  # noqa: PLC0415
+
+    (tmp_path / "Artist" / "Album").mkdir(parents=True)
+    (tmp_path / ".departed" / "Artist" / "Album").mkdir(parents=True)
+    (tmp_path / ".gmuse").mkdir()
+    keep = tmp_path / "Artist" / "Album" / "01 Kept.mp3"
+    keep.write_bytes(b"\x00")
+    (tmp_path / ".departed" / "Artist" / "Album" / "01 Gone.mp3").write_bytes(b"\x00")
+    (tmp_path / ".gmuse" / "01 Log.mp3").write_bytes(b"\x00")
+
+    assert walk(tmp_path) == [keep]

@@ -98,9 +98,21 @@ def tags_of(path: Path) -> dict[str, str]:
     return tags
 
 
+#: Directories under the library root that are not the library.
+#:
+#: `.gmuse` is the log. `.departed` is music somebody retired — kept so a
+#: mistake is reversible (`storage-layout.md` §6) and **not** a place any pass
+#: should propose work on: an audit that lists it asks you to identify records
+#: you removed on purpose, and a retag that touches it edits the copy you kept
+#: precisely so it would stay as it was.
+NOT_THE_LIBRARY: Final = (".gmuse", ".departed")
+
+
 def walk(root: Path) -> list[Path]:
-    """Return every audio file under `root`, sorted, skipping gmuse's own data directory."""
-    return sorted(p for p in root.rglob("*") if p.suffix.lower() in AUDIO and ".gmuse" not in p.parts)
+    """Return every audio file under `root`, sorted, skipping what is not the library."""
+    return sorted(
+        p for p in root.rglob("*") if p.suffix.lower() in AUDIO and not any(part in NOT_THE_LIBRARY for part in p.parts)
+    )
 
 
 def album_key(tags: dict[str, str]) -> tuple[str, str]:

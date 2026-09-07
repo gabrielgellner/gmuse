@@ -43,11 +43,6 @@ def coverage(root: Path) -> dict[str, tuple[int, int]]:
     """
     out: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0])
     for path in walk(root):
-        # **`.departed` is not the library** — a retired file is kept so a
-        # mistake is reversible (`storage-layout.md` §6), and auditing it would
-        # ask `ingest` to be pointed at music somebody removed on purpose.
-        if ".departed" in path.parts:
-            continue
         try:
             tags = File(path, easy=True)
         except Exception as e:  # noqa: BLE001 - an unreadable file is another audit's business

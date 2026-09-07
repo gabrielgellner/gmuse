@@ -32,8 +32,10 @@ ingest, then genre, then rsgain, and `--next` prints it.
 from __future__ import annotations
 
 import collections
+import csv
 import re
 import shutil
+import sys
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass
@@ -41,6 +43,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import typer
+from mutagen import File
 from mutagen.flac import FLAC
 from mutagen.id3 import (
     ID3,
@@ -61,7 +64,7 @@ from mutagen.id3 import (
     UFID,
 )
 
-from gmuse_tools.genre.common import tracklist_match
+from gmuse_tools.genre.common import compare_key, out_path, tracklist_match, walk, write_tsv
 from gmuse_tools.genre.fetch import get_json
 
 MB: Final = "https://musicbrainz.org/ws/2"
@@ -423,7 +426,111 @@ def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> No
 #: For records no title comparison can settle — MusicBrainz lists every track
 #: of `Studio 1 - Variationen` as `[untitled]`, which is the sleeve's own
 #: labelling, so only the numbering carries meaning.
+LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
 RELEASE = typer.Option("", help="a MusicBrainz release id you have checked yourself")
+
+
+def diffs(ours: list[str], theirs: list[str], limit: int = 3) -> str:
+    """The first few titles that disagree, as one reviewable field.
+
+    A share on its own says *how much* disagrees and never *what*, and what is
+    the whole question: `Adele — 21` scored 87% against two different releases,
+    one because our tags hold two typos and one because it is a genuinely
+    different record.
+    """
+    seen = {compare_key(t) for t in theirs}
+    missing = [t for t in ours if compare_key(t) not in seen]
+    shown = " · ".join(f"ours {t!r}" for t in missing[:limit])
+    return shown + (f" · +{len(missing) - limit} more" if len(missing) > limit else "")
+
+
+def survey(root: Path, out: Path) -> None:
+    """Identify every album that carries no MusicBrainz id. Writes no tags.
+
+    **The review file is the point.** `apply` accepts only an exact tracklist,
+    which is right unattended and leaves the interesting half untouched: an
+    album whose tags hold a typo, or which is one of several editions. Those
+    are a minute's reading each, and unreadable as 139 separate command runs.
+    """
+    rows: list[dict[str, object]] = []
+    albums = sorted({p.parent for p in walk(root)})
+    for i, d in enumerate(albums, 1):
+        files = [p for p in d.iterdir() if p.suffix.lower() in AUDIO]
+        if not files:
+            continue
+        if any((File(p, easy=True) or {}).get("musicbrainz_trackid") for p in files):
+            continue
+        rel = str(d.relative_to(root))
+        artist, _, album = rel.partition("/")
+        ours = [t for _, t in our_titles(d)]
+        print(f"  {i}/{len(albums)} {rel}", file=sys.stderr)
+        try:
+            match = identify(artist, album, ours)
+        except Exception as e:  # noqa: BLE001 - one album must not end the survey
+            # **A long pass has to survive one bad album.** Losing the run
+            # means losing every rate limit spent getting to it, and the file
+            # this writes is the only thing that made the work reviewable.
+            print(f"      failed: {e}", file=sys.stderr)
+            rows.append(
+                {
+                    "accept": "",
+                    "verdict": "error",
+                    "share": "",
+                    "ours": len(ours),
+                    "theirs": "",
+                    "album": rel,
+                    "release": "",
+                    "differs": str(e)[:80],
+                }
+            )
+            continue
+        if match is None:
+            rows.append(
+                {
+                    "accept": "",
+                    "verdict": "no candidate",
+                    "share": "",
+                    "ours": len(ours),
+                    "theirs": "",
+                    "album": rel,
+                    "release": "",
+                    "differs": "",
+                }
+            )
+            continue
+        theirs = [t["title"] for m in match.release.get("media", []) for t in m.get("tracks", [])]
+        rows.append(
+            {
+                "accept": "y" if match.verdict == "exact" else "",
+                "verdict": match.verdict,
+                "share": f"{match.share:.0%}",
+                "ours": len(ours),
+                "theirs": len(theirs),
+                "album": rel,
+                "release": match.release["id"],
+                "differs": diffs(ours, theirs),
+            }
+        )
+    write_tsv(out, rows)
+    tally = collections.Counter(str(r["verdict"]) for r in rows)
+    for k, n in tally.most_common():
+        print(f"{n:5}  {k}", file=sys.stderr)
+    print(f"\n{len(rows)} album(s) -> {out}", file=sys.stderr)
+    print("`exact` rows are marked `y` already. Read the rest and mark what you accept.", file=sys.stderr)
+
+
+def accept(root: Path, review: Path, *, write: bool) -> None:
+    """Bring in every album the review marks `y`, on the release it names."""
+    rows = [r for r in csv.DictReader(review.open(), delimiter="\t") if r["accept"].strip().lower() == "y"]
+    print(f"{len(rows)} album(s) marked")
+    for r in rows:
+        d = root / r["album"]
+        if not d.is_dir():
+            print(f"  gone: {r['album']}")
+            continue
+        print(f"\n== {r['album']}")
+        artist, _, album = r["album"].partition("/")
+        apply(d, Wanted(artist=artist, album=album, release=r["release"]), None, write=write)
 
 
 def register(app: typer.Typer) -> None:
@@ -434,6 +541,18 @@ def register(app: typer.Typer) -> None:
     # **Typer reads this parameter list as the command's interface**, so the
     # options cannot be grouped into an object the way `apply` groups them —
     # a struct here would be one positional argument on the command line.
+    @ingest_app.command("survey")
+    def survey_cmd(root: Path = LIB) -> None:
+        """Identify every album carrying no MusicBrainz id. Writes no tags."""
+        survey(root.expanduser(), out_path("ingest-review.tsv"))
+
+    @ingest_app.command("accept")
+    def accept_cmd(
+        root: Path = LIB, *, write: bool = typer.Option(default=False, help="actually move and tag")
+    ) -> None:
+        """Bring in every album the review marks `y`, on the release it names."""
+        accept(root.expanduser(), out_path("ingest-review.tsv"), write=write)
+
     @ingest_app.command("apply")
     def apply_cmd(  # noqa: PLR0913
         folder: Path = typer.Argument(..., help="the download to bring in"),

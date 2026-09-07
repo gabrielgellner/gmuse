@@ -97,7 +97,17 @@ def get_json(url: str, params: dict[str, str]) -> dict[str, Any] | None:
     """
     delay = COURTESY_DELAY
     for _ in range(RETRIES):
-        response = requests.get(url, headers=USER_AGENT, timeout=TIMEOUT, params=params)
+        try:
+            response = requests.get(url, headers=USER_AGENT, timeout=TIMEOUT, params=params)
+        except requests.RequestException:
+            # **A reset or a timeout is not an answer either**, and it used to
+            # be fatal: one `ReadTimeout` ended a 139-album survey at album 30
+            # and took the rate limit spent getting there with it. `bronze`
+            # learned this and this did not, though both ask the same server.
+            # Same remedy as a throttle — wait longer and ask again.
+            time.sleep(delay)
+            delay *= 2
+            continue
         time.sleep(delay)
         if response.status_code == HTTP_OK:
             body = response.json()
