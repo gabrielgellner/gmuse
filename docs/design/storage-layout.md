@@ -187,7 +187,10 @@ A convention, not a fact, and the rule holds: nothing may be recorded _only_ the
 
 ## 10. What is left to build
 
-- **The renderer**: propose a path from the library, check it against §5, refuse or move, record the holding.
+- **The renderer proposes and checks — built** (`gmuse shelf render`). It says where every file belongs and what stands
+  in the way, and moves nothing. On this library: 6,471 would move, 14 refused, 0 settled — everything moves because the
+  `General/` and `Dance/` catalog levels go.
+- **The mover**: take a plan and carry it out. The irreversible half, and deliberately separate.
 - **Ingest renders on the way in**, as part of #62's declaration, rather than cataloguing a file where it landed.
 - **Migration**, which is a re-render — and which must not start until #143 has consumed the paths, because on the ID3v1
   files the path is the better record and a re-render is the last moment it exists.

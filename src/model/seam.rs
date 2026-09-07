@@ -1140,6 +1140,16 @@ impl Librarian {
         self.placed.get(&copy).copied()
     }
 
+    /// One encoding, by id.
+    pub fn encoding(&self, copy: Id<Encoding>) -> Option<&Encoding> {
+        self.encodings.encodings.get(&copy)
+    }
+
+    /// How many discs a pressing has, where anything counted — #134.
+    pub fn release_media(&self, release: Id<crate::model::entity::Release>) -> Option<u16> {
+        self.spine.releases.get(&release)?.media
+    }
+
     /// The pressing a copy's slot sits on. Asked of a slot for the reason
     /// [`Librarian::files_under`] is: a recording is on every release that
     /// holds it, and only the slot says which one this copy came off.

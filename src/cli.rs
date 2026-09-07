@@ -182,6 +182,17 @@ pub enum Shelf {
         #[arg(long)]
         write: bool,
     },
+    /// **Say where every file belongs, and what stands in the way** — #132.
+    ///
+    /// One readable tree, rendered from the library rather than from the tags:
+    /// `{file_under}/{album}/{disc-}{track} {title}.{ext}`. Structural facts
+    /// only — never genre, era or catalog, because those are views.
+    ///
+    /// **Reports only.** Nothing is moved yet; a path that is illegal, too
+    /// long, or wanted by two copies goes to the list rather than being
+    /// mangled, and the file stays where it is. That is safe because the path
+    /// is not the binding — identity is the audio.
+    Render,
     /// Propose filing whatever is in no collection, by the folder it sits in.
     ///
     /// **A proposal, printed, and never applied.** The folder is evidence a

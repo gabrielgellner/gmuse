@@ -37,6 +37,7 @@ mod session;
 mod shelf;
 mod smart;
 mod sort;
+mod storage;
 mod text;
 mod ui;
 mod undo;
@@ -364,6 +365,32 @@ fn run_library(
             } else {
                 eprintln!("dry run — nothing written. Add --write.");
             }
+        }
+        cli::Shelf::Render => {
+            let (log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let mut library = crate::model::seam::Librarian::from_catalogue(&log.catalogue());
+            library.here(device);
+            let root = roots.first().cloned().unwrap_or_default();
+            let plan = crate::storage::plan(&library, &root);
+
+            for (_, from, to) in &plan.moves {
+                println!("{}\t{}", from.display(), root.join(to).display());
+            }
+            for (copy, why) in &plan.refused {
+                eprintln!("refused: {copy} — {why}");
+            }
+            eprintln!(
+                "{} settled, {} would move, {} refused, {} held elsewhere",
+                plan.settled,
+                plan.moves.len(),
+                plan.refused.len(),
+                plan.elsewhere
+            );
+            eprintln!("nothing was moved: `render` reports only.");
         }
         cli::Shelf::Query { unidentified } => {
             let (log, _) = crate::model::instance::Instance::open(

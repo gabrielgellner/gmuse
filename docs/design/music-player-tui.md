@@ -4333,6 +4333,28 @@ Append here as decisions are made. Format: date, decision, rationale.
   the renderer is not confident about is reported and left where it is, which is safe precisely because the path is not
   the binding.
 
+- **2026-09-06** **The renderer proposes and refuses; it does not mangle (#132).** `gmuse shelf render` says where each
+  file belongs — `{file_under}/{album}/{disc-}{track} {title}.{ext}` — and moves nothing. Splitting proposal from
+  movement is the whole safety property, and it is affordable because **the path is not the binding**: a file in the
+  wrong place costs nothing, so refusing is always available.
+
+  Checked before a name is used: forbidden and control characters, reserved Windows names, a trailing dot or space, the
+  255-byte component cap, and a case-insensitive collision — APFS and SMB fold case, so finding that out during a move
+  is finding out too late. **A trailing dot is stripped and an internal one kept**, because `Manhattan Research, Inc.`
+  is a name and the dot in `D.T.` is meaning.
+
+  **Two copies wanting one path are both refused.** Picking a winner moves one file onto the other's name, which is how
+  a file disappears.
+
+  **The first run on the real library found two problems it did not cause.** Fourteen refusals are one album under two
+  capitalisations — `Strange Time to Be Alive` against `Strange Time To Be Alive` — which are one directory on APFS and
+  two release groups in the fold, because a group id is derived from the raw title. And 400 files across 26 albums would
+  file under `Tom Waits and Crystal Gayle`: Tom Waits' whole discography, renamed by a joined credit from _One from the
+  Heart_. That is exactly the hazard `Scanned::credit_is_joined` documents, already in the data.
+
+  **NFC normalisation is stated as absent rather than half-done.** macOS hands out decomposed names and Linux does not,
+  so the same album can be two directories; doing it needs `unicode-normalization`, and a dependency needs a decision.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

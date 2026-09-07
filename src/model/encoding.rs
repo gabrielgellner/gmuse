@@ -136,6 +136,22 @@ pub enum Format {
 }
 
 impl Format {
+    /// The extension a file of this format carries — #132.
+    ///
+    /// **The one the tools already expect**, since the point of keeping an
+    /// extension at all is that everything which opens files by name still
+    /// works. `m4a` for both AAC and ALAC, which is what they are in.
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Format::Flac => "flac",
+            Format::Alac | Format::Aac => "m4a",
+            Format::Wav => "wav",
+            Format::Mp3 => "mp3",
+            Format::Vorbis => "ogg",
+            Format::Opus => "opus",
+        }
+    }
+
     pub const fn is_lossless(self) -> bool {
         matches!(self, Format::Flac | Format::Alac | Format::Wav)
     }
