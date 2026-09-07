@@ -10,6 +10,7 @@ gmuse-tools quality  survey|propose     what the bytes are
 gmuse-tools genre    fetch|propose|hierarchy|apply|snapshot
 gmuse-tools cache    stats|prune        what an authority said
 gmuse-tools audit    library|dj|duplicates  what is wrong
+gmuse-tools paths    survey             what a path knows
 gmuse-tools tags     normalise
 gmuse-tools ingest   run
 ```
@@ -35,7 +36,7 @@ from __future__ import annotations
 
 import typer
 
-from gmuse_tools import audit_dj, audit_library, bronze, duplicates, identify, ingest, quality, tags
+from gmuse_tools import audit_dj, audit_library, bronze, duplicates, identify, ingest, paths, quality, tags
 
 # `credits` shadows a builtin, which ruff is right to flag — the module is named
 # for what it holds and the alias keeps both true.
@@ -70,6 +71,7 @@ identify.register(identify_app)
 quality.register(quality_app)
 bronze.register(cache_app)
 credits_pass.register(app)
+paths.register(app)
 tags.register(app)
 ingest.register(app)
 audit_library.register(audit_app)

@@ -191,12 +191,18 @@ So the shape is a **pipeline of passes, ending in one import**:
 
 ```
 bought download
+  → read the path for facts             paths.py     #143, and it must be first
   → normalise the tag formats           tags.py
   → resolve against MusicBrainz         a lookup pass
   → fingerprint what that missed        AcoustID (#57)
   → fill the gaps by hand or by model   whatever the case needs
   → gmuse library import <dir>          strict, and the last step
 ```
+
+**`paths.py` runs first, and the order is load-bearing** (#143). A path holds facts nothing else records — a mastering
+marker on 144 files, a series in one filename — and its strongest signal for a _truncated_ tag is a value of exactly 30
+characters **beside a 128-byte ID3v1 block**. `tags.py` exists to strip those blocks. Run it first and the evidence is
+gone: on the local library, where it has already run, every truncation suspect is unconfirmable for exactly that reason.
 
 A Bandcamp purchase is the ordinary case: the core tags are there, and a MusicBrainz or Discogs pass and possibly a
 fingerprint are what turn "some files with plausible tags" into "something the library can hold". Each of those is a
