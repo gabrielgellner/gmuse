@@ -4448,6 +4448,25 @@ Append here as decisions are made. Format: date, decision, rationale.
   What is left in the old tree is Fiona Apple's 444-byte album title, which no filesystem will hold and which wants a
   shorter name in the library rather than a rule.
 
+- **2026-09-06** **A path too long is shortened at a word, not refused (#150).** Refusing was right while nothing
+  shortened — a name cut mid-word is one nobody can search for, and this library had one: Fiona Apple's album folder
+  ended `…to Batter When`, four words into a sentence.
+
+  But the refusal could not be the final answer, because **the title is not a mistake**. _When the Pawn…_ is 444
+  characters of poem, written in reply to a magazine profile, and it held the Guinness record for the longest album
+  title. MusicBrainz carries it whole and the library is right to. No filesystem will, so the **path** gives way and the
+  `…` says it did.
+
+  Renaming the album was the other option and it is the wrong one: the library would then be wrong about what the record
+  is called, to make a directory fit. The path is a rendering; renderings are what bend.
+
+  The cut lands on a space and never mid-character, and the track number and extension come out of the name's budget — a
+  title that just fits would otherwise make a filename that does not. That emptied the last of the old tree: `General/`
+  and `Dance/` are gone, 191 artist folders remain, and `shelf render` reports **0 refused, 0 blocked**.
+
+  A bonus nobody asked for: the old filenames were truncated too, so the migration restored `04 Love.mp3` to
+  `04 Love Ridden.mp3` from what the library knew.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

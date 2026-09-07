@@ -57,6 +57,9 @@ const COMPONENT_LIMIT: usize = 255;
 /// over SMB from machines that refuse them.
 const FORBIDDEN: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 
+/// What a shortened component ends with, so a reader can see it was cut.
+const ELLIPSIS: &str = "…";
+
 /// Names Windows will not open whatever the extension.
 const RESERVED: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"];
 
@@ -107,6 +110,37 @@ fn component(text: &str) -> String {
     cleaned.trim().trim_end_matches(['.', ' ']).to_string()
 }
 
+/// Shorten a component to fit, at a word boundary, and say so — #150.
+///
+/// **Deliberate and visible, which is the whole difference.** Refusing was
+/// right while nothing shortened: a name silently cut mid-word is one nobody
+/// can search for, and this library already had one — Fiona Apple's album
+/// folder ended `…to Batter When`, four words into a sentence.
+///
+/// But the refusal cannot be the final answer, because the title is not a
+/// mistake. *When the Pawn…* is 444 characters of poem and held the Guinness
+/// record for the longest album title; the library is right to hold it whole
+/// and no filesystem will. So the **path** gives way, and the `…` says it did.
+///
+/// Cut at a space so the result is a phrase rather than a fragment, and never
+/// mid-character.
+fn fit(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let room = budget.saturating_sub(ELLIPSIS.len());
+    let mut end = room.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = text[..end].trim_end();
+    let at = cut.rfind(' ').unwrap_or(cut.len());
+    // A single word longer than the budget has no boundary to cut at, so it is
+    // cut where it must be.
+    let kept = if at == 0 { cut } else { &cut[..at] };
+    format!("{}{ELLIPSIS}", kept.trim_end())
+}
+
 /// Whether a component can be a directory or a file name.
 fn check(part: &str) -> Result<(), Refused> {
     if part.is_empty() {
@@ -130,11 +164,15 @@ pub fn proposed(l: &Librarian, copy: Id<Encoding>) -> Option<Result<PathBuf, Ref
     let row = Listing::listed(l, copy)?;
     let format = l.encoding(copy)?.format;
 
-    let under = component(row.file_under);
+    let under = fit(&component(row.file_under), COMPONENT_LIMIT);
     // **`album_if_named`, not `album`.** The latter stands in `No Album` so a
     // tree node always has a label; rendering that would make a directory
     // called "No Album" the answer to "what release is this on".
-    let album = row.album_if_named.map(component).filter(|a| !a.is_empty());
+    let album = row
+        .album_if_named
+        .map(component)
+        .filter(|a| !a.is_empty())
+        .map(|a| fit(&a, COMPONENT_LIMIT));
     let title = component(if row.title.is_empty() { "" } else { row.title });
 
     // The disc prefix only where the release has more than one (#134).
@@ -148,7 +186,10 @@ pub fn proposed(l: &Librarian, copy: Id<Encoding>) -> Option<Result<PathBuf, Ref
         (None, _, _) => String::new(),
     };
 
-    let name = format!("{lead}{title}.{}", format.extension());
+    // The extension and the track prefix are part of the name's budget.
+    let ext = format.extension();
+    let room = COMPONENT_LIMIT.saturating_sub(lead.len() + 1 + ext.len());
+    let name = format!("{lead}{}.{ext}", fit(&title, room));
     let mut parts = vec![under];
     parts.extend(album);
     parts.push(name);
@@ -562,25 +603,72 @@ mod tests {
         );
     }
 
-    /// **A name over the limit is refused, never truncated.**
+    /// **A name over the limit is shortened at a word boundary, and says so.**
     ///
-    /// This library already holds the failure: Fiona Apple's album folder is
-    /// cut mid-word, and the fragment is not something anybody would search
-    /// for. The file stays put and the row goes to a person.
+    /// *When the Pawn…* is 444 characters of poem and held the Guinness record
+    /// for the longest album title. The library is right to hold it whole and
+    /// no filesystem will, so the path gives way — deliberately, at a space,
+    /// with an ellipsis, rather than the mid-word stump this library already
+    /// had.
     #[test]
-    fn a_component_over_the_limit_is_refused_rather_than_cut() {
+    fn a_component_over_the_limit_is_shortened_at_a_word() {
         let l = library(&[Tagged {
             path: "/m/x.mp3".into(),
             artist: Some("Fiona Apple".into()),
-            album: Some("When the Pawn ".repeat(30)),
+            album: Some("When the Pawn Hits the Conflicts ".repeat(20)),
             title: Some("Fast As You Can".into()),
             tracknumber: Some(2),
             ..Default::default()
         }]);
+        let at = only(&l).expect("a long name is not a refusal");
+        let album = at.components().nth(1).expect("an album level");
+        let album = album.as_os_str().to_string_lossy();
+        assert!(album.len() <= COMPONENT_LIMIT, "{} bytes", album.len());
         assert!(
-            matches!(only(&l), Err(Refused::TooLong(_))),
-            "a 420-byte album name was accepted"
+            album.ends_with(ELLIPSIS),
+            "nothing says it was cut: {album}"
         );
+        assert!(
+            !album.trim_end_matches(ELLIPSIS).ends_with(' '),
+            "cut left a trailing space: {album}"
+        );
+    }
+
+    /// The cut lands on a space, so what is left reads as a phrase.
+    #[test]
+    fn shortening_cuts_at_a_word_and_never_mid_character() {
+        assert_eq!(fit("short", 255), "short");
+        assert_eq!(fit("one two three four", 12), "one two…");
+
+        // **Never mid-character.** A budget landing inside a multi-byte char
+        // would otherwise produce something that is not a string.
+        let accented = "é".repeat(40);
+        let cut = fit(&accented, 21);
+        assert!(cut.len() <= 21, "{} bytes", cut.len());
+        assert!(cut.ends_with(ELLIPSIS));
+
+        // A single word longer than the budget has no boundary to cut at.
+        let word = "a".repeat(300);
+        assert!(fit(&word, 20).len() <= 20);
+    }
+
+    /// **The name's budget includes what goes around it**, or a title that
+    /// just fits produces a filename that does not.
+    #[test]
+    fn a_track_number_and_an_extension_come_out_of_the_budget() {
+        let l = library(&[Tagged {
+            path: "/m/x.mp3".into(),
+            artist: Some("An Artist".into()),
+            album: Some("An Album".into()),
+            title: Some("Word ".repeat(80)),
+            tracknumber: Some(2),
+            ..Default::default()
+        }]);
+        let at = only(&l).expect("renders");
+        let name = at.file_name().expect("a name").to_string_lossy();
+        assert!(name.len() <= COMPONENT_LIMIT, "{} bytes", name.len());
+        assert!(name.ends_with(".mp3"), "{name}");
+        assert!(name.starts_with("02 "), "{name}");
     }
 
     /// Windows refuses these whatever the extension, and this tree is read
