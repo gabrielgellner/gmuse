@@ -442,11 +442,12 @@ fn run_library(
                 eprintln!("could not move {}: {why}", at.display());
             }
             eprintln!(
-                "{} settled, {} {} move, {} refused, {} held elsewhere",
+                "{} settled, {} {}, {} refused, {} blocked, {} held elsewhere",
                 plan.settled,
                 done.moved,
-                if *write { "moved" } else { "would" },
-                plan.refused.len() + done.failed.len(),
+                if *write { "moved" } else { "would move" },
+                plan.refused.len(),
+                done.failed.len(),
                 plan.elsewhere
             );
             if *write {
