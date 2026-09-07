@@ -69,6 +69,31 @@ pub enum Outcome {
 
 /// Load a cache. Never an error the caller has to handle: a cache that cannot
 /// be read just means a rescan.
+/// Throw the cache away, because something outside the player moved the music.
+///
+/// **The writer says so; the reader never guesses.** A launch deliberately does
+/// not scan — `main` says a change to the library is something you make, not
+/// something a launch notices on your behalf — so the cache is trusted until
+/// somebody replaces it. That is right for files appearing on disk behind
+/// gmuse's back, and wrong for files *gmuse itself* moved: `shelf import
+/// --write` renames every file it places, and left a cache still naming the
+/// old paths. The player then opened `01 Cassius 1999.mp3` after the import
+/// had renamed it to `1-01 …`, and reported the FLAC beside it as nothing at
+/// all, because that cache had never seen one.
+///
+/// Discarding rather than rewriting, because the cache is derivable and the
+/// 2026-08-27 decision is that it may be dropped at any time. The next launch
+/// treats it as a first run and scans.
+///
+/// A cache that is not there is not an error.
+pub fn discard(path: &Path) -> Result<(), CacheError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(CacheError::Io(e)),
+    }
+}
+
 pub fn load(path: &Path) -> Result<Outcome, CacheError> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -132,6 +157,27 @@ pub fn save(
 mod tests {
     use super::*;
     use crate::scan::Held;
+
+    /// **A cache the writer knows is wrong is thrown away, not corrected.**
+    ///
+    /// An import renames every file it places, so the paths in the cache stop
+    /// existing. The next launch treats a missing cache as a first run and
+    /// scans, which is the only thing that can be right after music moved.
+    #[test]
+    fn a_discarded_cache_is_gone_and_discarding_twice_is_fine() {
+        let dir = std::env::temp_dir().join("gmuse-cache-test-discard");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.postcard");
+        std::fs::write(&path, b"anything").unwrap();
+        assert!(path.exists());
+
+        discard(&path).expect("discards");
+        assert!(!path.exists(), "the cache is gone");
+
+        // Two imports in a row, and the second must not fail for tidying up
+        // after the first.
+        discard(&path).expect("a cache that is not there is not an error");
+    }
 
     fn held(at: &str, title: &str, artist: &str, mtime: i64, audio: u128) -> Held {
         // **A holding is its audio and where it is** (#141) — the title and

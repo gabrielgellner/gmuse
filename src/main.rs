@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             args.library_roots()
         };
-        return run_library(op, &loaded, &roots);
+        return run_library(op, &loaded, &roots, stale_cache(&args));
     }
 
     // Before the device is opened, so a refused second instance never makes a
@@ -294,11 +294,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
+/// Which cache a library operation should discard, once it has moved music.
+///
+/// `None` when the run was told not to use one, so `--no-cache` means what it
+/// says at both ends.
+fn stale_cache(args: &cli::Cli) -> Option<std::path::PathBuf> {
+    (!args.no_cache).then(|| args.cache.clone().unwrap_or_else(cache::default_path))
+}
+
+/// Throw away a cache this command has just made wrong.
+///
+/// **The writer says so, because the reader is forbidden to guess.** A launch
+/// deliberately does not scan — a change to the library is something you make,
+/// not something a launch notices on your behalf — so the cache is believed
+/// until something replaces it. That is right for files that appear behind
+/// gmuse's back and wrong for files gmuse itself moved: an import renames
+/// every file it places, and the player went on opening the old names and
+/// showing nothing at all for the copies the cache had never seen.
+fn drop_cache(path: Option<&std::path::Path>) {
+    if let Some(path) = path
+        && let Err(e) = cache::discard(path)
+    {
+        eprintln!("cache: {e}");
+    }
+}
+
 /// One library operation, and then exit.
 fn run_library(
     op: &cli::Shelf,
     loaded: &config::Loaded,
     roots: &[std::path::PathBuf],
+    cache_path: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let machine = crate::events::machine_id(&config::default_state_dir());
     let device = crate::model::id::Id::derived(machine.as_bytes());
@@ -373,6 +399,7 @@ fn run_library(
                     let n = log.flush(&loaded.data_dir)?;
                     if n > 0 {
                         eprintln!("{n} record(s) written: the holdings moved");
+                        drop_cache(cache_path.as_deref());
                     }
                 }
                 return Ok(());
@@ -454,6 +481,13 @@ fn run_library(
                 }
                 let n = log.flush(&loaded.data_dir)?;
                 eprintln!("{n} record(s) written");
+                // **Only when something actually changed.** A re-run that
+                // moves nothing and writes nothing has not made the cache
+                // wrong, and discarding it would charge the next launch a
+                // full rescan for having asked a question.
+                if done.moved > 0 || n > 0 {
+                    drop_cache(cache_path.as_deref());
+                }
             } else {
                 eprintln!("dry run — nothing written. Add --write.");
             }
@@ -500,6 +534,9 @@ fn run_library(
                 );
                 let n = library_log.flush(&loaded.data_dir)?;
                 eprintln!("{} folder(s) pruned, {n} record(s) written", done.emptied);
+                if done.moved > 0 || n > 0 {
+                    drop_cache(cache_path.as_deref());
+                }
             } else {
                 eprintln!("dry run — nothing moved. Add --write.");
             }

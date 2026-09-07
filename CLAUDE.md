@@ -20,6 +20,11 @@ key, harmonic recommendation, embeddings and fingerprinting held by the library 
 forget are named operations; a scan reconciles holdings and reads no tags; the UI edits library metadata and writing
 tags is a separate export. There is no tag editor.
 
+[`docs/design/ingestion-flow.md`](docs/design/ingestion-flow.md) is **how it works today**: which tool touches a file
+and in what order, from a download to a placed row. Read it before importing anything by hand — two orderings are
+load-bearing, `ingest` and `identify` are both MusicBrainz and are not the same stage, and §4 lists what the stages do
+not cover.
+
 [`docs/design/layers.md`](docs/design/layers.md) says which system may talk to which — the librarian, the player, the
 scanner and the `tools/` scripts. Read it before adding a caller in either direction.
 

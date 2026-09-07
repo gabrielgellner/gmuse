@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import typer
+from mutagen.flac import FLAC
 from mutagen.id3 import (
     ID3,
     TALB,
@@ -98,15 +99,30 @@ class Match:
     share: float
 
 
+#: What a download may hold.
+#:
+#: This was `.mp3` alone, and a FLAC album therefore had **no front door**:
+#: the stage that verifies a tracklist against MusicBrainz skipped every file
+#: and reported an empty folder, so a bought FLAC could only be brought in by
+#: hand — which is how five albums arrived without a MusicBrainz id between
+#: them and minted 67 recordings the library already had.
+AUDIO: Final = {".mp3", ".flac"}
+
+
 def our_titles(folder: Path) -> list[tuple[Path, str]]:
-    """Each mp3 and the title its tags claim, in track order."""
+    """Each audio file and the title its tags claim, in track order."""
     out: list[tuple[int, Path, str]] = []
     for path in folder.iterdir():
-        if path.suffix.lower() != ".mp3":
+        if path.suffix.lower() not in AUDIO:
             continue
-        tag = ID3(path)
-        title = str(tag["TIT2"].text[0]) if "TIT2" in tag else path.stem
-        number = str(tag["TRCK"].text[0]).split("/")[0] if "TRCK" in tag else "0"
+        if path.suffix.lower() == ".flac":
+            flac = FLAC(path)
+            title = (flac.get("title") or [path.stem])[0]
+            number = (flac.get("tracknumber") or ["0"])[0].split("/")[0]
+        else:
+            tag = ID3(path)
+            title = str(tag["TIT2"].text[0]) if "TIT2" in tag else path.stem
+            number = str(tag["TRCK"].text[0]).split("/")[0] if "TRCK" in tag else "0"
         out.append((int(number or 0), path, title))
     return [(p, t) for _, p, t in sorted(out)]
 
@@ -146,10 +162,78 @@ def credit(artist_credit: list[dict[str, Any]]) -> Credit:
 
 
 def write_tags(path: Path, release: dict[str, Any], disc: dict[str, Any], track: dict[str, Any]) -> None:
-    """Put the gold-standard set onto one file.
+    """Put the gold-standard set onto one file, in the form its container uses."""
+    if path.suffix.lower() == ".flac":
+        write_vorbis(path, release, disc, track)
+    else:
+        write_id3(path, release, disc, track)
 
-    Written as ID3v2.4 with `v1=0`, so an import cannot reintroduce the ID3v1
-    block the whole library was just cleaned of.
+
+def write_vorbis(path: Path, release: dict[str, Any], disc: dict[str, Any], track: dict[str, Any]) -> None:
+    """The same set, under the names a Vorbis comment uses.
+
+    Field names match what this library's existing FLACs already carry — the
+    lowercase Picard convention — so a filter written against one format finds
+    the other.
+
+    **Multi-value is native here**, which ID3 has to fake: `artists` and
+    `musicbrainz_artistid` are real lists, where the ID3 path packs them into a
+    `TXXX` frame and a slash-join.
+    """
+    tag = FLAC(path)
+    group = release.get("release-group") or {}
+    label_info = (release.get("label-info") or [{}])[0]
+    recording = track.get("recording") or {}
+    album = credit(release["artist-credit"])
+    performer = credit(track["artist-credit"])
+
+    def put(field: str, value: str | list[str] | None) -> None:
+        """Set a field, or leave it absent. An empty tag says less than none."""
+        if value:
+            tag[field] = value if isinstance(value, list) else [value]
+
+    put("title", track["title"])
+    put("album", release["title"])
+    put("artist", performer.joined)
+    put("albumartist", album.joined)
+    put("artistsort", performer.sort)
+    put("albumartistsort", album.sort)
+    put("artists", performer.names)
+    put("tracknumber", str(track["position"]))
+    put("tracktotal", str(len(disc["tracks"])))
+    put("discnumber", str(disc["position"]))
+    put("disctotal", str(len(release["media"])))
+    put("date", release.get("date"))
+    # The *original* release, which is the release group's first — the field
+    # #59 needs, and the one that keeps a remaster out of the wrong year.
+    if first := group.get("first-release-date"):
+        put("originaldate", first)
+        put("originalyear", first[:4])
+    put("media", disc.get("format"))
+    put("label", (label_info.get("label") or {}).get("name"))
+    if isrcs := recording.get("isrcs"):
+        put("isrc", isrcs[0])
+    if script := (release.get("text-representation") or {}).get("script"):
+        put("script", script)
+
+    put("musicbrainz_albumid", release["id"])
+    put("musicbrainz_albumartistid", album.ids)
+    put("musicbrainz_artistid", performer.ids)
+    put("musicbrainz_releasetrackid", track["id"])
+    put("musicbrainz_releasegroupid", group.get("id"))
+    put("musicbrainz_trackid", recording.get("id"))
+    if primary := group.get("primary-type"):
+        put("releasetype", str(primary).lower())
+    if status := release.get("status"):
+        put("releasestatus", str(status).lower())
+    tag.save()
+
+
+def write_id3(path: Path, release: dict[str, Any], disc: dict[str, Any], track: dict[str, Any]) -> None:
+    """The gold-standard set as ID3v2.4 with `v1=0`.
+
+    `v1=0` so an import cannot reintroduce the ID3v1 block the whole library
+    was just cleaned of.
     """
     tag = ID3(path)
     group = release.get("release-group") or {}
@@ -254,7 +338,7 @@ def apply(folder: Path, artist: str, album: str, dest: Path | None, *, write: bo
     """Identify, tag, rename, and optionally move into the library."""
     pairs = our_titles(folder)
     if not pairs:
-        print(f"  no mp3s in {folder}")
+        print(f"  no audio in {folder}")
         return
     ours = [t for _, t in pairs]
     match = identify(artist, album or folder.name, ours)
