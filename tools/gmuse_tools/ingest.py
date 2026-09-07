@@ -35,8 +35,11 @@ import collections
 import contextlib
 import csv
 import difflib
+import functools
+import json
 import re
 import shutil
+import sqlite3
 import sys
 import unicodedata
 from dataclasses import dataclass
@@ -185,10 +188,21 @@ def asked(url: str, params: dict[str, str]) -> dict[str, Any] | None:
     a second run over the same library is free. That is the difference between
     a review file you can regenerate and one you dare not.
     """
-    status, body = bronze.get(bronze.open_cache(), url, params, headers=ASKING)
+    status, body = bronze.get(cache(), url, params, headers=ASKING)
     if status != HTTP_OK or not isinstance(body, dict):
         return None
     return body
+
+
+@functools.cache
+def cache() -> sqlite3.Connection:
+    """The one cache connection this process uses.
+
+    Opened per call at first, which is a new sqlite handle and a `CREATE TABLE
+    IF NOT EXISTS` for every question asked — hundreds of them in a library
+    pass, to answer a question the first one already settled.
+    """
+    return bronze.open_cache()
 
 
 def missing_tracks(folder: Path) -> list[str]:
@@ -682,6 +696,139 @@ def survey(root: Path, out: Path) -> None:
     print("`exact` rows are marked `y` already. Read the rest and mark what you accept.", file=sys.stderr)
 
 
+def held_discs(folder: Path) -> tuple[str, set[int]]:
+    """The MusicBrainz release this folder's files claim, and which discs of it.
+
+    Read off the **tags**, because that is what `import` read to mint the
+    release: a slot proposed against a release id the library never saw is
+    refused, and refused loudly is the right outcome — the ids only agree where
+    the files carry `musicbrainz_albumid`.
+
+    The disc numbers come from the files too, and not from the release, because
+    a two-disc record often arrives as two folders and the library holds the
+    media it was shown. Proposing a tracklist for a disc nothing here holds
+    would be inventing the disc.
+    """
+    ids: set[str] = set()
+    discs: set[int] = set()
+    for path in folder.iterdir():
+        if path.suffix.lower() not in AUDIO:
+            continue
+        tags = File(path, easy=True) or {}
+        for mbid in tags.get("musicbrainz_albumid") or []:
+            ids.add(str(mbid))
+        raw = (tags.get("discnumber") or ["1"])[0]
+        with contextlib.suppress(ValueError):
+            discs.add(int(str(raw).split("/")[0] or 1))
+    # **One release or none.** A folder whose files disagree about which
+    # pressing they are from is a folder two records got mixed in, and guessing
+    # which is right would catalogue the wrong tracklist over both.
+    return (next(iter(ids)) if len(ids) == 1 else ""), (discs or {1})
+
+
+def slots_of(disc: dict[str, Any]) -> list[dict[str, Any]]:
+    """One medium's tracks, in the shape a `tracklisted` proposal wants.
+
+    **The recording id, not the track id.** MusicBrainz has both and they name
+    different things: the track is this release's entry, the recording is the
+    performance — and the recording is what a copy bought later, off any
+    release, would also be. Sending the track id would mint a slot no file
+    could ever converge with.
+
+    **The artists go as a list, never the joined line.** A joined string mints
+    one artist called `Armand Van Helden,Dizzee Rascal` — the bug #152 exists
+    to repair — and asserted on the MusicBrainz rung it would outrank the tag
+    it came from. Sent as a list it produces exactly the facts #152's own
+    proposal produces, so the two converge instead of rendering the credit
+    twice.
+    """
+    out = []
+    for track in disc.get("tracks", []):
+        recording = track.get("recording") or {}
+        artists = credit(track.get("artist-credit") or []).names
+        if not recording.get("id") or not artists:
+            continue
+        out.append(
+            {
+                "position": track["position"],
+                "recording": recording["id"],
+                "title": track.get("title") or recording.get("title") or "",
+                "artists": artists,
+            }
+        )
+    return out
+
+
+def tracklist(root: Path, out: Path) -> None:
+    """Write a proposal cataloguing the whole tracklist of every identified album.
+
+    The second half of #155. Identification already takes a release's id and
+    then throws the tracklist away, so the library can say it holds fifteen
+    files and cannot name the three it is missing — `gmuse library apply` on
+    what this writes is what fills that in.
+
+    **Every album with an id, not only the short ones.** A tracklist that
+    matches what is held costs nothing (`apply` drops facts the log already
+    says) and is what sets the denominator #134 asked for; restricting it to
+    folders that look incomplete would mean trusting the count we are trying to
+    establish.
+    """
+    folders = sorted({f.parent for f in walk(root)})
+    lines: list[str] = []
+    tally: collections.Counter[str] = collections.Counter()
+    # **Written as it goes, not at the end.** MusicBrainz answers a heavy `inc`
+    # in anything from 0.4 to 25 seconds, so this pass is an hour on a library
+    # this size and the temptation to interrupt it is constant. Holding the
+    # whole file until the last folder means an interrupted run produces
+    # nothing — and the responses are cached, so the *next* run is cheap only
+    # for the part that already succeeded. Both halves should survive.
+    handle = out.open("w")
+    for folder in folders:
+        mbid, discs = held_discs(folder)
+        if not mbid:
+            tally["no release id in the tags"] += 1
+            continue
+        release = asked(f"{MB}/release/{mbid}", {"inc": INC, "fmt": "json"})
+        if not release:
+            tally["release not found"] += 1
+            continue
+        media = {m["position"]: m for m in release.get("media", [])}
+        for disc in sorted(discs):
+            found = media.get(disc)
+            if found is None:
+                tally["disc not on that release"] += 1
+                continue
+            tracks = slots_of(found)
+            if not tracks:
+                tally["no tracklist"] += 1
+                continue
+            line = json.dumps(
+                {
+                    "fact": "tracklisted",
+                    "release": mbid,
+                    "position": disc,
+                    "format": found.get("format"),
+                    "tracks": tracks,
+                }
+            )
+            handle.write(line + "\n")
+            handle.flush()
+            lines.append(line)
+            tally["discs catalogued"] += 1
+            tally["slots"] += len(tracks)
+
+    handle.close()
+    for key, n in sorted(tally.items()):
+        print(f"{n:6d}  {key}", file=sys.stderr)
+    print(f"\n{len(lines)} proposal(s) -> {out}", file=sys.stderr)
+    print("Apply with `gmuse library apply --write`.", file=sys.stderr)
+    print(
+        "A disc the library has not seen is reported `unknown` and written off — "
+        "that means the files carry no album id and want `ingest accept` first.",
+        file=sys.stderr,
+    )
+
+
 def accept(root: Path, review: Path, *, write: bool) -> None:
     """Bring in every album the review marks `y`, on the release it names."""
     rows = [r for r in csv.DictReader(review.open(), delimiter="\t") if r["accept"].strip().lower() == "y"]
@@ -708,6 +855,11 @@ def register(app: typer.Typer) -> None:
     def survey_cmd(root: Path = LIB) -> None:
         """Identify every album carrying no MusicBrainz id. Writes no tags."""
         survey(root.expanduser(), out_path("ingest-review.tsv"))
+
+    @ingest_app.command("tracklist")
+    def tracklist_cmd(root: Path = LIB) -> None:
+        """Catalogue the whole tracklist of every identified album — #155."""
+        tracklist(root.expanduser(), out_path("tracklists.jsonl"))
 
     @ingest_app.command("accept")
     def accept_cmd(

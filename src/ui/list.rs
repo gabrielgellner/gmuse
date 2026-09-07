@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
 use super::theme::{Role, Theme};
+use crate::format::NO_DURATION;
 use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
 
@@ -168,6 +169,27 @@ pub fn gutter(n: usize, selected: usize) -> String {
     }
 }
 
+/// How a track row reads: playing, missing, or ordinary.
+///
+/// **One function, because there are two panes that draw track rows and they
+/// had drifted.** The tree renders its own — a track row has to look different
+/// from the artist row above it — and the greying #155 added went into
+/// `items` alone, so view 1 was the one place a track you do not own looked
+/// exactly like a track you do. That is the pane where a record is read album
+/// by album, which is where the distinction is worth the most.
+///
+/// Playing outranks missing, because a row nothing fills cannot be the one
+/// playing, and if it somehow is, saying so is the more urgent of the two.
+pub fn body_style(theme: &Theme, listed: &crate::model::rows::Listed<'_>, playing: bool) -> Style {
+    if playing {
+        theme.get(Role::Playing)
+    } else if !listed.held {
+        theme.get(Role::Absent)
+    } else {
+        Style::default()
+    }
+}
+
 /// Blank space the same width, so a row with no number still lines up.
 pub const GUTTER_BLANK: &str = "    ";
 
@@ -207,20 +229,26 @@ pub fn items<'a>(
                     .track
                     .map(|n| format!("{n:>2}"))
                     .unwrap_or_else(|| "  ".into());
-                // The playing track is marked in every list it appears in, so
-                // you can see where you are without consulting the status bar.
-                let body = if style.playing == Some(*id) {
-                    theme.get(Role::Playing)
-                } else {
-                    Style::default()
-                };
+                let body = body_style(theme, &listed, style.playing == Some(*id));
                 let mut spans = vec![
                     Span::styled(lead, theme.get(Role::Gutter)),
                     Span::styled(format!("{num}  "), body),
                 ];
                 spans.extend(highlighted(listed.title, body, style.needle, theme));
                 spans.push(Span::styled("  ", body));
-                spans.push(Span::styled(fmt_duration(listed.duration), body));
+                // **A slot has no duration, and `0:00` claims one** (#155).
+                // The library knows this track is on the record; it knows
+                // nothing about how long it plays, because that is a property
+                // of a file and there is no file. Printing a number reads as a
+                // twelve-second rip rather than as an absence.
+                spans.push(Span::styled(
+                    if listed.held {
+                        fmt_duration(listed.duration)
+                    } else {
+                        NO_DURATION.to_string()
+                    },
+                    body,
+                ));
                 ListItem::new(Line::from(spans))
             }
         })
@@ -280,6 +308,13 @@ mod tests {
     fn store_with(
         rows: &[(&str, &str, Option<u32>, &str)],
     ) -> (crate::model::seam::Librarian, Vec<CopyId>) {
+        let (l, rows, _) = store_and_scan(rows);
+        (l, rows)
+    }
+
+    fn store_and_scan(
+        rows: &[(&str, &str, Option<u32>, &str)],
+    ) -> (crate::model::seam::Librarian, Vec<CopyId>, Scan) {
         let mut store = Scan::new();
         let mut ids = Vec::new();
         for (i, (artist, album, disc, title)) in rows.iter().enumerate() {
@@ -301,7 +336,7 @@ mod tests {
             .into_iter()
             .filter_map(|copy| crate::fixture::row_of(&l, copy))
             .collect();
-        (l, rows)
+        (l, rows, store)
     }
 
     fn headers(rows: &[Row]) -> Vec<&str> {
@@ -368,6 +403,142 @@ mod tests {
         // Otherwise a partially tagged album would divide itself in half.
         let rows = rows(&store, &ids);
         assert_eq!(headers(&rows), ["One", "Two"]);
+    }
+
+    /// **A track the library holds no file for has to look different** — #155.
+    ///
+    /// It did not, in the first build of this: the style was `DIM`, which is
+    /// advisory and which plenty of terminals render identically to normal, so
+    /// the only thing telling a missing track apart was a duration of `0:00` —
+    /// and that is a number the library does not have. Two signals now, and
+    /// neither is a modifier a terminal may ignore.
+    #[test]
+    fn a_track_nothing_fills_is_greyed_and_shows_no_duration() {
+        use crate::model::log::{Fact, Record};
+        use crate::model::rows::Listing as _;
+
+        let (l, ids, store) = store_and_scan(&[("A", "One", None, "t1")]);
+        let theme = Theme::default();
+
+        // A second track on the same disc, which the library knows about and
+        // holds no file for.
+        let cat_medium = *l.spine.media.keys().next().expect("the album has a disc");
+        let unheld =
+            crate::model::id::Id::<crate::model::spine::Recording>::derived(b"a track we lack");
+        let mut clock = crate::model::clock::HybridClock::new(crate::model::id::Id::derived(b"t"));
+        let records: std::collections::BTreeSet<Record> = [
+            Fact::RecordingCatalogued {
+                recording: unheld,
+                title: "t2".into(),
+                artist: crate::model::id::Id::of_artist(None, "A"),
+            },
+            Fact::TrackPlaced {
+                track: crate::model::id::Id::derived(b"slot two"),
+                medium: cat_medium,
+                recording: unheld,
+                position: 2,
+                title_on_release: None,
+            },
+        ]
+        .into_iter()
+        .map(|fact| Record {
+            stamp: clock.stamp(200),
+            fact,
+        })
+        .collect();
+        // Folded twice on purpose: the medium's id is not knowable until the
+        // file has been catalogued, and the slot has to name it.
+        let l = crate::fixture::from_holdings_and(&store, &records);
+
+        let gap = l
+            .rows()
+            .into_iter()
+            .find(|r| l.listed(*r).is_some_and(|x| x.title == "t2"))
+            .expect("the catalogued row");
+        let held = ids[0];
+
+        let drawn = items(
+            &theme,
+            &l,
+            &[Row::Track(held), Row::Track(gap)],
+            RowStyle::default(),
+        );
+        let text = |item: &ListItem<'_>| format!("{item:?}");
+
+        assert!(
+            text(&drawn[1]).contains(NO_DURATION),
+            "a slot has no duration, so it must not print one: {}",
+            text(&drawn[1])
+        );
+        assert!(
+            !text(&drawn[0]).contains(NO_DURATION),
+            "and a row with a file still prints its length"
+        );
+        assert_ne!(
+            theme.get(Role::Absent),
+            Style::default(),
+            "an unstyled `Absent` is a row that looks held"
+        );
+        // Asserted on the *title* span, because the gutter is grey on every
+        // row and matching the whole line would pass on that alone.
+        assert!(
+            text(&drawn[1]).contains(r#"Span::from("t2").dark_gray()"#),
+            "the missing row is painted, not merely modified: {}",
+            text(&drawn[1])
+        );
+        assert!(
+            !text(&drawn[0]).contains(r#"Span::from("t1").dark_gray()"#),
+            "and a row with a file is left alone: {}",
+            text(&drawn[0])
+        );
+    }
+
+    /// **Both panes ask the same question and must get the same answer** —
+    /// #155, and the reason `body_style` exists.
+    ///
+    /// The tree renders its own track rows, because a track has to look
+    /// different from the artist row above it. So the greying went into
+    /// `items` and view 1 — the pane where a record is read album by album,
+    /// and where a missing track matters most — was the one place it looked
+    /// exactly like a track you own.
+    #[test]
+    fn a_missing_row_reads_the_same_in_every_pane() {
+        let (l, ids, _) = store_and_scan(&[("A", "One", None, "t1")]);
+        let theme = Theme::default();
+        let held = ids[0];
+        let listed = {
+            use crate::model::rows::Listing as _;
+            l.listed(held).expect("the fixture row")
+        };
+
+        assert_eq!(
+            body_style(&theme, &listed, false),
+            Style::default(),
+            "a row with a file is left alone"
+        );
+        assert_eq!(
+            body_style(&theme, &listed, true),
+            theme.get(Role::Playing),
+            "and playing still outranks everything"
+        );
+
+        let mut missing = listed;
+        missing.held = false;
+        assert_eq!(
+            body_style(&theme, &missing, false),
+            theme.get(Role::Absent),
+            "a row with no file is painted"
+        );
+        assert_eq!(
+            body_style(&theme, &missing, true),
+            theme.get(Role::Playing),
+            "a row nothing fills cannot be playing, and if it is, say that"
+        );
+        assert_ne!(
+            theme.get(Role::Absent),
+            Style::default(),
+            "an unstyled `Absent` is a row that looks held"
+        );
     }
 
     /// The bridge between the two coordinate systems. Everything outside the

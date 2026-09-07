@@ -53,6 +53,12 @@ pub enum Role {
     CompletionSelected,
     /// vim's `~` on the lines past the end of a buffer.
     Filler,
+    /// **A track the library knows about and holds no file for** — #155.
+    ///
+    /// Its own role rather than a reuse of [`Role::Gutter`]'s grey, because
+    /// the two say different things and a theme should be able to disagree
+    /// about them: the gutter is furniture, and this is the row's own state.
+    Absent,
 }
 
 impl Role {
@@ -82,6 +88,7 @@ impl Role {
             Role::SelectionPlaying => "selection_playing",
             Role::CompletionSelected => "completion_selected",
             Role::Filler => "filler",
+            Role::Absent => "absent",
         }
     }
 
@@ -114,6 +121,7 @@ impl Role {
         Role::Playing,
         Role::SelectionPlaying,
         Role::CompletionSelected,
+        Role::Absent,
     ];
 }
 
@@ -226,6 +234,16 @@ impl Default for Theme {
                     .add_modifier(Modifier::BOLD),
                 Role::Gutter => Style::default().fg(Color::DarkGray),
                 Role::Filler => Style::default().fg(Color::DarkGray),
+                // **Grey, not `DIM`.** It was the modifier, on the argument
+                // that a greyed row is the same row with something missing
+                // and another hue would read as a category. True, and it is
+                // not a colour that says so: `DIM` is advisory, and plenty of
+                // terminals render it identically to normal — measured here,
+                // the only thing telling a missing track apart was its
+                // duration. Grey is the same argument made in a way the
+                // terminal has to honour, and it is the weight `Gutter` and
+                // `Filler` already use for "here but not the point".
+                Role::Absent => Style::default().fg(Color::DarkGray),
                 // The same green as the status line's play indicator, so
                 // "playing" means one thing wherever it appears.
                 Role::Playing => Style::default()

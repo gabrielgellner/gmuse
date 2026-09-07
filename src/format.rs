@@ -12,6 +12,16 @@
 
 use std::fmt::Write as _;
 
+/// What stands where a duration would go on a row the library holds no file
+/// for — #155.
+///
+/// The same width as `m:ss`, so a column still lines up, and dashes rather
+/// than blanks because a blank reads as a rendering fault. **One spelling**,
+/// because the tree renders a row through a template and the flat lists render
+/// it in `ui::list`, and two answers to "how long is a track I do not have"
+/// is how one pane comes to say `0:00`.
+pub const NO_DURATION: &str = "-:--";
+
 /// One field of a track that a template can name.
 ///
 /// Named rather than single-letter (`%a`): the alphabet runs out, and fields
@@ -296,6 +306,13 @@ impl Field {
             // writes them in, so what shows is what the file says.
             Field::ReleaseType => r.release_types().join("; "),
             Field::ReleaseHeld => r.release_held.written().to_string(),
+            // **A row nothing fills has no length** (#155). The library
+            // knows the track is on the record and knows nothing about how
+            // long it plays, because that is a property of a file and there is
+            // no file. `0:00` reads as a twelve-second rip rather than as an
+            // absence — and it was the *only* thing telling a missing track
+            // apart, in the pane where the greying had not been applied.
+            Field::Duration if !r.held => NO_DURATION.to_string(),
             Field::Duration => {
                 let secs = r.duration.as_secs();
                 format!("{}:{:02}", secs / 60, secs % 60)

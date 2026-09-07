@@ -582,7 +582,7 @@ impl Librarian {
         }
 
         l.placed = cat.placed.clone();
-        l.held = held_index(&l.spine);
+        l.held = held_index(&l.spine, &l.placed);
 
         // Names are a register: whatever the fold settled on is the label.
         //
@@ -1039,11 +1039,34 @@ impl Librarian {
             .map(|t| t.recording.id())
             .collect();
 
+        // **A disc nothing here came off is not a record you are missing
+        // tracks from** — #155, and the rule that stops 384 rows on this
+        // library being drawn twice.
+        //
+        // A retag that changes an album's MusicBrainz id mints a new release
+        // group, a new pressing, a new disc and new slots, and the copies move
+        // to them. The old disc stays — the log is append-only and nothing
+        // retracts a slot — and while a row was a *copy* it drew nothing.
+        // Drawing appearances makes every one of them a second, empty row
+        // beside the real one: `The Bug — London Zoo` had two release groups
+        // of that name and showed track 11 twice, once with no length.
+        //
+        // The honest reading is that an empty slot only means something
+        // against a record you own part of. Where the whole disc is empty, the
+        // library is not short of a track — it is holding an identity that
+        // moved.
+        let lived_on: std::collections::BTreeSet<Id<crate::model::entity::Medium>> = self
+            .placed
+            .values()
+            .filter_map(|slot| self.spine.tracks.get(slot))
+            .map(|t| t.medium.id())
+            .collect();
         let ids: Vec<CopyId> = self
             .spine
             .tracks
-            .keys()
-            .map(|t| CopyId::On(*t))
+            .iter()
+            .filter(|(id, t)| copies.contains_key(*id) || lived_on.contains(&t.medium.id()))
+            .map(|(t, _)| CopyId::On(*t))
             // **A recording on no release is a row too**, which MusicBrainz
             // calls a standalone recording and this library has one of. Minting
             // it a release group to give it a home is what
@@ -1190,6 +1213,12 @@ impl Librarian {
             bitrate: shown.map(|e| e.bitrate),
             sample_rate: shown.and_then(|e| e.sample_rate),
             channels: shown.and_then(|e| e.channels),
+            // **Of the recording, not of the slot** (#155). `shown` is empty
+            // for a compilation's slot whose copy you own off the original
+            // album, and that row plays perfectly well — `open` asks the
+            // recording for a copy and gets one. What earns a greyed row is
+            // holding no file for the performance at all.
+            held: by.holds(recording),
         })
     }
 
@@ -1304,10 +1333,17 @@ impl Librarian {
         self.spine.recordings.keys().copied()
     }
 
-    /// Which slot a copy sits in.
-    pub fn slot_of(&self, copy: Option<Id<Encoding>>) -> Option<Id<Track>> {
-        self.placed.get(&copy?).copied()
-    }
+    // **`slot_of` lived here and is gone** (#155).
+    //
+    // It answered "which slot is this copy in", and its last caller was the
+    // tree's sort key — where the question is which slot is this *row* in.
+    // The two agree only while every row has a copy, which is the assumption
+    // #155 removes: asked of a greyed row it answered `None`, and the row
+    // sorted to the bottom of its album instead of into its gap.
+    //
+    // `placed_at` is the same lookup and is kept, because its callers really
+    // are asking about a file — which pressing this copy came off is a fact
+    // about the copy.
 
     // **`listings` lived here and is gone** (#121).
     //
@@ -1564,10 +1600,18 @@ impl Held {
 /// per copy, and it cost 97 ms of a 124 ms fold on a 6,500-row library.
 fn held_index(
     spine: &crate::model::spine::Spine,
+    // **Which slots a file actually fills** — #155, and the count would be a
+    // lie without it. This counted *slots*, which was right only while nothing
+    // wrote a slot it had no copy for: cataloguing a whole tracklist makes
+    // every disc look full the moment it is known, so an album you are three
+    // tracks short of would answer `Complete`. The question is how much of the
+    // record is **here**, and a slot is not a file.
+    placed: &std::collections::BTreeMap<Id<Encoding>, Id<Track>>,
 ) -> std::collections::BTreeMap<Id<crate::model::entity::Release>, Counted> {
+    let filled: std::collections::BTreeSet<Id<Track>> = placed.values().copied().collect();
     let mut on_medium: std::collections::BTreeMap<Id<crate::model::entity::Medium>, usize> =
         Default::default();
-    for track in spine.tracks.values() {
+    for track in spine.tracks.values().filter(|t| filled.contains(&t.id)) {
         *on_medium.entry(track.medium.id()).or_default() += 1;
     }
 
@@ -1741,11 +1785,19 @@ mod tests {
                             title_on_release: None,
                         },
                     );
+                    // **A slot and a copy of it**, which is what `here` has
+                    // always meant. It used to be enough to write the slot,
+                    // because nothing wrote one it had no file for; #155 does,
+                    // so the file has to be said out loud.
+                    l.placed.insert(
+                        Id::<Encoding>::derived(format!("e{position}-{n}").as_bytes()),
+                        id,
+                    );
                 }
             }
             // The index, which is where the logic lives now (#137) — the
             // librarian's `held_of` is a lookup into exactly this.
-            l.held = held_index(&l.spine);
+            l.held = held_index(&l.spine, &l.placed);
             l.held_of(release)
         };
 
@@ -1792,6 +1844,76 @@ mod tests {
             Librarian::default().held_of(release),
             Held::Unknown,
             "nothing known about a release nothing holds"
+        );
+    }
+
+    /// **Knowing what a record is must not be mistaken for owning it** — #155.
+    ///
+    /// The regression the second half of that issue walks straight into.
+    /// `held_index` counted slots, which was right only while a slot and a
+    /// copy were written together; cataloguing a tracklist writes slots for
+    /// tracks you do not have, and counting those says the album is complete
+    /// the moment you learn how long it is. The number wanted is how much is
+    /// **here**.
+    #[test]
+    fn a_catalogued_track_you_do_not_hold_does_not_count_as_held() {
+        use crate::model::entity::{Medium, Release};
+        use crate::model::spine;
+
+        let release = Id::<Release>::derived(b"pressing");
+        let medium = Id::<Medium>::of_medium(release, 1);
+        let mut l = Librarian::default();
+        l.spine.releases.insert(
+            release,
+            spine::Release {
+                id: release,
+                group: crate::model::id::Ref::to(Id::derived(b"group")),
+                title: "Three Tracks".into(),
+                released: None,
+                label: None,
+                catalogue_number: None,
+                media: Some(1),
+            },
+        );
+        l.spine.media.insert(
+            medium,
+            spine::Medium {
+                id: medium,
+                release: crate::model::id::Ref::to(release),
+                position: 1,
+                format: None,
+                tracks: Some(3),
+            },
+        );
+        // Three slots, as a tracklist would write them, and a file for two.
+        for n in 0..3u16 {
+            let track = Id::<crate::model::entity::Track>::derived(&n.to_le_bytes());
+            l.spine.tracks.insert(
+                track,
+                spine::Track {
+                    id: track,
+                    medium: crate::model::id::Ref::to(medium),
+                    recording: crate::model::id::Ref::to(Id::derived(b"r")),
+                    position: n + 1,
+                    title_on_release: None,
+                },
+            );
+            if n < 2 {
+                l.placed
+                    .insert(Id::<Encoding>::derived(&n.to_le_bytes()), track);
+            }
+        }
+        l.held = held_index(&l.spine, &l.placed);
+
+        assert_eq!(
+            l.held_of(release),
+            Held::Partial,
+            "three slots and two files is two thirds of a record, not all of it"
+        );
+        assert_eq!(
+            l.counted_of(release),
+            Some((2, 3)),
+            "the numerator is files and the denominator is slots"
         );
     }
 

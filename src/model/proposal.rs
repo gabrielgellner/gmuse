@@ -39,7 +39,9 @@ use std::collections::BTreeSet;
 
 use crate::model::basis::Basis;
 use crate::model::clock::HybridClock;
-use crate::model::entity::{Artist, Collection, Concept, Device, Encoding, Facet, Recording, Role};
+use crate::model::entity::{
+    Artist, Collection, Concept, Device, Encoding, Facet, Medium, Recording, Release, Role, Track,
+};
 use crate::model::facet::{self, Described};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
@@ -243,12 +245,97 @@ pub enum Proposal {
         broader: String,
         narrower: String,
     },
+    /// **The whole tracklist of one medium** — #155.
+    ///
+    /// The proposal that lets the library hold *what a record is* rather than
+    /// only what it can play. Identification already takes a release's id and
+    /// then throws away the tracklist that came with it: having matched
+    /// `Adele — 21` against an 18-track release, the library can say it holds
+    /// 15 files and cannot name the three it is missing.
+    ///
+    /// **A slot with a recording and no encoding is how this model already
+    /// says "this track exists and I do not have it."** Nothing had ever
+    /// written one, because `import` writes a slot and a copy together and so
+    /// the distinction was never exercised.
+    ///
+    /// ## Named by MusicBrainz ids, and the model mints
+    ///
+    /// Like [`Proposal::Identified`], which sends a `Basis` rather than an
+    /// `Id<Recording>`: a tool has no business minting, and every id here is a
+    /// pure function of what it sends. The release mints the medium, the
+    /// recording mints the slot, and two devices given the same tracklist land
+    /// on the same entities without a conversation.
+    ///
+    /// ## The medium must already exist, and that is the safety property
+    ///
+    /// The subject is the medium, so a tracklist for a record the library has
+    /// never seen is **stale rather than applied**. That matters because the
+    /// release id has to agree with the one `import` minted, and it only does
+    /// where the files carried the album's MusicBrainz id: a file tagged
+    /// without one mints its release from the *group*
+    /// ([`Id::<Release>::of_release`]), and a tracklist arriving against the
+    /// real MBID would then catalogue a whole phantom disc beside the real
+    /// one. Refusing is loud; a second copy of the album is not.
+    ///
+    /// ## What it costs
+    ///
+    /// "Contains" changes meaning. Afterwards the library holds catalogue
+    /// entries as well as files, so a view that queues a row has to know which
+    /// it has — and a wrong release now **invents slots for tracks that are
+    /// not on your edition** rather than merely mistagging files you own.
+    /// That is the price of a `close` match accepted by hand.
+    Tracklisted {
+        /// The MusicBrainz release. Not a group: a tracklist belongs to one
+        /// pressing, which is the whole reason #134 put the level in.
+        release: uuid::Uuid,
+        /// Which disc of it, counting from 1.
+        position: u16,
+        /// `CD`, `12" Vinyl`, `Digital Media` — carried because this fact
+        /// supersedes the medium wholesale and dropping a field would clear
+        /// it. `None` where the authority did not say.
+        #[serde(default)]
+        format: Option<String>,
+        /// Every slot on it, **in full**. The length is the denominator #134
+        /// asked for, so a partial list would claim the record is shorter than
+        /// it is — which is a worse answer than "nobody said".
+        tracks: Vec<Slotted>,
+    },
     /// A rating. Included because it is the simplest possible proposal and
     /// therefore the one worth testing the format against.
     Rated {
         recording: Id<Recording>,
         stars: Option<u8>,
     },
+}
+
+/// One slot in a [`Proposal::Tracklisted`] — a track on the record, held or
+/// not.
+///
+/// Deliberately not [`crate::model::rows::Listed`], which is a *drawn row*.
+/// This is what an authority says sits at a position, before the library has
+/// any opinion about whether it can play it.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Slotted {
+    /// Where on the disc, as the authority numbers it.
+    pub position: u16,
+    /// The **recording** — the performance filling the slot, not the track
+    /// entry that names it. MusicBrainz has both and they are different ids;
+    /// the recording is what a copy of this song anywhere else would also be,
+    /// and so it is what makes the slot converge with a file we later buy.
+    pub recording: uuid::Uuid,
+    pub title: String,
+    /// Who it is credited to, **in the order the credit names them**.
+    ///
+    /// A list rather than the joined line, and that is not a nicety. A joined
+    /// string mints one artist called `Armand Van Helden,Dizzee Rascal`, which
+    /// is the bug #152 exists to repair — and asserted here on the MusicBrainz
+    /// rung it would outrank the tag it came from and make the repair harder,
+    /// not easier.
+    ///
+    /// Sent as a list, a tracklist emits exactly the facts
+    /// [`Proposal::Credited`] emits, so the two **converge** on one set of
+    /// rows instead of rendering a credit line twice over.
+    pub artists: Vec<String>,
 }
 
 /// What `query --format jsonl` hands a tool.
@@ -306,8 +393,8 @@ pub trait Holdings {
 /// Where a copy sits, as the library currently records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slot {
-    pub track: Id<crate::model::entity::Track>,
-    pub medium: Id<crate::model::entity::Medium>,
+    pub track: Id<Track>,
+    pub medium: Id<Medium>,
     pub position: u16,
 }
 
@@ -316,6 +403,14 @@ pub struct Slot {
 pub enum Subject {
     Encoding(Id<Encoding>),
     Recording(Id<Recording>),
+    /// **A disc of a pressing** — #155, and the only subject that is not a
+    /// thing you can play.
+    ///
+    /// A tracklist is about the record, not about any song on it. Gating it on
+    /// a recording would be asking the wrong question twice over: the slots it
+    /// writes are for recordings the library has never heard of, and the one
+    /// thing that *must* already exist is the disc they go on.
+    Medium(Id<Medium>),
     /// **The vocabulary itself**, which the library always has (#79).
     ///
     /// A hierarchy edge names two concepts and no holding. Gating it on "does
@@ -344,6 +439,16 @@ impl Proposal {
             // checked below, where a missing one is a reason to refuse rather
             // than a subject the library has not heard of.
             Proposal::Derived { to, .. } => Subject::Encoding(*to),
+            // **Minted here, not sent.** The tool names a MusicBrainz release
+            // and a disc number; the id is a pure function of those two, and
+            // asking a Python script to reproduce `of_medium`'s seeding would
+            // be a second door into the same identity.
+            Proposal::Tracklisted {
+                release, position, ..
+            } => Subject::Medium(Id::<Medium>::of_medium(
+                Id::<Release>::of_musicbrainz(*release),
+                *position,
+            )),
         }
     }
 }
@@ -801,6 +906,98 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             }
             facts
         }
+        // **The tracklist becomes slots** — #155, and the half that makes the
+        // greying visible. Every fact here is derived from the ids the tool
+        // sent; nothing is invented and nothing is looked up.
+        Proposal::Tracklisted {
+            release,
+            position,
+            format,
+            tracks,
+        } => {
+            if tracks.is_empty() {
+                return Err("a tracklist with no tracks says nothing".into());
+            }
+            // **Refused rather than deduplicated**, because the slot id is a
+            // function of the recording: two rows naming one recording fold to
+            // one slot, so the record would silently come out shorter than the
+            // list that was applied. A record that really plays one recording
+            // twice is `of_track`'s known cost and wants a decision, not a
+            // quiet halving of the denominator.
+            let mut seen = BTreeSet::new();
+            if let Some(twice) = tracks.iter().find(|t| !seen.insert(t.recording)) {
+                return Err(format!("{} is listed twice", twice.recording));
+            }
+            let release = Id::<Release>::of_musicbrainz(release);
+            let medium = Id::<Medium>::of_medium(release, position);
+            let role = Id::<Role>::of_name("performer");
+            let mut facts = vec![
+                // **The denominator, and the whole medium re-stated** — the
+                // fold takes this row wholesale, so a field left out is a
+                // field cleared. #134 put `tracks` here and nothing had ever
+                // been in a position to fill it from an authority.
+                Fact::MediumCatalogued {
+                    medium,
+                    release,
+                    position,
+                    format,
+                    tracks: u16::try_from(tracks.len()).ok(),
+                },
+                Fact::RoleDefined {
+                    role,
+                    name: "performer".to_string(),
+                    class: RoleClass::Performer,
+                },
+            ];
+            if let Some(nameless) = tracks.iter().find(|t| t.artists.is_empty()) {
+                return Err(format!("{} is credited to nobody", nameless.recording));
+            }
+            for listed in tracks {
+                let recording = Id::<Recording>::of_basis(&Basis::MusicBrainz(listed.recording));
+                facts.push(Fact::RecordingIdentified {
+                    recording,
+                    basis: Basis::MusicBrainz(listed.recording),
+                });
+                for (at, name) in listed.artists.iter().enumerate() {
+                    let artist = Id::<Artist>::of_artist(None, name);
+                    facts.push(Fact::ArtistNamed {
+                        artist,
+                        name: name.clone(),
+                    });
+                    facts.push(Fact::CreditAsserted {
+                        subject: CreditOn::Recording(recording),
+                        artist,
+                        role,
+                        basis: Source::MusicBrainz,
+                        position: u8::try_from(at).unwrap_or(u8::MAX),
+                        as_credited: None,
+                        join_phrase: None,
+                    });
+                }
+                facts.push(Fact::RecordingCatalogued {
+                    recording,
+                    title: listed.title.clone(),
+                    // **The first, and the field's own doc says why that is
+                    // enough**: it can name one artist and nothing about them,
+                    // and it survives only until the tree reads credits
+                    // instead. The credits above are the answer that is right.
+                    artist: Id::<Artist>::of_artist(None, &listed.artists[0]),
+                });
+                facts.push(Fact::TrackPlaced {
+                    track: Id::<Track>::of_track(medium, recording),
+                    medium,
+                    recording,
+                    position: listed.position,
+                    // **The recording's title is the slot's title**, so
+                    // nothing is said twice. This field is for a compilation
+                    // that renames a track, and a tracklist read straight off
+                    // the release cannot tell the difference — claiming it
+                    // could would put a rename on every row.
+                    title_on_release: None,
+                });
+            }
+            facts
+        }
         Proposal::Rated { recording, stars } => {
             vec![Fact::RecordingRated { recording, stars }]
         }
@@ -823,6 +1020,22 @@ pub(crate) mod tests {
         Id::from_uuid(uuid::Uuid::from_u128(n))
     }
 
+    /// A recording MusicBrainz has named, which the double holds — so a
+    /// proposal about the *recording* and one about the record it is on can
+    /// be compared against the same library.
+    pub(crate) fn named() -> uuid::Uuid {
+        uuid::Uuid::from_u128(0x51)
+    }
+
+    /// The MusicBrainz release the double holds one disc of.
+    pub(crate) fn pressed() -> uuid::Uuid {
+        uuid::Uuid::from_u128(0xbbbb)
+    }
+
+    fn pressing() -> Id<Release> {
+        Id::<Release>::of_musicbrainz(pressed())
+    }
+
     /// The MusicBrainz id encoding 3 has already been identified as, so that
     /// "propose what is already true" is reachable rather than hypothetical.
     fn settled() -> uuid::Uuid {
@@ -838,8 +1051,14 @@ pub(crate) mod tests {
         fn holds(&self, s: Subject) -> bool {
             match s {
                 Subject::Encoding(e) => e == enc(1) || e == enc(2) || e == enc(3),
-                Subject::Recording(r) => r == rec(1) || r == rec(2),
+                Subject::Recording(r) => {
+                    r == rec(1) || r == rec(2) || r == Id::of_basis(&Basis::MusicBrainz(named()))
+                }
                 Subject::Vocabulary => true,
+                // **Disc 1 of `pressing()`, and nothing else.** A tracklist is
+                // refused for a record the library has never seen, and that
+                // refusal is the safety property worth having a double for.
+                Subject::Medium(m) => m == Id::<Medium>::of_medium(pressing(), 1),
             }
         }
 
@@ -1708,5 +1927,178 @@ mod merged {
             winner: rec(2),
         };
         assert_eq!(p.subject(), Subject::Recording(rec(2)));
+    }
+
+    // ---- #155: a tracklist becomes slots ----
+
+    fn tracklisted(release: uuid::Uuid, tracks: &[(u16, u128, &str)]) -> String {
+        let listed = Proposal::Tracklisted {
+            release,
+            position: 1,
+            format: Some("CD".into()),
+            tracks: tracks
+                .iter()
+                .map(|(at, mbid, title)| Slotted {
+                    position: *at,
+                    recording: uuid::Uuid::from_u128(*mbid),
+                    title: (*title).to_string(),
+                    artists: vec!["Adele".into()],
+                })
+                .collect(),
+        };
+        serde_json::to_string(&listed).expect("a proposal serialises")
+    }
+
+    /// **The slot exists and nothing fills it**, which is how this model has
+    /// always said "this track is on the record and I do not have it" — and
+    /// what nothing had ever written.
+    #[test]
+    fn a_tracklist_writes_a_slot_for_a_track_no_file_holds() {
+        let text = tracklisted(pressed(), &[(1, 0x51, "Rolling in the Deep")]);
+        let (records, report) = parse(&text, dev(), 100, HELD);
+        assert!(report.malformed.is_empty(), "{report}");
+        assert_eq!(report.applied, 1, "{report}");
+
+        let recording = Id::<Recording>::of_basis(&Basis::MusicBrainz(uuid::Uuid::from_u128(0x51)));
+        let medium = Id::<Medium>::of_medium(Id::<Release>::of_musicbrainz(pressed()), 1);
+        let facts: Vec<_> = records.iter().map(|r| r.fact.clone()).collect();
+
+        assert!(
+            facts.contains(&Fact::TrackPlaced {
+                track: Id::<Track>::of_track(medium, recording),
+                medium,
+                recording,
+                position: 1,
+                title_on_release: None,
+            }),
+            "the slot itself"
+        );
+        assert!(
+            facts.contains(&Fact::RecordingCatalogued {
+                recording,
+                title: "Rolling in the Deep".into(),
+                artist: Id::<Artist>::of_artist(None, "Adele"),
+            }),
+            "a greyed row still needs a name to print"
+        );
+        assert!(
+            !facts
+                .iter()
+                .any(|f| matches!(f, Fact::EncodingPlaced { .. })),
+            "**nothing is placed**: a slot with no copy is the entire point, \
+             and inventing an encoding for it would put a file nowhere"
+        );
+    }
+
+    /// **The denominator #134 asked for**, filled from an authority for the
+    /// first time. It is stated wholesale because the fold takes the row
+    /// wholesale — which is why `format` is on the wire and not dropped.
+    #[test]
+    fn a_tracklist_says_how_long_the_record_is() {
+        let text = tracklisted(pressed(), &[(1, 0x51, "One"), (2, 0x52, "Two")]);
+        let (records, _) = parse(&text, dev(), 100, HELD);
+        let medium = Id::<Medium>::of_medium(Id::<Release>::of_musicbrainz(pressed()), 1);
+        assert!(
+            records.iter().any(|r| r.fact
+                == Fact::MediumCatalogued {
+                    medium,
+                    release: Id::<Release>::of_musicbrainz(pressed()),
+                    position: 1,
+                    format: Some("CD".into()),
+                    tracks: Some(2),
+                }),
+            "two slots is a two-track disc, and the format survives the restatement"
+        );
+    }
+
+    /// **The safety property.** A tracklist's ids agree with `import`'s only
+    /// where the files carried the album's MusicBrainz id. Applied blind
+    /// against a record the library has never seen, it would catalogue a
+    /// phantom disc beside the real one — so it is stale, and says so.
+    #[test]
+    fn a_tracklist_for_a_record_the_library_has_never_seen_is_stale() {
+        let text = tracklisted(uuid::Uuid::from_u128(0xdead), &[(1, 0x51, "One")]);
+        let (records, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 0, "{report}");
+        assert_eq!(report.unknown.len(), 1, "{report}");
+        assert!(records.is_empty(), "nothing is written for a stale line");
+    }
+
+    /// A slot is keyed by which recording fills it, so two rows naming one
+    /// recording are one slot — and a list applied that way comes out shorter
+    /// than the record it claims to describe. Refused, not quietly folded.
+    #[test]
+    fn a_tracklist_that_names_one_recording_twice_is_refused() {
+        let text = tracklisted(pressed(), &[(1, 0x51, "One"), (2, 0x51, "One Again")]);
+        let (_, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    /// **A tracklist and a credit repair agree**, rather than rendering the
+    /// line twice — #152 and #155 asserting the same thing.
+    ///
+    /// The reason `artists` is a list. Sent as the joined line it would mint
+    /// one artist called `A feat. B`, on the MusicBrainz rung, which outranks
+    /// the tag it came from — so the pass that exists to split joined credits
+    /// would be fighting a stronger claim of exactly the thing it repairs.
+    #[test]
+    fn a_tracklist_credits_the_same_rows_a_credit_repair_would() {
+        let mbid = named();
+        let recording = Id::<Recording>::of_basis(&Basis::MusicBrainz(mbid));
+        let who = ["Armand Van Helden", "Dizzee Rascal"];
+
+        let listed = Proposal::Tracklisted {
+            release: pressed(),
+            position: 1,
+            format: None,
+            tracks: vec![Slotted {
+                position: 1,
+                recording: mbid,
+                title: "Bonkers".into(),
+                artists: who.iter().map(|s| (*s).to_string()).collect(),
+            }],
+        };
+        let repair = Proposal::Credited {
+            recording,
+            artists: who.iter().map(|s| (*s).to_string()).collect(),
+            basis: Source::MusicBrainz,
+        };
+
+        let credits = |p: &Proposal| -> Vec<Fact> {
+            let text = serde_json::to_string(p).expect("serialises");
+            let (records, report) = parse(&text, dev(), 100, HELD);
+            assert_eq!(report.applied, 1, "{report}");
+            records
+                .iter()
+                .map(|r| r.fact.clone())
+                .filter(|f| matches!(f, Fact::CreditAsserted { .. } | Fact::ArtistNamed { .. }))
+                .collect()
+        };
+
+        assert_eq!(
+            credits(&listed),
+            credits(&repair),
+            "the same two artists, at the same positions, on the same rung"
+        );
+    }
+
+    /// **The tool sends facts and the model mints**, as `Identified` does with
+    /// a `Basis`. Nothing in Python reproduces `of_medium`'s seeding.
+    #[test]
+    fn the_medium_is_derived_from_the_release_and_the_disc_number() {
+        let listed = Proposal::Tracklisted {
+            release: pressed(),
+            position: 2,
+            format: None,
+            tracks: vec![],
+        };
+        assert_eq!(
+            listed.subject(),
+            Subject::Medium(Id::<Medium>::of_medium(
+                Id::<Release>::of_musicbrainz(pressed()),
+                2
+            ))
+        );
     }
 }

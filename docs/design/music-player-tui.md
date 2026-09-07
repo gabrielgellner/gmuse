@@ -4502,6 +4502,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   record has no business guessing, and this library holds exactly one record that proves it. `.departed` is the only one
   that matters for correctness; the rest hold no audio and are skipped to save the walk.
 
+- **2026-09-07** **The library holds what a record is, not only what it can play (#155).** A slot with a recording and
+  no encoding is how this model has always said _"this track is on the record and I do not have it"_, and nothing had
+  ever written one: `import` writes a slot and its copy together, so the distinction existed and was never exercised.
+  `Proposal::Tracklisted` writes them, and the row it produces is drawn under its album, at its number, dimmed.
+
+  **What made it safe is that the ids are a function of what a tool sends**, as `Identified` already was. A release
+  MusicBrainz id mints the release, the release and a disc number mint the medium, and a recording id mints the slot —
+  so a tracklist lands on the medium `import` already made rather than beside it. Where the files carry no album id
+  `import` mints the release from the _group_ instead, the ids disagree, and the proposal is refused as stale. **That
+  refusal is the safety property**: a phantom disc catalogued beside the real one would be silent, and this is loud.
+
+  **Two things had to change to keep an old answer true.** `held_index` counted _slots_ to say how much of a pressing is
+  here, which was right only while a slot implied a file — cataloguing a tracklist would have made every record read
+  `Complete` the moment its length was learned. It counts filled slots now. And `advance` stopped at the first row it
+  could not open; it steps past them and says how many, because a record you are three tracks short of should still play
+  the fifteen you have.
+
+  The cost the issue named is real and is now paid: **a wrong release invents slots for tracks that are not on your
+  edition**, where before it merely mistagged files you own. That is the price of a `close` match accepted by hand, and
+  it is why `ingest survey` produces a file a person reads.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

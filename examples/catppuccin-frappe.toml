@@ -66,3 +66,6 @@ filler              = { fg = "surface1" }
 playing             = { fg = "green", mods = ["bold"] }
 selection_playing   = { fg = "green", bg = "surface1", mods = ["bold"] }
 completion_selected = { fg = "sapphire", bg = "surface1", mods = ["bold"] }
+# A track the record has and the library holds no file for — the palette has a
+# name for exactly this weight of text, so it is stated rather than dimmed.
+absent              = { fg = "overlay1" }

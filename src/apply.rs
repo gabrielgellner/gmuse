@@ -68,6 +68,15 @@ impl proposal::Holdings for Shelf {
             // term a hierarchy is built ahead of is precisely the one nothing
             // is tagged with yet.
             Subject::Vocabulary => true,
+            // **The disc has to already be here** — #155. A tracklist's ids
+            // agree with the ones `import` minted only where the files carried
+            // the album's MusicBrainz id; without one, `import` mints the
+            // release from the *group* and a tracklist arriving against the
+            // real MBID would catalogue a phantom disc beside the real one.
+            //
+            // One place, for the reason `Recording` above is: `disk` is folded
+            // log-first, so it already carries every medium the log knows.
+            Subject::Medium(id) => self.disk.media.contains_key(&id),
         }
     }
 

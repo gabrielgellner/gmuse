@@ -102,3 +102,96 @@ def test_nothing_differing_says_nothing() -> None:
     from gmuse_tools.ingest import diffs  # noqa: PLC0415
 
     assert diffs(["One", "Two"], ["One", "Two"]) == ""
+
+
+# ---- #155: what a record has, including what we do not hold ----
+
+
+def catalogued(tmp_path: Path, name: str, album_ids: list[str], discs: list[str]) -> Path:
+    """A folder of FLACs carrying an album id and a disc number each."""
+    from mutagen.flac import FLAC  # noqa: PLC0415
+
+    import tests.flacfixture as fixture  # noqa: PLC0415
+
+    d = tmp_path / name
+    d.mkdir(parents=True)
+    for i, (mbid, disc) in enumerate(zip(album_ids, discs, strict=True)):
+        p = d / f"{i + 1:02d} Track.flac"
+        fixture.write_flac(p)
+        tag = FLAC(p)
+        if mbid:
+            tag["musicbrainz_albumid"] = [mbid]
+        tag["discnumber"] = [disc]
+        tag.save()
+    return d
+
+
+def test_the_release_and_the_discs_come_from_the_files(tmp_path: Path) -> None:
+    """**The tags, not the release**, because the tags are what `import` read.
+
+    A tracklist proposed against an id the library never saw is refused as
+    stale, so the id has to be the one the files carried. And the discs are the
+    ones present here: a two-disc record often arrives as two folders, and
+    proposing a tracklist for a disc nothing holds would be inventing it.
+    """
+    from gmuse_tools.ingest import held_discs  # noqa: PLC0415
+
+    mbid = "996d1cb0-9c75-4e25-9bd3-5eaff0419f37"
+    d = catalogued(tmp_path, "Two Discs", [mbid, mbid], ["1", "2"])
+    assert held_discs(d) == (mbid, {1, 2})
+
+
+def test_a_folder_two_records_got_mixed_in_is_skipped(tmp_path: Path) -> None:
+    """Guessing which pressing is right would catalogue the wrong tracklist over both."""
+    from gmuse_tools.ingest import held_discs  # noqa: PLC0415
+
+    d = catalogued(tmp_path, "Mixed", ["aaaa", "bbbb"], ["1", "1"])
+    assert held_discs(d) == ("", {1})
+
+
+def test_a_folder_with_no_album_id_is_skipped(tmp_path: Path) -> None:
+    """Without one, `import` minted the release from the *group* and the ids disagree."""
+    from gmuse_tools.ingest import held_discs  # noqa: PLC0415
+
+    d = catalogued(tmp_path, "Untagged", ["", ""], ["1", "1"])
+    assert held_discs(d) == ("", {1})
+
+
+def test_a_slot_names_the_recording_and_not_the_track() -> None:
+    """The one thing that has to be right, and the two ids look alike.
+
+    MusicBrainz gives a release entry a `track` id and the performance filling
+    it a `recording` id. The recording is what a copy bought later — off any
+    release at all — would also be, so it is what makes a slot converge with a
+    file. The track id would mint a slot nothing could ever fill.
+
+    And the artists go as a **list**: the joined line would mint one artist
+    called `A feat. B`, which is the #152 bug, asserted on a stronger rung than
+    the tag it came from.
+    """
+    from gmuse_tools.ingest import slots_of  # noqa: PLC0415
+
+    disc = {
+        "tracks": [
+            {
+                "id": "the-track-entry",
+                "position": 1,
+                "title": "Elephant Gun",
+                "recording": {"id": "the-performance", "title": "Elephant Gun"},
+                "artist-credit": [
+                    {"name": "Beirut", "artist": {"id": "e0e1ce9c", "name": "Beirut", "sort-name": "Beirut"}}
+                ],
+            },
+            # A track MusicBrainz has no recording for is dropped rather than
+            # given an invented one: a slot's identity *is* its recording.
+            {"id": "no-performance", "position": 2, "title": "Unlinked", "recording": {}},
+        ]
+    }
+    assert slots_of(disc) == [
+        {
+            "position": 1,
+            "recording": "the-performance",
+            "title": "Elephant Gun",
+            "artists": ["Beirut"],
+        }
+    ]

@@ -1551,6 +1551,182 @@ mod containment_tests {
         assert_eq!(placed.position, 3, "the track number is the slot's");
     }
 
+    /// **A track you do not own is a row that is greyed** — #155, end to end.
+    ///
+    /// One file of a two-track record, then the tracklist that record came
+    /// with. Everything below turns on the ids converging: the file was tagged
+    /// with the album's MusicBrainz id, so `import` and the tracklist mint the
+    /// *same* release and the *same* medium, and the slot the file fills is
+    /// the one the tracklist names rather than a second slot beside it.
+    #[test]
+    fn a_tracklist_draws_the_track_no_file_holds() {
+        use crate::model::entity::Medium;
+        use crate::model::proposal::{self, Holdings, Slotted, Subject};
+        use crate::model::rows::Listing;
+
+        let mbid = uuid::Uuid::from_u128(0x5e1e);
+        let pressing = 0x5e1e_u128;
+        // A one-disc release, said out loud: without a disc count `held_of`
+        // answers `Unknown`, because an unseen second disc cannot be ruled
+        // out. #134's third answer, and it is not what is under test here.
+        let file = || {
+            let mut s = scan(1, 1, Some(pressing));
+            s.disc_total = Some(1);
+            s
+        };
+        // Track 1 of 2, and the identity its tags carry — the same uuid the
+        // tracklist will name for that slot.
+        let held = uuid::Uuid::from_u128(1 << 32 | 1);
+        let missing = uuid::Uuid::from_u128(0xabcd);
+
+        let device = Id::from_uuid(uuid::Uuid::from_u128(1));
+        let mut i = Instance::new(device);
+        i.ingest(100, &[file()]);
+        i.assert_holdings(
+            100,
+            [(
+                Id::<crate::model::entity::Encoding>::of_audio(&file().audio),
+                "/m/01.mp3".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        /// Just enough of a library for `parse` to check a subject against.
+        struct Shelf(crate::model::log::Catalogue);
+        impl Holdings for Shelf {
+            fn holds(&self, subject: Subject) -> bool {
+                match subject {
+                    Subject::Encoding(id) => self.0.encodings.contains_key(&id),
+                    Subject::Recording(id) => self.0.recordings.contains_key(&id),
+                    Subject::Medium(id) => self.0.media.contains_key(&id),
+                    Subject::Vocabulary => true,
+                }
+            }
+            fn bound(&self, _: Id<crate::model::entity::Encoding>) -> Option<Id<Recording>> {
+                None
+            }
+            fn identified(&self, _: Id<Recording>) -> Option<crate::model::basis::Basis> {
+                None
+            }
+            fn slot(&self, _: Id<crate::model::entity::Encoding>) -> Option<proposal::Slot> {
+                None
+            }
+        }
+
+        let listed = proposal::Proposal::Tracklisted {
+            release: mbid,
+            position: 1,
+            format: Some("CD".into()),
+            tracks: vec![
+                Slotted {
+                    position: 1,
+                    recording: held,
+                    title: "Track 1".into(),
+                    artists: vec!["Bodzin".into()],
+                },
+                Slotted {
+                    position: 2,
+                    recording: missing,
+                    title: "The One We Lack".into(),
+                    artists: vec!["Bodzin".into()],
+                },
+            ],
+        };
+        let text = serde_json::to_string(&listed).expect("a proposal serialises");
+        let (records, report) =
+            crate::model::proposal::parse(&text, device, 200, &Shelf(i.catalogue()));
+        assert_eq!(report.applied, 1, "{report}");
+        i.merge(200, &records);
+
+        let cat = i.catalogue();
+        assert_eq!(
+            cat.media.len(),
+            1,
+            "**the ids converged** — a second medium here is a phantom disc"
+        );
+        assert_eq!(cat.tracks.len(), 2, "two slots on the one disc");
+
+        let l = crate::model::seam::Librarian::from_catalogue(&cat);
+        let medium = Id::<Medium>::of_medium(Id::<Release>::of_musicbrainz(mbid), 1);
+        let slot_of = |rec: uuid::Uuid| {
+            crate::model::rows::CopyId::On(Id::<Track>::of_track(
+                medium,
+                Id::<Recording>::of_basis(&crate::model::basis::Basis::MusicBrainz(rec)),
+            ))
+        };
+
+        let ours = l.listed(slot_of(held)).expect("the track we hold");
+        assert!(ours.held, "we have a file for it");
+
+        let theirs = l.listed(slot_of(missing)).expect("the track we do not");
+        assert!(!theirs.held, "**the greyed row** — the whole point of #155");
+        assert_eq!(theirs.title, "The One We Lack");
+        assert_eq!(
+            theirs.album, "Luna",
+            "under the record it is missing from, not under `No Album`"
+        );
+        assert_eq!(theirs.track, Some(2), "and at its place on it");
+
+        // And knowing the record is two tracks long must not read as owning
+        // both of them.
+        let release = Id::<Release>::of_musicbrainz(mbid);
+        assert_eq!(l.counted_of(release), Some((1, 2)));
+        assert_eq!(l.held_of(release), crate::model::seam::Held::Partial);
+    }
+
+    /// **A retag leaves a disc behind, and it must not draw** — #155.
+    ///
+    /// Found on the real library, by looking at it. `The Bug — London Zoo`
+    /// showed track 11 twice, once with a length of 0: the album had been
+    /// retagged, which mints a new release group, pressing, disc and slots and
+    /// moves the copies to them. The old disc stays — the log is append-only
+    /// and nothing retracts a slot — and while a row was a *copy* it drew
+    /// nothing. Drawing appearances made every one of them a second, empty row
+    /// beside the real one. **384 of them on this library.**
+    ///
+    /// The rule that fixes it is the honest reading of what a greyed row
+    /// means: an empty slot is a track missing from a record you own part of.
+    /// A disc no file here came off is not a record you are short of — it is
+    /// an identity that moved.
+    #[test]
+    fn a_disc_nothing_here_came_off_is_not_drawn() {
+        use crate::model::rows::{CopyId, Listing};
+
+        let was = 0x5e1e_u128;
+        let now = 0x5e2e_u128;
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan(1, 1, Some(was))]);
+        // The same bytes, retagged onto another pressing and rescanned. The
+        // encoding is minted from the audio, so it is the same encoding and
+        // its placement moves; the slot it left does not go anywhere.
+        i.ingest(200, &[scan(1, 1, Some(now))]);
+
+        let cat = i.catalogue();
+        assert_eq!(
+            cat.tracks.len(),
+            2,
+            "the abandoned slot is still in the log"
+        );
+        assert_eq!(cat.media.len(), 2, "and so is the disc it sits on");
+
+        let l = crate::model::seam::Librarian::from_catalogue(&cat);
+        let drawn: Vec<CopyId> = l.rows();
+        assert_eq!(
+            drawn.len(),
+            1,
+            "one file, one row — the abandoned disc drew a second, empty one"
+        );
+
+        let slot = drawn[0].slot().expect("an appearance");
+        let medium = cat.tracks[&slot].medium;
+        assert_eq!(
+            cat.media[&medium].release,
+            Id::<Release>::of_musicbrainz(uuid::Uuid::from_u128(now)),
+            "and the row that survived is the one on the pressing we hold"
+        );
+    }
+
     /// **A two-disc album is two media, not one.** The shape the old fact
     /// could not hold: both discs collapsed onto the group, and the only thing
     /// telling them apart was a number on the placement.

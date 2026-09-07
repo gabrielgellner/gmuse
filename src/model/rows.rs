@@ -166,6 +166,17 @@ pub struct Listed<'a> {
     pub bitrate: Option<u32>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
+    /// **Whether the library holds a file for this row at all** — #155.
+    ///
+    /// `false` is a track the library knows is on the record and has no copy
+    /// of anywhere, which is the row this issue exists to be able to draw. It
+    /// is a property of the *recording*, not of the slot: a song you own off
+    /// its own album is playable from a compilation's row too, and greying
+    /// that one would be claiming you cannot hear it.
+    ///
+    /// Distinct from #38's Local/Remote/Absent, which asks *where* the bytes
+    /// are. This asks whether there are any.
+    pub held: bool,
 }
 
 /// A drawn row the library **owns**.
@@ -199,6 +210,7 @@ pub struct Drawn {
     pub bitrate: Option<u32>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
+    pub held: bool,
 }
 
 impl Listed<'_> {
@@ -247,6 +259,7 @@ impl Listed<'_> {
             bitrate: self.bitrate,
             sample_rate: self.sample_rate,
             channels: self.channels,
+            held: self.held,
         }
     }
 }
@@ -294,6 +307,7 @@ impl Drawn {
             bitrate: self.bitrate,
             sample_rate: self.sample_rate,
             channels: self.channels,
+            held: self.held,
         }
     }
 }
@@ -499,6 +513,7 @@ mod tests {
             bitrate: Some(320),
             sample_rate: Some(44_100),
             channels: Some(2),
+            held: true,
         };
         assert_eq!(full.listed().owned(), full, "a field was lost on the way");
     }

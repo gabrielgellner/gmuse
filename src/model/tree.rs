@@ -277,7 +277,13 @@ fn sort_within(l: &Librarian, by_outer: &mut BTreeMap<SortKey, BTreeMap<SortKey,
                         .get(&c.recording)
                         .map(|r| r.title.to_lowercase())
                         .unwrap_or_default();
-                    (l.place_of(l.slot_of(c.copy)), title, c.copy)
+                    // **The row's own slot, not the copy's** (#155). This
+                    // was `slot_of(c.copy)`, the same mistake `row_of_via`
+                    // had: a row the library holds no file for has no copy,
+                    // so `place_of` answered `u16::MAX` — "not numbered" —
+                    // and every greyed track sorted to the bottom of its
+                    // album instead of into the gap it belongs in.
+                    (l.place_of(c.row.slot()), title, c.copy)
                 });
             }
         }
@@ -758,6 +764,75 @@ mod tests {
             .map(|r| r.title)
             .collect();
         assert_eq!(titles, ["First", "Second", "Third"]);
+    }
+
+    /// **A track you do not own sorts into its gap, not to the bottom** — #155.
+    ///
+    /// Found on the real library by looking at it: `Daft Punk — Homework` is
+    /// missing `Teachers`, track 9, and drew it after track 16. The sort key
+    /// asked `slot_of(copy)` — which slot is this *file* in — and a row with
+    /// no file answered `None`, which `place_of` reads as "not numbered" and
+    /// deliberately sorts last. It is the same mistake `row_of_via` had, at
+    /// the one site that was missed: the question is which slot is this *row*
+    /// in, and a row knows.
+    #[test]
+    fn a_track_nothing_fills_sorts_by_its_own_number() {
+        let mut i = Instance::new(Id::derived(b"laptop"));
+        i.ingest(
+            100,
+            &[
+                scanned("One", "Laurie Anderson", None, 1),
+                scanned("Three", "Laurie Anderson", None, 3),
+            ],
+        );
+
+        // Track two, which the library knows about and holds no file for.
+        let cat = i.catalogue();
+        let medium = *cat.media.keys().next().expect("the album has a disc");
+        let unheld = Id::<crate::model::entity::Recording>::derived(b"two");
+        let slot = Id::<crate::model::entity::Track>::derived(b"slot two");
+        let mut clock = crate::model::clock::HybridClock::new(Id::derived(b"laptop"));
+        let records: std::collections::BTreeSet<crate::model::log::Record> = [
+            crate::model::log::Fact::RecordingCatalogued {
+                recording: unheld,
+                title: "Two".into(),
+                artist: Id::of_artist(None, "Laurie Anderson"),
+            },
+            crate::model::log::Fact::TrackPlaced {
+                track: slot,
+                medium,
+                recording: unheld,
+                position: 2,
+                title_on_release: None,
+            },
+        ]
+        .into_iter()
+        .map(|fact| crate::model::log::Record {
+            stamp: clock.stamp(200),
+            fact,
+        })
+        .collect();
+        i.merge(200, &records);
+
+        let l = Librarian::from_catalogue(&i.catalogue());
+        let tree = Tree::grouped(
+            &l,
+            (Level::of(Field::FileUnder), Level::of(Field::Album)),
+            false,
+            &everything(&l),
+        );
+        let titles: Vec<String> = {
+            use crate::model::rows::Listing as _;
+            flat(&tree)
+                .iter()
+                .filter_map(|c| l.listed(c.row).map(|r| r.title.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            titles,
+            ["One", "Two", "Three"],
+            "the gap is where it belongs"
+        );
     }
 
     /// **The reissue trap (#59).** A 2015 pressing of a 1982 album files under

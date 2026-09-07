@@ -1205,28 +1205,53 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
 /// The queue pop lives here rather than in `next()`, which stays pure — see
 /// DESIGN §5 and the note on [`Source::Queue`].
 fn advance(ui: &mut Ui, ctx: &Context<'_>, forward: bool) {
-    let decision = if forward {
-        next::next_with_source(next_input(ui))
-    } else {
-        next::prev(next_input(ui)).map(|id| (id, Source::Pool))
-    };
+    // **Step past what cannot be played** — #155. The library holds rows for
+    // tracks it has no file of, so a pool laid over an album is now allowed to
+    // contain gaps; stopping dead at one is exactly the "a view that silently
+    // queues an unplayable row" cost that issue names. A record you are three
+    // tracks short of should play the fifteen you have.
+    //
+    // **Bounded by the pool**, so a library where nothing is held ends rather
+    // than spins. The bound counts every row once and the queue besides,
+    // which is the most a lap can visit.
+    let bound = ui.library.len() + ui.queue.len() + 1;
+    for skipped in 0..bound {
+        let decision = if forward {
+            next::next_with_source(next_input(ui))
+        } else {
+            next::prev(next_input(ui)).map(|id| (id, Source::Pool))
+        };
 
-    let Some((id, source)) = decision else {
-        ui.notify("end of pool");
-        ui.playback.current = None;
-        return;
-    };
+        let Some((id, source)) = decision else {
+            ui.notify("end of pool");
+            ui.playback.current = None;
+            return;
+        };
 
-    match source {
-        Source::Queue => {
-            ui.queue.pop_front();
+        match source {
+            Source::Queue => {
+                ui.queue.pop_front();
+            }
+            // A shuffled lap that wrapped would otherwise replay in the same
+            // order; reseed so the next pass differs.
+            Source::Wrapped if ui.playback.shuffle => ui.playback.reshuffle(),
+            _ => {}
         }
-        // A shuffled lap that wrapped would otherwise replay in the same
-        // order; reseed so the next pass differs.
-        Source::Wrapped if ui.playback.shuffle => ui.playback.reshuffle(),
-        _ => {}
+        if source_for(ui, ctx, id).is_some() {
+            play(ui, ctx, id);
+            if skipped > 0 {
+                // Said out loud, because silently jumping three tracks looks
+                // like the player losing its place.
+                ui.notify(format!("skipped {skipped} not held"));
+            }
+            return;
+        }
+        // `current` moves so the next lap asks from where this one stopped;
+        // without it `next` returns the same unheld row forever.
+        ui.playback.current = Some(id);
     }
-    play(ui, ctx, id);
+    ui.notify("nothing in the pool is held");
+    ui.playback.current = None;
 }
 
 /// Resolve what follows the current track and hand back its path.
@@ -1247,6 +1272,12 @@ fn announce_next(ui: &mut Ui, ctx: &Context<'_>) -> Option<crate::audio::TrackSo
     // The encoding is not remembered here: this is the *next* track being
     // spliced on, and which copy is playing is only true once it is playing.
     // `Loaded` sets it, from the same choice made again.
+    //
+    // **A row nothing holds splices nothing**, and that is right rather than a
+    // gap: the side effects above have already consumed it, so `advance` picks
+    // up from after it when the current track ends. What is lost is the
+    // gapless join across a track you do not own, which there was never going
+    // to be a way to make seamless.
     let (source, _) = source_for(ui, ctx, id)?;
     ui.pending_next = Some(id);
     Some(source)
@@ -1576,6 +1607,15 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: CopyId) {
     // The locator is produced here and used immediately. Nothing above this
     // line holds one, which is what stops anything being keyed by a path.
     let Some((source, encoding)) = source_for(ui, ctx, id) else {
+        // **Playability is checked here, and it says so** — #155. The library
+        // now holds rows for tracks it has no file of, so pressing enter on
+        // one is an ordinary thing to do and returning in silence would read
+        // as the player being broken. It is not: the record has this track and
+        // you do not.
+        ui.status = match ctx.library.listed(id) {
+            Some(listed) => format!("no copy of \"{}\" is held", listed.title),
+            None => "no copy of that is held".to_string(),
+        };
         return;
     };
     ui.playback.current = Some(id);
@@ -5991,13 +6031,22 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
             let needle = ui.highlight.as_ref();
             match row {
                 tree::Row::Track { id, .. } => {
-                    let style = if ui.playback.current == Some(*id) {
-                        ui.theme.get(theme::Role::Playing)
-                    } else {
-                        Style::default()
-                    };
-                    spans.push(Span::raw(row.label()));
                     let files: &dyn Listing = ctx.library;
+                    // **The tree greys a row it holds no file for, like every
+                    // other list** — #155. It did not, because this pane
+                    // renders its own rows rather than going through
+                    // `list::items`, and the styling was added there alone.
+                    // The result was the case that pane exists for: view 1 is
+                    // where a record is read album by album, so it is where a
+                    // missing track is most worth seeing, and it was the one
+                    // place it looked exactly like a track you own.
+                    let style = files
+                        .listed(*id)
+                        .map(|listed| {
+                            list::body_style(&ui.theme, &listed, ui.playback.current == Some(*id))
+                        })
+                        .unwrap_or_default();
+                    spans.push(Span::styled(row.label(), style));
                     let text = files
                         .listed(*id)
                         .map(|listed| {
@@ -6733,6 +6782,104 @@ mod tests {
         ui.playback.repeat = true;
         advance(&mut ui, &ctx, true);
         assert_eq!(ui.playback.current, Some(ui.library.sorted()[0]));
+    }
+
+    /// **A track the library holds no file for is stepped over** — #155.
+    ///
+    /// The cost that issue names: once the library holds catalogue entries as
+    /// well as files, a pool laid over an album has gaps in it, and a player
+    /// that stopped at the first one would look broken on a record you are
+    /// three tracks short of. It plays the ones you have and says how many it
+    /// passed.
+    #[test]
+    fn a_track_no_file_is_held_for_is_skipped_rather_than_stopping_playback() {
+        use crate::model::log::{Fact, Record};
+
+        // A recording the library knows about and holds nothing of — the
+        // shape a catalogued tracklist produces, minus the album, which is
+        // not what is under test.
+        let absent = Id::<crate::model::spine::Recording>::derived(b"catalogued only");
+        let mut clock = crate::model::clock::HybridClock::new(Id::derived(b"test"));
+        let records: std::collections::BTreeSet<Record> = [
+            Fact::ArtistNamed {
+                artist: Id::of_artist(None, "Anderson .Paak"),
+                name: "Anderson .Paak".into(),
+            },
+            Fact::RecordingCatalogued {
+                recording: absent,
+                title: "The One We Lack".into(),
+                artist: Id::of_artist(None, "Anderson .Paak"),
+            },
+        ]
+        .into_iter()
+        .map(|fact| Record {
+            stamp: clock.stamp(100),
+            fact,
+        })
+        .collect();
+
+        let store = fixture();
+        let library = Box::leak(Box::new(crate::bridge::imported(
+            &store,
+            &records,
+            Id::derived(b"test"),
+            100,
+        )));
+        let ctx = Context {
+            library,
+            player: None,
+            remote: None,
+        };
+        let mut ui = Ui::new(Shelf::rebuild(library, true));
+
+        let sorted: Vec<_> = ui.library.sorted().to_vec();
+        let at = sorted
+            .iter()
+            .position(|id| {
+                library
+                    .listed(*id)
+                    .is_some_and(|l| l.title == "The One We Lack")
+            })
+            .expect("the catalogued row is in the pool");
+        assert!(
+            !library.listed(sorted[at]).unwrap().held,
+            "and it is the row this is about"
+        );
+        assert!(at + 1 < sorted.len(), "something has to follow it");
+
+        ui.playback.current = Some(sorted[at.saturating_sub(1)]);
+        advance(&mut ui, &ctx, true);
+
+        assert_eq!(
+            ui.playback.current,
+            Some(sorted[at + 1]),
+            "playback landed on the gap instead of stepping past it"
+        );
+        assert!(ui.status.contains("skipped 1"), "{}", ui.status);
+    }
+
+    /// And pressing play on one **says why**, rather than doing nothing.
+    #[test]
+    fn playing_a_track_no_file_is_held_for_says_so() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let row = ui.library.sorted()[0];
+
+        // A row whose file the library cannot open is the same case from the
+        // player's side, and `play` must not return in silence.
+        play(
+            &mut ui,
+            &ctx,
+            crate::model::rows::CopyId::Loose(Id::derived(b"nothing")),
+        );
+        assert!(ui.status.contains("no copy"), "{}", ui.status);
+        assert_eq!(ui.playback.current, None, "and nothing started");
+
+        // The ordinary row still plays and clears the notice.
+        play(&mut ui, &ctx, row);
+        assert_eq!(ui.playback.current, Some(row));
+        assert!(ui.status.is_empty(), "{}", ui.status);
     }
 
     #[test]
@@ -11649,9 +11796,7 @@ mod tests {
         // which performance sits there; moving only the first leaves the row
         // naming the song the file used to be. `Proposal::Identified` emits
         // all three, and this test builds them by hand, so it builds all three.
-        let slot = l
-            .slot_of(Some(encoding))
-            .expect("the fixture places its copy");
+        let slot = l.placed_at(encoding).expect("the fixture places its copy");
         let placed = &l.spine.tracks[&slot];
         let mut clock = crate::model::clock::HybridClock::new(crate::model::id::Id::derived(b"t"));
         let relink: std::collections::BTreeSet<Record> = [

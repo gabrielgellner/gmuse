@@ -16,6 +16,11 @@ and "I want this" are the same shape, and always were.
 
 Files serialize the library. They do not constitute it.
 
+**Built, as of #155.** `Proposal::Tracklisted` catalogues the whole tracklist of a medium, so the library holds a row
+for a track it has no file of — drawn under its album, at its number, dimmed. Playability is asked at the moment of
+playing and answered `no copy of "…" is held`; a pool steps past such rows rather than stopping at one. The sentence
+above stopped being a premise and became a thing on screen.
+
 ---
 
 ## 2. Nothing is implicit
@@ -131,7 +136,14 @@ Not a call per fact. A tool proposes in bulk, a person reviews, gmuse applies:
 {"fact":"genre_assigned","path":"…/03 Callisto.mp3","genre":"Techno","basis":"discogs","confidence":"matched"}
 {"fact":"measured","path":"…/03 Callisto.mp3","cutoff_hz":19800,"analyser":1}
 {"fact":"credited","path":"…/03 Callisto.mp3","artist":"Marc Romboy","role":"remixer","position":1}
+{"fact":"tracklisted","release":"996d1c…","position":1,"format":"CD","tracks":[{"position":1,"recording":"298472…","title":"Elephant Gun","artist":"Beirut"}]}
 ```
+
+**A proposal may be about something you do not have.** `tracklisted` is the first one that is: it says what is on a
+record, and most of what it says the library will already know. Its subject is the **medium**, which must already exist
+— a tracklist for a pressing nothing here has seen is refused as stale rather than applied, because the ids only line up
+where the files carried the album's MusicBrainz id, and a mismatch would catalogue a phantom disc beside the real one.
+`ingest tracklist` writes these.
 
 **JSONL because facts are heterogeneous.** A TSV would need a column union across every fact type, and this project has
 already been bitten by a TSV whose quoting fought its own content. One object per line keeps it greppable and `jq`-able,

@@ -21,7 +21,8 @@ a download arrives
   6. rsgain easy         ReplayGain, on the album in its final home
   7. identify + apply    MusicBrainz for whatever step 2 missed
   8. joined + apply      is a credit one artist or several
-  9. audit               what is still wrong
+  9. ingest tracklist    what the record has, including what you do not
+ 10. audit               what is still wrong
 ```
 
 **Two orderings are load-bearing and both were learned by breaking them.**
@@ -38,17 +39,18 @@ its folder.
 
 ## 2. What each stage is for
 
-| stage    | command                                                                           | reads                | writes                           |
-| -------- | --------------------------------------------------------------------------------- | -------------------- | -------------------------------- |
-| paths    | `gmuse-tools paths survey`                                                        | filenames            | a review TSV                     |
-| ingest   | `gmuse-tools ingest apply <dir> --artist X`                                       | tags, MusicBrainz    | **tags**                         |
-| tags     | `gmuse-tools tags survey` / `apply`                                               | tags                 | **tags**, with a snapshot        |
-| genre    | `gmuse-tools genre propose` / `apply`                                             | MusicBrainz, Discogs | **tags**, with a snapshot        |
-| import   | `gmuse shelf import <paths…> --write`                                             | tags, audio          | **the log**, and moves the files |
-| identify | `gmuse shelf query --unidentified` → `identify fetch` / `propose` → `shelf apply` | the work list        | **the log**                      |
-| joined   | `gmuse-tools joined survey` / `propose` → `shelf apply`                           | tags, MusicBrainz    | **the log**                      |
-| audit    | `gmuse-tools audit library` / `identity` / `dj` / `duplicates`                    | everything           | nothing                          |
-| merge    | `shelf apply` with `{"fact":"merged",…}`                                          | —                    | **the log**                      |
+| stage     | command                                                                           | reads                | writes                           |
+| --------- | --------------------------------------------------------------------------------- | -------------------- | -------------------------------- |
+| paths     | `gmuse-tools paths survey`                                                        | filenames            | a review TSV                     |
+| ingest    | `gmuse-tools ingest apply <dir> --artist X`                                       | tags, MusicBrainz    | **tags**                         |
+| tags      | `gmuse-tools tags survey` / `apply`                                               | tags                 | **tags**, with a snapshot        |
+| genre     | `gmuse-tools genre propose` / `apply`                                             | MusicBrainz, Discogs | **tags**, with a snapshot        |
+| import    | `gmuse shelf import <paths…> --write`                                             | tags, audio          | **the log**, and moves the files |
+| identify  | `gmuse shelf query --unidentified` → `identify fetch` / `propose` → `shelf apply` | the work list        | **the log**                      |
+| joined    | `gmuse-tools joined survey` / `propose` → `shelf apply`                           | tags, MusicBrainz    | **the log**                      |
+| tracklist | `gmuse-tools ingest tracklist` → `shelf apply`                                    | tags, MusicBrainz    | **the log**                      |
+| audit     | `gmuse-tools audit library` / `identity` / `dj` / `duplicates`                    | everything           | nothing                          |
+| merge     | `shelf apply` with `{"fact":"merged",…}`                                          | —                    | **the log**                      |
 
 **A command that moves music throws the player's cache away.** A launch deliberately does not scan — a change to the
 library is something you make, not something a launch notices on your behalf — so the cache is believed until something
@@ -99,9 +101,12 @@ back to hand-work.
   explicitly. `shelf import` with no arguments deliberately ignores files it already knows.
 - **No proposal names an artist** (#154), so an artist correctly identified by a MusicBrainz id can have no label and be
   unbrowsable.
-- **A row is a copy, not a performance.** `Listing::rows` returns encodings, so an album held in two formats shows every
-  track twice. That is the stated model, and dual-format albums at scale are new here — so whether it is what you want
-  on screen is a live question rather than a hypothetical one.
+- **~~A row is a copy, not a performance.~~** Settled by #155: a row is an appearance on a medium, or a recording no
+  release holds. An album held in two formats draws one row per track.
+- **`ingest tracklist` runs last and wants the album id in the tags.** It proposes against the release the _files_
+  claim, because that is what `import` read to mint the pressing. A folder whose files carry no `musicbrainz_albumid` is
+  skipped, and one whose files disagree about which pressing they are from is skipped too — two records got mixed, and
+  guessing which is right would catalogue the wrong tracklist over both.
 
 ---
 
