@@ -235,6 +235,8 @@ pub fn plan_of(l: &Librarian, root: &Path, copies: &[Id<Encoding>]) -> Plan {
 #[derive(Debug, Default)]
 pub struct Moved {
     pub moved: usize,
+    /// Cover art, rip logs and the like, carried along with their album.
+    pub assets: usize,
     /// A move that could not be made, and why. The file stays where it is.
     pub failed: Vec<(PathBuf, String)>,
     /// Directories left empty by a move and taken away.
@@ -256,6 +258,8 @@ pub struct Moved {
 /// finishes.
 pub fn carry_out(plan: &Plan, root: &Path, write: bool) -> Moved {
     let mut out = Moved::default();
+    // Where each source folder's audio went, so what is left in it can follow.
+    let mut followed: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
     for (_, from, to) in &plan.moves {
         let at = root.join(to);
         if at.exists() {
@@ -276,12 +280,59 @@ pub fn carry_out(plan: &Plan, root: &Path, write: bool) -> Moved {
         match std::fs::rename(from, &at) {
             Ok(()) => {
                 out.moved += 1;
-                out.emptied += prune(from.parent(), root);
+                if let (Some(was), Some(now)) = (from.parent(), at.parent()) {
+                    followed.insert(was.to_path_buf(), now.to_path_buf());
+                }
             }
             Err(e) => out.failed.push((from.clone(), e.to_string())),
         }
     }
+
+    // **What sits beside an album goes with it** (#149). Cover art, a rip log
+    // and a cue sheet belong to the *release*, and moving the audio out from
+    // under them left 13 orphaned images in this library's old tree.
+    //
+    // After the audio, and only from a folder none is left in: a directory
+    // still holding music has not moved anywhere yet.
+    if write {
+        for (was, now) in &followed {
+            out.assets += carry_assets(was, now);
+        }
+    }
+    for was in followed.keys() {
+        out.emptied += prune(Some(was), root);
+    }
     out
+}
+
+/// Move whatever is left in a folder the audio has gone from.
+///
+/// **Only when no audio remains**, because a folder still holding music is a
+/// folder that has not moved: two albums under one directory would otherwise
+/// have the first one's move drag the second one's cover away.
+fn carry_assets(was: &Path, now: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(was) else {
+        return 0;
+    };
+    let left: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    if left.iter().any(|p| crate::scan::is_audio(p)) {
+        return 0;
+    }
+    let mut moved = 0;
+    for asset in left {
+        let Some(name) = asset.file_name() else {
+            continue;
+        };
+        let to = now.join(name);
+        if !to.exists() && std::fs::rename(&asset, &to).is_ok() {
+            moved += 1;
+        }
+    }
+    moved
 }
 
 /// Take away directories a move left empty, up to but never including `root`.
@@ -349,6 +400,63 @@ mod tests {
         assert!(!at.exists(), "the file is still at its old path");
         assert!(!was.exists(), "the emptied folder was left behind");
         assert!(root.exists(), "the root was pruned away");
+    }
+
+    /// **What sits beside an album goes with it** — #149.
+    ///
+    /// Cover art belongs to the release, and moving the audio out from under
+    /// it left 13 orphaned images in this library's old tree.
+    #[test]
+    fn a_cover_follows_the_album_it_belongs_to() {
+        let root = std::env::temp_dir().join("gmuse-storage-assets");
+        let _ = std::fs::remove_dir_all(&root);
+        let was = root.join("General").join("An Artist").join("An Album");
+        std::fs::create_dir_all(&was).unwrap();
+        std::fs::write(was.join("01 A Track.mp3"), b"audio").unwrap();
+        std::fs::write(was.join("cover.jpg"), b"art").unwrap();
+        std::fs::write(was.join("rip.log"), b"log").unwrap();
+
+        let plan = Plan {
+            moves: vec![(
+                Id::from_uuid(uuid::Uuid::from_u128(1)),
+                was.join("01 A Track.mp3"),
+                PathBuf::from("An Artist/An Album/01 A Track.mp3"),
+            )],
+            ..Default::default()
+        };
+        let done = carry_out(&plan, &root, true);
+
+        assert_eq!((done.moved, done.assets), (1, 2));
+        assert!(root.join("An Artist/An Album/cover.jpg").exists());
+        assert!(root.join("An Artist/An Album/rip.log").exists());
+        assert!(!was.exists(), "the emptied folder stayed behind");
+    }
+
+    /// **A folder still holding music has not moved.** Two albums under one
+    /// directory must not have the first one's move drag the second's cover.
+    #[test]
+    fn a_cover_stays_where_audio_remains() {
+        let root = std::env::temp_dir().join("gmuse-storage-assets-stay");
+        let _ = std::fs::remove_dir_all(&root);
+        let was = root.join("Mixed");
+        std::fs::create_dir_all(&was).unwrap();
+        std::fs::write(was.join("moving.mp3"), b"audio").unwrap();
+        std::fs::write(was.join("staying.mp3"), b"other").unwrap();
+        std::fs::write(was.join("cover.jpg"), b"art").unwrap();
+
+        let plan = Plan {
+            moves: vec![(
+                Id::from_uuid(uuid::Uuid::from_u128(1)),
+                was.join("moving.mp3"),
+                PathBuf::from("An Artist/An Album/01 A Track.mp3"),
+            )],
+            ..Default::default()
+        };
+        let done = carry_out(&plan, &root, true);
+
+        assert_eq!(done.assets, 0, "a cover left a folder that still has music");
+        assert!(was.join("cover.jpg").exists());
+        assert!(was.join("staying.mp3").exists());
     }
 
     /// **Nothing is overwritten**, even by a plan that thought the path free —

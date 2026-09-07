@@ -161,6 +161,7 @@ pub fn audio_files(roots: &[PathBuf]) -> Vec<PathBuf> {
         for entry in walkdir::WalkDir::new(&root)
             .follow_links(false)
             .into_iter()
+            .filter_entry(crate::scan::worth_entering)
             .filter_map(Result::ok)
         {
             if entry.file_type().is_file() && crate::scan::is_audio(entry.path()) {

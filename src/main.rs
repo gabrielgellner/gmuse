@@ -349,6 +349,16 @@ fn run_library(
             };
             if targets.is_empty() {
                 eprintln!("nothing to import: every audio file under the roots is already known");
+                // **The walk still learned where things are.** Nothing else
+                // persists holdings, so returning here threw away the one
+                // record that says a file moved — and files move, by hand and
+                // by `render`.
+                if *write {
+                    let n = log.flush(&loaded.data_dir)?;
+                    if n > 0 {
+                        eprintln!("{n} record(s) written: the holdings moved");
+                    }
+                }
                 return Ok(());
             }
 

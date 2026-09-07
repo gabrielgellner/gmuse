@@ -227,6 +227,7 @@ pub fn scan(held: &mut Holdings, roots: &[PathBuf]) -> ScanReport {
         for entry in walkdir::WalkDir::new(root)
             .follow_links(false)
             .into_iter()
+            .filter_entry(worth_entering)
             .filter_map(Result::ok)
         {
             if !entry.file_type().is_file() || !is_audio(entry.path()) {
@@ -459,6 +460,23 @@ pub(crate) fn prune_nested(roots: &[PathBuf]) -> Vec<PathBuf> {
         kept.push(root.clone());
     }
     kept
+}
+
+/// Whether a walk should step into this — #146.
+///
+/// **A dotted directory is not part of the library.** `.gmuse` holds the log
+/// and `.departed/` holds what `remove` retired, and a scan that walked into
+/// the second would hand back every file somebody had just taken out. The
+/// convention is the usual one, so `.Trash` and `.Spotlight-V100` go with it.
+///
+/// The root itself is never skipped, however it is spelled: a library at
+/// `~/.music` is a library.
+pub(crate) fn worth_entering(entry: &walkdir::DirEntry) -> bool {
+    entry.depth() == 0
+        || !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with('.'))
 }
 
 pub(crate) fn is_audio(path: &Path) -> bool {

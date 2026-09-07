@@ -4423,6 +4423,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   On this library it refuses 14 files: the Early James duplicate, and a Thomas Brinkmann one the renderer could not see
   because those copies share their encodings.
 
+- **2026-09-06** **The library is one readable tree, and the migration is done (#132, #146, #149).**
+  `shelf render --write` moved 6,471 files in 19 seconds and pruned 619 folders. 6,500 audio files before and after, 42
+  GB before and after, and `shelf import` reporting every file still known — which is the check that counts, because
+  identity is the audio and anything the library could not find would have said so.
+
+  **The survey ran first and earned its place** (#143): of 6,500 files, **14 rows held something the tags did not** —
+  thirteen Thomas Brinkmann tracks whose filenames name `Variation1`…`Variation13` where the tag says `[untitled]`, and
+  one series in a filename. Everything else was the reverse, the tag being the better record and the filename its
+  sanitised form. None of the 82 truncation suspects were confirmed by a folder, so the ID3v1 hazard that made the
+  ordering mandatory did not bite here — it was measured on the NAS, and that is where it would have.
+
+  **Three things the run found that no test would have.** Cover art did not follow its album, leaving 13 orphaned images
+  (#149) — fixed, and only from a folder no audio remains in, or two albums under one directory would have the first
+  one's move drag the second's cover away. A scan walked into dotted directories, so `.departed/` would have handed back
+  every retired file on the next pass. And `shelf import` with nothing to import returned without flushing, throwing
+  away the walk that had just learned where everything moved to.
+
+  **The Early James duplicate is resolved** (#146). Ten of twelve tracks were byte-identical; the two that differed
+  differ in the _audio_ — 43,288 bytes, same duration, same bitrate, same size, both measuring clean — so quality could
+  not choose and provenance did: the MusicBrainz-tagged copy is the better described. Twelve files retired to
+  `.departed/`, which is a directory standing in for a tombstone until #62 writes one.
+
+  What is left in the old tree is Fiona Apple's 444-byte album title, which no filesystem will hold and which wants a
+  shorter name in the library rather than a rule.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
