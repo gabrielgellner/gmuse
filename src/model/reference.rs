@@ -142,6 +142,15 @@ pub struct Credit {
     pub as_credited: Option<String>,
     /// What joins this credit to the next — `" & "`, `" vs. "`, `" feat. "`.
     pub join_phrase: Option<String>,
+    /// Why this credit is recorded — #152.
+    ///
+    /// Carried so a **line can be superseded rather than appended to**. It was
+    /// dropped in the projection, and the fold keys credits by it, so a
+    /// correction arrived as an extra name: splitting
+    /// `Stephan Bodzin & Marc Romboy` printed
+    /// `Stephan Bodzin & Marc Romboy, Stephan Bodzin, Marc Romboy`, and since
+    /// `file_under` is this line, the tree would have followed it.
+    pub basis: Source,
 }
 
 /// Why a name is recorded, and how much it should be trusted.
@@ -302,9 +311,30 @@ impl Reference {
         // are different claims — and joining them produced `Orbital, Orbital`
         // and a Trio listed twice under two spellings of its own line. The
         // first by position wins, which is the one the credit is ordered by.
+        // **The best-attested credits supersede the rest** — #152.
+        //
+        // Credits accumulate and there is no retraction, deliberately: the
+        // fold keys them by basis because a remixer guessed from a title and
+        // MusicBrainz naming the same remixer are two pieces of evidence, and
+        // their agreeing is the most useful thing the pair says. That is right
+        // for the *log* and wrong for a *line*, which has to print one answer.
+        //
+        // Unioned, a correction arrived as an extra name: splitting
+        // `Stephan Bodzin & Marc Romboy` printed
+        // `Stephan Bodzin & Marc Romboy, Stephan Bodzin, Marc Romboy` — and
+        // `file_under` is this line, so the tree would have followed it into a
+        // folder by that name.
+        //
+        // `Source` is ordered from `TagVariant`, "the weakest thing a name can
+        // be", to `Manual`, "someone typed it on purpose", so the strongest
+        // basis present is the answer and the weaker ones stay evidence.
+        let Some(best) = credits.iter().map(|c| c.basis).max() else {
+            return String::new();
+        };
         let mut seen = std::collections::BTreeSet::new();
         let named: Vec<_> = credits
             .iter()
+            .filter(|c| c.basis == best)
             .filter(|c| seen.insert(c.artist.id()))
             .filter_map(|c| {
                 let name = c.as_credited.clone().unwrap_or_else(|| {
@@ -455,6 +485,69 @@ mod tests {
         id
     }
 
+    fn credit(r: &mut Reference, on: CreditOn, who: Id<Artist>, at: u8, basis: Source) {
+        let performer = role(r, "performer", RoleClass::Performer);
+        r.credits.push(Credit {
+            subject: on,
+            artist: Ref::to(who),
+            role: Ref::to(performer),
+            position: at,
+            as_credited: None,
+            join_phrase: None,
+            basis,
+        });
+    }
+
+    /// **A correction replaces the line; it does not join it** — #152.
+    ///
+    /// Credits accumulate and nothing retracts them, so a split arrived beside
+    /// the joined credit it fixes and printed all three names. `file_under` is
+    /// this line, so a `shelf render` would have moved 285 files into folders
+    /// named `Stephan Bodzin & Marc Romboy, Stephan Bodzin, Marc Romboy`.
+    #[test]
+    fn a_stronger_basis_supersedes_the_line_rather_than_extending_it() {
+        let mut r = Reference::default();
+        let joined = artist(&mut r, "Stephan Bodzin & Marc Romboy");
+        let bodzin = artist(&mut r, "Stephan Bodzin");
+        let romboy = artist(&mut r, "Marc Romboy");
+        let group = CreditOn::ReleaseGroup(Id::derived(b"luna"));
+
+        credit(&mut r, group, joined, 0, Source::TagVariant);
+        assert_eq!(r.credited_as(group), "Stephan Bodzin & Marc Romboy");
+
+        credit(&mut r, group, bodzin, 0, Source::Inferred);
+        credit(&mut r, group, romboy, 1, Source::Inferred);
+        assert_eq!(
+            r.credited_as(group),
+            "Stephan Bodzin, Marc Romboy",
+            "the tag reading is evidence now, not half of the answer"
+        );
+    }
+
+    /// The weaker credits are still *there* — superseded is not deleted.
+    #[test]
+    fn the_superseded_credits_remain_in_the_reference() {
+        let mut r = Reference::default();
+        let joined = artist(&mut r, "A & B");
+        let a = artist(&mut r, "A");
+        let group = CreditOn::ReleaseGroup(Id::derived(b"x"));
+        credit(&mut r, group, joined, 0, Source::TagVariant);
+        credit(&mut r, group, a, 0, Source::Manual);
+        assert_eq!(r.credits_on(group).len(), 2, "both are held");
+        assert_eq!(r.credited_as(group), "A", "one is printed");
+    }
+
+    /// One basis, several artists: the ordinary case must be untouched.
+    #[test]
+    fn credits_at_one_basis_all_print() {
+        let mut r = Reference::default();
+        let (a, b) = (artist(&mut r, "A"), artist(&mut r, "B"));
+        let rec = CreditOn::Recording(Id::derived(b"r"));
+        credit(&mut r, rec, a, 0, Source::TagVariant);
+        credit(&mut r, rec, b, 1, Source::TagVariant);
+        assert_eq!(r.credited_as(rec), "A, B");
+    }
+
     /// **The line on the sleeve, rebuilt.** `Stephan Bodzin vs. Marc Romboy` is
     /// two credits joined by `" vs. "`, not one artist with a strange name —
     /// which is why the library holds that act under two spellings today and
@@ -476,6 +569,7 @@ mod tests {
             position: 0,
             as_credited: None,
             join_phrase: Some(" vs. ".into()),
+            basis: Source::TagVariant,
         });
         r.credits.push(Credit {
             subject: rec,
@@ -484,6 +578,7 @@ mod tests {
             position: 1,
             as_credited: None,
             join_phrase: None,
+            basis: Source::TagVariant,
         });
 
         assert_eq!(r.credited_as(rec), "Stephan Bodzin vs. Marc Romboy");
@@ -509,6 +604,7 @@ mod tests {
             position: 0,
             as_credited: Some("Blind Boy Grunt".into()),
             join_phrase: None,
+            basis: Source::TagVariant,
         });
 
         assert_eq!(r.credited_as(rec), "Blind Boy Grunt", "as printed");
@@ -600,6 +696,7 @@ mod tests {
             position: 0,
             as_credited: None,
             join_phrase: None,
+            basis: Source::TagVariant,
         });
         assert!(
             r.misplaced_credits().is_empty(),
@@ -613,6 +710,7 @@ mod tests {
             position: 0,
             as_credited: None,
             join_phrase: None,
+            basis: Source::TagVariant,
         });
         assert_eq!(
             r.misplaced_credits().len(),
@@ -627,6 +725,7 @@ mod tests {
             position: 1,
             as_credited: None,
             join_phrase: None,
+            basis: Source::TagVariant,
         });
         assert_eq!(
             r.misplaced_credits().len(),
@@ -650,6 +749,7 @@ mod tests {
             position: 0,
             as_credited: None,
             join_phrase: None,
+            basis: Source::TagVariant,
         });
         assert_eq!(r.credited_as(group), "Various Artists");
     }

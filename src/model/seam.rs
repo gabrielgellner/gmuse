@@ -482,7 +482,7 @@ impl Librarian {
                 },
             );
         }
-        for ((subject, artist, role, _), c) in &cat.credits {
+        for ((subject, artist, role, basis), c) in &cat.credits {
             l.reference.credits.push(crate::model::reference::Credit {
                 subject: *subject,
                 artist: crate::model::id::Ref::to(*artist),
@@ -490,6 +490,7 @@ impl Librarian {
                 position: c.position,
                 as_credited: c.as_credited.clone(),
                 join_phrase: c.join_phrase.clone(),
+                basis: *basis,
             });
         }
         for (id, name) in &cat.label_names {
