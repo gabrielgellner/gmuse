@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Final
@@ -179,6 +180,11 @@ def secret(name: str) -> str | None:
     return _from_envfile(Path(__file__).parent / ".env", name)
 
 
+#: A featured-artist suffix, which is a *place* two sources disagree about
+#: rather than a difference between two records.
+FEATURING: Final = re.compile(r"\s*[\(\[]\s*(?:feat|ft|featuring)\b[^)\]]*[\)\]]\s*$", re.IGNORECASE)
+
+
 def compare_key(title: str) -> str:
     """A track title reduced to what two sources can be expected to agree on.
 
@@ -187,8 +193,19 @@ def compare_key(title: str) -> str:
     difference means the records are different — a curly apostrophe against a
     straight one is the commonest case. Everything that is not a letter or a
     digit goes.
+
+    **A trailing `(feat. …)` goes too**, because MusicBrainz keeps featured
+    artists in the *artist credit* and a downloaded tag usually keeps them in
+    the title. That is a documented convention, not noise: *Malibu* agreed on
+    11 of 16 titles and every one of the five that differed did so only this
+    way, so a certain match scored 69% and was refused.
+
+    Only a **trailing** parenthesis, and only that word. `Water Fall
+    (Interluuube)` and `Sleepless (Stephan Bodzin Remix)` keep their suffixes,
+    which is the line worth holding: a remix is a different recording and a
+    guest is not.
     """
-    return "".join(c for c in title.lower() if c.isalnum())
+    return "".join(c for c in FEATURING.sub("", title).lower() if c.isalnum())
 
 
 #: Below this share of matching titles a candidate is not worth offering.

@@ -127,6 +127,26 @@ def our_titles(folder: Path) -> list[tuple[Path, str]]:
     return [(p, t) for _, p, t in sorted(out)]
 
 
+def named_release(mbid: str, ours: list[str]) -> Match | None:
+    """The release a person named, taken on their word.
+
+    **The override, and the only thing here that skips the tracklist gate.**
+    Some records cannot be matched by title however good the rule: MusicBrainz
+    lists every track of *Studio 1 - Variationen* as `[untitled]`, which is the
+    sleeve's own labelling — only the numbering carries meaning — so a title
+    comparison proves nothing in either direction and never will.
+
+    The verdict is still reported, so the shell history shows what was accepted
+    and on whose say-so.
+    """
+    full = get_json(f"{MB}/release/{mbid}", {"inc": INC, "fmt": "json"})
+    if not full:
+        return None
+    titles = [t["title"] for m in full.get("media", []) for t in m.get("tracks", [])]
+    _, share = tracklist_match(ours, titles)
+    return Match(full, "named", share)
+
+
 def identify(artist: str, album: str, ours: list[str]) -> Match | None:
     """Find the release, and refuse anything short of an exact tracklist."""
     query = f'artist:"{artist}" AND release:"{album}"'
@@ -324,6 +344,15 @@ def report(match: Match | None, ours: list[str]) -> bool:
     print(f"  {release['title']} — {release.get('date', '?')} — {release.get('country', '??')}")
     print(f"  {release['id']}")
     print(f"  tracklist: {match.verdict} ({match.share:.0%}), {len(ours)} ours vs {len(titles)} theirs")
+    # **Named is accepted, and says so.** A person has looked; the count is
+    # still shown, because a release with a different number of tracks is
+    # almost always the wrong one whatever anybody says.
+    if match.verdict == "named":
+        print(f"  accepted on your say-so ({len(ours)} ours vs {len(titles)} theirs)")
+        if len(ours) != len(titles):
+            print("  REFUSED — the track counts differ, which no override should paper over")
+            return False
+        return True
     if match.verdict != "exact":
         print("\n  NOT exact — nothing written. A name search returns plausible wrong")
         print("  answers, so only an exact tracklist is used unattended.")
@@ -334,14 +363,31 @@ def report(match: Match | None, ours: list[str]) -> bool:
     return True
 
 
-def apply(folder: Path, artist: str, album: str, dest: Path | None, *, write: bool) -> None:
+@dataclass(frozen=True)
+class Wanted:
+    """Which record this download is, as far as the caller knows.
+
+    `release` is the caller's own answer and skips the tracklist gate; the
+    other two are a search, which does not.
+    """
+
+    artist: str
+    album: str
+    release: str
+
+
+def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> None:
     """Identify, tag, rename, and optionally move into the library."""
     pairs = our_titles(folder)
     if not pairs:
         print(f"  no audio in {folder}")
         return
     ours = [t for _, t in pairs]
-    match = identify(artist, album or folder.name, ours)
+    match = (
+        named_release(wanted.release, ours)
+        if wanted.release
+        else identify(wanted.artist, wanted.album or folder.name, ours)
+    )
     if not report(match, ours) or match is None:
         return
     if not write:
@@ -372,16 +418,28 @@ def apply(folder: Path, artist: str, album: str, dest: Path | None, *, write: bo
     print("  and `tags survey` to confirm nothing reintroduced an ID3v1 block.")
 
 
+#: Accept a release the caller has checked, skipping the tracklist gate.
+#:
+#: For records no title comparison can settle — MusicBrainz lists every track
+#: of `Studio 1 - Variationen` as `[untitled]`, which is the sleeve's own
+#: labelling, so only the numbering carries meaning.
+RELEASE = typer.Option("", help="a MusicBrainz release id you have checked yourself")
+
+
 def register(app: typer.Typer) -> None:
     """Attach the importer."""
     ingest_app = typer.Typer(no_args_is_help=True, help=__doc__)
     app.add_typer(ingest_app, name="ingest")
 
+    # **Typer reads this parameter list as the command's interface**, so the
+    # options cannot be grouped into an object the way `apply` groups them —
+    # a struct here would be one positional argument on the command line.
     @ingest_app.command("apply")
-    def apply_cmd(
+    def apply_cmd(  # noqa: PLR0913
         folder: Path = typer.Argument(..., help="the download to bring in"),
         artist: str = typer.Option(..., help="who it is by"),
         album: str = typer.Option("", help="defaults to the folder name"),
+        release: str = RELEASE,
         dest: Path | None = typer.Option(None, help="album folder in the library to move into"),
         *,
         write: bool = typer.Option(default=False, help="actually move and tag"),
@@ -389,8 +447,7 @@ def register(app: typer.Typer) -> None:
         """Identify a download against MusicBrainz and bring it in."""
         apply(
             folder.expanduser(),
-            artist,
-            album,
+            Wanted(artist=artist, album=album, release=release),
             dest.expanduser() if dest else None,
             write=write,
         )
