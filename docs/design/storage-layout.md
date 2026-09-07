@@ -113,7 +113,9 @@ works only because the path is not the binding: the library tolerates a file in 
 
 These were a rendered tree's problem all along; they are now the only tree's problem:
 
-- **Unicode normalisation** — NFC on write, since macOS and Linux disagree about composed forms.
+- **Unicode normalisation** — NFC on write, **built** (#151). Measured here, the disagreement is total: all 48 non-ASCII
+  names are composed on APFS and decomposed on the share. Both fold composition on lookup so nothing is lost today;
+  `ext4` and `btrfs` do not, and there the same album is two directories.
 - **Case-insensitive collisions** — APFS and SMB fold case, so two artists differing only in case are one directory.
 - **Reserved names and characters** — `CON`, `PRN`, `:`, `?`, `*`, for a tree read over SMB from Windows.
 - **The 255-byte component cap** — already reached here: Fiona Apple's album folder is truncated mid-word.

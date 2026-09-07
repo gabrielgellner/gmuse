@@ -4354,6 +4354,29 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   **NFC normalisation is stated as absent rather than half-done.** macOS hands out decomposed names and Linux does not,
   so the same album can be two directories; doing it needs `unicode-normalization`, and a dependency needs a decision.
+  Decided 2026-09-07, below — the dependency was taken.
+
+- **2026-09-07** **The renderer composes on write, and `unicode-normalization` is the dependency that lets it (#151).**
+  Measured on the real library, and the split is total: all 48 non-ASCII names are NFC on APFS and NFD on the SMB share.
+  Both filesystems are form-_insensitive_ on lookup, so nothing was unreachable — but `readdir` hands back the form the
+  filesystem chose, not the one that was written, so the two devices observe byte-different names for one file.
+
+  **What it was not is worth recording.** Minting is untouched: `Basis::seed` seeds from an MBID, an external key or an
+  `AudioId`, never a name, so a recording mints the same id whatever the share spells. The damage was confined to paths
+  — `plan` compared them as raw bytes, so a file already correctly placed under a decomposed name was proposed for a
+  move on every run, a rename onto itself forever, and two names differing only in form passed the collision check and
+  then landed in one directory.
+
+  **The dependency, against this project's own hand-rolling precedent.** `text.rs` rejected `unicode-normalization` for
+  search folding and that decision stands — it was measured against a tag cache holding `ö ü í ´ ’ ＂ ⧸ ？` and nothing
+  else, and `flatten` strips marks entirely, which turns `Björk` into `Bjork` and is right for search and catastrophic
+  for a path. Rendering is a different question: correct NFC needs the canonical composition table, the library will
+  meet names outside any table small enough to hand-write, and being 95% right here produces exactly the silent
+  directory-splitting the change exists to prevent. So the table is bought rather than approximated.
+
+  **On-disk names are left alone.** The renderer proposes NFC and the ordinary move carries it; nothing is rewritten to
+  chase a form. The share will decompose again on write, which costs nothing — it is form-insensitive, and §8 already
+  holds that the NAS is a copy and not a source of truth.
 
 - **2026-09-06** **A joined album credit does not rename the artist it starts with (#145).** `shelf render` proposed to
   file 400 files across 26 albums under `Tom Waits and Crystal Gayle` — his whole discography.

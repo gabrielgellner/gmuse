@@ -28,17 +28,23 @@
 //! and this library already has some — Fiona Apple's album folder is cut
 //! mid-word at 255 bytes.
 //!
-//! ## What is not checked yet
+//! ## Composed on write — #151
 //!
-//! **Unicode normalisation.** §5 says NFC on write, and macOS hands out
-//! decomposed names while Linux does not, so the same album can be two
-//! directories. Doing it needs `unicode-normalization`, and a dependency needs
-//! a Decision Log entry — so it is stated here as absent rather than half-done.
-//! Everything below compares raw bytes, which is right for collisions and
-//! silent about composition.
+//! Every name this renders is **NFC**, because the two devices here disagree:
+//! measured across the library, all 48 non-ASCII names are composed on APFS
+//! and decomposed on the SMB share. Both filesystems happen to be
+//! form-*insensitive* on lookup, so nothing is unreachable today — but `ext4`
+//! and `btrfs` are not, and there the same album is genuinely two directories.
+//!
+//! This does not rewrite what is on disk. It fixes what the renderer
+//! *proposes*, and the ordinary move carries it. The share will decompose
+//! again on write, which is fine: the NAS is a copy (§8), not a source of
+//! truth.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use unicode_normalization::UnicodeNormalization;
 
 use crate::model::entity::Encoding;
 use crate::model::id::Id;
@@ -107,7 +113,10 @@ fn component(text: &str) -> String {
             }
         })
         .collect();
-    cleaned.trim().trim_end_matches(['.', ' ']).to_string()
+    // **Composed, and before `fit` measures it** — NFD spends extra bytes on
+    // the combining marks, so an accented name would be shortened against a
+    // budget it does not really exceed.
+    cleaned.trim().trim_end_matches(['.', ' ']).nfc().collect()
 }
 
 /// Shorten a component to fit, at a word boundary, and say so — #150.
@@ -139,6 +148,21 @@ fn fit(text: &str, budget: usize) -> String {
     // cut where it must be.
     let kept = if at == 0 { cut } else { &cut[..at] };
     format!("{}{ELLIPSIS}", kept.trim_end())
+}
+
+/// A path as the filesystem would match it, for comparing two of them.
+///
+/// **Composed and case-folded**, and both halves are load-bearing. APFS and
+/// SMB fold case, so two artists differing only in capitals are one directory.
+/// They also fold composition — and they disagree about which form to hand
+/// back, so a name written here as `Sinéad` is read back off the share
+/// decomposed. Comparing the bytes says those are two places; the filesystem
+/// says they are one, and the filesystem is right.
+fn folded(at: &Path) -> String {
+    at.to_string_lossy()
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// Whether a component can be a directory or a file name.
@@ -242,7 +266,7 @@ pub fn plan_of(l: &Librarian, root: &Path, copies: &[Id<Encoding>]) -> Plan {
                 // **Case-insensitively**, because APFS and SMB fold case: two
                 // artists differing only in capitals are one directory, and
                 // finding that out during a move is finding out too late.
-                let key = at.to_string_lossy().to_lowercase();
+                let key = folded(&at);
                 let from = PathBuf::from(here);
                 wanted.entry(key).or_default().push((copy, from));
                 out.moves.push((copy, PathBuf::new(), at));
@@ -254,14 +278,17 @@ pub fn plan_of(l: &Librarian, root: &Path, copies: &[Id<Encoding>]) -> Plan {
     let mut settled = 0;
     let mut moves = Vec::new();
     for (copy, _, to) in std::mem::take(&mut out.moves) {
-        let key = to.to_string_lossy().to_lowercase();
+        let key = folded(&to);
         let holders = wanted.get(&key).map(Vec::len).unwrap_or(0);
         if holders > 1 {
             out.refused.push((copy, Refused::Contested(to)));
             continue;
         }
         let from = l.where_held(copy).map(PathBuf::from).unwrap_or_default();
-        if from == root.join(&to) {
+        // Folded, not byte-equal: a file already in the right place on a share
+        // that decomposed its name would otherwise be proposed for a move on
+        // every run, and the move is a rename onto itself.
+        if folded(&from) == folded(&root.join(&to)) {
             settled += 1;
         } else {
             moves.push((copy, from, to));
@@ -413,6 +440,121 @@ mod tests {
     fn only(l: &Librarian) -> Result<PathBuf, Refused> {
         let copy = Listing::rows(l)[0];
         proposed(l, copy).expect("a fixture row renders")
+    }
+
+    /// `Sinéad`, decomposed: an `e` followed by U+0301 COMBINING ACUTE.
+    const NFD: &str = "Sine\u{301}ad O'Connor";
+    /// The same name, composed: a single U+00E9.
+    const NFC: &str = "Sin\u{e9}ad O'Connor";
+
+    #[test]
+    fn a_decomposed_name_renders_composed() {
+        // The share hands names back decomposed, so this is what a tag read
+        // off the NAS actually carries.
+        let l = library(&[Tagged {
+            path: "/m/x.flac".into(),
+            artist: Some(NFD.into()),
+            album: Some("The Lion and the Cobra".into()),
+            title: Some("Troy".into()),
+            tracknumber: Some(1),
+            ..Default::default()
+        }]);
+        let at = only(&l).expect("it renders");
+        let under = at.components().next().expect("a first component");
+        assert_eq!(
+            under.as_os_str().to_string_lossy(),
+            NFC,
+            "the renderer proposes NFC whatever form the library carries"
+        );
+    }
+
+    #[test]
+    fn the_two_forms_of_one_name_are_one_place() {
+        assert_eq!(folded(&PathBuf::from(NFD)), folded(&PathBuf::from(NFC)));
+        assert_eq!(
+            folded(&PathBuf::from("Bjork")),
+            folded(&PathBuf::from("BJORK")),
+            "case still folds — the composed half must not have replaced it"
+        );
+        assert_ne!(
+            folded(&PathBuf::from("Bj\u{f6}rk")),
+            folded(&PathBuf::from("Bjork")),
+            "an accent is not noise: folding it away would merge distinct artists"
+        );
+    }
+
+    #[test]
+    fn a_file_already_placed_under_a_decomposed_name_is_settled_not_moved() {
+        // The bug this would have caught: `from` comes off a share that
+        // decomposed the name, `to` renders composed, the bytes differ, and
+        // every accented file is proposed for a move on every run — a rename
+        // onto itself, forever.
+        let l = library(&[Tagged {
+            path: format!("/m/{NFD}/The Lion and the Cobra/01 Troy.flac").into(),
+            artist: Some(NFC.into()),
+            album: Some("The Lion and the Cobra".into()),
+            title: Some("Troy".into()),
+            tracknumber: Some(1),
+            ..Default::default()
+        }]);
+        let plan = plan(&l, Path::new("/m"));
+        assert_eq!(plan.moves.len(), 0, "nothing to move: it is already there");
+        assert_eq!(plan.settled, 1);
+    }
+
+    #[test]
+    fn two_recordings_whose_names_differ_only_in_form_contest_one_path() {
+        // The filesystem is form-insensitive, so these land in one directory.
+        // A byte-comparing check reports no contest and finds out during the
+        // move, which is too late.
+        let l = library(&[
+            Tagged {
+                path: "/m/a.flac".into(),
+                artist: Some(NFD.into()),
+                album: Some("The Lion and the Cobra".into()),
+                title: Some("Troy".into()),
+                tracknumber: Some(1),
+                ..Default::default()
+            },
+            Tagged {
+                path: "/m/b.flac".into(),
+                artist: Some(NFC.into()),
+                album: Some("The Lion and the Cobra".into()),
+                title: Some("Troy".into()),
+                tracknumber: Some(1),
+                ..Default::default()
+            },
+        ]);
+        let plan = plan(&l, Path::new("/m"));
+        assert_eq!(
+            plan.moves.len(),
+            0,
+            "neither moves while the contest stands"
+        );
+        assert!(
+            plan.refused
+                .iter()
+                .all(|(_, r)| matches!(r, Refused::Contested(_))),
+            "both are refused as contested, not silently merged: {:?}",
+            plan.refused
+        );
+    }
+
+    #[test]
+    fn composing_happens_before_the_length_budget() {
+        // NFD spends two extra bytes per accent. A name that fits composed
+        // must not be shortened for exceeding the cap decomposed.
+        let long = "É".repeat(120); // 240 bytes NFD, 240 NFC — but 120 chars
+        let out = component(&long);
+        assert!(
+            !out.contains(ELLIPSIS),
+            "component does not shorten; fit does"
+        );
+        assert_eq!(out.chars().count(), 120);
+        assert!(
+            out.len() < component(&long.nfd().collect::<String>()).len() + 1,
+            "the output is composed regardless of the input's form"
+        );
     }
 
     /// **A move puts the file where the plan said, and takes the empty
