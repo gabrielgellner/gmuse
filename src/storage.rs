@@ -180,10 +180,16 @@ pub struct Plan {
 /// is not a tie to be broken — moving one on top of the other's name is how a
 /// file disappears — so both stay put and both are reported.
 pub fn plan(l: &Librarian, root: &Path) -> Plan {
+    plan_of(l, root, &Listing::rows(l))
+}
+
+/// The same, over a chosen set — what an import plans for the files it just
+/// took in, rather than for the whole library.
+pub fn plan_of(l: &Librarian, root: &Path, copies: &[Id<Encoding>]) -> Plan {
     let mut wanted: BTreeMap<String, Vec<(Id<Encoding>, PathBuf)>> = BTreeMap::new();
     let mut out = Plan::default();
 
-    for copy in Listing::rows(l) {
+    for copy in copies.iter().copied() {
         let Some(here) = l.where_held(copy) else {
             out.elsewhere += 1;
             continue;
@@ -225,6 +231,77 @@ pub fn plan(l: &Librarian, root: &Path) -> Plan {
     out
 }
 
+/// What carrying a plan out actually did.
+#[derive(Debug, Default)]
+pub struct Moved {
+    pub moved: usize,
+    /// A move that could not be made, and why. The file stays where it is.
+    pub failed: Vec<(PathBuf, String)>,
+    /// Directories left empty by a move and taken away.
+    pub emptied: usize,
+}
+
+/// Carry out a plan: move each file to where the library says it belongs.
+///
+/// **Nothing is overwritten, ever.** A destination that already exists stops
+/// that one move and is reported — even though the plan checked for collisions
+/// among the files it knows about, because the tree may hold something the
+/// library does not.
+///
+/// **A rename, not a copy.** Within one root it is atomic and does not touch a
+/// byte of the file, which is what makes this safe to do to 6,000 files: the
+/// audio cannot change, so identity cannot change, so nothing can be lost even
+/// if the pass dies halfway. What a half-finished run leaves is some files
+/// moved and some not, which the next scan reconciles and the next plan
+/// finishes.
+pub fn carry_out(plan: &Plan, root: &Path, write: bool) -> Moved {
+    let mut out = Moved::default();
+    for (_, from, to) in &plan.moves {
+        let at = root.join(to);
+        if at.exists() {
+            out.failed
+                .push((from.clone(), format!("{} is already there", at.display())));
+            continue;
+        }
+        if !write {
+            out.moved += 1;
+            continue;
+        }
+        if let Some(parent) = at.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            out.failed.push((from.clone(), e.to_string()));
+            continue;
+        }
+        match std::fs::rename(from, &at) {
+            Ok(()) => {
+                out.moved += 1;
+                out.emptied += prune(from.parent(), root);
+            }
+            Err(e) => out.failed.push((from.clone(), e.to_string())),
+        }
+    }
+    out
+}
+
+/// Take away directories a move left empty, up to but never including `root`.
+///
+/// **Only empty ones**, so nothing can be lost: `remove_dir` refuses a
+/// directory with anything in it, and that refusal is the whole safety
+/// argument rather than a check written here.
+fn prune(from: Option<&Path>, root: &Path) -> usize {
+    let mut gone = 0;
+    let mut at = from.map(Path::to_path_buf);
+    while let Some(dir) = at {
+        if dir == root || !dir.starts_with(root) || std::fs::remove_dir(&dir).is_err() {
+            break;
+        }
+        gone += 1;
+        at = dir.parent().map(Path::to_path_buf);
+    }
+    gone
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +321,85 @@ mod tests {
     fn only(l: &Librarian) -> Result<PathBuf, Refused> {
         let copy = Listing::rows(l)[0];
         proposed(l, copy).expect("a fixture row renders")
+    }
+
+    /// **A move puts the file where the plan said, and takes the empty
+    /// folder with it.**
+    #[test]
+    fn carrying_out_a_plan_moves_the_file_and_prunes_what_it_left() {
+        let root = std::env::temp_dir().join("gmuse-storage-move");
+        let _ = std::fs::remove_dir_all(&root);
+        let was = root.join("General").join("Singles");
+        std::fs::create_dir_all(&was).unwrap();
+        let at = was.join("whatever.mp3");
+        std::fs::write(&at, b"audio").unwrap();
+
+        let plan = Plan {
+            moves: vec![(
+                Id::from_uuid(uuid::Uuid::from_u128(1)),
+                at.clone(),
+                PathBuf::from("An Artist/An Album/01 A Track.mp3"),
+            )],
+            ..Default::default()
+        };
+        let done = carry_out(&plan, &root, true);
+
+        assert_eq!((done.moved, done.failed.len()), (1, 0));
+        assert!(root.join("An Artist/An Album/01 A Track.mp3").exists());
+        assert!(!at.exists(), "the file is still at its old path");
+        assert!(!was.exists(), "the emptied folder was left behind");
+        assert!(root.exists(), "the root was pruned away");
+    }
+
+    /// **Nothing is overwritten**, even by a plan that thought the path free —
+    /// the tree may hold something the library has never seen.
+    #[test]
+    fn a_move_onto_something_that_exists_is_refused() {
+        let root = std::env::temp_dir().join("gmuse-storage-clash");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("An Artist/An Album")).unwrap();
+        let occupied = root.join("An Artist/An Album/01 A Track.mp3");
+        std::fs::write(&occupied, b"someone else").unwrap();
+        let from = root.join("elsewhere.mp3");
+        std::fs::write(&from, b"mine").unwrap();
+
+        let plan = Plan {
+            moves: vec![(
+                Id::from_uuid(uuid::Uuid::from_u128(1)),
+                from.clone(),
+                PathBuf::from("An Artist/An Album/01 A Track.mp3"),
+            )],
+            ..Default::default()
+        };
+        let done = carry_out(&plan, &root, true);
+
+        assert_eq!(done.moved, 0);
+        assert_eq!(done.failed.len(), 1);
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"someone else");
+        assert!(from.exists(), "the file that could not move was lost");
+    }
+
+    /// A dry run says what it would do and touches nothing.
+    #[test]
+    fn a_plan_not_written_moves_nothing() {
+        let root = std::env::temp_dir().join("gmuse-storage-dry");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let from = root.join("here.mp3");
+        std::fs::write(&from, b"audio").unwrap();
+
+        let plan = Plan {
+            moves: vec![(
+                Id::from_uuid(uuid::Uuid::from_u128(1)),
+                from.clone(),
+                PathBuf::from("An Artist/An Album/01 A Track.mp3"),
+            )],
+            ..Default::default()
+        };
+        let done = carry_out(&plan, &root, false);
+        assert_eq!(done.moved, 1, "a dry run still says what it would do");
+        assert!(from.exists());
+        assert!(!root.join("An Artist").exists());
     }
 
     /// **The ordinary path, and every level of it comes from the library.**

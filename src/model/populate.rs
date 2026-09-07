@@ -226,7 +226,18 @@ pub fn reconcile(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report
         report.ingested += 1;
     }
 
-    instance.assert_holdings(now, held);
+    // **Only when the set actually changed** (#148). Holdings supersede, so
+    // re-asserting an identical set folds to exactly what is already there —
+    // and a scan that publishes regardless makes every no-op run grow the log
+    // by one record that says nothing.
+    let unchanged = instance
+        .catalogue()
+        .holdings
+        .get(&instance.device())
+        .is_some_and(|there| there.held == held);
+    if !unchanged {
+        instance.assert_holdings(now, held);
+    }
     report.elapsed = started.elapsed();
     report
 }

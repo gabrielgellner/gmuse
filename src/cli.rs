@@ -188,11 +188,15 @@ pub enum Shelf {
     /// `{file_under}/{album}/{disc-}{track} {title}.{ext}`. Structural facts
     /// only — never genre, era or catalog, because those are views.
     ///
-    /// **Reports only.** Nothing is moved yet; a path that is illegal, too
-    /// long, or wanted by two copies goes to the list rather than being
-    /// mangled, and the file stays where it is. That is safe because the path
-    /// is not the binding — identity is the audio.
-    Render,
+    /// **A dry run unless given `--write`.** A path that is illegal, too long,
+    /// or wanted by two copies goes to the list rather than being mangled, and
+    /// the file stays where it is. That is safe because the path is not the
+    /// binding — identity is the audio.
+    Render {
+        /// Actually move the files. Without this, nothing is touched.
+        #[arg(long)]
+        write: bool,
+    },
     /// Propose filing whatever is in no collection, by the folder it sits in.
     ///
     /// **A proposal, printed, and never applied.** The folder is evidence a

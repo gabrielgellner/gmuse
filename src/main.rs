@@ -108,7 +108,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // somebody is listening to the library they are editing.
     if let Some(cli::Command::Shelf(op)) = &args.command {
         let loaded = if args.no_config {
-            config::Loaded::default()
+            // **`--no-config` still keeps the log where the log lives.**
+            // `Loaded::default()` leaves `data_dir` empty, and an empty path
+            // reads as nothing (`read_dir("")` fails) while writing perfectly
+            // well relative to the working directory — so a library operation
+            // silently started a fresh log in whatever folder it was run from
+            // and wrote it there.
+            config::Loaded {
+                data_dir: config::default_data_dir(),
+                ..config::Loaded::default()
+            }
         } else {
             config::load(&args.config.clone().unwrap_or_else(config::default_path))
         };
@@ -366,24 +375,58 @@ fn run_library(
                 report.written
             );
             if *write {
-                // **Then republish what this device holds** (#145). `import`
-                // catalogues the files it was given and says nothing about the
-                // rest; only a walk of every root knows the whole set, and the
-                // set is what a holdings fact carries.
+                // **Publish the holdings first, then place** (#132, #145).
+                // The planner asks where a copy *is* before saying where it
+                // belongs, and a file taken in a moment ago is not held
+                // anywhere until a walk says so.
                 crate::model::populate::reconcile(&mut log, roots, crate::history::now_ms());
+
+                // Import is strict, so anything that got this far is
+                // describable — every row has a credit and a title, because
+                // ingest is total — and the renderer cannot fail for want of
+                // metadata. What it can refuse is a *destination*: a name too
+                // long, a collision. Such a file is catalogued and left where
+                // it is, because the library's contents must not depend on
+                // path lengths.
+                let root = roots.first().cloned().unwrap_or_default();
+                let mut placed = crate::model::seam::Librarian::from_catalogue(&log.catalogue());
+                placed.here(device);
+                let taken: Vec<_> = report
+                    .identified
+                    .keys()
+                    .filter_map(|at| crate::model::ingest::read(at).ok())
+                    .map(|s| crate::model::id::Id::of_audio(&s.audio))
+                    .collect();
+                let plan = crate::storage::plan_of(&placed, &root, &taken);
+                let done = crate::storage::carry_out(&plan, &root, true);
+                for (at, why) in &done.failed {
+                    eprintln!("could not place {}: {why}", at.display());
+                }
+                for (copy, why) in &plan.refused {
+                    eprintln!("left where it is: {copy} — {why}");
+                }
+                eprintln!("{} file(s) placed, {} left alone", done.moved, plan.settled);
+
+                // **And again, because the bytes moved.** Identity is the
+                // audio, so a moved file is the same encoding at a new place,
+                // and the holdings fact is what carries that.
+                if done.moved > 0 {
+                    crate::model::populate::reconcile(&mut log, roots, crate::history::now_ms());
+                }
                 let n = log.flush(&loaded.data_dir)?;
                 eprintln!("{n} record(s) written");
             } else {
                 eprintln!("dry run — nothing written. Add --write.");
             }
         }
-        cli::Shelf::Render => {
-            let (log, _) = crate::model::instance::Instance::open(
+        cli::Shelf::Render { write } => {
+            let (mut library_log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
                 crate::history::now_ms(),
             );
-            let mut library = crate::model::seam::Librarian::from_catalogue(&log.catalogue());
+            let mut library =
+                crate::model::seam::Librarian::from_catalogue(&library_log.catalogue());
             library.here(device);
             let root = roots.first().cloned().unwrap_or_default();
             let plan = crate::storage::plan(&library, &root);
@@ -394,14 +437,32 @@ fn run_library(
             for (copy, why) in &plan.refused {
                 eprintln!("refused: {copy} — {why}");
             }
+            let done = crate::storage::carry_out(&plan, &root, *write);
+            for (at, why) in &done.failed {
+                eprintln!("could not move {}: {why}", at.display());
+            }
             eprintln!(
-                "{} settled, {} would move, {} refused, {} held elsewhere",
+                "{} settled, {} {} move, {} refused, {} held elsewhere",
                 plan.settled,
-                plan.moves.len(),
-                plan.refused.len(),
+                done.moved,
+                if *write { "moved" } else { "would" },
+                plan.refused.len() + done.failed.len(),
                 plan.elsewhere
             );
-            eprintln!("nothing was moved: `render` reports only.");
+            if *write {
+                // **The locators follow the bytes.** Identity is the audio, so
+                // a moved file is the same encoding at a new place — and the
+                // holdings fact is what carries that.
+                crate::model::populate::reconcile(
+                    &mut library_log,
+                    roots,
+                    crate::history::now_ms(),
+                );
+                let n = library_log.flush(&loaded.data_dir)?;
+                eprintln!("{} folder(s) pruned, {n} record(s) written", done.emptied);
+            } else {
+                eprintln!("dry run — nothing moved. Add --write.");
+            }
         }
         cli::Shelf::Query { unidentified } => {
             let (log, _) = crate::model::instance::Instance::open(
