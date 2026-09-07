@@ -45,8 +45,37 @@ HTTP_BUSY: Final = 503
 RETRIES: Final = 4
 
 
-def open_cache(path: Path) -> sqlite3.Connection:
+def cache_path() -> Path:
+    """Where the genre lookups live — beside `bronze.sqlite`, not in `tools/out`.
+
+    **A cache is not an artefact.** It sat in the review folder, which is where
+    a person looks to find what is left to decide, and an audit of that folder
+    had to stop and work out whether a 209 KB sqlite file was a todo. It is
+    not: it is a device fact, like `bronze` and unlike a review, and two
+    machines keep their own.
+
+    **Its own store rather than a `bronze` table**, because it is a different
+    kind of cache. `bronze` keys raw HTTP responses by url and parameters;
+    this keys a *derived* record — the genres and styles gathered from a
+    MusicBrainz release and up to three Discogs fetches — by the release it
+    describes. One sits on top of the other, and collapsing them would mean
+    either losing the assembly or pretending it was a response.
+    """
+    return bronze.cache_dir() / "genre.sqlite"
+
+
+def open_cache(path: Path | None = None) -> sqlite3.Connection:
     """Open the lookup cache, creating it if this is the first run."""
+    path = path or cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # **Carried over rather than left behind.** These 429 lookups cost 429
+    # requests against a rate limit and a Discogs token; recreating the file
+    # empty in its new home would spend all of them again for a move. Runs
+    # once and is a no-op forever after.
+    stale = out_path("genre-cache.sqlite")
+    if stale.exists() and not path.exists():
+        stale.replace(path)
+        print(f"moved the genre cache to {path}")
     con = sqlite3.connect(path)
     con.execute("CREATE TABLE IF NOT EXISTS lookup (mbid TEXT PRIMARY KEY, fetched_at TEXT, payload TEXT)")
     # The fallback's results live in their own table because they are keyed on
@@ -261,7 +290,7 @@ def has_genres(payload: dict[str, Any] | None) -> bool:
 
 def fetch_all(root: Path) -> None:
     """Fetch what the cache is missing, and report what each release yielded."""
-    con = open_cache(out_path("genre-cache.sqlite"))
+    con = open_cache()
     token = secret("DISCOGS_TOKEN")
 
     albums = albums_in(root.expanduser())

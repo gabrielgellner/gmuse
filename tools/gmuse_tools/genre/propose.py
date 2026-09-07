@@ -14,14 +14,13 @@ length is a *rendering* problem the format language already solves with
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
 import typer
 
-from gmuse_tools.genre import hierarchy
+from gmuse_tools.genre import fetch, hierarchy
 from gmuse_tools.genre.common import album_key, fix_case, out_path, tags_of, walk, write_tsv
 
 #: Re-exported from `hierarchy`, which owns the vocabulary (#79).
@@ -292,7 +291,7 @@ def row_for(
 
 def propose_all(root: Path, *, show_all: bool) -> None:
     """Write the review file and summarise what it proposes."""
-    con = sqlite3.connect(out_path("genre-cache.sqlite"))
+    con = fetch.open_cache()
     lookup = {mbid: json.loads(payload) for mbid, payload in con.execute("SELECT mbid, payload FROM lookup")}
     # A `null` payload is a recorded "Discogs has never heard of this" (#58),
     # which is an answer and not a gap — it is what stops the four requests it

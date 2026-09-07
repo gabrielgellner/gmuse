@@ -39,6 +39,7 @@ from typing import Final
 
 import typer
 
+from gmuse_tools.genre import fetch
 from gmuse_tools.genre.common import fix_case, out_path, tags_of, walk, write_tsv
 
 #: The terms this library treats as broad — Discogs' 15 Genres, **after**
@@ -584,7 +585,7 @@ def withdrawn(edges: list[dict[str, object]], previous: Path) -> list[tuple[str,
 def run(root: Path, *, write: bool) -> None:
     """Say what the hierarchy would be, and write the proposals when told."""
     held = terms_in(root.expanduser())
-    edges, review = propose(out_path("genre-cache.sqlite"), held)
+    edges, review = propose(fetch.cache_path(), held)
     gone = withdrawn(edges, out_path("genre-hierarchy.jsonl"))
     print(f"{len(held)} genre terms in the library")
 
