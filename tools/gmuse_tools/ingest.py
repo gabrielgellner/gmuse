@@ -216,6 +216,11 @@ def whole_album(folder: Path) -> bool:
     the release it belongs to and can score *exact* against a wrong small one:
     a two-track folder will find some two-track single, and that match is
     confident and useless.
+
+    **Unconditional, including under `--release`.** `apply` pairs files against
+    the release's tracklist by position, so naming the right release for a
+    fragment is worse than naming none: `Adele/21 (Bonus Tracks)` pointed at the
+    eighteen-track edition would be tagged as its first two tracks.
     """
     short = missing_tracks(folder)
     if not short:
@@ -223,7 +228,12 @@ def whole_album(folder: Path) -> bool:
     print(f"  {folder.name} is part of an album, not an album:")
     for line in short:
         print(f"    {line}")
-    print("  Nothing written. Bring the whole record together, or pass --release yourself.")
+    print("  Nothing written. Put the whole record in one folder and identify that.")
+    # **`--release` does not get you past this, and must not.** `apply` pairs
+    # your files against the release's tracklist *by position*, so a two-file
+    # folder pointed at an eighteen-track release would be tagged as tracks one
+    # and two of it. The escape hatch is a person saying which release, never a
+    # person saying how much of it they have.
     return False
 
 
