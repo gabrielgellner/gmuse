@@ -77,6 +77,28 @@ pub struct Report {
     /// entry nobody will ever fix, which is what `library-api.md` §7 refuses
     /// to accumulate.
     pub contradicts: Vec<(PathBuf, String)>,
+    /// **Audio that joins a recording this library already holds** — #62.
+    ///
+    /// The `add` case the issue calls risky, and the one a content hash cannot
+    /// answer: a re-encode has different bytes by design, so it mints a new
+    /// encoding and lands on the *same* recording through the MusicBrainz id.
+    /// The library is then holding one performance twice, which is one of
+    /// three things it cannot tell apart —
+    ///
+    /// - an **upgrade**, and the old encoding should be retired
+    /// - a **duplicate**, and this one should not have been imported
+    /// - a deliberate **second format**, and both belong
+    ///
+    /// **Reported and kept, not refused.** Unlike `contradicts`, nothing here
+    /// is damaged by importing: one recording with two encodings is the shape
+    /// #62 settled on for `replace`, and history hangs off the recording, so
+    /// it crosses whichever encoding is eventually kept. What cannot be
+    /// guessed is *intent*, and guessing it is how a 4-star rating ends up on
+    /// the copy somebody deletes.
+    ///
+    /// The count is the encodings the recording already had, so "one file, and
+    /// the library had one" reads differently from "one file, and it had six".
+    pub joins: Vec<(PathBuf, Id<Recording>, usize)>,
     pub elapsed: Duration,
     /// What each scanned path turned out to be.
     ///
@@ -380,9 +402,33 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
     // just produced. Not recomputed: the ladder that chooses a recording id
     // lives in one place and this reads its answer.
     let catalogue = instance.catalogue();
-    for (path, encoding) in minted {
-        if let Some(recording) = catalogue.encodings.get(&encoding).and_then(|e| e.recording) {
-            report.identified.insert(path, recording);
+    for (path, encoding) in &minted {
+        if let Some(recording) = catalogue.encodings.get(encoding).and_then(|e| e.recording) {
+            report.identified.insert(path.clone(), recording);
+        }
+    }
+
+    // **What the library held before this pass** — #62, and folded rather than
+    // inferred for the same reason `identified` is read back out: the binding
+    // from an encoding to a recording is decided by the ladder in `ingest`,
+    // and asking a second copy of that question is how two answers to it get
+    // into the codebase. One extra fold, on a command a person runs by hand.
+    let was = crate::model::log::fold(&before);
+    let mut already: BTreeMap<Id<Recording>, usize> = BTreeMap::new();
+    for recording in was.bound.values() {
+        *already.entry(*recording).or_default() += 1;
+    }
+    for (path, encoding) in &minted {
+        // In the log before this pass, so this is a re-import rather than a
+        // second copy arriving.
+        if was.bound.contains_key(encoding) {
+            continue;
+        }
+        let Some(recording) = catalogue.bound.get(encoding) else {
+            continue;
+        };
+        if let Some(&had) = already.get(recording) {
+            report.joins.push((path.clone(), *recording, had));
         }
     }
 
@@ -837,6 +883,93 @@ mod tests {
             write_tags(&p, title, "Stephan Bodzin", *mbid);
         }
         dir
+    }
+
+    /// One file, one recording id, a second set of bytes — the `add` case #62
+    /// calls the risky one.
+    fn re_encoded(name: &str, samples: usize) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gmuse-populate-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("01 Callisto.wav");
+        write_wav(&p, samples);
+        write_tags(
+            &p,
+            "Callisto",
+            "Stephan Bodzin",
+            Some("183105b5-0000-4000-8000-000000000000"),
+        );
+        dir
+    }
+
+    /// **A second encoding of a held recording is reported, not swallowed.**
+    ///
+    /// The case a content hash cannot answer: a re-encode has different bytes
+    /// by design, so it mints a new encoding and reaches the same recording
+    /// through the MusicBrainz id. Nothing is damaged — one recording with two
+    /// encodings is what `replace` settled on — but which copy the person
+    /// meant to keep is not inferable, and #35 already cost a 4-star rating to
+    /// exactly that guess.
+    #[test]
+    fn a_re_encode_of_something_held_is_reported_as_joining_it() {
+        let first = re_encoded("joins-first", 4410);
+        let second = re_encoded("joins-second", 8820);
+        let mut i = Instance::new(Id::derived(b"laptop"));
+
+        let one = populate(&mut i, std::slice::from_ref(&first), 100);
+        assert!(
+            one.joins.is_empty(),
+            "nothing was held before the first pass"
+        );
+
+        let two = populate(&mut i, std::slice::from_ref(&second), 200);
+        assert_eq!(
+            two.joins.len(),
+            1,
+            "the re-encode joins what is held: {:?}",
+            two.joins
+        );
+        let (at, recording, had) = &two.joins[0];
+        assert_eq!(at.file_name().unwrap(), "01 Callisto.wav");
+        assert_eq!(*had, 1, "the recording had exactly one encoding before");
+        assert_eq!(
+            Some(recording),
+            two.identified.values().next(),
+            "the recording named is the one the file identified as"
+        );
+    }
+
+    /// **A re-import is not a second copy**, or the report cries wolf on every
+    /// no-op run and stops being read.
+    #[test]
+    fn importing_the_same_file_again_joins_nothing() {
+        let dir = re_encoded("joins-again", 4410);
+        let mut i = Instance::new(Id::derived(b"laptop"));
+
+        populate(&mut i, std::slice::from_ref(&dir), 100);
+        let again = populate(&mut i, std::slice::from_ref(&dir), 200);
+        assert_eq!(again.ingested, 1, "the file was still read");
+        assert!(
+            again.joins.is_empty(),
+            "the encoding was already in the log: {:?}",
+            again.joins
+        );
+    }
+
+    /// A different recording is not a join, however similar it looks.
+    #[test]
+    fn an_unrelated_file_joins_nothing() {
+        let held = re_encoded("joins-held", 4410);
+        let other = library("joins-other", &[("Atlas", None)]);
+        let mut i = Instance::new(Id::derived(b"laptop"));
+
+        populate(&mut i, std::slice::from_ref(&held), 100);
+        let new = populate(&mut i, std::slice::from_ref(&other), 200);
+        assert!(
+            new.joins.is_empty(),
+            "a different recording: {:?}",
+            new.joins
+        );
     }
 
     /// **Two files, identical bytes, and both paths still answer.**

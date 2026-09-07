@@ -392,12 +392,25 @@ fn run_library(
             for (path, why) in &report.contradicts {
                 eprintln!("contradicts the library: {}\n    {why}", path.display());
             }
+            // **Kept and reported, not refused** (#62). A re-encode is not a
+            // contradiction — one recording with two encodings is the shape
+            // `replace` settled on, and history hangs off the recording so it
+            // crosses whichever copy is kept. What cannot be inferred is
+            // whether this is an upgrade, a duplicate, or a second format
+            // wanted on purpose, and that is a question for a person.
+            for (path, recording, had) in &report.joins {
+                eprintln!(
+                    "joins a recording already held as {had} other encoding(s): {}\n    {recording} — an upgrade, a duplicate, or a second format?",
+                    path.display()
+                );
+            }
             eprintln!(
-                "{} file(s), {} confirmed, {} resting on their bytes, {} refused, {} new fact(s)",
+                "{} file(s), {} confirmed, {} resting on their bytes, {} refused, {} joining a recording already held, {} new fact(s)",
                 report.ingested,
                 report.confirmed,
                 report.provisional,
                 report.contradicts.len(),
+                report.joins.len(),
                 report.written
             );
             if *write {

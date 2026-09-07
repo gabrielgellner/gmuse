@@ -213,6 +213,28 @@ can corrupt it.
 with: a recording identity from a MusicBrainz id or a fingerprint, a title, and an artist. Whether an album and a track
 number join that list is a question the first few real imports will settle better than this paragraph can.
 
+### A second copy is reported, not refused — #62
+
+Strictness is about files the library **cannot describe**. A file it describes perfectly well, and has already described
+once, is a different question: a re-encode has different bytes by design, so it mints a new encoding and reaches the
+same recording through the MusicBrainz id.
+
+That is one recording with two encodings, which is exactly the shape §2.1 settled on for `replace`, and history hangs
+off the recording — so it crosses to whichever copy is eventually kept. Nothing is damaged and nothing needs refusing.
+
+What cannot be inferred is **intent**, and there are three of them:
+
+- an **upgrade**, and the old encoding should be retired
+- a **duplicate**, and this one should not have come in
+- a deliberate **second format**, and both belong
+
+So `import` says so and moves on: `joins a recording already held as N other encoding(s)`. This is the `Uncertain`
+answer #62 asks for, and it is the same discipline as the contradiction check (#148) — a rule for picking a winner is a
+guess that is wrong sometimes and invisibly so. #35 already cost a 4-star rating to exactly that guess.
+
+**A re-import is not a second copy.** An encoding already in the log says nothing, or the line would print on every
+no-op run and stop being read.
+
 ### Where a proposal file lives
 
 **Wherever you say.** It is an argument, defaulting to the working directory, and there is no magic location — because
