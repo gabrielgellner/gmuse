@@ -50,6 +50,11 @@ pub fn rows(
     let mut scratch = Instance::new(device);
     scratch.merge(now, records);
     crate::model::populate::populate(&mut scratch, roots, now);
+    // **And publish what is here** (#145). A work list hands a tool an id and
+    // a **locator**, so the holdings are half of the answer — and cataloguing
+    // stopped asserting them, because a partial import must not unpublish the
+    // rest of the library.
+    crate::model::populate::reconcile(&mut scratch, roots, now);
     let catalogue = scratch.catalogue();
     let library = Librarian::from_catalogue(&catalogue);
 

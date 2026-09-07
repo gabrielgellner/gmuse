@@ -47,6 +47,18 @@ pub struct Scanned {
     /// a guest credit makes a new artist: `2Pac feat. Nate Dogg` is not `2Pac`
     /// to a hash (#89 §5).
     pub artist_mbid: Option<uuid::Uuid>,
+    /// Whether the **album artist** tag names several — #145.
+    ///
+    /// The same trap as [`Self::credit_is_joined`] and it was unguarded: on
+    /// *One from the Heart* the album artist id is `c3aeb863…/cefd9d3d…`, the
+    /// primary half of which is Tom Waits, and the string is
+    /// `Tom Waits and Crystal Gayle`. Writing one as the other renamed Tom
+    /// Waits across 400 files and 26 albums.
+    ///
+    /// **A separate field, because the track's answer does not carry.** On
+    /// that record the *track* artist is Crystal Gayle alone, with no slash,
+    /// so `credit_is_joined` is false and guards nothing.
+    pub album_credit_is_joined: bool,
     /// Whether the artist tag names **several** artists.
     ///
     /// Picard `/`-joins every credited artist's id, so the field says outright
@@ -368,13 +380,20 @@ impl Instance {
                 // is the *album artist's*, which is why it is not
                 // `artist_mbid` — on a compilation those are different people.
                 let group_artist = Id::<Artist>::of_artist(s.album_artist_mbid, credited);
-                self.append(
-                    now,
-                    Fact::ArtistNamed {
-                        artist: group_artist,
-                        name: credited.to_string(),
-                    },
-                );
+                // **A joined album credit names nobody**, exactly as a joined
+                // track credit does not (#145). The id is the primary
+                // artist's and the string is the whole credit, so writing one
+                // as the other is a global rename. The string is kept on the
+                // credit below, which is where a sleeve's wording belongs.
+                if !s.album_credit_is_joined {
+                    self.append(
+                        now,
+                        Fact::ArtistNamed {
+                            artist: group_artist,
+                            name: credited.to_string(),
+                        },
+                    );
+                }
                 self.append(
                     now,
                     Fact::ReleaseGroupCatalogued {
@@ -389,13 +408,14 @@ impl Instance {
                 // The album-level credit, which is what `file_under` asks for
                 // first and what keeps a guest credit from splitting an album
                 // off from its artist.
-                self.credit(
+                self.credit_as(
                     now,
                     CreditOn::ReleaseGroup(group),
                     group_artist,
                     "performer",
                     Source::TagVariant,
                     0,
+                    s.album_credit_is_joined.then(|| credited.to_string()),
                 );
                 // **The three levels a file actually sits in.** A scan sees
                 // one pressing — the one on disk — so the release falls back
@@ -1454,6 +1474,7 @@ mod containment_tests {
             label: None,
             levels: Default::default(),
             release_kind: Default::default(),
+            album_credit_is_joined: false,
             key: None,
             track_total: None,
             disc_total: None,
@@ -1643,6 +1664,7 @@ mod credit_tests {
             label: None,
             levels: Default::default(),
             release_kind: Default::default(),
+            album_credit_is_joined: false,
             key: None,
             track_total: None,
             disc_total: None,
@@ -1650,6 +1672,59 @@ mod credit_tests {
             sample_rate: Some(44_100),
             channels: Some(2),
         }
+    }
+
+    /// **A joined album credit does not rename the primary artist** — #145.
+    ///
+    /// Found by `shelf render`: 400 files across 26 albums proposed to file
+    /// under `Tom Waits and Crystal Gayle`, which is his whole discography.
+    /// The album artist id on *One from the Heart* is `c3aeb863…/cefd9d3d…`
+    /// and its primary half is Tom Waits, so the joined string was written as
+    /// his name and every release group crediting him read it back.
+    ///
+    /// `credit_is_joined` guarded the *track* credit and could not help: on
+    /// that record the track artist is Crystal Gayle alone.
+    #[test]
+    fn a_joined_album_credit_does_not_rename_the_artist_it_starts_with() {
+        let waits = uuid::Uuid::from_u128(0xc3aeb863);
+        let solo = Scanned {
+            artist: "Tom Waits".into(),
+            artist_mbid: Some(waits),
+            album: Some("Bone Machine".into()),
+            album_artist: Some("Tom Waits".into()),
+            album_artist_mbid: Some(waits),
+            ..scan("Earth Died Screaming", "Tom Waits")
+        };
+        let duet = Scanned {
+            artist: "Crystal Gayle".into(),
+            artist_mbid: Some(uuid::Uuid::from_u128(0xcefd9d3d)),
+            album: Some("One From the Heart".into()),
+            album_artist: Some("Tom Waits and Crystal Gayle".into()),
+            // Picard writes the *primary* id here, and the joined field is
+            // what says there were two.
+            album_artist_mbid: Some(waits),
+            album_credit_is_joined: true,
+            ..scan("Is There Any Way Out of This Dream", "Crystal Gayle")
+        };
+
+        let mut i = Instance::new(crate::fixture::device());
+        i.ingest(100, &[solo, duet]);
+        let cat = i.catalogue();
+        let who = Id::<crate::model::entity::Artist>::of_artist(Some(waits), "Tom Waits");
+        assert_eq!(
+            cat.artist_names.get(&who).map(String::as_str),
+            Some("Tom Waits"),
+            "the joined credit renamed the artist it merely starts with"
+        );
+
+        // **The wording is not lost.** It is on the credit, which is where a
+        // sleeve's phrasing belongs.
+        let joined = cat
+            .credits
+            .values()
+            .filter_map(|c| c.as_credited.as_deref())
+            .any(|s| s == "Tom Waits and Crystal Gayle");
+        assert!(joined, "the credit lost what the sleeve printed");
     }
 
     /// A scan credits the track artist and the album artist, and the role it

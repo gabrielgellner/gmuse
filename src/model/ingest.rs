@@ -163,6 +163,10 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // rung of #89's ladder; a harvest pass fills the middle one.
         artist_mbid: primary_artist(&get(ItemKey::MusicBrainzArtistId)),
         credit_is_joined: get(ItemKey::MusicBrainzArtistId).contains('/'),
+        // The album artist's own answer, which the track's does not give
+        // (#145): a record credited to two people may have a single-artist
+        // track credit, and on *One from the Heart* it does.
+        album_credit_is_joined: get(ItemKey::MusicBrainzReleaseArtistId).contains('/'),
         album_artist_mbid: primary_artist(&get(ItemKey::MusicBrainzReleaseArtistId)),
         // The ladder, best rung first (#89): MusicBrainz where the tags carry
         // it, otherwise whatever authority does name this performance. `None`

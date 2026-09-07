@@ -360,6 +360,11 @@ fn run_library(
                 log.records().len() - before
             );
             if *write {
+                // **Then republish what this device holds** (#145). `import`
+                // catalogues the files it was given and says nothing about the
+                // rest; only a walk of every root knows the whole set, and the
+                // set is what a holdings fact carries.
+                crate::model::populate::reconcile(&mut log, roots, crate::history::now_ms());
                 let n = log.flush(&loaded.data_dir)?;
                 eprintln!("{n} record(s) written");
             } else {

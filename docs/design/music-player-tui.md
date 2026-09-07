@@ -4355,6 +4355,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   **NFC normalisation is stated as absent rather than half-done.** macOS hands out decomposed names and Linux does not,
   so the same album can be two directories; doing it needs `unicode-normalization`, and a dependency needs a decision.
 
+- **2026-09-06** **A joined album credit does not rename the artist it starts with (#145).** `shelf render` proposed to
+  file 400 files across 26 albums under `Tom Waits and Crystal Gayle` — his whole discography.
+
+  The guard existed and could not help. `credit_is_joined` is read from the **track** artist id, and on _One from the
+  Heart_ the track artist is Crystal Gayle alone with no slash. The album artist id is `c3aeb863…/cefd9d3d…`, whose
+  primary half is Tom Waits, and the album artist _string_ is the joined credit — so the album path wrote the joined
+  string as Tom Waits' name, and every release group crediting him read it back.
+
+  So `album_credit_is_joined` is its own field, read from the release-artist id, and the wording goes on the credit as
+  `as_credited` where a sleeve's phrasing belongs. The outcome after repair is exactly right: 388 files under
+  `Tom Waits`, and _One from the Heart_ under `Tom Waits and Crystal Gayle`, which is the credit rather than the artist.
+
+  **It surfaced only because paths are rendered now.** A wrong `file_under` was a column nobody counted; it is 400 files
+  proposing to move into a wrongly-named folder.
+
+  **And repairing it broke something worse, which is the part worth remembering.** `populate` published holdings, and
+  `HoldingsAsserted` supersedes per device — so importing one folder replaced the whole library's holdings with those
+  400 files and left 6,085 unopenable. Cataloguing is told which files to take in and **nothing about the rest**, so it
+  cannot say what the set is; `reconcile` publishes, because only a walk of every root knows. `shelf import` and
+  `shelf query` now do both.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

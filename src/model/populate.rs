@@ -275,7 +275,16 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
         }
     }
 
-    instance.assert_holdings(now, held);
+    // **Cataloguing does not publish holdings** — #145, learned the hard way.
+    //
+    // `HoldingsAsserted` supersedes per device rather than accumulating, so a
+    // pass over *some* paths that published what it saw replaced the whole
+    // library's holdings with those few: importing 400 Tom Waits files left
+    // 6,085 others reading as held on another machine.
+    //
+    // Publishing the set is `reconcile`'s job, because only a walk of every
+    // root knows what the set *is*. This one is told which files to catalogue.
+    let _ = held;
 
     // **After the ingest, so the collections are the ones this fold knows.**
     // Asked of the catalogue rather than recomputed, for the reason
@@ -339,6 +348,47 @@ mod tests {
 
     use crate::model::round_trip::{write_tags, write_wav};
     use crate::model::seam::Librarian;
+
+    /// **Cataloguing some files does not unpublish the rest** — #145.
+    ///
+    /// `HoldingsAsserted` supersedes per device, so a pass over a few paths
+    /// that published what it saw replaced the whole library's holdings with
+    /// those few. Importing 400 Tom Waits files left 6,085 others reading as
+    /// held on another machine, and the player could open none of them.
+    #[test]
+    fn importing_one_folder_leaves_the_other_holdings_alone() {
+        let root = std::env::temp_dir().join("gmuse-import-holdings");
+        let _ = std::fs::remove_dir_all(&root);
+        // Different lengths, so they are two encodings: identical bytes are
+        // one row however many paths hold them.
+        for (n, folder) in ["A", "B"].into_iter().enumerate() {
+            let dir = root.join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            let at = dir.join(format!("01 {folder}.wav"));
+            write_wav(&at, 4410 + n * 700);
+            write_tags(&at, folder, "An Artist", None);
+        }
+
+        let mut i = Instance::new(crate::fixture::device());
+        populate(&mut i, std::slice::from_ref(&root), 100);
+        reconcile(&mut i, std::slice::from_ref(&root), 150);
+        let held = |i: &Instance| {
+            i.catalogue()
+                .holdings
+                .values()
+                .map(|h| h.held.len())
+                .sum::<usize>()
+        };
+        assert_eq!(held(&i), 2, "both were imported and both are held");
+
+        // Import one folder again — a correction, a retag, a re-run.
+        populate(&mut i, &[root.join("A")], 200);
+        assert_eq!(
+            held(&i),
+            2,
+            "cataloguing one folder unpublished the other, which is what #145 was"
+        );
+    }
 
     /// **A scan offers; it does not catalogue** — #62, and the inversion the
     /// issue is about.
@@ -760,15 +810,20 @@ mod tests {
 
     /// A deleted file goes away rather than being resurrected — the holdings
     /// set is published whole every pass (#71).
+    ///
+    /// **Asked of `reconcile`**, which is what publishes them (#145).
+    /// Cataloguing is told which files to take in and nothing about the rest,
+    /// so it cannot say what the set is.
     #[test]
     fn a_second_pass_drops_what_is_no_longer_there() {
         let dir = library("deleted", &[("Callisto", None), ("Luna", None)]);
         let mut i = Instance::new(Id::derived(b"laptop"));
         populate(&mut i, std::slice::from_ref(&dir), 100);
+        reconcile(&mut i, std::slice::from_ref(&dir), 110);
         assert_eq!(i.catalogue().holdings[&i.device()].held.len(), 2);
 
         std::fs::remove_file(dir.join("02 Luna.wav")).unwrap();
-        populate(&mut i, &[dir], 200);
+        reconcile(&mut i, &[dir], 200);
 
         assert_eq!(
             i.catalogue().holdings[&i.device()].held.len(),
