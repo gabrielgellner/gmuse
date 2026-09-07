@@ -305,9 +305,11 @@ def survey(root: Path, out: Path, tier: int | None, workers: int) -> None:
                 }
             )
 
-    if rows:
-        rows.sort(key=_worst_first)
-        write_tsv(out, rows)
+    # **Written even when it is empty** — a survey that found nothing used to
+    # leave the last one that found something standing, so a clean library went
+    # on being described by a stale file listing work already done.
+    rows.sort(key=_worst_first)
+    write_tsv(out, rows)
     for verdict, n in tally.most_common():
         print(f"  {n:6d}  {verdict}")
     print(f"\n{len(rows)} row(s) -> {out}")

@@ -185,3 +185,29 @@ def test_departed_is_not_walked(tmp_path: Path) -> None:
     (tmp_path / ".gmuse" / "01 Log.mp3").write_bytes(b"\x00")
 
     assert walk(tmp_path) == [keep]
+
+
+def test_a_survey_that_found_nothing_overwrites_the_one_that_found_something(tmp_path: Path) -> None:
+    """Nothing to do is an answer, and it has to be written down.
+
+    `write_tsv` needed a row to know its own columns, so every caller guarded
+    with `if rows:` — and a pass that found nothing left the last one that
+    found something standing. `tags survey` reported `0 file(s) ->
+    tags-review.tsv` and did not touch the 107-row file already there, so the
+    folder went on claiming 107 files needed work long after they were done.
+    Half of `tools/out` had gone stale by exactly this route.
+    """
+    from gmuse_tools.genre.common import write_tsv  # noqa: PLC0415
+
+    out = tmp_path / "review.tsv"
+    write_tsv(out, [{"verdict": "differs", "path": "/m/a.mp3"}])
+    assert "differs" in out.read_text()
+
+    write_tsv(out, [], columns=["verdict", "path"])
+    assert out.read_text() == "verdict\tpath\n", "a header and no rows is what nothing to do looks like"
+
+    # And with no columns to write it under, the file is still cleared: one
+    # nobody rewrote reads exactly like one nobody has dealt with.
+    write_tsv(out, [{"verdict": "differs", "path": "/m/a.mp3"}])
+    write_tsv(out, [])
+    assert out.read_text() == ""

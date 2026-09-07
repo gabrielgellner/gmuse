@@ -271,9 +271,11 @@ def survey(root: Path, out: Path) -> None:
             tally["ID3v1 to remove"] += 1
         if row["salvage_lyrics"]:
             tally["lyrics to migrate into ID3"] += 1
-    if rows:
-        rows.sort(key=_by_path)
-        write_tsv(out, rows)
+    # **Written even when it is empty** — a survey that found nothing used to
+    # leave the last one that found something standing, so a clean library went
+    # on being described by a stale file listing work already done.
+    rows.sort(key=_by_path)
+    write_tsv(out, rows)
     for key, n in sorted(tally.items()):
         print(f"  {n:6d}  {key}")
     print(f"\n{len(rows)} file(s) -> {out}")

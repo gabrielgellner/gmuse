@@ -258,8 +258,17 @@ class TabInFieldError(ValueError):
         super().__init__(f"{name}: {field}={value!r} holds a tab or newline")
 
 
-def write_tsv(path: Path, rows: list[dict[str, object]]) -> None:
+def write_tsv(path: Path, rows: list[dict[str, object]], columns: list[str] | None = None) -> None:
     """Write rows as TSV, refusing rather than emitting a row that cannot be read back.
+
+    **An empty result is an answer and gets written.** This used to need a row
+    to know its own columns, so every caller guarded with `if rows:` and a pass
+    that found nothing left the last one that found something standing. `tags
+    survey` reported `0 file(s) -> tags-review.tsv` and did not touch the
+    107-row file already there, so the folder went on claiming 107 files needed
+    work months after they had all been done — and half of `tools/out` had gone
+    stale the same way. Pass `columns` and a run with nothing to report writes
+    a header and no rows, which is what "nothing to do" looks like.
 
     TSV has no escape mechanism: a tab inside a field silently shifts every
     column right of it. Downstream that is a *dropped* row rather than a wrong
@@ -271,6 +280,13 @@ def write_tsv(path: Path, rows: list[dict[str, object]]) -> None:
     23-in-504 rows that hold a comma; these files are read by eye and by ``cut``,
     so plain columns win and the guard covers the hazard.
     """
+    names = list(rows[0]) if rows else columns
+    if names is None:
+        # Nothing to write and no columns to write it under. Truncating is
+        # still better than leaving yesterday's findings in place, because a
+        # file nobody rewrote reads exactly like a file nobody has dealt with.
+        path.write_text("")
+        return
     for row in rows:
         for field, value in row.items():
             if "\t" in str(value) or "\n" in str(value):
@@ -281,6 +297,6 @@ def write_tsv(path: Path, rows: list[dict[str, object]]) -> None:
         # stray \r. `awk -F'\t' '$8=="y"'` then matches nothing, silently, which
         # is exactly the kind of wrong-but-plausible shell result the tab
         # separator was chosen to avoid.
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), delimiter="\t", lineterminator="\n")
+        writer = csv.DictWriter(handle, fieldnames=names, delimiter="\t", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)

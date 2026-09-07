@@ -250,8 +250,10 @@ def scan(root: Path, out: Path) -> None:
                 "path": str(rel),
             }
         )
-    if rows:
-        write_tsv(out, rows)
+    # **Written even when it is empty** — a survey that found nothing used to
+    # leave the last one that found something standing, so a clean library went
+    # on being described by a stale file listing work already done.
+    write_tsv(out, rows)
     print(f"{sum(tally.values())} files")
     for k, v in sorted(tally.items()):
         print(f"  {v:6d}  {k}")
