@@ -465,10 +465,29 @@ fn peak_e4(raw: &str) -> Option<u32> {
 /// is a typo and never a distinction — and this is the function concept ids are
 /// minted through, so a distinction it draws is a concept nobody meant to
 /// create.
+///
+/// **Whitespace around a comma collapses too** — #153. `split_whitespace`
+/// cannot see a space that is *missing*, so `Sante, Sidney Charles` and
+/// `Sante,Sidney Charles` minted two artists from one credit typed by two
+/// taggers. Four pairs in this library, all from DJ-pool tags, and invisible
+/// until now because a file carrying a MusicBrainz artist id never reaches the
+/// name path at all.
+///
+/// **The joiner's spelling is deliberately left alone.** Folding `&` to `and`
+/// is the obvious next step and it crosses the line above: a merge repairs a
+/// split and nothing repairs a fold, so `Dom & Roland` — one person, whose
+/// stage name contains an ampersand — must not become two. No two artists are
+/// distinguished by whether a space follows a comma; plenty are distinguished
+/// by everything else.
 pub fn normalise(name: &str) -> String {
-    name.split_whitespace()
+    let tidy = |part: &str| part.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Empty parts dropped, so a trailing comma does not leave a dangling
+    // separator that is itself a distinction.
+    name.split(',')
+        .map(tidy)
+        .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(", ")
         .to_lowercase()
 }
 
@@ -841,6 +860,62 @@ mod tests {
             normalise("Christian Löffler"),
             normalise("Christian Loffler"),
             "accents are a real difference here, not noise"
+        );
+    }
+
+    /// **A space after a comma is never a distinction** — #153.
+    ///
+    /// `split_whitespace` cannot see a space that is missing, so these minted
+    /// two artists from one credit. All four pairs in this library are DJ-pool
+    /// tags typed by two different taggers.
+    #[test]
+    fn a_comma_is_spaced_the_same_way_however_it_was_typed() {
+        assert_eq!(
+            normalise("Sante, Sidney Charles"),
+            normalise("Sante,Sidney Charles")
+        );
+        assert_eq!(
+            normalise("Daniel Dubb , m.O.N.R.O.E."),
+            normalise("Daniel Dubb,m.O.N.R.O.E."),
+            "a space before the comma is the same typo from the other side"
+        );
+        assert_eq!(normalise("Sante,Sidney Charles"), "sante, sidney charles");
+    }
+
+    /// **The joiner's spelling is not normalised, and that is the point.**
+    ///
+    /// `Dom & Roland` is one person — MusicBrainz says so, `drum & bass artist
+    /// Dominic Angas` — and folding `&` to `and` is the step that would make
+    /// him two. A merge repairs a split; nothing repairs a fold (#152).
+    #[test]
+    fn the_joiner_is_left_exactly_as_written() {
+        assert_ne!(
+            normalise("Dom & Roland"),
+            normalise("Dom and Roland"),
+            "an ampersand is not a spelling of `and` for a name that contains one"
+        );
+        assert_ne!(
+            normalise("Neko Case & Her Boyfriends"),
+            normalise("Neko Case and Her Boyfriends")
+        );
+    }
+
+    /// A trailing comma must not leave a separator that is itself a difference.
+    #[test]
+    fn an_empty_part_leaves_nothing_behind() {
+        assert_eq!(normalise("Sante,"), normalise("Sante"));
+        assert_eq!(normalise("Sante,,Sidney"), normalise("Sante, Sidney"));
+        assert_eq!(normalise(","), "");
+    }
+
+    /// The shallowness this was already promising still holds — a comma is not
+    /// a licence to start folding other things.
+    #[test]
+    fn a_name_with_no_comma_is_untouched_by_the_comma_rule() {
+        assert_eq!(normalise("  Emmy Lou Harris "), "emmy lou harris");
+        assert_ne!(
+            normalise("Christian Löffler"),
+            normalise("Christian Loffler")
         );
     }
 
