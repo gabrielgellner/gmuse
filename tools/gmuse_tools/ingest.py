@@ -39,7 +39,6 @@ import re
 import shutil
 import sys
 import unicodedata
-import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -66,8 +65,8 @@ from mutagen.id3 import (
     UFID,
 )
 
+from gmuse_tools import bronze
 from gmuse_tools.genre.common import compare_key, out_path, tracklist_match, walk, write_tsv
-from gmuse_tools.genre.fetch import get_json
 
 MB: Final = "https://musicbrainz.org/ws/2"
 #: Everything needed in one request. Each `inc` is a round trip saved against a
@@ -157,12 +156,39 @@ def named_release(mbid: str, ours: list[str]) -> Match | None:
     The verdict is still reported, so the shell history shows what was accepted
     and on whose say-so.
     """
-    full = get_json(f"{MB}/release/{mbid}", {"inc": INC, "fmt": "json"})
+    full = asked(f"{MB}/release/{mbid}", {"inc": INC, "fmt": "json"})
     if not full:
         return None
     titles = [t["title"] for m in full.get("media", []) for t in m.get("tracks", [])]
     _, share = tracklist_match(ours, titles)
     return Match(full, "named", share)
+
+
+#: The one status that carries an answer.
+HTTP_OK: Final = 200
+
+#: The user agent MusicBrainz sees, per its rate-limit policy.
+ASKING: Final = {"User-Agent": "gmuse-ingest/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
+
+
+def asked(url: str, params: dict[str, str]) -> dict[str, Any] | None:
+    """Ask MusicBrainz, or recall having asked — through `bronze`.
+
+    **This used `genre.fetch.get_json`, which is the raw fetcher underneath a
+    cache rather than beside one.** `genre/fetch.py` calls it and then stores
+    the *genres* it extracted; `ingest` called it and stored nothing, so every
+    survey re-asked MusicBrainz for every release. A 139-album survey is around
+    600 requests at one a second, and re-running it to change a column spent
+    all of them again.
+
+    `bronze` keys on the url and its parameters and keeps what it was told, so
+    a second run over the same library is free. That is the difference between
+    a review file you can regenerate and one you dare not.
+    """
+    status, body = bronze.get(bronze.open_cache(), url, params, headers=ASKING)
+    if status != HTTP_OK or not isinstance(body, dict):
+        return None
+    return body
 
 
 def missing_tracks(folder: Path) -> list[str]:
@@ -240,10 +266,13 @@ def whole_album(folder: Path) -> bool:
 def identify(artist: str, album: str, ours: list[str]) -> Match | None:
     """Find the release, and refuse anything short of an exact tracklist."""
     query = f'artist:"{artist}" AND release:"{album}"'
-    found = get_json(f"{MB}/release?query={urllib.parse.quote(query)}&fmt=json&limit={CANDIDATES}", {})
+    found = asked(
+        f"{MB}/release",
+        {"query": query, "fmt": "json", "limit": str(CANDIDATES)},
+    )
     best: Match | None = None
     for candidate in (found or {}).get("releases", [])[:CANDIDATES]:
-        full = get_json(f"{MB}/release/{candidate['id']}", {"inc": INC, "fmt": "json"})
+        full = asked(f"{MB}/release/{candidate['id']}", {"inc": INC, "fmt": "json"})
         if not full:
             continue
         titles = [t["title"] for m in full.get("media", []) for t in m.get("tracks", [])]
@@ -642,7 +671,7 @@ def survey(root: Path, out: Path) -> None:
     rank = {"exact": 0, "close": 1, "weak": 2, "part of an album": 3, "no candidate": 4, "error": 5}
 
     def reading_order(row: dict[str, object]) -> tuple[int, int, str]:
-        return (rank.get(str(row["verdict"]), 9), -int(row["ours"] or 0), str(row["album"]))
+        return (rank.get(str(row["verdict"]), 9), -int(str(row["ours"] or 0)), str(row["album"]))
 
     rows.sort(key=reading_order)
     write_tsv(out, rows)
