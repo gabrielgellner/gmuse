@@ -39,13 +39,13 @@ use std::collections::BTreeSet;
 
 use crate::model::basis::Basis;
 use crate::model::clock::HybridClock;
-use crate::model::entity::{Collection, Concept, Device, Encoding, Facet, Recording};
+use crate::model::entity::{Artist, Collection, Concept, Device, Encoding, Facet, Recording, Role};
 use crate::model::facet::{self, Described};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Fact, Record};
 use crate::model::ord::OrdKey;
-use crate::model::reference::Source;
+use crate::model::reference::{CreditOn, RoleClass, Source};
 
 /// One assertion, as a tool writes it.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -183,7 +183,41 @@ pub enum Proposal {
     ///
     /// Shadows rather than deletes, like every retraction here: a stale
     /// replica re-delivering the edge would otherwise resurrect it.
-    NarrowingRetracted { broader: String, narrower: String },
+    /// **This credit names several artists** — #152, and the repair for a
+    /// credit that became one.
+    ///
+    /// Without a MusicBrainz artist id an artist is minted from the credit
+    /// *string*, so `Armand Van Helden,Dizzee Rascal` is an artist and Stephan
+    /// Bodzin is four people. The model was always ready for the fix —
+    /// `CreditAsserted` carries a `position` and a `join_phrase` precisely so
+    /// a multi-artist credit is several rows — and what was missing is a way
+    /// for a pass to say so.
+    ///
+    /// **Named, not identified**, like a genre and a collection: a tool has no
+    /// business minting an artist id, and a name is what a person reviewing
+    /// the file can read. The ids come out of `Id::of_artist`, so two devices
+    /// applying the same row land on the same artists.
+    ///
+    /// **The joined artist is left alone.** Its credit is superseded by these,
+    /// but the row itself stays, because §1 is explicit that a row nothing
+    /// holds is ordinary and deleting one takes its ratings and plays with it.
+    /// A split is repaired by a merge (#88); a merge is repaired by nothing,
+    /// which is why this proposes rather than the pass deciding.
+    Credited {
+        recording: Id<Recording>,
+        /// The artists the credit names, **in the order it names them** — the
+        /// position is what `CreditAsserted` keys a row by, so a reordering is
+        /// a different set of rows rather than an edit.
+        artists: Vec<String>,
+        /// Where the answer came from, on the wire for the reason it is on a
+        /// genre: MusicBrainz naming these two and a person typing them are
+        /// the same shape and must not become the same fact.
+        basis: Source,
+    },
+    NarrowingRetracted {
+        broader: String,
+        narrower: String,
+    },
     /// A rating. Included because it is the simplest possible proposal and
     /// therefore the one worth testing the format against.
     Rated {
@@ -259,7 +293,8 @@ impl Proposal {
             Proposal::GenreAssigned { recording, .. }
             | Proposal::QualifierAssigned { recording, .. }
             | Proposal::Rated { recording, .. }
-            | Proposal::CollectedInto { recording, .. } => Subject::Recording(*recording),
+            | Proposal::CollectedInto { recording, .. }
+            | Proposal::Credited { recording, .. } => Subject::Recording(*recording),
             Proposal::Narrowed { .. } | Proposal::NarrowingRetracted { .. } => Subject::Vocabulary,
             // **The thing it is about is the derived file.** The source is
             // checked below, where a missing one is a reason to refuse rather
@@ -535,6 +570,61 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
         }
         // The collection is named rather than identified, for the reason a
         // genre is: a tool has no way to mint an id and should not.
+        Proposal::Credited {
+            recording,
+            artists,
+            basis,
+        } => {
+            let named: Vec<String> = artists.iter().map(|a| a.trim().to_string()).collect();
+            if named.iter().any(String::is_empty) {
+                return Err("an artist needs a name".to_string());
+            }
+            // **Two names, or it is not a split.** A one-artist "split" would
+            // quietly re-credit the recording to a differently-spelled artist,
+            // which is a rename wearing a repair's clothes.
+            if named.len() < 2 {
+                return Err(format!(
+                    "a credit names several artists, and this names {}",
+                    named.len()
+                ));
+            }
+            // **Positions are what keep them distinct**, so a duplicate name
+            // would fold two credits into one row and lose the second.
+            let mut seen = std::collections::BTreeSet::new();
+            if let Some(twice) = named
+                .iter()
+                .find(|a| !seen.insert(crate::model::ingest::normalise(a)))
+            {
+                return Err(format!("{twice:?} is credited twice"));
+            }
+            let role = Id::<Role>::of_name("performer");
+            let mut facts = vec![Fact::RoleDefined {
+                role,
+                name: "performer".to_string(),
+                class: RoleClass::Performer,
+            }];
+            for (at, name) in named.iter().enumerate() {
+                let artist = Id::<Artist>::of_artist(None, name);
+                facts.push(Fact::ArtistNamed {
+                    artist,
+                    name: name.clone(),
+                });
+                facts.push(Fact::CreditAsserted {
+                    subject: CreditOn::Recording(recording),
+                    artist,
+                    role,
+                    // **Whatever the proposer says**, and never `TagVariant`:
+                    // the row this supersedes was a tag's reading, and folding
+                    // them to one basis would make the correction
+                    // indistinguishable from the thing it corrects.
+                    basis,
+                    position: u8::try_from(at).unwrap_or(u8::MAX),
+                    as_credited: None,
+                    join_phrase: None,
+                });
+            }
+            facts
+        }
         Proposal::CollectedInto {
             recording,
             collection,
@@ -1363,5 +1453,124 @@ mod collecting {
         let (_, report) = parse(&line(99, "Dance"), dev(), 100, HELD);
         assert_eq!(report.applied, 0);
         assert_eq!(report.unknown.len(), 1, "{report}");
+    }
+}
+
+#[cfg(test)]
+mod credited {
+    //! **Splitting a joined credit back into the artists it names** — #152.
+    //!
+    //! Without a MusicBrainz artist id an artist is minted from the credit
+    //! *string*, so this library holds an artist called
+    //! `Armand Van Helden,Dizzee Rascal` and four Stephan Bodzins. The model
+    //! was always ready — `CreditAsserted` carries a position precisely so a
+    //! multi-artist credit is several rows — and only the proposal was
+    //! missing.
+    //!
+    //! Most of these tests are about **refusing**, because the failure is not
+    //! symmetric: a split is repaired by a merge (#88) and a merge is repaired
+    //! by nothing.
+
+    use super::tests::*;
+    use super::*;
+
+    fn line(r: u128, artists: &str) -> String {
+        format!(
+            r#"{{"fact":"credited","recording":"{}","artists":{artists},"basis":"musicbrainz"}}"#,
+            rec(r)
+        )
+    }
+
+    #[test]
+    fn a_joined_credit_becomes_one_row_per_artist_in_order() {
+        let (records, report) = parse(
+            &line(1, r#"["Armand van Helden","Dizzee Rascal"]"#),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(report.applied, 1, "{report}");
+
+        let credits: Vec<(u8, Id<Artist>)> = records
+            .iter()
+            .filter_map(|r| match &r.fact {
+                Fact::CreditAsserted {
+                    position, artist, ..
+                } => Some((*position, *artist)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(credits.len(), 2, "one row per artist: {credits:?}");
+        assert_eq!(credits[0].0, 0);
+        assert_eq!(
+            credits[1].0, 1,
+            "the order the credit names them is the position"
+        );
+        assert_eq!(
+            credits[0].1,
+            Id::<Artist>::of_artist(None, "Armand van Helden"),
+            "the id is the one `of_artist` mints, so two devices agree"
+        );
+    }
+
+    #[test]
+    fn every_artist_is_named_before_it_is_credited() {
+        let (records, _) = parse(&line(1, r#"["Kiko","Spencer K"]"#), dev(), 100, HELD);
+        let named: Vec<&String> = records
+            .iter()
+            .filter_map(|r| match &r.fact {
+                Fact::ArtistNamed { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            named,
+            vec!["Kiko", "Spencer K"],
+            "an id no fact resolves is unrenderable"
+        );
+    }
+
+    /// **The basis is on the wire**, for the reason it is on a genre.
+    ///
+    /// The row this supersedes was a tag's reading. Folding the correction to
+    /// the same basis would make it indistinguishable from the thing it
+    /// corrects.
+    #[test]
+    fn the_correction_does_not_arrive_as_another_tag_reading() {
+        let (records, _) = parse(&line(1, r#"["Kiko","Spencer K"]"#), dev(), 100, HELD);
+        assert!(
+            records.iter().all(|r| !matches!(
+                &r.fact,
+                Fact::CreditAsserted {
+                    basis: Source::TagVariant,
+                    ..
+                }
+            )),
+            "a curated split must not read as a tag"
+        );
+    }
+
+    /// **One artist is a rename wearing a repair's clothes**, and refused.
+    #[test]
+    fn a_split_into_one_artist_is_refused() {
+        let (_, report) = parse(&line(1, r#"["Just The One"]"#), dev(), 100, HELD);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    /// A duplicate name would fold two credits into one row and lose the
+    /// second, so the count would silently disagree with the credit.
+    #[test]
+    fn the_same_artist_credited_twice_is_refused() {
+        let (_, report) = parse(&line(1, r#"["Onno","onno"]"#), dev(), 100, HELD);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    #[test]
+    fn an_empty_name_is_refused() {
+        let (_, report) = parse(&line(1, r#"["Onno","  "]"#), dev(), 100, HELD);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
     }
 }

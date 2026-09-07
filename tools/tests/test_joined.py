@@ -13,6 +13,7 @@ from gmuse_tools.joined import (
     all_solo,
     locally,
     members,
+    proposals,
     reordered,
     resolve,
     shares_members,
@@ -131,3 +132,49 @@ def test_a_person_whose_name_contains_an_ampersand_survives() -> None:
     got = resolve(v, known.get)
     assert got.verdict == "one"
     assert "drum & bass artist" in got.why
+
+
+def test_only_a_settled_list_becomes_a_proposal() -> None:
+    """The whole discipline: an unsure credit goes to a person, not the library."""
+    work = [
+        {"recording": "r1", "artist": "Okain,Onno"},
+        {"recording": "r2", "artist": "Itch-E & Scratch-E"},
+        {"recording": "r3", "artist": "Deerhoof"},
+    ]
+    decided = {
+        "Okain,Onno": Verdict("Okain,Onno", "list", "reordered", ("Okain", "Onno")),
+        "Itch-E & Scratch-E": Verdict("Itch-E & Scratch-E", "unsure", "nothing", ("Itch-E", "Scratch-E")),
+    }
+    got = proposals(work, decided)
+    assert [p["recording"] for p in got] == ["r1"]
+    assert got[0]["artists"] == ["Okain", "Onno"]
+    assert got[0]["fact"] == "credited"
+
+
+def test_the_basis_says_which_evidence_settled_it() -> None:
+    """A library reading and an authority's answer must not be the same fact."""
+    work = [{"recording": "r1", "artist": "A,B"}, {"recording": "r2", "artist": "C,D"}]
+    decided = {
+        "A,B": Verdict("A,B", "list", "the same members appear in another order", ("A", "B")),
+        "C,D": Verdict("C,D", "list", "MusicBrainz holds every member and not the whole", ("C", "D")),
+    }
+    got = {p["recording"]: p["basis"] for p in proposals(work, decided)}
+    assert got == {"r1": "inferred", "r2": "musicbrainz"}
+
+
+def test_a_credit_is_proposed_as_the_sleeve_spells_it() -> None:
+    """MusicBrainz's spelling is a separate claim, and `as_credited` is for it.
+
+    Proposing `Armand van Helden` because an authority files him that way would
+    smuggle a rename into a split.
+    """
+    work = [{"recording": "r1", "artist": "Armand Van Helden,Dizzee Rascal"}]
+    decided = {
+        "Armand Van Helden,Dizzee Rascal": Verdict(
+            "Armand Van Helden,Dizzee Rascal",
+            "list",
+            "MusicBrainz holds every member and not the whole",
+            ("Armand Van Helden", "Dizzee Rascal"),
+        )
+    }
+    assert proposals(work, decided)[0]["artists"] == ["Armand Van Helden", "Dizzee Rascal"]

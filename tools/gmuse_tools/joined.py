@@ -40,11 +40,22 @@ a merge (#88) and a wrong merge is not.
 
     uv run gmuse-tools joined survey ~/MusicLibrary     # -> out/joined-review.tsv
     uv run gmuse-tools joined survey ~/MusicLibrary --offline   # skip the lookup
+
+    gmuse shelf query > work.jsonl                     # the library says what it holds
+    uv run gmuse-tools joined propose work.jsonl       # -> out/joined-propose.jsonl
+    gmuse shelf apply out/joined-propose.jsonl         # dry run
+    gmuse shelf apply out/joined-propose.jsonl --write
+
+`propose` reads the **work list** rather than walking a disk, for `identify.py`'s
+reason: a proposal has to name an id the library knows, and a path is a property
+of one machine's copy. It proposes only what a verdict called a `list`, and a
+credit the pass could not settle produces no line at all.
 """
 
 from __future__ import annotations
 
 import collections
+import json
 import re
 import sqlite3
 import sys
@@ -267,23 +278,35 @@ def credits_under(root: Path) -> list[str]:
     return list(seen)
 
 
+def settle(corpus: list[str], *, offline: bool = False) -> dict[str, Verdict]:
+    """Decide what can be decided: the library first, then an authority.
+
+    The library first because it is free and has no false positives on this
+    data, and an authority only for what is left — which is also what keeps a
+    rate limit off the 37 credits that never needed it.
+    """
+    decided = locally(corpus)
+    if offline:
+        return decided
+    con = bronze.open_cache()
+    cache: dict[str, dict[str, str] | None] = {}
+
+    def ask(name: str) -> dict[str, str] | None:
+        if name not in cache:
+            cache[name] = ask_musicbrainz(con, name)
+        return cache[name]
+
+    unsure = [v for v in decided.values() if v.verdict == "unsure"]
+    for i, v in enumerate(unsure, 1):
+        print(f"  {i}/{len(unsure)} asking about {v.credit}", file=sys.stderr)
+        decided[v.credit] = resolve(v, ask)
+    return decided
+
+
 def survey(root: Path, out: Path, *, offline: bool = False) -> None:
     """Report every joined-looking credit and what is known about it."""
     found = credits_under(root)
-    decided = locally(found)
-    if not offline:
-        con = bronze.open_cache()
-        cache: dict[str, dict[str, str] | None] = {}
-
-        def ask(name: str) -> dict[str, str] | None:
-            if name not in cache:
-                cache[name] = ask_musicbrainz(con, name)
-            return cache[name]
-
-        unsure = [v for v in decided.values() if v.verdict == "unsure"]
-        for i, v in enumerate(unsure, 1):
-            print(f"  {i}/{len(unsure)} asking about {v.credit}", file=sys.stderr)
-            decided[v.credit] = resolve(v, ask)
+    decided = settle(found, offline=offline)
 
     def order(v: Verdict) -> tuple[str, str]:
         return (v.verdict, v.credit.lower())
@@ -302,6 +325,7 @@ def survey(root: Path, out: Path, *, offline: bool = False) -> None:
 
 LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
 OFFLINE = typer.Option(default=False, help="use only what the library itself can corroborate")
+WORK = typer.Argument(Path("work.jsonl"), help="the work list from `gmuse shelf query`")
 
 
 def register(app: typer.Typer) -> None:
@@ -313,4 +337,67 @@ def register(app: typer.Typer) -> None:
         """Report which credits name several artists. Writes nothing to the library."""
         survey(root.expanduser(), out_path("joined-review.tsv"), offline=offline)
 
+    @sub.command("propose")
+    def propose_cmd(work: Path = WORK, root: Path = LIB, *, offline: bool = OFFLINE) -> None:
+        """Turn the settled verdicts into facts `gmuse shelf apply` can read."""
+        propose(work.expanduser(), root.expanduser(), out_path("joined-propose.jsonl"), offline=offline)
+
     app.add_typer(sub, name="joined")
+
+
+def proposals(work: list[dict[str, str]], decided: dict[str, Verdict]) -> list[dict[str, object]]:
+    """Turn settled verdicts into lines `gmuse shelf apply` can read.
+
+    **Only `list`.** A credit that is one artist needs no proposal and a credit
+    nothing settled must not get one — the whole discipline of this pass is
+    that an unsure row goes to a person rather than to the library.
+
+    The members are proposed **as the credit spells them**, not as MusicBrainz
+    files them. A name from an authority is a separate claim somebody else can
+    propose, and `CreditAsserted` already has `as_credited` for the difference;
+    conflating the two would smuggle a rename into a split.
+    """
+    out: list[dict[str, object]] = []
+    for row in work:
+        v = decided.get(row.get("artist", ""))
+        if v is None or v.verdict != "list":
+            continue
+        out.append(
+            {
+                "fact": "credited",
+                "recording": row["recording"],
+                "artists": list(v.parts),
+                # `inferred` where the library corroborated it, because that is
+                # what it was: a reading of what this library already holds.
+                "basis": "musicbrainz" if v.why.startswith("MusicBrainz") else "inferred",
+            }
+        )
+    return out
+
+
+def propose(work: Path, root: Path, out: Path, *, offline: bool = False) -> None:
+    """Read the work list, settle what can be settled, and write the proposals.
+
+    **Two sources, and they answer different questions.** The work list says
+    which recording a credit belongs to, and it is the only thing that may:
+    a proposal has to name an id the library knows. The *tags* are what the
+    corroboration reads, because the library's answer is already canonical
+    where MusicBrainz named it — measured here, 338 distinct artist strings
+    against the tags' 503, and the 165 missing are mostly the per-track
+    `feat.` credits that corroborate each other. Settling on the narrow corpus
+    decided 4 credits; on the wide one, 57.
+    """
+    rows = [json.loads(line) for line in work.read_text().splitlines() if line.strip()]
+    corpus = sorted({r["artist"] for r in rows if r.get("artist")} | set(credits_under(root)))
+    decided = settle(corpus, offline=offline)
+    lines = proposals(rows, decided)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w") as fh:
+        for line in lines:
+            fh.write(json.dumps(line) + "\n")
+
+    settled = sum(1 for v in decided.values() if v.verdict == "list")
+    unsure = sum(1 for v in decided.values() if v.verdict == "unsure")
+    print(f"{len(lines)} proposal(s) over {settled} settled credit(s) -> {out}", file=sys.stderr)
+    print(f"{unsure} credit(s) left to a person, and no line was written for them.", file=sys.stderr)

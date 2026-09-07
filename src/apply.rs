@@ -94,6 +94,14 @@ pub struct Outcome {
     pub report: Report,
     /// Facts already in the log, so a second run is not a second play count.
     pub already: usize,
+    /// Facts this run would append — **records, like `already`**.
+    ///
+    /// Stored rather than derived from `report.applied`, because that counts
+    /// *lines* and this counts *facts*, and one proposal makes several. The
+    /// display subtracted one from the other and so under-reported by however
+    /// many declarations a file repeated: seeding the Dance collection said
+    /// "106 would apply" and appended 107.
+    pub fresh: usize,
     /// Records actually appended. Zero on a dry run.
     pub written: usize,
     pub dry_run: bool,
@@ -103,9 +111,9 @@ impl std::fmt::Display for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} proposals — {} would apply, {} already known, {} unknown to this library, {} malformed",
+            "{} proposals — {} new fact(s), {} already known, {} unknown to this library, {} malformed",
             self.report.applied + self.report.unknown.len() + self.report.malformed.len(),
-            self.report.applied.saturating_sub(self.already),
+            self.fresh,
             self.already,
             self.report.unknown.len(),
             self.report.malformed.len(),
@@ -257,6 +265,7 @@ pub fn run(
     Ok(Outcome {
         report,
         already,
+        fresh: fresh.len(),
         written,
         dry_run: !write,
     })
