@@ -34,6 +34,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import csv
+import difflib
 import re
 import shutil
 import sys
@@ -509,17 +510,40 @@ RELEASE = typer.Option("", help="a MusicBrainz release id you have checked yours
 
 
 def diffs(ours: list[str], theirs: list[str], limit: int = 3) -> str:
-    """The first few titles that disagree, as one reviewable field.
+    """What disagrees, **as a pair**: what we call it and what they call it.
 
-    A share on its own says *how much* disagrees and never *what*, and what is
-    the whole question: `Adele — 21` scored 87% against two different releases,
-    one because our tags hold two typos and one because it is a genuinely
-    different record.
+    A share says how much disagrees and never what, and a list of our own
+    titles says what we have and never what it would become — which is the
+    question a reviewer is actually asking. `ours 'I Found a Bot'` is a
+    complaint; `'I Found a Bot' -> 'I Found a Boy'` is a decision.
+
+    **Paired by similarity, not by position**, because the verdict is computed
+    on sets and a release whose tracks are ordered differently would otherwise
+    report every line as a difference. `difflib` is enough here and is already
+    in the standard library.
+
+    A title with nothing close on the other side is shown alone, because that
+    is the interesting case: it means the two records really differ rather than
+    one of them being spelled oddly.
     """
-    seen = {compare_key(t) for t in theirs}
-    missing = [t for t in ours if compare_key(t) not in seen]
-    shown = " · ".join(f"ours {t!r}" for t in missing[:limit])
-    return shown + (f" · +{len(missing) - limit} more" if len(missing) > limit else "")
+    theirs_keys = {compare_key(t) for t in theirs}
+    ours_keys = {compare_key(t) for t in ours}
+    only_ours = [t for t in ours if compare_key(t) not in theirs_keys]
+    only_theirs = [t for t in theirs if compare_key(t) not in ours_keys]
+
+    shown: list[str] = []
+    left = list(only_theirs)
+    for mine in only_ours:
+        near = difflib.get_close_matches(compare_key(mine), [compare_key(t) for t in left], n=1, cutoff=0.6)
+        if near:
+            i = next(i for i, t in enumerate(left) if compare_key(t) == near[0])
+            shown.append(f"{mine!r} -> {left.pop(i)!r}")
+        else:
+            shown.append(f"{mine!r} -> (nothing like it)")
+    shown += [f"(nothing like it) -> {t!r}" for t in left]
+
+    head = " · ".join(shown[:limit])
+    return head + (f" · +{len(shown) - limit} more" if len(shown) > limit else "")
 
 
 def survey(root: Path, out: Path) -> None:

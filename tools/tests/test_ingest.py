@@ -70,3 +70,35 @@ def test_each_disc_declares_its_own_total(tmp_path: Path) -> None:
     got = missing_tracks(short)
     assert len(got) == 1
     assert got[0].startswith("disc 2:")
+
+
+def test_a_difference_shows_both_sides() -> None:
+    """A reviewer is asking what it becomes, not what we have."""
+    from gmuse_tools.ingest import diffs  # noqa: PLC0415
+
+    got = diffs(["Rolling in the Deep", "I Found a Bot (Bonus Track)"], ["Rolling in the Deep", "I Found a Boy"])
+    assert got == "'I Found a Bot (Bonus Track)' -> 'I Found a Boy'"
+
+
+def test_pairing_survives_a_different_running_order() -> None:
+    """The verdict is computed on sets, so display must not assume position."""
+    from gmuse_tools.ingest import diffs  # noqa: PLC0415
+
+    got = diffs(["Tuming Tables", "Someone Like You"], ["Someone Like You", "Turning Tables"])
+    assert got == "'Tuming Tables' -> 'Turning Tables'"
+
+
+def test_a_title_with_nothing_like_it_is_shown_alone() -> None:
+    """The interesting case: the records really differ, rather than one being spelled oddly."""
+    from gmuse_tools.ingest import diffs  # noqa: PLC0415
+
+    got = diffs(["Need You Now"], ["Hiding My Heart"])
+    assert "'Need You Now' -> (nothing like it)" in got
+    assert "(nothing like it) -> 'Hiding My Heart'" in got
+
+
+def test_nothing_differing_says_nothing() -> None:
+    """An exact match has no diff to print."""
+    from gmuse_tools.ingest import diffs  # noqa: PLC0415
+
+    assert diffs(["One", "Two"], ["One", "Two"]) == ""
