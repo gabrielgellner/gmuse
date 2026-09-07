@@ -575,6 +575,45 @@ mod tests {
         );
     }
 
+    /// **An album whose name begins with a dot is an album** — #150.
+    ///
+    /// A walk skipping anything dotted is the usual convention and it silently
+    /// took sixteen tracks out of this library: Britney Spears'
+    /// `...Baby One More Time`. The directories worth skipping are named now,
+    /// because a rule that cannot tell a hidden folder from a record has no
+    /// business guessing.
+    #[test]
+    fn a_folder_that_starts_with_a_dot_is_still_part_of_the_library() {
+        let root = std::env::temp_dir().join("gmuse-populate-dotted");
+        let _ = std::fs::remove_dir_all(&root);
+        for (folder, title) in [
+            ("...Baby One More Time", "Sometimes"),
+            (".departed", "Retired"),
+            (".gmuse", "NotMusic"),
+        ] {
+            let dir = root.join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            let at = dir.join(format!("01 {title}.wav"));
+            write_wav(&at, 4410 + title.len() * 13);
+            write_tags(&at, title, "An Artist", None);
+        }
+
+        let found = audio_files(std::slice::from_ref(&root));
+        let names: BTreeSet<String> = found
+            .iter()
+            .filter_map(|p| p.parent()?.file_name()?.to_str().map(str::to_string))
+            .collect();
+        assert!(
+            names.contains("...Baby One More Time"),
+            "an album was mistaken for a hidden folder: {names:?}"
+        );
+        assert!(
+            !names.contains(".departed"),
+            "a walk into .departed hands back everything `remove` retired"
+        );
+        assert!(!names.contains(".gmuse"));
+    }
+
     /// **A scan offers; it does not catalogue** — #62, and the inversion the
     /// issue is about.
     ///

@@ -462,21 +462,34 @@ pub(crate) fn prune_nested(roots: &[PathBuf]) -> Vec<PathBuf> {
     kept
 }
 
-/// Whether a walk should step into this — #146.
+/// Directories a walk does not step into — #146, #150.
 ///
-/// **A dotted directory is not part of the library.** `.gmuse` holds the log
-/// and `.departed/` holds what `remove` retired, and a scan that walked into
-/// the second would hand back every file somebody had just taken out. The
-/// convention is the usual one, so `.Trash` and `.Spotlight-V100` go with it.
+/// **Named, not a pattern.** The first version skipped anything beginning with
+/// a dot, which is the usual convention and which silently took sixteen tracks
+/// out of this library: Britney Spears' `...Baby One More Time` is an album,
+/// not a hidden folder. A rule that cannot tell those apart has no business
+/// guessing.
 ///
-/// The root itself is never skipped, however it is spelled: a library at
-/// `~/.music` is a library.
+/// `.departed` is the one that matters — it holds what `remove` retired, and a
+/// walk that entered it would hand every one of them straight back. The rest
+/// hold no audio and are skipped to save the walk.
+const NOT_THE_LIBRARY: &[&str] = &[
+    ".gmuse",
+    ".departed",
+    ".Trash",
+    ".Spotlight-V100",
+    ".fseventsd",
+    ".DocumentRevisions-V100",
+    ".TemporaryItems",
+];
+
+/// Whether a walk should step into this.
 pub(crate) fn worth_entering(entry: &walkdir::DirEntry) -> bool {
     entry.depth() == 0
         || !entry
             .file_name()
             .to_str()
-            .is_some_and(|name| name.starts_with('.'))
+            .is_some_and(|name| NOT_THE_LIBRARY.contains(&name))
 }
 
 pub(crate) fn is_audio(path: &Path) -> bool {

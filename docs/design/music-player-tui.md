@@ -4467,6 +4467,18 @@ Append here as decisions are made. Format: date, decision, rationale.
   A bonus nobody asked for: the old filenames were truncated too, so the migration restored `04 Love.mp3` to
   `04 Love Ridden.mp3` from what the library knew.
 
+- **2026-09-06** **A dot-prefixed album is an album (#150).** `worth_entering` skipped any directory beginning with a
+  dot — the usual convention, added so a walk would not step into `.departed` and hand back everything `remove` had
+  retired. It also took sixteen tracks out of this library, because `...Baby One More Time` is a Britney Spears record.
+
+  **How it surfaced is the part worth recording.** The missing sixteen looked like _duplicate paths_ — 6,483 files
+  against 6,467 holdings — and were reported as such. Going to remove them is what found the cause. Read the other way,
+  sixteen files would have been retired for being copies of nothing.
+
+  The skipped directories are **named** now rather than matched, because a rule that cannot tell a hidden folder from a
+  record has no business guessing, and this library holds exactly one record that proves it. `.departed` is the only one
+  that matters for correctness; the rest hold no audio and are skipped to save the walk.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

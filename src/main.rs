@@ -343,7 +343,23 @@ fn run_library(
             // with no arguments: the scan already said which files it did not
             // recognise, and importing them is the answer to that offer.
             let targets: Vec<std::path::PathBuf> = if paths.is_empty() {
-                crate::model::populate::reconcile(&mut log, roots, crate::history::now_ms()).unknown
+                let seen =
+                    crate::model::populate::reconcile(&mut log, roots, crate::history::now_ms());
+                // **A duplicate is a filesystem accident, and must not be
+                // silent** — `Report::duplicates` has said so since it was
+                // written, and nothing printed it. Two paths holding one set
+                // of bytes are one row, so the second buys no capability and
+                // the only way it comes to light is here.
+                for (extra, kept) in &seen.duplicates {
+                    println!("{}\t{}", extra.display(), kept.display());
+                }
+                if !seen.duplicates.is_empty() {
+                    eprintln!(
+                        "{} duplicate path(s): the same audio held twice, first column is the spare",
+                        seen.duplicates.len()
+                    );
+                }
+                seen.unknown
             } else {
                 paths.clone()
             };
