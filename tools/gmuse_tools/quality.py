@@ -28,6 +28,15 @@ it ranked 96 kbps *above* 128, because filter leakage and musical content
 swamped the signal it was looking for. The FFT is not gold-plating; the cheap
 version does not work.
 
+## What the cutoff cannot see
+
+A competent re-encode from a good source leaves no wall, so a 320 that was
+decoded and written again measures exactly like one that was not. **Provenance
+is the only record of it**, and on this library it is on the path: 144 files
+carry a `_pn` from a DJ mastering tool. 130 of them measure clean and are
+reported as `re-encoded` — a fact about where the bytes came from rather than a
+charge against them. Read before a rename takes it away (#143).
+
     uv run python -m quality survey ~/MusicLibrary       # -> out/quality-review.tsv
     uv run python -m quality survey ~/MusicLibrary --tier 320
 """
@@ -50,6 +59,7 @@ from mutagen import File as MutagenFile
 from mutagen import MutagenError
 
 from gmuse_tools.genre.common import AUDIO, out_path, walk, write_tsv
+from gmuse_tools.paths import PROCESSED
 
 #: Analysis rate. Everything is resampled here so one FFT size means one
 #: frequency resolution across formats.
@@ -265,13 +275,23 @@ def survey(root: Path, out: Path, tier: int | None, workers: int) -> None:
     tally: collections.Counter[str] = collections.Counter()
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for m in pool.map(inspect, paths, chunksize=8):
-            tally[m.verdict] += 1
-            if m.verdict == "ok":
+            marked = processed(Path(m.path))
+            verdict = m.verdict
+            # **A re-encode the audio does not show** — #143. The cutoff test
+            # catches a lossy ancestor by the wall an encoder leaves; a
+            # competent 320-to-320 pass leaves no wall, and 130 of this
+            # collection's 144 marked files measure clean. The marker is the
+            # only record that it happened.
+            if marked and verdict == "ok":
+                verdict = "re-encoded"
+            tally[verdict] += 1
+            if verdict == "ok":
                 continue
             _, artist, album = named(Path(m.path))
             rows.append(
                 {
-                    "verdict": m.verdict,
+                    "verdict": verdict,
+                    "processed": "y" if marked else "",
                     "artist": artist,
                     "album": album,
                     "title": Path(m.path).stem,
@@ -279,7 +299,8 @@ def survey(root: Path, out: Path, tier: int | None, workers: int) -> None:
                     "cutoff_khz": f"{m.cutoff_khz:.1f}" if m.cutoff_khz else "",
                     "cliff_db": f"{m.cliff_db:.0f}" if m.cliff_db else "",
                     "codec": m.codec,
-                    "note": m.note,
+                    "note": m.note
+                    or ("a mastering tool re-encoded this; the audio does not show it" if marked else ""),
                     "path": m.path,
                 }
             )
@@ -290,6 +311,23 @@ def survey(root: Path, out: Path, tier: int | None, workers: int) -> None:
     for verdict, n in tally.most_common():
         print(f"  {n:6d}  {verdict}")
     print(f"\n{len(rows)} row(s) -> {out}")
+
+
+def processed(path: Path) -> bool:
+    """Whether a filename records that a mastering tool re-encoded this — #143.
+
+    **Evidence the measurement cannot reach.** The cutoff test finds a lossy
+    ancestor by the wall an encoder leaves; a competent re-encode from a good
+    source leaves no wall, so a 320 that was decoded and written again looks
+    exactly like one that was not. The marker is the only record that it
+    happened, and it is on the path — which is why it must be read before a
+    rename takes it away.
+
+    Measured here: 9.7% of marked files fail the cutoff test against 6.2% of
+    the rest, so the marker is a poor *predictor* of damage and a complete
+    record of provenance. Those are different jobs.
+    """
+    return path.stem.endswith(PROCESSED)
 
 
 def _declared(path: str) -> int:

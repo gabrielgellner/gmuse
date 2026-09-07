@@ -11,6 +11,7 @@ So most of these tests are about *not* reporting.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gmuse_tools.paths import (
@@ -25,8 +26,6 @@ from gmuse_tools.paths import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
 
@@ -151,3 +150,17 @@ def test_a_thirty_character_album_nothing_confirms_is_only_suspect(
     at.write_bytes(b"\x00")
     cut = [f for f in findings(at) if "album truncated" in f.what]
     assert [f.verdict for f in cut] == ["suspect"]
+
+
+def test_the_mastering_marker_is_shared_with_the_quality_pass() -> None:
+    """One definition, because both passes ask the same question — #143.
+
+    `paths` finds the marker as something only the path knows; `quality` reads
+    it as evidence of a re-encode its own measurement cannot see. Two spellings
+    of `_pn` would let one drift.
+    """
+    from gmuse_tools.quality import processed  # noqa: PLC0415
+
+    assert processed(Path("/x/A - B (Radio edit)_pn.mp3")) is True
+    assert processed(Path("/x/A - B.mp3")) is False
+    assert processed(Path("/x/openpn.mp3")) is False, "a suffix, not a substring"
