@@ -368,13 +368,26 @@ impl Instance {
             // the *album* as well as the track; otherwise from the album
             // artist and title together, because two artists' "Greatest Hits"
             // are not one album.
+            //
+            // **Both halves normalised** (#147), as every other named thing
+            // is: `Id::of_name` goes through `normalise` and this went through
+            // the raw string, so `Strange Time To Be Alive` and
+            // `Strange Time to Be Alive` minted two albums. That breaks the
+            // promise the whole model rests on — two devices agreeing without
+            // coordination — because the capitalisation a tagger chose is not
+            // something they can be expected to share.
             if let Some(album) = &s.album {
                 let credited = s.album_artist.as_deref().unwrap_or(&s.artist);
                 let group = match s.mb_release_group {
                     Some(mbid) => Id::<ReleaseGroup>::of_musicbrainz(mbid),
-                    None => {
-                        Id::<ReleaseGroup>::derived(format!("{credited}\u{1f}{album}").as_bytes())
-                    }
+                    None => Id::<ReleaseGroup>::derived(
+                        format!(
+                            "{}\u{1f}{}",
+                            crate::model::ingest::normalise(credited),
+                            crate::model::ingest::normalise(album)
+                        )
+                        .as_bytes(),
+                    ),
                 };
                 // The album's credit, by the same ladder. Its MusicBrainz id
                 // is the *album artist's*, which is why it is not
@@ -1672,6 +1685,54 @@ mod credit_tests {
             sample_rate: Some(44_100),
             channels: Some(2),
         }
+    }
+
+    /// **Capitalisation does not make two albums** — #147.
+    ///
+    /// Every other named thing mints through `normalise`; the release-group
+    /// fallback went through the raw string, so `Strange Time To Be Alive` and
+    /// `Strange Time to Be Alive` were two albums. That breaks the promise the
+    /// model rests on — two devices agreeing without coordination — because
+    /// the capitalisation a tagger chose is not something they share.
+    #[test]
+    fn one_album_spelled_two_ways_is_one_album() {
+        // **No release-group id**, which is what puts the id on the fallback
+        // this test is about. With one the album converges on MusicBrainz and
+        // the spelling never enters into it.
+        let of = |album: &str, artist: &str| Scanned {
+            album: Some(album.into()),
+            album_artist: Some(artist.into()),
+            mb_release_group: None,
+            ..scan(album, artist)
+        };
+        let mut i = Instance::new(crate::fixture::device());
+        i.ingest(
+            100,
+            &[
+                of("Strange Time To Be Alive", "Early James"),
+                of("Strange Time to Be Alive", "Early James"),
+                of("strange time to be alive", "EARLY JAMES"),
+            ],
+        );
+        assert_eq!(
+            i.catalogue().groups.len(),
+            1,
+            "one album became several because a tagger pressed shift"
+        );
+
+        // **And two albums are still two.** Normalising must not merge things
+        // that differ in more than case — two artists' "Greatest Hits" are not
+        // one record, which is why the credit is half of the id.
+        let mut j = Instance::new(crate::fixture::device());
+        j.ingest(
+            100,
+            &[
+                of("Greatest Hits", "One Artist"),
+                of("Greatest Hits", "Another Artist"),
+                of("Greatest Hits Vol. 2", "One Artist"),
+            ],
+        );
+        assert_eq!(j.catalogue().groups.len(), 3);
     }
 
     /// **A joined album credit does not rename the primary artist** — #145.

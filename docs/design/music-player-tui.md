@@ -4376,6 +4376,19 @@ Append here as decisions are made. Format: date, decision, rationale.
   cannot say what the set is; `reconcile` publishes, because only a walk of every root knows. `shelf import` and
   `shelf query` now do both.
 
+- **2026-09-06** **A release group's fallback id normalises, like every other named thing (#147).** `Id::of_name` goes
+  through `normalise`; the release-group fallback went through the raw string, so `Strange Time To Be Alive` and
+  `Strange Time to Be Alive` minted two albums.
+
+  That breaks the promise the model rests on — **two devices agreeing without coordination** — because the
+  capitalisation a tagger chose is not something they can be expected to share. Both halves normalise now, and two
+  artists' "Greatest Hits" are still two records, because the credit is half of the id.
+
+  **It was not what caused the case that found it.** `shelf render` refused four Early James files, and the two release
+  groups turned out to exist because one copy of the album carries MusicBrainz ids and the other does not — the
+  capitalisation was a coincidence riding along. Hashing the folder settled it: 10 of 12 tracks are byte-identical and
+  deduped correctly, 2 genuinely differ. The duplicate is #146; the minting defect was real anyway and is fixed here.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
