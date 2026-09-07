@@ -190,6 +190,14 @@ phones hold subsets (#38).
 rsync -a --delete ~/MusicLibrary/ /Volumes/Media/GMuseLibrary/
 ```
 
+**Run it striped, not serially.** Measured over SMB on this library: one rsync moves 1.6–1.8 files/s whatever the
+implementation, because each file costs a round trip the transfer cannot overlap — at ~7 MB a file that is 14 MB/s
+against a link that does 41. Six workers over disjoint artist folders reach 8.2 files/s, **4.5×**. It is the parallelism
+that does it and not the tool: GNU rsync 3.5.0 beat the system openrsync by 12%, which is noise.
+
+`--delete` is the exception and belongs to a final serial pass. A striped run only ever visits the folders it was
+handed, so it cannot see that a whole artist has gone.
+
 **The log is copied, not hosted.** §1 of the design doc makes local-first non-negotiable, and a data directory on a
 share means an unmounted NAS is an empty library rather than a degraded one. The log's own layout is already the sync
 design — one file per device, append-only, read as a union, stamps that cannot collide — so copying the directory _is_
