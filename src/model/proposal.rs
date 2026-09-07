@@ -214,6 +214,31 @@ pub enum Proposal {
         /// the same shape and must not become the same fact.
         basis: Source,
     },
+    /// **These two rows are one performance** — #88, and the repair a split
+    /// leaves needing.
+    ///
+    /// A recording splits whenever two copies of one piece of music are named
+    /// differently: a FLAC bought against an MP3 already held, the two tagged
+    /// from different MusicBrainz releases, is the ordinary case. Both ids are
+    /// *correct* — MusicBrainz really does hold two recordings — and the
+    /// library holds one piece of music twice.
+    ///
+    /// **A merge carries everything, which is why it is the right instrument
+    /// and a relink is not.** `RecordingMerged` folds in a pre-pass and every
+    /// fact after it resolves its recording through the result, so ratings,
+    /// plays, collection memberships, concepts and credits all follow the
+    /// winner — and so does the loser's encodings' binding. `Identified` moves
+    /// a binding and merges *only* where the old id was minted from bytes,
+    /// because an authority having named it means the two are different
+    /// performances. Where they are not, this is the fact that says so.
+    ///
+    /// **The direction is on the wire because it is not inferable.** A merge is
+    /// not undone by another merge, and the wrong winner hides the id
+    /// everything else already points at.
+    Merged {
+        loser: Id<Recording>,
+        winner: Id<Recording>,
+    },
     NarrowingRetracted {
         broader: String,
         narrower: String,
@@ -295,6 +320,9 @@ impl Proposal {
             | Proposal::Rated { recording, .. }
             | Proposal::CollectedInto { recording, .. }
             | Proposal::Credited { recording, .. } => Subject::Recording(*recording),
+            // **The winner**, because that is the row that has to exist for the
+            // merge to mean anything. A loser nothing holds is ordinary.
+            Proposal::Merged { winner, .. } => Subject::Recording(*winner),
             Proposal::Narrowed { .. } | Proposal::NarrowingRetracted { .. } => Subject::Vocabulary,
             // **The thing it is about is the derived file.** The source is
             // checked below, where a missing one is a reason to refuse rather
@@ -567,6 +595,15 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     confidence,
                 },
             ]
+        }
+        Proposal::Merged { loser, winner } => {
+            // **A row cannot absorb itself.** Folding that to a no-op would
+            // hide the usual cause: a pass that mapped both sides of a pair
+            // through one lookup and got one answer.
+            if loser == winner {
+                return Err("a recording cannot be merged into itself".to_string());
+            }
+            vec![Fact::RecordingMerged { loser, winner }]
         }
         // The collection is named rather than identified, for the reason a
         // genre is: a tool has no way to mint an id and should not.
@@ -1572,5 +1609,61 @@ mod credited {
         let (_, report) = parse(&line(1, r#"["Onno","  "]"#), dev(), 100, HELD);
         assert_eq!(report.applied, 0);
         assert_eq!(report.refused.len(), 1, "{report}");
+    }
+}
+
+#[cfg(test)]
+mod merged {
+    //! **Two rows that are one performance** — #88.
+    //!
+    //! A FLAC bought against an MP3 already held split eight tracks on this
+    //! library: both sides carried a correct MusicBrainz id and the ids were
+    //! different, because the two copies were tagged from different releases.
+    //! A relink would have moved the binding and stranded what hung off the
+    //! old row — 1 play, 8 collection memberships and 53 concept assertions.
+
+    use super::tests::*;
+    use super::*;
+
+    fn line(loser: u128, winner: u128) -> String {
+        format!(
+            r#"{{"fact":"merged","loser":"{}","winner":"{}"}}"#,
+            rec(loser),
+            rec(winner)
+        )
+    }
+
+    #[test]
+    fn a_merge_says_which_row_survives() {
+        let (records, report) = parse(&line(1, 2), dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+        let facts: Vec<&Fact> = records.iter().map(|r| &r.fact).collect();
+        assert!(
+            facts.iter().any(|f| matches!(
+                f,
+                Fact::RecordingMerged { loser, winner } if *loser == rec(1) && *winner == rec(2)
+            )),
+            "the direction is carried, not inferred: {facts:?}"
+        );
+    }
+
+    /// Folding this to a no-op would hide its usual cause — a pass that mapped
+    /// both sides of a pair through one lookup and got one answer back.
+    #[test]
+    fn a_recording_cannot_absorb_itself() {
+        let (_, report) = parse(&line(1, 1), dev(), 100, HELD);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    /// The **winner** is the subject, because that is the row that has to
+    /// exist. A loser nothing holds is an ordinary row.
+    #[test]
+    fn the_winner_is_what_the_library_is_asked_about() {
+        let p = Proposal::Merged {
+            loser: rec(9),
+            winner: rec(2),
+        };
+        assert_eq!(p.subject(), Subject::Recording(rec(2)));
     }
 }

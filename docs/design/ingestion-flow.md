@@ -48,6 +48,12 @@ its folder.
 | identify | `gmuse shelf query --unidentified` → `identify fetch` / `propose` → `shelf apply` | the work list        | **the log**                      |
 | joined   | `gmuse-tools joined survey` / `propose` → `shelf apply`                           | tags, MusicBrainz    | **the log**                      |
 | audit    | `gmuse-tools audit library` / `identity` / `dj` / `duplicates`                    | everything           | nothing                          |
+| merge    | `shelf apply` with `{"fact":"merged",…}`                                          | —                    | **the log**                      |
+
+**A command that moves music throws the player's cache away.** A launch deliberately does not scan — a change to the
+library is something you make, not something a launch notices on your behalf — so the cache is believed until something
+replaces it. `shelf import --write` renames the files it places, so it discards the cache and the next launch rescans.
+Without that the player went on opening pre-rename paths and showed newly imported copies as nothing at all.
 
 **`ingest` and `identify` are both MusicBrainz and they are not the same stage.** This is the single easiest mistake to
 make, and it is the one that cost a day here:
@@ -93,6 +99,9 @@ back to hand-work.
   explicitly. `shelf import` with no arguments deliberately ignores files it already knows.
 - **No proposal names an artist** (#154), so an artist correctly identified by a MusicBrainz id can have no label and be
   unbrowsable.
+- **A row is a copy, not a performance.** `Listing::rows` returns encodings, so an album held in two formats shows every
+  track twice. That is the stated model, and dual-format albums at scale are new here — so whether it is what you want
+  on screen is a live question rather than a hypothetical one.
 
 ---
 
@@ -118,13 +127,34 @@ uv run gmuse-tools ingest apply ~/MusicLibrary/Cassius/1999 --artist Cassius --a
 gmuse shelf import ~/MusicLibrary/_inbox --write
 #    38 file(s), 38 confirmed, 30 joining a recording already held
 
-# 5. and the copies whose tags changed have to be re-read, because a retag
-#    behind the library's back changes nothing
+# 5. the copies whose tags changed have to be re-read
 gmuse shelf import ~/MusicLibrary/Cassius/1999 … --write
+
+# 6. and where a retag changed the id, re-reading is NOT enough — see below
+gmuse shelf apply merges.jsonl --write
 ```
 
-Result: **53 recordings held as both FLAC and MP3**, 30 of them new. Two albums were refused by step 2 and are still
-MP3-only, which is the correct outcome — an unverified match is worse than no match.
+**Step 5 does less than it looks.** Re-importing a retagged file adds facts but **cannot move a binding**: `ingest`
+refuses to mint over a binding somebody already made. So a file whose MusicBrainz id changed keeps the recording its
+_old_ tag minted while the new copy beside it takes the new one, and the album splits in half. Eight of these 38 did.
+
+**The repair is a merge, not a relink.** Both ids are correct — MusicBrainz really does hold two recordings, because the
+copies were tagged from different releases. `Identified` would move the binding and strand what hung off the old row:
+measured here, 1 play, 8 collection memberships and 53 concept assertions. `RecordingMerged` folds in a pre-pass and
+every fact after it resolves through the result, so ratings, plays, memberships, concepts and credits follow the winner
+— and so does the loser's encodings' binding.
+
+```jsonl
+{
+  "fact": "merged",
+  "loser": "6739b413-…",
+  "winner": "06ea25b7-…"
+}
+```
+
+Result: **16 recordings for 32 Cassius files, 12 for 24, 10 for 20** — one recording per track holding both formats, and
+playback picks the FLAC because `for_playback` prefers the higher bitrate. Two albums were refused by step 2 and are
+still MP3-only, which is the correct outcome — an unverified match is worse than no match.
 
 ---
 
