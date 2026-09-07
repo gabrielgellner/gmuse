@@ -75,6 +75,19 @@ INC: Final = "recordings+artist-credits+labels+release-groups+isrcs+media"
 #: How many name-search candidates are worth fetching a tracklist for.
 CANDIDATES: Final = 5
 
+#: How many tracks an `exact` tracklist needs before it is accepted unread.
+#:
+#: **The rule's strength is combinatorial and vanishes at one.** Twelve titles
+#: agreeing at once is hard to do by accident; *one* title agreeing means only
+#: that a release exists with that name, which is the weakest possible evidence
+#: wearing the strongest verdict. The survey pre-marked three one-track folders
+#: — `Becky G & El Alfa/Fulanito`, `Cat Clyde/All The Black`, `Mala/Changes` —
+#: as ready to accept unread, and they are exactly the rows a person should
+#: look at.
+#:
+#: Short releases are still *reported* as exact. They are simply not marked.
+ENOUGH_TO_TRUST: Final = 4
+
 #: Characters no filesystem in this library's life should have to carry. The
 #: library is read on macOS and backed up to a NAS that has seen Windows.
 #: Annotated rather than inlined: `dict.fromkeys` infers a `LiteralString` key
@@ -590,6 +603,14 @@ def survey(root: Path, out: Path) -> None:
                 "differs": diffs(ours, theirs),
             }
         )
+    # **Ordered by what wants reading**, not alphabetically. A file of 139 rows
+    # is only reviewable if the ten that need a decision are at the top.
+    rank = {"exact": 0, "close": 1, "weak": 2, "part of an album": 3, "no candidate": 4, "error": 5}
+
+    def reading_order(row: dict[str, object]) -> tuple[int, int, str]:
+        return (rank.get(str(row["verdict"]), 9), -int(row["ours"] or 0), str(row["album"]))
+
+    rows.sort(key=reading_order)
     write_tsv(out, rows)
     tally = collections.Counter(str(r["verdict"]) for r in rows)
     for k, n in tally.most_common():
