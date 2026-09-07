@@ -4307,6 +4307,32 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   Non-audio assets stop being a problem with it: art and rip logs sit beside the album, where every other tool looks.
 
+- **2026-09-06** **The storage tree may use structural facts only (#132).** Asked to design the _desired_ layout rather
+  than describe the current one, the rule falls out of #26: the folder tree was doing three jobs and is qualified for
+  one. Storage may use **who made it and what release it is on**; never genre, era, catalog, tempo or how a file was
+  acquired. A tree has one dimension and description has many — a file is Jazz _and_ Christmas — so a folder must pick
+  one and lie about the rest.
+
+  That deletes every root on disk: `Classical/`, `Jazz/`, `Christmas/`, `Experimental/`, the era and BPM-band
+  directories, `Singles/`, **and the `Dance`/`General` catalogs**, which are curated collections a recording may be in
+  several of and which are already 6,311 facts in the log. Keeping them was the inconsistency in the previous draft:
+  rejecting `Classical/` as a taxonomy in a directory and then keeping one.
+
+  **Both hard cases dissolve.** `Music/Classical/` holds five naming conventions in twelve folders — composer, surname,
+  composer-and-performer, ensemble-and-conductor, a compilation title — and under this rule the library answers "who is
+  this credited to" once and all five render alike. A one-track dance release gets an album folder like anything else,
+  and #135 already collapses those in the tree.
+
+  **Rendering the real files is what corrected the design.** Some NAS files carry only ID3v1, whose fields are 30 bytes:
+  `Acoustica: Alarm Will Sound Performs Aphex Twin` is `Acoustica: Alarm Will Sound Pe` in the tag while the _folder_
+  holds the full name. A renderer reading tags would replace good names with stumps. Beatport files carry chart
+  positions in `track`, so `37 Long Chicken` on a two-track release. And stripping trailing dots for Windows turns
+  `Manhattan Research, Inc.` into `Inc`.
+
+  So: **consume the path first (#143), identify, and only then render — from the library, never from the tags.** A file
+  the renderer is not confident about is reported and left where it is, which is safe precisely because the path is not
+  the binding.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
