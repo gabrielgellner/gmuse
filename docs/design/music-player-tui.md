@@ -4380,14 +4380,22 @@ Append here as decisions are made. Format: date, decision, rationale.
   through `normalise`; the release-group fallback went through the raw string, so `Strange Time To Be Alive` and
   `Strange Time to Be Alive` minted two albums.
 
-  That breaks the promise the model rests on — **two devices agreeing without coordination** — because the
-  capitalisation a tagger chose is not something they can be expected to share. Both halves normalise now, and two
-  artists' "Greatest Hits" are still two records, because the credit is half of the id.
+  **The reason is not sync, and the first version of this entry said it was.** An id is a UUIDv5 over `(kind, seed)`;
+  nothing is transmitted, every machine recomputes it, and two machines reading one file always agree. Divergence needs
+  the _seed_ to differ, and the seed is a tag on a file — so the unit is the **file**, not the machine. This happens on
+  one disk, when an album is acquired twice and the two copies are tagged by different tools.
 
-  **It was not what caused the case that found it.** `shelf render` refused four Early James files, and the two release
-  groups turned out to exist because one copy of the album carries MusicBrainz ids and the other does not — the
-  capitalisation was a coincidence riding along. Hashing the folder settled it: 10 of 12 tracks are byte-identical and
-  deduped correctly, 2 genuinely differ. The duplicate is #146; the minting defect was real anyway and is fixed here.
+  The justification is simply that **capitalisation is not part of an album's identity**. `Luna` and `luna` are one
+  album, and every other named thing already mints through `normalise`.
+
+  **The album is the only identity that free text can split**, which is why it is the only one that needed this: an
+  encoding is minted from the audio hash and a recording from an id or the bytes, so neither can be moved by a title.
+  The release group falls back to the credit and the title as text when no MusicBrainz id is there.
+
+  **It was not what caused the case that found it.** `shelf render` refused four Early James files, and those are two
+  groups because one copy carries MusicBrainz ids and the other does not — the capitalisation was riding along. Hashing
+  the folder settled it: 10 of 12 tracks byte-identical and deduped correctly, 2 genuinely different. That duplicate is
+  #146; the minting defect was real anyway and is fixed here.
 
 ## 14. Prior art worth reading
 
