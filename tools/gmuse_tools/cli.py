@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import typer
 
-from gmuse_tools import audit_dj, audit_library, bronze, duplicates, identify, ingest, paths, quality, tags
+from gmuse_tools import audit_dj, audit_library, bronze, duplicates, identify, ingest, joined, paths, quality, tags
 
 # `credits` shadows a builtin, which ruff is right to flag — the module is named
 # for what it holds and the alias keeps both true.
@@ -71,6 +71,7 @@ identify.register(identify_app)
 quality.register(quality_app)
 bronze.register(cache_app)
 credits_pass.register(app)
+joined.register(app)
 paths.register(app)
 tags.register(app)
 ingest.register(app)

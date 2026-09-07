@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Is this credit one artist or several, when the tags do not say — issue #152.
+
+`credits.py` asks a neighbouring question and answers it with the **MusicBrainz
+id count**: two names and two ids mean the slash is a separator, two names and
+one id mean it is a character, so `AC/DC` survives. That arbiter is right and
+this pass does not replace it. It is simply absent on the files that need it
+most — 1 of the 96 DJ singles imported from `DanceMusic/1980-2014` carried a
+MusicBrainz id at all, against 92.7% of the library it landed in.
+
+Without an id, an artist is minted from the credit *string*, so
+`Armand Van Helden,Dizzee Rascal` becomes an artist and Stephan Bodzin becomes
+four people. What this pass must not do is fix that with a rule about
+punctuation: the same library holds `Angus & Julia Stone`, `Itch-E &
+Scratch-E`, `Bob Dylan & The Band`, and `Lonnie Young, Jr.` — a comma **inside**
+one person's name.
+
+So it corroborates instead, and reports rather than splits.
+
+## Three signals from the library itself, and one from outside
+
+- **reordered** — the same members under two spellings. A band name is stable;
+  nothing writes `Scratch-E & Itch-E`. A credit list is not: `Marc Romboy,
+  Stephan Bodzin` / `Stephan Bodzin & Marc Romboy` / `Stephan Bodzin vs. Marc
+  Romboy` are three spellings of one pair, and the reordering is the proof.
+- **all members solo** — every part is also credited alone somewhere.
+- **shares members** — a *different* credit overlaps by two or more:
+  `Kiko, Spencer K` beside `Kiko,Oxia,Spencer K`.
+- **MusicBrainz**, for what is left: does an artist exist under the whole
+  string, and under each part?
+
+Measured on this library: the three local signals decide 40 of 92 with **no
+false positives**, MusicBrainz decides a further 42, and 10 go to a person.
+
+## What it will not do
+
+**Nothing here writes.** A credit stays one artist until somebody says
+otherwise, because the failure mode is not symmetric: a split is repairable by
+a merge (#88) and a wrong merge is not.
+
+    uv run gmuse-tools joined survey ~/MusicLibrary     # -> out/joined-review.tsv
+    uv run gmuse-tools joined survey ~/MusicLibrary --offline   # skip the lookup
+"""
+
+from __future__ import annotations
+
+import collections
+import re
+import sqlite3
+import sys
+import unicodedata as u
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, NamedTuple
+
+import typer
+
+from gmuse_tools import bronze
+from gmuse_tools.genre.common import out_path, tags_of, walk, write_tsv
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+#: Two credits must share at least this many members before the overlap says
+#: anything. One shared person is a collaboration — `Hank Williams` appears in
+#: two unrelated credits here — and only a second makes it a list.
+ENOUGH_SHARED: Final = 2
+#: How many names make a credit a list at all rather than one artist.
+SEVERAL: Final = 2
+
+#: What separates two credited artists.
+#:
+#: `and` earns its place on `Tom Waits and Crystal Gayle` and costs three false
+#: splits — `J.E. Mainer and Band`, `Neko Case and Her Boyfriends`,
+#: `Leroy Miller, with hoe group`. It is kept because those land in `unsure`
+#: rather than in a proposal, which is the outcome they want anyway.
+#:
+#: `feat.` earns its place on the eleven `2Pac feat. …` credits, which the
+#: first version left as `unsure` for the wrong reason: without it the credit
+#: split to `["2Pac feat. Danny Boy", "Syke", "CPO"]` and MusicBrainz was asked
+#: about an artist that has never existed. This is the very case
+#: `Scanned::credit_is_joined` documents — `2Pac feat. Nate Dogg` is not `2Pac`
+#: to a hash — so it was always in scope.
+#:
+#: `with` is **not** here, and the pair that argues both ways is why:
+#: `Emmylou Harris with Dolly Parton and Linda Ronstadt` wants it and
+#: `Leroy Miller, with hoe group` does not, since `hoe group` is not an artist
+#: under any spelling. Two credits, opposite answers, so it goes to a person.
+#:
+#: `/` is **not** here: it is `credits.py`'s separator and its arbiter is
+#: better. Splitting `AC/DC` is that pass's job to refuse, not this one's.
+JOINERS: Final = re.compile(
+    r"\s*,\s*|\s+&\s+|\s+and\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+[xX]\s+|\s+vs\.?\s+", re.IGNORECASE
+)
+
+MB_ARTIST: Final = "https://musicbrainz.org/ws/2/artist"
+#: The one status that carries an answer.
+HTTP_OK: Final = 200
+USER_AGENT: Final = {"User-Agent": "gmuse-joined/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
+
+
+def key(name: str) -> str:
+    """A name reduced to what a comparison should ignore.
+
+    Matches `ingest::normalise`'s shallowness in spirit — case and spacing go,
+    accents stay — but goes further because this is a *comparison* and never an
+    id. Nothing is minted from it, so folding here cannot create the
+    unrepairable merge the Rust side is careful about.
+    """
+    return re.sub(r"[^a-z0-9]+", "", u.normalize("NFKD", name).lower())
+
+
+def members(credit: str) -> tuple[str, ...]:
+    """The names a credit appears to list, in the order it lists them."""
+    return tuple(p.strip() for p in JOINERS.split(credit) if p.strip())
+
+
+class Verdict(NamedTuple):
+    """One credit, and what is known about it."""
+
+    credit: str
+    verdict: str
+    why: str
+    parts: tuple[str, ...]
+
+
+def reordered(corpus: Iterable[str]) -> set[str]:
+    """Credits whose members appear elsewhere in a different order.
+
+    The strongest of the three, and the only one that needs no other evidence:
+    a name does not get reordered, a list does.
+
+    **Order, not spelling.** `Neko Case & Her Boyfriends` and `Neko Case and
+    Her Boyfriends` are the same two members in the same order, which is a
+    spelling variant and not evidence of anything. An early version counted it
+    and flagged a real band.
+    """
+    by_set: dict[frozenset[str], set[str]] = collections.defaultdict(set)
+    for c in corpus:
+        parts = members(c)
+        if len(parts) >= SEVERAL:
+            by_set[frozenset(key(p) for p in parts)].add(c)
+    out: set[str] = set()
+    for group in by_set.values():
+        if len({tuple(key(p) for p in members(c)) for c in group}) > 1:
+            out |= group
+    return out
+
+
+def all_solo(credit: str, solo: frozenset[str]) -> bool:
+    """Every member is also credited on its own somewhere."""
+    parts = members(credit)
+    return len(parts) >= SEVERAL and all(key(p) in solo for p in parts)
+
+
+def shares_members(credit: str, corpus: Iterable[str]) -> str | None:
+    """Another, *different* credit that overlaps by two or more members.
+
+    **Different**, and that word is the whole test. Comparing a credit against
+    a punctuation variant of itself finds two shared members every time, which
+    flagged `Neko Case & Her Boyfriends` against `Neko Case and Her Boyfriends`
+    and would have shipped a false positive on a real band.
+    """
+    mine = frozenset(key(p) for p in members(credit))
+    if len(mine) < ENOUGH_SHARED:
+        return None
+    for other in corpus:
+        theirs = frozenset(key(p) for p in members(other))
+        if theirs != mine and len(mine & theirs) >= ENOUGH_SHARED:
+            return other
+    return None
+
+
+def locally(corpus: list[str]) -> dict[str, Verdict]:
+    """What the library alone can say. No network, no guesses about spelling."""
+    solo = frozenset(key(c) for c in corpus if len(members(c)) == 1)
+    swapped = reordered(corpus)
+    out: dict[str, Verdict] = {}
+    for c in corpus:
+        parts = members(c)
+        if len(parts) < SEVERAL:
+            continue
+        if c in swapped:
+            out[c] = Verdict(c, "list", "the same members appear in another order", parts)
+        elif all_solo(c, solo):
+            out[c] = Verdict(c, "list", "every member is credited alone elsewhere", parts)
+        elif (other := shares_members(c, corpus)) is not None:
+            out[c] = Verdict(c, "list", f"shares two or more members with {other!r}", parts)
+        else:
+            out[c] = Verdict(c, "unsure", "nothing in the library corroborates it", parts)
+    return out
+
+
+def ask_musicbrainz(con: sqlite3.Connection, name: str) -> dict[str, str] | None:
+    """Does MusicBrainz hold an artist known by exactly this name?
+
+    **Aliases count, and leaving them out was a real bug.** A tag carries the
+    name a record was *credited* to, which is often not the name MusicBrainz
+    files the artist under: `Puffy AmiYumi` is an alias of `PUFFY`,
+    `Me'Shell NdegéOcello` of `Meshell Ndegeocello`, `Dramacydal` of `Outlawz`.
+    Searching the primary name alone reported all three as unknown, which read
+    as a limit of the method and was a limit of the query.
+
+    **An exact name match is still not an identification.** `The Game`,
+    `La Fleur` and `Sonya Elise` are common enough that the artist returned may
+    have nothing to do with the record in hand. That is tolerable because the
+    output is reviewed and never applied, and it is the second reason this pass
+    proposes nothing.
+    """
+    status, body = bronze.get(
+        con,
+        MB_ARTIST,
+        {"query": f'artist:"{name}" OR alias:"{name}"', "fmt": "json", "limit": "5"},
+        headers=USER_AGENT,
+    )
+    if status != HTTP_OK or not isinstance(body, dict):
+        return None
+    for a in body.get("artists", []):
+        known = [a.get("name", ""), *(al.get("name", "") for al in a.get("aliases", []))]
+        if any(key(k) == key(name) for k in known):
+            as_filed = a.get("name", "")
+            note = a.get("disambiguation") or ""
+            if key(as_filed) != key(name):
+                note = f"filed as {as_filed}" + (f", {note}" if note else "")
+            return {"name": as_filed, "type": a.get("type") or "", "id": a["id"], "note": note}
+    return None
+
+
+def resolve(v: Verdict, ask: Callable[[str], dict[str, str] | None]) -> Verdict:
+    """Ask an authority about one credit the library could not settle.
+
+    The whole string is the decisive question. Where MusicBrainz holds an
+    artist under it, that is a credited entity and the credit stays whole —
+    **even when the members also exist**, which is the ordinary case for a duo.
+    `Angus & Julia Stone` is a group whose members record solo, and both facts
+    being true does not make it a coin flip.
+    """
+    whole = ask(v.credit)
+    hits = [ask(p) for p in v.parts]
+    found = [h for h in hits if h]
+    if whole is not None:
+        note = f"MusicBrainz: {whole['type'] or 'artist'}"
+        if whole["note"]:
+            note += f", {whole['note']}"
+        return v._replace(verdict="one", why=note)
+    if len(found) == len(v.parts):
+        return v._replace(verdict="list", why="MusicBrainz holds every member and not the whole")
+    if found:
+        missing = [p for p, h in zip(v.parts, hits, strict=True) if not h]
+        return v._replace(verdict="unsure", why=f"MusicBrainz knows {len(found)} of {len(v.parts)}; not {missing}")
+    return v._replace(verdict="unsure", why="MusicBrainz knows neither the whole nor the members")
+
+
+def credits_under(root: Path) -> list[str]:
+    """Every artist and album-artist credit the files under `root` carry.
+
+    Both fields, because they answer different questions and disagree: the
+    album credit is what the tree files by, and the track credit is where a
+    guest shows up. A pass that read only one would miss half the cases.
+    """
+    seen: collections.Counter[str] = collections.Counter()
+    for path in walk(root):
+        tags = tags_of(path)
+        for field in ("albumartist", "album_artist", "artist"):
+            value = tags.get(field, "").strip()
+            if value:
+                seen[value] += 1
+    return list(seen)
+
+
+def survey(root: Path, out: Path, *, offline: bool = False) -> None:
+    """Report every joined-looking credit and what is known about it."""
+    found = credits_under(root)
+    decided = locally(found)
+    if not offline:
+        con = bronze.open_cache()
+        cache: dict[str, dict[str, str] | None] = {}
+
+        def ask(name: str) -> dict[str, str] | None:
+            if name not in cache:
+                cache[name] = ask_musicbrainz(con, name)
+            return cache[name]
+
+        unsure = [v for v in decided.values() if v.verdict == "unsure"]
+        for i, v in enumerate(unsure, 1):
+            print(f"  {i}/{len(unsure)} asking about {v.credit}", file=sys.stderr)
+            decided[v.credit] = resolve(v, ask)
+
+    def order(v: Verdict) -> tuple[str, str]:
+        return (v.verdict, v.credit.lower())
+
+    rows = sorted(decided.values(), key=order)
+    write_tsv(
+        out,
+        [{"verdict": v.verdict, "credit": v.credit, "members": " | ".join(v.parts), "why": v.why} for v in rows],
+    )
+    tally = collections.Counter(v.verdict for v in rows)
+    for name, n in tally.most_common():
+        print(f"{n:5}  {name}", file=sys.stderr)
+    print(f"\n{len(rows)} joined-looking credit(s) of {len(found)} -> {out}", file=sys.stderr)
+    print("nothing was written to the library: a credit stays one artist until somebody says.", file=sys.stderr)
+
+
+LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
+OFFLINE = typer.Option(default=False, help="use only what the library itself can corroborate")
+
+
+def register(app: typer.Typer) -> None:
+    """Attach this pass to the CLI."""
+    sub = typer.Typer(help=__doc__, no_args_is_help=True)
+
+    @sub.command("survey")
+    def survey_cmd(root: Path = LIB, *, offline: bool = OFFLINE) -> None:
+        """Report which credits name several artists. Writes nothing to the library."""
+        survey(root.expanduser(), out_path("joined-review.tsv"), offline=offline)
+
+    app.add_typer(sub, name="joined")
