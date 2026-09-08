@@ -551,7 +551,7 @@ def contested(candidates: list[dict[str, Any]], ours: float | None, who: str | N
 
 
 def also(
-    row: Work,  # noqa: ARG001 — the subject every emitted line will name, once one can be
+    row: Work,
     chosen: dict[str, Any],
     remixer: str | None,
     confidence: str,
@@ -581,18 +581,22 @@ def also(
     """
     if confidence not in APPLIES or not remixer or not names(chosen, remixer):
         return []
-    # **Nothing yet, and the gap is one proposal wide** — #162.
-    #
-    # `Proposal::Credited` is the *split*: it refuses a credit naming one
-    # artist, because "this credit names several" is the claim it exists to
-    # make. And it asserts `performer`, which a remixer must not be — `line_of`
-    # filters to performers precisely so a remixer does not put the record in
-    # the remixer's folder.
-    #
-    # So the fact supports what is needed and no proposal reaches it. Written
-    # here rather than emitted, because a line that is always refused is noise
-    # in a file a person reads.
-    return []
+    return [
+        {
+            # **`contributed`, not `credited`** — the latter is the *split*,
+            # which refuses a single name and asserts `performer`. A remixer
+            # must not be a performer: `line_of` reads performers, so the wrong
+            # role would put the record in the remixer's folder.
+            "fact": "contributed",
+            "recording": row.recording,
+            "artist": remixer,
+            "role": "remixer",
+            # **MusicBrainz's claim, not the tag's.** Our title named this
+            # remixer and the candidate's own title agrees; that agreement is
+            # the whole reason this line is written.
+            "basis": "musicbrainz",
+        }
+    ]
 
 
 def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:

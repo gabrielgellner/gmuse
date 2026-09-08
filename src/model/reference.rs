@@ -372,33 +372,36 @@ impl Reference {
         else {
             return String::new();
         };
-        let mut seen = std::collections::BTreeSet::new();
-        let named: Vec<_> = credits
-            .iter()
-            .filter(|c| performed(c) && c.basis == best)
-            .filter_map(|c| {
-                let name = c.as_credited.clone().unwrap_or_else(|| {
-                    self.artists
-                        .get(&c.artist.id())
-                        .map(|a| a.name.clone())
-                        .unwrap_or_default()
-                });
-                (!name.trim().is_empty()).then(|| (name, c.join_phrase.clone()))
-            })
-            // **By the name, not the id** — #156. It deduplicated ids, which
-            // is the same rule one step too early: an album merged out of two
-            // entries brings both their credits, and where one was tagged with
-            // a MusicBrainz artist id and the other was not, the same person
-            // is two ids. `Anderson .Paak, Anderson .Paak` — on 298 files, and
-            // `file_under` is this line, so `shelf render` wanted to move
-            // every one of them into a folder by that name.
-            //
-            // Two people who really share a name collapse here, and that is
-            // the right trade for a *line*: printing one name twice is
-            // unreadable whichever way it happened. The distinction lives in
-            // the credits, which keep both.
-            .filter(|(name, _)| seen.insert(crate::model::ingest::normalise(name)))
-            .collect();
+        // **Deduplicated by the rendered name, not by the artist id** — #156.
+        //
+        // The id rule was the same rule one step too early: an album merged out
+        // of two entries brings both their credits, and where one was tagged
+        // with a MusicBrainz artist id and the other was not, **the same person
+        // is two ids**. The line came out `Anderson .Paak, Anderson .Paak` on
+        // 298 files, and `file_under` is this line, so `shelf render` wanted to
+        // move every one of them into a folder by that name.
+        //
+        // Two people who really share a name collapse here, and that is the
+        // right trade for a *line*: printing one name twice is unreadable
+        // whichever way it happened, and the credits keep both.
+        //
+        // **A linear scan, and no set.** A credit line is one to five names,
+        // and this runs per row while the tree draws thousands: hashing or
+        // normalising each name cost more than comparing them all. `normalise`
+        // here took a narrowed view from under 50ms to 92.
+        let mut named: Vec<(String, Option<String>)> = Vec::new();
+        for credit in credits.iter().filter(|c| performed(c) && c.basis == best) {
+            let name = credit.as_credited.clone().unwrap_or_else(|| {
+                self.artists
+                    .get(&credit.artist.id())
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default()
+            });
+            if name.trim().is_empty() || named.iter().any(|(seen, _)| *seen == name) {
+                continue;
+            }
+            named.push((name, credit.join_phrase.clone()));
+        }
 
         let mut line = String::new();
         for (i, (name, join)) in named.iter().enumerate() {

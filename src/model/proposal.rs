@@ -241,6 +241,35 @@ pub enum Proposal {
         /// the same shape and must not become the same fact.
         basis: Source,
     },
+    /// **One person did one thing on this recording** — #162.
+    ///
+    /// [`Proposal::Credited`] is the *split*: "this credit names several
+    /// artists", which is why it refuses a single name and why it asserts
+    /// `performer`. This is the other claim — **one artist, one role** — and
+    /// the two are not the same statement wearing different clothes.
+    ///
+    /// The case it was built for: `identify` matches a remix and the
+    /// candidate's own title names the remixer our title named. That agreement
+    /// is evidence no tag provides alone, and 57 of them were computed and
+    /// discarded because nothing could say them.
+    ///
+    /// **The role must be one the codelist knows.** A codelist grows by fact
+    /// and `RoleDefined` will take any name — but it takes a *class* with it,
+    /// and a class cannot be inferred from a string. A `remixer` filed as
+    /// `Performer` is worse than no credit at all: `line_of` reads performers,
+    /// so it would put the record in the remixer's folder, which is the bug
+    /// that made the role filter exist.
+    ///
+    /// **Named, not identified**, as every artist on this wire is: minting is
+    /// the model's job and a name is what a person reviewing the file reads.
+    Contributed {
+        recording: Id<Recording>,
+        artist: String,
+        /// `remixer`, `producer`, `featured`, `composer`. One of
+        /// [`crate::model::reference::ROLES`].
+        role: String,
+        basis: Source,
+    },
     /// **These two rows are one performance** — #88, and the repair a split
     /// leaves needing.
     ///
@@ -512,7 +541,8 @@ impl Proposal {
             | Proposal::QualifierAssigned { recording, .. }
             | Proposal::Rated { recording, .. }
             | Proposal::CollectedInto { recording, .. }
-            | Proposal::Credited { recording, .. } => Subject::Recording(*recording),
+            | Proposal::Credited { recording, .. }
+            | Proposal::Contributed { recording, .. } => Subject::Recording(*recording),
             // **The winner**, because that is the row that has to exist for the
             // merge to mean anything. A loser nothing holds is ordinary.
             Proposal::Merged { winner, .. } => Subject::Recording(*winner),
@@ -1103,6 +1133,61 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 artist,
                 name: name.to_string(),
             }]
+        }
+        Proposal::Contributed {
+            recording,
+            artist,
+            role,
+            basis,
+        } => {
+            let name = artist.trim();
+            if name.is_empty() {
+                return Err("an artist needs a name".into());
+            }
+            let wanted = role.trim().to_lowercase();
+            // **The class is what makes this refusable.** `RoleDefined` takes
+            // any name, but it takes a class with it and a string does not say
+            // which — and a `remixer` classed as `Performer` reads back as
+            // somebody the record is *by*.
+            let Some((canonical, class)) = crate::model::reference::ROLES
+                .iter()
+                .find(|(known, _)| *known == wanted)
+            else {
+                let known: Vec<&str> = crate::model::reference::ROLES
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect();
+                return Err(format!(
+                    "{role:?} is not a role this codelist knows — {}",
+                    known.join(", ")
+                ));
+            };
+            let role_id = Id::<Role>::of_name(canonical);
+            let who = Id::<Artist>::of_artist(None, name);
+            vec![
+                Fact::RoleDefined {
+                    role: role_id,
+                    name: (*canonical).to_string(),
+                    class: *class,
+                },
+                Fact::ArtistNamed {
+                    artist: who,
+                    name: name.to_string(),
+                },
+                Fact::CreditAsserted {
+                    subject: CreditOn::Recording(recording),
+                    artist: who,
+                    role: role_id,
+                    basis,
+                    // **Zero, and it is cosmetic here.** A position orders a
+                    // credit *line*, and `line_of` reads performers only — a
+                    // remixer never appears in one. Two remixers stay distinct
+                    // because the fold keys on the artist.
+                    position: 0,
+                    as_credited: None,
+                    join_phrase: None,
+                },
+            ]
         }
         Proposal::RecordingDerived { from, to, kind } => {
             if from == to {
@@ -2174,6 +2259,73 @@ mod merged {
         let (_, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.applied, 0);
         assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    // ---- #162: one person, one role ----
+
+    /// **The claim `Credited` cannot make.** That one is the split — several
+    /// artists, all performers — and refuses a single name for good reason.
+    #[test]
+    fn one_person_can_be_credited_in_one_role() {
+        let p = Proposal::Contributed {
+            recording: rec(1),
+            artist: "Andhim".into(),
+            role: "remixer".into(),
+            basis: Source::MusicBrainz,
+        };
+        let text = serde_json::to_string(&p).expect("serialises");
+        let (records, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+
+        let facts: Vec<_> = records.iter().map(|r| r.fact.clone()).collect();
+        let role = Id::<Role>::of_name("remixer");
+        assert!(
+            facts.contains(&Fact::RoleDefined {
+                role,
+                name: "remixer".into(),
+                class: RoleClass::Production,
+            }),
+            "**a remixer is Production, not Performer** — `line_of` reads \
+             performers, so the wrong class puts the record in the remixer's \
+             folder"
+        );
+        assert!(facts.contains(&Fact::CreditAsserted {
+            subject: CreditOn::Recording(rec(1)),
+            artist: Id::<Artist>::of_artist(None, "Andhim"),
+            role,
+            basis: Source::MusicBrainz,
+            position: 0,
+            as_credited: None,
+            join_phrase: None,
+        }));
+    }
+
+    /// **A role the codelist does not know is refused**, because the class
+    /// travels with the name and a string does not say which class it is.
+    #[test]
+    fn a_role_nobody_defined_is_refused() {
+        for role in ["remixer ", "REMIXER"] {
+            let text = serde_json::to_string(&Proposal::Contributed {
+                recording: rec(1),
+                artist: "Andhim".into(),
+                role: role.into(),
+                basis: Source::MusicBrainz,
+            })
+            .expect("serialises");
+            let (_, report) = parse(&text, dev(), 100, HELD);
+            assert_eq!(report.applied, 1, "{role:?} is the same role: {report}");
+        }
+        for bad in ["remixxer", "vocalist", ""] {
+            let text = serde_json::to_string(&Proposal::Contributed {
+                recording: rec(1),
+                artist: "Andhim".into(),
+                role: bad.into(),
+                basis: Source::MusicBrainz,
+            })
+            .expect("serialises");
+            let (_, report) = parse(&text, dev(), 100, HELD);
+            assert_eq!(report.refused.len(), 1, "{bad:?}: {report}");
+        }
     }
 
     // ---- #162: one recording made out of another ----

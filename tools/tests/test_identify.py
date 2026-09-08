@@ -357,11 +357,17 @@ def test_a_corroborated_remixer_is_credited_and_an_uncertain_one_is_not() -> Non
     named = {"id": "mb-1", "title": "How Many Times (Andhim remix)"}
     plain_title = {"id": "mb-2", "title": "How Many Times"}
 
-    # **Empty, and the gap is one proposal wide** — #162. `Proposal::Credited`
-    # refuses a credit naming one artist, because "this names several" is the
-    # claim it exists to make, and it asserts `performer`, which a remixer must
-    # not be. The corroboration is computed and has nowhere to go.
-    assert also(row, named, "Andhim", "matched") == []
+    # `contributed`, not `credited`: the latter is the split, which refuses a
+    # single name and asserts `performer` — a role a remixer must not have.
+    assert also(row, named, "Andhim", "matched") == [
+        {
+            "fact": "contributed",
+            "recording": "rec-1",
+            "artist": "Andhim",
+            "role": "remixer",
+            "basis": "musicbrainz",
+        }
+    ]
     assert also(row, plain_title, "Andhim", "matched") == [], "nothing corroborated the remixer"
     assert also(row, named, "Andhim", "uncertain") == [], "a row awaiting a person establishes nothing"
     assert also(row, named, None, "matched") == [], "no remixer in our title, nothing to credit"

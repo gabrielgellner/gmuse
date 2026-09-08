@@ -227,7 +227,22 @@ Of 510 unidentified rows, 406 carried a bracketed version or remix. Fixing the q
 
 ---
 
-## 14. What the numbers actually are
+## 14. A refusal that is not printed is a line that vanished
+
+`shelf apply` counted refusals nowhere and printed them never. 57 lines the vocabulary refused disappeared from a file
+of 340 and the summary read `283 proposals` — which is exactly what a file with 283 lines in it looks like. Finding out
+what happened meant splitting the file by kind and applying each half by hand.
+
+The refusal itself was correct and useful: `Proposal::Credited` is the _split_ — "this credit names several artists" —
+so it declines a single name, and it asserts `performer`, which a remixer must not be. One line of output would have
+said so.
+
+> **Every line a pass declines to act on has to be visible in what it prints.** A count that omits a category reads as a
+> smaller file, not as a category.
+
+---
+
+## 15. What the numbers actually are
 
 Kept because every rule above was written against a guess first and a measurement second.
 
@@ -245,7 +260,7 @@ Kept because every rule above was written against a guess first and a measuremen
 
 ---
 
-## 15. The rules, in one place
+## 16. The rules, in one place
 
 1. Corroborate against something the rule did not produce.
 2. When the discriminator is X, do not let a ranking on Y decide what X sees.
@@ -260,12 +275,13 @@ Kept because every rule above was written against a guess first and a measuremen
 11. A log backup restores the claims, not the bytes.
 12. Duration separates a recording from its edit and separates nothing among remixes of one track.
 13. Ask the authority the question in the terms the authority uses; a query that cannot match is not absence.
-14. **Prefer refusing to guessing** — a fold is the one thing this model cannot repair, and `library-api.md` §7 already
+14. Every line a pass declines to act on has to be visible in what it prints.
+15. **Prefer refusing to guessing** — a fold is the one thing this model cannot repair, and `library-api.md` §7 already
     says a library that accepts anything and marks it provisional fills with entries nobody will ever fix.
 
 ---
 
-## 16. How the mistakes were actually caught
+## 17. How the mistakes were actually caught
 
 Worth recording, because it is not flattering to the tests.
 
@@ -279,7 +295,7 @@ answers confidently.
 
 ---
 
-## 17. Related
+## 18. Related
 
 #160 (what the ingest flow should be — the standing question this feeds) · #57 (AcoustID, the rung the ladder is
 missing) · #143 (a path is evidence, on the weakest rung) · #152, #157 (joined credits, in the artist field and the

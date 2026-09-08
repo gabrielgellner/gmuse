@@ -28,7 +28,7 @@ not cover.
 [`docs/design/identification-lessons.md`](docs/design/identification-lessons.md) is a **working document**: what twenty
 years of retagging did to this library's metadata, and the rules that came out of being wrong about it. Read it before
 writing any rule that reads a tag, a filename or a credit — every entry is a plausible rule that failed on real data,
-with the measurement that killed it. §15 is the rules in one place.
+with the measurement that killed it. §16 is the rules in one place.
 
 [`docs/design/layers.md`](docs/design/layers.md) says which system may talk to which — the librarian, the player, the
 scanner and the `tools/` scripts. Read it before adding a caller in either direction.
