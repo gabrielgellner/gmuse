@@ -77,6 +77,12 @@ impl proposal::Holdings for Shelf {
             // One place, for the reason `Recording` above is: `disk` is folded
             // log-first, so it already carries every medium the log knows.
             Subject::Medium(id) => self.disk.media.contains_key(&id),
+            // **The winner has to be an album the library holds** — #156. A
+            // merge into an id nothing names is a redirect pointing nowhere,
+            // and the loser is deliberately not checked: it is the row being
+            // retired, and one already merged elsewhere is refused by
+            // `Merges` rather than here.
+            Subject::ReleaseGroup(id) => self.disk.groups.contains_key(&id),
         }
     }
 

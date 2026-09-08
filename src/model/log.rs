@@ -455,6 +455,36 @@ pub enum Fact {
         winner: Id<Recording>,
     },
 
+    /// **These two album entries are one album** — #156.
+    ///
+    /// The same instrument as [`Fact::RecordingMerged`], one level up, and it
+    /// exists for the same reason: an id that turned out to name something
+    /// already named, with everything that hangs off it still hanging there.
+    ///
+    /// **A group's id is a function of what the tags said.** It comes from
+    /// `mb_release_group` where there is one and from artist-and-title where
+    /// there is not, so learning an album's MusicBrainz id *changes its
+    /// identity* — and a release, a medium and every slot are minted from the
+    /// group in turn. One tag edit therefore mints a whole second album, and
+    /// `import` moves the copies to it. Measured on this library, 33 albums
+    /// are held as more than one group.
+    ///
+    /// **Groups only. A merge here says nothing about the pressings under
+    /// them**, which is the distinction the case that wanted this turns on:
+    /// *Barton Hollow* is a standard edition of 14 tracks and a deluxe with 4
+    /// more, and the right answer is **one group holding two releases** — not
+    /// one release, and not two albums. Merging downward as well would erase
+    /// the difference this model spent a year acquiring the level to hold.
+    ///
+    /// **And not every duplicate title is one album.** `AC/DC — High Voltage`
+    /// is two records, the 1975 Australian and the 1976 international, sharing
+    /// a name and a folder. They are correctly two groups, and a rule that
+    /// merged on title would have folded them.
+    ReleaseGroupMerged {
+        loser: Id<ReleaseGroup>,
+        winner: Id<ReleaseGroup>,
+    },
+
     /// A composition, as distinct from any performance of it.
     ///
     /// **Nothing in this library's tags produces one.** `MUSICBRAINZ_WORKID`
@@ -943,6 +973,9 @@ pub struct Catalogue {
     /// else keyed by a recording, so a merge moves what was said about the
     /// loser rather than stranding it.
     pub merges: crate::model::merge::Merges<Recording>,
+    /// The same, for albums — #156. Kept apart because they answer different
+    /// questions and a merge at one level implies nothing at the other.
+    pub group_merges: crate::model::merge::Merges<ReleaseGroup>,
     /// Every composition anyone has named.
     pub works: BTreeMap<Id<Work>, String>,
     /// Which recordings perform which works. Row existence: a recording can
@@ -1125,17 +1158,29 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     // move a rating given on Monday, so it cannot be applied as it is reached
     // — every recording named below is resolved through the finished set.
     for Record { fact, .. } in records {
-        if let Fact::RecordingMerged { loser, winner } = fact {
-            let _ = cat.merges.merge(*loser, *winner);
+        match fact {
+            Fact::RecordingMerged { loser, winner } => {
+                let _ = cat.merges.merge(*loser, *winner);
+            }
+            Fact::ReleaseGroupMerged { loser, winner } => {
+                let _ = cat.group_merges.merge(*loser, *winner);
+            }
+            _ => {}
         }
     }
     let of = |r: &Id<Recording>| cat.merges.resolve(*r);
+    let group_of = |g: &Id<ReleaseGroup>| cat.group_merges.resolve(*g);
     let described = |s: &Described| match s {
         Described::Recording(r) => Described::Recording(cat.merges.resolve(*r)),
-        other => *other,
+        // A genre asserted on the loser is a genre on the album — #156.
+        Described::ReleaseGroup(g) => Described::ReleaseGroup(cat.group_merges.resolve(*g)),
     };
     let credit_on = |s: &CreditOn| match s {
         CreditOn::Recording(r) => CreditOn::Recording(cat.merges.resolve(*r)),
+        // And so is the album credit, which is what `file_under` asks for
+        // first: a merge that left it behind would file the two halves of one
+        // record under different artists.
+        CreditOn::ReleaseGroup(g) => CreditOn::ReleaseGroup(cat.group_merges.resolve(*g)),
         other => *other,
     };
 
@@ -1366,7 +1411,10 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 secondary,
             } => {
                 cat.groups.insert(
-                    *group,
+                    // **Through the merge**, so the loser keeps no album row
+                    // of its own — the same shape `RecordingCatalogued` takes,
+                    // and what stops a merged album still drawing a node.
+                    group_of(group),
                     Grouped {
                         title: title.clone(),
                         artist: *artist,
@@ -1426,7 +1474,12 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 cat.releases.insert(
                     *release,
                     Released {
-                        group: *group,
+                        // **The pressing stays; only which album it is on
+                        // moves.** That is the whole point of merging at this
+                        // level: *Barton Hollow* is one album holding a
+                        // standard edition and a deluxe, and folding the
+                        // releases together would lose the difference.
+                        group: group_of(group),
                         title: title.clone(),
                         released: *released,
                         label: *label,
@@ -1520,7 +1573,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             }
             // Applied in the pass above, because a merge has to move what was
             // said before it.
-            Fact::RecordingMerged { .. } => {}
+            Fact::RecordingMerged { .. } | Fact::ReleaseGroupMerged { .. } => {}
             Fact::RecordingAcquired { recording, at } => {
                 let first = cat.acquired.entry(of(recording)).or_insert(*at);
                 *first = (*first).min(*at);
@@ -2227,6 +2280,107 @@ mod merge_tests {
             "the song is listed twice"
         );
         assert_eq!(cat.recordings[&new].title, "0011");
+    }
+
+    /// **An album merge moves the pressings and keeps them apart** — #156.
+    ///
+    /// The case that wanted this: *Barton Hollow* is a standard edition of 14
+    /// tracks and a deluxe with 4 more, and a retag made them two albums. The
+    /// answer is one album holding two releases — so the merge has to move the
+    /// pressing's `group` and must not touch the pressing itself.
+    #[test]
+    fn a_merged_album_keeps_its_pressings_and_loses_its_row() {
+        use crate::model::entity::{Release, ReleaseGroup};
+        let old = Id::<ReleaseGroup>::derived(b"barton hollow, deluxe");
+        let new = Id::<ReleaseGroup>::derived(b"barton hollow");
+        let standard = Id::<Release>::derived(b"standard");
+        let deluxe = Id::<Release>::derived(b"deluxe");
+        let cat = fold(&log([
+            Fact::ReleaseGroupCatalogued {
+                group: new,
+                title: "Barton Hollow".into(),
+                artist: Id::derived(b"the civil wars"),
+                first_released: None,
+                kind: Default::default(),
+                secondary: Default::default(),
+            },
+            Fact::ReleaseGroupCatalogued {
+                group: old,
+                title: "Barton Hollow".into(),
+                artist: Id::derived(b"the civil wars"),
+                first_released: None,
+                kind: Default::default(),
+                secondary: Default::default(),
+            },
+            Fact::ReleaseCatalogued {
+                release: standard,
+                group: new,
+                title: "Barton Hollow".into(),
+                released: None,
+                label: None,
+                media: Some(1),
+            },
+            Fact::ReleaseCatalogued {
+                release: deluxe,
+                group: old,
+                title: "Barton Hollow".into(),
+                released: None,
+                label: None,
+                media: Some(1),
+            },
+            Fact::ReleaseGroupMerged {
+                loser: old,
+                winner: new,
+            },
+        ]));
+
+        assert!(!cat.groups.contains_key(&old), "the album is listed twice");
+        assert_eq!(cat.releases.len(), 2, "**both pressings survive**");
+        assert!(
+            cat.releases.values().all(|r| r.group == new),
+            "a pressing did not follow its album"
+        );
+    }
+
+    /// A credit and a genre asserted on the loser are about the album, so they
+    /// come too. Otherwise a merge files the two halves of one record under
+    /// different artists.
+    #[test]
+    fn what_was_said_about_the_loser_is_said_about_the_winner() {
+        use crate::model::entity::ReleaseGroup;
+        use crate::model::facet::Described;
+        use crate::model::reference::{CreditOn, RoleClass, Source};
+        let old = Id::<ReleaseGroup>::derived(b"loser");
+        let new = Id::<ReleaseGroup>::derived(b"winner");
+        let who = Id::derived(b"the civil wars");
+        let role = Id::<crate::model::entity::Role>::of_name("performer");
+        let cat = fold(&log([
+            Fact::RoleDefined {
+                role,
+                name: "performer".into(),
+                class: RoleClass::Performer,
+            },
+            Fact::CreditAsserted {
+                subject: CreditOn::ReleaseGroup(old),
+                artist: who,
+                role,
+                basis: Source::TagVariant,
+                position: 0,
+                as_credited: None,
+                join_phrase: None,
+            },
+            Fact::ReleaseGroupMerged {
+                loser: old,
+                winner: new,
+            },
+        ]));
+        assert!(
+            cat.credits
+                .keys()
+                .all(|(subject, ..)| *subject == CreditOn::ReleaseGroup(new)),
+            "the album credit stayed on the row nothing points at"
+        );
+        let _ = Described::ReleaseGroup(new);
     }
 
     /// Nothing is destroyed. The loser's facts are all still in the log, which

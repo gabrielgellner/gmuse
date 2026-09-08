@@ -40,7 +40,8 @@ use std::collections::BTreeSet;
 use crate::model::basis::Basis;
 use crate::model::clock::HybridClock;
 use crate::model::entity::{
-    Artist, Collection, Concept, Device, Encoding, Facet, Medium, Recording, Release, Role, Track,
+    Artist, Collection, Concept, Device, Encoding, Facet, Medium, Recording, Release, ReleaseGroup,
+    Role, Track,
 };
 use crate::model::facet::{self, Described};
 use crate::model::id::Id;
@@ -245,6 +246,28 @@ pub enum Proposal {
         broader: String,
         narrower: String,
     },
+    /// **These two album entries are one album** — #156.
+    ///
+    /// [`Proposal::Merged`] one level up, and needed for the same reason: a
+    /// group's id is a function of what the tags said, so learning an album's
+    /// MusicBrainz id changes its identity and `import` mints a second album
+    /// beside the first. 33 albums on this library are held twice that way.
+    ///
+    /// **Groups only, and that is the decision.** It says nothing about the
+    /// pressings underneath: *Barton Hollow* is a standard edition of 14
+    /// tracks and a deluxe with 4 more, and the answer wanted is *one album
+    /// holding two releases*. A merge that folded downward would erase the
+    /// level #134 exists to hold.
+    ///
+    /// **The direction is on the wire because it is not inferable**, exactly
+    /// as it is for a recording — and here there is a second reason to make a
+    /// person say it: not every duplicate title is one album. `AC/DC — High
+    /// Voltage` is the 1975 Australian record and the 1976 international one,
+    /// sharing a name and a folder, and they are correctly two.
+    GroupsMerged {
+        loser: Id<ReleaseGroup>,
+        winner: Id<ReleaseGroup>,
+    },
     /// **The whole tracklist of one medium** — #155.
     ///
     /// The proposal that lets the library hold *what a record is* rather than
@@ -403,6 +426,9 @@ pub struct Slot {
 pub enum Subject {
     Encoding(Id<Encoding>),
     Recording(Id<Recording>),
+    /// **An album** — #156. Its own subject rather than a recording's,
+    /// because a merge at this level says nothing about the songs on it.
+    ReleaseGroup(Id<ReleaseGroup>),
     /// **A disc of a pressing** — #155, and the only subject that is not a
     /// thing you can play.
     ///
@@ -443,6 +469,10 @@ impl Proposal {
             // and a disc number; the id is a pure function of those two, and
             // asking a Python script to reproduce `of_medium`'s seeding would
             // be a second door into the same identity.
+            // **The winner**, for the reason a recording merge names one:
+            // that is the row that has to exist for the merge to mean
+            // anything. A loser nothing holds is ordinary.
+            Proposal::GroupsMerged { winner, .. } => Subject::ReleaseGroup(*winner),
             Proposal::Tracklisted {
                 release, position, ..
             } => Subject::Medium(Id::<Medium>::of_medium(
@@ -998,6 +1028,12 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             }
             facts
         }
+        Proposal::GroupsMerged { loser, winner } => {
+            if loser == winner {
+                return Err("an album cannot absorb itself".into());
+            }
+            vec![Fact::ReleaseGroupMerged { loser, winner }]
+        }
         Proposal::Rated { recording, stars } => {
             vec![Fact::RecordingRated { recording, stars }]
         }
@@ -1025,6 +1061,11 @@ pub(crate) mod tests {
     /// be compared against the same library.
     pub(crate) fn named() -> uuid::Uuid {
         uuid::Uuid::from_u128(0x51)
+    }
+
+    /// The one album the double holds.
+    pub(crate) fn album() -> Id<ReleaseGroup> {
+        Id::derived(b"an album the library has")
     }
 
     /// The MusicBrainz release the double holds one disc of.
@@ -1059,6 +1100,9 @@ pub(crate) mod tests {
                 // refused for a record the library has never seen, and that
                 // refusal is the safety property worth having a double for.
                 Subject::Medium(m) => m == Id::<Medium>::of_medium(pressing(), 1),
+                // The double holds one album, so a merge into it is reachable
+                // and a merge into anything else is stale.
+                Subject::ReleaseGroup(g) => g == album(),
             }
         }
 
@@ -2032,6 +2076,54 @@ mod merged {
         let text = tracklisted(pressed(), &[(1, 0x51, "One"), (2, 0x51, "One Again")]);
         let (_, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    // ---- #156: two album entries that are one album ----
+
+    /// **The winner is the subject**, for the reason a recording merge's is:
+    /// that is the row that has to exist. A loser nothing holds is ordinary.
+    #[test]
+    fn an_album_merge_is_asked_about_the_winner() {
+        let p = Proposal::GroupsMerged {
+            loser: Id::derived(b"somewhere else"),
+            winner: album(),
+        };
+        assert_eq!(p.subject(), Subject::ReleaseGroup(album()));
+
+        let text = serde_json::to_string(&p).expect("serialises");
+        let (records, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+        assert_eq!(
+            records.iter().map(|r| r.fact.clone()).collect::<Vec<_>>(),
+            vec![Fact::ReleaseGroupMerged {
+                loser: Id::derived(b"somewhere else"),
+                winner: album(),
+            }]
+        );
+    }
+
+    /// A merge into an album nothing names is a redirect pointing nowhere.
+    #[test]
+    fn an_album_merge_into_one_the_library_lacks_is_stale() {
+        let p = Proposal::GroupsMerged {
+            loser: album(),
+            winner: Id::derived(b"never heard of it"),
+        };
+        let text = serde_json::to_string(&p).expect("serialises");
+        let (_, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.unknown.len(), 1, "{report}");
+    }
+
+    #[test]
+    fn an_album_cannot_absorb_itself() {
+        let p = Proposal::GroupsMerged {
+            loser: album(),
+            winner: album(),
+        };
+        let text = serde_json::to_string(&p).expect("serialises");
+        let (_, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.refused.len(), 1, "{report}");
     }
 

@@ -329,6 +329,69 @@ fn run_library(
     let machine = crate::events::machine_id(&config::default_state_dir());
     let device = crate::model::id::Id::derived(machine.as_bytes());
     match op {
+        cli::Shelf::Duplicates => {
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            crate::model::populate::populate(&mut log, roots, crate::history::now_ms());
+            let cat = log.catalogue();
+            let library = crate::model::seam::Librarian::from_catalogue(&cat);
+
+            // How many files sit on each album, which is what tells a dead
+            // duplicate from a real split. A group with none is an identity
+            // that moved; two with files each is one record in two halves.
+            let mut held: std::collections::BTreeMap<_, usize> = Default::default();
+            for slot in cat.placed.values() {
+                if let Some(track) = cat.tracks.get(slot)
+                    && let Some(medium) = cat.media.get(&track.medium)
+                    && let Some(release) = cat.releases.get(&medium.release)
+                {
+                    *held.entry(release.group).or_default() += 1;
+                }
+            }
+
+            let mut by_name: std::collections::BTreeMap<(String, String), Vec<_>> =
+                Default::default();
+            for (id, group) in &cat.groups {
+                let who = library
+                    .reference
+                    .credited_as(crate::model::reference::CreditOn::ReleaseGroup(*id));
+                by_name
+                    .entry((who, group.title.clone()))
+                    .or_default()
+                    .push(*id);
+            }
+
+            let mut found = 0usize;
+            for ((who, title), mut ids) in by_name {
+                if ids.len() < 2 {
+                    continue;
+                }
+                found += 1;
+                // Most files first, so the obvious winner reads first.
+                ids.sort_by_key(|id| std::cmp::Reverse(held.get(id).copied().unwrap_or(0)));
+                println!("{who} — {title}");
+                for id in &ids {
+                    let n = held.get(id).copied().unwrap_or(0);
+                    println!("  {id}  {n:4} file(s)");
+                }
+                println!(
+                    "  {}",
+                    serde_json::to_string(&serde_json::json!({
+                        "fact": "groups_merged",
+                        "loser": ids[1].to_string(),
+                        "winner": ids[0].to_string(),
+                    }))?
+                );
+            }
+            eprintln!(
+                "\n{found} album(s) held more than once. The line under each is the merge that \
+                 would join them — **read it first**: two records can share a name, and \
+                 `AC/DC — High Voltage` is two."
+            );
+        }
         cli::Shelf::Unfiled => {
             let (mut log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,

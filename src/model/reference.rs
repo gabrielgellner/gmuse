@@ -361,7 +361,6 @@ impl Reference {
         let named: Vec<_> = credits
             .iter()
             .filter(|c| performed(c) && c.basis == best)
-            .filter(|c| seen.insert(c.artist.id()))
             .filter_map(|c| {
                 let name = c.as_credited.clone().unwrap_or_else(|| {
                     self.artists
@@ -371,6 +370,19 @@ impl Reference {
                 });
                 (!name.trim().is_empty()).then(|| (name, c.join_phrase.clone()))
             })
+            // **By the name, not the id** — #156. It deduplicated ids, which
+            // is the same rule one step too early: an album merged out of two
+            // entries brings both their credits, and where one was tagged with
+            // a MusicBrainz artist id and the other was not, the same person
+            // is two ids. `Anderson .Paak, Anderson .Paak` — on 298 files, and
+            // `file_under` is this line, so `shelf render` wanted to move
+            // every one of them into a folder by that name.
+            //
+            // Two people who really share a name collapse here, and that is
+            // the right trade for a *line*: printing one name twice is
+            // unreadable whichever way it happened. The distinction lives in
+            // the credits, which keep both.
+            .filter(|(name, _)| seen.insert(crate::model::ingest::normalise(name)))
             .collect();
 
         let mut line = String::new();
@@ -620,6 +632,44 @@ mod tests {
             "Stephan Bodzin, Marc Romboy",
             "the tag reading is evidence now, not half of the answer"
         );
+    }
+
+    /// **One person, two ids, one name in the line** — #156.
+    ///
+    /// The line deduplicated by artist *id*, which is the same rule one step
+    /// too early. Merging two album entries into one brings both their
+    /// credits, and where one was tagged with a MusicBrainz artist id and the
+    /// other was not, the same person is two ids: the line came out
+    /// `Anderson .Paak, Anderson .Paak` on 298 files. `file_under` is this
+    /// line, so `shelf render` wanted to move every one of them into a folder
+    /// by that name.
+    #[test]
+    fn one_person_credited_under_two_ids_is_named_once() {
+        let mut r = Reference::default();
+        let group = CreditOn::ReleaseGroup(Id::derived(b"malibu"));
+        // The two ids `of_artist` mints for one person, depending on whether
+        // the file that made them carried a MusicBrainz id.
+        let named = Id::<Artist>::derived(b"anderson-paak-mbid");
+        let minted = Id::<Artist>::derived(b"anderson-paak-from-the-string");
+        for id in [named, minted] {
+            r.artists.insert(
+                id,
+                ArtistRecord {
+                    id,
+                    name: "Anderson .Paak".into(),
+                    sort_name: "Paak, Anderson .".into(),
+                },
+            );
+        }
+        credit(&mut r, group, named, 0, Source::TagVariant);
+        credit(&mut r, group, minted, 1, Source::TagVariant);
+
+        assert_eq!(r.credited_as(group), "Anderson .Paak");
+
+        // And two people who really are two are both still named.
+        let other = artist(&mut r, "Knxwledge");
+        credit(&mut r, group, other, 2, Source::TagVariant);
+        assert_eq!(r.credited_as(group), "Anderson .Paak, Knxwledge");
     }
 
     /// The weaker credits are still *there* — superseded is not deleted.

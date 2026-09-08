@@ -4523,6 +4523,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   edition**, where before it merely mistagged files you own. That is the price of a `close` match accepted by hand, and
   it is why `ingest survey` produces a file a person reads.
 
+- **2026-09-07** **An album is merged at the group, and nowhere else (#156).** A release group's id is a function of
+  what the tags said — `mb_release_group` where there is one, artist-and-title where there is not — so learning an
+  album's MusicBrainz id _changes its identity_, and a release, a medium and every slot are minted from it in turn. One
+  tag edit mints a whole second album and `import` moves the copies to it. `Fact::ReleaseGroupMerged` says the two are
+  one, and `shelf duplicates` is how you find them, because nothing else prints a group id.
+
+  **Groups only, and that is the decision the evidence forced.** Of 50 albums held twice here, 48 are one live album
+  beside a dead identity and would take any answer. The two that are not settle it in opposite directions: _Barton
+  Hollow_ is a standard edition of 14 tracks and a deluxe with 4 more, so the right answer is **one album holding two
+  releases** — merging downward would erase the level #134 exists to hold. And `AC/DC — High Voltage` is the 1975
+  Australian record and the 1976 international one, sharing a name and a folder: **correctly two**, and a rule that
+  merged on title would have folded them. So the command reports and a person decides.
+
+  **The merge exposed a second duplicate underneath, and that is worth recording.** Applying 48 of them made
+  `shelf render` want to move 298 files: an album merged out of two entries brings both its credits, and where one was
+  tagged with a MusicBrainz artist id and the other was not, **the same person is two ids** — so the line read
+  `Anderson .Paak, Anderson .Paak`, and `file_under` is that line. `line_of` deduplicated by artist id, which is the
+  same rule one step too early; it dedupes by rendered name now. Two people who really share a name collapse in the
+  line, and that is the right trade: printing one name twice is unreadable however it happened, and the credits keep
+  both.
+
+  What this does **not** do: the media under a merged group stay separate, so the 384 slots on discs no file came off
+  are still in the log. #155 stopped drawing them, and merging releases and media is a further step nothing yet needs.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

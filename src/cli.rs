@@ -206,6 +206,18 @@ pub enum Shelf {
     ///
     /// Review it, then `gmuse shelf apply --write`.
     Unfiled,
+    /// **Albums the library holds more than once** — #156.
+    ///
+    /// A group's id is a function of what the tags said, so learning an
+    /// album's MusicBrainz id changes its identity and `import` mints a second
+    /// album beside the first. Nothing else in this tool prints a group id, so
+    /// without this the merge that repairs it cannot be written by hand.
+    ///
+    /// **Reported, never decided.** Two albums sharing a name are not always
+    /// one record: `AC/DC — High Voltage` is the 1975 Australian and the 1976
+    /// international, and they are correctly two. So this prints what it found
+    /// and how many files sit on each, and a person says which is the winner.
+    Duplicates,
 }
 
 impl Cli {
