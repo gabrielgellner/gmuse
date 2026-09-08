@@ -50,6 +50,29 @@ pub struct Report {
     ///
     /// `gmuse shelf import` is the declaration. This is the offer.
     pub unknown: Vec<PathBuf>,
+    /// **Albums whose credit names nobody who is on them** — the check that
+    /// was missing when `[MARAPCANA.COM]` became an artist.
+    ///
+    /// A warez site had written itself into `albumartist` on four files. Import
+    /// took it at face value, `file_under` asks the album-level credit first
+    /// (#84), and `shelf render` duly made a folder called `[MARAPCANA.COM]`.
+    /// Nothing was wrong with any single step.
+    ///
+    /// **Reported, never refused**, because the same shape is sometimes right:
+    /// a netlabel in `albumartist` is how Bandcamp writes one, and this
+    /// library holds `Through My Speakers` legitimately. Refusing would block
+    /// real music to catch a stamp; reporting puts it in front of a person the
+    /// moment it arrives, which is all that was needed.
+    ///
+    /// **And a name rule is not the check.** A blocklist of domains missed
+    /// `minimalfreaks.pw` sitting in this library the whole time. What is
+    /// checkable without guessing is *corroboration*: an album credit that
+    /// shares no name with any track on it, and which no MusicBrainz id
+    /// vouches for, is a claim nothing supports. Measured here, **11 of 733
+    /// album credits, and every one of them wrong** — two site stamps, a
+    /// netlabel, a bare `Various`, and two albums credited to an artist who is
+    /// not on them.
+    pub uncorroborated: Vec<(String, String, String)>,
     /// Files whose bytes another file already had.
     ///
     /// **A scanner observation, not a library fact.** A holding answers "can
@@ -272,6 +295,43 @@ pub fn reconcile(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report
 /// Where a file says it sits: the album, the disc and the track.
 type Placement = (Id<crate::model::entity::ReleaseGroup>, u16, u16);
 
+/// **Whether a credit is the "nobody in particular" one.** A compilation
+/// legitimately names nobody who is on it, so it is exempt by construction
+/// rather than by scoring.
+fn is_various(credit: &str) -> bool {
+    matches!(
+        crate::model::ingest::normalise(credit).as_str(),
+        "various artists" | "various" | "va"
+    )
+}
+
+/// The names a credit appears to list, folded for comparison.
+///
+/// **Members, not the whole string**, and that is what makes the check quiet:
+/// comparing whole strings called `Onno, Okain` and `Okain,Onno` a
+/// disagreement and produced 36 findings, 25 of them that. Split, it is 11 and
+/// every one is real.
+///
+/// Folded to letters and digits, because this is a *comparison* and never an
+/// id — nothing is minted from it, so folding here cannot create the
+/// unrepairable merge `mint.rs` is careful about.
+fn named_in(credit: &str) -> std::collections::BTreeSet<String> {
+    credit
+        .split([',', '&'])
+        .flat_map(|part| part.split(" and "))
+        .flat_map(|part| part.split(" feat. "))
+        .flat_map(|part| part.split(" ft. "))
+        .flat_map(|part| part.split(" vs. "))
+        .map(|part| {
+            part.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
 /// What this file says about where it sits, in the same terms.
 ///
 /// **Derived exactly as `ingest` would derive it**, so the comparison is
@@ -353,6 +413,41 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
     // Two files in one pass claiming one encoding for two albums cannot be
     // explained that way. Telling those apart *across* passes needs the log to
     // record which file a placement came from, and it does not.
+    // **Does anyone this album is credited to actually appear on it?** — the
+    // check `[MARAPCANA.COM]` walked past. Asked within the pass, because it
+    // is a question about the record in hand and not about the library.
+    let mut on_album: BTreeMap<(String, String), (std::collections::BTreeSet<String>, bool)> =
+        BTreeMap::new();
+    for s in &scanned {
+        let (Some(credited), Some(album)) = (s.album_artist.as_deref(), s.album.as_deref()) else {
+            continue;
+        };
+        let entry = on_album
+            .entry((credited.to_string(), album.to_string()))
+            .or_default();
+        entry.0.insert(s.artist.clone());
+        // A MusicBrainz id is somebody else vouching for the credit, which is
+        // the corroboration this is looking for.
+        entry.1 |= s.album_artist_mbid.is_some() || s.mb_release.is_some();
+    }
+    for ((credited, album), (artists, vouched)) in &on_album {
+        if *vouched || is_various(credited) {
+            continue;
+        }
+        let mine = named_in(credited);
+        if artists
+            .iter()
+            .any(|a| a.trim().is_empty() || !named_in(a).is_disjoint(&mine))
+        {
+            continue;
+        }
+        report.uncorroborated.push((
+            credited.clone(),
+            album.clone(),
+            artists.iter().next().cloned().unwrap_or_default(),
+        ));
+    }
+
     let mut wanted: BTreeMap<Id<Encoding>, (Placement, PathBuf)> = BTreeMap::new();
     let mut refused: std::collections::HashSet<Id<Encoding>> = Default::default();
     for (at, s) in paths_of.iter().zip(&scanned) {

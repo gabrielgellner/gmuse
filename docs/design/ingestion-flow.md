@@ -45,12 +45,38 @@ its folder.
 | ingest    | `gmuse-tools ingest apply <dir> --artist X`                                       | tags, MusicBrainz    | **tags**                         |
 | tags      | `gmuse-tools tags survey` / `apply`                                               | tags                 | **tags**, with a snapshot        |
 | genre     | `gmuse-tools genre propose` / `apply`                                             | MusicBrainz, Discogs | **tags**, with a snapshot        |
-| import    | `gmuse shelf import <paths…> --write`                                             | tags, audio          | **the log**, and moves the files |
+| import    | `gmuse shelf import <paths…> --into <collection> --write`                         | tags, audio          | **the log**, and moves the files |
 | identify  | `gmuse shelf query --unidentified` → `identify fetch` / `propose` → `shelf apply` | the work list        | **the log**                      |
 | joined    | `gmuse-tools joined survey` / `propose` → `shelf apply`                           | tags, MusicBrainz    | **the log**                      |
 | tracklist | `gmuse-tools ingest tracklist` → `shelf apply`                                    | tags, MusicBrainz    | **the log**                      |
 | audit     | `gmuse-tools audit library` / `identity` / `dj` / `duplicates`                    | everything           | nothing                          |
 | merge     | `shelf apply` with `{"fact":"merged",…}`                                          | —                    | **the log**                      |
+
+**Import reports an album credited to nobody who is on it.** A warez site had written `[MARAPCANA.COM]` into
+`albumartist` on four files; import took it at face value, `file_under` asks the album-level credit first (#84), and
+`shelf render` duly made a folder of that name. Nothing was wrong with any single step.
+
+**A name rule is not the check** — a blocklist of domains missed `minimalfreaks.pw`, which was sitting in this library
+the whole time. What is checkable without guessing is _corroboration_: an album credit sharing no member with any track
+on it, which no MusicBrainz id vouches for, is a claim nothing supports. Measured here, **11 of 733 album credits and
+every one of them wrong** — two site stamps, a netlabel, a bare `Various`, and two singles credited to an artist who is
+not on them.
+
+**Reported, never refused**, because the same shape is sometimes right: a netlabel in `albumartist` is how Bandcamp
+writes one, and `Through My Speakers` is in this library legitimately. It is the one finding that survives the repair,
+which is the check working rather than failing.
+
+**Import takes the collection, because bringing music in and saying what it is _for_ are one act** (#94). `--into Dance`
+files every recording it catalogues, at the moment a person declares it — the same shape a package manager gives a
+dependency group. Deriving it afterwards from the folder is the inference #90 and #94 took away, and `shelf unfiled` is
+the repair for material that arrived before this existed rather than the intended route.
+
+**Importing from outside a root works, and did not until it was measured.** Holdings are published whole, so the walk
+that publishes them has to cover the roots _and_ what was named: walking the roots alone says the device holds nothing
+in a staging folder, which is false the moment a file is taken from one, and the planner then has no `from` for it.
+Importing 592 files from `~/DanceMusic-staging` catalogued every one and moved five. The same walk runs again after the
+move, because a file refused a destination is still catalogued and still openable (§10), and dropping its holding turns
+a playable row into a greyed one.
 
 **A command that moves music throws the player's cache away.** A launch deliberately does not scan — a change to the
 library is something you make, not something a launch notices on your behalf — so the cache is believed until something

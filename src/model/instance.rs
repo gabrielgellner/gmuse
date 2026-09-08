@@ -601,6 +601,15 @@ impl Instance {
         self.records = compact(&self.records);
     }
 
+    /// **Append one fact**, for a caller that has already decided what to say.
+    ///
+    /// The narrow door `import --into` uses: filing music into a collection is
+    /// one fact per recording and needs none of the ladder the ingest methods
+    /// carry.
+    pub fn append_fact(&mut self, now: i64, fact: Fact) {
+        self.append(now, fact);
+    }
+
     /// **Retire a copy** — `storage-layout.md` §6, #159.
     ///
     /// A tombstone, so the library stops offering the copy while every row

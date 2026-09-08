@@ -175,6 +175,22 @@ pub enum Shelf {
     /// With no paths it imports everything the last scan reported as unknown,
     /// which is the common case — "yes, those, I meant those".
     Import {
+        /// **The collection this music is being brought in as** — #94.
+        ///
+        /// A declaration, said at the moment the declaring happens. Bringing
+        /// music in and saying what it is *for* are one act, and splitting
+        /// them means every import is followed by a second pass that has to
+        /// re-derive from the folder what the person already knew — which is
+        /// the inference #90 and #94 took away.
+        ///
+        /// The same shape a package manager gives a dependency group: you say
+        /// which section you are installing into, once, rather than sorting it
+        /// out afterwards.
+        ///
+        /// Optional, because a collection is a judgement and not every import
+        /// carries one.
+        #[arg(long, value_name = "NAME")]
+        into: Option<String>,
         /// Files or folders to catalogue. Empty means whatever the library
         /// roots hold that is not known yet.
         paths: Vec<PathBuf>,
@@ -304,14 +320,14 @@ mod tests {
     #[test]
     fn import_writes_nothing_unless_asked() {
         let bare = parse(&["shelf", "import", "/m/a.flac"]);
-        let Some(Command::Shelf(Shelf::Import { paths, write })) = bare.command else {
+        let Some(Command::Shelf(Shelf::Import { paths, write, .. })) = bare.command else {
             panic!("not an import: {:?}", bare.command)
         };
         assert_eq!(paths, vec![PathBuf::from("/m/a.flac")]);
         assert!(!write, "a bare import would have written");
 
         let asked = parse(&["shelf", "import", "--write", "/m/a.flac", "/m/b.flac"]);
-        let Some(Command::Shelf(Shelf::Import { paths, write })) = asked.command else {
+        let Some(Command::Shelf(Shelf::Import { paths, write, .. })) = asked.command else {
             panic!("not an import")
         };
         assert_eq!(paths.len(), 2);

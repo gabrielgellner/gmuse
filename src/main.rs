@@ -645,7 +645,7 @@ fn run_library(
                 report.unfiled.len()
             );
         }
-        cli::Shelf::Import { paths, write } => {
+        cli::Shelf::Import { paths, write, into } => {
             let (mut log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
@@ -712,6 +712,15 @@ fn run_library(
             // crosses whichever copy is kept. What cannot be inferred is
             // whether this is an upgrade, a duplicate, or a second format
             // wanted on purpose, and that is a question for a person.
+            // **Nobody credited to this album is on it** — the check that was
+            // missing when a warez site's name became an artist. Reported, not
+            // refused: a netlabel in `albumartist` is how Bandcamp writes one,
+            // and this library holds `Through My Speakers` legitimately.
+            for (credited, album, someone) in &report.uncorroborated {
+                eprintln!(
+                    "credited to nobody on it: {album:?} is credited to {credited:?}\n                         but its tracks are by {someone:?} — a label, a site stamp, or a mistake?"
+                );
+            }
             for (path, recording, had) in &report.joins {
                 eprintln!(
                     "joins a recording already held as {had} other encoding(s): {}\n    {recording} — an upgrade, a duplicate, or a second format?",
@@ -732,7 +741,18 @@ fn run_library(
                 // The planner asks where a copy *is* before saying where it
                 // belongs, and a file taken in a moment ago is not held
                 // anywhere until a walk says so.
-                crate::model::populate::reconcile(&mut log, roots, crate::history::now_ms());
+                //
+                // **Over the roots *and* what was named**, because holdings
+                // are published whole: walking the roots alone says the device
+                // holds nothing outside them, which is false the moment a
+                // file is imported from a staging folder — and the planner
+                // then has no `from` for it, so it is silently counted
+                // `elsewhere` and never placed. Importing 592 files from
+                // `~/DanceMusic-staging` catalogued every one of them and
+                // moved five.
+                let mut walk: Vec<std::path::PathBuf> = roots.to_vec();
+                walk.extend(targets.iter().cloned());
+                crate::model::populate::reconcile(&mut log, &walk, crate::history::now_ms());
 
                 // Import is strict, so anything that got this far is
                 // describable — every row has a credit and a title, because
@@ -763,8 +783,44 @@ fn run_library(
                 // **And again, because the bytes moved.** Identity is the
                 // audio, so a moved file is the same encoding at a new place,
                 // and the holdings fact is what carries that.
+                //
+                // **Over the same walk**, because a file refused a
+                // destination is still catalogued and still openable — §10 of
+                // `storage-layout.md` says so outright, "catalogued and left
+                // where it is". Walking the roots alone drops its holding and
+                // turns a playable row into a greyed one.
                 if done.moved > 0 {
-                    crate::model::populate::reconcile(&mut log, roots, crate::history::now_ms());
+                    crate::model::populate::reconcile(&mut log, &walk, crate::history::now_ms());
+                }
+                // **Filed as it is brought in** (#94). The collection is a
+                // judgement a person made, and this is the moment they made
+                // it — deriving it afterwards from the folder is the
+                // inference the collection model exists to replace.
+                if let Some(name) = into {
+                    let now = crate::history::now_ms();
+                    let collection =
+                        crate::model::id::Id::<crate::model::entity::Collection>::of_name(name);
+                    log.append_fact(
+                        now,
+                        crate::model::log::Fact::CollectionNamed {
+                            collection,
+                            name: name.trim().to_string(),
+                            // A set somebody curated, not a running order —
+                            // the same answer `unfiled` gives.
+                            ordered: false,
+                        },
+                    );
+                    for recording in report.identified.values() {
+                        log.append_fact(
+                            now,
+                            crate::model::log::Fact::CollectionEntryAdded {
+                                collection,
+                                recording: *recording,
+                                ord: crate::model::ord::OrdKey::first(),
+                            },
+                        );
+                    }
+                    eprintln!("{} filed into {name}", report.identified.len());
                 }
                 let n = log.flush(&loaded.data_dir)?;
                 eprintln!("{n} record(s) written");
