@@ -351,15 +351,20 @@ def test_a_corroborated_remixer_is_credited_and_an_uncertain_one_is_not() -> Non
     Nothing is emitted for a row a person still has to read: an uncertain
     identification is not evidence of a remix relationship.
     """
-    from gmuse_tools.identify import Work, also  # noqa: PLC0415
+    from gmuse_tools.identify import Answer, Work, also  # noqa: PLC0415
 
     row = Work(recording="rec-1", encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
     named = {"id": "mb-1", "title": "How Many Times (Andhim remix)"}
     plain_title = {"id": "mb-2", "title": "How Many Times"}
 
+    # One candidate list, holding only the remix: the original is not in it, so
+    # these cases are about the credit alone.
+    def asked(chosen: dict[str, object], who: str | None) -> Answer:
+        return Answer("How Many Times", "How Many Times (Andhim remix)", who, [named], chosen)
+
     # `contributed`, not `credited`: the latter is the split, which refuses a
     # single name and asserts `performer` — a role a remixer must not have.
-    assert also(row, named, "Andhim", "matched") == [
+    assert also(row, asked(named, "Andhim"), "matched") == [
         {
             "fact": "contributed",
             "recording": "rec-1",
@@ -368,9 +373,9 @@ def test_a_corroborated_remixer_is_credited_and_an_uncertain_one_is_not() -> Non
             "basis": "musicbrainz",
         }
     ]
-    assert also(row, plain_title, "Andhim", "matched") == [], "nothing corroborated the remixer"
-    assert also(row, named, "Andhim", "uncertain") == [], "a row awaiting a person establishes nothing"
-    assert also(row, named, None, "matched") == [], "no remixer in our title, nothing to credit"
+    assert also(row, asked(plain_title, "Andhim"), "matched") == [], "nothing corroborated the remixer"
+    assert also(row, asked(named, "Andhim"), "uncertain") == [], "a row awaiting a person establishes nothing"
+    assert also(row, asked(named, None), "matched") == [], "no remixer in our title, nothing to credit"
 
 
 def test_the_version_qualifier_is_not_emitted_here() -> None:
@@ -380,8 +385,108 @@ def test_the_version_qualifier_is_not_emitted_here() -> None:
     that side; emitting it again from this pass would be a second answer to one
     question, at a different rung.
     """
-    from gmuse_tools.identify import Work, also  # noqa: PLC0415
+    from gmuse_tools.identify import Answer, Work, also  # noqa: PLC0415
 
     row = Work(recording="rec-1", encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
-    lines = also(row, {"id": "mb-1", "title": "Cream"}, None, "matched")
+    cream = {"id": "mb-1", "title": "Cream"}
+    lines = also(row, Answer("Cream", "Cream", None, [cream], cream), "matched")
     assert not any(line.get("fact") == "qualifier_assigned" for line in lines)
+
+
+def test_the_original_is_the_candidate_that_claims_to_be_no_version() -> None:
+    """How a remix finds what it was made out of — #162.
+
+    The search `asked_about` builds is already the query for the original: the
+    remix suffix is stripped and the original artist swapped in. So the answer
+    is in the result set, and it is picked out by what its title does *not*
+    say — no version qualifier at all, or an explicit `(original mix)`.
+    """
+    from gmuse_tools.identify import original_among  # noqa: PLC0415
+
+    remix = {"id": "mb-r", "title": "Dogfish (Jamie Jones remix)", "score": 100}
+    origin = {"id": "mb-o", "title": "Dogfish", "score": 100}
+    assert original_among([remix, origin], "Dogfish", remix) is origin
+
+    # Beatport's way of saying the same thing, and it *wins* over the bare
+    # titles rather than joining them: a release that bothers to mark the
+    # original has told us which one it is.
+    marked = {"id": "mb-m", "title": "Dogfish (Original Mix)", "score": 100}
+    assert original_among([remix, origin, marked], "Dogfish", remix) is marked
+
+
+def test_an_ambiguous_original_refuses_rather_than_guessing() -> None:
+    """Measured: 24 of 56 remixes leave several candidates at different lengths.
+
+    Four `Slip Away` recordings between 331s and 388s, and nothing says which
+    one Giacomotto remixed. Duration cannot help — an original and its remix
+    have no expected relationship in length — so there is no honest answer and
+    the rule fails and waits, which is what this library prefers to a guess.
+    """
+    from gmuse_tools.identify import original_among  # noqa: PLC0415
+
+    remix = {"id": "mb-r", "title": "Slip Away (Olivier Giacomotto Remix)", "score": 100}
+    several = [
+        {"id": "mb-1", "title": "Slip Away", "score": 100},
+        {"id": "mb-2", "title": "Slip Away", "score": 100},
+    ]
+    assert original_among([remix, *several], "Slip Away", remix) is None
+    assert original_among([remix], "Slip Away", remix) is None, "no unqualified candidate at all"
+
+
+def test_the_original_is_never_the_remix_itself() -> None:
+    """A remix whose suffix is a bare name slips past the version words.
+
+    `Riot - Carl Cox (remix)` is caught, but a title written `Riot (Carl Cox)`
+    claims no version and would be the only unqualified candidate — deriving
+    the recording from itself. The model refuses that too; refusing it here
+    says why.
+    """
+    from gmuse_tools.identify import original_among  # noqa: PLC0415
+
+    itself = {"id": "mb-r", "title": "Riot", "score": 100}
+    assert original_among([itself], "Riot", itself) is None
+
+
+def test_an_original_needs_the_title_that_was_asked_for() -> None:
+    """A search that finds nothing still returns its nearest misses.
+
+    A nearest miss ranked alone is still alone, so "exactly one candidate" is
+    not on its own evidence of anything. The title has to be the one asked
+    about, and the name has to be strong — this has no duration to check it
+    with, unlike an identification.
+    """
+    from gmuse_tools.identify import original_among  # noqa: PLC0415
+
+    remix = {"id": "mb-r", "title": "Awake (Julian Jeweil remix)", "score": 100}
+    other = {"id": "mb-o", "title": "Awaken", "score": 100}
+    assert original_among([remix, other], "Awake", remix) is None, "a different song"
+
+    weak = {"id": "mb-w", "title": "Awake", "score": 70}
+    assert original_among([remix, weak], "Awake", remix) is None, "nothing corroborates a weak name"
+
+
+def test_a_bare_mix_names_a_version_and_credits_nobody() -> None:
+    """The divergence that minted nine artists nobody is called.
+
+    `qualifier::REMIXER_WORDS` excludes `mix` and `edit` on measured grounds —
+    71 of the segments ending in `mix` were remaster notes — but this pass's
+    `REMIXED_BY` includes them, because *stripping* a suffix from a query is
+    harmless whatever the suffix meant. Asserting who made something is not,
+    and over the whole library that gap proposed `reggae`, `single`,
+    `alternate`, `full`, `Pro`, `Vox` and `monotone` as remixers.
+
+    So the wide regex still shapes the question and a narrower one guards the
+    answer. The 11 real credits this defers are waiting for better evidence
+    than a bracket, which is the trade this library prefers.
+    """
+    from gmuse_tools.identify import Answer, Work, also  # noqa: PLC0415
+
+    row = Work(recording="rec-1", encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
+    chosen = {"id": "mb-1", "title": "Only Time (reggae mix)"}
+    said = "Only Time (reggae mix)"
+    assert also(row, Answer("Only Time", said, "reggae", [chosen], chosen), "matched") == []
+
+    # The same title with a word that does credit a person still does.
+    real = {"id": "mb-2", "title": "Only Time (Danny Morris remix)"}
+    lines = also(row, Answer("Only Time", "Only Time (Danny Morris remix)", "Danny Morris", [real], real), "matched")
+    assert [line["artist"] for line in lines if line["fact"] == "contributed"] == ["Danny Morris"]

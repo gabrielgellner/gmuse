@@ -430,7 +430,7 @@ pub struct WorkDerivation {
 
 #[expect(
     dead_code,
-    reason = "the derivation model, proposed in domain-model.md; nothing mints one"
+    reason = "the edge is minted now — `identify derivations` writes it — but it lands in `Catalogue::derived` as a tuple; nothing yet reads one back out in this shape"
 )]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecordingDerivation {

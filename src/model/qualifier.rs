@@ -195,6 +195,11 @@ const REMIXER_WORDS: &[&str] = &["remix", "rework", "bootleg", "refix", "vip"];
 
 /// Words that describe a version rather than name a person, so a segment made
 /// only of them credits nobody.
+///
+/// The last three arrived from the tools' own run of this rule over the whole
+/// library, which proposed `Vox`, `alternate` and `full` as remixers — from
+/// `(Vox Mix)`, `(alternate mix)` and `(full vocal mix)`. `identify.py` keeps
+/// the same list, and the two are meant to stay the same list.
 const NOT_A_NAME: &[&str] = &[
     "original",
     "radio",
@@ -209,6 +214,9 @@ const NOT_A_NAME: &[&str] = &[
     "short",
     "long",
     "remix",
+    "vox",
+    "alternate",
+    "full",
 ];
 
 /// Who a title says remixed this, where it says so plainly.

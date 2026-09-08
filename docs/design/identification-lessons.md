@@ -295,7 +295,39 @@ answers confidently.
 
 ---
 
-## 18. Related
+## 18. The regex that shapes a question is not the bar for asserting an answer
+
+Finding the original a remix was made out of turned out to need no new source. `asked_about` already strips the remix
+suffix and swaps in the original artist, so the search **is** the query for the original — it was in the result set the
+whole time and was being thrown away. It is picked out by what its title does not say: no version qualifier at all, or
+an explicit `(original mix)`, and exactly one such candidate.
+
+Measured over the 56 remixes identified so far: **23 leave exactly one unqualified candidate**, 9 leave none, and 24
+leave several at different lengths — four `Slip Away` recordings between 331s and 388s with nothing to say which one
+Giacomotto remixed. Duration cannot help, because an original and its remix have no expected relationship in length. So
+ambiguity refuses, and over the whole library the rule produced **24 derivations, the first this model has ever held**.
+
+The mistake was in the other half of the same pass. `REMIXED_BY` matches a bracket ending in `mix` or `edit` as well as
+`remix`, which is right for _stripping_ a suffix — a query is no worse for losing a segment that turned out to be a
+remaster note. It is wrong for _crediting_, and the same regex was doing both. Run over the whole library it proposed
+nine artists nobody is called: `reggae`, `single` twice, `alternate`, `full`, `Pro`, `Vox`, `monotone` — every one of
+them from a bare `(X mix)`.
+
+`qualifier::REMIXER_WORDS` had already excluded `mix` and `edit` on measured grounds — of the segments ending in `mix`,
+**71 were version and remaster notes** against 65 ending in `remix` that were real people. The Rust side knew; the tool
+had drifted.
+
+> **Widening a query is free and widening an assertion is not.** The same string can be good enough to search with and
+> nowhere near good enough to claim with, so the two bars belong in two places even when they read from one field.
+
+Requiring a real remixer word defers 11 correct credits — `Dub Pistols mix`, `The Stingray mix`, `1969 Glyn Johns mix` —
+to refuse those nine. That is the trade this library prefers, and the 11 are waiting for evidence better than a bracket
+rather than lost. Three names the fix does not reach (`Mindless`, and two the run no longer emits) are a genre and two
+production treatments, and a blocklist of those would be exactly the sneaky rule §15 says should fail and wait.
+
+---
+
+## 19. Related
 
 #160 (what the ingest flow should be — the standing question this feeds) · #57 (AcoustID, the rung the ladder is
 missing) · #143 (a path is evidence, on the weakest rung) · #152, #157 (joined credits, in the artist field and the

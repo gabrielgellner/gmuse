@@ -156,7 +156,45 @@ NOT_A_REMIX: Final = re.compile(r"\s*[([](?:original(?:\s+mix)?)[)\]]\s*$", re.I
 REMIXED_BY: Final = re.compile(r"[([](?P<who>[^)\]]+?)\s+(?:re-?mix|rework|edit|mix)[)\]]", re.IGNORECASE)
 #: Words that end a remix credit without being part of the name. Mirrors
 #: `qualifier::NOT_A_NAME` on the Rust side.
-NOT_A_NAME: Final = frozenset({"radio", "club", "extended", "vocal", "dub", "instrumental", "original", "album"})
+NOT_A_NAME: Final = frozenset(
+    {
+        "radio",
+        "club",
+        "extended",
+        "vocal",
+        "dub",
+        "instrumental",
+        "original",
+        "album",
+        "single",
+        "main",
+        "short",
+        "long",
+        "remix",
+        "mix",
+        "edit",
+        "vox",
+        "alternate",
+        "full",
+    }
+)
+
+#: The bracket endings that credit **a person**, mirroring `qualifier`'s
+#: `REMIXER_WORDS` — and `mix` and `edit` are absent from it on purpose.
+#:
+#: Rust measured this and this pass did not, which is the whole of why they
+#: disagreed: of the bracketed segments ending in `mix`, **71 were remaster and
+#: version notes** — `1969 Glyn Johns`, `2021`, `Boy Wunder radio` — against 65
+#: ending in `remix` that were real people. `REMIXED_BY` stays wide because
+#: *stripping* a suffix from a query is harmless whatever the suffix meant;
+#: **asserting** who made something is not, and a title is the only evidence
+#: there is.
+#:
+#: Measured here over the whole library: requiring this defers 11 real credits
+#: and refuses 9 artists nobody is called — `reggae`, `single`, `alternate`,
+#: `full`, `Pro`, `Vox`, `monotone` — plus the one derivation built on them.
+#: The 11 are not lost, they are waiting for evidence better than a bracket.
+CREDITS_A_PERSON: Final = re.compile(r"\b(?:re-?mix|rework|bootleg|refix|vip)\s*[)\]]", re.IGNORECASE)
 
 
 def first_artist(credit: str) -> str:
@@ -457,6 +495,70 @@ VERSION_WORDS: Final = re.compile(
 )
 
 
+#: A bracketed segment naming **some** version — any version at all. Wider
+#: than `VERSION_WORDS`, which asks "is theirs a different version from ours";
+#: this asks "does this title claim to be a version of something", and a title
+#: that claims nothing is the candidate for being the thing itself.
+A_VERSION: Final = re.compile(
+    r"[([][^)\]]*\b(?:re-?mix|rework|refix|vip|bootleg|edit|instrumental|live"
+    r"|acappella|a cappella|dub|version|mix)\b[^)\]]*[)\]]",
+    re.IGNORECASE,
+)
+
+#: Beatport for "this is the thing itself". Kept apart from `A_VERSION`
+#: because it is the one bracketed qualifier that marks an *original* rather
+#: than a departure from one.
+SAYS_ORIGINAL: Final = re.compile(r"[([]\s*original(?:\s+mix)?\s*[)\]]", re.IGNORECASE)
+
+
+def original_among(candidates: list[dict[str, Any]], asked: str, chosen: dict[str, Any]) -> dict[str, Any] | None:
+    """The recording a remix was made out of, where the answer is unambiguous.
+
+    **The search already asked the right question.** `asked_about` strips the
+    remix suffix and swaps in the original artist, so the result set is
+    `recording:"<bare title>" AND artist:"<original artist>"` — which is the
+    query for the original. It was in front of us the whole time and was being
+    thrown away.
+
+    So the original is picked out by what its title does *not* say: take the
+    candidates carrying no version qualifier at all, or the ones explicitly
+    marked `(original mix)` where any say so. Duration cannot help here — an
+    original and its remix have no expected relationship in length — so the
+    only honest signal is that exactly one candidate is left.
+
+    **Ambiguity refuses.** Measured over the 56 confirmed remixes: 23 leave
+    exactly one unqualified candidate, 9 leave none, and 24 leave several at
+    different lengths — four `Slip Away` recordings between 331s and 388s,
+    with no way to say which one Giacomotto remixed. Guessing among those is
+    the sneaky rule this library would rather fail on and wait, so it does.
+
+    Of the 23, **17 survive the two guards below** and become the first
+    derivation edges the model has ever held.
+    """
+    pool = [c for c in candidates if SAYS_ORIGINAL.search(c.get("title") or "")] or [
+        c for c in candidates if not A_VERSION.search(c.get("title") or "")
+    ]
+    if len(pool) != 1:
+        return None
+    it = pool[0]
+    # **Not the remix itself.** `A_VERSION` catches every remix title seen so
+    # far, but a remix whose suffix is a bare name — `Riot - Carl Cox` — would
+    # slip through and derive a recording from itself. The model refuses that
+    # too; refusing it here says why.
+    if it.get("id") == chosen.get("id"):
+        return None
+    # **The title has to be the one asked for**, not merely the best answer
+    # MusicBrainz could offer. A search that finds nothing still returns its
+    # nearest misses, and a nearest miss ranked alone is still alone.
+    if plain(BRACKETED.sub("", it.get("title") or "")) != plain(asked):
+        return None
+    # **A strong name, because nothing else here can corroborate.** An
+    # identification has duration to check it; this has the title and the
+    # artist and no third thing, so the one signal available is held high.
+    # Costs 6 of the 23; they are the ones a person should read.
+    return it if (it.get("score") or 0) >= STRONG else None
+
+
 def plain(text: str) -> str:
     """A title with the spellings that carry no meaning taken out."""
     return re.sub(r"\s+", " ", text.translate(CONFUSABLES).lower()).strip()
@@ -550,12 +652,31 @@ def contested(candidates: list[dict[str, Any]], ours: float | None, who: str | N
     return len(near) > 1 and not any(names(c, who) for c in near)
 
 
-def also(
-    row: Work,
-    chosen: dict[str, Any],
-    remixer: str | None,
-    confidence: str,
-) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class Answer:
+    """One search: what it asked, and everything that came back.
+
+    **The losing candidates are part of the answer**, which is why this is a
+    record rather than the winner alone. `best` picks one and that is the
+    identification, but the original a remix was made out of is a *different*
+    row of the same result set (#162) — so a pass that keeps only `chosen`
+    throws away the evidence for half of what it learned.
+    """
+
+    #: The title actually put to MusicBrainz — the remix suffix already gone.
+    asked: str
+    #: The title as the library holds it, suffix and all. `asked` cannot stand
+    #: in for it: the suffix is exactly what says whether a person is credited.
+    said: str
+    #: Who the title said remixed it, where it said so.
+    remixer: str | None
+    #: Everything MusicBrainz offered, in its order.
+    candidates: list[dict[str, Any]]
+    #: The one `best` believes.
+    chosen: dict[str, Any]
+
+
+def also(row: Work, answer: Answer, confidence: str) -> list[dict[str, Any]]:
     """Everything else a confident match established — #162.
 
     The identification says *which recording this is*. Two more things were
@@ -579,9 +700,15 @@ def also(
     Nothing is emitted for a match a person still has to read: an uncertain
     identification is not evidence of a remix relationship.
     """
-    if confidence not in APPLIES or not remixer or not names(chosen, remixer):
+    remixer = answer.remixer
+    if confidence not in APPLIES or not remixer or not names(answer.chosen, remixer):
         return []
-    return [
+    # **A bare `mix` names a version, not a person** — see `CREDITS_A_PERSON`.
+    # This is the rung between shaping a question and asserting an answer, and
+    # it is the only place the distinction matters.
+    if not CREDITS_A_PERSON.search(answer.said):
+        return []
+    lines: list[dict[str, Any]] = [
         {
             # **`contributed`, not `credited`** — the latter is the *split*,
             # which refuses a single name and asserts `performer`. A remixer
@@ -597,6 +724,28 @@ def also(
             "basis": "musicbrainz",
         }
     ]
+    origin = original_among(answer.candidates, answer.asked, answer.chosen)
+    if origin:
+        lines.append(
+            {
+                "fact": "recording_derived",
+                # **A basis, not an id.** The original is a fact about the
+                # world and the library need not hold a copy of it — the whole
+                # point of the archivist reading (`library-api.md` §1). Naming
+                # it by its MusicBrainz id lets the edge stand whether or not
+                # the file ever arrives, and mints the same id if it does.
+                "from": {"musicbrainz": origin.get("id")},
+                # **The row as it stands now**, which the identification on the
+                # line above is about to merge into its MusicBrainz twin.
+                # References resolve through redirects when read, so naming the
+                # id that exists at apply time is the same answer as naming the
+                # one that survives (`merge.rs`, "nothing is destroyed").
+                "to": row.recording,
+                "kind": "Remix",
+                "why": f"{origin.get('title')!r} is the only unqualified candidate, score {origin.get('score')}",
+            }
+        )
+    return lines
 
 
 def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:
@@ -729,6 +878,58 @@ def fetch(work: Path, *, limit: int | None) -> None:
     print(f"done: {asked} asked, {cached} already cached")
 
 
+def derivations(work: Path, out: Path, *, limit: int | None) -> None:
+    """What the *already identified* remixes established and nobody kept — #162.
+
+    `propose` learns three things at once and `also` writes all three, but it
+    only ever runs over rows gmuse calls **unidentified**. Every remix the
+    library had already settled — 249 of them, named as a remix by their own
+    title — was identified before `also` existed, so its remixer credit and the
+    original it was made out of were known once and thrown away.
+
+    **This does not re-identify anything**, and that is the whole reason it is
+    a separate command rather than a flag. These rows already rest on a
+    MusicBrainz basis; proposing `identified` over them again would relink
+    MusicBrainz to MusicBrainz, which does not merge and strands whatever the
+    old id carried — 24 descriptions, once, and that is
+    `identification-lessons.md` §10. So the identification line is not written
+    here at all. The search is run for its *evidence*, and only `also`'s
+    findings are kept.
+
+    **The library's title, not the file's.** A settled row has a name the
+    library stands behind; reaching past it to the tag would ask MusicBrainz
+    about a string the library already decided was wrong. The file is opened
+    for its duration alone, which is a fact about bytes and is not in the log.
+    """
+    con = bronze.open_cache()
+    counts = {"derived": 0, "credited": 0, "unsure": 0, "no candidates": 0}
+    with out.open("w", encoding="utf-8") as sink:
+        for row in work_list(work, limit=limit):
+            said = {"title": row.title, "artist": row.artist}
+            artist, title, remixer = asked_about(said, "")
+            if not remixer or not title:
+                continue
+            _, seconds = read(Path(row.locator or ""))
+            body = search(con, artist, title)
+            candidates = (body or {}).get("recordings") or []
+            chosen = best(candidates, seconds, remixer) if candidates else None
+            if chosen is None:
+                counts["no candidates"] += 1
+                continue
+            confidence, _ = verdict(chosen, seconds)
+            if confidence == "matched" and contested(candidates, seconds, remixer):
+                confidence = "uncertain"
+            lines = also(row, Answer(title, row.title, remixer, candidates, chosen), confidence)
+            if not lines:
+                counts["unsure"] += 1
+                continue
+            for line in lines:
+                counts["derived" if line["fact"] == "recording_derived" else "credited"] += 1
+                sink.write(json.dumps({**line, "ours": {"title": row.title, "artist": row.artist}}) + "\n")
+    print(f"{counts['derived']} originals and {counts['credited']} remixer credits -> {out}")
+    print(f"  {counts['unsure']} said nothing new, {counts['no candidates']} had no candidate at all")
+
+
 def propose(work: Path, out: Path, *, limit: int | None) -> None:
     """Turn the cache into a file `gmuse library apply` can read.
 
@@ -809,7 +1010,8 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
             # **What else this match established** — #162. The identification
             # is one fact; the remix that produced it is three, and until now
             # all three were thrown away at the moment they were known.
-            for line in also(row, chosen, remixer, confidence):
+            said = tags.get("title", "") or path.stem
+            for line in also(row, Answer(title, said, remixer, candidates, chosen), confidence):
                 sink.write(prefix + json.dumps(line) + "\n")
 
     total = sum(counts.values())
@@ -846,6 +1048,17 @@ def register(app: typer.Typer) -> None:
     def fetch_cmd(work: Path = WORK, limit: int | None = LIMIT) -> None:
         """Ask MusicBrainz about the recordings gmuse says are unidentified."""
         fetch(existing(work), limit=limit)
+
+    @app.command("derivations")
+    def derivations_cmd(
+        work: Path = WORK,
+        out: Path | None = OUT,
+        limit: int | None = LIMIT,
+    ) -> None:
+        """What the already-identified remixes established: a remixer, and an original."""
+        work = existing(work)
+        default = out_path(f"derivations-{work.stem.lower()}.jsonl")
+        derivations(work, out.expanduser() if out else default, limit=limit)
 
     @app.command("propose")
     def propose_cmd(
