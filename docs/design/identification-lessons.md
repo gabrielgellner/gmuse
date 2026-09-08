@@ -191,7 +191,43 @@ that says where a copy _is_.
 
 ---
 
-## 12. What the numbers actually are
+## 12. Two remixes of one track are the same length
+
+`Slip Away (Larse Vox Remix)` is 518 seconds. Our Olivier Giacomotto remix is 517. A rule that takes the candidate
+closest in duration files one as the other, confidently, at score 84.
+
+Duration is the discriminator that separates a recording from its radio edit, and it separates nothing at all among
+remixes of one track — they are the same piece of music at the same tempo, and there is no reason for them to differ.
+
+> **What corroborates a remix is a candidate whose own title names the remixer.** Where several fit the length and none
+> claims it, the length has decided nothing and the answer is a person.
+
+Applied here that pushed `uncertain` from 29 to 46 — **refusals on purpose**, not a regression. 57 matches came back
+confirmed by the remixer being named: `Elderbrook — How Many Times (Andhim remix)` at 495s against our 495s.
+
+---
+
+## 13. The two catalogues disagree about who a remix is by
+
+MusicBrainz credits the recording to the **original** artist and holds the remixer as a relationship. A DJ tag puts the
+**remixer** in `artist`, frequently as the only name there.
+
+So `Andhim — How Many Times (Andhim Remix)` asked MusicBrainz about Andhim, who did not record it: 8 candidates, none
+naming a remix. Asked about Elderbrook: 16, including the one that names Andhim's.
+
+**And the suffix has to leave the query too.** `recording:"Slip Away (Olivier Giacomotto Remix)"` matches nothing at all
+— MusicBrainz does not store it the way Beatport writes it — so keeping it turns a findable record into "no match",
+which is indistinguishable from the record not existing.
+
+Of 510 unidentified rows, 406 carried a bracketed version or remix. Fixing the question took `nothing` from **196 to
+156** and `matched` from 258 to 283.
+
+> **Ask the authority the question in the terms the authority uses.** A query that cannot match is not evidence of
+> absence.
+
+---
+
+## 14. What the numbers actually are
 
 Kept because every rule above was written against a guess first and a measurement second.
 
@@ -209,7 +245,7 @@ Kept because every rule above was written against a guess first and a measuremen
 
 ---
 
-## 13. The rules, in one place
+## 15. The rules, in one place
 
 1. Corroborate against something the rule did not produce.
 2. When the discriminator is X, do not let a ranking on Y decide what X sees.
@@ -222,12 +258,14 @@ Kept because every rule above was written against a guess first and a measuremen
 9. Read what only the path knows before the path is gone.
 10. Identify from the original state, once.
 11. A log backup restores the claims, not the bytes.
-12. **Prefer refusing to guessing** — a fold is the one thing this model cannot repair, and `library-api.md` §7 already
+12. Duration separates a recording from its edit and separates nothing among remixes of one track.
+13. Ask the authority the question in the terms the authority uses; a query that cannot match is not absence.
+14. **Prefer refusing to guessing** — a fold is the one thing this model cannot repair, and `library-api.md` §7 already
     says a library that accepts anything and marks it provisional fills with entries nobody will ever fix.
 
 ---
 
-## 14. How the mistakes were actually caught
+## 16. How the mistakes were actually caught
 
 Worth recording, because it is not flattering to the tests.
 
@@ -241,7 +279,7 @@ answers confidently.
 
 ---
 
-## 15. Related
+## 17. Related
 
 #160 (what the ingest flow should be — the standing question this feeds) · #57 (AcoustID, the rung the ladder is
 missing) · #143 (a path is evidence, on the weakest rung) · #152, #157 (joined credits, in the artist field and the

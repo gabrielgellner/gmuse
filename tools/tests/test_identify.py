@@ -280,3 +280,62 @@ def test_a_remix_is_never_the_top_hit_and_the_window_must_hold_it() -> None:
     assert best(ranked[:3], ours)["id"] != "rmx-8", (
         "with the old window of three the right answer is not even a candidate"
     )
+
+
+def test_a_remix_asks_about_the_original_artist() -> None:
+    """The swap: MusicBrainz credits the original, the DJ tag credits the remixer.
+
+    `Andhim — How Many Times (Andhim Remix)` asked about Andhim returns 8
+    candidates; asked about Elderbrook it returns 16, including the one whose
+    own title names the remixer. And the suffix leaves the query, because
+    `recording:"Slip Away (Olivier Giacomotto Remix)"` matches nothing at all.
+    """
+    from gmuse_tools.identify import asked_about  # noqa: PLC0415
+
+    artist, title, who = asked_about({"artist": "Andhim,Elderbrook", "title": "How Many Times (Andhim Remix)"}, "stem")
+    assert (artist, title, who) == ("Elderbrook", "How Many Times", "Andhim")
+
+
+def test_a_remixer_who_is_the_only_name_is_kept() -> None:
+    """A query naming nobody returns 25 unrelated candidates and no duration match.
+
+    Asking imprecisely beats asking about nothing, and the corroboration below
+    still has to be satisfied either way.
+    """
+    from gmuse_tools.identify import asked_about  # noqa: PLC0415
+
+    artist, title, who = asked_about({"artist": "Andhim", "title": "How Many Times (Andhim Remix)"}, "stem")
+    assert (artist, title, who) == ("Andhim", "How Many Times", "Andhim")
+
+
+def test_an_original_mix_names_no_remixer() -> None:
+    """`Original` is Beatport saying *not* a remix, and it is not a person."""
+    from gmuse_tools.identify import asked_about, remixer_in  # noqa: PLC0415
+
+    assert remixer_in("Cream (Original Mix)") is None
+    artist, title, who = asked_about({"artist": "Danny Avila,Tujamo", "title": "Cream (Original Mix)"}, "stem")
+    assert (artist, title, who) == ("Danny Avila", "Cream", None)
+
+
+def test_two_remixes_of_one_track_are_the_same_length_and_the_title_decides() -> None:
+    """The `Larse Vox` trap, which is why duration cannot be the corroboration.
+
+    `Slip Away (Larse Vox Remix)` is 518s and our Giacomotto remix is 517s. A
+    rule taking the closest duration files one as the other.
+    """
+    from gmuse_tools.identify import best, contested  # noqa: PLC0415
+
+    ours = 517.0
+    larse = {"id": "larse", "score": 84, "length": 518_000, "title": "Slip Away (Larse Vox Remix)"}
+    giac = {"id": "giac", "score": 84, "length": 519_000, "title": "Slip Away (Olivier Giacomotto Remix)"}
+
+    # Named, so it wins even though Larse is nearer in length.
+    assert best([larse, giac], ours, "Olivier Giacomotto")["id"] == "giac"
+    # Nobody claims it, and two fit: the length has decided nothing.
+    assert contested(
+        [larse, {"id": "x", "score": 84, "length": 516_000, "title": "Slip Away"}], ours, "Olivier Giacomotto"
+    )
+    # One candidate is not a contest — there is nothing to confuse it with.
+    assert not contested([larse], ours, "Olivier Giacomotto")
+    # And with no remixer to look for, this rule says nothing at all.
+    assert not contested([larse, giac], ours, None)

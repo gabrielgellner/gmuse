@@ -150,6 +150,13 @@ CREDIT_SPLIT: Final = re.compile(r"\s*(?:,|&|;|\bfeat\.?\b|\bft\.?\b|\bvs\.?\b|\
 #: Beatport's way of saying "not a remix". Narrow on purpose: a real remix name
 #: identifies a different recording and has to survive.
 NOT_A_REMIX: Final = re.compile(r"\s*[([](?:original(?:\s+mix)?)[)\]]\s*$", re.IGNORECASE)
+#: Who a bracketed segment says remixed this. `(Olivier Giacomotto Remix)`,
+#: `(Andhim remix)`, `(Bedrock Vocal Mix)` — the name is what precedes the
+#: word, and the word itself is never part of it.
+REMIXED_BY: Final = re.compile(r"[([](?P<who>[^)\]]+?)\s+(?:re-?mix|rework|edit|mix)[)\]]", re.IGNORECASE)
+#: Words that end a remix credit without being part of the name. Mirrors
+#: `qualifier::NOT_A_NAME` on the Rust side.
+NOT_A_NAME: Final = frozenset({"radio", "club", "extended", "vocal", "dub", "instrumental", "original", "album"})
 
 
 def first_artist(credit: str) -> str:
@@ -166,6 +173,75 @@ def first_artist(credit: str) -> str:
 def searchable_title(title: str) -> str:
     """The title with Beatport's "not a remix" suffix removed."""
     return NOT_A_REMIX.sub("", title).strip()
+
+
+def asked_about(tags: dict[str, str], stem: str) -> tuple[str, str, str | None]:
+    """The artist, title and remixer this file should be searched by — #161.
+
+    **The remix swap.** A remix is a different recording credited to somebody
+    else, and the two catalogues disagree about who: MusicBrainz credits the
+    *original* artist and holds the remixer as a relationship, while a DJ tag
+    puts the remixer in `artist` — often as the only name there.
+
+    Measured: `Andhim — How Many Times (Andhim Remix)` asked about Andhim
+    returns 8 candidates; asked about Elderbrook it returns 16, including
+    `How Many Times (Andhim remix)` at 495s against our 495s — the one
+    candidate that *names the remixer*, which is the corroboration duration
+    cannot give.
+
+    **The remix segment leaves the query too.** `recording:"Slip Away (Olivier
+    Giacomotto Remix)"` matches nothing at all: MusicBrainz does not store the
+    suffix the way Beatport writes it, so keeping it turns a findable record
+    into "no match". It comes back as the *check* rather than the question.
+    """
+    raw = tags.get("title", "") or stem
+    remixer = remixer_in(raw)
+    title = searchable_title(REMIXED_BY.sub("", raw).strip() if remixer else raw)
+    return first_artist(without(tags.get("artist", ""), remixer)), title, remixer
+
+
+def remixer_in(title: str) -> str | None:
+    """Who a title says remixed this, if it says so — #161.
+
+    **A remix is a different recording credited to somebody else**, and the
+    two catalogues disagree about who. MusicBrainz credits the recording to
+    the *original* artist and holds the remixer as a relationship; a DJ tag
+    puts the remixer in `artist`, often as the only name there.
+
+    So `Andhim — How Many Times (Andhim Remix)` asks MusicBrainz about Andhim,
+    who did not record it. Asked about Elderbrook instead, the answer comes
+    back naming the remixer in its own title — which is the corroboration
+    duration cannot give.
+    """
+    m = REMIXED_BY.search(title)
+    if not m:
+        return None
+    who = m.group("who").strip()
+    # Trailing version words are not part of a name — the same rule
+    # `qualifier::credits_in` follows on the Rust side, and for the same
+    # reason: `Hi-Bias Signature radio remix` credits nobody called `radio`.
+    while who and who.rsplit(" ", 1)[-1].lower() in NOT_A_NAME:
+        cut = who.rsplit(" ", 1)
+        if len(cut) == 1:
+            return None
+        who = cut[0].strip()
+    return who or None
+
+
+def without(credit: str, name: str | None) -> str:
+    """The credit with one name taken out, where anything is left.
+
+    **The swap #161 is about.** For a remix the tag's artist is frequently the
+    remixer and MusicBrainz credits the original, so asking about the remixer
+    asks the wrong question. Where the remixer is the *only* name, it is left
+    alone: a query naming nobody returns 25 unrelated candidates and no
+    duration match at all, which is worse than asking imprecisely.
+    """
+    if not name:
+        return credit
+    wanted = plain(name)
+    kept = [p.strip() for p in CREDIT_SPLIT.split(credit) if p.strip() and plain(p.strip()) != wanted]
+    return ", ".join(kept) if kept else credit
 
 
 def flatten(value: object) -> str:
@@ -301,7 +377,7 @@ def credit_of(recording: dict[str, Any]) -> str:
     return ", ".join(names)
 
 
-def best(candidates: list[dict[str, Any]], ours: float | None) -> dict[str, Any] | None:
+def best(candidates: list[dict[str, Any]], ours: float | None, who: str | None = None) -> dict[str, Any] | None:
     """The candidate to believe, which is not always the first one.
 
     **MusicBrainz ranks by name, and several candidates routinely tie at 100.**
@@ -343,6 +419,14 @@ def best(candidates: list[dict[str, Any]], ours: float | None) -> dict[str, Any]
         length = candidate["length"]
         return abs(float(length) / 1000.0 - ours)
 
+    # **A candidate naming the remixer wins outright** (#161). Duration cannot
+    # separate two remixes of one track — `Slip Away (Larse Vox Remix)` is 518s
+    # against our 517s — so where one candidate says whose remix it is and
+    # fits the length, it is the answer and the ranking is beside the point.
+    if who:
+        claimed = [c for c in timed if names(c, who) and drift(c) <= SAME_RECORDING]
+        if claimed:
+            return min(claimed, key=drift)
     return min(timed, key=drift)
 
 
@@ -433,6 +517,37 @@ def unasked_qualifier(ours: str, theirs: str) -> str | None:
         if unasked:
             return group.group(0)
     return None
+
+
+def names(recording: dict[str, Any], who: str | None) -> bool:
+    """Whether a candidate's own title credits this remixer — #161.
+
+    The corroboration duration cannot give. Two remixes of one track are
+    routinely the same length: `Slip Away (Larse Vox Remix)` is 518s and our
+    Giacomotto remix is 517s, so a rule that accepted the closest duration
+    would file one as the other.
+    """
+    if not who:
+        return False
+    return plain(who) in plain(str(recording.get("title") or ""))
+
+
+def contested(candidates: list[dict[str, Any]], ours: float | None, who: str | None) -> bool:
+    """Whether several candidates fit the duration and none names the remixer.
+
+    **The `Larse Vox` trap.** With a remixer to look for and nobody claiming to
+    be them, two candidates a second apart are two remixes and the length says
+    nothing about which is ours. One candidate is a different matter: there is
+    nothing to confuse it with.
+    """
+    if not who or ours is None:
+        return False
+    near = [
+        c
+        for c in candidates
+        if isinstance(c.get("length"), int) and c["length"] > 0 and abs(c["length"] / 1000.0 - ours) <= SAME_RECORDING
+    ]
+    return len(near) > 1 and not any(names(c, who) for c in near)
 
 
 def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:
@@ -551,8 +666,7 @@ def fetch(work: Path, *, limit: int | None) -> None:
         return
     asked = cached = 0
     for index, (path, tags) in enumerate(todo, start=1):
-        artist = first_artist(tags.get("artist", ""))
-        title = searchable_title(tags.get("title", "") or path.stem)
+        artist, title, _ = asked_about(tags, path.stem)
         if not title:
             continue
         before = con.execute("SELECT 1 FROM response WHERE key = ?", (query_key(artist, title),)).fetchone()
@@ -589,18 +703,26 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
     counts = {"matched": 0, "probable": 0, "uncertain": 0, "nothing": 0}
     with out.open("w", encoding="utf-8") as sink:
         for row, path, tags, seconds in todo:
-            artist = first_artist(tags.get("artist", ""))
-            title = searchable_title(tags.get("title", "") or path.stem)
+            artist, title, remixer = asked_about(tags, path.stem)
             body = search(con, artist, title) if title else None
             candidates = (body or {}).get("recordings") or []
             if not candidates:
                 counts["nothing"] += 1
                 continue
-            chosen = best(candidates, seconds)
+            chosen = best(candidates, seconds, remixer)
             if chosen is None:
                 counts["nothing"] += 1
                 continue
             confidence, why = verdict(chosen, seconds)
+            # **A remix nobody claims, among candidates the length cannot
+            # separate** (#161). Two remixes of one track are routinely the
+            # same length; where several fit and none says whose remix it is,
+            # the duration has decided nothing and a person should.
+            if confidence == "matched" and contested(candidates, seconds, remixer):
+                confidence = "uncertain"
+                why = f"{why}, but nothing here says it is the {remixer} remix and more than one fits"
+            elif confidence == "matched" and names(chosen, remixer):
+                why = f"{why}, and it names the {remixer} remix"
             kind: str | None = None
             extra = unasked_qualifier(tags.get("title", ""), str(chosen.get("title") or ""))
             if confidence == "matched" and extra:
