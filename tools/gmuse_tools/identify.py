@@ -83,8 +83,26 @@ if TYPE_CHECKING:
 USER_AGENT: Final = {"User-Agent": "gmuse-identify/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
 MB_RECORDING: Final = "https://musicbrainz.org/ws/2/recording"
 HTTP_OK: Final = 200
-#: How many candidates to keep. Past the third, a match is not one to trust.
-CANDIDATES: Final = 3
+#: How many candidates to ask for.
+#:
+#: **It was three, and three loses every remix.** MusicBrainz ranks by name, and
+#: a remix cannot outrank the original it is a remix *of* — the titles differ
+#: only by a suffix, so the plain track always sorts first. `How Many Times
+#: (Andhim Remix)` returned the 3:39 original twice before any remix, and the
+#: four candidates matching our 8:15 file to the second sat at ranks 5, 7, 8
+#: and 10. The window threw them away before `best` ever saw them.
+#:
+#: **Widening is safe because duration selects, not the ranking.** `best` takes
+#: the candidate closest in length among those scoring `PLAUSIBLE` or better,
+#: within `TOLERANCE` seconds. More candidates give that choice more to work
+#: with; they do not loosen it. The note this replaces called raising the limit
+#: "a different question with a real cost" — measured, on twelve rows this pass
+#: left for a person, **five resolve at score 100 with a duration exact to the
+#: second**, at ranks 4, 5, 6, 7 and 14.
+#:
+#: It costs no extra request either: the limit is a parameter on the one search
+#: already being made.
+CANDIDATES: Final = 25
 #: A Lucene score at or above this is a name match worth considering. Below it
 #: MusicBrainz is guessing from a partial term.
 STRONG: Final = 95

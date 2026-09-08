@@ -250,3 +250,33 @@ class TestWorkList:
             )
         )
         assert len(rows) == 1
+
+
+def test_a_remix_is_never_the_top_hit_and_the_window_must_hold_it() -> None:
+    """The window was three, and three loses every remix.
+
+    MusicBrainz ranks by name, and a remix cannot outrank the original it is a
+    remix *of* — the titles differ only by a suffix, so the plain track sorts
+    first. `How Many Times (Andhim Remix)` returned the 3:39 original twice
+    before any remix, and the four candidates matching our 8:15 file to the
+    second sat at ranks 5, 7, 8 and 10.
+
+    Widening is safe because `best` selects on duration, not on the ranking:
+    more candidates give that choice more to work with and do not loosen it.
+    """
+    from gmuse_tools.identify import CANDIDATES, best  # noqa: PLC0415
+
+    ours = 495.4
+    # The shape MusicBrainz actually returned, in the order it returned it.
+    ranked = [
+        {"id": "orig-a", "score": 100, "length": 219_000, "title": "How Many Times"},
+        {"id": "orig-b", "score": 100, "length": 218_000, "title": "How Many Times"},
+        {"id": "rmx-6", "score": 88, "length": 377_000, "title": "How Many Times (andhim remix)"},
+        {"id": "rmx-6b", "score": 88, "length": 382_000, "title": "How Many Times (Andhim remix)"},
+        {"id": "rmx-8", "score": 88, "length": 495_000, "title": "How Many Times (Andhim remix)"},
+    ]
+    assert len(ranked) <= CANDIDATES, "the window is narrower than the case that motivated it"
+    assert best(ranked, ours)["id"] == "rmx-8", "the 8:15 remix is the one our file is"
+    assert best(ranked[:3], ours)["id"] != "rmx-8", (
+        "with the old window of three the right answer is not even a candidate"
+    )

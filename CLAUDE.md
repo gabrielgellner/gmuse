@@ -25,6 +25,11 @@ and in what order, from a download to a placed row. Read it before importing any
 load-bearing, `ingest` and `identify` are both MusicBrainz and are not the same stage, and §4 lists what the stages do
 not cover.
 
+[`docs/design/identification-lessons.md`](docs/design/identification-lessons.md) is a **working document**: what twenty
+years of retagging did to this library's metadata, and the rules that came out of being wrong about it. Read it before
+writing any rule that reads a tag, a filename or a credit — every entry is a plausible rule that failed on real data,
+with the measurement that killed it. §11 is the rules in one place.
+
 [`docs/design/layers.md`](docs/design/layers.md) says which system may talk to which — the librarian, the player, the
 scanner and the `tools/` scripts. Read it before adding a caller in either direction.
 
