@@ -4586,6 +4586,24 @@ Append here as decisions are made. Format: date, decision, rationale.
   nothing to propose against. And the branch that had to be fixed was the one for files whose tags will not parse —
   exactly the files whose name is the only evidence there is.
 
+- **2026-09-08** **An archivist, not a completionist (#162).** A derivation names both ends, and the far end is
+  routinely something the library does not hold: you own the remix, not the original. The question that settles what to
+  do about it is whether an unresolved reference is _a gap to fill_ or _a fact about the world_, and it is the second.
+  Recording that a remix was made out of an original is the archival act; treating it as a work list would turn every
+  relationship into a shopping list.
+
+  **It is not the same absence as #155's greyed row**, and keeping them apart is what makes both coherent. A track on a
+  record you own part of is _missing_ — you hold the album and the row is a gap in it. A recording something of yours
+  merely _refers to_ is not missing at all.
+
+  What makes this cost nothing: `draw` builds rows from `RecordingCatalogued`, so a recording named only by
+  `RecordingIdentified` has no title and **is never drawn**. The reference is traversable, nameable in the info panel
+  and invisible in the browse, by construction rather than by a rule. And `Id::of_basis` is convergent, so the id a
+  reference was minted with is the id an acquisition would mint — the edge resolves itself if the thing ever arrives.
+
+  `Ref<T>` said this all along — _"a reference is valid when its target is absent; resolution is an optimisation, not a
+  precondition"_ — and the first `RecordingDerived` arm refused on exactly that. The refusal is gone.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

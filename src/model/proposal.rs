@@ -189,13 +189,32 @@ pub enum Proposal {
     /// that were never made out of it. A cover is two recordings of one
     /// `Work`, and that is the level it belongs to.
     ///
-    /// **Both ends, by id, because a derivation is the fact that names two.**
-    /// A version qualifier says "this is a shortened version of something" and
-    /// is always available; this says "of *that*", and is only sayable when
-    /// you hold both. `identify` holds both at the moment it matches a remix:
-    /// the candidate it chose, and the original it searched by.
+    /// **The far end is named, not held** — an archivist, not a completionist.
+    ///
+    /// A derivation names both ends, and the original is routinely something
+    /// this library does not have: you own the remix. `library-api.md` §1
+    /// settles what to do about that — **a reference to something the library
+    /// does not hold is a fact about the world, not a gap to fill** — and
+    /// `Ref<T>` said it all along: *a reference is valid when its target is
+    /// absent; resolution is an optimisation, not a precondition.* The first
+    /// version of this arm refused on exactly that, and was wrong to.
+    ///
+    /// **So `from` is a `Basis` and not an id.** The authority's name for the
+    /// original, which the model mints — the same shape
+    /// [`Proposal::Identified`] takes, and for the same reason: a tool does
+    /// not compute an identity, it receives one. `Basis::Audio` covers a
+    /// derivation between two recordings nobody has named.
+    ///
+    /// It costs nothing in the browse. `draw` builds rows from
+    /// `RecordingCatalogued`, so a recording named only by
+    /// `RecordingIdentified` has no title and **is never drawn** — the
+    /// reference is traversable, nameable in an info panel, and invisible in a
+    /// list, by construction rather than by a rule. And because
+    /// `Id::of_basis` is convergent, the id this mints is the id an
+    /// acquisition would mint: the edge resolves itself if the original ever
+    /// arrives.
     RecordingDerived {
-        from: Id<Recording>,
+        from: Basis,
         to: Id<Recording>,
         kind: crate::model::spine::RecordingDerivationKind,
     },
@@ -1190,17 +1209,26 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             ]
         }
         Proposal::RecordingDerived { from, to, kind } => {
-            if from == to {
+            let origin = Id::<Recording>::of_basis(&from);
+            if origin == to {
                 return Err("a recording cannot be derived from itself".into());
             }
-            // **Both ends have to exist**, because the whole value of a
-            // derivation over a qualifier is that it names the other one. An
-            // edge into a row nothing holds says less than the qualifier it
-            // would have replaced.
-            if !library.holds(Subject::Recording(from)) {
-                return Err(format!("{from} is not a recording this library holds"));
-            }
-            vec![Fact::RecordingDerived { from, to, kind }]
+            vec![
+                // **The far end is named even though nothing holds it.** One
+                // fact, and it is what turns a bare id into something an info
+                // panel can say out loud — "made out of the recording
+                // MusicBrainz calls X" — without inventing a title it would
+                // then have to draw.
+                Fact::RecordingIdentified {
+                    recording: origin,
+                    basis: from,
+                },
+                Fact::RecordingDerived {
+                    from: origin,
+                    to,
+                    kind,
+                },
+            ]
         }
         Proposal::GroupsMerged { loser, winner } => {
             if loser == winner {
@@ -2335,8 +2363,9 @@ mod merged {
     #[test]
     fn a_remix_is_derived_from_the_recording_it_was_made_out_of() {
         use crate::model::spine::RecordingDerivationKind;
+        let original = uuid::Uuid::from_u128(0x0121);
         let p = Proposal::RecordingDerived {
-            from: rec(1),
+            from: Basis::MusicBrainz(original),
             to: rec(2),
             kind: RecordingDerivationKind::Remix,
         };
@@ -2348,39 +2377,66 @@ mod merged {
         let text = serde_json::to_string(&p).expect("serialises");
         let (records, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.applied, 1, "{report}");
+
+        let origin = Id::<Recording>::of_basis(&Basis::MusicBrainz(original));
         assert_eq!(
             records.iter().map(|r| r.fact.clone()).collect::<Vec<_>>(),
-            vec![Fact::RecordingDerived {
-                from: rec(1),
-                to: rec(2),
-                kind: RecordingDerivationKind::Remix,
-            }]
+            vec![
+                Fact::RecordingIdentified {
+                    recording: origin,
+                    basis: Basis::MusicBrainz(original),
+                },
+                Fact::RecordingDerived {
+                    from: origin,
+                    to: rec(2),
+                    kind: RecordingDerivationKind::Remix,
+                }
+            ],
+            "the far end is named, so an info panel can say what this was made out of"
         );
     }
 
-    /// **Both ends have to exist.** The whole value of a derivation over a
-    /// version qualifier is that it names the other one — an edge into a row
-    /// nothing holds says less than the qualifier it would have replaced.
+    /// **The far end is a fact about the world, not a gap to fill** — an
+    /// archivist, not a completionist (`library-api.md` §1).
+    ///
+    /// This refused when the library did not hold the original, on the
+    /// argument that an edge into a row nothing holds says less than the
+    /// qualifier it replaced. `Ref<T>` had said otherwise all along: *a
+    /// reference is valid when its target is absent.* You own the remix; the
+    /// original being elsewhere is what is true.
     #[test]
-    fn a_derivation_from_a_recording_the_library_lacks_is_refused() {
+    fn a_derivation_names_an_original_the_library_does_not_hold() {
         use crate::model::spine::RecordingDerivationKind;
+        let elsewhere = Basis::MusicBrainz(uuid::Uuid::from_u128(0xfeed));
         let text = serde_json::to_string(&Proposal::RecordingDerived {
-            from: Id::derived(b"never heard of it"),
+            from: elsewhere.clone(),
             to: rec(2),
             kind: RecordingDerivationKind::Remix,
         })
         .expect("serialises");
-        let (_, report) = parse(&text, dev(), 100, HELD);
-        assert_eq!(report.applied, 0);
-        assert_eq!(report.refused.len(), 1, "{report}");
+        let (records, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+
+        // **And it stays out of the browse by construction.** `draw` builds
+        // rows from `RecordingCatalogued`; nothing here writes one, so the
+        // original is nameable and never drawn.
+        assert!(
+            !records
+                .iter()
+                .any(|r| matches!(r.fact, Fact::RecordingCatalogued { .. })),
+            "a title would make this a row in a list of music you do not have"
+        );
     }
 
     #[test]
     fn a_recording_cannot_be_derived_from_itself() {
         use crate::model::spine::RecordingDerivationKind;
+        // The same performance by both names: the id minted from the basis is
+        // the id the recording already has.
+        let same = Basis::MusicBrainz(named());
         let text = serde_json::to_string(&Proposal::RecordingDerived {
-            from: rec(2),
-            to: rec(2),
+            from: same.clone(),
+            to: Id::<Recording>::of_basis(&same),
             kind: RecordingDerivationKind::Remix,
         })
         .expect("serialises");

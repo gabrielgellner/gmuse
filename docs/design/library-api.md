@@ -16,6 +16,23 @@ and "I want this" are the same shape, and always were.
 
 Files serialize the library. They do not constitute it.
 
+### An archivist, not a completionist — #162
+
+**A reference to something the library does not hold is a fact about the world, not a gap to fill.** A remix was made
+out of an original; that is true whether or not the original is ever acquired, and recording it is the archival act.
+Treating it as a work list would turn every relationship into a shopping list and make the library's own completeness a
+thing it nags about.
+
+The distinction is not the same as #155's greyed row, and the difference is what makes both coherent:
+
+- A **track on a record you own part of** is missing. You hold the album; the row is a gap in something you have.
+- A **recording something of yours refers to** is not missing. You hold a remix, and the original is a fact about where
+  it came from.
+
+So an unresolved reference is drawn as context where it is relevant, offered nowhere as a task, and never counted
+against you. It resolves on its own if the thing ever arrives — `Id::of_basis` is convergent, so the id a reference was
+minted with is the id the acquisition mints.
+
 **Built, as of #155.** `Proposal::Tracklisted` catalogues the whole tracklist of a medium, so the library holds a row
 for a track it has no file of — drawn under its album, at its number, dimmed. Playability is asked at the moment of
 playing and answered `no copy of "…" is held`; a pool steps past such rows rather than stopping at one. The sentence
