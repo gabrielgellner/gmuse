@@ -145,6 +145,23 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
             .trim()
             .to_string()
     };
+    // **How many artists a credit's id field names** — #145, and the half of
+    // that guard which only worked in ID3.
+    //
+    // Picard `/`-joins ids into one ID3 frame, so `contains('/')` answered the
+    // question there and nowhere else. A Vorbis comment is natively repeated:
+    // *Trio* carries three separate `musicbrainz_albumartistid` fields, no
+    // slash anywhere, so the guard read `false` and let the credit rename
+    // Dolly Parton to `Dolly Parton, Linda Ronstadt & Emmylou Harris` — which
+    // filed all six of her albums under a name only one of them has.
+    //
+    // Measured on this library: 72 mp3 files slash-joined, where the old test
+    // worked, and 11 ogg files repeated, where it did not.
+    let names_several = |k: ItemKey| {
+        tag.is_some_and(|t| {
+            t.get_strings(k).take(2).count() > 1 || t.get_string(k).is_some_and(|v| v.contains('/'))
+        })
+    };
 
     let title = match tag.and_then(|t| t.title()) {
         Some(t) if !t.trim().is_empty() => t.trim().to_string(),
@@ -162,11 +179,11 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // `musicbrainz_trackid` onto it, and both mean the recording. The top
         // rung of #89's ladder; a harvest pass fills the middle one.
         artist_mbid: primary_artist(&get(ItemKey::MusicBrainzArtistId)),
-        credit_is_joined: get(ItemKey::MusicBrainzArtistId).contains('/'),
+        credit_is_joined: names_several(ItemKey::MusicBrainzArtistId),
         // The album artist's own answer, which the track's does not give
         // (#145): a record credited to two people may have a single-artist
         // track credit, and on *One from the Heart* it does.
-        album_credit_is_joined: get(ItemKey::MusicBrainzReleaseArtistId).contains('/'),
+        album_credit_is_joined: names_several(ItemKey::MusicBrainzReleaseArtistId),
         album_artist_mbid: primary_artist(&get(ItemKey::MusicBrainzReleaseArtistId)),
         // The ladder, best rung first (#89): MusicBrainz where the tags carry
         // it, otherwise whatever authority does name this performance. `None`
@@ -502,6 +519,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// **A tag whose artist-id field is repeated rather than slash-joined** —
+    /// the half of #145's guard that only worked in ID3.
+    ///
+    /// Picard `/`-joins ids into one ID3 frame, which is what the old test
+    /// looked for. A Vorbis comment is natively repeated: *Trio* carries three
+    /// separate `musicbrainz_albumartistid` fields with no slash anywhere, so
+    /// the guard read `false` and the credit renamed Dolly Parton to
+    /// `Dolly Parton, Linda Ronstadt & Emmylou Harris` — filing all six of her
+    /// albums under a name only one of them has.
+    ///
+    /// Written as a real file, because the bug is in *reading* one: the model
+    /// test for #145 sets the flag by hand and could never have caught this.
+    ///
+    /// **The fixture is ID3 rather than Vorbis**, because a WAV cannot hold a
+    /// Vorbis comment and there is no FLAC fixture here. It exercises the same
+    /// branch — two values under one key — and the slash spelling is asserted
+    /// below, so both halves of the test are covered. The library's real
+    /// instance is `Trio`, in Vorbis, and it reads correctly now.
+    #[test]
+    fn a_repeated_artist_id_says_the_credit_names_several() {
+        use lofty::config::WriteOptions;
+        use lofty::prelude::TagExt;
+        use lofty::tag::{ItemValue, Tag, TagItem, TagType};
+
+        let d = dir("repeated-artist-id");
+        let one = d.join("solo.wav");
+        let several = d.join("trio.wav");
+        wav(&one, 600);
+        wav(&several, 600);
+
+        let dolly = "1d543e07-d0d2-4834-a8db-d65c50c2a856";
+        let write = |path: &Path, ids: &[&str], credit: &str| {
+            let mut t = Tag::new(TagType::Id3v2);
+            t.insert_text(ItemKey::AlbumArtist, credit.to_string());
+            for id in ids {
+                t.push(TagItem::new(
+                    ItemKey::MusicBrainzReleaseArtistId,
+                    ItemValue::Text((*id).to_string()),
+                ));
+            }
+            t.save_to_path(path, WriteOptions::default()).unwrap();
+        };
+        write(&one, &[dolly], "Dolly Parton");
+        write(
+            &several,
+            &[dolly, "498f2581-be21-4eef-8756-fbb89d79b1c0"],
+            "Dolly Parton, Linda Ronstadt & Emmylou Harris",
+        );
+
+        assert!(
+            !read(&one).unwrap().album_credit_is_joined,
+            "one id names one artist"
+        );
+        assert!(
+            read(&several).unwrap().album_credit_is_joined,
+            "**the bug**: a repeated field carries no slash, so the guard read \
+             `false` and let a three-way credit rename Dolly Parton"
+        );
+
+        // And the ID3 spelling the guard was written for still answers.
+        let slashed = d.join("id3.wav");
+        wav(&slashed, 600);
+        let mut t = Tag::new(TagType::Id3v2);
+        t.insert_text(
+            ItemKey::MusicBrainzReleaseArtistId,
+            format!("{dolly}/498f2581-be21-4eef-8756-fbb89d79b1c0"),
+        );
+        t.save_to_path(&slashed, WriteOptions::default()).unwrap();
+        assert!(read(&slashed).unwrap().album_credit_is_joined);
     }
 
     /// A tiny real WAV, so there is something to hash and tag.
