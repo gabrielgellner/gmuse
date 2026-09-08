@@ -194,6 +194,21 @@ pub enum Shelf {
         /// Files or folders to catalogue. Empty means whatever the library
         /// roots hold that is not known yet.
         paths: Vec<PathBuf>,
+        /// **Take files no authority names** — #160, and the escape hatch the
+        /// gate needs to be honest.
+        ///
+        /// Without this, a file carrying no MusicBrainz id is refused rather
+        /// than catalogued on its own bytes. `library-api.md` §7 states that
+        /// rule; the code did the opposite of it until this existed, and 479
+        /// recordings arrived resting on their bytes in a single import
+        /// because nothing ever asked.
+        ///
+        /// **The hatch is not a formality.** A white label, a live rip, a
+        /// friend's record — MusicBrainz has never heard of any of them and
+        /// they belong here. What changes is that taking one is something you
+        /// say, and the refusal above it names what a lookup would need.
+        #[arg(long)]
+        unidentified: bool,
         /// Append the facts. Without this, nothing is written.
         #[arg(long)]
         write: bool,

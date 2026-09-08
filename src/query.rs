@@ -49,7 +49,16 @@ pub fn rows(
     // work list did not move.
     let mut scratch = Instance::new(device);
     scratch.merge(now, records);
-    crate::model::populate::populate(&mut scratch, roots, now);
+    // **Anything**, because a work list has to show what the library *holds*
+    // and some of it rests on bytes — 228 rows here, taken deliberately. This
+    // scratch is discarded and nothing it catalogues is persisted, so the
+    // gate #160 put on the front door does not belong on reading.
+    crate::model::populate::populate(
+        &mut scratch,
+        roots,
+        now,
+        crate::model::populate::Admits::Anything,
+    );
     // **And publish what is here** (#145). A work list hands a tool an id and
     // a **locator**, so the holdings are half of the answer — and cataloguing
     // stopped asserting them, because a partial import must not unpublish the

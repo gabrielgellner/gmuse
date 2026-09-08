@@ -35,6 +35,17 @@ unconfirmable.
 `rsgain` runs **after** `shelf import`, because it computes album gain per folder and import is what puts the album in
 its folder.
 
+**Step 5 now refuses what nothing has named** (#160). `shelf import` used to catalogue anything readable and rest on
+`Basis::Audio` whatever carried no MusicBrainz id — which is how 479 recordings arrived on their bytes in a single run.
+It refuses instead, printing `artist`, `title` and the path for each, and `--unidentified` is the door out for a white
+label or anything else no authority holds.
+
+That makes the **step 2 / step 7 split visible as the problem it is.** `ingest` matches a whole _album_ and `identify`
+searches for a _recording_, and only the first runs before the declaration — so a single, a DJ-pool rip or a track
+sliced off a chart compilation walks past the album-shaped gate with nothing to catch it. `Till Dawn` is the worked case
+in §4: refused by every route here, and found at score 100 by one recording search. Until `identify` can be handed a
+file that is not catalogued yet, the honest answer at step 5 is a refusal a person reads, not a row nobody will fix.
+
 ---
 
 ## 2. What each stage is for

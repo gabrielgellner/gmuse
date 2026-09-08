@@ -451,7 +451,12 @@ fn run_library(
                 device,
                 crate::history::now_ms(),
             );
-            crate::model::populate::populate(&mut log, roots, crate::history::now_ms());
+            crate::model::populate::populate(
+                &mut log,
+                roots,
+                crate::history::now_ms(),
+                crate::model::populate::Admits::Identified,
+            );
             let cat = log.catalogue();
 
             // Every name each id has ever been given, in log order, so the
@@ -547,7 +552,12 @@ fn run_library(
                 device,
                 crate::history::now_ms(),
             );
-            crate::model::populate::populate(&mut log, roots, crate::history::now_ms());
+            crate::model::populate::populate(
+                &mut log,
+                roots,
+                crate::history::now_ms(),
+                crate::model::populate::Admits::Identified,
+            );
             let cat = log.catalogue();
             let library = crate::model::seam::Librarian::from_catalogue(&cat);
 
@@ -628,7 +638,12 @@ fn run_library(
                 device,
                 crate::history::now_ms(),
             );
-            crate::model::populate::populate(&mut log, roots, crate::history::now_ms());
+            crate::model::populate::populate(
+                &mut log,
+                roots,
+                crate::history::now_ms(),
+                crate::model::populate::Admits::Identified,
+            );
             let cat = log.catalogue();
 
             // **Every name an id has ever held, not just the one in force.**
@@ -723,8 +738,12 @@ fn run_library(
                 device,
                 crate::history::now_ms(),
             );
-            let report =
-                crate::model::populate::populate(&mut log, roots, crate::history::now_ms());
+            let report = crate::model::populate::populate(
+                &mut log,
+                roots,
+                crate::history::now_ms(),
+                crate::model::populate::Admits::Identified,
+            );
             let mut lines = 0usize;
             for (folder, held) in &report.unfiled {
                 for recording in held {
@@ -746,7 +765,12 @@ fn run_library(
                 report.unfiled.len()
             );
         }
-        cli::Shelf::Import { paths, write, into } => {
+        cli::Shelf::Import {
+            paths,
+            write,
+            into,
+            unidentified,
+        } => {
             let (mut log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
@@ -793,8 +817,16 @@ fn run_library(
                 return Ok(());
             }
 
-            let report =
-                crate::model::populate::populate(&mut log, &targets, crate::history::now_ms());
+            let report = crate::model::populate::populate(
+                &mut log,
+                &targets,
+                crate::history::now_ms(),
+                if *unidentified {
+                    crate::model::populate::Admits::Anything
+                } else {
+                    crate::model::populate::Admits::Identified
+                },
+            );
             for (path, recording) in &report.identified {
                 println!("{recording}\t{}", path.display());
             }
@@ -828,15 +860,34 @@ fn run_library(
                     path.display()
                 );
             }
+            // **Refused for want of an identity** — #160. Printed to stdout as
+            // `artist \t title \t path`, because the refusal has to be
+            // *answerable*: those are the two fields a recording search needs,
+            // and an album-shaped lookup is what failed on this material in the
+            // first place.
+            for (path, artist, title) in &report.unidentified {
+                println!("{artist}\t{title}\t{}", path.display());
+            }
             eprintln!(
-                "{} file(s), {} confirmed, {} resting on their bytes, {} refused, {} joining a recording already held, {} new fact(s)",
+                "{} file(s), {} confirmed, {} resting on their bytes, {} refused for want of an identity, {} refused as contradictions, {} joining a recording already held, {} new fact(s)",
                 report.ingested,
                 report.confirmed,
                 report.provisional,
+                report.unidentified.len(),
                 report.contradicts.len(),
                 report.joins.len(),
                 report.written
             );
+            if !report.unidentified.is_empty() {
+                eprintln!(
+                    "\nNothing named those {}, so they were not catalogued — `library-api.md` §7.\n\
+                     The columns above are what a MusicBrainz *recording* search wants; the album\n\
+                     fields on this material are the least reliable part of it.\n\
+                     Take them anyway with `--unidentified`, and the library will rest them on\n\
+                     their bytes — which is right for a white label and wrong for everything else.",
+                    report.unidentified.len()
+                );
+            }
             if *write {
                 // **Publish the holdings first, then place** (#132, #145).
                 // The planner asks where a copy *is* before saying where it

@@ -215,7 +215,15 @@ fn paired(fact: &crate::model::log::Fact) -> Option<(PairKey, bool)> {
 fn shelf(log: &Instance, roots: &[std::path::PathBuf], device: Id<Device>, now: i64) -> Shelf {
     let mut scanned = Instance::new(device);
     scanned.merge(now, log.records());
-    crate::model::populate::populate(&mut scanned, roots, now);
+    // **Anything**: this asks what the disk holds so a proposal can be checked
+    // against it, and a proposal naming a row that rests on its bytes is
+    // precisely what `identify` writes. Nothing here is persisted either.
+    crate::model::populate::populate(
+        &mut scanned,
+        roots,
+        now,
+        crate::model::populate::Admits::Anything,
+    );
     Shelf {
         // What the disk says exists, which is what "holds" asks about:
         // encodings are established by looking, and a proposal against a file
@@ -538,7 +546,12 @@ mod tests {
         // And scanning first is the bug, which is what makes this a test: the
         // bytes re-mint a different id and the log's is nowhere.
         let mut wrong = Instance::new(device);
-        crate::model::populate::populate(&mut wrong, std::slice::from_ref(&dir), 300);
+        crate::model::populate::populate(
+            &mut wrong,
+            std::slice::from_ref(&dir),
+            300,
+            crate::model::populate::Admits::Anything,
+        );
         let scanned_only = Shelf {
             disk: wrong.catalogue(),
             log: log.catalogue(),

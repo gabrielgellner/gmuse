@@ -25,6 +25,38 @@ use crate::model::id::Id;
 use crate::model::ingest;
 use crate::model::instance::Instance;
 
+/// **Who may be catalogued** — #160, and `library-api.md` §7 states the rule:
+///
+/// > A file that cannot be identified is not imported. It is an error, and the
+/// > import fails rather than cataloguing something the library cannot
+/// > describe. [...] a library that accepts anything and marks it provisional
+/// > is a library that fills with entries nobody will ever fix, because
+/// > nothing ever forced the question.
+///
+/// The doc predicted the failure mode and the code implemented it. Measured
+/// when this was written: **522 of 6,927 recordings rested on their bytes, and
+/// 479 of them arrived in a single import** — not because anyone decided to
+/// take them unidentified, but because nothing asked.
+///
+/// **The gate belongs here rather than in the command.** Seven of this
+/// function's eight callers pass the roots to build the current view, so a
+/// refusal `shelf import` made would be undone by the next `shelf render`
+/// walking the same file straight back in.
+///
+/// **`Basis::Audio` stays, and must.** A library that refuses everything
+/// MusicBrainz has never heard of cannot hold a white label. What changes is
+/// that taking one becomes something a person says rather than something they
+/// land on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Admits {
+    /// Only a file some authority names. The rule §7 states.
+    #[default]
+    Identified,
+    /// Anything readable, bytes nobody has named included. The explicit act —
+    /// `shelf import --unidentified`.
+    Anything,
+}
+
 /// What a pass over the disk found.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -38,8 +70,17 @@ pub struct Report {
     /// Ingested with a MusicBrainz id to converge on.
     pub confirmed: usize,
     /// Ingested with nothing to converge on — the residue §11 leaves to the
-    /// collision.
+    /// collision. Only reachable under [`Admits::Anything`].
     pub provisional: usize,
+    /// **Refused for want of an identity** — #160, and the point of the gate.
+    ///
+    /// Carries what the tags do say, so the refusal is answerable rather than
+    /// merely final. Every external route in the flow is album-shaped and this
+    /// material's album fields are its least reliable — a chart name, a site
+    /// stamp, a DJ-pool folder — while `artist` and `title` are its most.
+    /// `Till Dawn` was refused by every route and comes back at score 100 from
+    /// one recording search on exactly those two.
+    pub unidentified: Vec<(PathBuf, String, String)>,
     /// **Audio this library has never seen** — #62.
     ///
     /// Reported, never catalogued. A file appearing in a watched root is not
@@ -353,7 +394,10 @@ fn claims(s: &crate::model::instance::Scanned) -> Option<Placement> {
     Some((group, s.disc.unwrap_or(1), s.track?))
 }
 
-pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report {
+/// Catalogue what is under `roots`, admitting only what `admits` allows.
+///
+/// See [`Admits`] for why the gate is here and not in the command.
+pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64, admits: Admits) -> Report {
     let started = Instant::now();
     let paths = audio_files(roots);
     let mut report = Report {
@@ -375,6 +419,14 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report 
     for path in paths {
         match ingest::read(&path) {
             Ok(s) => {
+                // **The gate** — #160. Nothing named this performance, so
+                // cataloguing it would mint a recording out of its own bytes
+                // and call the question answered. Refused instead, carrying
+                // the two fields a recording search actually wants.
+                if s.identity.is_none() && admits == Admits::Identified {
+                    report.unidentified.push((path, s.artist, s.title));
+                    continue;
+                }
                 if s.identity.is_some() {
                     report.confirmed += 1;
                 } else {
@@ -577,9 +629,12 @@ fn folder_of(path: &Path, roots: &[PathBuf]) -> Option<String> {
 }
 
 /// A convenience for the common case: one device, one set of roots.
+///
+/// Admits anything: this reads a library that already exists rather than
+/// taking one in, and the gate is about the front door.
 pub fn read_library(device_name: &str, roots: &[PathBuf], now: i64) -> (Instance, Report) {
     let mut instance = Instance::new(Id::derived(device_name.as_bytes()));
-    let report = populate(&mut instance, roots, now);
+    let report = populate(&mut instance, roots, now, Admits::Anything);
     (instance, report)
 }
 
@@ -613,14 +668,81 @@ mod tests {
         let dir = library("idempotent", &[("Callisto", None), ("Luna", None)]);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        let first = populate(&mut i, std::slice::from_ref(&dir), 100);
+        let first = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
         assert!(first.written > 0, "the first pass has to write something");
         let after = i.records().len();
 
-        let again = populate(&mut i, std::slice::from_ref(&dir), 200);
+        let again = populate(&mut i, std::slice::from_ref(&dir), 200, Admits::Anything);
         assert_eq!(again.ingested, 2, "both files were still read");
         assert_eq!(again.written, 0, "a second pass wrote facts the log had");
         assert_eq!(i.records().len(), after, "the log grew on a no-op import");
+    }
+
+    /// **Nothing named it, so it is not catalogued** — #160, and
+    /// `library-api.md` §7 has said so all along.
+    ///
+    /// The doc's own words: a library that accepts anything and marks it
+    /// provisional is a library that fills with entries nobody will ever fix,
+    /// because nothing ever forced the question. Measured before this existed:
+    /// 522 of 6,927 recordings rested on their bytes and **479 of them arrived
+    /// in one import** — nobody chose that, they just were not asked.
+    #[test]
+    fn a_file_no_authority_names_is_refused_rather_than_catalogued() {
+        let dir = library("ungated", &[("Callisto", None)]);
+        let mut i = Instance::new(Id::derived(b"laptop"));
+
+        let report = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Identified);
+        assert_eq!(report.ingested, 0, "it was catalogued anyway");
+        assert_eq!(report.provisional, 0, "nothing may rest on its bytes here");
+        assert_eq!(report.unidentified.len(), 1);
+        assert_eq!(report.written, 0, "a refused file still wrote facts");
+
+        // **The refusal is answerable.** Every external route in the flow is
+        // album-shaped and this material's album fields are its worst; these
+        // two are what a *recording* search wants, and they are usually there.
+        let (_, artist, title) = &report.unidentified[0];
+        assert_eq!(
+            (artist.as_str(), title.as_str()),
+            ("Stephan Bodzin", "Callisto")
+        );
+    }
+
+    /// **And the hatch is real**, because a white label is not a mistake.
+    ///
+    /// A library that refuses everything MusicBrainz has never heard of cannot
+    /// hold one. `Basis::Audio` stays; what #160 changes is that landing on it
+    /// becomes something a person said rather than a default nobody saw.
+    #[test]
+    fn the_same_file_is_taken_when_somebody_asks_for_it() {
+        let dir = library("hatch", &[("Callisto", None)]);
+        let mut i = Instance::new(Id::derived(b"laptop"));
+
+        let report = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
+        assert_eq!(report.ingested, 1);
+        assert_eq!(report.provisional, 1, "it rests on its bytes, as asked");
+        assert!(report.unidentified.is_empty(), "nothing was refused");
+        assert!(report.written > 0);
+    }
+
+    /// **A file an authority names is taken either way**, which is what makes
+    /// the gate a gate rather than a wall: it separates the two cases and does
+    /// not narrow the one that was already working.
+    #[test]
+    fn a_file_musicbrainz_names_passes_the_gate() {
+        let dir = library(
+            "named",
+            &[("Callisto", Some("183105b5-0000-4000-8000-000000000000"))],
+        );
+        let mut i = Instance::new(Id::derived(b"laptop"));
+
+        let strict = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Identified);
+        assert_eq!(strict.confirmed, 1);
+        assert!(strict.unidentified.is_empty());
+
+        let mut j = Instance::new(Id::derived(b"laptop"));
+        let open = populate(&mut j, std::slice::from_ref(&dir), 100, Admits::Anything);
+        assert_eq!(open.confirmed, 1, "the gate changed a file it should not");
+        assert_eq!(strict.written, open.written);
     }
 
     /// **Two files, one set of bytes, two albums — both refused** — #148.
@@ -646,7 +768,7 @@ mod tests {
         write_placed(&second, "Callisto", "A Completely Different Album");
 
         let mut i = Instance::new(Id::derived(b"laptop"));
-        let report = populate(&mut i, std::slice::from_ref(&dir), 100);
+        let report = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
 
         assert_eq!(report.contradicts.len(), 1, "{:?}", report.contradicts);
         assert_eq!(
@@ -669,8 +791,8 @@ mod tests {
         write_placed(&at, "Callisto", "Luna");
 
         let mut i = Instance::new(Id::derived(b"laptop"));
-        populate(&mut i, std::slice::from_ref(&dir), 100);
-        let again = populate(&mut i, std::slice::from_ref(&dir), 200);
+        populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
+        let again = populate(&mut i, std::slice::from_ref(&dir), 200, Admits::Anything);
         assert_eq!(again.contradicts.len(), 0);
         assert_eq!(again.written, 0);
     }
@@ -696,7 +818,7 @@ mod tests {
         }
 
         let mut i = Instance::new(crate::fixture::device());
-        populate(&mut i, std::slice::from_ref(&root), 100);
+        populate(&mut i, std::slice::from_ref(&root), 100, Admits::Anything);
         reconcile(&mut i, std::slice::from_ref(&root), 150);
         let held = |i: &Instance| {
             i.catalogue()
@@ -708,7 +830,7 @@ mod tests {
         assert_eq!(held(&i), 2, "both were imported and both are held");
 
         // Import one folder again — a correction, a retag, a re-run.
-        populate(&mut i, &[root.join("A")], 200);
+        populate(&mut i, &[root.join("A")], 200, Admits::Anything);
         assert_eq!(
             held(&i),
             2,
@@ -777,7 +899,7 @@ mod tests {
 
         // One of them is imported — declared — and the other is merely there.
         let mut i = Instance::new(crate::fixture::device());
-        populate(&mut i, std::slice::from_ref(&known), 100);
+        populate(&mut i, std::slice::from_ref(&known), 100, Admits::Anything);
 
         let report = reconcile(&mut i, std::slice::from_ref(&root), 200);
         assert_eq!(report.files, 2);
@@ -801,7 +923,7 @@ mod tests {
         );
 
         // And importing it is the answer to the offer.
-        populate(&mut i, &report.unknown, 300);
+        populate(&mut i, &report.unknown, 300, Admits::Anything);
         let after = reconcile(&mut i, std::slice::from_ref(&root), 400);
         assert!(after.unknown.is_empty(), "still unknown after an import");
         assert_eq!(after.ingested, 2);
@@ -824,7 +946,7 @@ mod tests {
         write_tags(&at, "Callisto", "Stephan Bodzin", None);
 
         let mut i = Instance::new(crate::fixture::device());
-        populate(&mut i, std::slice::from_ref(&root), 100);
+        populate(&mut i, std::slice::from_ref(&root), 100, Admits::Anything);
 
         // Somebody else rewrites the tags. The audio is untouched.
         write_tags(&at, "Something Else Entirely", "Not Bodzin", None);
@@ -864,7 +986,7 @@ mod tests {
         write_tags(&was, "Callisto", "Stephan Bodzin", None);
 
         let mut i = Instance::new(crate::fixture::device());
-        populate(&mut i, std::slice::from_ref(&root), 100);
+        populate(&mut i, std::slice::from_ref(&root), 100, Admits::Anything);
         let recording =
             crate::model::rows::Listing::rows(&Librarian::from_catalogue(&i.catalogue()))[0];
 
@@ -914,7 +1036,7 @@ mod tests {
         write_tags(&root.join("loose.wav"), "Loose", "An Artist", None);
 
         let mut i = Instance::new(Id::derived(b"test"));
-        let report = populate(&mut i, std::slice::from_ref(&root), 100);
+        let report = populate(&mut i, std::slice::from_ref(&root), 100, Admits::Anything);
         assert_eq!(
             report.unfiled.keys().collect::<Vec<_>>(),
             ["Classical", "Dance"],
@@ -933,7 +1055,7 @@ mod tests {
         i.name_collection(200, list, "Classical", false);
         i.add_to_collection(200, list, recording, crate::model::ord::OrdKey::first());
 
-        let again = populate(&mut i, std::slice::from_ref(&root), 300);
+        let again = populate(&mut i, std::slice::from_ref(&root), 300, Admits::Anything);
         assert_eq!(
             again.unfiled.keys().collect::<Vec<_>>(),
             ["Dance"],
@@ -1013,13 +1135,13 @@ mod tests {
         let second = re_encoded("joins-second", 8820);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        let one = populate(&mut i, std::slice::from_ref(&first), 100);
+        let one = populate(&mut i, std::slice::from_ref(&first), 100, Admits::Anything);
         assert!(
             one.joins.is_empty(),
             "nothing was held before the first pass"
         );
 
-        let two = populate(&mut i, std::slice::from_ref(&second), 200);
+        let two = populate(&mut i, std::slice::from_ref(&second), 200, Admits::Anything);
         assert_eq!(
             two.joins.len(),
             1,
@@ -1043,8 +1165,8 @@ mod tests {
         let dir = re_encoded("joins-again", 4410);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        populate(&mut i, std::slice::from_ref(&dir), 100);
-        let again = populate(&mut i, std::slice::from_ref(&dir), 200);
+        populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
+        let again = populate(&mut i, std::slice::from_ref(&dir), 200, Admits::Anything);
         assert_eq!(again.ingested, 1, "the file was still read");
         assert!(
             again.joins.is_empty(),
@@ -1060,8 +1182,8 @@ mod tests {
         let other = library("joins-other", &[("Atlas", None)]);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        populate(&mut i, std::slice::from_ref(&held), 100);
-        let new = populate(&mut i, std::slice::from_ref(&other), 200);
+        populate(&mut i, std::slice::from_ref(&held), 100, Admits::Anything);
+        let new = populate(&mut i, std::slice::from_ref(&other), 200, Admits::Anything);
         assert!(
             new.joins.is_empty(),
             "a different recording: {:?}",
@@ -1299,7 +1421,7 @@ mod tests {
     fn a_second_pass_drops_what_is_no_longer_there() {
         let dir = library("deleted", &[("Callisto", None), ("Luna", None)]);
         let mut i = Instance::new(Id::derived(b"laptop"));
-        populate(&mut i, std::slice::from_ref(&dir), 100);
+        populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
         reconcile(&mut i, std::slice::from_ref(&dir), 110);
         assert_eq!(i.catalogue().holdings[&i.device()].held.len(), 2);
 

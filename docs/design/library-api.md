@@ -242,6 +242,34 @@ can corrupt it.
 with: a recording identity from a MusicBrainz id or a fingerprint, a title, and an artist. Whether an album and a track
 number join that list is a question the first few real imports will settle better than this paragraph can.
 
+### What the gate does, and the one door out of it — #160
+
+Stated here since the beginning, and implemented in the opposite direction until #160: `shelf import` catalogued
+whatever it could read and rested on `Basis::Audio` whatever no authority named. It then _reported_ the count, which is
+how **522 of 6,927 recordings came to rest on their bytes with 479 of them arriving in a single import**. Nobody chose
+that. Nothing asked.
+
+`populate` now refuses a file no authority names, and the refusal prints `artist`, `title` and the path — because a
+refusal has to be answerable. Every external route in the flow is album-shaped and this material's album fields are its
+_least_ reliable: a chart name, a warez stamp, a DJ-pool folder. `artist` and `title` are its most. `Till Dawn` was
+refused by every album-shaped route and comes back at score 100 from one MusicBrainz **recording** search on exactly
+those two fields.
+
+**The gate is in `populate`, not in the command.** Seven of its eight callers pass the library roots to bring their view
+up to date, and `render --write` persists what it walked — so a refusal made in `shelf import` would be undone by the
+next render walking the same file straight back in. Reading is exempt on purpose: `query` and `apply` build a scratch
+catalogue that is discarded, and a work list has to show the rows that _do_ rest on their bytes, or the pass that exists
+to identify them cannot see them.
+
+**`--unidentified` is the door out, and it is not a formality.** A white label, a live rip, a friend's record:
+MusicBrainz has never heard of any of them and they belong here. `Basis::Audio` stays. What changed is that landing on
+it is something a person says.
+
+**What this does not do yet.** The ladder §7 wants runs `MusicBrainz id → fingerprint → recording search → refuse`, and
+only the first and last rungs are at the front door. The fingerprint rung is #57 and needs a key. The recording-search
+rung is `identify`, which today runs two stages later against rows that are already catalogued — so the refused file has
+no id to propose against and cannot be handed to it. Closing that is the other half of #160.
+
 ### A second copy is reported, not refused — #62
 
 Strictness is about files the library **cannot describe**. A file it describes perfectly well, and has already described
