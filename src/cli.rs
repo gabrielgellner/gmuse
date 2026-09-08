@@ -218,6 +218,19 @@ pub enum Shelf {
     /// international, and they are correctly two. So this prints what it found
     /// and how many files sit on each, and a person says which is the winner.
     Duplicates,
+    /// **Artists whose name is in doubt** — #154.
+    ///
+    /// Two shapes, and they are the two ends of one guard. An artist with a
+    /// right id and **no name** is what #145 leaves behind when it withholds a
+    /// joined credit — correct, and it makes the artist unreachable in a
+    /// browse. An artist named **more than one thing** is where that guard did
+    /// not fire: `ArtistNamed` is last-writer-wins, so the last file folded
+    /// owns the label, and a joined credit that slipped through renames the
+    /// artist it merely starts with.
+    ///
+    /// Nothing else prints an artist id, so without this neither is fixable by
+    /// hand.
+    Names,
 }
 
 impl Cli {

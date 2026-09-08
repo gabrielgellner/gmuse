@@ -329,6 +329,96 @@ fn run_library(
     let machine = crate::events::machine_id(&config::default_state_dir());
     let device = crate::model::id::Id::derived(machine.as_bytes());
     match op {
+        cli::Shelf::Names => {
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            crate::model::populate::populate(&mut log, roots, crate::history::now_ms());
+            let cat = log.catalogue();
+
+            // Every name each id has ever been given, in log order, so the
+            // last one — the one in force — reads last.
+            let mut said: std::collections::BTreeMap<_, Vec<&str>> = Default::default();
+            for record in log.records() {
+                if let crate::model::log::Fact::ArtistNamed { artist, name } = &record.fact {
+                    let seen: &mut Vec<&str> = said.entry(*artist).or_default();
+                    if seen.last() != Some(&name.as_str()) {
+                        seen.push(name);
+                    }
+                }
+            }
+            let credited: std::collections::BTreeSet<_> =
+                cat.credits.keys().map(|(_, artist, ..)| *artist).collect();
+
+            let mut nameless = 0usize;
+            for artist in credited
+                .iter()
+                .filter(|a| !cat.artist_names.contains_key(a))
+            {
+                println!("{artist}  <<never named>>");
+                nameless += 1;
+            }
+            // **A line is offered only for the exact signature of the fault** — an
+            // earlier name, followed by a joiner, followed by somebody else. That is
+            // what #145 describes: the id is the *primary* artist's and the string
+            // names the whole credit, so `Bob Dylan` becomes `Bob Dylan & The Band`.
+            //
+            // The looser rule — offer whichever earlier name carries no joiner — was
+            // wrong on half of this library's cases. `MGMT` against `The Management`,
+            // `Antigone` against `ANTIGONE`, `Bush` against `Bush X`, `Sidney Carter`
+            // against `Mrs. Sidney Carter`: four artists with two real names, where
+            // which one the library should use is a decision and not a defect. It
+            // caught eight and four of them were that.
+            //
+            // Narrowed to the prefix, it offers exactly the four that are the bug.
+            let renamed_by_a_joiner = |was: &str, now: &str| {
+                now.strip_prefix(was).is_some_and(|rest| {
+                    [
+                        " & ", ", ", ",", " and ", " feat. ", " ft. ", " vs. ", " with ",
+                    ]
+                    .iter()
+                    .any(|j| rest.starts_with(j))
+                })
+            };
+            let mut renamed = 0usize;
+            let mut offered = 0usize;
+            for (artist, names) in said.iter().filter(|(_, n)| n.len() > 1) {
+                renamed += 1;
+                let current = names.last().copied().unwrap_or_default();
+                println!("{artist}");
+                // The distinct names, because an alternating history repeats
+                // the same two a dozen times and says nothing more than twice.
+                let mut shown: Vec<&str> = Vec::new();
+                for name in names {
+                    if !shown.contains(name) {
+                        shown.push(name);
+                    }
+                }
+                for name in &shown {
+                    let mark = if *name == current { "->" } else { "  " };
+                    println!("  {mark} {name}");
+                }
+                if let Some(plain) = shown.iter().find(|n| renamed_by_a_joiner(n, current)) {
+                    offered += 1;
+                    println!(
+                        "  {}",
+                        serde_json::to_string(&serde_json::json!({
+                            "fact": "named",
+                            "artist": artist.to_string(),
+                            "name": plain,
+                        }))?
+                    );
+                }
+            }
+            eprintln!(
+                "\n{nameless} credited artist(s) have no name, {renamed} have been named more than \
+                 once — `->` marks the one in force. {offered} are named for a credit they merely \
+                 begin, and the line under each puts the artist's own name back. The rest are \
+                 artists with two real names, and which to use is yours to say."
+            );
+        }
         cli::Shelf::Duplicates => {
             let (mut log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,

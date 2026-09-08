@@ -4547,6 +4547,25 @@ Append here as decisions are made. Format: date, decision, rationale.
   What this does **not** do: the media under a merged group stay separate, so the 384 slots on discs no file came off
   are still in the log. #155 stopped drawing them, and merging releases and media is a further step nothing yet needs.
 
+- **2026-09-07** **A re-import cannot repair a name, and that is why naming is a proposal (#154).** `ArtistNamed` is
+  last-writer-wins over one key, so an artist renamed by a joined credit stays renamed: the right name is already in the
+  log, `apply`'s replay guard drops it as a duplicate, and `shelf import` on the affected folders reports
+  `0 new fact(s)` and changes nothing. **Only a new assertion can outrank the wrong one**, and until now nothing could
+  make one — `Instance::rename_artist` wrote the right fact and had no caller.
+
+  So the guard learned the rule the paired facts already taught it: **"already in the log" is not "still true"**. A name
+  is judged against what the fold currently says, not against the history, exactly as a hierarchy edge is. Saying a name
+  that is already the answer still writes nothing.
+
+  **The report offers a repair only for the exact signature of the fault** — an earlier name, followed by a joiner,
+  followed by somebody else. The looser rule tried first, "offer whichever earlier name carries no joiner", was wrong on
+  half of this library: `MGMT` against `The Management`, `Bush` against `Bush X`, `Antigone` against `ANTIGONE`,
+  `Sidney Carter` against `Mrs. Sidney Carter` are four artists with two real names, where which to use is a decision
+  and not a defect. Narrowed to the prefix it offers exactly the four that are the bug.
+
+  Applied here: `Bob Dylan`, `Dolly Parton`, `Flume` and `Hobart Smith` got their names back, 276 files moved out of
+  folders named after a credit, and the library reached **6,648 settled, 0 would move** for the first time.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

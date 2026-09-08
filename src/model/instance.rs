@@ -1601,6 +1601,7 @@ mod containment_tests {
                     Subject::Recording(id) => self.0.recordings.contains_key(&id),
                     Subject::Medium(id) => self.0.media.contains_key(&id),
                     Subject::ReleaseGroup(id) => self.0.groups.contains_key(&id),
+                    Subject::Artist(id) => self.0.artist_names.contains_key(&id),
                     Subject::Vocabulary => true,
                 }
             }

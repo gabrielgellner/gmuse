@@ -268,6 +268,36 @@ pub enum Proposal {
         loser: Id<ReleaseGroup>,
         winner: Id<ReleaseGroup>,
     },
+    /// **This artist is called that** — #154.
+    ///
+    /// The one thing no proposal could say. `Instance::rename_artist` has
+    /// written the right fact all along with nothing to drive it, so the model
+    /// half was built and the wire half was not.
+    ///
+    /// Two cases want it, and they are the two ends of the same guard.
+    ///
+    /// **An artist with a right id and no label.** #145 withholds the name
+    /// when a credit is joined, because the id is the *primary* artist's and
+    /// the string names the whole credit. Correct, and it leaves Tony Furtado
+    /// identified by his MusicBrainz id, named by nothing, and unreachable in
+    /// a browse — the library knows exactly who he is and cannot say it.
+    ///
+    /// **And an artist the guard failed to protect.** Where it did not fire —
+    /// in Vorbis, until #158 — a joined credit renamed the artist it merely
+    /// starts with, and `ArtistNamed` is last-writer-wins, so Dolly Parton is
+    /// called `Dolly Parton, Linda Ronstadt & Emmylou Harris` and six of her
+    /// albums file under it. **A re-import does not repair that**: the right
+    /// name is already in the log, so it is dropped as a repeat and the wrong
+    /// one goes on being the last word. Only a new assertion can outrank it.
+    ///
+    /// **A name, not a rule.** Nothing here parses `Tony Furtado feat. Alison
+    /// Krauss` back into two names — #152 is that question, and its finding is
+    /// that parsing credits is unsafe. The id is already right; only the label
+    /// is owed.
+    Named {
+        artist: Id<Artist>,
+        name: String,
+    },
     /// **The whole tracklist of one medium** — #155.
     ///
     /// The proposal that lets the library hold *what a record is* rather than
@@ -426,6 +456,8 @@ pub struct Slot {
 pub enum Subject {
     Encoding(Id<Encoding>),
     Recording(Id<Recording>),
+    /// **A person or an act** — #154.
+    Artist(Id<Artist>),
     /// **An album** — #156. Its own subject rather than a recording's,
     /// because a merge at this level says nothing about the songs on it.
     ReleaseGroup(Id<ReleaseGroup>),
@@ -473,6 +505,7 @@ impl Proposal {
             // that is the row that has to exist for the merge to mean
             // anything. A loser nothing holds is ordinary.
             Proposal::GroupsMerged { winner, .. } => Subject::ReleaseGroup(*winner),
+            Proposal::Named { artist, .. } => Subject::Artist(*artist),
             Proposal::Tracklisted {
                 release, position, ..
             } => Subject::Medium(Id::<Medium>::of_medium(
@@ -1028,6 +1061,20 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             }
             facts
         }
+        Proposal::Named { artist, name } => {
+            let name = name.trim();
+            if name.is_empty() {
+                // **A name nobody can read is worse than none**, because the
+                // absence is at least visible: `line_of` drops a credit whose
+                // artist has no name, and an empty label would print a
+                // separator introducing nobody.
+                return Err("an artist needs a name".into());
+            }
+            vec![Fact::ArtistNamed {
+                artist,
+                name: name.to_string(),
+            }]
+        }
         Proposal::GroupsMerged { loser, winner } => {
             if loser == winner {
                 return Err("an album cannot absorb itself".into());
@@ -1061,6 +1108,11 @@ pub(crate) mod tests {
     /// be compared against the same library.
     pub(crate) fn named() -> uuid::Uuid {
         uuid::Uuid::from_u128(0x51)
+    }
+
+    /// An artist the double credits and has never named — #154's case.
+    pub(crate) fn nameless() -> Id<Artist> {
+        Id::derived(b"identified and never named")
     }
 
     /// The one album the double holds.
@@ -1103,6 +1155,9 @@ pub(crate) mod tests {
                 // The double holds one album, so a merge into it is reachable
                 // and a merge into anything else is stale.
                 Subject::ReleaseGroup(g) => g == album(),
+                // Held, and deliberately nameless: the case #154 exists for
+                // is an artist with a right id and no name.
+                Subject::Artist(a) => a == nameless(),
             }
         }
 
@@ -2077,6 +2132,57 @@ mod merged {
         let (_, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.applied, 0);
         assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    // ---- #154: an artist that can be identified and never named ----
+
+    /// The variant that was missing, and the two ends of one guard it serves.
+    #[test]
+    fn an_artist_can_be_given_a_name() {
+        let p = Proposal::Named {
+            artist: nameless(),
+            name: "Tony Furtado".into(),
+        };
+        assert_eq!(p.subject(), Subject::Artist(nameless()));
+
+        let text = serde_json::to_string(&p).expect("serialises");
+        let (records, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+        assert_eq!(
+            records.iter().map(|r| r.fact.clone()).collect::<Vec<_>>(),
+            vec![Fact::ArtistNamed {
+                artist: nameless(),
+                name: "Tony Furtado".into(),
+            }]
+        );
+    }
+
+    /// **Held, not named.** The case this exists for is an artist with a right
+    /// id and no label, so gating on having one would refuse the row it is
+    /// meant to repair.
+    #[test]
+    fn an_artist_with_no_name_yet_is_still_a_subject_the_library_holds() {
+        let p = Proposal::Named {
+            artist: nameless(),
+            name: "Tony Furtado".into(),
+        };
+        assert!(HELD.holds(p.subject()));
+    }
+
+    /// A label nobody can read is worse than none: `line_of` drops a credit
+    /// whose artist has no name, and an empty one would print a separator
+    /// introducing nobody.
+    #[test]
+    fn an_artist_cannot_be_named_nothing() {
+        for name in ["", "   "] {
+            let text = serde_json::to_string(&Proposal::Named {
+                artist: nameless(),
+                name: name.into(),
+            })
+            .expect("serialises");
+            let (_, report) = parse(&text, dev(), 100, HELD);
+            assert_eq!(report.refused.len(), 1, "{name:?}: {report}");
+        }
     }
 
     // ---- #156: two album entries that are one album ----

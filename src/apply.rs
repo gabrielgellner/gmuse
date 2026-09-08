@@ -83,6 +83,18 @@ impl proposal::Holdings for Shelf {
             // retired, and one already merged elsewhere is refused by
             // `Merges` rather than here.
             Subject::ReleaseGroup(id) => self.disk.groups.contains_key(&id),
+            // **An artist the library credits somewhere** — #154. Held rather
+            // than named: the case this exists for is an artist with a right
+            // id and no name, so requiring a name would refuse exactly the row
+            // it is meant to repair.
+            Subject::Artist(id) => {
+                self.disk.artist_names.contains_key(&id)
+                    || self
+                        .disk
+                        .credits
+                        .keys()
+                        .any(|(_, artist, ..)| *artist == id)
+            }
         }
     }
 
@@ -279,11 +291,34 @@ pub fn run(
         }
     };
 
+    // **A name is judged against the state too, for the pair rule's reason.**
+    //
+    // `ArtistNamed` is last-writer-wins over one key, so "already in the log"
+    // is not "still the name". Dolly Parton was named correctly and then, by a
+    // joined credit the #145 guard could not see in Vorbis, renamed to
+    // `Dolly Parton, Linda Ronstadt & Emmylou Harris`. Both facts are in the
+    // log. Re-asserting the right one is the *only* way to outrank the wrong
+    // one — and the replay guard dropped it as a duplicate, which is why a
+    // re-import repairs nothing and reports `0 new fact(s)`.
+    //
+    // Judged by what the fold currently says, so a name that is already the
+    // answer is still `already known` and a run over an unchanged library
+    // still writes nothing.
+    let restates_the_name = |fact: &crate::model::log::Fact| match fact {
+        crate::model::log::Fact::ArtistNamed { artist, name } => {
+            Some(cat.artist_names.get(artist).map(String::as_str) == Some(name.as_str()))
+        }
+        _ => None,
+    };
+
     let fresh: BTreeSet<_> = proposed
         .iter()
         .filter(|r| {
             if paired(&r.fact).is_some() {
                 return !redundant(&r.fact);
+            }
+            if let Some(already_the_name) = restates_the_name(&r.fact) {
+                return !already_the_name;
             }
             serde_json::to_string(&r.fact).is_ok_and(|encoded| !seen.contains(&encoded))
         })
@@ -386,6 +421,62 @@ mod tests {
             live(&dir),
             "a fact retracted last week read as already known"
         );
+    }
+
+    /// **A name restated is not a replay either** — #154, and the reason a
+    /// re-import repairs nothing.
+    ///
+    /// `ArtistNamed` is last-writer-wins over one key, so "already in the log"
+    /// is not "still the name". Dolly Parton was named correctly and then, by
+    /// a joined credit the #145 guard could not see in Vorbis, renamed to
+    /// `Dolly Parton, Linda Ronstadt & Emmylou Harris`. Both facts are in the
+    /// log, so re-asserting the right one is the only way to outrank the
+    /// wrong one — and the replay guard dropped it as a duplicate. That is why
+    /// importing those files again reported `0 new fact(s)` and changed
+    /// nothing.
+    #[test]
+    fn a_name_taken_over_by_a_later_one_can_be_restated() {
+        use crate::model::entity::Artist;
+
+        let dir = std::env::temp_dir().join("gmuse-apply-rename");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let device = Id::<Device>::derived(b"laptop");
+        let dolly = Id::<Artist>::derived(b"dolly parton");
+        let named =
+            |name: &str| format!(r#"{{"fact":"named","artist":"{dolly}","name":"{name}"}}"#);
+        let file = dir.join("names.jsonl");
+        let now = |dir: &std::path::Path| {
+            let (log, _) = Instance::open(dir, device, 0);
+            log.catalogue().artist_names.get(&dolly).cloned()
+        };
+
+        // **Both names arrive by import**, which is how they did: the plain
+        // one from her own albums, then the three-way credit from *Trio*, in a
+        // Vorbis tag where the #145 guard could not see the joiner.
+        {
+            let (mut log, _) = Instance::open(&dir, device, 0);
+            log.rename_artist(100, dolly, "Dolly Parton");
+            log.rename_artist(200, dolly, "Dolly Parton, Linda Ronstadt & Emmylou Harris");
+            log.flush(&dir).expect("writes");
+        }
+        assert_eq!(
+            now(&dir).as_deref(),
+            Some("Dolly Parton, Linda Ronstadt & Emmylou Harris"),
+            "the joined credit did not take the register over"
+        );
+
+        // **The repair**, which the replay guard used to swallow.
+        std::fs::write(&file, format!("{}\n", named("Dolly Parton"))).unwrap();
+        let outcome = super::run(&file, &dir, &[], device, 300, true).expect("applies");
+        assert_eq!(outcome.fresh, 1, "the right name read as already known");
+        assert_eq!(now(&dir).as_deref(), Some("Dolly Parton"));
+
+        // And saying it once more, when it is already the answer, writes
+        // nothing — a run over an unchanged library stays quiet.
+        let again = super::run(&file, &dir, &[], device, 400, true).expect("applies");
+        assert_eq!(again.fresh, 0, "a name already in force was written again");
     }
 
     /// A file on disk, and a log that has since identified it as something
