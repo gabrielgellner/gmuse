@@ -218,6 +218,29 @@ pub enum Shelf {
     /// international, and they are correctly two. So this prints what it found
     /// and how many files sit on each, and a person says which is the winner.
     Duplicates,
+    /// **Retire these copies** — `storage-layout.md` §6, #159.
+    ///
+    /// How a file leaves, and it is two steps because the first is reversible
+    /// and the second is not: this writes a tombstone and moves the bytes to
+    /// `.departed/`, keeping the path they had beneath it. **Nothing is
+    /// deleted.** A purge is a separate operation and does not exist.
+    ///
+    /// The recording stays, and so does everything said about it — a row the
+    /// library holds no copy of is ordinary, and a track you do not own is a
+    /// row on purpose (#155). What stops is the library claiming a *copy* it
+    /// has retired.
+    ///
+    /// **A file already under `.departed` is accepted**, because that is the
+    /// album somebody retired by hand before this existed, and the tombstone
+    /// is the only thing it is missing.
+    Remove {
+        /// Files or folders to retire.
+        paths: Vec<PathBuf>,
+        /// Write the tombstones and move the bytes. Without this, nothing
+        /// happens.
+        #[arg(long)]
+        write: bool,
+    },
     /// **Artists whose name is in doubt** — #154.
     ///
     /// Two shapes, and they are the two ends of one guard. An artist with a

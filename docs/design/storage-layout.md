@@ -139,6 +139,18 @@ already has some.
 
 Two steps, because the first is reversible and the second is not.
 
+**Steps 1 and 2 are built** (`gmuse shelf remove`, #159); step 3 is not, and that is the point of it being separate. The
+tombstone is `EncodingRetired` and it is a shadow, undone by `EncodingRestored` — one fact, not a re-import.
+
+**Said about the encoding, because that is what left.** The recording stays and so does everything hanging off it: a row
+the library holds no copy of is ordinary, and since #155 it is a row drawn on purpose. What stops is the library
+claiming a _copy_ it has retired.
+
+**And it refuses to retire bytes the library still holds elsewhere.** Identity is the audio, so two paths can be one
+encoding — `Early James` had two folders of the same rip, ten files byte-identical across them, and retiring "the
+departed copy" retired the live one too. Measured before the check existed: 6,648 settled became 6,638. A file whose
+bytes are still in the library has not left, whatever the folder it is in is called.
+
 ---
 
 ## 7. Derived copies live outside

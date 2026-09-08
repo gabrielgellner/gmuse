@@ -581,7 +581,17 @@ impl Librarian {
             );
         }
 
-        l.placed = cat.placed.clone();
+        // **A retired copy fills no slot** (#159). `placed` is what
+        // `held_index` counts and what #155's "a disc nothing came off" rule
+        // reads, so leaving a retired copy in it keeps a retired disc alive:
+        // `Early James` had two of twelve still placed on the folder that went
+        // to `.departed`, and those two kept the other ten drawing.
+        l.placed = cat
+            .placed
+            .iter()
+            .filter(|(id, _)| !cat.retired.contains(id))
+            .map(|(id, slot)| (*id, *slot))
+            .collect();
         l.held = held_index(&l.spine, &l.placed);
 
         // Names are a register: whatever the fold settled on is the label.
@@ -604,7 +614,19 @@ impl Librarian {
             a.name = name.clone();
             a.sort_name = name.clone();
         }
-        for (id, d) in &cat.encodings {
+        // **A retired copy is not loaded** — #159, and this is the one place
+        // it has to be excluded rather than everywhere downstream.
+        //
+        // The row is still in the log and the retirement is one fact to undo,
+        // which is what makes `remove` reversible. What must not happen is the
+        // library going on offering a copy it retired: `holds` would say yes,
+        // the row would draw ungreyed, and `shelf render` would want to put
+        // bytes somewhere they no longer are.
+        for (id, d) in cat
+            .encodings
+            .iter()
+            .filter(|(id, _)| !cat.retired.contains(id))
+        {
             l.encodings.encodings.insert(
                 *id,
                 Encoding {

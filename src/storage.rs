@@ -375,6 +375,74 @@ pub fn carry_out(plan: &Plan, root: &Path, write: bool) -> Moved {
     out
 }
 
+/// **Carry retired bytes out of the library** — `storage-layout.md` §6, #159.
+///
+/// Step two of how a file leaves: the tombstone is written first and this
+/// moves the bytes to `.departed/`, keeping the path they had beneath it so a
+/// restore is a move back and not a puzzle.
+///
+/// **Never a delete.** §6 makes the two steps separate precisely because the
+/// first is reversible and the second is not, and there is no second step
+/// here — a purge is its own operation and does not exist yet.
+///
+/// A file already under `.departed` is left alone rather than refused: that is
+/// the album somebody retired by hand before `remove` existed, and its
+/// tombstone is the only thing it is missing.
+pub fn retire(root: &Path, files: &[PathBuf], write: bool) -> Moved {
+    let mut out = Moved::default();
+    let departed = root.join(crate::scan::DEPARTED);
+    let mut emptied: std::collections::BTreeSet<PathBuf> = Default::default();
+    for from in files {
+        if from.starts_with(&departed) {
+            continue;
+        }
+        let Ok(under) = from.strip_prefix(root) else {
+            out.failed.push((
+                from.clone(),
+                "outside the library, so there is nowhere beneath `.departed` for it".into(),
+            ));
+            continue;
+        };
+        let to = departed.join(under);
+        if to.exists() {
+            out.failed
+                .push((from.clone(), format!("{} is already there", to.display())));
+            continue;
+        }
+        if !write {
+            out.moved += 1;
+            continue;
+        }
+        if let Some(parent) = to.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            out.failed.push((from.clone(), e.to_string()));
+            continue;
+        }
+        match std::fs::rename(from, &to) {
+            Ok(()) => {
+                out.moved += 1;
+                if let Some(was) = from.parent() {
+                    emptied.insert(was.to_path_buf());
+                }
+            }
+            Err(e) => out.failed.push((from.clone(), e.to_string())),
+        }
+    }
+    if write {
+        // The cover goes with the record, as it does on a render (#149).
+        for was in &emptied {
+            if let Ok(under) = was.strip_prefix(root) {
+                out.assets += carry_assets(was, &departed.join(under));
+            }
+        }
+        for was in &emptied {
+            out.emptied += prune(Some(was), root);
+        }
+    }
+    out
+}
+
 /// Move whatever is left in a folder the audio has gone from.
 ///
 /// **Only when no audio remains**, because a folder still holding music is a
@@ -870,6 +938,55 @@ mod tests {
     }
 
     /// A file already where it belongs is not a move.
+    /// **Retiring keeps the path beneath `.departed`** — §6, so a restore is
+    /// a move back and not a puzzle. And it never deletes: §6 makes the two
+    /// steps separate precisely because the first is reversible.
+    #[test]
+    fn retiring_carries_the_bytes_and_the_path_they_had() {
+        let root = std::env::temp_dir().join("gmuse-retire");
+        let _ = std::fs::remove_dir_all(&root);
+        let album = root.join("Early James/Strange Time to Be Alive");
+        std::fs::create_dir_all(&album).unwrap();
+        let track = album.join("01 Racing to a Red Light.mp3");
+        std::fs::write(&track, b"bytes").unwrap();
+        std::fs::write(album.join("cover.jpg"), b"art").unwrap();
+
+        let dry = retire(&root, std::slice::from_ref(&track), false);
+        assert_eq!(dry.moved, 1);
+        assert!(track.exists(), "a dry run moved a file");
+
+        let done = retire(&root, std::slice::from_ref(&track), true);
+        assert_eq!(done.moved, 1);
+        assert!(!track.exists());
+        let now = root
+            .join(".departed/Early James/Strange Time to Be Alive/01 Racing to a Red Light.mp3");
+        assert!(now.exists(), "the path beneath `.departed` was not kept");
+        assert_eq!(std::fs::read(&now).unwrap(), b"bytes", "the bytes changed");
+        assert!(
+            root.join(".departed/Early James/Strange Time to Be Alive/cover.jpg")
+                .exists(),
+            "the cover went with the record, as it does on a render (#149)"
+        );
+        assert!(!album.exists(), "the folder the audio left was not pruned");
+    }
+
+    /// A file already under `.departed` is the album somebody retired by hand
+    /// before `remove` existed. Its tombstone is the only thing it is missing,
+    /// so there is nothing to move and nothing to refuse.
+    #[test]
+    fn a_file_already_departed_is_left_where_it_is() {
+        let root = std::env::temp_dir().join("gmuse-retire-again");
+        let _ = std::fs::remove_dir_all(&root);
+        let at = root.join(".departed/A/B/01 t.mp3");
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, b"bytes").unwrap();
+
+        let done = retire(&root, std::slice::from_ref(&at), true);
+        assert_eq!(done.moved, 0);
+        assert!(done.failed.is_empty(), "{:?}", done.failed);
+        assert!(at.exists());
+    }
+
     #[test]
     fn a_file_in_the_right_place_is_settled() {
         let l = library(&[Tagged {

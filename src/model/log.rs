@@ -455,6 +455,38 @@ pub enum Fact {
         winner: Id<Recording>,
     },
 
+    /// **This copy is retired** — the tombstone `storage-layout.md` §6 names
+    /// and #159 found missing.
+    ///
+    /// §6 says how a file leaves: `remove` writes a tombstone, the bytes move
+    /// to `.departed/`, and only a separate purge deletes them. **The second
+    /// step was built and the first was not.** `.departed` is in the scanner's
+    /// skip list with a test asserting *"a walk into .departed hands back
+    /// everything `remove` retired"* — carefully built around a first half
+    /// that did not exist.
+    ///
+    /// What that costs: an album retired by moving its folder is still wholly
+    /// catalogued, because a *holding* lapses when a scan stops seeing a file
+    /// and a *claim* does not. `Early James — Strange Time to Be Alive` drew
+    /// 24 rows for a 12-track record.
+    ///
+    /// **About the encoding, because that is what left.** The recording stays
+    /// — §1 is explicit that a row nothing holds is ordinary, and a track you
+    /// do not own is a row on purpose (#155). What has to stop is the library
+    /// claiming a *copy* it has retired.
+    ///
+    /// **A shadow, not a deletion.** Nothing in this log is destroyed: a merge
+    /// is a redirect and a retraction is a shadow, and this is the same. The
+    /// bytes coming back is [`Fact::EncodingRestored`] — one fact, not a
+    /// re-import.
+    EncodingRetired { encoding: Id<Encoding> },
+
+    /// **A retired copy is back.** The other half, and not optional for the
+    /// reason `NarrowingRetracted` is not: a step you cannot take back is one
+    /// nobody takes, and §6's whole design is that retiring is reversible and
+    /// purging is not.
+    EncodingRestored { encoding: Id<Encoding> },
+
     /// **These two album entries are one album** — #156.
     ///
     /// The same instrument as [`Fact::RecordingMerged`], one level up, and it
@@ -994,6 +1026,10 @@ pub struct Catalogue {
     /// Which slot each copy sits in. Row existence — a file is in one place,
     /// and two devices holding the same file agree about where.
     pub placed: BTreeMap<Id<Encoding>, Id<Track>>,
+    /// Copies the library has retired — #159. Their rows are all still here,
+    /// which is what makes the retirement reversible; what changes is that
+    /// nothing counts them as a copy the library holds.
+    pub retired: BTreeSet<Id<Encoding>>,
     /// What each device last said it holds, and when it said so.
     ///
     /// The stamp is not decoration. You cannot stat another machine's disk, so
@@ -1453,6 +1489,15 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             }
             Fact::EncodingPlaced { encoding, track } => {
                 cat.placed.insert(*encoding, *track);
+            }
+            // **Last word wins**, because these come in a pair: a copy retired
+            // and brought back and retired again is retired, and the set is
+            // already in stamp order.
+            Fact::EncodingRetired { encoding } => {
+                cat.retired.insert(*encoding);
+            }
+            Fact::EncodingRestored { encoding } => {
+                cat.retired.remove(encoding);
             }
             Fact::EncodingLevelled { encoding, levels } => {
                 // Last writer wins: re-tagging a file is a correction, and
@@ -2381,6 +2426,49 @@ mod merge_tests {
             "the album credit stayed on the row nothing points at"
         );
         let _ = Described::ReleaseGroup(new);
+    }
+
+    /// **A retired copy stops being one, and nothing else changes** — #159.
+    ///
+    /// The tombstone `storage-layout.md` §6 specified and nothing wrote. What
+    /// it has to do is narrow: the library stops offering the *copy*, and the
+    /// recording, its slot and everything said about it stay exactly where
+    /// they are — because a row the library holds no copy of is ordinary, and
+    /// since #155 it is a row on purpose.
+    #[test]
+    fn a_retired_copy_is_shadowed_and_its_row_is_not() {
+        use crate::model::encoding::Format;
+        let enc = Id::<crate::model::entity::Encoding>::derived(b"a copy");
+        let audio = crate::audio_id::AudioId { scheme: 1, hash: 7 };
+        let described = Fact::EncodingDescribed {
+            encoding: enc,
+            audio,
+            format: Some(Format::Mp3),
+            bitrate: 320,
+            length_ms: 200_000,
+            sample_rate: Some(44_100),
+            channels: Some(2),
+        };
+        let cat = fold(&log([
+            described.clone(),
+            Fact::EncodingRetired { encoding: enc },
+        ]));
+        assert!(cat.retired.contains(&enc));
+        assert!(
+            cat.encodings.contains_key(&enc),
+            "**nothing is destroyed** — the row is what makes this reversible"
+        );
+
+        // And back, because a step you cannot take back is one nobody takes.
+        let cat = fold(&log([
+            described,
+            Fact::EncodingRetired { encoding: enc },
+            Fact::EncodingRestored { encoding: enc },
+        ]));
+        assert!(
+            !cat.retired.contains(&enc),
+            "a restored copy is still shadowed"
+        );
     }
 
     /// Nothing is destroyed. The loser's facts are all still in the log, which

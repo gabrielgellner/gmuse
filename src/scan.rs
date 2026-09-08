@@ -473,9 +473,15 @@ pub(crate) fn prune_nested(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// `.departed` is the one that matters — it holds what `remove` retired, and a
 /// walk that entered it would hand every one of them straight back. The rest
 /// hold no audio and are skipped to save the walk.
+/// Where a retired copy's bytes go — `storage-layout.md` §6.
+///
+/// Named here because the walk has to skip it and the mover has to find it,
+/// and two spellings of one directory is how a purge deletes the wrong thing.
+pub const DEPARTED: &str = ".departed";
+
 const NOT_THE_LIBRARY: &[&str] = &[
     ".gmuse",
-    ".departed",
+    DEPARTED,
     ".Trash",
     ".Spotlight-V100",
     ".fseventsd",
@@ -492,7 +498,7 @@ pub(crate) fn worth_entering(entry: &walkdir::DirEntry) -> bool {
             .is_some_and(|name| NOT_THE_LIBRARY.contains(&name))
 }
 
-pub(crate) fn is_audio(path: &Path) -> bool {
+pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| {

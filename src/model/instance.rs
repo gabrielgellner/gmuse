@@ -580,10 +580,20 @@ impl Instance {
         self.records = compact(&self.records);
     }
 
+    /// **Retire a copy** — `storage-layout.md` §6, #159.
+    ///
+    /// A tombstone, so the library stops offering the copy while every row
+    /// resting on it stays exactly where it is. That is what makes the second
+    /// step — a purge, which does not exist — the only irreversible one.
+    pub fn retire_encoding(&mut self, now: i64, encoding: Id<Encoding>) {
+        self.append(now, Fact::EncodingRetired { encoding });
+    }
+
     #[allow(
         dead_code,
-        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
+        reason = "used by tests; #154 is served by `Proposal::Named`, and a proposal emits its facts rather than calling an `Instance` method — this stays the shortest way for a test to say the same thing"
     )]
+    /// **Name an artist.** #154's `Proposal::Named` writes the same fact.
     pub fn rename_artist(&mut self, now: i64, artist: Id<Artist>, name: &str) {
         self.append(
             now,
@@ -1675,6 +1685,39 @@ mod containment_tests {
         let release = Id::<Release>::of_musicbrainz(mbid);
         assert_eq!(l.counted_of(release), Some((1, 2)));
         assert_eq!(l.held_of(release), crate::model::seam::Held::Partial);
+    }
+
+    /// **A retired disc stops being drawn** — #159, and the case that found it.
+    ///
+    /// `Early James — Strange Time to Be Alive` drew 24 rows for a 12-track
+    /// record: the album had been retired by moving its folder to `.departed`
+    /// by hand, and nothing recorded that. A *holding* lapses when a scan
+    /// stops seeing a file; a *claim* does not, so every recording, slot,
+    /// medium and release group stayed catalogued.
+    ///
+    /// #155 draws a slot whose disc a copy came off, which that disc still
+    /// had. The tombstone is what takes it away.
+    #[test]
+    fn a_disc_whose_copies_are_retired_stops_being_drawn() {
+        use crate::model::rows::Listing;
+
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[scan(1, 1, Some(0x5e1e)), scan(1, 2, Some(0x5e1e))]);
+        let l = crate::model::seam::Librarian::from_catalogue(&i.catalogue());
+        assert_eq!(l.rows().len(), 2, "two files, two rows");
+
+        // Retire both copies, as `remove` does once the bytes have gone.
+        let now = 200;
+        for track in [1u16, 2] {
+            let enc = Id::<crate::model::entity::Encoding>::of_audio(&scan(1, track, None).audio);
+            i.retire_encoding(now, enc);
+        }
+        let l = crate::model::seam::Librarian::from_catalogue(&i.catalogue());
+        assert_eq!(
+            l.rows().len(),
+            0,
+            "a disc the library holds no copy of is not a record you are short of"
+        );
     }
 
     /// **A retag leaves a disc behind, and it must not draw** — #155.

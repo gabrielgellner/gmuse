@@ -311,6 +311,11 @@ fn stale_cache(args: &cli::Cli) -> Option<std::path::PathBuf> {
 /// gmuse's back and wrong for files gmuse itself moved: an import renames
 /// every file it places, and the player went on opening the old names and
 /// showing nothing at all for the copies the cache had never seen.
+/// The library root a retirement moves beneath.
+fn root_of(roots: &[std::path::PathBuf]) -> std::path::PathBuf {
+    roots.first().cloned().unwrap_or_default()
+}
+
 fn drop_cache(path: Option<&std::path::Path>) {
     if let Some(path) = path
         && let Err(e) = cache::discard(path)
@@ -329,6 +334,117 @@ fn run_library(
     let machine = crate::events::machine_id(&config::default_state_dir());
     let device = crate::model::id::Id::derived(machine.as_bytes());
     match op {
+        cli::Shelf::Remove { paths, write } => {
+            // Every audio file under what was named, `.departed` included:
+            // an album retired by hand before this existed is exactly the case
+            // that wants a tombstone and no move.
+            let mut files: Vec<std::path::PathBuf> = Vec::new();
+            for path in paths {
+                if path.is_dir() {
+                    for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
+                        if entry.file_type().is_file() && crate::scan::is_audio(entry.path()) {
+                            files.push(entry.path().to_path_buf());
+                        }
+                    }
+                } else if crate::scan::is_audio(path) {
+                    files.push(path.clone());
+                }
+            }
+            files.sort();
+            if files.is_empty() {
+                eprintln!("no audio under what was named");
+                return Ok(());
+            }
+
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let cat = log.catalogue();
+            // **Resolved by hashing, not by path.** A retirement is about
+            // bytes, and the path is a property of one device's copy — which
+            // is the whole reason nothing here is keyed by one. It also means
+            // a file already sitting in `.departed` still resolves.
+            // **Where every device says it holds each copy.** Identity is
+            // the audio, so two paths can be one encoding — and retiring the
+            // one you meant would retire the one you did not.
+            let departed = root_of(roots).join(crate::scan::DEPARTED);
+            let mut elsewhere: std::collections::BTreeMap<_, Vec<&str>> = Default::default();
+            for asserted in cat.holdings.values() {
+                for (id, at) in &asserted.held {
+                    if !std::path::Path::new(at).starts_with(&departed) {
+                        elsewhere.entry(*id).or_default().push(at);
+                    }
+                }
+            }
+
+            let mut retiring = Vec::new();
+            for file in &files {
+                match crate::model::ingest::read(file) {
+                    Ok(scanned) => {
+                        let id = crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(
+                            &scanned.audio,
+                        );
+                        if !cat.encodings.contains_key(&id) {
+                            eprintln!("not in the library: {}", file.display());
+                        } else if let Some(held) = elsewhere.get(&id) {
+                            // **The bytes have not left.** `Early James` was
+                            // retired by moving one of two folders holding
+                            // identical rips: ten of its twelve files are the
+                            // same encoding as a file still in the library, so
+                            // retiring "the departed copy" retired the live one
+                            // too. Measured before this guard existed — the
+                            // library went from 6,648 settled to 6,638.
+                            eprintln!(
+                                "still held, so not retired: {}\n    the same bytes are at {}",
+                                file.display(),
+                                held.join("\n    and at ")
+                            );
+                        } else {
+                            retiring.push((file.clone(), id));
+                        }
+                    }
+                    Err(why) => eprintln!("unreadable: {} — {why}", file.display()),
+                }
+            }
+
+            let root = root_of(roots);
+            let done = crate::storage::retire(
+                &root,
+                &retiring.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>(),
+                *write,
+            );
+            for (path, why) in &done.failed {
+                eprintln!("refused: {} — {why}", path.display());
+            }
+
+            let fresh: usize = if *write {
+                let now = crate::history::now_ms();
+                let before = log.records().len();
+                for (_, id) in &retiring {
+                    log.retire_encoding(now, *id);
+                }
+                let _ = before;
+                log.flush(&loaded.data_dir)?
+            } else {
+                0
+            };
+            eprintln!(
+                "{} file(s), {} to retire, {} would move to {}, {} refused",
+                files.len(),
+                retiring.len(),
+                done.moved,
+                crate::scan::DEPARTED,
+                done.failed.len(),
+            );
+            if *write {
+                eprintln!("{fresh} tombstone(s) written, {} moved", done.moved);
+                drop_cache(cache_path.as_deref());
+            } else {
+                eprintln!("dry run — nothing written. Add --write.");
+            }
+        }
         cli::Shelf::Names => {
             let (mut log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
