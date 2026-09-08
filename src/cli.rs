@@ -234,6 +234,23 @@ pub enum Shelf {
     /// international, and they are correctly two. So this prints what it found
     /// and how many files sit on each, and a person says which is the winner.
     Duplicates,
+    /// **Artists the library holds more than once** — `merge.rs`, and the
+    /// split `of_artist` documents as the price of its name fallback.
+    ///
+    /// An artist is minted from its MusicBrainz id where the tags carry one
+    /// and from its name otherwise, so one artist arriving both ways mints
+    /// two. Of 1015 named artists here, **82 names are held by more than one
+    /// id** — and almost none of it shows: `line_of` dedupes by rendered
+    /// name, so two ids that both say `Daft Punk` draw as one. Only where the
+    /// casing also differs does the split reach a folder.
+    ///
+    /// **Reported with a direction, because here there is a rule.** Unlike a
+    /// duplicate album, the winner is not a judgement call: the
+    /// MusicBrainz-derived id is the higher rung. The line is still printed
+    /// for a person to read, and a pair where *both* ids came from
+    /// MusicBrainz gets no line at all — two MusicBrainz artists sharing a
+    /// name is evidence for two.
+    Artists,
     /// **Retire these copies** — `storage-layout.md` §6, #159.
     ///
     /// How a file leaves, and it is two steps because the first is reversible

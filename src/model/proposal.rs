@@ -340,6 +340,28 @@ pub enum Proposal {
         loser: Id<ReleaseGroup>,
         winner: Id<ReleaseGroup>,
     },
+    /// **These two ids are one artist** — the same repair one level sideways,
+    /// and the largest of the three splits this library actually has.
+    ///
+    /// `of_artist` mints from a MusicBrainz id where the tags carry one and
+    /// from the name otherwise, so one artist arriving both ways mints two.
+    /// Of 1015 named artists here, **82 names are held by more than one id**.
+    ///
+    /// **The direction is on the wire**, for the reason it is at every other
+    /// level: it is not inferable. Here the caller has a rule — the
+    /// MusicBrainz-derived id is the higher rung and wins — but a rule the
+    /// tool applies is still a claim the file has to state, or a person
+    /// reading the proposal cannot see which way it went.
+    ///
+    /// **Two MusicBrainz ids sharing a name are not a split.** `Christian
+    /// Löffler` is held under two here, and MusicBrainz saying two artists is
+    /// evidence for two. Nothing in this refuses that pair — the refusal is
+    /// the emitter's job, because only it knows how each id was derived — but
+    /// it is the pair to think about before proposing a name-matched merge.
+    ArtistsMerged {
+        loser: Id<Artist>,
+        winner: Id<Artist>,
+    },
     /// **This artist is called that** — #154.
     ///
     /// The one thing no proposal could say. `Instance::rename_artist` has
@@ -578,6 +600,11 @@ impl Proposal {
             // that is the row that has to exist for the merge to mean
             // anything. A loser nothing holds is ordinary.
             Proposal::GroupsMerged { winner, .. } => Subject::ReleaseGroup(*winner),
+            // **The winner**, for the reason the other two merges name one:
+            // that is the row that has to exist. A loser nothing holds is
+            // ordinary — it is what half a split looks like from the other
+            // side.
+            Proposal::ArtistsMerged { winner, .. } => Subject::Artist(*winner),
             Proposal::Named { artist, .. } => Subject::Artist(*artist),
             // **The derived recording**, for the reason `Derived` names its
             // `to`: that is the row this is about. The original is checked in
@@ -1235,6 +1262,12 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 return Err("an album cannot absorb itself".into());
             }
             vec![Fact::ReleaseGroupMerged { loser, winner }]
+        }
+        Proposal::ArtistsMerged { loser, winner } => {
+            if loser == winner {
+                return Err("an artist cannot absorb themselves".into());
+            }
+            vec![Fact::ArtistMerged { loser, winner }]
         }
         Proposal::Rated { recording, stars } => {
             vec![Fact::RecordingRated { recording, stars }]
@@ -2541,6 +2574,44 @@ mod merged {
         let text = serde_json::to_string(&p).expect("serialises");
         let (_, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    #[test]
+    fn an_artist_cannot_absorb_themselves() {
+        let p = Proposal::ArtistsMerged {
+            loser: nameless(),
+            winner: nameless(),
+        };
+        let text = serde_json::to_string(&p).expect("serialises");
+        let (_, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    /// **The split this repairs, end to end.**
+    ///
+    /// `of_artist` mints from the MusicBrainz id where the tags carry one and
+    /// from the name otherwise, so one artist arriving both ways mints two —
+    /// and the two ids here are minted the way the library really minted them
+    /// rather than derived from literals, because that equality *is* the bug.
+    #[test]
+    fn an_artist_minted_both_ways_is_two_ids_and_one_merge_joins_them() {
+        let mbid = uuid::Uuid::from_u128(0x0102);
+        let named = Id::<Artist>::of_artist(None, "Umfang");
+        let minted = Id::<Artist>::of_artist(Some(mbid), "Umfang");
+        assert_ne!(named, minted, "the split this exists to repair");
+        // And the casing that made three of the 82 visible folds away on its
+        // own: it never was a second id, only a second label.
+        assert_eq!(named, Id::<Artist>::of_artist(None, "UMFANG"));
+
+        let p = Proposal::ArtistsMerged {
+            loser: named,
+            winner: minted,
+        };
+        assert_eq!(
+            p.subject(),
+            Subject::Artist(minted),
+            "a merge is about the row that has to exist"
+        );
     }
 
     /// **A tracklist and a credit repair agree**, rather than rendering the

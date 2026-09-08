@@ -456,10 +456,16 @@ fn run_library(
 
             // Every name each id has ever been given, in log order, so the
             // last one — the one in force — reads last.
+            //
+            // **Through the merge**, because the raw log still names the loser
+            // and the loser is no longer a row. Without this, every artist
+            // merge adds a permanent entry here: an id nothing holds, listed
+            // as being in doubt about a name it no longer owns.
             let mut said: std::collections::BTreeMap<_, Vec<&str>> = Default::default();
             for record in log.records() {
                 if let crate::model::log::Fact::ArtistNamed { artist, name } = &record.fact {
-                    let seen: &mut Vec<&str> = said.entry(*artist).or_default();
+                    let seen: &mut Vec<&str> =
+                        said.entry(cat.artist_merges.resolve(*artist)).or_default();
                     if seen.last() != Some(&name.as_str()) {
                         seen.push(name);
                     }
@@ -614,6 +620,101 @@ fn run_library(
                 "\n{found} album(s) held more than once. The line under each is the merge that \
                  would join them — **read it first**: two records can share a name, and \
                  `AC/DC — High Voltage` is two."
+            );
+        }
+        cli::Shelf::Artists => {
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            crate::model::populate::populate(&mut log, roots, crate::history::now_ms());
+            let cat = log.catalogue();
+
+            // **Every name an id has ever held, not just the one in force.**
+            // A name-derived id can be renamed afterwards — `Flume & Chet
+            // Faker` was minted and is now called `Flume` — and testing only
+            // the current name would call that id MusicBrainz-derived and
+            // merge the wrong way. So an id is name-derived if *any* name it
+            // has ever been given mints it.
+            let mut from_name: std::collections::BTreeSet<
+                crate::model::id::Id<crate::model::entity::Artist>,
+            > = Default::default();
+            for record in log.records() {
+                if let crate::model::log::Fact::ArtistNamed { artist, name } = &record.fact
+                    && crate::model::id::Id::<crate::model::entity::Artist>::of_artist(None, name)
+                        == *artist
+                {
+                    from_name.insert(*artist);
+                }
+            }
+
+            // How much work sits under each id, so a person can see which half
+            // of a split is the big one. Credits rather than files: an artist
+            // is credited on recordings, and not every recording is held.
+            let mut weight: std::collections::BTreeMap<_, usize> = Default::default();
+            for (_, artist, ..) in cat.credits.keys() {
+                *weight.entry(*artist).or_default() += 1;
+            }
+
+            let mut by_name: std::collections::BTreeMap<String, Vec<_>> = Default::default();
+            for (id, name) in &cat.artist_names {
+                by_name
+                    .entry(crate::model::ingest::normalise(name))
+                    .or_default()
+                    .push(*id);
+            }
+
+            let (mut split, mut refused) = (0usize, 0usize);
+            for (_, ids) in by_name {
+                if ids.len() < 2 {
+                    continue;
+                }
+                let (mut minted, mut named): (Vec<_>, Vec<_>) =
+                    ids.iter().partition(|id| !from_name.contains(id));
+                println!("{}", cat.artist_names[&ids[0]]);
+                for id in &ids {
+                    let how = if from_name.contains(id) {
+                        "from the name"
+                    } else {
+                        "from MusicBrainz"
+                    };
+                    let n = weight.get(id).copied().unwrap_or(0);
+                    println!("  {id}  {n:4} credit(s)  {how}  {:?}", cat.artist_names[id]);
+                }
+                // **Two MusicBrainz ids are two artists.** MusicBrainz saying
+                // so is evidence for two, not a collision to tidy away, and
+                // `Christian Löffler` is held under two here. No line, because
+                // there is nothing this can propose that would be honest.
+                if minted.len() != 1 {
+                    refused += 1;
+                    println!(
+                        "  -- no merge offered: {} of these came from MusicBrainz, and \
+                         MusicBrainz saying two artists is evidence for two",
+                        minted.len()
+                    );
+                    continue;
+                }
+                split += 1;
+                let winner = minted.pop().expect("exactly one by the check above");
+                // Heaviest loser first, so the biggest half of the split reads
+                // directly under the winner it is going into.
+                named.sort_by_key(|id| std::cmp::Reverse(weight.get(id).copied().unwrap_or(0)));
+                for loser in named {
+                    println!(
+                        "  {}",
+                        serde_json::to_string(&serde_json::json!({
+                            "fact": "artists_merged",
+                            "loser": loser.to_string(),
+                            "winner": winner.to_string(),
+                        }))?
+                    );
+                }
+            }
+            eprintln!(
+                "\n{split} artist(s) held twice, {refused} name(s) left alone. The line under \
+                 each is the merge that would join them, and the MusicBrainz id is the winner \
+                 because it is the rung a second device would also derive."
             );
         }
         cli::Shelf::Unfiled => {

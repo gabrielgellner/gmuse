@@ -807,6 +807,24 @@ map consulted at resolution time is enough: every old reference keeps resolving 
 rewritten. A redirect is also the honest record of a judgement that could be wrong, and it can be undone. A destructive
 merge cannot.
 
+**The split that actually happened was not the one predicted.** The census above expected duplicates from _joined_
+credits — `Stephan Bodzin & Marc Romboy` beside `Stephan Bodzin vs. Marc Romboy` — and those are real. But the larger
+source is `of_artist` itself: it mints from a MusicBrainz id where the tags carry one and from the name otherwise, so
+**one artist arriving both ways mints two**. Measured on this library: of 1015 named artists, **82 names are held by
+more than one id**, and every one of those pairs is a MusicBrainz-derived id beside a name-derived one.
+
+Almost none of it was visible. `line_of` dedupes by rendered name, so two ids that both say `Daft Punk` draw as one
+artist; only where the _casing_ also differed — `Umfang` against `UMFANG` — did the split reach a folder name, and that
+was three of the 82. The other 79 divided one artist's work in the model while the tree drew it whole.
+
+**Here the winner is a rule, not a judgement.** Unlike a duplicate album, where `AC/DC — High Voltage` is genuinely two
+records, the MusicBrainz-derived id is simply the higher rung: it is the one a second device would also derive, and the
+name is the fallback `of_artist` calls honest rather than good. The direction still travels on the wire, because a rule
+the tool applied is a claim a person must be able to read.
+
+**Two MusicBrainz ids sharing a name are not this**, and `shelf artists` offers no line for such a pair. MusicBrainz
+saying two artists is evidence for two.
+
 ### Resolution at ingest, and provisional entities
 
 Tags are claims, not facts. The boundary resolves them against the catalogue in order:

@@ -541,6 +541,35 @@ pub enum Fact {
         winner: Id<ReleaseGroup>,
     },
 
+    /// **These two ids are one artist** — `merge.rs`, and the split
+    /// `of_artist` documents as the price of having a name-derived fallback.
+    ///
+    /// An artist is minted from its MusicBrainz id where the tags carry one
+    /// and from its name otherwise, so **one artist arriving both ways mints
+    /// two**. Measured on this library: of 1015 named artists, **82 names are
+    /// held by more than one id**, and all but one of those pairs is exactly
+    /// this — a MusicBrainz-derived id and a name-derived one, spelled the
+    /// same after `normalise`.
+    ///
+    /// Almost none of it is visible. `line_of` dedupes by rendered name, so
+    /// two ids that both say `Daft Punk` draw as one; only where the *casing*
+    /// also differs — `Umfang` against `UMFANG` — does the split reach a
+    /// folder name, which is three of the 82. The other 79 are a real division
+    /// of one artist's work that nothing on screen reports.
+    ///
+    /// **The MusicBrainz id wins**, being the higher rung: it is the one a
+    /// second device would also derive, and the name-derived id is the
+    /// fallback `of_artist` calls honest rather than good.
+    ///
+    /// **Two MusicBrainz ids sharing a name are not this.** `Christian
+    /// Löffler` is held under two of them here, and MusicBrainz saying two is
+    /// evidence *for* two, not a collision to be tidied away. That pair is
+    /// left alone.
+    ArtistMerged {
+        loser: Id<Artist>,
+        winner: Id<Artist>,
+    },
+
     /// A composition, as distinct from any performance of it.
     ///
     /// **Nothing in this library's tags produces one.** `MUSICBRAINZ_WORKID`
@@ -1032,6 +1061,8 @@ pub struct Catalogue {
     /// The same, for albums — #156. Kept apart because they answer different
     /// questions and a merge at one level implies nothing at the other.
     pub group_merges: crate::model::merge::Merges<ReleaseGroup>,
+    /// The redirects an artist merge left — `Fact::ArtistMerged`.
+    pub artist_merges: crate::model::merge::Merges<Artist>,
     /// Every composition anyone has named.
     pub works: BTreeMap<Id<Work>, String>,
     /// Which recordings perform which works. Row existence: a recording can
@@ -1231,11 +1262,19 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             Fact::ReleaseGroupMerged { loser, winner } => {
                 let _ = cat.group_merges.merge(*loser, *winner);
             }
+            Fact::ArtistMerged { loser, winner } => {
+                let _ = cat.artist_merges.merge(*loser, *winner);
+            }
             _ => {}
         }
     }
     let of = |r: &Id<Recording>| cat.merges.resolve(*r);
     let group_of = |g: &Id<ReleaseGroup>| cat.group_merges.resolve(*g);
+    // **Every artist named below**, because a merge has to move a credit given
+    // before it just as it moves a rating. The name goes through too: the
+    // loser's label lands on the winner and the last writer wins, which is the
+    // same rule `RecordingCatalogued`'s title already follows through `of`.
+    let who = |a: &Id<Artist>| cat.artist_merges.resolve(*a);
     let described = |s: &Described| match s {
         Described::Recording(r) => Described::Recording(cat.merges.resolve(*r)),
         // A genre asserted on the loser is a genre on the album — #156.
@@ -1254,7 +1293,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
         match fact {
             Fact::ArtistNamed { artist, name } => {
                 // Last writer wins, and the set is already in stamp order.
-                cat.artist_names.insert(*artist, name.clone());
+                cat.artist_names.insert(who(artist), name.clone());
             }
             Fact::RecordingCatalogued {
                 recording,
@@ -1265,7 +1304,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     of(recording),
                     Recorded {
                         title: title.clone(),
-                        artist: *artist,
+                        artist: who(artist),
                     },
                 );
             }
@@ -1483,7 +1522,11 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     group_of(group),
                     Grouped {
                         title: title.clone(),
-                        artist: *artist,
+                        // **Through the merge too**, and this is the one that
+                        // reaches a folder: `file_under` asks the group for its
+                        // artist first, so a split left here files the two
+                        // halves of one artist's record apart.
+                        artist: who(artist),
                         first_released: *first_released,
                         kind: *kind,
                         secondary: secondary.clone(),
@@ -1509,7 +1552,10 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 join_phrase,
             } => {
                 cat.credits.insert(
-                    (credit_on(subject), *artist, *role, *basis),
+                    // **The artist through the merge**, which is what collapses
+                    // the two halves of a split credit into one row rather than
+                    // leaving `line_of` to render the same person twice.
+                    (credit_on(subject), who(artist), *role, *basis),
                     Credited {
                         position: *position,
                         as_credited: as_credited.clone(),
@@ -1651,7 +1697,9 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             }
             // Applied in the pass above, because a merge has to move what was
             // said before it.
-            Fact::RecordingMerged { .. } | Fact::ReleaseGroupMerged { .. } => {}
+            Fact::RecordingMerged { .. }
+            | Fact::ReleaseGroupMerged { .. }
+            | Fact::ArtistMerged { .. } => {}
             Fact::RecordingAcquired { recording, at } => {
                 let first = cat.acquired.entry(of(recording)).or_insert(*at);
                 *first = (*first).min(*at);
@@ -2358,6 +2406,94 @@ mod merge_tests {
             "the song is listed twice"
         );
         assert_eq!(cat.recordings[&new].title, "0011");
+    }
+
+    /// **An artist merge collapses a split credit into one row.**
+    ///
+    /// The measured case: of 1015 named artists this library holds, 82 names
+    /// are held by more than one id, because `of_artist` mints from a
+    /// MusicBrainz id where the tags carry one and from the name otherwise.
+    /// `line_of` dedupes by rendered name, so both halves drew as one artist
+    /// and the division was invisible — but the credits really were two rows,
+    /// and a browse by artist really did split the work.
+    #[test]
+    fn a_merged_artist_takes_the_credits_given_to_both() {
+        use crate::model::entity::Artist;
+        let named = Id::<Artist>::derived(b"name\x1fumfang");
+        let minted = Id::<Artist>::derived(b"musicbrainz\x1fumfang");
+        let one = Id::<Recording>::derived(b"shant");
+        let two = Id::<Recording>::derived(b"six");
+        let performer = Id::<crate::model::entity::Role>::derived(b"performer");
+        let credit = |recording, artist| Fact::CreditAsserted {
+            subject: CreditOn::Recording(recording),
+            artist,
+            role: performer,
+            basis: Source::TagVariant,
+            position: 0,
+            as_credited: None,
+            join_phrase: None,
+        };
+        let cat = fold(&log([
+            Fact::ArtistNamed {
+                artist: named,
+                name: "UMFANG".into(),
+            },
+            Fact::ArtistNamed {
+                artist: minted,
+                name: "Umfang".into(),
+            },
+            credit(one, named),
+            credit(two, minted),
+            Fact::ArtistMerged {
+                loser: named,
+                winner: minted,
+            },
+        ]));
+
+        assert!(
+            !cat.artist_names.contains_key(&named),
+            "the artist is still listed twice"
+        );
+        assert_eq!(
+            cat.credits.len(),
+            2,
+            "both credits survive — a merge joins the artist, not the work"
+        );
+        assert!(
+            cat.credits.keys().all(|(_, artist, ..)| *artist == minted),
+            "a credit did not follow the artist it was given to"
+        );
+        // Last writer wins, as it does for every descriptive fact: the merge
+        // moves the loser's label onto the winner and the later one stands.
+        assert_eq!(cat.artist_names[&minted], "Umfang");
+    }
+
+    /// **And it moves the album credit**, which is the one that reaches a
+    /// folder: `file_under` asks the release group for its artist first, so a
+    /// split left here files the two halves of one record apart. Three of the
+    /// 82 splits differ in case as well — `Umfang` against `UMFANG` — and
+    /// those are the ones that showed, as a folder named `Umfang, UMFANG`.
+    #[test]
+    fn a_merged_artist_takes_the_album_with_them() {
+        use crate::model::entity::{Artist, ReleaseGroup};
+        let named = Id::<Artist>::derived(b"name\x1fantigone");
+        let minted = Id::<Artist>::derived(b"musicbrainz\x1fantigone");
+        let group = Id::<ReleaseGroup>::derived(b"as i walk to you");
+        let cat = fold(&log([
+            Fact::ReleaseGroupCatalogued {
+                group,
+                title: "As I Walk to You".into(),
+                artist: named,
+                first_released: None,
+                kind: Default::default(),
+                secondary: Default::default(),
+            },
+            Fact::ArtistMerged {
+                loser: named,
+                winner: minted,
+            },
+        ]));
+        assert_eq!(cat.groups[&group].artist, minted);
     }
 
     /// **An album merge moves the pressings and keeps them apart** — #156.
