@@ -175,6 +175,30 @@ pub enum Proposal {
         from: Id<Encoding>,
         to: Id<Encoding>,
     },
+    /// **One recording was made out of another** — #162, and the first thing
+    /// to mint a `RecordingDerivation`.
+    ///
+    /// [`Proposal::Derived`] one level up, and a different kind of act. That
+    /// one is a transcode: the same performance, encoded again. This is a
+    /// musical decision — a remix, an edit, a dub — and the result is a
+    /// *different recording* that a different person made.
+    ///
+    /// **A cover is deliberately not expressible here.** It realises the
+    /// existing work as any performance does, and putting it in the derivation
+    /// graph would make "which versions of this recording" answer with things
+    /// that were never made out of it. A cover is two recordings of one
+    /// `Work`, and that is the level it belongs to.
+    ///
+    /// **Both ends, by id, because a derivation is the fact that names two.**
+    /// A version qualifier says "this is a shortened version of something" and
+    /// is always available; this says "of *that*", and is only sayable when
+    /// you hold both. `identify` holds both at the moment it matches a remix:
+    /// the candidate it chose, and the original it searched by.
+    RecordingDerived {
+        from: Id<Recording>,
+        to: Id<Recording>,
+        kind: crate::model::spine::RecordingDerivationKind,
+    },
     /// **Withdraw a hierarchy edge** — the other half, and not optional.
     ///
     /// The log is append-only, so a curation pass that revises itself leaves
@@ -506,6 +530,11 @@ impl Proposal {
             // anything. A loser nothing holds is ordinary.
             Proposal::GroupsMerged { winner, .. } => Subject::ReleaseGroup(*winner),
             Proposal::Named { artist, .. } => Subject::Artist(*artist),
+            // **The derived recording**, for the reason `Derived` names its
+            // `to`: that is the row this is about. The original is checked in
+            // the arm below, where a missing one is a reason to refuse rather
+            // than a subject nobody has heard of.
+            Proposal::RecordingDerived { to, .. } => Subject::Recording(*to),
             Proposal::Tracklisted {
                 release, position, ..
             } => Subject::Medium(Id::<Medium>::of_medium(
@@ -1074,6 +1103,19 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 artist,
                 name: name.to_string(),
             }]
+        }
+        Proposal::RecordingDerived { from, to, kind } => {
+            if from == to {
+                return Err("a recording cannot be derived from itself".into());
+            }
+            // **Both ends have to exist**, because the whole value of a
+            // derivation over a qualifier is that it names the other one. An
+            // edge into a row nothing holds says less than the qualifier it
+            // would have replaced.
+            if !library.holds(Subject::Recording(from)) {
+                return Err(format!("{from} is not a recording this library holds"));
+            }
+            vec![Fact::RecordingDerived { from, to, kind }]
         }
         Proposal::GroupsMerged { loser, winner } => {
             if loser == winner {
@@ -2131,6 +2173,66 @@ mod merged {
         let text = tracklisted(pressed(), &[(1, 0x51, "One"), (2, 0x51, "One Again")]);
         let (_, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    // ---- #162: one recording made out of another ----
+
+    /// **The first thing to mint a `RecordingDerivation`.** The taxonomy has
+    /// been built and dead for as long as it has existed.
+    #[test]
+    fn a_remix_is_derived_from_the_recording_it_was_made_out_of() {
+        use crate::model::spine::RecordingDerivationKind;
+        let p = Proposal::RecordingDerived {
+            from: rec(1),
+            to: rec(2),
+            kind: RecordingDerivationKind::Remix,
+        };
+        assert_eq!(
+            p.subject(),
+            Subject::Recording(rec(2)),
+            "the derived recording is the row this is about"
+        );
+        let text = serde_json::to_string(&p).expect("serialises");
+        let (records, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+        assert_eq!(
+            records.iter().map(|r| r.fact.clone()).collect::<Vec<_>>(),
+            vec![Fact::RecordingDerived {
+                from: rec(1),
+                to: rec(2),
+                kind: RecordingDerivationKind::Remix,
+            }]
+        );
+    }
+
+    /// **Both ends have to exist.** The whole value of a derivation over a
+    /// version qualifier is that it names the other one — an edge into a row
+    /// nothing holds says less than the qualifier it would have replaced.
+    #[test]
+    fn a_derivation_from_a_recording_the_library_lacks_is_refused() {
+        use crate::model::spine::RecordingDerivationKind;
+        let text = serde_json::to_string(&Proposal::RecordingDerived {
+            from: Id::derived(b"never heard of it"),
+            to: rec(2),
+            kind: RecordingDerivationKind::Remix,
+        })
+        .expect("serialises");
+        let (_, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    #[test]
+    fn a_recording_cannot_be_derived_from_itself() {
+        use crate::model::spine::RecordingDerivationKind;
+        let text = serde_json::to_string(&Proposal::RecordingDerived {
+            from: rec(2),
+            to: rec(2),
+            kind: RecordingDerivationKind::Remix,
+        })
+        .expect("serialises");
+        let (_, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.refused.len(), 1, "{report}");
     }
 

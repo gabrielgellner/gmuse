@@ -339,3 +339,43 @@ def test_two_remixes_of_one_track_are_the_same_length_and_the_title_decides() ->
     assert not contested([larse], ours, "Olivier Giacomotto")
     # And with no remixer to look for, this rule says nothing at all.
     assert not contested([larse, giac], ours, None)
+
+
+def test_a_corroborated_remixer_is_credited_and_an_uncertain_one_is_not() -> None:
+    """What else a confident match established — #162.
+
+    The identification says which recording this is. That the candidate's own
+    title names the remixer our title named is evidence no tag provides on its
+    own, and it was being discarded at the moment it was known.
+
+    Nothing is emitted for a row a person still has to read: an uncertain
+    identification is not evidence of a remix relationship.
+    """
+    from gmuse_tools.identify import Work, also  # noqa: PLC0415
+
+    row = Work(recording="rec-1", encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
+    named = {"id": "mb-1", "title": "How Many Times (Andhim remix)"}
+    plain_title = {"id": "mb-2", "title": "How Many Times"}
+
+    # **Empty, and the gap is one proposal wide** — #162. `Proposal::Credited`
+    # refuses a credit naming one artist, because "this names several" is the
+    # claim it exists to make, and it asserts `performer`, which a remixer must
+    # not be. The corroboration is computed and has nowhere to go.
+    assert also(row, named, "Andhim", "matched") == []
+    assert also(row, plain_title, "Andhim", "matched") == [], "nothing corroborated the remixer"
+    assert also(row, named, "Andhim", "uncertain") == [], "a row awaiting a person establishes nothing"
+    assert also(row, named, None, "matched") == [], "no remixer in our title, nothing to credit"
+
+
+def test_the_version_qualifier_is_not_emitted_here() -> None:
+    """`Instance::ingest` already reads it off the title and asserts it.
+
+    Adding `original` to that vocabulary is the whole of what #162 needed on
+    that side; emitting it again from this pass would be a second answer to one
+    question, at a different rung.
+    """
+    from gmuse_tools.identify import Work, also  # noqa: PLC0415
+
+    row = Work(recording="rec-1", encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
+    lines = also(row, {"id": "mb-1", "title": "Cream"}, None, "matched")
+    assert not any(line.get("fact") == "qualifier_assigned" for line in lines)

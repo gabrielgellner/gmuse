@@ -923,6 +923,17 @@ fn run_library(
             if outcome.report.unknown.len() > 20 {
                 println!("  … and {} more", outcome.report.unknown.len() - 20);
             }
+            // **A refusal is a reason and has to be readable.** It was neither
+            // counted nor printed: 57 lines the vocabulary refused vanished
+            // from a file of 340 and the summary said `283 proposals`, which
+            // reads as a file with 283 lines in it. Finding out what happened
+            // meant applying the lines by hand, one kind at a time.
+            for (line, why) in outcome.report.refused.iter().take(20) {
+                println!("  line {line}: {why}");
+            }
+            if outcome.report.refused.len() > 20 {
+                println!("  … and {} more refused", outcome.report.refused.len() - 20);
+            }
         }
     }
     Ok(())

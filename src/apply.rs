@@ -159,11 +159,15 @@ impl std::fmt::Display for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} proposals — {} new fact(s), {} already known, {} unknown to this library, {} malformed",
-            self.report.applied + self.report.unknown.len() + self.report.malformed.len(),
+            "{} proposals — {} new fact(s), {} already known, {} unknown to this library, {} refused, {} malformed",
+            self.report.applied
+                + self.report.unknown.len()
+                + self.report.refused.len()
+                + self.report.malformed.len(),
             self.fresh,
             self.already,
             self.report.unknown.len(),
+            self.report.refused.len(),
             self.report.malformed.len(),
         )?;
         if self.dry_run {

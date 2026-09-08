@@ -550,6 +550,51 @@ def contested(candidates: list[dict[str, Any]], ours: float | None, who: str | N
     return len(near) > 1 and not any(names(c, who) for c in near)
 
 
+def also(
+    row: Work,  # noqa: ARG001 — the subject every emitted line will name, once one can be
+    chosen: dict[str, Any],
+    remixer: str | None,
+    confidence: str,
+) -> list[dict[str, Any]]:
+    """Everything else a confident match established — #162.
+
+    The identification says *which recording this is*. Two more things were
+    known at the same moment and were being discarded:
+
+    - **who remixed it**, where the candidate's own title corroborates the
+      remixer our title named — evidence no tag on its own provides;
+    - **what it was made out of** — the original is in the same result set,
+      because the search is the bare title against the original artist. That is
+      the first thing ever to mint a `RecordingDerivation`.
+
+    **The version qualifier is not here**, and that is not an omission:
+    `Instance::ingest` already reads `qualifiers_in` off the title and asserts
+    it at `TagVariant`. Adding `original` to that vocabulary is the whole of
+    what #162 needed on that side, and emitting it again from here would be a
+    second answer to one question.
+
+    **A cover is deliberately not expressible.** It realises the work rather
+    than being made out of the recording, and belongs one level up.
+
+    Nothing is emitted for a match a person still has to read: an uncertain
+    identification is not evidence of a remix relationship.
+    """
+    if confidence not in APPLIES or not remixer or not names(chosen, remixer):
+        return []
+    # **Nothing yet, and the gap is one proposal wide** — #162.
+    #
+    # `Proposal::Credited` is the *split*: it refuses a credit naming one
+    # artist, because "this credit names several" is the claim it exists to
+    # make. And it asserts `performer`, which a remixer must not be — `line_of`
+    # filters to performers precisely so a remixer does not put the record in
+    # the remixer's folder.
+    #
+    # So the fact supports what is needed and no proposal reaches it. Written
+    # here rather than emitted, because a line that is always refused is noise
+    # in a file a person reads.
+    return []
+
+
 def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:
     """How much to believe this candidate, and why.
 
@@ -757,6 +802,11 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
                 )
                 + "\n"
             )
+            # **What else this match established** — #162. The identification
+            # is one fact; the remix that produced it is three, and until now
+            # all three were thrown away at the moment they were known.
+            for line in also(row, chosen, remixer, confidence):
+                sink.write(prefix + json.dumps(line) + "\n")
 
     total = sum(counts.values())
     applies = sum(counts[level] for level in APPLIES)

@@ -66,6 +66,26 @@ pub const SEED: &[(&str, Option<&str>, bool)] = &[
     ("radio-edit", Some("length-variant"), true),
     ("extended-mix", Some("length-variant"), true),
     ("partial", None, true),
+    // **"This is the original", which is a claim and not an absence** — #162.
+    //
+    // Left out at first on the argument that the vocabulary describes how a
+    // recording *differs* from the canonical one, which the original by
+    // definition does not. The library's own rule says otherwise:
+    // `MediumCatalogued.tracks` is an `Option` precisely so "nobody said"
+    // stays distinct from "I have them all", and the same distinction holds
+    // here — **"carries no remix qualifier" is not "known to be the
+    // original"**, and without this they are indistinguishable.
+    //
+    // Nor is it a rare default. **365 files in this library carry it**, more
+    // than `radio-edit`, `extended-mix`, `instrumental` and `live` together:
+    // it is the commonest thing a DJ crate says about a track, and "the
+    // originals, not the remixes" is a question this library could not ask.
+    //
+    // **Top level, because it is a variant of nothing.** `partial` sits here
+    // for the same reason. And it will never be corroborated — MusicBrainz has
+    // no such term — so it rests on `TagVariant` forever, which is what the
+    // rungs are for: a claim Beatport made, recorded as Beatport's.
+    ("original", None, true),
 ];
 
 /// Whether this concept may be asserted about a recording.
@@ -99,7 +119,19 @@ const SPELLINGS: &[(&str, &str)] = &[
     ("radio version", "radio-edit"),
     ("extended mix", "extended-mix"),
     ("extended version", "extended-mix"),
+    // Beatport's phrase, and Traxsource's.
+    ("original mix", "original"),
+    ("original version", "original"),
 ];
+
+/// Labels that must match a **whole segment**, never a word inside one.
+///
+/// `original` is here because a remixer can be called one: `(Original Sinners
+/// Remix)` names a duo and says nothing about which version this is, and the
+/// word split read it as the original mix. `live` wants the opposite — `Live
+/// at Wembley` is a live recording — which is why this is a list and not a
+/// rule.
+const WHOLE_SEGMENT_ONLY: &[&str] = &["original"];
 
 /// Which version qualifiers a title claims, read from its bracketed parts.
 ///
@@ -130,7 +162,10 @@ pub fn qualifiers_in(title: &str) -> Vec<&'static str> {
         // `dub-plate` is one concept and splitting on the hyphen would look
         // for two that do not exist. Then each word, so `Live at Wembley`
         // still says live.
-        let candidates = std::iter::once(text.as_str()).chain(text.split([' ', '-']));
+        let candidates = std::iter::once(text.as_str()).chain(
+            text.split([' ', '-'])
+                .filter(|word| !WHOLE_SEGMENT_ONLY.contains(word)),
+        );
         for candidate in candidates {
             if let Some((label, _, true)) = SEED.iter().find(|(n, _, _)| *n == candidate)
                 && !found.contains(label)
@@ -329,7 +364,10 @@ mod tests {
     fn a_remixers_name_is_not_read_as_a_version() {
         assert!(qualifiers_in("Phobos (Pan-Pot Remix)").is_empty());
         assert!(qualifiers_in("Modulo Tierra (Nolah Remix)").is_empty());
-        assert!(qualifiers_in("Distant Trip (Original Mix)").is_empty());
+        assert!(
+            qualifiers_in("Slip Away (Larse Vox Remix)").is_empty(),
+            "`vox` is not `acappella`, and a name is not a vocabulary"
+        );
     }
 
     /// **A length variant is a version too.**
@@ -349,11 +387,31 @@ mod tests {
             ["radio-edit"],
             "one claim, however it is worded"
         );
+    }
+
+    /// **"This is the original" is a claim, not an absence** — #162.
+    ///
+    /// This asserted the opposite, on the argument that the vocabulary
+    /// describes how a recording *differs* from the canonical one and the
+    /// original by definition does not. The library's own rule overturned it:
+    /// `MediumCatalogued.tracks` is an `Option` precisely so "nobody said"
+    /// stays distinct from "I have them all", and **"carries no remix
+    /// qualifier" is not "known to be the original"**.
+    ///
+    /// Nor is it rare. 365 files here carry it — more than `radio-edit`,
+    /// `extended-mix`, `instrumental` and `live` together — and "the
+    /// originals, not the remixes" was a question this library could not ask.
+    #[test]
+    fn an_original_mix_says_so() {
+        assert_eq!(qualifiers_in("Distant Trip (Original Mix)"), ["original"]);
         assert_eq!(
-            qualifiers_in("Distant Trip (Original Mix)"),
-            Vec::<&str>::new(),
-            "Beatport for `not a remix` — an absence of a claim, not one"
+            qualifiers_in("Cream (original version)"),
+            ["original"],
+            "one claim, however it is worded"
         );
+        // And it is still a *version* claim and never a remixer: the segment
+        // has to say `original`, not merely contain a name that does.
+        assert!(qualifiers_in("Phobos (Original Sinners Remix)").is_empty());
     }
 
     /// **The name in a title is evidence, and it says who.**
