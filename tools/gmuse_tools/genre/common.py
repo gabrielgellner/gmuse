@@ -134,9 +134,27 @@ def album_key(tags: dict[str, str]) -> tuple[str, str]:
 
 
 def fix_case(term: str) -> str:
-    """Normalise a genre term's capitalisation, then apply the exceptions in `CASE`."""
+    """Normalise a genre term's capitalisation, then apply the exceptions in `CASE`.
+
+    **The table is consulted per word as well as whole.** It was whole only,
+    and most of its entries are words — so `R&b` was corrected to `R&B` when it
+    was the entire term and never inside one, and this library carried
+    `Contemporary R&B` on 125 files and `Contemporary R&b` on 45. The bare
+    `R&B` was right the whole time, which is what kept it hidden.
+
+    Whole first, because two entries mean something only as a phrase: `Uk
+    Garage` needs the pair, and `Drum N Bass` becomes `Drum & Bass` rather than
+    three words separately corrected.
+
+    **`capitalize()` lowercasing after a hyphen is deliberate, not a gap.**
+    This library spells 27 terms that way — `Hip-hop`, `Post-punk`, `Lo-fi`,
+    `Avant-garde` — so it is the convention, and the one deviation
+    (`Non-Music`) is what wants fixing rather than the rule.
+    """
     titled = " ".join(word.capitalize() if not word.isupper() else word for word in term.split())
-    return CASE.get(titled, titled)
+    if titled in CASE:
+        return CASE[titled]
+    return " ".join(CASE.get(word, word) for word in titled.split())
 
 
 def _from_keychain(service: str) -> str | None:
