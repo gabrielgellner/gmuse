@@ -102,6 +102,36 @@ pub enum Fact {
     /// distribution and PREMIS *ingests* an object. Borrowing the word from
     /// the level above suggested this was the same kind of event, and it is
     /// not: nobody makes an editorial decision about a file's bitrate.
+    /// **What these bytes say they are, said as a claim** — #160.
+    ///
+    /// The state the gate needed and did not have. A file no authority names
+    /// is refused, and a refusal that leaves no trace means the library has no
+    /// record that the bytes exist at all: each import re-refuses them, and
+    /// there is nowhere to say "these are being worked on". So the encoding is
+    /// described and held, and this records what its tags claimed — while
+    /// **no recording is minted**, because nothing has named the performance.
+    ///
+    /// **A claim is not a value**, which is `info-panel.md`'s rule and the one
+    /// this fact exists to keep. `RecordingCatalogued` asserts that a
+    /// performance *is* called something; this says only that a tag *said* so.
+    /// The two look identical on this material and are not: the album fields
+    /// alone yielded a warez stamp as an artist, a chart as a release, and ten
+    /// 30-byte ID3v1 stumps.
+    ///
+    /// It is promoted, not consumed. When an authority finally names the
+    /// performance, `Proposal::Identified` catalogues the recording *from this
+    /// claim* — the tags were right about the title even when they had no id,
+    /// and re-reading the file to learn again what the log already recorded
+    /// would be a second door onto the same evidence.
+    EncodingClaimed {
+        encoding: Id<Encoding>,
+        /// Exactly as the tag wrote it, joined credits and all. Nothing here
+        /// is normalised, because a claim is evidence and normalising evidence
+        /// is editing it.
+        artist: String,
+        title: String,
+    },
+
     EncodingDescribed {
         encoding: Id<Encoding>,
         audio: AudioId,
@@ -1063,6 +1093,11 @@ pub struct Catalogue {
     pub group_merges: crate::model::merge::Merges<ReleaseGroup>,
     /// The redirects an artist merge left — `Fact::ArtistMerged`.
     pub artist_merges: crate::model::merge::Merges<Artist>,
+    /// **Bytes the library holds and has not named** — #160.
+    ///
+    /// What the tags claimed, for an encoding bound to no recording. Empty for
+    /// every file an authority names, because those are catalogued outright.
+    pub claims: BTreeMap<Id<Encoding>, (String, String)>,
     /// Every composition anyone has named.
     pub works: BTreeMap<Id<Work>, String>,
     /// Which recordings perform which works. Row existence: a recording can
@@ -1562,6 +1597,16 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         join_phrase: join_phrase.clone(),
                     },
                 );
+            }
+            Fact::EncodingClaimed {
+                encoding,
+                artist,
+                title,
+            } => {
+                // Last writer wins, as every descriptive fact does: a retag
+                // that changes what the file says changes what it claims.
+                cat.claims
+                    .insert(*encoding, (artist.clone(), title.clone()));
             }
             Fact::EncodingPlaced { encoding, track } => {
                 cat.placed.insert(*encoding, *track);

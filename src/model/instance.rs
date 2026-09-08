@@ -214,6 +214,68 @@ impl Instance {
     /// its bytes, and the recording's from its MusicBrainz id. Without one, the
     /// recording is minted locally — which is the case §11 leaves to the
     /// collision, and the case this instance cannot resolve alone.
+    /// **Hold the bytes without naming the performance** — #160.
+    ///
+    /// The other half of the gate. Refusing a file outright leaves the library
+    /// with no record that it exists, so every import re-refuses it and there
+    /// is nowhere to say which ones are being worked on. This records what is
+    /// true — that these bytes are here, and what their tags claim — and stops
+    /// short of the one thing nothing has established: which performance this
+    /// is.
+    ///
+    /// **No `EncodingBound`, and that is the whole point.** An encoding bound
+    /// to a recording minted from its own bytes is exactly the answer-by-
+    /// default §7 forbids. Unbound, it draws nowhere and browses nowhere, and
+    /// `shelf query --unnamed` is the only thing that can see it — which is
+    /// the work list a pass needs.
+    ///
+    /// Everything emitted here is a fact about the *bytes*: how they are
+    /// encoded, how loud they are, whether a path says they were processed.
+    /// None of it presumes a performance.
+    pub fn hold_unnamed(&mut self, now: i64, scan: &[Scanned]) {
+        for s in scan {
+            let encoding = Id::<Encoding>::of_audio(&s.audio);
+            self.append(
+                now,
+                Fact::EncodingDescribed {
+                    encoding,
+                    audio: s.audio,
+                    format: s.format,
+                    bitrate: s.bitrate,
+                    length_ms: s.length_ms,
+                    sample_rate: s.sample_rate,
+                    channels: s.channels,
+                },
+            );
+            self.append(
+                now,
+                Fact::EncodingClaimed {
+                    encoding,
+                    artist: s.artist.clone(),
+                    title: s.title.clone(),
+                },
+            );
+            if !s.levels.is_empty() {
+                self.append(
+                    now,
+                    Fact::EncodingLevelled {
+                        encoding,
+                        levels: s.levels,
+                    },
+                );
+            }
+            if s.processed {
+                self.append(
+                    now,
+                    Fact::EncodingProcessed {
+                        encoding,
+                        basis: Source::Path,
+                    },
+                );
+            }
+        }
+    }
+
     pub fn ingest(&mut self, now: i64, scan: &[Scanned]) {
         // Rung zero of the ladder: have these exact bytes been bound before?
         //
@@ -1636,6 +1698,12 @@ mod containment_tests {
         /// Just enough of a library for `parse` to check a subject against.
         struct Shelf(crate::model::log::Catalogue);
         impl Holdings for Shelf {
+            fn claim(
+                &self,
+                encoding: Id<crate::model::entity::Encoding>,
+            ) -> Option<(String, String)> {
+                self.0.claims.get(&encoding).cloned()
+            }
             fn holds(&self, subject: Subject) -> bool {
                 match subject {
                     Subject::Encoding(id) => self.0.encodings.contains_key(&id),

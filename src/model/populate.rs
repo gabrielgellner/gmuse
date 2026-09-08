@@ -415,16 +415,39 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64, admits: Ad
     // album before this existed, and reported them as unidentifiable files
     // that were sitting on disk under the exact names it had just printed.
     let mut minted: Vec<(PathBuf, Id<Encoding>)> = Vec::with_capacity(paths.len());
+    // **Refused a performance, kept as bytes** — #160. These take the shorter
+    // ladder below: described, claimed, held, and bound to nothing.
+    let mut unnamed: Vec<crate::model::instance::Scanned> = Vec::new();
+    // Rung zero, read once rather than per file: the encodings this library has
+    // already bound to a performance, whatever their tags say now.
+    let already_bound: std::collections::BTreeSet<Id<Encoding>> =
+        instance.catalogue().bound.keys().copied().collect();
 
     for path in paths {
         match ingest::read(&path) {
             Ok(s) => {
                 // **The gate** — #160. Nothing named this performance, so
                 // cataloguing it would mint a recording out of its own bytes
-                // and call the question answered. Refused instead, carrying
-                // the two fields a recording search actually wants.
-                if s.identity.is_none() && admits == Admits::Identified {
-                    report.unidentified.push((path, s.artist, s.title));
+                // and call the question answered. Held instead: the bytes are
+                // described and what they claim is recorded, and no recording
+                // is minted. The report carries the two fields a recording
+                // search actually wants.
+                let encoding = Id::<Encoding>::of_audio(&s.audio);
+                // **Rung zero comes first.** `ingest` asks whether these exact
+                // bytes have been bound before, and the gate has to ask it too
+                // — otherwise a file the library named long ago is refused on
+                // every pass for the crime of carrying no id in its tags, and
+                // a relink somebody made by hand is refused by the scan that
+                // was meant to honour it.
+                let seen = already_bound.contains(&encoding);
+                if s.identity.is_none() && !seen && admits == Admits::Identified {
+                    if let Some(first) = held.insert(encoding, path.display().to_string()) {
+                        report.duplicates.push((path.clone(), PathBuf::from(first)));
+                    }
+                    report
+                        .unidentified
+                        .push((path, s.artist.clone(), s.title.clone()));
+                    unnamed.push(s);
                     continue;
                 }
                 if s.identity.is_some() {
@@ -432,7 +455,6 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64, admits: Ad
                 } else {
                     report.provisional += 1;
                 }
-                let encoding = Id::<Encoding>::of_audio(&s.audio);
                 if let Some(first) = held.insert(encoding, path.display().to_string()) {
                     // The map kept the later path; the report names both, so
                     // "which one do I delete" is answerable.
@@ -542,6 +564,10 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64, admits: Ad
     let scanned = keep;
 
     instance.ingest(now, &scanned);
+    // **And the ones nothing named**, on the shorter ladder — #160. After the
+    // full one, so that a file which *is* identified and happens to share
+    // bytes with a refused one wins the encoding rather than racing it.
+    instance.hold_unnamed(now, &unnamed);
     instance.drop_repeats_since(&before);
     report.written = instance.records().len() - before.len();
 
@@ -695,7 +721,22 @@ mod tests {
         assert_eq!(report.ingested, 0, "it was catalogued anyway");
         assert_eq!(report.provisional, 0, "nothing may rest on its bytes here");
         assert_eq!(report.unidentified.len(), 1);
-        assert_eq!(report.written, 0, "a refused file still wrote facts");
+
+        // **The bytes are held; the performance is not named.** Refusing
+        // outright left no record that the file existed at all, so every
+        // import re-refused it and there was nowhere to say which ones were
+        // being worked on. What must not appear is a recording — that is the
+        // answer-by-default §7 forbids.
+        let cat = i.catalogue();
+        assert_eq!(cat.encodings.len(), 1, "the bytes were forgotten");
+        assert_eq!(cat.claims.len(), 1, "what the tags said was thrown away");
+        assert!(cat.recordings.is_empty(), "a performance was minted anyway");
+        assert!(cat.bound.is_empty(), "the encoding was bound to something");
+        assert_eq!(
+            cat.claims.values().next(),
+            Some(&("Stephan Bodzin".to_string(), "Callisto".to_string())),
+            "the claim is what the tag wrote, not a catalogue entry"
+        );
 
         // **The refusal is answerable.** Every external route in the flow is
         // album-shaped and this material's album fields are its worst; these

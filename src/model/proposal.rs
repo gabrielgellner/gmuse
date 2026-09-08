@@ -496,7 +496,13 @@ pub struct Slotted {
 /// locator is good until the file moves; the id is good forever.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Queried {
-    pub recording: Id<Recording>,
+    /// **Absent for a row the library has not named** — #160.
+    ///
+    /// The gate holds a file's bytes without minting a performance, so there
+    /// is genuinely no recording to name. A pass working that list proposes
+    /// against the `encoding`, which is what an identification names anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording: Option<Id<Recording>>,
     /// The encoding a tool would measure — the canonical one, unless the query
     /// asked for something else.
     pub encoding: Option<Id<Encoding>>,
@@ -535,6 +541,13 @@ pub trait Holdings {
     /// first leaves the appearance naming the song the file used to be, so a
     /// rating given to the row went to the old song.
     fn slot(&self, encoding: Id<Encoding>) -> Option<Slot>;
+    /// **What these bytes claimed, for an encoding nothing has named** — #160.
+    ///
+    /// `None` once a recording is bound, because then the library has a
+    /// catalogue entry and a claim is not needed to build one. Present exactly
+    /// for the rows the gate held back, which is what lets an identification
+    /// finish the job instead of leaving a recording with no title.
+    fn claim(&self, encoding: Id<Encoding>) -> Option<(String, String)>;
 }
 
 /// Where a copy sits, as the library currently records it.
@@ -1031,6 +1044,31 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 },
                 Fact::EncodingBound { encoding, from, to },
             ];
+            // **A held-back file is catalogued here, from what it claimed** —
+            // #160. The gate keeps a recording from being minted out of a
+            // file's own bytes, so nothing named this performance and nothing
+            // gave it a title; without this the identification would bind an
+            // encoding to a recording the library cannot draw.
+            //
+            // **From the claim rather than from the file.** The tags were
+            // right about the title even when they carried no id, and that is
+            // already in the log — re-opening the file to learn it again would
+            // be a second door onto one piece of evidence, and `apply` does
+            // not read audio.
+            if from.is_none()
+                && let Some((artist, title)) = library.claim(encoding)
+            {
+                let who = Id::<Artist>::of_artist(None, &artist);
+                facts.push(Fact::ArtistNamed {
+                    artist: who,
+                    name: artist,
+                });
+                facts.push(Fact::RecordingCatalogued {
+                    recording: to,
+                    title,
+                    artist: who,
+                });
+            }
             // **The appearance is re-pointed too** — #155. Two facts name a
             // recording: the file says which performance it holds, and the
             // slot it fills says which performance sits there. Moving only the
@@ -1331,7 +1369,9 @@ pub(crate) mod tests {
     impl Holdings for Held {
         fn holds(&self, s: Subject) -> bool {
             match s {
-                Subject::Encoding(e) => e == enc(1) || e == enc(2) || e == enc(3),
+                // `enc(4)` is the gate's case (#160): bytes the library holds
+                // and has bound to no recording, carrying only a claim.
+                Subject::Encoding(e) => e == enc(1) || e == enc(2) || e == enc(3) || e == enc(4),
                 Subject::Recording(r) => {
                     r == rec(1) || r == rec(2) || r == Id::of_basis(&Basis::MusicBrainz(named()))
                 }
@@ -1350,6 +1390,7 @@ pub(crate) mod tests {
         }
 
         fn bound(&self, encoding: Id<Encoding>) -> Option<Id<Recording>> {
+            // `enc(4)` is bound to nothing on purpose — see `claim`.
             match encoding {
                 e if e == enc(1) => Some(rec(1)),
                 e if e == enc(3) => Some(Id::of_basis(&Basis::MusicBrainz(settled()))),
@@ -1365,6 +1406,12 @@ pub(crate) mod tests {
         /// exercised where there is a spine to have one.
         fn slot(&self, _encoding: Id<Encoding>) -> Option<Slot> {
             None
+        }
+
+        /// **The row the gate held back**, so an identification against bytes
+        /// nobody named can be exercised against the real `apply`.
+        fn claim(&self, encoding: Id<Encoding>) -> Option<(String, String)> {
+            (encoding == enc(4)).then(|| ("Roberto Capuano".into(), "Till Dawn".into()))
         }
 
         fn identified(&self, recording: Id<Recording>) -> Option<Basis> {
@@ -1824,7 +1871,7 @@ pub(crate) mod tests {
     #[test]
     fn a_tool_proposes_against_what_the_query_handed_it() {
         let row = Queried {
-            recording: rec(1),
+            recording: Some(rec(1)),
             encoding: Some(enc(1)),
             locator: Some("/m/a.mp3".into()),
             title: "Callisto".into(),
@@ -1853,10 +1900,63 @@ pub(crate) mod tests {
 
     /// A recording this machine does not hold still comes back from a query —
     /// decided about, not owned — with nothing to open.
+    /// **Naming held-back bytes catalogues them from what they claimed** —
+    /// #160, and the round trip the gate exists to make possible.
+    ///
+    /// The gate keeps a recording from being minted out of a file's own bytes,
+    /// so a file it held back has no performance and no title. An
+    /// identification that only bound the encoding would leave a recording the
+    /// library cannot draw — a row with an id and nothing to print.
+    ///
+    /// The claim is promoted rather than re-read: the tags were right about
+    /// the title even when they carried no id, and that is already in the log.
+    #[test]
+    fn identifying_held_back_bytes_catalogues_them_from_the_claim() {
+        let mbid = uuid::Uuid::from_u128(0x7711);
+        let p = Proposal::Identified {
+            encoding: enc(4),
+            basis: Basis::MusicBrainz(mbid),
+        };
+        let text = serde_json::to_string(&p).expect("serialises");
+        let (records, report) = parse(&text, dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+
+        let to = Id::<Recording>::of_basis(&Basis::MusicBrainz(mbid));
+        let facts: Vec<_> = records.iter().map(|r| &r.fact).collect();
+        assert!(
+            facts.iter().any(|f| matches!(
+                f,
+                Fact::EncodingBound {
+                    encoding,
+                    from: None,
+                    to: bound
+                } if *encoding == enc(4) && *bound == to
+            )),
+            "the encoding was not bound to the named recording"
+        );
+        assert!(
+            facts.iter().any(|f| matches!(
+                f,
+                Fact::RecordingCatalogued { recording, title, .. }
+                    if *recording == to && title == "Till Dawn"
+            )),
+            "the recording has an id and no title: {facts:?}"
+        );
+        // **No merge.** Merging is a repair for two ids naming one
+        // performance, and held-back bytes never minted a first one — there is
+        // nothing to redirect.
+        assert!(
+            !facts
+                .iter()
+                .any(|f| matches!(f, Fact::RecordingMerged { .. })),
+            "a merge was written for a recording that never existed"
+        );
+    }
+
     #[test]
     fn a_row_with_no_copy_here_is_still_a_row() {
         let row = Queried {
-            recording: rec(2),
+            recording: Some(rec(2)),
             encoding: None,
             locator: None,
             title: "Wanted".into(),

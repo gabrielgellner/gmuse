@@ -880,11 +880,16 @@ fn run_library(
             );
             if !report.unidentified.is_empty() {
                 eprintln!(
-                    "\nNothing named those {}, so they were not catalogued — `library-api.md` §7.\n\
+                    "\nNothing named those {}, so no performance was minted for them — \
+                     `library-api.md` §7.\n\
+                     Their bytes are held and what their tags claim is recorded, so they are on\n\
+                     the work list: `gmuse shelf query --unidentified` hands each one an encoding\n\
+                     and a locator, and an `identified` proposal against it catalogues it from\n\
+                     that claim.\n\
                      The columns above are what a MusicBrainz *recording* search wants; the album\n\
                      fields on this material are the least reliable part of it.\n\
-                     Take them anyway with `--unidentified`, and the library will rest them on\n\
-                     their bytes — which is right for a white label and wrong for everything else.",
+                     Or take them as they are with `--unidentified`, which rests them on their\n\
+                     bytes — right for a white label, wrong for everything else.",
                     report.unidentified.len()
                 );
             }

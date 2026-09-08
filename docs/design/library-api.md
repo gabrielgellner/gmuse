@@ -265,10 +265,40 @@ to identify them cannot see them.
 MusicBrainz has never heard of any of them and they belong here. `Basis::Audio` stays. What changed is that landing on
 it is something a person says.
 
-**What this does not do yet.** The ladder §7 wants runs `MusicBrainz id → fingerprint → recording search → refuse`, and
-only the first and last rungs are at the front door. The fingerprint rung is #57 and needs a key. The recording-search
-rung is `identify`, which today runs two stages later against rows that are already catalogued — so the refused file has
-no id to propose against and cannot be handed to it. Closing that is the other half of #160.
+### Held, not forgotten — the state a refusal leaves
+
+A refusal that leaves no trace is a dead end. The library would have no record that the bytes exist, every import would
+re-refuse them, and there would be nowhere to say which ones somebody is working on — so the only way forward would be
+to take them unidentified after all, which is the outcome the gate exists to avoid.
+
+So a held-back file is **described, claimed and held, and bound to nothing**. `EncodingDescribed` says how the bytes are
+encoded; `EncodingClaimed` records what its tags said; the holdings say where it is. What is not written is a
+`Recording`, because nothing has named the performance — and an encoding bound to a recording minted from its own bytes
+is precisely the answer-by-default this section forbids.
+
+**A claim is not a value**, which is `info-panel.md`'s rule. `RecordingCatalogued` asserts that a performance _is_
+called something; `EncodingClaimed` says only that a tag said so. On this material those are very different: the album
+fields alone yielded a warez stamp as an artist, a chart as a release, and ten 30-byte ID3v1 stumps.
+
+The claim is then **promoted, not consumed**. `shelf query` lists a held-back file as a row with an `encoding`, a
+`locator` and no `recording`; a pass proposes an ordinary `identified` against that encoding; and applying it mints the
+recording from the basis _and catalogues it from the claim_. The tags were right about the title even when they carried
+no id, and re-opening the file to learn again what the log already recorded would be a second door onto one piece of
+evidence — `apply` does not read audio.
+
+**Reading is gated too, and exempting it was wrong.** `query` and `apply` build a scratch catalogue that is discarded,
+so letting them admit anything looked free. It is not: `populate` under `Anything` does not merely show what exists, it
+mints a recording out of the file's own bytes. Doing that in the scratch recreated exactly the row the gate had refused,
+and an identification written against it would have carried a merge redirecting an id that existed nowhere but there.
+
+**Rung zero comes before the gate.** `ingest` asks whether these exact bytes have been bound before, and the gate has to
+ask it too — otherwise a file the library named long ago is refused on every pass for carrying no id in its tags, and a
+relink somebody made by hand is refused by the scan meant to honour it.
+
+**What is still missing.** The ladder runs `MusicBrainz id → fingerprint → recording search → refuse`, and the
+fingerprint rung is #57 and needs a key. The recording-search rung now _can_ be run — the work list carries the encoding
+and the locator — but the pass that would run it is `identify`, which still reads a work list produced after
+cataloguing. Pointing it at these rows is a tools change, not a model one.
 
 ### A second copy is reported, not refused — #62
 

@@ -114,6 +114,19 @@ impl proposal::Holdings for Shelf {
             .or_else(|| self.disk.encodings.get(&encoding).and_then(|e| e.recording))
     }
 
+    /// **What the bytes claimed, for a file the gate held back** — #160.
+    ///
+    /// The log first and the disk second, like every other answer here: a
+    /// claim recorded on an earlier import is in the log, and one made by the
+    /// scan that just ran is on the disk.
+    fn claim(&self, encoding: Id<crate::model::entity::Encoding>) -> Option<(String, String)> {
+        self.log
+            .claims
+            .get(&encoding)
+            .or_else(|| self.disk.claims.get(&encoding))
+            .cloned()
+    }
+
     fn slot(
         &self,
         encoding: Id<crate::model::entity::Encoding>,
@@ -215,14 +228,16 @@ fn paired(fact: &crate::model::log::Fact) -> Option<(PairKey, bool)> {
 fn shelf(log: &Instance, roots: &[std::path::PathBuf], device: Id<Device>, now: i64) -> Shelf {
     let mut scanned = Instance::new(device);
     scanned.merge(now, log.records());
-    // **Anything**: this asks what the disk holds so a proposal can be checked
-    // against it, and a proposal naming a row that rests on its bytes is
-    // precisely what `identify` writes. Nothing here is persisted either.
+    // **Gated, for the reason `query` is** — #160. Under `Anything` this
+    // scratch mints a recording from the bytes of a file the gate refused, and
+    // `bound` then reports that invented row as what an identification is
+    // moving *from* — so the proposal would carry a merge redirecting an id
+    // that exists nowhere. Gated, `from` is `None`, which is the truth.
     crate::model::populate::populate(
         &mut scanned,
         roots,
         now,
-        crate::model::populate::Admits::Anything,
+        crate::model::populate::Admits::Identified,
     );
     Shelf {
         // What the disk says exists, which is what "holds" asks about:

@@ -31,6 +31,10 @@ pub enum Only {
     /// The work list an identification pass actually wants: a recording with a
     /// MusicBrainz id needs no looking up, and asking about it spends a rate
     /// limit to be told what the tags already said.
+    ///
+    /// **Includes the rows the gate held back** (#160), which have no recording
+    /// at all. They are the same question one step earlier: nothing has named
+    /// this performance. A row with no `recording` is one of them.
     Unidentified,
 }
 
@@ -49,15 +53,21 @@ pub fn rows(
     // work list did not move.
     let mut scratch = Instance::new(device);
     scratch.merge(now, records);
-    // **Anything**, because a work list has to show what the library *holds*
-    // and some of it rests on bytes — 228 rows here, taken deliberately. This
-    // scratch is discarded and nothing it catalogues is persisted, so the
-    // gate #160 put on the front door does not belong on reading.
+    // **Gated, like the front door** — #160, and `Anything` here was wrong.
+    // Reading does not persist anything, so exempting it looked free; but
+    // `populate` under `Anything` does not merely *show* what exists, it mints
+    // a recording out of the file's own bytes. Doing that in the scratch
+    // recreated exactly the row the gate had refused, and a pass reading this
+    // list would then propose an identification whose `from` names a recording
+    // that never existed anywhere but here.
+    //
+    // Gated, a held-back file arrives as what it is: an encoding, a claim, and
+    // no performance.
     crate::model::populate::populate(
         &mut scratch,
         roots,
         now,
-        crate::model::populate::Admits::Anything,
+        crate::model::populate::Admits::Identified,
     );
     // **And publish what is here** (#145). A work list hands a tool an id and
     // a **locator**, so the holdings are half of the answer — and cataloguing
@@ -83,7 +93,7 @@ pub fn rows(
         // the library knows about and this machine cannot open.
         let opened = library.open(*recording, &[device], &[]);
         out.push(Queried {
-            recording: *recording,
+            recording: Some(*recording),
             encoding: opened.map(|(e, _)| e.id),
             locator: opened.map(|(_, l)| l.to_string()),
             title: recorded.title.clone(),
@@ -92,6 +102,31 @@ pub fn rows(
                 .get(&recorded.artist)
                 .cloned()
                 .unwrap_or_default(),
+        });
+    }
+    // **The bytes nothing has named** — #160, on the same list rather than on
+    // one of their own. The library holds them, which is what `Everything`
+    // asks; and nothing has named them, which is what `Unidentified` asks. A
+    // pass that walks either proposes an `identified` against the **encoding**,
+    // exactly as it would for a row resting on its bytes — so this needs no new
+    // vocabulary to be acted on.
+    for (encoding, (artist, title)) in &catalogue.claims {
+        if catalogue.bound.contains_key(encoding) {
+            continue;
+        }
+        out.push(Queried {
+            recording: None,
+            encoding: Some(*encoding),
+            // **This device's copy**, by the rule `open` follows for a named
+            // row: a locator is where *this* machine can reach the bytes, and
+            // a holding on another device is not an answer to "open this".
+            locator: library
+                .holdings_of(*encoding)
+                .into_iter()
+                .find(|(d, _)| *d == device.to_string())
+                .map(|(_, l)| l),
+            title: title.clone(),
+            artist: artist.clone(),
         });
     }
     out
@@ -225,7 +260,7 @@ mod tests {
         let after = rows(&[root], &log, device(), 300, Only::Unidentified);
         assert_eq!(after.len(), 2, "the two on disk still rest on their bytes");
         assert!(
-            !after.iter().any(|r| r.recording == named),
+            !after.iter().any(|r| r.recording == Some(named)),
             "a recording an authority has named is not work"
         );
     }
@@ -242,26 +277,120 @@ mod tests {
     ///
     /// Nothing failed. 377 identifications applied cleanly, the log was
     /// correct, and the work list did not move — which is the only way it
+    /// **Bytes the gate held back are on the work list** — #160, and this is
+    /// what makes the refusal answerable rather than merely final.
+    ///
+    /// `import` mints no recording for a file nothing has named, so there is
+    /// no row for `Only::Unidentified`'s usual filter to find. Without this
+    /// the gate would be a dead end: the file is refused, nothing can see it,
+    /// and the only way forward is to take it unidentified after all.
+    ///
+    /// The row carries an **encoding** and no recording, which is exactly what
+    /// an `identified` proposal names — so the pass that walks this list needs
+    /// no new vocabulary to act on it.
+    #[test]
+    fn bytes_the_gate_held_back_are_work_a_pass_can_see() {
+        use crate::model::populate::Admits;
+
+        let root = dir("held-back");
+        let path = root.join("a.wav");
+        wav(&path, 1000);
+
+        // The gate: nothing named it, so nothing catalogued it.
+        let mut i = crate::model::instance::Instance::new(device());
+        let report = crate::model::populate::populate(
+            &mut i,
+            std::slice::from_ref(&root),
+            100,
+            Admits::Identified,
+        );
+        assert_eq!(report.unidentified.len(), 1, "the gate did not hold it");
+        crate::model::populate::reconcile(&mut i, std::slice::from_ref(&root), 100);
+
+        let work = rows(
+            std::slice::from_ref(&root),
+            i.records(),
+            device(),
+            200,
+            Only::Unidentified,
+        );
+        assert_eq!(work.len(), 1, "the held-back file is invisible to a pass");
+        let row = &work[0];
+        assert!(
+            row.recording.is_none(),
+            "a performance was minted after all"
+        );
+        assert!(row.encoding.is_some(), "nothing to propose against");
+        assert_eq!(
+            row.locator.as_deref(),
+            Some(path.display().to_string().as_str()),
+            "a pass cannot open it"
+        );
+
+        // **And it stops being work once it is named.** The claim is what the
+        // tags said; binding the encoding is what answers the question.
+        let named = Id::<Recording>::of_basis(&Basis::MusicBrainz(uuid::Uuid::from_u128(7)));
+        let mut log = i.records().clone();
+        log.extend(records(
+            300,
+            [
+                Fact::RecordingIdentified {
+                    recording: named,
+                    basis: Basis::MusicBrainz(uuid::Uuid::from_u128(7)),
+                },
+                Fact::EncodingBound {
+                    encoding: row.encoding.expect("an encoding"),
+                    from: None,
+                    to: named,
+                },
+            ],
+        ));
+        let after = rows(
+            std::slice::from_ref(&root),
+            &log,
+            device(),
+            400,
+            Only::Unidentified,
+        );
+        assert!(
+            !after.iter().any(|r| r.recording.is_none()),
+            "a named file is still being offered as work"
+        );
+    }
+
     /// showed up.
     #[test]
     fn a_scan_does_not_mint_over_an_identification() {
         let root = dir("relink");
         wav(&root.join("a.wav"), 1000);
 
-        // What the file mints on its own.
+        // What the file mints when somebody takes it unidentified — which
+        // since #160 is the only way it mints anything, and is the state this
+        // test is about: a byte-minted recording that a later identification
+        // moves off. A scan can no longer produce one by itself.
+        let mut taken = crate::model::instance::Instance::new(device());
+        crate::model::populate::populate(
+            &mut taken,
+            std::slice::from_ref(&root),
+            50,
+            crate::model::populate::Admits::Anything,
+        );
         let before = rows(
             std::slice::from_ref(&root),
-            &BTreeSet::new(),
+            taken.records(),
             device(),
             100,
             Only::Everything,
         );
         let encoding = before[0].encoding.expect("an encoding");
-        let minted = before[0].recording;
+        let minted = before[0]
+            .recording
+            .expect("taking it unidentified mints one");
 
         // Somebody identifies it, exactly as `apply` writes one.
         let named = Id::<Recording>::of_basis(&Basis::MusicBrainz(uuid::Uuid::from_u128(1)));
-        let log = records(
+        let mut log = taken.records().clone();
+        log.extend(records(
             200,
             [
                 Fact::RecordingIdentified {
@@ -274,7 +403,7 @@ mod tests {
                     to: named,
                 },
             ],
-        );
+        ));
 
         let after = rows(
             std::slice::from_ref(&root),
@@ -283,13 +412,25 @@ mod tests {
             300,
             Only::Everything,
         );
-        assert_eq!(after.len(), 1, "the file became two recordings");
+        // **The row holding the file names the identified recording.** Asserted
+        // through the encoding rather than by counting rows: the byte-minted
+        // recording is in the log now — it is what the relink moved *off* — and
+        // a recording nothing holds a copy of is an ordinary row (#155), not a
+        // second copy of this file.
+        let holding: Vec<_> = after
+            .iter()
+            .filter(|r| r.encoding == Some(encoding))
+            .collect();
+        assert_eq!(holding.len(), 1, "the file is offered twice");
         assert_eq!(
-            after[0].recording, named,
+            holding[0].recording,
+            Some(named),
             "the scan minted over a decision somebody made"
         );
         assert!(
-            rows(&[root], &log, device(), 300, Only::Unidentified).is_empty(),
+            !rows(&[root], &log, device(), 300, Only::Unidentified)
+                .iter()
+                .any(|r| r.encoding == Some(encoding)),
             "an identified file is still on the work list"
         );
     }
@@ -316,7 +457,7 @@ mod tests {
         let rows = rows(&[root], &log, device(), 200, Only::Everything);
         let row = rows
             .iter()
-            .find(|r| r.recording == elsewhere)
+            .find(|r| r.recording == Some(elsewhere))
             .expect("dropped");
         assert!(row.locator.is_none());
         assert!(row.encoding.is_none());
