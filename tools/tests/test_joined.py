@@ -21,12 +21,23 @@ from gmuse_tools.joined import (
 
 
 def test_a_credit_splits_into_the_names_it_lists() -> None:
-    """`&` inside a name still splits — which is why splitting is not the verdict."""
+    """Splitting is a candidate, not the verdict — but the candidate has to be sane.
+
+    **This asserted `Chus | Ceballos` and that was wrong**, on the theory that
+    a bad split is harmless because the corroboration decides. It is not: the
+    corroboration *agreed*, because a sibling credit listed the same
+    wrongly-split parts in another order, and the pass confirmed its own
+    mistake. See the ampersand test below.
+    """
     assert members("Armand Van Helden,Dizzee Rascal") == ("Armand Van Helden", "Dizzee Rascal")
     assert members("2Pac feat. Danny Boy, Syke & CPO") == ("2Pac", "Danny Boy", "Syke", "CPO"), (
         "without `feat.` the first member is `2Pac feat. Danny Boy`, an artist that never existed"
     )
-    assert members("Chus & Ceballos, DJ Chus, Pablo Ceballos") == ("Chus", "Ceballos", "DJ Chus", "Pablo Ceballos")
+    assert members("Chus & Ceballos, DJ Chus, Pablo Ceballos") == (
+        "Chus & Ceballos",
+        "DJ Chus",
+        "Pablo Ceballos",
+    )
     assert members("Deerhoof") == ("Deerhoof",), "one name is not a list"
 
 
@@ -178,3 +189,48 @@ def test_a_credit_is_proposed_as_the_sleeve_spells_it() -> None:
         )
     }
     assert proposals(work, decided)[0]["artists"] == ["Armand Van Helden", "Dizzee Rascal"]
+
+
+def test_an_ampersand_inside_a_comma_list_stays_part_of_the_name() -> None:
+    """`Chus & Ceballos` is a duo, and the split invented two people.
+
+    The credit is `Chus & Ceballos, DJ Chus, Pablo Ceballos, Leonardo Gonnelli`
+    — the duo *is* DJ Chus and Pablo Ceballos, so the list is redundant and not
+    wrong. Splitting on the ampersand as well produced `Chus` and `Ceballos`,
+    who have never existed.
+
+    Worse, the corroboration agreed: a sibling credit listed the same
+    wrongly-split parts in another order, so the pass confirmed its own mistake
+    and marked it `list`. A fold is the one thing the model cannot repair.
+    """
+    assert members("Chus & Ceballos, DJ Chus, Pablo Ceballos, Leonardo Gonnelli") == (
+        "Chus & Ceballos",
+        "DJ Chus",
+        "Pablo Ceballos",
+        "Leonardo Gonnelli",
+    )
+
+
+def test_the_last_item_is_where_english_puts_the_ampersand() -> None:
+    """So the tail is split by everything, and only the tail."""
+    assert members("Dolly Parton, Linda Ronstadt & Emmylou Harris") == (
+        "Dolly Parton",
+        "Linda Ronstadt",
+        "Emmylou Harris",
+    )
+
+
+def test_a_credit_with_no_comma_is_not_a_list_yet() -> None:
+    """Every joiner applies, which is what makes a bare pair two."""
+    assert members("Stephan Bodzin & Marc Romboy") == ("Stephan Bodzin", "Marc Romboy")
+
+
+def test_featuring_still_splits_inside_the_list() -> None:
+    """The case that put `feat.` in the pattern, and it must not regress.
+
+    `2Pac feat. Danny Boy, Syke & CPO` is four people. A rule that spared every
+    joiner inside a comma list would trade one bug for the one it replaced —
+    MusicBrainz asked about `2Pac feat. Danny Boy`, an artist that has never
+    existed.
+    """
+    assert members("2Pac feat. Danny Boy, Syke & CPO") == ("2Pac", "Danny Boy", "Syke", "CPO")

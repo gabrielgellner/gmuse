@@ -103,6 +103,18 @@ JOINERS: Final = re.compile(
     r"\s*,\s*|\s+&\s+|\s+and\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+[xX]\s+|\s+vs\.?\s+", re.IGNORECASE
 )
 
+#: The joiners that still apply **inside** a comma-separated list — everything
+#: but `&` and `and`.
+#:
+#: A comma is the list separator, so a `&` between two commas is part of a name:
+#: `Chus & Ceballos` is a duo, and splitting it invented `Chus` and `Ceballos`.
+#: A `feat.` never is. `2Pac feat. Danny Boy, Syke & CPO` is four people and the
+#: reason `feat.` joined this pattern in the first place, so dropping it here
+#: would trade one bug for the one it replaced.
+WITHIN: Final = re.compile(
+    r"\s+feat\.?\s+|\s+ft\.?\s+|\s+[xX]\s+|\s+vs\.?\s+", re.IGNORECASE
+)
+
 MB_ARTIST: Final = "https://musicbrainz.org/ws/2/artist"
 #: The one status that carries an answer.
 HTTP_OK: Final = 200
@@ -121,8 +133,37 @@ def key(name: str) -> str:
 
 
 def members(credit: str) -> tuple[str, ...]:
-    """The names a credit appears to list, in the order it lists them."""
-    return tuple(p.strip() for p in JOINERS.split(credit) if p.strip())
+    """The names a credit appears to list, in the order it lists them.
+
+    **A comma is the list separator, and inside a list an `&` is part of a
+    name.** `Chus & Ceballos, DJ Chus, Pablo Ceballos, Leonardo Gonnelli` was
+    split on both and produced `Chus` and `Ceballos` — two artists who have
+    never existed, since the duo *is* DJ Chus and Pablo Ceballos. Worse, the
+    corroboration agreed: a sibling credit listed the same wrongly-split parts
+    in another order, so the pass confirmed its own mistake and marked it
+    `list`.
+
+    **Except the last item**, because that is where English puts the `&`:
+    `Dolly Parton, Linda Ronstadt & Emmylou Harris` is three people and only
+    the final comma-part carries the joiner. So commas divide the list, the
+    tail is divided by everything, and an ampersand anywhere else stays inside
+    the name it belongs to.
+
+    **`feat.` keeps applying throughout**, because it is never part of an act's
+    name: `2Pac feat. Danny Boy, Syke & CPO` is four people, and it is the case
+    that put `feat.` in `JOINERS` to begin with.
+
+    A credit with no comma at all is not a list yet, so every joiner applies —
+    which is what makes `Stephan Bodzin & Marc Romboy` two.
+    """
+    if "," not in credit:
+        return tuple(p.strip() for p in JOINERS.split(credit) if p.strip())
+    listed = [p.strip() for p in credit.split(",") if p.strip()]
+    if not listed:
+        return ()
+    within = [p.strip() for part in listed[:-1] for p in WITHIN.split(part) if p.strip()]
+    tail = [p.strip() for p in JOINERS.split(listed[-1]) if p.strip()]
+    return tuple(within + tail)
 
 
 class Verdict(NamedTuple):
