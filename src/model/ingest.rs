@@ -110,6 +110,21 @@ fn types(tag: Option<&lofty::tag::Tag>) -> Vec<String> {
 
 /// title falls back to the file stem, which is a playable, sortable row rather
 /// than a hole.
+/// The suffix a mastering tool leaves on a filename — #143.
+///
+/// One spelling, in the layer that reads files, because the Python `quality`
+/// pass tests for the same thing and two spellings would let them drift. A
+/// *suffix* on the stem and never a substring: `openpn.mp3` is a file called
+/// `openpn`.
+pub const PROCESSED_MARKER: &str = "_pn";
+
+/// Whether this file's name records that a mastering tool re-encoded it.
+pub fn processed(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| stem.ends_with(PROCESSED_MARKER))
+}
+
 pub fn read(path: &Path) -> Result<Scanned, IngestError> {
     let bad = |message: String| IngestError::Unreadable {
         path: path.display().to_string(),
@@ -134,6 +149,11 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
             title: stem(),
             artist: String::new(),
             identity: None,
+            // **Especially here** (#143). A file whose tags will not parse is
+            // exactly the one whose filename is the only evidence there is,
+            // and this branch dropped it — which is the shape of the whole
+            // problem: the path knows something and nothing carries it.
+            processed: processed(path),
             ..Default::default()
         });
     };
@@ -184,6 +204,10 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // (#145): a record credited to two people may have a single-artist
         // track credit, and on *One from the Heart* it does.
         album_credit_is_joined: names_several(ItemKey::MusicBrainzReleaseArtistId),
+        // **What only the name knows, read while it still exists** (#143).
+        // `shelf render` names a placed file from the library, so this is the
+        // last moment the marker is there to be read.
+        processed: processed(path),
         album_artist_mbid: primary_artist(&get(ItemKey::MusicBrainzReleaseArtistId)),
         // The ladder, best rung first (#89): MusicBrainz where the tags carry
         // it, otherwise whatever authority does name this performance. `None`
@@ -519,6 +543,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// **What only the filename knows, read at the last moment it exists** —
+    /// #143.
+    ///
+    /// `_pn` is a mastering tool's mark, and the cutoff test cannot reach it:
+    /// a competent 320-to-320 pass leaves no wall, and 130 of this
+    /// collection's 144 marked files measure clean. The suffix is the only
+    /// record that it happened.
+    ///
+    /// **And import destroys it.** `shelf render` names a placed file
+    /// `{track} {title}` from the library — measured, 147 marked files on the
+    /// NAS and in staging and **0 in the library**. So this is read while
+    /// scanning and not proposed afterwards, because afterwards there is
+    /// nothing left to read.
+    #[test]
+    fn a_mastering_marker_is_read_from_the_name() {
+        let d = dir("mastering-marker");
+        let marked = d.join("120 - G - John Wizards - Muizenberg (Original Mix)_pn.mp3");
+        let plain = d.join("121 - Em - Jem Cooke - Slowly Burning (Dub).mp3");
+        wav(&marked, 600);
+        wav(&plain, 600);
+
+        assert!(read(&marked).unwrap().processed);
+        assert!(!read(&plain).unwrap().processed);
+
+        // **A suffix on the stem, never a substring.** `openpn.mp3` is a file
+        // called `openpn`, and the Python `quality` pass makes the same
+        // distinction against the same constant.
+        let word = d.join("openpn.mp3");
+        wav(&word, 600);
+        assert!(!read(&word).unwrap().processed);
+
+        // And the extension is not part of the stem, so a marked FLAC reads
+        // the same way a marked MP3 does.
+        let flac = d.join("a_pn.flac");
+        wav(&flac, 600);
+        assert!(processed(&flac));
     }
 
     /// **A tag whose artist-id field is repeated rather than slash-joined** —

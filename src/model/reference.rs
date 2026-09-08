@@ -173,6 +173,20 @@ pub struct Credit {
 // index rather than by name, so this costs the stored form nothing.
 #[serde(rename_all = "snake_case")]
 pub enum Source {
+    /// **Read off the file's name** — #143, and the weakest rung there is.
+    ///
+    /// Below a tag deliberately. A path claim is evidence and never the
+    /// answer: it is recorded, it is queryable, and while any tag says
+    /// anything it does not render. That is the whole discipline — a DJ-pool
+    /// filename carries a chart position where a track number goes, so a rule
+    /// that let the path win would be right about `_pn` and wrong about `37
+    /// Long Chicken` on a two-track release.
+    ///
+    /// Where the path really is the better record — `storage-layout.md` §4's
+    /// ID3v1 stumps — that is settled by MusicBrainz or by a person, not by a
+    /// rung. A ladder cannot encode "better on these files and worse on
+    /// those".
+    Path,
     /// Read off a file. The weakest thing a name can be.
     TagVariant,
     Inferred,
@@ -191,6 +205,7 @@ impl Source {
     /// so `genre[basis=discogs]` matches what a tool wrote (#93).
     pub fn written(self) -> &'static str {
         match self {
+            Source::Path => "path",
             Source::TagVariant => "tag",
             Source::Inferred => "inferred",
             Source::MusicBrainz => "musicbrainz",

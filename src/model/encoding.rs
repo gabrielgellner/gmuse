@@ -209,6 +209,17 @@ pub struct Encoding {
     /// picking between them would be answering a question nobody asked: what
     /// the player wants to know is how long *the thing it opened* is.
     pub length: std::time::Duration,
+    /// **A mastering tool re-encoded this, and the path said so** — #143.
+    ///
+    /// Kept beside the measurement because it answers what the measurement
+    /// cannot: a competent 320-to-320 pass leaves no wall for the cutoff test
+    /// to find, and 130 of this collection's 144 marked files measure clean.
+    ///
+    /// It does not move [`Encoding::verdict`], deliberately. Measured here,
+    /// 9.7% of marked files fail the cutoff test against 6.2% of the rest — a
+    /// complete record of provenance and a poor predictor of damage, and those
+    /// are different jobs. What it is for is being *askable*.
+    pub processed: bool,
     pub cutoff_hz: Option<Measured<u32>>,
     pub gain: Option<Measured<Gain>>,
     /// ReplayGain as the tags claim it — what a fader applies. Not
@@ -458,6 +469,7 @@ mod tests {
             sample_rate: Some(44_100),
             channels: Some(2),
             length: std::time::Duration::from_secs(200),
+            processed: false,
             cutoff_hz: cutoff.map(Measured::now),
             gain: None,
             levels: Levels::default(),

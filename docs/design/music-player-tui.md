@@ -4566,6 +4566,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   Applied here: `Bob Dylan`, `Dolly Parton`, `Flume` and `Hobart Smith` got their names back, 276 files moved out of
   folders named after a credit, and the library reached **6,648 settled, 0 would move** for the first time.
 
+- **2026-09-08** **A path is evidence on the weakest rung, and never the answer (#143).** `paths survey` had produced
+  394 findings that nothing consumed. Asking why turned up the reason it has no `apply` column: **every one of them is
+  on the NAS and not one is a file the library holds.** It is a pre-import report, and the decisions it feeds are
+  tagging decisions made before `shelf import`, not facts applied after.
+
+  `Source::Path` sits **below `TagVariant`**, the weakest rung there is. A path claim is recorded, queryable, and while
+  any tag says anything it does not render. The tempting alternative — put it above, because `storage-layout.md` §4
+  found the path is _better_ evidence on the ID3v1 files — is wrong for the same file set: those DJ-pool names carry a
+  chart position where a track number goes. A ladder cannot encode "better on these files and worse on those", so where
+  the path really is the better record it is settled by MusicBrainz or by a person, not by a rung.
+
+  **Only the 144 mastering markers were easy, and they were easy because nothing contests them**: the path knows
+  something the tags never claimed. The other 250 are disagreements, and they wait — which is the rule, not a shortfall.
+  A first pass takes what needs no adjudication and leaves what does.
+
+  **It had to be read at ingest, not proposed after.** `shelf render` names a placed file from the library, so `_pn` is
+  destroyed by import: 147 marked files on the NAS and in staging, **0 in the library**. A proposal would have had
+  nothing to propose against. And the branch that had to be fixed was the one for files whose tags will not parse —
+  exactly the files whose name is the only evidence there is.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

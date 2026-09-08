@@ -59,6 +59,13 @@ pub struct Scanned {
     /// that record the *track* artist is Crystal Gayle alone, with no slash,
     /// so `credit_is_joined` is false and guards nothing.
     pub album_credit_is_joined: bool,
+    /// **Whether the file's name says a mastering tool re-encoded it** — #143.
+    ///
+    /// The one fact on this struct that comes from the path rather than the
+    /// tags, and it is here because the path is about to stop existing: a
+    /// placed file is named from the library, so import is the last moment the
+    /// `_pn` suffix can be read.
+    pub processed: bool,
     /// Whether the artist tag names **several** artists.
     ///
     /// Picard `/`-joins every credited artist's id, so the field says outright
@@ -526,6 +533,20 @@ impl Instance {
                     to: recording,
                 },
             );
+            // **On the weakest rung**, because it is a claim the path makes
+            // and a path never outranks a tag (#143). Recorded rather than
+            // acted on: it is a complete record of provenance and a poor
+            // predictor of damage — 9.7% of marked files fail the cutoff test
+            // against 6.2% of the rest — and those are different jobs.
+            if s.processed {
+                self.append(
+                    now,
+                    Fact::EncodingProcessed {
+                        encoding,
+                        basis: Source::Path,
+                    },
+                );
+            }
         }
     }
 
@@ -1505,6 +1526,7 @@ mod containment_tests {
             artist: "Bodzin".into(),
             artist_mbid: None,
             credit_is_joined: false,
+            processed: false,
             identity: Some(crate::model::basis::Basis::MusicBrainz(
                 uuid::Uuid::from_u128(u128::from(disc) << 32 | u128::from(track)),
             )),
@@ -1685,6 +1707,41 @@ mod containment_tests {
         let release = Id::<Release>::of_musicbrainz(mbid);
         assert_eq!(l.counted_of(release), Some((1, 2)));
         assert_eq!(l.held_of(release), crate::model::seam::Held::Partial);
+    }
+
+    /// **A path claim is recorded and never outranks a tag** — #143.
+    ///
+    /// The evidence rule this whole pass rests on: a filename and a tag are
+    /// both claims, and the stronger *renders* while the weaker stays
+    /// askable. `Source::Path` is the weakest rung there is, below
+    /// `TagVariant`, because a DJ-pool filename carries a chart position where
+    /// a track number goes — a rule that let the path win would be right about
+    /// `_pn` and wrong about `37 Long Chicken` on a two-track release.
+    #[test]
+    fn a_mastering_marker_is_recorded_on_the_weakest_rung() {
+        use crate::model::reference::Source;
+
+        let mut marked = scan(1, 1, None);
+        marked.processed = true;
+        let mut i = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        i.ingest(100, &[marked.clone(), scan(1, 2, None)]);
+        let cat = i.catalogue();
+
+        let enc = Id::<crate::model::entity::Encoding>::of_audio(&marked.audio);
+        assert_eq!(
+            cat.processed
+                .get(&enc)
+                .map(|by| by.iter().copied().collect::<Vec<_>>()),
+            Some(vec![Source::Path]),
+            "the marker did not land, or landed on the wrong rung"
+        );
+        assert_eq!(cat.processed.len(), 1, "an unmarked file was marked");
+
+        assert!(
+            Source::Path < Source::TagVariant,
+            "**a path must never outrank a tag** — `line_of` takes the strongest \
+             basis present, so this ordering is the whole of the rule"
+        );
     }
 
     /// **A retired disc stops being drawn** — #159, and the case that found it.
@@ -1906,6 +1963,7 @@ mod credit_tests {
             artist: artist.into(),
             artist_mbid: None,
             credit_is_joined: false,
+            processed: false,
             identity: Some(crate::model::basis::Basis::MusicBrainz(
                 uuid::Uuid::from_u128(title.len() as u128),
             )),

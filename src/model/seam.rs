@@ -638,6 +638,7 @@ impl Librarian {
                     sample_rate: d.sample_rate,
                     channels: d.channels,
                     length: std::time::Duration::from_millis(u64::from(d.length_ms)),
+                    processed: cat.processed.contains_key(id),
                     cutoff_hz: cat.measurements.get(id).map(|(hz, analyser)| {
                         crate::model::encoding::Measured {
                             value: *hz,

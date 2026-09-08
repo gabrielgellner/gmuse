@@ -90,9 +90,20 @@ actually are: **one recording, two encodings**, which is the shape `library-api.
 Written down because each of these was hit while doing an ordinary import, and each is a place the flow silently falls
 back to hand-work.
 
-- **`paths survey` output has no route into the library.** 394 findings sit in a TSV — mastering markers, key and BPM
-  disagreements, truncation suspects — and nothing consumes them. The pass that must run first is the one whose answers
-  go nowhere.
+- **`paths survey` output mostly has no route into the library, and one part now does.** Its 394 findings are all on
+  `/Volumes/Media/DanceMusic` — **not one is a file the library holds** — so it is a _pre-import_ report, which is why
+  it has no `apply` column: there is nothing to apply it to.
+
+  The **144 mastering markers** are the part that lands, and they land at ingest rather than through a proposal:
+  `shelf render` names a placed file from the library, so the `_pn` suffix is gone the moment it is imported — measured,
+  147 marked files on the NAS and in staging, **0 in the library**. `read` takes it off the name while the name still
+  says it, and records it at `Source::Path`.
+
+  The other **250 are disagreements between a filename and a tag** — 139 keys, 89 artist/title, 10 truncation suspects,
+  8 tempos — and they stay unrouted **on purpose**. Neither side is authoritative: a filename and a tag are both
+  evidence, and where they disagree and no unique id settles it, the answer is a person. A rule that picked a winner
+  would be right about `_pn` and wrong about `37 Long Chicken` on a two-track release.
+
 - **No stage means "same album, better format".** The FLAC-beside-MP3 case is only reachable by getting both sides onto
   one MusicBrainz release and letting the ids converge. It works, but nothing names the operation, so nothing checks it.
 - **`ingest` handles mp3 and flac.** Anything else — m4a, opus, ogg — still has no front door.

@@ -455,6 +455,30 @@ pub enum Fact {
         winner: Id<Recording>,
     },
 
+    /// **A mastering tool re-encoded this copy, and only the path says so** —
+    /// #143.
+    ///
+    /// The one thing the measurement cannot reach. The cutoff test finds a
+    /// lossy ancestor by the wall an encoder leaves; a competent 320-to-320
+    /// pass leaves no wall, and 130 of this collection's 144 marked files
+    /// measure clean. The `_pn` suffix is the only record that it happened.
+    ///
+    /// **Read at ingest, because import destroys it.** `shelf render` names a
+    /// file `{track} {title}` from the library, so the suffix is gone the
+    /// moment the file is placed — measured: 147 marked files on the NAS and
+    /// in staging, **0 in the library**. A pass that proposed this afterwards
+    /// would have nothing to propose against, which is why it is a scanned
+    /// fact and not a proposal.
+    ///
+    /// **Carries its basis**, because it is evidence like any other claim and
+    /// because a tagger may one day say the same thing another way. On the
+    /// weakest rung, `Source::Path`: it is recorded and queryable and it never
+    /// outranks anything.
+    EncodingProcessed {
+        encoding: Id<Encoding>,
+        basis: crate::model::reference::Source,
+    },
+
     /// **This copy is retired** — the tombstone `storage-layout.md` §6 names
     /// and #159 found missing.
     ///
@@ -1026,6 +1050,12 @@ pub struct Catalogue {
     /// Which slot each copy sits in. Row existence — a file is in one place,
     /// and two devices holding the same file agree about where.
     pub placed: BTreeMap<Id<Encoding>, Id<Track>>,
+    /// Which copies a mastering tool re-encoded, and who says so — #143.
+    ///
+    /// A set of bases rather than one, because claims accumulate: the path
+    /// saying it and a tagger saying it are two pieces of evidence, and their
+    /// agreeing is the most useful thing the pair says.
+    pub processed: BTreeMap<Id<Encoding>, BTreeSet<crate::model::reference::Source>>,
     /// Copies the library has retired — #159. Their rows are all still here,
     /// which is what makes the retirement reversible; what changes is that
     /// nothing counts them as a copy the library holds.
@@ -1493,6 +1523,9 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             // **Last word wins**, because these come in a pair: a copy retired
             // and brought back and retired again is retired, and the set is
             // already in stamp order.
+            Fact::EncodingProcessed { encoding, basis } => {
+                cat.processed.entry(*encoding).or_default().insert(*basis);
+            }
             Fact::EncodingRetired { encoding } => {
                 cat.retired.insert(*encoding);
             }
