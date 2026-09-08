@@ -448,18 +448,36 @@ fn run_library(
                 let who = library
                     .reference
                     .credited_as(crate::model::reference::CreditOn::ReleaseGroup(*id));
+                // **Folded, because capitalisation is a typo and not a
+                // distinction.** `normalise` folds case when it mints a group
+                // id for exactly that reason, so a report that compares titles
+                // exactly is asking a different question from the one that
+                // created the duplicate. `Early James — Strange Time To Be
+                // Alive` and `… to Be Alive` are one record held twice, and
+                // this listed neither.
                 by_name
-                    .entry((who, group.title.clone()))
+                    .entry((
+                        crate::model::ingest::normalise(&who),
+                        crate::model::ingest::normalise(&group.title),
+                    ))
                     .or_default()
                     .push(*id);
             }
 
             let mut found = 0usize;
-            for ((who, title), mut ids) in by_name {
+            for ((_, _), mut ids) in by_name {
                 if ids.len() < 2 {
                     continue;
                 }
                 found += 1;
+                // Printed from the winner rather than the folded key, so what
+                // is shown is a title somebody actually wrote.
+                let (who, title) = (
+                    library
+                        .reference
+                        .credited_as(crate::model::reference::CreditOn::ReleaseGroup(ids[0])),
+                    cat.groups[&ids[0]].title.clone(),
+                );
                 // Most files first, so the obvious winner reads first.
                 ids.sort_by_key(|id| std::cmp::Reverse(held.get(id).copied().unwrap_or(0)));
                 println!("{who} — {title}");
