@@ -1108,7 +1108,20 @@ mod perf {
             "{:<28} {:>9} {:>9} {:>9} {:>7}",
             "query", "resolve", "copies", "shelf", "rows"
         );
-        let mut narrowed = std::time::Duration::ZERO;
+        // **Per drawn row, against the whole library's own rate.** The bound
+        // used to be a wall clock — 50ms — and a wall clock measures the
+        // machine as much as the code. Under `cargo test` this runs beside
+        // 1,300 other tests and takes 52-58ms for the contention alone, where
+        // on its own it takes 46-48; so `just ci` failed at random and the one
+        // safe reading of a red bar was "look again".
+        //
+        // The claim was never about milliseconds. #121 is that drawing a view
+        // cost the same whatever the filter matched — 1.3 seconds for a
+        // handful of rows out of 6,485 — so what has to hold is that the cost
+        // *follows the rows*. A ratio says that, and contention cancels out of
+        // it because it inflates both sides equally.
+        let mut full: Option<(std::time::Duration, usize)> = None;
+        let mut worst: Option<(f64, &str, usize)> = None;
         for src in [
             "all",
             r#"genre="Techno""#,
@@ -1135,13 +1148,44 @@ mod perf {
                 shelf.len()
             );
             assert_eq!(shelf.len(), n, "the shelf lost rows the filter matched");
-            if n < rows {
-                narrowed = narrowed.max(grouped);
+
+            match full {
+                // "all" is first, and is the rate everything else is read
+                // against: what this library costs per row when nothing is
+                // filtered out.
+                None => full = Some((grouped, n)),
+                Some((whole, all_rows)) => {
+                    let rate = whole.as_secs_f64() / all_rows as f64;
+                    if n == 0 {
+                        // Nothing drawn, so there is no rate to compare — what
+                        // must hold is that it did not walk the library to
+                        // find that out. Measured at 1.1µs against 331ms.
+                        assert!(
+                            grouped.as_secs_f64() < whole.as_secs_f64() / 10.0,
+                            "a query matching nothing took {grouped:?} against {whole:?} for \
+                             the whole library — it is walking rows it will not draw"
+                        );
+                    } else {
+                        let mine = grouped.as_secs_f64() / n as f64;
+                        if worst.is_none_or(|(w, ..)| mine / rate > w) {
+                            worst = Some((mine / rate, src, n));
+                        }
+                    }
+                }
             }
         }
+
+        let (whole, all_rows) = full.expect("the bench asks for `all` first");
+        let (ratio, src, n) = worst.expect("the bench asks for narrowed views too");
+        // **Four times the full library's rate**, which is loose on purpose:
+        // the numbers sit within 15% of each other in practice (51, 48 and
+        // 45 microseconds a row), and the regression this exists for is not
+        // subtle — drawing 1,090 rows at the whole library's *total* cost is
+        // six times the rate, and 40 rows at it is a hundred and eighty.
         assert!(
-            narrowed < std::time::Duration::from_millis(50),
-            "drawing a narrowed view took {narrowed:?} — it is paying for rows it did not draw"
+            ratio < 4.0,
+            "{src:?} drew {n} of {all_rows} rows at {ratio:.1}x the rate the whole library \
+             manages ({whole:?} for all of it) — it is paying for rows it did not draw"
         );
     }
 }
