@@ -319,6 +319,27 @@ A fingerprint is **not** self-corroborating: the score measures the audio agains
 MusicBrainz id on it was submitted by whoever ran a tagger. `identification-lessons.md` §19 has the measurement — built
 without a name check the pass confirmed fifteen wrong matches at scores up to 1.00.
 
+### Verifying that the account is still true — `shelf verify`
+
+Identity here is the audio, so the library's whole account of itself rests on **one claim per copy**: these bytes
+produce this `AudioId`. Everything else hangs off it — which recording a file holds, which slot it fills, what has been
+said about it. Nothing checked that claim until `shelf verify` existed.
+
+It reads every file this device holds, hashes it again, and compares. A file replaced in place, a re-encode written over
+its original, a copy restored wrong from a backup: each leaves the log describing audio that is not there, and every id
+derived from it silently names the wrong thing. Twenty-two seconds for seven thousand files, which is cheap for the
+question.
+
+**Four answers, and they are different questions.** `agrees`; `changed`, which prints both ids because the difference is
+the finding; `unreadable`, which is a file that is there and will not decode; and `gone`, which is a holding whose path
+no longer exists and says nothing about any bytes. Reporting a moved file as a replacement would send somebody looking
+for a corruption that is not there.
+
+A file on disk that no holding names is not reported — that is `import`'s offer, and a different question.
+
+Measured on this library the first time it ran: **7,059 of 7,059 agree**, nothing changed, nothing unreadable, nothing
+missing.
+
 ### A second copy is reported, not refused — #62
 
 Strictness is about files the library **cannot describe**. A file it describes perfectly well, and has already described

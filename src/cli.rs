@@ -249,6 +249,23 @@ pub enum Shelf {
     /// international, and they are correctly two. So this prints what it found
     /// and how many files sit on each, and a person says which is the winner.
     Duplicates,
+    /// **Does every file still hash to what the log says it is?**
+    ///
+    /// Identity here is the audio, so the library's whole account of itself
+    /// rests on one claim per copy: these bytes produce this `AudioId`. Nothing
+    /// checked it. A file replaced in place, a re-encode written over its
+    /// original, a copy that came back wrong off a backup — all of them leave
+    /// the log describing bytes that are no longer there, and every id derived
+    /// from those bytes silently names the wrong thing.
+    ///
+    /// **Reads only, and reads everything.** About twenty seconds for seven
+    /// thousand files, because each one is decoded far enough to hash. That is
+    /// cheap for the question, which is whether anything the library says is
+    /// still true.
+    ///
+    /// A file on disk that no holding names is not reported here — that is
+    /// `import`'s offer, and a different question.
+    Verify,
     /// **Artists the library holds more than once** — `merge.rs`, and the
     /// split `of_artist` documents as the price of its name fallback.
     ///

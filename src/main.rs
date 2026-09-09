@@ -636,6 +636,59 @@ fn run_library(
                  `AC/DC — High Voltage` is two."
             );
         }
+        cli::Shelf::Verify => {
+            let (log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let cat = log.catalogue();
+            // **This device's holdings.** A locator another machine published
+            // names a path that is not here, and hashing it is not something
+            // this run can do or should claim to have done.
+            let mine = cat.holdings.get(&device);
+            let held: Vec<(
+                &String,
+                crate::model::id::Id<crate::model::entity::Encoding>,
+            )> = mine
+                .map(|a| a.held.iter().map(|(id, at)| (at, *id)).collect())
+                .unwrap_or_default();
+
+            let (mut agrees, mut differs, mut unreadable, mut gone) =
+                (0usize, 0usize, 0usize, 0usize);
+            for (at, said) in &held {
+                match still_holds(at, *said) {
+                    Holds::Agrees => agrees += 1,
+                    // **Both ids, because the difference is the finding.** What
+                    // the library believes it is holding, and what is there.
+                    Holds::Changed(now) => {
+                        differs += 1;
+                        println!("changed\t{at}\t{said}\t{now}");
+                    }
+                    Holds::Unreadable(why) => {
+                        unreadable += 1;
+                        println!("unreadable\t{at}\t{why}");
+                    }
+                    Holds::Gone => {
+                        gone += 1;
+                        println!("gone\t{at}");
+                    }
+                }
+            }
+            eprintln!(
+                "{} holding(s) checked: {agrees} agree, {differs} changed, {unreadable} unreadable, {gone} not on disk",
+                held.len()
+            );
+            if differs == 0 && unreadable == 0 && gone == 0 {
+                eprintln!("every copy still hashes to what the library says it is");
+            } else if differs > 0 {
+                eprintln!(
+                    "\nA changed copy means the bytes were replaced without the library being told.\n\
+                     Its recording, its slot and everything said about it still name the old audio.\n\
+                     `gmuse shelf import <path>` takes the new bytes in as what they are."
+                );
+            }
+        }
         cli::Shelf::Artists => {
             let (mut log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
@@ -1562,6 +1615,45 @@ fn scan_roots(from_catalogs: Vec<PathBuf>, cached: Vec<PathBuf>) -> Vec<PathBuf>
     }
 }
 
+/// What one holding turned out to be, when the bytes were read again.
+#[derive(Debug, PartialEq)]
+enum Holds {
+    /// The file hashes to the id the library recorded for it.
+    Agrees,
+    /// It hashes to something else — the bytes were replaced without the
+    /// library being told, and every id derived from the old ones now names
+    /// audio that is not there.
+    Changed(crate::model::id::Id<crate::model::entity::Encoding>),
+    /// It is there and will not decode.
+    Unreadable(String),
+    /// The holding names a path that no longer exists.
+    Gone,
+}
+
+/// **Read the bytes again and compare** — `shelf verify`.
+///
+/// Identity here is the audio, so one claim per copy carries the library's
+/// whole account of itself: these bytes produce this `AudioId`. Nothing
+/// checked it until this existed.
+fn still_holds(at: &str, said: crate::model::id::Id<crate::model::entity::Encoding>) -> Holds {
+    let path = std::path::Path::new(at);
+    if !path.exists() {
+        return Holds::Gone;
+    }
+    match crate::model::ingest::read(path) {
+        Ok(scanned) => {
+            let now =
+                crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&scanned.audio);
+            if now == said {
+                Holds::Agrees
+            } else {
+                Holds::Changed(now)
+            }
+        }
+        Err(e) => Holds::Unreadable(e.to_string()),
+    }
+}
+
 /// **Where each copy is still held after this retirement** — the guard
 /// `shelf remove` refuses on.
 ///
@@ -1598,6 +1690,73 @@ fn surviving_holders<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tiny real WAV, so there is audio to hash.
+    fn wav(path: &std::path::Path, frames: usize) {
+        use std::io::Write;
+        let bytes = 4 * frames;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(b"RIFF").unwrap();
+        f.write_all(&((36 + bytes) as u32).to_le_bytes()).unwrap();
+        f.write_all(b"WAVEfmt ").unwrap();
+        f.write_all(&16u32.to_le_bytes()).unwrap();
+        f.write_all(&1u16.to_le_bytes()).unwrap();
+        f.write_all(&2u16.to_le_bytes()).unwrap();
+        f.write_all(&44100u32.to_le_bytes()).unwrap();
+        f.write_all(&176_400u32.to_le_bytes()).unwrap();
+        f.write_all(&4u16.to_le_bytes()).unwrap();
+        f.write_all(&16u16.to_le_bytes()).unwrap();
+        f.write_all(b"data").unwrap();
+        f.write_all(&(bytes as u32).to_le_bytes()).unwrap();
+        f.write_all(&vec![0u8; bytes]).unwrap();
+    }
+
+    /// **The claim the whole library rests on, checked** — `shelf verify`.
+    ///
+    /// Identity is the audio, so one statement per copy carries everything:
+    /// these bytes produce this id. A file replaced in place leaves the log
+    /// describing audio that is not there, and every id derived from it names
+    /// the wrong thing — silently, because nothing ever read the bytes again.
+    #[test]
+    fn verify_notices_bytes_that_were_replaced_in_place() {
+        use crate::model::entity::Encoding;
+        use crate::model::id::Id;
+
+        let dir = std::env::temp_dir().join("gmuse-verify");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("a.wav");
+        wav(&at, 1000);
+
+        let said =
+            Id::<Encoding>::of_audio(&crate::model::ingest::read(&at).expect("readable").audio);
+        let path = at.display().to_string();
+        assert_eq!(still_holds(&path, said), Holds::Agrees);
+
+        // The same path, different audio — a re-encode written over its
+        // original, or a copy that came back wrong off a backup.
+        wav(&at, 2000);
+        let Holds::Changed(now) = still_holds(&path, said) else {
+            panic!("a replaced file passed as unchanged")
+        };
+        assert_ne!(now, said);
+
+        std::fs::remove_file(&at).unwrap();
+        assert_eq!(still_holds(&path, said), Holds::Gone);
+    }
+
+    /// **Gone is not changed.** A holding whose file has been moved away says
+    /// nothing about the bytes, and reporting it as a replacement would send
+    /// somebody looking for a corruption that is not there.
+    #[test]
+    fn a_holding_with_no_file_is_its_own_answer() {
+        use crate::model::entity::Encoding;
+        use crate::model::id::Id;
+        assert_eq!(
+            still_holds("/nowhere/at/all.mp3", Id::<Encoding>::derived(b"x")),
+            Holds::Gone
+        );
+    }
 
     /// **A file does not block its own retirement**, and thirty-two of them did.
     ///
