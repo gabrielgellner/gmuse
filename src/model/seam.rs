@@ -250,6 +250,20 @@ impl<'a> Lookup<'a> {
     }
 }
 
+/// Whether `long` is `short` plus a parenthetical — `Innocent When You Dream
+/// (78)` over `Innocent When You Dream`.
+///
+/// A suffix in brackets is a qualifier: which take, which mix, which of two
+/// same-named recordings on the same record. Anything else that merely starts
+/// with the other title is a different song — `Home` and `Home Altars of
+/// Mexico` are not one thing said twice — so the bracket is required, not
+/// incidental.
+fn qualifies(long: &str, short: &str) -> bool {
+    long.len() > short.len()
+        && long.starts_with(short)
+        && long[short.len()..].trim_start().starts_with(['(', '['])
+}
+
 impl Librarian {
     pub fn new() -> Self {
         Librarian {
@@ -320,7 +334,44 @@ impl Librarian {
         let canonical = copy.and_then(|id| self.encodings.encodings.get(&id));
         Some(Row {
             recording,
-            title: rec.title.clone(),
+            // **What the sleeve prints here, where it prints something else.**
+            //
+            // A recording is called one thing and a release may print another:
+            // MusicBrainz's recording is `The Fox` and *Live 1975-85* prints
+            // `The Fox (live)`; the recording is `Phobos` and *Luna* prints
+            // `Phobos (Synthapella)`. `Tracklisted` has recorded that
+            // difference since #310 and nothing read it, so cataloguing 487
+            // tracklists would have stripped `(live)`, `(acoustic)` and
+            // `(Synthapella)` off 87 files — the recording's name is right and
+            // it is not the name of the thing in that slot.
+            //
+            // It cuts both ways, so neither name simply wins. *Beautiful
+            // Maladies* prints `Innocent When You Dream` for the recording
+            // `Innocent When You Dream (78)` — *Frank's Wild Years* carries
+            // both the `(78)` and the `(Barroom)`, and the compilation, having
+            // room for only one, drops the qualifier the recording needs. The
+            // sleeve is shorter there and longer on *Live 1975-85*.
+            //
+            // So: whichever name carries the qualifier. Where one title is the
+            // other plus a parenthetical, the parenthetical is information and
+            // the qualified name is the more precise of the two; where they
+            // differ any other way the sleeve is describing its own disc and
+            // is right about it.
+            //
+            // Only where the copy actually sits on that release. A loose
+            // recording, or one drawn outside any appearance, has no sleeve to
+            // read and takes its own name.
+            title: slot
+                .and_then(|t| self.spine.tracks.get(&t))
+                .and_then(|t| t.title_on_release.as_deref())
+                .map(|sleeve| {
+                    if qualifies(&rec.title, sleeve) {
+                        rec.title.clone()
+                    } else {
+                        sleeve.to_owned()
+                    }
+                })
+                .unwrap_or_else(|| rec.title.clone()),
             file_under: self.files_under(recording, slot, by),
             album: self.album_of(slot),
             // **The length of the copy this would open**, not of the
@@ -1937,6 +1988,107 @@ mod tests {
             l.counted_of(release),
             Some((2, 3)),
             "the numerator is files and the denominator is slots"
+        );
+    }
+
+    /// **The name of the thing in the slot, not the name of the recording** —
+    /// #310 wrote it down and nothing read it.
+    ///
+    /// A release prints what it prints. MusicBrainz's recording is `The Fox`
+    /// and *Live 1975-85* prints `The Fox (live)`; the recording is `Phobos`
+    /// and *Luna* prints `Phobos (Synthapella)`. Both names are correct and
+    /// they name different things, so the row for a copy sitting in that slot
+    /// takes the sleeve's.
+    ///
+    /// The consequence of skipping it is not cosmetic: the storage tree is
+    /// built from the row, so cataloguing 487 tracklists would have renamed
+    /// 87 files to the plainer name and lost `(live)`, `(acoustic)` and
+    /// `(Synthapella)` off disc.
+    #[test]
+    fn a_row_takes_the_name_the_sleeve_prints() {
+        use crate::model::entity::{Medium, Release, Track};
+        use crate::model::spine;
+        use crate::model::spine::Recording as Rec;
+
+        let rec = Id::<Recording>::derived(b"the fox");
+        let release = Id::<Release>::derived(b"live 1975-85");
+        let medium = Id::<Medium>::of_medium(release, 1);
+        let slot = Id::<Track>::derived(b"slot");
+
+        let mut l = Librarian::default();
+        l.spine.recordings.insert(
+            rec,
+            Rec {
+                id: rec,
+                title: "The Fox".into(),
+                work: None,
+                recorded: None,
+                bpm: None,
+                length: Default::default(),
+                pinned: None,
+            },
+        );
+        l.spine.media.insert(
+            medium,
+            spine::Medium {
+                id: medium,
+                release: crate::model::id::Ref::to(release),
+                position: 1,
+                format: None,
+                tracks: Some(1),
+            },
+        );
+        l.spine.tracks.insert(
+            slot,
+            spine::Track {
+                id: slot,
+                medium: crate::model::id::Ref::to(medium),
+                recording: crate::model::id::Ref::to(rec),
+                position: 1,
+                title_on_release: Some("The Fox (live)".into()),
+            },
+        );
+
+        assert_eq!(
+            l.row(rec).map(|r| r.title),
+            Some("The Fox".into()),
+            "asked about the recording and not any appearance of it, \
+             the recording's own name is the answer"
+        );
+
+        let copy = Id::<Encoding>::derived(b"a file");
+        l.placed.insert(copy, slot);
+        l.held = held_index(&l.spine, &l.placed);
+        assert_eq!(
+            l.row_of(rec, Some(copy)).map(|r| r.title),
+            Some("The Fox (live)".into()),
+            "the copy sits in a slot whose sleeve prints a longer name, \
+             and that is the name of the thing there"
+        );
+
+        // And the other direction. *Frank's Wild Years* holds both
+        // `Innocent When You Dream (78)` and `(Barroom)`; the compilation has
+        // room for one and prints the bare title, so here the sleeve is the
+        // name that lost the qualifier and the recording keeps it.
+        l.spine.recordings.get_mut(&rec).unwrap().title = "Innocent When You Dream (78)".into();
+        l.spine.tracks.get_mut(&slot).unwrap().title_on_release =
+            Some("Innocent When You Dream".into());
+        assert_eq!(
+            l.row_of(rec, Some(copy)).map(|r| r.title),
+            Some("Innocent When You Dream (78)".into()),
+            "a compilation that drops the qualifier does not un-distinguish \
+             two recordings that need distinguishing"
+        );
+
+        // A prefix is not a qualifier. Two different songs, one of whose names
+        // begins with the other, stay two songs.
+        l.spine.recordings.get_mut(&rec).unwrap().title = "Home Altars of Mexico".into();
+        l.spine.tracks.get_mut(&slot).unwrap().title_on_release = Some("Home".into());
+        assert_eq!(
+            l.row_of(rec, Some(copy)).map(|r| r.title),
+            Some("Home".into()),
+            "no bracket, so nothing was qualified and the sleeve is describing \
+             its own disc"
         );
     }
 
