@@ -392,6 +392,35 @@ pub enum Proposal {
         artist: Id<Artist>,
         name: String,
     },
+    /// **This recording is called that** — the twin of [`Proposal::Named`] one
+    /// level down, and the thing an identification could not say.
+    ///
+    /// An identification moves an encoding's binding and merges what the old
+    /// id carried, which is right — except when the *title* was the error.
+    /// `James Blake — The Bells Sketch` and `Give a Man a Rod` are one folder
+    /// with their tags transposed; two fingerprints name the other's title at
+    /// 0.98 each, and identifying them fixed both bindings and left both
+    /// labels wrong.
+    ///
+    /// **Separate from the identification on purpose.** A relink is a claim
+    /// about which performance the bytes hold; a title is a claim about what
+    /// it is called, and most relinks should not touch it — the tags were
+    /// right about the name and only vague about the id. Folding the two
+    /// together would make every identification a rename, which is how a
+    /// careful tag gets overwritten by whichever spelling MusicBrainz happens
+    /// to prefer.
+    ///
+    /// So the tool sends it only where it has reason to, and a person reading
+    /// the file sees a rename as a rename.
+    ///
+    /// **`identify fingerprint` sends one where the names differ**, because
+    /// there the record was found by *audio* and a differing title is
+    /// therefore something learned. `propose` never sends one: it found the
+    /// record by title, so the two agree by construction.
+    Retitled {
+        recording: Id<Recording>,
+        title: String,
+    },
     /// **The whole tracklist of one medium** — #155.
     ///
     /// The proposal that lets the library hold *what a record is* rather than
@@ -619,6 +648,10 @@ impl Proposal {
             // side.
             Proposal::ArtistsMerged { winner, .. } => Subject::Artist(*winner),
             Proposal::Named { artist, .. } => Subject::Artist(*artist),
+            // **The recording has to exist.** A title is a description of
+            // something held, and a retitle naming a row nothing points at is
+            // stale rather than wrong.
+            Proposal::Retitled { recording, .. } => Subject::Recording(*recording),
             // **The derived recording**, for the reason `Derived` names its
             // `to`: that is the row this is about. The original is checked in
             // the arm below, where a missing one is a reason to refuse rather
@@ -1216,6 +1249,18 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             vec![Fact::ArtistNamed {
                 artist,
                 name: name.to_string(),
+            }]
+        }
+        Proposal::Retitled { recording, title } => {
+            let title = title.trim();
+            if title.is_empty() {
+                // **A row with no title cannot be found or played**, and unlike
+                // a missing artist name there is nothing else to draw it by.
+                return Err("a recording needs a title".into());
+            }
+            vec![Fact::RecordingRetitled {
+                recording,
+                title: title.to_string(),
             }]
         }
         Proposal::Contributed {
@@ -2674,6 +2719,55 @@ mod merged {
         let text = serde_json::to_string(&p).expect("serialises");
         let (_, report) = parse(&text, dev(), 100, HELD);
         assert_eq!(report.refused.len(), 1, "{report}");
+    }
+
+    /// **A retitle names a row, and refuses an empty one.**
+    ///
+    /// Unlike a missing artist name — which `line_of` can at least drop — a
+    /// recording with no title cannot be found or played at all, so there is
+    /// nothing to fall back to.
+    #[test]
+    fn a_retitle_needs_a_title_and_a_row_that_exists() {
+        let good = Proposal::Retitled {
+            recording: rec(1),
+            title: "Give a Man a Rod".into(),
+        };
+        assert_eq!(good.subject(), Subject::Recording(rec(1)));
+        let (records, report) = parse(
+            &serde_json::to_string(&good).expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(report.applied, 1, "{report}");
+        assert!(matches!(
+            records.iter().next().map(|r| &r.fact),
+            Some(Fact::RecordingRetitled { title, .. }) if title == "Give a Man a Rod"
+        ));
+
+        let blank = Proposal::Retitled {
+            recording: rec(1),
+            title: "   ".into(),
+        };
+        let (_, refused) = parse(
+            &serde_json::to_string(&blank).expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(refused.refused.len(), 1, "{refused}");
+
+        let stale = Proposal::Retitled {
+            recording: Id::derived(b"never heard of it"),
+            title: "Anything".into(),
+        };
+        let (_, unknown) = parse(
+            &serde_json::to_string(&stale).expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(unknown.unknown.len(), 1, "{unknown}");
     }
 
     #[test]

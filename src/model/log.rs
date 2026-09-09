@@ -571,6 +571,44 @@ pub enum Fact {
         winner: Id<ReleaseGroup>,
     },
 
+    /// **This recording is called that** — the recording-level twin of
+    /// [`Fact::ArtistNamed`], and the fact an identification could not write.
+    ///
+    /// **An identification moves the identity, not the description**, and for
+    /// the ordinary case that is right: the tags already gave a title and a
+    /// MusicBrainz id only settles *which performance* it is, so the label
+    /// should not change underneath somebody.
+    ///
+    /// It is exactly wrong when the title was the thing that was wrong.
+    /// Measured: `James Blake — The Bells Sketch` and `Give a Man a Rod` sit
+    /// in one folder with their tags **transposed**, and two independent
+    /// fingerprints each name the other's title at 0.98, each matching the
+    /// other's length. Identifying them moved both bindings correctly and left
+    /// both labels wrong, because a relink merges the old recording into the
+    /// new one and the old row's title comes along.
+    ///
+    /// So a tool that has learned a better title needs somewhere to say it.
+    /// `identify` has had MusicBrainz's title in hand on every row it has ever
+    /// written and no fact to put it in.
+    ///
+    /// **It outranks a scan, whenever it was written**, and that is not the
+    /// rule `ArtistNamed` follows. Last writer wins was tried first and does
+    /// not work here: `query` and `apply` bring their view up to date by
+    /// walking the disk, and a scan re-asserts `RecordingCatalogued` from the
+    /// tags with a fresh stamp — against the *current* recording id, so after
+    /// a relink it is a new fact rather than a repeat and survives
+    /// `drop_repeats`. Twenty-three retitles applied cleanly and not one was
+    /// visible afterwards, because the next read scanned over them.
+    ///
+    /// So the fold applies these in a pass after the rest. A retitle is
+    /// curation and a scan is a reading; curation wins. That is the same
+    /// relationship `Source` encodes for a claim, and `RecordingCatalogued`
+    /// carries no rung to say it with.
+    RecordingRetitled {
+        recording: Id<Recording>,
+        title: String,
+    },
+
     /// **These two ids are one artist** — `merge.rs`, and the split
     /// `of_artist` documents as the price of having a name-derived fallback.
     ///
@@ -1598,6 +1636,9 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     },
                 );
             }
+            // Applied in the pass below, because a retitle has to outlast a
+            // scan rather than merely follow it.
+            Fact::RecordingRetitled { .. } => {}
             Fact::EncodingClaimed {
                 encoding,
                 artist,
@@ -1749,6 +1790,30 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 let first = cat.acquired.entry(of(recording)).or_insert(*at);
                 *first = (*first).min(*at);
             }
+        }
+    }
+
+    // **Retitles last, and that is a rung rather than an ordering trick.**
+    //
+    // Last writer wins is the rule for a descriptive fact, and it does not
+    // work here: `query` and `apply` bring their view up to date by scanning
+    // the disk, and a scan re-asserts `RecordingCatalogued` from the tags with
+    // a fresh stamp. Worse, it asserts it against the *current* recording id —
+    // so after a relink the fact is new rather than a repeat, `drop_repeats`
+    // keeps it, and it lands on top of anything written earlier.
+    //
+    // Measured the hard way: 23 retitles applied cleanly and not one of them
+    // was visible afterwards, because the next read re-scanned over them.
+    //
+    // So a retitle is curation and a scan is a reading, and curation outranks
+    // a reading whenever it was written. That is the same relationship
+    // `Source` encodes for a claim; `RecordingCatalogued` carries no rung, and
+    // giving it one is a larger change than this needs.
+    for Record { fact, .. } in records {
+        if let Fact::RecordingRetitled { recording, title } = fact
+            && let Some(recorded) = cat.recordings.get_mut(&of(recording))
+        {
+            recorded.title = title.clone();
         }
     }
 
@@ -2451,6 +2516,121 @@ mod merge_tests {
             "the song is listed twice"
         );
         assert_eq!(cat.recordings[&new].title, "0011");
+    }
+
+    /// **A retitle changes the label and nothing else** — the fact an
+    /// identification could not write.
+    ///
+    /// The case that wanted it: two James Blake tracks in one folder with
+    /// their tags transposed. Identifying them bound each encoding to the
+    /// right performance and merged the byte-minted rows away — and left both
+    /// titles wrong, because a merge carries the loser's description onto the
+    /// winner and nothing wrote a new one.
+    #[test]
+    fn a_retitle_moves_the_label_and_leaves_the_credit() {
+        use crate::model::entity::Artist;
+        let song = Id::<Recording>::derived(b"give a man a rod");
+        let blake = Id::<Artist>::derived(b"james blake");
+        let cat = fold(&log([
+            Fact::RecordingCatalogued {
+                recording: song,
+                title: "The Bells Sketch".into(),
+                artist: blake,
+            },
+            Fact::RecordingRetitled {
+                recording: song,
+                title: "Give a Man a Rod".into(),
+            },
+        ]));
+        assert_eq!(cat.recordings[&song].title, "Give a Man a Rod");
+        assert_eq!(
+            cat.recordings[&song].artist, blake,
+            "a retitle is not a recredit"
+        );
+    }
+
+    /// **A retitle outlasts a scan, whenever it was written.**
+    ///
+    /// The bug this exists for: 23 retitles applied cleanly and not one was
+    /// visible afterwards. `query` and `apply` bring their view up to date by
+    /// scanning the disk, and a scan re-asserts `RecordingCatalogued` from the
+    /// tags with a *fresh* stamp — so last-writer-wins hands the tag the win
+    /// on every read, forever.
+    ///
+    /// Note the stamps here: the scan's fact is newer, and the retitle still
+    /// wins. That is the point.
+    #[test]
+    fn a_retitle_is_not_undone_by_the_next_scan() {
+        use crate::model::entity::Artist;
+        let song = Id::<Recording>::derived(b"give a man a rod");
+        let blake = Id::<Artist>::derived(b"james blake");
+        let mut records = log([
+            Fact::RecordingCatalogued {
+                recording: song,
+                title: "The Bells Sketch".into(),
+                artist: blake,
+            },
+            Fact::RecordingRetitled {
+                recording: song,
+                title: "Give a Man a Rod".into(),
+            },
+        ]);
+        // The next read walks the disk and says what the tags still say.
+        records.extend(log([Fact::RecordingCatalogued {
+            recording: song,
+            title: "The Bells Sketch".into(),
+            artist: blake,
+        }]));
+
+        assert_eq!(
+            fold(&records).recordings[&song].title,
+            "Give a Man a Rod",
+            "a scan wrote over a title somebody curated"
+        );
+    }
+
+    /// **And it follows a merge**, which is the shape it actually arrives in:
+    /// an identification merges the byte-minted row into the MusicBrainz one,
+    /// and the retitle names whichever of the two the tool was looking at.
+    #[test]
+    fn a_retitle_reaches_the_row_a_merge_moved_it_to() {
+        use crate::model::entity::Artist;
+        let old = Id::<Recording>::derived(b"minted from bytes");
+        let new = Id::<Recording>::derived(b"named by musicbrainz");
+        let cat = fold(&log([
+            Fact::RecordingCatalogued {
+                recording: old,
+                title: "The Bells Sketch".into(),
+                artist: Id::<Artist>::derived(b"james blake"),
+            },
+            Fact::RecordingMerged {
+                loser: old,
+                winner: new,
+            },
+            Fact::RecordingRetitled {
+                recording: old,
+                title: "Give a Man a Rod".into(),
+            },
+        ]));
+        assert!(!cat.recordings.contains_key(&old));
+        assert_eq!(
+            cat.recordings[&new].title, "Give a Man a Rod",
+            "the retitle did not follow the merge"
+        );
+    }
+
+    /// **A retitle of a row nothing catalogued does nothing.** It describes
+    /// something held; `parse` refuses one whose subject is unknown, and this
+    /// is the fold half of that — a stray fact must not mint a row with a
+    /// title and no artist.
+    #[test]
+    fn a_retitle_does_not_invent_a_recording() {
+        let nobody = Id::<Recording>::derived(b"never catalogued");
+        let cat = fold(&log([Fact::RecordingRetitled {
+            recording: nobody,
+            title: "Out of nowhere".into(),
+        }]));
+        assert!(cat.recordings.is_empty(), "a title minted a row");
     }
 
     /// **An artist merge collapses a split credit into one row.**

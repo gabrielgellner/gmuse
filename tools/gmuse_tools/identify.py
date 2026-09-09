@@ -1233,6 +1233,29 @@ def credited_by_sound(recording: dict[str, Any]) -> str:
     return ", ".join(a["name"] for a in recording.get("artists") or [] if "name" in a)
 
 
+def listened(
+    con: sqlite3.Connection, key: str, path: Path, seconds: float | None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
+    """Fingerprint this file and ask, returning the result, the recording, or why not.
+
+    Three ways to get nothing, and they are different answers rather than one
+    failure: the file would not decode, AcoustID has never heard it or has
+    nothing linked to it, or one AcoustID names several recordings the length
+    cannot separate.
+    """
+    printed = fingerprinted(path)
+    if not printed:
+        return None, None, "fpcalc could not read it"
+    results = heard(con, key, printed[0], printed[1])
+    if not results:
+        return None, None, "nothing MusicBrainz has linked"
+    best = results[0]
+    chosen = sounds_like(best, seconds)
+    if chosen is None:
+        return best, None, "several recordings, and the length cannot separate them"
+    return best, chosen, ""
+
+
 def by_sound(work: Path, out: Path, *, limit: int | None) -> None:
     """Identify by what the file sounds like — #57, and the rung #160 was missing.
 
@@ -1272,6 +1295,7 @@ def by_sound(work: Path, out: Path, *, limit: int | None) -> None:
         return
     con = bronze.open_cache()
     counts = collections.Counter()
+    renamed = 0
     with out.open("w", encoding="utf-8") as sink:
         for row in work_list(work, limit=limit):
             path = Path(row.locator or "")
@@ -1279,18 +1303,9 @@ def by_sound(work: Path, out: Path, *, limit: int | None) -> None:
                 counts["no copy on this device"] += 1
                 continue
             _, seconds = read(path)
-            printed = fingerprinted(path)
-            if not printed:
-                counts["fpcalc could not read it"] += 1
-                continue
-            results = heard(con, key, printed[0], printed[1])
-            if not results:
-                counts["nothing MusicBrainz has linked"] += 1
-                continue
-            best = results[0]
-            chosen = sounds_like(best, seconds)
-            if chosen is None:
-                counts["several recordings, and the length cannot separate them"] += 1
+            best, chosen, why_not = listened(con, key, path, seconds)
+            if chosen is None or best is None:
+                counts[why_not] += 1
                 continue
             score = best.get("score") or 0
             theirs = chosen.get("duration")
@@ -1327,10 +1342,42 @@ def by_sound(work: Path, out: Path, *, limit: int | None) -> None:
                 )
                 + "\n"
             )
+            # **And what it is called** — a `retitled` beside the
+            # identification, where the two names differ by more than nothing.
+            #
+            # **Only on this path.** A name search found the record *by* its
+            # title, so the titles agree by construction and a retitle would
+            # say nothing. A fingerprint found it by audio, so a differing
+            # title is a thing learned — and on a transposed pair it is the
+            # whole finding: `The Bells Sketch` and `Give a Man a Rod` were
+            # identified correctly and stayed labelled wrongly, because a
+            # relink moves the binding and a merge carries the old title.
+            # **Where there is a row to rename.** A held-back file has no
+            # recording yet (#160); the identification above mints one and
+            # catalogues it from the claim, so its title is still the tag's.
+            # Renaming that wants the id the identification is about to mint,
+            # which a tool must not compute — so it waits for the next pass,
+            # when the row is ordinary.
+            if row.recording and folded(ours["title"]) != folded(theirs["title"]):
+                sink.write(
+                    ("" if sure else "# ")
+                    + json.dumps(
+                        {
+                            "fact": "retitled",
+                            "recording": row.recording,
+                            "title": theirs["title"],
+                            "was": ours["title"],
+                        }
+                    )
+                    + "\n"
+                )
+                renamed += 1
     total = sum(counts.values())
     print(f"{total} file(s) listened to -> {out}")
     for k, n in counts.most_common():
         print(f"  {n:4d}  {k}")
+    if renamed:
+        print(f"\n  {renamed} of them are also called something else by MusicBrainz")
 
 
 def existing(root: Path) -> Path:
