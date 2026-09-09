@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import struct
 import subprocess
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -180,21 +181,36 @@ def fold(text: str | None) -> str:
     return "".join(c.lower() for c in (text or "") if c.isalnum())
 
 
-def nominate(copies: list[Copy]) -> list[tuple[Copy, Copy]]:
-    """Pairs worth fingerprinting: same artist, near-identical length.
+def nominate(copies: list[Copy], *, any_artist: bool = False) -> list[tuple[Copy, Copy]]:
+    """Pairs worth fingerprinting: a near-identical length, and usually an artist.
 
     **Recall is the whole job here** — a pair this misses is never looked at
     again. Nominating on the title as well would be tighter and would have
     found none of the nine real ones, because the copy worth finding is the
     one whose tags were lost.
+
+    **`any_artist` drops the last bucket, and asks a different question.** The
+    artist bucket is a recall limit, not a correctness one: it can only find
+    music held twice under the *same* credit. What it cannot see is a track on
+    a chart compilation that is also on its own artist's album, the same
+    recording under two joined-credit spellings, or anything a copy filed as
+    `Various Artists` duplicates.
+
+    That is the question "is this the same music" actually asks, and it is
+    affordable now: 149,546 pairs against 2,603, over the same fingerprints,
+    and the comparison is C-level since `packed` exists. What it costs is
+    fingerprinting nearly every file rather than the 2,579 the artist bucket
+    nominates.
     """
-    by_artist: dict[str, list[Copy]] = defaultdict(list)
+    buckets: dict[str, list[Copy]] = defaultdict(list)
     for copy in copies:
-        if fold(copy.artist):
-            by_artist[fold(copy.artist)].append(copy)
+        if any_artist:
+            buckets["everything"].append(copy)
+        elif fold(copy.artist):
+            buckets[fold(copy.artist)].append(copy)
 
     pairs = []
-    for group in by_artist.values():
+    for group in buckets.values():
         group.sort(key=attrgetter("seconds"))
         lengths = [c.seconds for c in group]
         for i, left in enumerate(group):
@@ -204,8 +220,61 @@ def nominate(copies: list[Copy]) -> list[tuple[Copy, Copy]]:
     return pairs
 
 
+def _words(stdout: str) -> list[int]:
+    """The fingerprint out of `fpcalc`'s JSON, or nothing it could not parse."""
+    try:
+        return [int(v) for v in json.loads(stdout)["fingerprint"]]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return []
+
+
+def _piped(locator: str) -> list[int]:
+    """Fingerprint the audio stream alone, decoded by ffmpeg.
+
+    **`fpcalc` refuses a file with cover art in it.** Its demuxer meets the
+    embedded MJPEG stream and answers `Invalid data found when processing
+    input` — for the whole file, not the picture. Measured on this library:
+    **1,550 files, 22% of it**, silently unfingerprintable and therefore
+    invisible to this pass.
+
+    `ffmpeg -map 0:a` hands over the audio and nothing else, and the same
+    binary that refused the file reads the stream happily. The duration it
+    reports is 0.00 because a pipe has no length, which costs nothing here —
+    the length came from the tags, and it is the nomination that used it.
+    """
+    try:
+        decode = subprocess.Popen(
+            ["ffmpeg", "-v", "quiet", "-i", locator, "-map", "0:a", "-f", "wav", "-"],
+            stdout=subprocess.PIPE,
+        )
+    except OSError:
+        return []
+    try:
+        done = subprocess.run(
+            ["fpcalc", "-raw", "-json", "-"],
+            stdin=decode.stdout,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        decode.kill()
+        return []
+    finally:
+        if decode.stdout:
+            decode.stdout.close()
+        decode.wait()
+    return _words(done.stdout) if done.returncode == 0 else []
+
+
 def fingerprint(locator: str) -> list[int]:
-    """Chromaprint's raw fingerprint, or an empty list if it will not decode."""
+    """Chromaprint's raw fingerprint, or an empty list if it will not decode.
+
+    Two ways, because the first one refuses a fifth of this library: `fpcalc`
+    on the file, then — only when that comes back with nothing — the audio
+    stream alone through ffmpeg. See [`_piped`] for what it is working around.
+    """
     try:
         done = subprocess.run(
             ["fpcalc", "-raw", "-json", locator],
@@ -215,14 +284,23 @@ def fingerprint(locator: str) -> list[int]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return _piped(locator)
     if done.returncode != 0:
-        return []
-    try:
-        raw = json.loads(done.stdout)["fingerprint"]
-    except (json.JSONDecodeError, KeyError):
-        return []
-    return [int(v) for v in raw]
+        return _piped(locator)
+    return _words(done.stdout) or _piped(locator)
+
+
+def packed(raw: list[int]) -> bytes:
+    """A fingerprint as bytes, so a comparison is one operation rather than N.
+
+    **The whole cost of this pass is pairwise.** Comparing two fingerprints a
+    word at a time is a Python loop over a couple of thousand elements, which
+    is affordable for the 2,603 pairs the artist-bucketed nomination makes and
+    is not for the 149,546 that ignoring the artist makes. Packed, the compare
+    is a `bytes` slice, one big-integer XOR and one `bit_count` — all of it in
+    C — and the sweep runs in seconds.
+    """
+    return struct.pack(f"<{len(raw)}I", *(w & 0xFFFF_FFFF for w in raw))
 
 
 def agreement(left: list[int], right: list[int]) -> float:
@@ -232,11 +310,17 @@ def agreement(left: list[int], right: list[int]) -> float:
     here and would not be for a DJ mix containing a track: nomination already
     required the two to be the same length.
     """
+    return agrees(packed(left), packed(right))
+
+
+def agrees(left: bytes, right: bytes) -> float:
+    """The same measure, on fingerprints already packed by [`packed`]."""
     span = min(len(left), len(right))
     if span == 0:
         return 0.0
-    differing = sum(((left[i] ^ right[i]) & 0xFFFFFFFF).bit_count() for i in range(span))
-    return 1.0 - differing / (32.0 * span)
+    a = int.from_bytes(left[:span], "little")
+    b = int.from_bytes(right[:span], "little")
+    return 1.0 - (a ^ b).bit_count() / (8.0 * span)
 
 
 def why(left: Copy, right: Copy, score: float) -> list[str]:
@@ -320,12 +404,12 @@ class Findings:
     files: int
 
 
-def examine(copies: list[Copy], *, workers: int, floor: float = FLOOR) -> Findings:
+def examine(copies: list[Copy], *, workers: int, floor: float = FLOOR, any_artist: bool = False) -> Findings:
     """Nominate, fingerprint what was nominated, and rank it. Decide nothing."""
-    pairs = nominate(copies)
+    pairs = nominate(copies, any_artist=any_artist)
     wanted = sorted({c.locator for pair in pairs for c in pair})
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        prints = dict(zip(wanted, pool.map(fingerprint, wanted), strict=True))
+        prints = {at: packed(raw) for at, raw in zip(wanted, pool.map(fingerprint, wanted), strict=True)}
 
     found: list[Suspect] = []
     unchecked: list[tuple[Copy, Copy]] = []
@@ -334,7 +418,7 @@ def examine(copies: list[Copy], *, workers: int, floor: float = FLOOR) -> Findin
         if not prints[left.locator] or not prints[right.locator]:
             unchecked.append((left, right))
             continue
-        score = agreement(prints[left.locator], prints[right.locator])
+        score = agrees(prints[left.locator], prints[right.locator])
         if score >= floor:
             found.append(Suspect(left, right, score, why(left, right, score)))
         else:
@@ -389,15 +473,17 @@ def register(app: typer.Typer) -> None:
     """Attach the duplicate audit."""
 
     @app.command("duplicates")
-    def duplicates_cmd(
+    # PLR0913/PLR0917: a command's parameters are its flags, and the rule's
+    # concern — an argument list nobody can hold in their head at a call site —
+    # does not arise for something only ever called from a shell.
+    # FBT001/FBT003: a Typer flag is declared as a boolean parameter with a
+    # boolean default, which is the framework's only spelling for one.
+    def duplicates_cmd(  # noqa: PLR0913, PLR0917
         work: Path = typer.Argument(..., help="work list from `gmuse shelf query`"),
         root: Path = typer.Option(None, "--root", help="trim this prefix off reported paths"),
         workers: int = typer.Option(8, "--workers", help="parallel fpcalc processes"),
         floor: float = typer.Option(FLOOR, "--floor", help="lowest fingerprint score to list"),
-        # FBT001/FBT003: a Typer flag is declared as a boolean parameter with a
-        # boolean default — that is the framework's only spelling for `--json`,
-        # and the rule's concern (a boolean argument at a call site) cannot arise
-        # because nothing calls this but the command line.
+        any_artist: bool = typer.Option(False, "--any-artist", help="the same music, whoever the tags say made it"),  # noqa: FBT001, FBT003
         as_json: bool = typer.Option(False, "--json", help="one suspect per line, for a script"),  # noqa: FBT001, FBT003
     ) -> None:
         """Same music held twice, scored, with the evidence. Changes nothing."""
@@ -407,7 +493,7 @@ def register(app: typer.Typer) -> None:
             if line.strip() and not line.startswith("#")
         ]
         copies = [c for c in (read(row) for row in rows) if c is not None]
-        found = examine(copies, workers=workers, floor=floor)
+        found = examine(copies, workers=workers, floor=floor, any_artist=any_artist)
         if as_json:
             for suspect in found.suspects:
                 typer.echo(

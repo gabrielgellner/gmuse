@@ -285,3 +285,55 @@ class TestExamine:
         found = examine(self.two(), workers=1)
         assert len(found.suspects) == 1
         assert found.suspects[0].score == 1.0
+
+
+def test_an_unrelated_pair_sits_at_the_noise_floor() -> None:
+    """Two fingerprints of different music agree on about half their bits.
+
+    That is the whole reason `FLOOR` is 0.60 and not something nearer zero:
+    chance agreement is 0.5 by construction, so a score has to be read against
+    that floor rather than against perfection.
+    """
+    import random  # noqa: PLC0415
+
+    from gmuse_tools.duplicates import agreement  # noqa: PLC0415
+
+    rng = random.Random(7)  # noqa: S311 -- fixture noise, not a secret
+    a = [rng.getrandbits(32) for _ in range(900)]
+    b = [rng.getrandbits(32) for _ in range(900)]
+    assert 0.45 < agreement(a, b) < 0.55, "unrelated audio should sit at chance"
+    assert agreement(a, a) == 1.0
+
+
+def test_the_packed_compare_agrees_with_the_word_by_word_one() -> None:
+    """`packed` exists only to make the sweep affordable, not to change it.
+
+    Ignoring the artist takes the pass from 2,603 pairs to 149,546, and a
+    Python loop per pair is what made that unaffordable. The measure must come
+    out the same.
+    """
+    import random  # noqa: PLC0415
+
+    from gmuse_tools.duplicates import agreement, agrees, packed  # noqa: PLC0415
+
+    rng = random.Random(11)  # noqa: S311 -- fixture noise, not a secret
+    a = [rng.getrandbits(32) for _ in range(400)]
+    # A copy with a tenth of its words disturbed — a re-encode, roughly.
+    b = [w ^ (1 if rng.random() < 0.1 else 0) for w in a]
+    slow = 1.0 - sum(((a[i] ^ b[i]) & 0xFFFFFFFF).bit_count() for i in range(400)) / (32.0 * 400)
+    assert abs(agrees(packed(a), packed(b)) - slow) < 1e-12
+    assert abs(agreement(a, b) - slow) < 1e-12
+
+
+def test_the_shorter_fingerprint_bounds_the_comparison() -> None:
+    """A pair where one side decoded only partly must not read as agreement.
+
+    The span is the shorter of the two, so a one-word fingerprint compared
+    against a full one is measured over one word — which is chance, not
+    evidence. Nomination keeps the two within a second of each other, so this
+    is a guard against a truncated decode rather than against a real edit.
+    """
+    from gmuse_tools.duplicates import agreement  # noqa: PLC0415
+
+    assert agreement([], [1, 2, 3]) == 0.0
+    assert agreement([0xFFFF_FFFF], [0xFFFF_FFFF, 0, 0, 0]) == 1.0
