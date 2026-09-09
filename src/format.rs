@@ -599,6 +599,46 @@ fn render_atoms(atoms: &[Atom], row: &crate::model::rows::Listed<'_>, out: &mut 
 #[cfg(test)]
 mod tests {
 
+    /// **A column a row has no value for should not cost it a gap.**
+    ///
+    /// The tree's track line is `[{track:2}  ]{display_title}  {duration}`,
+    /// and the brackets are the whole of this. A field with no value renders
+    /// nothing but its separator is literal text and stays, so a single with
+    /// no track number read two spaces further in than one with — two
+    /// spellings of the same row, and visible the moment the leaf marker gave
+    /// the eye a fixed point to measure from.
+    #[test]
+    fn a_grouped_column_takes_its_separator_with_it() {
+        let ungrouped = Template::parse("{track:2}  {display_title}").expect("parses");
+        let grouped = Template::parse("[{track:2}  ]{display_title}").expect("parses");
+
+        let mut numbered = full();
+        numbered.tracknumber = Some(20);
+        numbered.title = Some("After Dark".into());
+        let numbered = numbered.drawn();
+        assert_eq!(ungrouped.render(&numbered.listed()), "20  After Dark");
+        assert_eq!(
+            grouped.render(&numbered.listed()),
+            "20  After Dark",
+            "grouping changed a row that has the field"
+        );
+
+        let mut single = full();
+        single.tracknumber = None;
+        single.title = Some("Trilogy Feat. Sabota".into());
+        let single = single.drawn();
+        assert_eq!(
+            ungrouped.render(&single.listed()),
+            "  Trilogy Feat. Sabota",
+            "the separator outlived the field it separates"
+        );
+        assert_eq!(
+            grouped.render(&single.listed()),
+            "Trilogy Feat. Sabota",
+            "the group left its literal behind"
+        );
+    }
+
     /// **Every field is classified, in one place** — #96.
     ///
     /// A field that arrives uncategorised would get an affordance nobody

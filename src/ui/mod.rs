@@ -634,7 +634,13 @@ impl Ui {
             now_playing: crate::format::Template::default(),
             remote_track: None,
             transport_line: crate::format::Template::transport_default(),
-            track_line: crate::format::Template::parse("{track:2}  {display_title}  {duration}")
+            // **The track number is grouped, so a single does not pay for a
+            // column it has no value for.** A field with no value renders
+            // nothing, but its separator is literal text and stays — so a
+            // track with a number read `20  After Dark` and one without read
+            // `  Trilogy`, two spellings of the same row. `[...]` drops the
+            // literal with the field, which is what grouping is for.
+            track_line: crate::format::Template::parse("[{track:2}  ]{display_title}  {duration}")
                 .expect("a literal template"),
             library,
             composed: crate::view::Stack::default(),

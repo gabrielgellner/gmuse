@@ -81,7 +81,16 @@ impl Row {
             // **At the album's indent when it stands in for one**, so the
             // artist's children stay in one column whether they are albums or
             // the tracks that replaced them.
-            Row::Track { alone, .. } => if *alone { "    " } else { "      " }.to_string(),
+            //
+            // **And the caret column always says something.** A track standing
+            // in for its group sits exactly where an album row would, so
+            // nothing distinguished "opens to reveal its tracks" from "is a
+            // track" — and `l` on one looks inviting and does nothing. In a
+            // library of singles that is not an edge case: 466 of 490 albums.
+            //
+            // `▸` closed, `▾` open, `·` nothing to open. One column, three
+            // states, and the widths are unchanged so no row shifts.
+            Row::Track { alone, .. } => if *alone { "  · " } else { "    · " }.to_string(),
         }
     }
 
@@ -661,7 +670,27 @@ impl TreeState {
             None => match row {
                 Row::Artist { .. } => return false,
                 Row::Album { artist, .. } => vec![artist.clone()],
-                Row::Track { artist, album, .. } => vec![artist.clone(), album.clone()],
+                // **A track standing in for its group closes the artist**, not
+                // the album it stands in for. That album has no row (#135), so
+                // closing it folded something invisible: nothing moved, the
+                // cursor could not follow, and `h` looked broken on the
+                // commonest row in a library of singles.
+                //
+                // `reveal_row` already takes this view from the other side —
+                // "a track standing in for its group has only the artist above
+                // it" — and this is the same statement going up.
+                Row::Track {
+                    artist,
+                    album,
+                    alone,
+                    ..
+                } => {
+                    if *alone {
+                        vec![artist.clone()]
+                    } else {
+                        vec![artist.clone(), album.clone()]
+                    }
+                }
             },
         };
         self.folds.close(&target);
@@ -977,14 +1006,95 @@ mod tests {
         );
 
         // The track is there, at the album's indent, and it is a leaf with no
-        // fold — because there is nothing left to open.
+        // fold — because there is nothing left to open. Its caret column says
+        // so: `·` where an album would carry `▸`, in the same column and at
+        // the same width, so the row does not shift and the eye can tell a
+        // thing that opens from a thing that does not.
         let alone = rows
             .iter()
             .find(|r| matches!(r, Row::Track { alone: true, .. }))
             .expect("the track that replaced its album");
-        assert_eq!(alone.label(), "    ");
+        assert_eq!(alone.label(), "  · ");
+        assert_eq!(
+            alone.label().chars().count(),
+            "  ▸ ".chars().count(),
+            "the leaf marker changed the indent an album row sets"
+        );
         assert!(alone.is_leaf());
         assert!(!alone.is_expanded());
+    }
+
+    /// **`h` on a track standing in for its group closes the artist.**
+    ///
+    /// The bug: `close` targeted `[artist, album]` for every track, and a
+    /// track that replaced its album is folding something with no row (#135).
+    /// Nothing moved, the cursor could not follow the fold it had just made,
+    /// and `h` looked broken — on the commonest row in a library of singles,
+    /// where 466 of 490 albums are groups of one.
+    ///
+    /// snacks' rule is that `h` on a closed thing goes up and out. Here "up"
+    /// has to skip the level that was never drawn.
+    #[test]
+    fn closing_a_track_that_replaced_its_album_goes_up_to_the_artist() {
+        let store = store_with(&[
+            ("/m/1.mp3", "Riton", "Fake I.D", "Fake I.D (Original Mix)"),
+            ("/m/2.mp3", "Burial", "Untrue", "Archangel"),
+            ("/m/3.mp3", "Burial", "Untrue", "Shell of Light"),
+        ]);
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&store), true);
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+
+        let at = state
+            .rows(&lib)
+            .iter()
+            .position(|r| matches!(r, Row::Track { alone: true, .. }))
+            .expect("the track that replaced its album");
+        state.selected = at;
+
+        assert!(
+            state.close(&lib),
+            "`h` refused a row it should have acted on"
+        );
+        let row = &state.rows(&lib)[state.selected];
+        assert!(
+            matches!(row, Row::Artist { display, expanded: false, .. } if display == "Riton"),
+            "the cursor did not land on the closed artist: {row:?}"
+        );
+        assert!(
+            !state
+                .rows(&lib)
+                .iter()
+                .any(|r| matches!(r, Row::Track { alone: true, .. })),
+            "the artist closed and its stand-in track is still drawn"
+        );
+    }
+
+    /// **And a track under a real album still closes that album**, which is
+    /// the case the rule was written for — only the elided level is skipped.
+    #[test]
+    fn closing_an_ordinary_track_goes_up_to_its_album() {
+        let store = store_with(&[
+            ("/m/2.mp3", "Burial", "Untrue", "Archangel"),
+            ("/m/3.mp3", "Burial", "Untrue", "Shell of Light"),
+        ]);
+        let lib = Shelf::rebuild(&crate::fixture::from_holdings(&store), true);
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+
+        let at = state
+            .rows(&lib)
+            .iter()
+            .position(|r| matches!(r, Row::Track { alone: false, .. }))
+            .expect("a track under an album of its own");
+        state.selected = at;
+
+        assert!(state.close(&lib));
+        let row = &state.rows(&lib)[state.selected];
+        assert!(
+            matches!(row, Row::Album { display, expanded: false, .. } if display == "Untrue"),
+            "the cursor did not land on the closed album: {row:?}"
+        );
     }
 
     /// **What the collapsed row stands in for still shows** — #135.
