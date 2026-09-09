@@ -377,6 +377,30 @@ fn named_in(credit: &str) -> std::collections::BTreeSet<String> {
 ///
 /// **Derived exactly as `ingest` would derive it**, so the comparison is
 /// against the id that would actually be minted rather than against a string.
+/// **Where the library already says each copy sits**, in the shape `claims`
+/// produces — so the two can be compared.
+///
+/// Read back out of the fold rather than recomputed, for the reason
+/// `report.identified` is: the ladder that chooses these ids lives in one
+/// place, and asking the question a second way is how two answers to it get
+/// into the codebase.
+fn already_placed(cat: &crate::model::log::Catalogue) -> Vec<(Id<Encoding>, Placement)> {
+    let mut out = Vec::new();
+    for (encoding, track) in &cat.placed {
+        let Some(slot) = cat.tracks.get(track) else {
+            continue;
+        };
+        let Some(medium) = cat.media.get(&slot.medium) else {
+            continue;
+        };
+        let Some(release) = cat.releases.get(&medium.release) else {
+            continue;
+        };
+        out.push((*encoding, (release.group, medium.position, slot.position)));
+    }
+    out
+}
+
 fn claims(s: &crate::model::instance::Scanned) -> Option<Placement> {
     let album = s.album.as_deref()?;
     let credited = s.album_artist.as_deref().unwrap_or(&s.artist);
@@ -524,6 +548,26 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64, admits: Ad
 
     let mut wanted: BTreeMap<Id<Encoding>, (Placement, PathBuf)> = BTreeMap::new();
     let mut refused: std::collections::HashSet<Id<Encoding>> = Default::default();
+    // **What the library already says these bytes are**, seeded before this
+    // pass's own files — because the check below was **within one pass only**,
+    // and the copies that disagree are routinely scanned separately.
+    //
+    // Measured: `Luna` is held once under `~/MusicLibrary` with a MusicBrainz
+    // album id, and once under `~/DanceMusic-staging` with seven tags and no
+    // id. Identical audio, so **one encoding** — and importing the staging
+    // folder re-placed all 32 of the library's encodings onto a medium minted
+    // from the album *name*, off the MusicBrainz-derived medium their
+    // tracklist sits on. Nothing was reported, because the two files were
+    // never in the same scan for `wanted` to compare.
+    //
+    // Same shape as the `Early James` retirement (`surviving_holders`): two
+    // paths are one encoding, and the second one to be looked at wins.
+    for (encoding, placement) in already_placed(&crate::model::log::fold(&before)) {
+        wanted.insert(
+            encoding,
+            (placement, PathBuf::from("(what the library already held)")),
+        );
+    }
     for (at, s) in paths_of.iter().zip(&scanned) {
         let encoding = Id::<Encoding>::of_audio(&s.audio);
         let Some(here) = claims(s) else { continue };

@@ -1323,6 +1323,9 @@ type Bindings = BTreeMap<(Id<Encoding>, Option<Id<Recording>>), Vec<(Stamp, Id<R
 pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     let mut cat = Catalogue::default();
     let mut bindings: Bindings = BTreeMap::new();
+    // Every placement each copy has ever been given, in stamp order, so the
+    // pass below can prefer the best-evidenced rather than the last.
+    let mut claimed: BTreeMap<Id<Encoding>, Vec<Id<Track>>> = BTreeMap::new();
 
     // **Merges first, in their own pass.** A merge recorded on Tuesday has to
     // move a rating given on Monday, so it cannot be applied as it is reached
@@ -1650,7 +1653,10 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                     .insert(*encoding, (artist.clone(), title.clone()));
             }
             Fact::EncodingPlaced { encoding, track } => {
+                // Kept in full and resolved below, because the last word is
+                // not always the best one — see the pass after this loop.
                 cat.placed.insert(*encoding, *track);
+                claimed.entry(*encoding).or_default().push(*track);
             }
             // **Last word wins**, because these come in a pair: a copy retired
             // and brought back and retired again is retired, and the set is
@@ -1790,6 +1796,41 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 let first = cat.acquired.entry(of(recording)).or_insert(*at);
                 *first = (*first).min(*at);
             }
+        }
+    }
+
+    // **A placement onto a MusicBrainz release outranks one onto a name.**
+    //
+    // Last writer wins was the rule and it loses real information. A release
+    // is minted from its MusicBrainz id where the tags carry one and from its
+    // release group otherwise (`of_release`), and **identical audio is one
+    // encoding however many files hold it** — so scanning a badly tagged copy
+    // re-places the well tagged one.
+    //
+    // Measured: `Luna` is held under `~/MusicLibrary` with a MusicBrainz album
+    // id and was held under `~/DanceMusic-staging` with seven tags and none.
+    // Same audio, so the same 32 encodings — and importing the staging folder
+    // moved all 32 onto a medium minted from the album *name*, off the
+    // MusicBrainz-derived medium where their catalogued tracklist sits. The
+    // tracklist then appeared to have attached to nothing. 39 files across the
+    // library were sitting on the weaker medium when this was written.
+    //
+    // The rung is computable rather than recorded: a release equal to
+    // `of_release(None, group)` was minted from the group, and anything else
+    // came from an id. So no fact needs a new field to say which it was.
+    //
+    // Resolved after the loop because a placement can be folded before the
+    // release it points at, and the rung is a property of that release.
+    for (encoding, tracks) in &claimed {
+        let rung = |t: &Id<Track>| {
+            cat.tracks
+                .get(t)
+                .and_then(|slot| cat.media.get(&slot.medium))
+                .and_then(|m| cat.releases.get(&m.release).map(|r| (m.release, r.group)))
+                .is_some_and(|(release, group)| release != Id::<Release>::of_release(None, group))
+        };
+        if let Some(best) = tracks.iter().rev().find(|t| rung(t)) {
+            cat.placed.insert(*encoding, *best);
         }
     }
 
@@ -2516,6 +2557,117 @@ mod merge_tests {
             "the song is listed twice"
         );
         assert_eq!(cat.recordings[&new].title, "0011");
+    }
+
+    /// **A badly tagged copy does not re-place a well tagged one.**
+    ///
+    /// Identical audio is one encoding however many files hold it, and
+    /// `EncodingPlaced` was last-writer-wins — so scanning the worse copy moved
+    /// the better one. Measured: `Luna` was held under `~/MusicLibrary` with a
+    /// MusicBrainz album id and under `~/DanceMusic-staging` with seven tags
+    /// and none. Importing the staging folder moved all 32 encodings onto a
+    /// medium minted from the album *name*, and the tracklist catalogued
+    /// against the MusicBrainz medium then appeared to have attached to
+    /// nothing. 39 files were sitting on the weaker medium.
+    ///
+    /// The rung is computable: a release equal to `of_release(None, group)`
+    /// came from the group, anything else came from an id.
+    #[test]
+    fn a_placement_from_a_musicbrainz_release_outranks_one_from_a_name() {
+        use crate::model::entity::{Artist, Medium, Release, ReleaseGroup, Track};
+        let group = Id::<ReleaseGroup>::derived(b"luna");
+        let named = Id::<Release>::of_release(None, group);
+        let minted = Id::<Release>::of_musicbrainz(uuid::Uuid::from_u128(0xdc70));
+        let good = Id::<Medium>::of_medium(minted, 1);
+        let weak = Id::<Medium>::of_medium(named, 1);
+        let song = Id::<Recording>::derived(b"triton");
+        let copy = Id::<Encoding>::derived(b"one rip");
+        let here = Id::<Track>::of_track(good, song);
+        let there = Id::<Track>::of_track(weak, song);
+        let disc = |release, medium| Fact::MediumCatalogued {
+            medium,
+            release,
+            position: 1,
+            format: None,
+            tracks: Some(34),
+        };
+        let pressing = |release| Fact::ReleaseCatalogued {
+            release,
+            group,
+            title: "Luna".into(),
+            released: None,
+            label: None,
+            media: Some(1),
+        };
+        let slot = |track, medium| Fact::TrackPlaced {
+            track,
+            medium,
+            recording: song,
+            position: 1,
+            title_on_release: None,
+        };
+        let cat = fold(&log([
+            pressing(minted),
+            pressing(named),
+            disc(minted, good),
+            disc(named, weak),
+            slot(here, good),
+            slot(there, weak),
+            Fact::RecordingCatalogued {
+                recording: song,
+                title: "Triton".into(),
+                artist: Id::<Artist>::derived(b"bodzin"),
+            },
+            // The well tagged copy first, then the badly tagged one — which is
+            // the order that lost the good placement.
+            Fact::EncodingPlaced {
+                encoding: copy,
+                track: here,
+            },
+            Fact::EncodingPlaced {
+                encoding: copy,
+                track: there,
+            },
+        ]));
+        assert_eq!(
+            cat.placed.get(&copy),
+            Some(&here),
+            "the later, worse-evidenced placement won"
+        );
+    }
+
+    /// **And where nothing is better evidenced, the last word still wins.**
+    /// The rung picks the best available; it does not freeze a placement.
+    #[test]
+    fn among_placements_of_one_rung_the_latest_stands() {
+        use crate::model::entity::{Medium, Release, ReleaseGroup, Track};
+        let group = Id::<ReleaseGroup>::derived(b"a record");
+        let named = Id::<Release>::of_release(None, group);
+        let one = Id::<Medium>::of_medium(named, 1);
+        let two = Id::<Medium>::of_medium(named, 2);
+        let song = Id::<Recording>::derived(b"a song");
+        let copy = Id::<Encoding>::derived(b"a copy");
+        let first = Id::<Track>::of_track(one, song);
+        let last = Id::<Track>::of_track(two, song);
+        let cat = fold(&log([
+            Fact::ReleaseCatalogued {
+                release: named,
+                group,
+                title: "A Record".into(),
+                released: None,
+                label: None,
+                media: Some(2),
+            },
+            Fact::EncodingPlaced {
+                encoding: copy,
+                track: first,
+            },
+            Fact::EncodingPlaced {
+                encoding: copy,
+                track: last,
+            },
+        ]));
+        assert_eq!(cat.placed.get(&copy), Some(&last));
     }
 
     /// **A retitle changes the label and nothing else** — the fact an
