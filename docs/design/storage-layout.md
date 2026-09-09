@@ -122,6 +122,20 @@ These were a rendered tree's problem all along; they are now the only tree's pro
 - **Trailing dots**, and carefully: stripping them is a Windows rule, and applied bluntly it turns
   `Manhattan Research, Inc.` into `Manhattan Research, Inc`. The dot is meaning. Strip only where the component would
   otherwise be invalid, and say so.
+- **Typographic marks** — folded to ASCII on write, **built** (#167). MusicBrainz catalogues the sleeve and a sleeve is
+  typeset: `Doin’ Time` with U+2019, `Froggie Went a‐Courtin’` with U+2010, `Live 1975–85` with an en dash. A path is
+  not typeset — it is typed, globbed and tab-completed — and a U+2010 in a name that looks exactly like it has a hyphen
+  is a name nobody can reach. Quotes, hyphens, dashes and the no-break space are written as the ASCII they stand for.
+
+  Three limits, and each one is the rule's edge rather than an exception to it. **Accents are spelling**, so `Sinéad`
+  and `Björk` keep every mark — `’` and `'` are two renderings of one apostrophe, where `é` and `e` are two letters.
+  **Nothing folds into a forbidden character**: `"` is refused here, so `“ ” ″` stay curly rather than land four real
+  titles on `_`. And **`…` is not folded**, because the harm is impersonation and an ellipsis impersonates nothing —
+  folding it would meet the trailing-dot rule above and delete it outright from `When the Pawn…`.
+
+  The library keeps the sleeve's own text either way. This is how a filename is written, at the same standing as
+  replacing a colon — and it is what stops the tree churning every time a better catalogue arrives with better
+  typography.
 
 **The renderer proposes, verifies, and refuses.** A path that is illegal, too long, or already taken by a different
 recording goes to a review list. Silently mangling a name is how a library grows files nobody can find, and this library

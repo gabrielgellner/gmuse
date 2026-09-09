@@ -41,6 +41,19 @@
 //! again on write, which is fine: the NAS is a copy (§8), not a source of
 //! truth.
 
+//! ## Spelled plainly — #167
+//!
+//! The same reasoning one step further. MusicBrainz catalogues the sleeve, and
+//! a sleeve is typeset: `Doin’ Time`, `Froggie Went a‐Courtin’`, `Live
+//! 1975–85`. A path is not typeset — it is typed, globbed and tab-completed —
+//! and a U+2010 in a name that looks exactly like it has a hyphen is a name
+//! nobody can reach. So [`TYPOGRAPHIC`] writes each such mark as the ASCII it
+//! stands for.
+//!
+//! **Marks only.** Accents are spelling and are kept whole. The library keeps
+//! the sleeve's own text either way; this is how a filename is written, which
+//! is the same standing as replacing a colon.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -96,20 +109,75 @@ impl std::fmt::Display for Refused {
     }
 }
 
+/// The ASCII a typographic mark is a variant of — #167.
+///
+/// **A curly quote is a typesetting choice, not a character.** MusicBrainz
+/// catalogues `Doin’ Time` with U+2019 and `Froggie Went a‐Courtin’` with
+/// U+2010, and both are right about the printed sleeve. A path is not printed
+/// — it is typed, globbed, and completed by a shell, and none of those produce
+/// U+2010. A hyphen nobody's keyboard makes, in a name that looks exactly like
+/// one that has a hyphen, is a name that cannot be reached.
+///
+/// So the library keeps the sleeve's spelling and the tree spells it plainly.
+/// The library is still the ledger; this is only how it writes a filename,
+/// which is the same standing as `component` replacing a colon.
+///
+/// **Only marks, never letters.** `Sinéad`, `Björk` and `Beyoncé` keep every
+/// accent: a diacritic is part of how a name is spelled and dropping it is a
+/// misspelling, where `’` and `'` are two renderings of one apostrophe.
+///
+/// `…` is absent for a different reason. The harm this rule addresses is
+/// **impersonation** — `‐` is indistinguishable from `-` and is not one — and
+/// an ellipsis impersonates nothing; it is legible as itself. Folding it would
+/// also destroy the very title the module's `fit` documentation is about:
+/// `When the Pawn…` becomes `When the Pawn...`, and the trailing dots are then
+/// stripped because Windows cannot open a name that ends in one, leaving
+/// `When the Pawn`. The mark stays.
+///
+/// And only where the ASCII form is allowed here, which is why `“ ” ″` are
+/// absent. `"` is in [`FORBIDDEN`], so folding them would land four real
+/// titles — `“En Gallop”`, `No More “I Love You’s”` — on `_`. Turning a
+/// character every filesystem here accepts into one none of them do is
+/// destruction wearing the costume of a normalisation, so the quotes stay
+/// curly.
+const TYPOGRAPHIC: [(char, &str); 11] = [
+    // Apostrophes and the prime that stands in for one.
+    ('\u{2018}', "'"), // ‘ left single quote
+    ('\u{2019}', "'"), // ’ right single quote
+    ('\u{201B}', "'"), // ‛ reversed
+    ('\u{2032}', "'"), // ′ prime — `40′`
+    // Every dash that is a hyphen wearing better clothes.
+    ('\u{2010}', "-"), // ‐ hyphen
+    ('\u{2011}', "-"), // ‑ non-breaking hyphen
+    ('\u{2012}', "-"), // ‒ figure dash
+    ('\u{2013}', "-"), // – en dash
+    ('\u{2014}', "-"), // — em dash
+    ('\u{2212}', "-"), // − minus sign
+    // A space that does not look like one is worse than the others: it is
+    // invisible, and a name with one cannot be typed at all.
+    ('\u{00A0}', " "), // no-break space
+];
+
 /// One component, with the characters a filesystem refuses taken out.
 ///
 /// **Replaced rather than dropped**, so a title does not silently lose a word
 /// boundary. A trailing dot or space is stripped because Windows cannot open a
 /// name that has one — and only there, since `Manhattan Research, Inc.` is a
 /// name and the dot is meaning rather than noise.
+///
+/// Typographic marks are folded first, per [`TYPOGRAPHIC`], and before `fit`
+/// measures — `’` is three bytes and `'` is one, so folding after would spend
+/// a budget on characters the name no longer has.
 fn component(text: &str) -> String {
     let cleaned: String = text
         .chars()
         .map(|c| {
             if FORBIDDEN.contains(&c) || c.is_control() {
-                '_'
+                "_".into()
+            } else if let Some((_, ascii)) = TYPOGRAPHIC.iter().find(|(from, _)| *from == c) {
+                (*ascii).to_owned()
             } else {
-                c
+                c.to_string()
             }
         })
         .collect();
@@ -911,6 +979,90 @@ mod tests {
         assert_eq!(component("O.C.M.S."), "O.C.M.S");
         assert_eq!(component("  spaced  "), "spaced");
         assert_eq!(component("D.T.: Part 1"), "D.T._ Part 1");
+    }
+
+    /// **A path is typed, not printed** — #167.
+    ///
+    /// MusicBrainz catalogues the sleeve, and the sleeve is typeset: `Doin’
+    /// Time` with U+2019, `Froggie Went a‐Courtin’` with U+2010. Neither is on
+    /// anybody's keyboard, and a U+2010 in a name that looks exactly like a
+    /// hyphen is a name no glob reaches. The library keeps the sleeve's
+    /// spelling; the tree spells it plainly.
+    #[test]
+    fn a_typographic_mark_is_written_as_the_ascii_it_stands_for() {
+        assert_eq!(component("Doin’ Time"), "Doin' Time");
+        assert_eq!(
+            component("Froggie Went a‐Courtin’"),
+            "Froggie Went a-Courtin'"
+        );
+        assert_eq!(
+            component("Feelin’ Single — Seein’ Double"),
+            "Feelin' Single - Seein' Double"
+        );
+        assert_eq!(component("Live 1975–85"), "Live 1975-85");
+        assert_eq!(component("40′"), "40'");
+        assert_eq!(
+            component("When the Pawn…"),
+            "When the Pawn…",
+            "an ellipsis impersonates nothing, and folding it would meet the \
+             trailing-dot rule and be stripped away entirely"
+        );
+        assert_eq!(
+            component("Hard\u{a0}Times"),
+            "Hard Times",
+            "an invisible space cannot be typed at all"
+        );
+    }
+
+    /// **A diacritic is spelling, and a curly quote is typesetting.**
+    ///
+    /// `’` and `'` are two renderings of one apostrophe, so choosing the
+    /// typeable one loses nothing. `é` and `e` are different letters, and a
+    /// tree that folded them would be misspelling its artists — which is the
+    /// line the rule stops at.
+    #[test]
+    fn an_accent_is_not_a_typographic_mark() {
+        assert_eq!(component("Sinéad O’Connor"), "Sinéad O'Connor");
+        assert_eq!(component("Björk"), "Björk");
+        assert_eq!(component("Beyoncé"), "Beyoncé");
+        assert_eq!(component("Motörhead"), "Motörhead");
+    }
+
+    /// **Nothing is folded into a character this tree refuses.**
+    ///
+    /// `"` is in `FORBIDDEN` because the shares here will not open it, so
+    /// folding `“ ” ″` would put four real titles on `_` — `“En Gallop”`, `No
+    /// More “I Love You’s”`, `Waiting for Magic (Total remix 7″)`. Turning a
+    /// character every filesystem here accepts into one none of them do is
+    /// destruction dressed as normalisation.
+    #[test]
+    fn a_quote_stays_curly_because_the_straight_one_is_refused() {
+        assert_eq!(component("“En Gallop”"), "“En Gallop”");
+        assert_eq!(
+            component("No More “I Love You’s”"),
+            "No More “I Love You's”"
+        );
+        assert_eq!(
+            component("Waiting for Magic (Total remix 7″)"),
+            "Waiting for Magic (Total remix 7″)"
+        );
+        // And the straight one still goes, so the two are not silently equal.
+        assert_eq!(component("Say \"Yes\""), "Say _Yes_");
+    }
+
+    /// **Folding happens before the budget is measured.**
+    ///
+    /// `’` is three bytes and `'` is one. Measuring first would shorten a name
+    /// against bytes it is about to stop having, and `fit` cuts at a word — so
+    /// the error is a whole word, not a character.
+    #[test]
+    fn the_budget_counts_the_bytes_the_name_will_have() {
+        let curly = "’".repeat(90);
+        assert_eq!(
+            component(&curly).len(),
+            90,
+            "270 bytes of typeset apostrophe is 90 bytes of apostrophe"
+        );
     }
 
     /// **Two copies wanting one path are both refused**, because moving one
