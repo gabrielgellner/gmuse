@@ -205,6 +205,18 @@ That is the whole difference from where this started. "Edit the tag and let the 
 authority and the library a cache of it. "Edit the library and serialize when you want to" makes the library the thing
 and the file a copy — and only one of those survives a second machine.
 
+**When a value is ready to be written back, the rung already says so** (#165). A claim at `TagVariant` came _from_ the
+tag, so exporting it is churn; a claim at `MusicBrainz`, `Discogs` or `Manual` is something the library knows and the
+file does not, and that is the set worth serializing. No new notion of "settled" is needed for this.
+
+**And the export must be recorded, not merely performed.** A value written into a file and read back by a later scan
+becomes evidence for itself. Precedence mostly handles that on its own — a tag enters at `TagVariant` and loses to the
+`Manual` claim that produced it, which is why `RecordingRetitled` outranks a scan rather than racing it. What precedence
+does not handle is **corroboration**: `identification-lessons.md` §19 is the lesson that names are circular evidence on
+a name search and independent evidence on a fingerprint, and an export makes that trap available everywhere. Once the
+library has written its own conclusions into the files, a pass that checks the file against an authority the library
+already consulted is checking its own homework. Knowing which tags the library wrote is what keeps that answerable.
+
 ---
 
 ## 7. Import is strict, and the tools are what make a file ready
