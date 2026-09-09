@@ -102,6 +102,14 @@ pub fn rows(
                 .get(&recorded.artist)
                 .cloned()
                 .unwrap_or_default(),
+            // **Of the copy this device would open**, not of the recording:
+            // two encodings of one performance can differ by a second of
+            // silence, and a pass checking a duration is checking the file it
+            // has in front of it.
+            length_ms: opened
+                .map(|(e, _)| e.id)
+                .and_then(|e| catalogue.encodings.get(&e))
+                .and_then(|e| (e.length_ms > 0).then_some(e.length_ms)),
         });
     }
     // **The bytes nothing has named** — #160, on the same list rather than on
@@ -127,6 +135,10 @@ pub fn rows(
                 .map(|(_, l)| l),
             title: title.clone(),
             artist: artist.clone(),
+            length_ms: catalogue
+                .encodings
+                .get(encoding)
+                .and_then(|e| (e.length_ms > 0).then_some(e.length_ms)),
         });
     }
     out

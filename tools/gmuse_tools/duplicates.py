@@ -165,7 +165,17 @@ def read(row: dict[str, str]) -> Copy | None:
         locator=locator,
         title=row.get("title", ""),
         artist=row.get("artist", ""),
-        seconds=round(probed.info.length, 2),
+        # **The library's length where it has one.** `info.length` is computed
+        # from the Xing header where a file has one and from `size / first
+        # frame's bitrate` where it does not — wrong by up to 26 minutes on
+        # this library. Nomination buckets by duration, so a wrong one hides a
+        # real duplicate in a bucket of its own. The library counts frames at
+        # import, which is exact.
+        seconds=(
+            round(row["length_ms"] / 1000.0, 2)
+            if isinstance(row.get("length_ms"), (int, float)) and row["length_ms"] > 0
+            else round(probed.info.length, 2)
+        ),
         bitrate=getattr(probed.info, "bitrate", 0),
         channels=getattr(probed.info, "channels", 0),
         sample_rate=getattr(probed.info, "sample_rate", 0),

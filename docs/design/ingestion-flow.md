@@ -35,6 +35,13 @@ unconfirmable.
 `rsgain` runs **after** `shelf import`, because it computes album gain per folder and import is what puts the album in
 its folder.
 
+**Step 5 measures the length, and every later step uses that one.** `audio_id` walks every audio packet to hash it, and
+each packet carries the duration of its own frames — so counting them is exact and costs nothing. Every pass that wants
+a duration reads it off the work list rather than asking a tagging library, which computes
+`size / first frame's bitrate` where a file has no Xing header: measured on this library, **34 files wrong by more than
+two seconds, one claiming 1735s for a 287s track**. Duration is what corroborates a MusicBrainz match and what buckets a
+duplicate candidate, so one bad number made a file both unidentifiable and undiscoverable.
+
 **Step 5 now refuses what nothing has named** (#160). `shelf import` used to catalogue anything readable and rest on
 `Basis::Audio` whatever carried no MusicBrainz id — which is how 479 recordings arrived on their bytes in a single run.
 It refuses instead, printing `artist`, `title` and the path for each, and `--unidentified` is the door out for a white

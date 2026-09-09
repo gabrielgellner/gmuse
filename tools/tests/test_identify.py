@@ -353,7 +353,7 @@ def test_a_corroborated_remixer_is_credited_and_an_uncertain_one_is_not() -> Non
     """
     from gmuse_tools.identify import Answer, Work, also  # noqa: PLC0415
 
-    row = Work(recording="rec-1", encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
+    row = Work(recording="rec-1", seconds=300.0, encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
     named = {"id": "mb-1", "title": "How Many Times (Andhim remix)"}
     plain_title = {"id": "mb-2", "title": "How Many Times"}
 
@@ -387,7 +387,7 @@ def test_the_version_qualifier_is_not_emitted_here() -> None:
     """
     from gmuse_tools.identify import Answer, Work, also  # noqa: PLC0415
 
-    row = Work(recording="rec-1", encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
+    row = Work(recording="rec-1", seconds=300.0, encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
     cream = {"id": "mb-1", "title": "Cream"}
     lines = also(row, Answer("Cream", "Cream", None, [cream], cream), "matched")
     assert not any(line.get("fact") == "qualifier_assigned" for line in lines)
@@ -481,7 +481,7 @@ def test_a_bare_mix_names_a_version_and_credits_nobody() -> None:
     """
     from gmuse_tools.identify import Answer, Work, also  # noqa: PLC0415
 
-    row = Work(recording="rec-1", encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
+    row = Work(recording="rec-1", seconds=300.0, encoding="enc-1", locator="/m/a.mp3", title="t", artist="a")
     chosen = {"id": "mb-1", "title": "Only Time (reggae mix)"}
     said = "Only Time (reggae mix)"
     assert also(row, Answer("Only Time", said, "reggae", [chosen], chosen), "matched") == []

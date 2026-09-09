@@ -584,6 +584,24 @@ pub struct Queried {
     pub locator: Option<String>,
     pub title: String,
     pub artist: String,
+    /// **How long it runs, measured** — and the reason it is here rather than
+    /// left to the tool that wants it.
+    ///
+    /// Every pass that uses a duration was opening the file and asking a
+    /// tagging library, which computes one from the Xing header where there is
+    /// one and from `size / first frame's bitrate` where there is not. That is
+    /// wrong by up to 26 minutes on this library, and it is wrong in the
+    /// *same* way in every tool, because they all ask the same kind of
+    /// question of the same kind of parser.
+    ///
+    /// `audio_id` counts the frames at import, which is exact. Carrying the
+    /// answer here is what stops each pass re-deriving it badly — the same
+    /// reason a work list carries an id rather than letting a tool mint one.
+    ///
+    /// `None` for a row this device holds no copy of, which is the only case
+    /// where nothing has been measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length_ms: Option<u32>,
 }
 
 /// What `parse` needs to know about the library it is proposing against.
@@ -2007,6 +2025,7 @@ pub(crate) mod tests {
             recording: Some(rec(1)),
             encoding: Some(enc(1)),
             locator: Some("/m/a.mp3".into()),
+            length_ms: Some(320_000),
             title: "Callisto".into(),
             artist: "Bodzin & Romboy".into(),
         };
@@ -2092,6 +2111,7 @@ pub(crate) mod tests {
             recording: Some(rec(2)),
             encoding: None,
             locator: None,
+            length_ms: None,
             title: "Wanted".into(),
             artist: "Someone".into(),
         };

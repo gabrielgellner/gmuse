@@ -841,6 +841,15 @@ class Work:
     #: this — `identified` names the encoding — but `also` does, and cannot
     #: speak about a performance that does not exist yet.
     recording: str | None
+    #: **How long it runs, as the library measured it** — counted from the
+    #: audio packets at import rather than computed from a bitrate.
+    #:
+    #: This pass used to ask mutagen, which estimates `size / first frame's
+    #: bitrate` where a file carries no Xing header. Measured on the library:
+    #: 34 files wrong by more than two seconds, one of them claiming 1735s for
+    #: a 287s track — and duration is what corroborates every match here, so
+    #: those files could never be identified at all.
+    seconds: float | None
     encoding: str | None
     locator: str | None
     title: str
@@ -860,8 +869,10 @@ def work_list(path: Path, *, limit: int | None = None) -> list[Work]:
         if not line or line.startswith("#"):
             continue
         raw = json.loads(line)
+        ms = raw.get("length_ms")
         row = Work(
             recording=raw.get("recording"),
+            seconds=(ms / 1000.0 if isinstance(ms, (int, float)) and ms > 0 else None),
             encoding=raw.get("encoding"),
             locator=raw.get("locator"),
             title=raw.get("title", ""),
@@ -962,7 +973,8 @@ def derivations(work: Path, out: Path, *, limit: int | None) -> None:
             artist, title, remixer = asked_about(said, "")
             if not remixer or not title:
                 continue
-            _, seconds = read(Path(row.locator or ""))
+            # **The library's length, not the file's.** See `Work.seconds`.
+            seconds = row.seconds
             body = search(con, artist, title)
             candidates = (body or {}).get("recordings") or []
             chosen = best(candidates, seconds, remixer) if candidates else None
@@ -1000,8 +1012,11 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
     todo = []
     for row in work_list(work, limit=limit):
         path = Path(row.locator or "")
-        tags, seconds = read(path)
-        todo.append((row, path, tags, seconds))
+        # **The tags from the file, the length from the library.** The file is
+        # still where the artist and title come from; the duration is not, for
+        # the reason `Work.seconds` gives.
+        tags, measured = read(path)
+        todo.append((row, path, tags, row.seconds if row.seconds is not None else measured))
 
     counts = {"matched": 0, "probable": 0, "uncertain": 0, "nothing": 0}
     held_back = sum(1 for row, *_ in todo if row.recording is None)
@@ -1302,7 +1317,7 @@ def by_sound(work: Path, out: Path, *, limit: int | None) -> None:
             if not path.exists():
                 counts["no copy on this device"] += 1
                 continue
-            _, seconds = read(path)
+            seconds = row.seconds
             best, chosen, why_not = listened(con, key, path, seconds)
             if chosen is None or best is None:
                 counts[why_not] += 1
