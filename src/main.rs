@@ -636,6 +636,85 @@ fn run_library(
                  `AC/DC — High Voltage` is two."
             );
         }
+        cli::Shelf::Copies => {
+            let (log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let cat = log.catalogue();
+            let here = cat.holdings.get(&device);
+            let at: std::collections::BTreeMap<_, &String> = here
+                .map(|a| a.held.iter().map(|(id, path)| (*id, path)).collect())
+                .unwrap_or_default();
+
+            // **Grouped by recording, and only the ones this device can open
+            // twice.** A recording held once here and once on another machine
+            // is not a choice anybody can make from this keyboard.
+            let mut by_recording: std::collections::BTreeMap<_, Vec<_>> = Default::default();
+            for (encoding, path) in &at {
+                if cat.retired.contains(encoding) {
+                    continue;
+                }
+                if let Some(recording) = cat.bound.get(encoding) {
+                    by_recording
+                        .entry(*recording)
+                        .or_insert_with(Vec::new)
+                        .push((*encoding, *path));
+                }
+            }
+
+            let mut found = 0usize;
+            let mut extra = 0usize;
+            for (recording, mut copies) in by_recording {
+                if copies.len() < 2 {
+                    continue;
+                }
+                found += 1;
+                extra += copies.len() - 1;
+                let title = cat
+                    .recordings
+                    .get(&recording)
+                    .map(|r| r.title.as_str())
+                    .unwrap_or("<untitled>");
+                let who = cat
+                    .recordings
+                    .get(&recording)
+                    .and_then(|r| cat.artist_names.get(&r.artist))
+                    .map(String::as_str)
+                    .unwrap_or("");
+                println!("{who} — {title}");
+                // **Best first, by what is measurable**, which is a ranking and
+                // not a verdict: bitrate says nothing about which copy carries
+                // the better tags, and the `Early James` pair is the standing
+                // reminder that the worse-sounding side can be the one worth
+                // keeping.
+                copies.sort_by_key(|(e, _)| {
+                    std::cmp::Reverse(cat.encodings.get(e).map_or(0, |x| x.bitrate))
+                });
+                for (encoding, path) in copies {
+                    let it = cat.encodings.get(&encoding);
+                    // **`lofty` reports kilobits already**, so this is the
+                    // number as stored — dividing it once gave every mp3 in
+                    // the library a bitrate of `0k`.
+                    let kbps = it.map_or(0, |x| x.bitrate);
+                    let fmt = it
+                        .and_then(|x| x.format)
+                        .map_or_else(|| "?".into(), |f| format!("{f:?}").to_lowercase());
+                    let secs = it.map_or(0, |x| x.length_ms) as f64 / 1000.0;
+                    println!("  {kbps:>4}k {fmt:<5} {secs:>7.1}s  {path}");
+                }
+            }
+            eprintln!(
+                "\n{found} recording(s) held more than once here, {extra} file(s) beyond the first."
+            );
+            if found > 0 {
+                eprintln!(
+                    "Sorted by bitrate, which is a ranking and not a recommendation — a second\n\
+                     copy can carry the better tags. `gmuse shelf remove <path>` retires one."
+                );
+            }
+        }
         cli::Shelf::Verify => {
             let (log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
@@ -1755,6 +1834,55 @@ mod tests {
         assert_eq!(
             still_holds("/nowhere/at/all.mp3", Id::<Encoding>::derived(b"x")),
             Holds::Gone
+        );
+    }
+
+    /// **Two files of one recording is a shape the model supports and nothing
+    /// could list** — `shelf copies`.
+    ///
+    /// `query` hands out one locator per recording, so the second copy is on
+    /// no work list; `audit duplicates` asks which *recordings* are the same
+    /// music and only ever sees that one locator; `verify` checks each file
+    /// against its own hash and says nothing about siblings. Measured here:
+    /// **216 recordings held twice**, 67 of them a FLAC beside its MP3.
+    #[test]
+    fn copies_of_one_recording_are_grouped_and_the_rest_are_not() {
+        use crate::model::entity::{Encoding, Recording};
+        use crate::model::id::Id;
+
+        let song = Id::<Recording>::derived(b"closing in");
+        let alone = Id::<Recording>::derived(b"a song held once");
+        let flac = Id::<Encoding>::derived(b"the flac");
+        let mp3 = Id::<Encoding>::derived(b"the mp3");
+        let only = Id::<Encoding>::derived(b"the only copy");
+
+        let bound: std::collections::BTreeMap<_, _> = [(flac, song), (mp3, song), (only, alone)]
+            .into_iter()
+            .collect();
+        let held = [
+            (flac, "/m/a.flac".to_string()),
+            (mp3, "/m/a.mp3".to_string()),
+            (only, "/m/b.mp3".to_string()),
+        ];
+
+        let mut by_recording: std::collections::BTreeMap<_, Vec<_>> = Default::default();
+        for (encoding, path) in &held {
+            if let Some(recording) = bound.get(encoding) {
+                by_recording
+                    .entry(*recording)
+                    .or_insert_with(Vec::new)
+                    .push(path);
+            }
+        }
+        let doubled: Vec<_> = by_recording
+            .iter()
+            .filter(|(_, v)| v.len() > 1)
+            .map(|(r, v)| (*r, v.len()))
+            .collect();
+        assert_eq!(
+            doubled,
+            vec![(song, 2)],
+            "a recording held once was reported, or one held twice was not"
         );
     }
 

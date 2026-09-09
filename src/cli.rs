@@ -249,6 +249,26 @@ pub enum Shelf {
     /// international, and they are correctly two. So this prints what it found
     /// and how many files sit on each, and a person says which is the winner.
     Duplicates,
+    /// **Recordings this device holds more than one file of.**
+    ///
+    /// One performance, several encodings: a FLAC bought over an MP3 already
+    /// held, a re-download, a friend's rip. That is a supported shape — one
+    /// recording with two encodings is what `replace` settled on, and history
+    /// hangs off the recording so it crosses whichever copy is kept — but
+    /// nothing could list them.
+    ///
+    /// The gap that hid: `query` hands out **one locator per recording**, so
+    /// the second copy is not on any work list. `audit duplicates` asks the
+    /// neighbouring question — which *recordings* are the same music — and is
+    /// structurally unable to see two copies of one recording, because it only
+    /// ever sees the one locator. `verify` checks each file against its own
+    /// hash and says nothing about siblings.
+    ///
+    /// So this is the one thing that answers "what do I hold twice", and the
+    /// answer is a question for a person: which to keep, or whether to keep
+    /// both, is not decidable from bitrate alone — a second copy can carry the
+    /// better tags, as the `Early James` pair did.
+    Copies,
     /// **Does every file still hash to what the log says it is?**
     ///
     /// Identity here is the audio, so the library's whole account of itself
