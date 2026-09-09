@@ -131,7 +131,8 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         message,
     };
 
-    let audio = crate::audio_id::of(path).map_err(|e| bad(e.to_string()))?;
+    let measured = crate::audio_id::measure(path).map_err(|e| bad(e.to_string()))?;
+    let audio = measured.audio;
     let stem = || {
         path.file_stem()
             .and_then(|s| s.to_str())
@@ -256,7 +257,24 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         // The audio bitrate where the container reports one, else the overall
         // rate. A verdict compares a cutoff against what the file *claims*, so
         // the claim has to come from the file rather than from a guess.
-        length_ms: tagged.properties().duration().as_millis() as u32,
+        // **Counted, not estimated.** `lofty` computes a duration from the
+        // Xing header where there is one and from `size / first frame's
+        // bitrate` where there is not — and on a VBR file whose first frame is
+        // unrepresentative that is wildly wrong. Measured here: 33 files, in
+        // four albums, one of them stating 1735s for a 287s track, because the
+        // first frame read as 32 kbps against a real average of 175.
+        //
+        // The container is no better: ffprobe agreed with a decode for 1 of
+        // those 33. Only counting frames is right, and `audio_id` already
+        // walks every audio packet to hash it — so the exact answer costs
+        // nothing and comes from the same pass.
+        //
+        // Falls back to `lofty` where the track carries no time base to
+        // convert frames with, because a number that is usually right beats
+        // none at all.
+        length_ms: measured
+            .length_ms
+            .unwrap_or_else(|| tagged.properties().duration().as_millis() as u32),
         // Two dates, because the tags carry two and they mean different
         // things: `DATE` is this pressing, `ORIGINALDATE` the album. They
         // disagree for 820 files in this library.

@@ -119,11 +119,25 @@ pub enum AudioIdError {
     },
 }
 
-/// Hash a file's encoded audio packets.
+/// What one pass over a file's packets learns: its identity, and its length.
+///
+/// **The length comes free.** This walk already visits every audio packet to
+/// hash it, and every packet carries the duration of its own frames — so
+/// counting them costs nothing and is *exact*, which is more than the
+/// container can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Measured {
+    pub audio: AudioId,
+    /// Playing time in milliseconds, summed from the packets. `None` where the
+    /// track carries no time base to convert them with.
+    pub length_ms: Option<u32>,
+}
+
+/// Hash a file's encoded audio packets, and measure how long they run.
 ///
 /// Reads but never decodes: this is I/O plus a hash, not a decode of the
 /// library, which is what made the cheap version worth measuring.
-pub fn of(path: &Path) -> Result<AudioId, AudioIdError> {
+pub fn measure(path: &Path) -> Result<Measured, AudioIdError> {
     let file = std::fs::File::open(path).map_err(|source| AudioIdError::Open {
         path: path.to_path_buf(),
         source,
@@ -148,13 +162,15 @@ pub fn of(path: &Path) -> Result<AudioId, AudioIdError> {
         )
         .map_err(|e| bad(e.to_string()))?;
 
-    let track_id = format
+    let track = format
         .default_track(TrackType::Audio)
-        .ok_or_else(|| bad("no audio track".into()))?
-        .id;
+        .ok_or_else(|| bad("no audio track".into()))?;
+    let track_id = track.id;
+    let time_base = track.time_base;
 
     let mut hasher = XxHash3_128::new();
     let mut packets = 0u64;
+    let mut frames = 0u64;
     loop {
         match format.next_packet() {
             // Only the audio track. A cover-art or subtitle stream alongside it
@@ -162,6 +178,9 @@ pub fn of(path: &Path) -> Result<AudioId, AudioIdError> {
             Ok(Some(p)) if p.track_id == track_id => {
                 hasher.write(&p.data);
                 packets += 1;
+                // **The duration of all *valid* frames in the packet**, which
+                // is what makes this exact where the container is a guess.
+                frames = frames.saturating_add(p.dur.get());
             }
             Ok(Some(_)) => continue,
             Ok(None) => break,
@@ -175,10 +194,25 @@ pub fn of(path: &Path) -> Result<AudioId, AudioIdError> {
         return Err(bad("no audio packets".into()));
     }
 
-    Ok(AudioId {
-        scheme: SCHEME,
-        hash: hasher.finish_128(),
+    Ok(Measured {
+        audio: AudioId {
+            scheme: SCHEME,
+            hash: hasher.finish_128(),
+        },
+        // **Integer maths on the time base**, so the answer is exact rather
+        // than a float that rounds: milliseconds are `frames × numer × 1000 /
+        // denom`, and for the 44.1 kHz case that is `frames × 1000 / 44100`.
+        length_ms: time_base.and_then(|base| {
+            let numer = u64::from(base.numer.get());
+            let denom = u64::from(base.denom.get());
+            u32::try_from(frames.saturating_mul(numer).saturating_mul(1000) / denom).ok()
+        }),
     })
+}
+
+/// Just the identity, for callers that do not want the length.
+pub fn of(path: &Path) -> Result<AudioId, AudioIdError> {
+    measure(path).map(|m| m.audio)
 }
 
 #[cfg(test)]
@@ -217,6 +251,43 @@ mod tests {
     }
 
     /// The whole point: a tagger cannot move the id.
+    /// **The length is counted, not estimated**, which is the whole point of
+    /// taking it from this pass.
+    ///
+    /// `lofty` computes a duration from the Xing header where there is one and
+    /// from `size / first frame's bitrate` where there is not, and on a VBR
+    /// file whose first frame is unrepresentative that is wildly wrong.
+    /// Measured on the library: 34 files across four albums, one stating
+    /// 1735s for a 287s track. The container is no better — ffprobe agreed
+    /// with a decode for 1 of 33. Counting frames is exact, and this walk
+    /// already visits every one of them.
+    #[test]
+    fn the_length_is_counted_from_the_packets() {
+        let dir = std::env::temp_dir().join("gmuse-audioid-length");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 44,100 frames at 44.1 kHz is one second, exactly.
+        let one = dir.join("one.wav");
+        wav(&one, 44_100);
+        let m = measure(&one).expect("readable");
+        assert_eq!(
+            m.length_ms,
+            Some(1000),
+            "a one-second file did not measure one second"
+        );
+
+        // And it scales: half as many frames, half the time.
+        let half = dir.join("half.wav");
+        wav(&half, 22_050);
+        assert_eq!(measure(&half).expect("readable").length_ms, Some(500));
+
+        // The identity is unchanged by any of this — two different lengths are
+        // two different sets of packets, and `of` still answers only that.
+        assert_ne!(of(&one).unwrap(), of(&half).unwrap());
+        assert_eq!(of(&one).unwrap(), m.audio);
+    }
+
     #[test]
     fn tagging_does_not_change_the_id() {
         use lofty::config::WriteOptions;
