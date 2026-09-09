@@ -46,8 +46,8 @@ sliced off a chart compilation walks past the album-shaped gate with nothing to 
 in §4: refused by every route here, and found at score 100 by one recording search. A refused file is not forgotten: its
 bytes are described and held and its tags' claim is recorded, so it appears on `shelf query --unidentified` as a row
 with an encoding, a locator and no recording. An ordinary `identified` proposal against that encoding catalogues it —
-from the claim, without re-reading the file. What is still missing is a pass that walks _that_ list; `identify` reads
-the one produced after cataloguing.
+from the claim, without re-reading the file. `identify propose` reads that list directly: a row with no recording is the
+ordinary case, and the proposal names the encoding either way.
 
 ---
 

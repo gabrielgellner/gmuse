@@ -490,3 +490,60 @@ def test_a_bare_mix_names_a_version_and_credits_nobody() -> None:
     real = {"id": "mb-2", "title": "Only Time (Danny Morris remix)"}
     lines = also(row, Answer("Only Time", "Only Time (Danny Morris remix)", "Danny Morris", [real], real), "matched")
     assert [line["artist"] for line in lines if line["fact"] == "contributed"] == ["Danny Morris"]
+
+
+def test_one_acoustid_linking_several_recordings_needs_a_person() -> None:
+    """One AcoustID is one piece of audio; MusicBrainz may hold it twice.
+
+    `Control Your Mind (vocal mix)` and `Control Your Mind (Vocal Mix)` are two
+    recording ids on one fingerprint, same duration, differing in a capital
+    letter. Either is defensible and they are different ids, so picking one is
+    a judgement rather than a reading — and this library refuses those.
+    """
+    from gmuse_tools.identify import sounds_like  # noqa: PLC0415
+
+    twice = {
+        "recordings": [
+            {"id": "a", "title": "Control Your Mind (vocal mix)", "duration": 560.0},
+            {"id": "b", "title": "Control Your Mind (Vocal Mix)", "duration": 560.0},
+        ]
+    }
+    assert sounds_like(twice, 560.0) is None, "two ids, one performance — a person picks"
+
+    lone = {"recordings": [{"id": "a", "title": "Bear Biscuit", "duration": 210.0}]}
+    assert sounds_like(lone, 210.0)["id"] == "a"
+
+
+def test_a_duration_that_separates_them_is_used() -> None:
+    """Where one candidate is our length and the others are not, that is a reading.
+
+    A single AcoustID legitimately covers a radio edit and its extended mix
+    when the audio overlaps enough; the length is what tells them apart, and it
+    is the only thing here that can — the title is off limits (see
+    `by_sound`).
+    """
+    from gmuse_tools.identify import sounds_like  # noqa: PLC0415
+
+    both = {
+        "recordings": [
+            {"id": "radio", "duration": 210.0},
+            {"id": "extended", "duration": 480.0},
+        ]
+    }
+    assert sounds_like(both, 478.0)["id"] == "extended"
+    assert sounds_like(both, 350.0) is None, "neither is our length"
+    assert sounds_like(both, None) is None, "nothing to separate them with"
+
+
+def test_the_duration_acoustid_sends_is_a_float() -> None:
+    """The bug that silently removed the only corroborator this pass has.
+
+    AcoustID answers `"duration": 560.0`. An `isinstance(..., int)` guard is
+    False for that, so the first full run reported "no duration to check" on
+    every row and confirmed seven matches on the fingerprint score alone. Two
+    of those seven do not survive the check once it runs.
+    """
+    from gmuse_tools.identify import sounds_like  # noqa: PLC0415
+
+    floated = {"recordings": [{"id": "a", "duration": 560.0}, {"id": "b", "duration": 90.0}]}
+    assert sounds_like(floated, 560.0)["id"] == "a", "a float duration was ignored"

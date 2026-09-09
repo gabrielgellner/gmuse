@@ -327,7 +327,53 @@ production treatments, and a blocklist of those would be exactly the sneaky rule
 
 ---
 
-## 19. Related
+## 19. A fingerprint is not self-corroborating
+
+The rung #57 was always described as the strong one: a fingerprint does not care how the tag is spelled, so it finds
+what a name search cannot. That is true, and it is not the whole shape of the thing.
+
+**AcoustID's score is not a measure of the answer.** It says how closely this audio matches a fingerprint AcoustID has
+stored. The MusicBrainz id attached to that fingerprint was submitted by whoever ran a tagger, and a wrong submission is
+permanent. So a score of 1.00 means "this is certainly that fingerprint" and says nothing about whether the fingerprint
+is labelled correctly.
+
+Built on score and duration alone, the first pass over 203 files returned **51 confident matches, of which roughly
+fifteen were wrong** — and wrong in ways no reasonable person would accept:
+
+| ours                                 | what the link said                             | score |
+| ------------------------------------ | ---------------------------------------------- | ----- |
+| Mars Bill — Motorcity                | Profetus — Dead Are Our Leaves of Autumn       | 1.00  |
+| Hey Sunshine (Antonio Giacca Remix)  | Electric Light Orchestra — Roll Over Beethoven | 1.00  |
+| Darius Syrossian — U+I               | Jivemaster — Sonic 3D Blast OC ReMix           | 1.00  |
+| Slip Away (Olivier Giacomotto Remix) | Goldfish — Moonwalk Away (Lexer remix)         | 0.99  |
+
+The design error was mine and it was reasoned, not careless. I turned the title check **off** on purpose, on the
+argument that the audio had already matched — so a differing title must be our tag being wrong, which is exactly the
+case the fingerprint exists to catch. `Trixi B2` really is MusicBrainz's `Trixi 1`. The argument is right about the
+cases it was built from and wrong about the population.
+
+> **The names are circular evidence on a name search and independent evidence on a fingerprint.** On the name path the
+> search was _by_ name, so agreement says the search worked rather than that the record is right, and duration is the
+> only independent axis. On the fingerprint path the search was by audio, so the names are a second axis and the
+> **only** check available on a crowd-sourced link.
+
+So the check comes back, loosely: the artist must **share one name** — `Andhim, Super Flu` against `Andhim` passes — and
+the title must contain the other or read close to it. `Mr. Bass feat. Super Flu (Original Mix)` against `Mr. Bass`
+passes; `Motorcity` against `Dead Are Our Leaves of Autumn` does not. **32 of the 51 survive, and the 19 refused include
+every wrong one.**
+
+**`sources` was measured and is not enough on its own.** A link submitted once is weaker than one submitted fifty times,
+and `sources: 1` does flag three of the bad matches — but eight more had two or more sources and were still wrong. It is
+a signal, not a gate.
+
+**And the accent fold is load-bearing.** `Lvis Mejía` reaches this library as `Lvis Meji` + U+00B4 + `a`, and a
+normaliser that deletes non-ASCII maps those to `lvismejia` and `lvismeja`, which do not match. The first version of the
+name check refused both of that artist's tracks for that reason alone — a correct match thrown away by the guard meant
+to protect it. Fold to ASCII through NFKD; do not strip.
+
+---
+
+## 20. Related
 
 #160 (what the ingest flow should be — the standing question this feeds) · #57 (AcoustID, the rung the ladder is
 missing) · #143 (a path is evidence, on the weakest rung) · #152, #157 (joined credits, in the artist field and the

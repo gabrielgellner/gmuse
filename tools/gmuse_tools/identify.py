@@ -65,9 +65,13 @@ at one request per second, the two roots together are about twenty minutes.
 
 from __future__ import annotations
 
+import collections
 import json
 import re
+import subprocess
+import unicodedata
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -75,7 +79,7 @@ import mutagen
 import typer
 
 from gmuse_tools import bronze
-from gmuse_tools.genre.common import out_path
+from gmuse_tools.genre.common import out_path, secret
 
 if TYPE_CHECKING:
     import sqlite3
@@ -703,6 +707,16 @@ def also(row: Work, answer: Answer, confidence: str) -> list[dict[str, Any]]:
     remixer = answer.remixer
     if confidence not in APPLIES or not remixer or not names(answer.chosen, remixer):
         return []
+    # **Nothing to hang a credit on yet** — #160. A row the library has not
+    # named has no recording, and both facts below are *about* a recording.
+    # The identification on the line above mints one, but its id is
+    # `of_basis(MusicBrainz(...))` and computing that here would be a second
+    # door onto identity (`layers.md` §5: a tool cannot mint an id).
+    #
+    # Not lost: once the identification applies the row is catalogued like any
+    # other, and `identify derivations` reads it off the ordinary work list.
+    if row.recording is None:
+        return []
     # **A bare `mix` names a version, not a person** — see `CREDITS_A_PERSON`.
     # This is the rung between shaping a question and asserting an answer, and
     # it is the only place the distinction matters.
@@ -748,6 +762,30 @@ def also(row: Work, answer: Answer, confidence: str) -> list[dict[str, Any]]:
     return lines
 
 
+def graded(answer: Answer, seconds: float | None) -> tuple[str, str, str | None]:
+    """How much to believe this match, why, and what kind of difference remains.
+
+    Three checks in order, and each can only *lower* the verdict — which is the
+    property that makes them safe to compose. `verdict` grades the name and the
+    duration; the two below are the things those two cannot see.
+    """
+    confidence, why = verdict(answer.chosen, seconds)
+    remixer = answer.remixer
+    # **A remix nobody claims, among candidates the length cannot separate**
+    # (#161). Two remixes of one track are routinely the same length; where
+    # several fit and none says whose remix it is, the duration has decided
+    # nothing and a person should.
+    if confidence == "matched" and contested(answer.candidates, seconds, remixer):
+        confidence = "uncertain"
+        why = f"{why}, but nothing here says it is the {remixer} remix and more than one fits"
+    elif confidence == "matched" and names(answer.chosen, remixer):
+        why = f"{why}, and it names the {remixer} remix"
+    extra = unasked_qualifier(answer.said, str(answer.chosen.get("title") or ""))
+    if confidence == "matched" and extra:
+        return "uncertain", f"{why}, but theirs is {extra}", variance(seconds, answer.chosen.get("length"))
+    return confidence, why, None
+
+
 def verdict(recording: dict[str, Any], ours: float | None) -> tuple[str, str]:
     """How much to believe this candidate, and why.
 
@@ -791,9 +829,18 @@ class Work:
     712 confident matches sat in `tools/out/` that `apply` could not read: a
     path is a property of one machine's copy and names nothing the library
     knows.
+
+    **A row with no recording is the ordinary case now** — #160. The import
+    gate refuses to mint a performance for a file no authority names, so what
+    the library holds is bytes and a claim; the row carries an `encoding` and a
+    `locator` and nothing else to name. That is exactly enough, because an
+    identification names the encoding either way.
     """
 
-    recording: str
+    #: `None` for a row the library has not named. The proposal never used
+    #: this — `identified` names the encoding — but `also` does, and cannot
+    #: speak about a performance that does not exist yet.
+    recording: str | None
     encoding: str | None
     locator: str | None
     title: str
@@ -814,7 +861,7 @@ def work_list(path: Path, *, limit: int | None = None) -> list[Work]:
             continue
         raw = json.loads(line)
         row = Work(
-            recording=raw["recording"],
+            recording=raw.get("recording"),
             encoding=raw.get("encoding"),
             locator=raw.get("locator"),
             title=raw.get("title", ""),
@@ -905,6 +952,12 @@ def derivations(work: Path, out: Path, *, limit: int | None) -> None:
     counts = {"derived": 0, "credited": 0, "unsure": 0, "no candidates": 0}
     with out.open("w", encoding="utf-8") as sink:
         for row in work_list(work, limit=limit):
+            # **Skip what the library has not named** — #160. This command is
+            # for rows already settled against MusicBrainz; a held-back row has
+            # no recording, so `also` can say nothing about it and the search
+            # would spend a rate limit to be told so.
+            if row.recording is None:
+                continue
             said = {"title": row.title, "artist": row.artist}
             artist, title, remixer = asked_about(said, "")
             if not remixer or not title:
@@ -951,6 +1004,7 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
         todo.append((row, path, tags, seconds))
 
     counts = {"matched": 0, "probable": 0, "uncertain": 0, "nothing": 0}
+    held_back = sum(1 for row, *_ in todo if row.recording is None)
     with out.open("w", encoding="utf-8") as sink:
         for row, path, tags, seconds in todo:
             artist, title, remixer = asked_about(tags, path.stem)
@@ -963,21 +1017,10 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
             if chosen is None:
                 counts["nothing"] += 1
                 continue
-            confidence, why = verdict(chosen, seconds)
-            # **A remix nobody claims, among candidates the length cannot
-            # separate** (#161). Two remixes of one track are routinely the
-            # same length; where several fit and none says whose remix it is,
-            # the duration has decided nothing and a person should.
-            if confidence == "matched" and contested(candidates, seconds, remixer):
-                confidence = "uncertain"
-                why = f"{why}, but nothing here says it is the {remixer} remix and more than one fits"
-            elif confidence == "matched" and names(chosen, remixer):
-                why = f"{why}, and it names the {remixer} remix"
-            kind: str | None = None
-            extra = unasked_qualifier(tags.get("title", ""), str(chosen.get("title") or ""))
-            if confidence == "matched" and extra:
-                confidence, why = "uncertain", f"{why}, but theirs is {extra}"
-                kind = variance(seconds, chosen.get("length"))
+            confidence, why, kind = graded(
+                Answer(title, tags.get("title", "") or path.stem, remixer, candidates, chosen),
+                seconds,
+            )
             counts[confidence] += 1
             # Confident rows apply; the rest are commented out, so accepting
             # one is deleting a `#` in the file being reviewed.
@@ -1018,6 +1061,13 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
     applies = sum(counts[level] for level in APPLIES)
     print(f"{total} recordings looked up -> {out}")
     print(f"  {applies} would apply; the rest are commented out")
+    # **How many of these the library never named** — #160. The import gate
+    # holds a file's bytes without minting a performance, so these rows arrive
+    # here with an encoding and no recording. Worth counting separately: it is
+    # the population the gate created, and a matched one is catalogued by this
+    # proposal rather than merely relinked by it.
+    if held_back:
+        print(f"  {held_back} of them the library holds and has never named")
     for level in ("matched", "probable", "uncertain", "nothing"):
         share = f"{100 * counts[level] / total:.1f}%" if total else "-"
         print(f"  {level:9s} {counts[level]:5d}  {share}")
@@ -1030,6 +1080,257 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
 WORK = typer.Argument(help="the work list from `gmuse library query --unidentified`")
 LIMIT = typer.Option(None, help="stop after this many rows")
 OUT = typer.Option(None, help="where to write the proposals")
+
+
+#: Where a fingerprint is looked up. The client key is a `SECRET_PARAMS`
+#: member in `bronze`, so it never reaches a cache key — rotating it is not a
+#: cache flush, and the fingerprint *is* the question being asked.
+ACOUSTID: Final = "https://api.acoustid.org/v2/lookup"
+
+#: Chromaprint's command-line tool. Present already — the fingerprint
+#: experiments in #57 were run with it before there was a key to look one up.
+FPCALC: Final = "fpcalc"
+
+#: An AcoustID match score at or above this is the audio, not a near miss.
+#:
+#: Measured over the first 24 unidentified files with a copy here: every result
+#: that carried a MusicBrainz recording scored **0.76 or better**, and the eight
+#: of them were all correct. Nothing landed in between, so this is set at the
+#: bottom of the observed band rather than at a number chosen for looking safe.
+SURE: Final = 0.70
+
+#: How alike two titles must read before a crowd-sourced link is believed.
+#:
+#: Chosen against the measurement in `corroborates`: at 0.72 every wrong match
+#: in the first run is refused and every right one that differs only by tag
+#: noise survives. It is deliberately loose — `Mr. Bass feat. Super Flu
+#: (Original Mix)` and `Mr. Bass` have to pass.
+ALIKE: Final = 0.72
+
+
+def fingerprinted(path: Path) -> tuple[str, int] | None:
+    """What this file sounds like, as chromaprint hears it.
+
+    **Not cached, and it does not need to be.** The expensive half of this pass
+    is the lookup, and `bronze` caches that keyed by the fingerprint — so a
+    re-run pays `fpcalc` again (about a third of a second a file, a minute for
+    the whole work list) and pays the network nothing.
+    """
+    out = subprocess.run([FPCALC, "-json", str(path)], capture_output=True, text=True, check=False).stdout
+    try:
+        d = json.loads(out)
+        return d["fingerprint"], int(d["duration"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def heard(con: sqlite3.Connection, key: str, fingerprint: str, seconds: int) -> list[dict[str, Any]]:
+    """Every recording AcoustID links to this audio, best score first."""
+    status, body = bronze.get(
+        con,
+        ACOUSTID,
+        {
+            "client": key,
+            "duration": str(seconds),
+            "fingerprint": fingerprint,
+            "meta": "recordings",
+            "format": "json",
+        },
+        headers=USER_AGENT,
+    )
+    if status != HTTP_OK or not isinstance(body, dict):
+        return []
+    found: list[dict[str, Any]] = [r for r in (body.get("results") or []) if r.get("recordings")]
+
+    def strength(result: dict[str, Any]) -> float:
+        return -float(result.get("score") or 0)
+
+    return sorted(found, key=strength)
+
+
+def sounds_like(result: dict[str, Any], seconds: float | None) -> dict[str, Any] | None:
+    """The one recording to believe, among those on a single AcoustID.
+
+    **Duration decides, and it is the only thing that can.** One AcoustID is one
+    piece of audio, so where it links several MusicBrainz recordings they are
+    usually one performance entered twice — but not always, and the title cannot
+    separate them here for the reason given on `credited_by_sound`.
+    """
+    recordings: list[dict[str, Any]] = result.get("recordings") or []
+    if len(recordings) == 1:
+        return recordings[0]
+    if seconds is None:
+        return None
+    close = [
+        # **A float**, and this cost the corroborator once: AcoustID answers
+        # `560.0`, an `isinstance(..., int)` guard is False for it, and every
+        # row of the first run read "no duration to check".
+        r
+        for r in recordings
+        if isinstance(r.get("duration"), (int, float)) and abs(r["duration"] - seconds) <= SAME_RECORDING
+    ]
+    return close[0] if len(close) == 1 else None
+
+
+def folded(text: str) -> str:
+    """A name reduced to what two spellings of it can be expected to share.
+
+    Accents are **folded away**, not stripped: `Lvis Mejía` reaches this pass
+    as `Lvis Meji` + U+00B4 + `a`, because some tagger long ago turned a combining acute
+    into a literal one. Removing every non-ASCII character maps those two to
+    `lvismejia` and `lvismeja`, which then do not match — and the first version
+    of this check refused both of that artist's tracks for exactly that reason.
+    """
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    without_marks = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]", "", without_marks.lower())
+
+
+def named_in(credit: str) -> set[str]:
+    """Every artist a credit string names, folded."""
+    parts = re.split(r"[,;/&]| feat\.? | ft\.? | vs\.? | and ", credit or "", flags=re.IGNORECASE)
+    return {folded(p) for p in parts if folded(p)}
+
+
+def corroborates(ours: dict[str, str], theirs: dict[str, str]) -> bool:
+    """Whether the names agree well enough to believe a crowd-sourced link.
+
+    **A fingerprint is not self-corroborating**, and building this pass without
+    that was the mistake worth recording. `score` measures how closely the audio
+    matches a fingerprint AcoustID has stored; it says nothing about whether the
+    MusicBrainz id somebody attached to that fingerprint is right. The links are
+    submitted by whoever ran a tagger, and a wrong submission is permanent.
+
+    Measured over the first 203 files: **51 matches confident on score and
+    duration alone, of which roughly 15 were wrong** — `Motorcity` to a funeral
+    doom record, a Giacca remix to `Roll Over Beethoven`, a Giacomotto remix to
+    a Lexer one, all at score 1.00.
+
+    So the names come back as the check — and this is the *opposite* of the
+    rule on the name path, for a reason worth stating. There the search is *by*
+    name, so name agreement is circular: it says the search worked, not that
+    the record is right, and duration is the independent axis. Here the search
+    is by audio, so the names are genuinely independent evidence about the link.
+
+    Loose on purpose, because tag noise is exactly what this pass exists to see
+    through: an artist need only **share one name** (`Andhim, Super Flu` against
+    `Andhim`), and a title need only contain the other or be close to it
+    (`Mr. Bass feat. Super Flu (Original Mix)` against `Mr. Bass`). What it
+    refuses is two records with nothing in common.
+    """
+    mine, yours = named_in(ours.get("artist", "")), named_in(theirs.get("artist", ""))
+    shared = bool(mine & yours) or any(a in b or b in a for a in mine for b in yours)
+    if not shared:
+        return False
+    x, y = folded(ours.get("title", "")), folded(theirs.get("title", ""))
+    if not x or not y:
+        return False
+    return x in y or y in x or SequenceMatcher(None, x, y).ratio() >= ALIKE
+
+
+def credited_by_sound(recording: dict[str, Any]) -> str:
+    """A candidate's artists, joined as a tag would write them."""
+    return ", ".join(a["name"] for a in recording.get("artists") or [] if "name" in a)
+
+
+def by_sound(work: Path, out: Path, *, limit: int | None) -> None:
+    """Identify by what the file sounds like — #57, and the rung #160 was missing.
+
+    The ladder `library-api.md` §7 describes runs `MusicBrainz id → fingerprint
+    → recording search → refuse`. Everything but the middle rung existed; this
+    is the middle rung.
+
+    **The title check is off here, and that is the whole point.** `propose`
+    downgrades a match whose title carries something ours does not, because on
+    a *name* search a surprise in the title means the search found the wrong
+    record. On a fingerprint it means the opposite: the audio already matched,
+    so a differing title is the tag being wrong, which is the case this exists
+    to catch. Measured on the first 24 files — every one of these would have
+    been thrown away by a title check, and every one is right:
+
+    | ours | MusicBrainz |
+    | --- | --- |
+    | `Trixi B2` | `Trixi 1` |
+    | `Control of Your Mind (vocal mix)` | `Control Your Mind (vocal mix)` |
+    | `Andhim,Super Flu — Mr. Bass feat. Super Flu` | `Andhim — Mr. Bass` |
+    | `Lvis Meji` U+00B4 `a` | `Lvis Mejía` |
+
+    **So duration is the corroboration**, as it is everywhere else here: the
+    fingerprint says which audio, the length says the library holds that much
+    of it, and nothing else in the response is independent of the match.
+
+    **A fingerprint AcoustID knows with no MusicBrainz recording behind it is
+    not a failure to look up.** It is a different answer — the audio is
+    catalogued and nobody has linked it — and it is two thirds of this work
+    list, so it is counted apart from "never heard of it" rather than folded in
+    with it.
+    """
+    key = secret("ACOUSTID_KEY")
+    if not key:
+        print("no AcoustID key: register at https://acoustid.org/new-application, then")
+        print('  security add-generic-password -a "$USER" -s gmuse-acoustid -w')
+        return
+    con = bronze.open_cache()
+    counts = collections.Counter()
+    with out.open("w", encoding="utf-8") as sink:
+        for row in work_list(work, limit=limit):
+            path = Path(row.locator or "")
+            if not path.exists():
+                counts["no copy on this device"] += 1
+                continue
+            _, seconds = read(path)
+            printed = fingerprinted(path)
+            if not printed:
+                counts["fpcalc could not read it"] += 1
+                continue
+            results = heard(con, key, printed[0], printed[1])
+            if not results:
+                counts["nothing MusicBrainz has linked"] += 1
+                continue
+            best = results[0]
+            chosen = sounds_like(best, seconds)
+            if chosen is None:
+                counts["several recordings, and the length cannot separate them"] += 1
+                continue
+            score = best.get("score") or 0
+            theirs = chosen.get("duration")
+            drift = abs(theirs - seconds) if isinstance(theirs, (int, float)) and seconds else None
+            ours = {"title": row.title, "artist": row.artist}
+            theirs = {"title": chosen.get("title") or "", "artist": credited_by_sound(chosen)}
+            # **Three checks, and the third is the one that was missing.** The
+            # score says the audio matches something AcoustID has stored; the
+            # duration says we hold that much of it; the names say the id
+            # somebody attached to that fingerprint is plausible. Without the
+            # third, 51 matches were confident and about 15 of them were wrong.
+            agrees = corroborates(ours, theirs)
+            sure = score >= SURE and (drift is None or drift <= SAME_RECORDING) and agrees
+            if not sure and score >= SURE and not agrees:
+                counts["the link says a different record"] += 1
+            else:
+                counts["identified" if sure else "for a person to read"] += 1
+            sink.write(
+                ("" if sure else "# ")
+                + json.dumps(
+                    {
+                        "fact": "identified",
+                        "encoding": row.encoding,
+                        "basis": {"musicbrainz": chosen.get("id")},
+                        "locator": str(path),
+                        "confidence": "matched" if sure else "uncertain",
+                        "why": f"fingerprint score {score:.2f}"
+                        + (f", duration within {drift:.0f}s" if drift is not None else ", no duration to check")
+                        + ("" if agrees else ", but the names have nothing in common"),
+                        "acoustid": best.get("id"),
+                        "theirs": theirs,
+                        "ours": ours,
+                    }
+                )
+                + "\n"
+            )
+    total = sum(counts.values())
+    print(f"{total} file(s) listened to -> {out}")
+    for k, n in counts.most_common():
+        print(f"  {n:4d}  {k}")
 
 
 def existing(root: Path) -> Path:
@@ -1059,6 +1360,17 @@ def register(app: typer.Typer) -> None:
         work = existing(work)
         default = out_path(f"derivations-{work.stem.lower()}.jsonl")
         derivations(work, out.expanduser() if out else default, limit=limit)
+
+    @app.command("fingerprint")
+    def fingerprint_cmd(
+        work: Path = WORK,
+        out: Path | None = OUT,
+        limit: int | None = LIMIT,
+    ) -> None:
+        """Identify by what the file sounds like, not by what its tags claim."""
+        work = existing(work)
+        default = out_path(f"fingerprint-{work.stem.lower()}.jsonl")
+        by_sound(work, out.expanduser() if out else default, limit=limit)
 
     @app.command("propose")
     def propose_cmd(

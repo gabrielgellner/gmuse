@@ -295,10 +295,29 @@ and an identification written against it would have carried a merge redirecting 
 ask it too — otherwise a file the library named long ago is refused on every pass for carrying no id in its tags, and a
 relink somebody made by hand is refused by the scan meant to honour it.
 
-**What is still missing.** The ladder runs `MusicBrainz id → fingerprint → recording search → refuse`, and the
-fingerprint rung is #57 and needs a key. The recording-search rung now _can_ be run — the work list carries the encoding
-and the locator — but the pass that would run it is `identify`, which still reads a work list produced after
-cataloguing. Pointing it at these rows is a tools change, not a model one.
+**Worked end to end, on the case that opened #160.** `Till Dawn` arrives tagged `artist=Roberto Capuano`,
+`title=Till Dawn`, `album=Beatport Techno Top 100 December 2015`, `albumartist=[MARAPCANA.COM]`, no MusicBrainz id — two
+of five fields junk, and every album-shaped route in the flow fails on it:
+
+```
+shelf import                 1 refused for want of an identity; bytes and claim held
+shelf query --unidentified   {"encoding": …, "locator": …, "title": "Till Dawn", "artist": "Roberto Capuano"}
+identify propose             identified -> 714d679a…, name score 100
+shelf apply --write          4 facts; catalogued as Till Dawn by Roberto Capuano
+shelf query --unidentified   0
+```
+
+The evidence was in the file the whole time. What was missing was a route that asked about a _recording_ before
+cataloguing, and somewhere to keep the file while that question was open.
+
+**The fingerprint rung is in** — #57, `gmuse-tools identify fingerprint`. Over the 203 unidentified files with a copy
+here: **32 identified**, 24 where one AcoustID links several MusicBrainz recordings the length cannot separate, 23 where
+the link names a different record, 6 for a person, and **118 whose fingerprint AcoustID knows with nothing linked to
+it** — DJ-pool material nobody has submitted, which is the honest ceiling of this rung on this library.
+
+A fingerprint is **not** self-corroborating: the score measures the audio against a stored fingerprint, and the
+MusicBrainz id on it was submitted by whoever ran a tagger. `identification-lessons.md` §19 has the measurement — built
+without a name check the pass confirmed fifteen wrong matches at scores up to 1.00.
 
 ### A second copy is reported, not refused — #62
 

@@ -41,7 +41,10 @@ CASE: Final[dict[str, str]] = {
 }
 
 #: Keychain service names, by environment-variable name. See `secret`.
-KEYCHAIN: Final[dict[str, str]] = {"DISCOGS_TOKEN": "gmuse-discogs"}
+KEYCHAIN: Final[dict[str, str]] = {
+    "DISCOGS_TOKEN": "gmuse-discogs",
+    "ACOUSTID_KEY": "gmuse-acoustid",
+}
 
 
 #: Where generated files go: review tables, snapshots, and the API cache.
