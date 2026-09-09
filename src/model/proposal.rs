@@ -289,6 +289,34 @@ pub enum Proposal {
         role: String,
         basis: Source,
     },
+    /// **This artist is not on this record** — the withdrawal #145 left
+    /// needing, and the only thing that can undo a joined credit.
+    ///
+    /// A joined credit mints one artist nobody is called — `Stephan Bodzin &
+    /// Marc Romboy` as one act — and asserts it on the album. #145 stopped new
+    /// ones being minted; nothing could withdraw the 356 already here.
+    ///
+    /// **Names the artist by id, not by name**, and that is the difference
+    /// from [`Proposal::Contributed`]. A contribution mints the artist it
+    /// credits, so a name is the right input. A withdrawal is about a row that
+    /// already exists and is usually *wrongly named* — minting from the string
+    /// would derive a fresh id and retract a credit nobody ever asserted.
+    /// `shelf artists` and `shelf names` are what print the id.
+    ///
+    /// **The subject is a recording or an album.** A joined credit lands on
+    /// both — `file_under` asks the album first, which is how one bad credit
+    /// renames a folder.
+    CreditWithdrawn {
+        subject: CreditOn,
+        artist: Id<Artist>,
+        /// One of [`crate::model::reference::ROLES`], as the credit was
+        /// asserted.
+        role: String,
+        /// **Whose decision this is.** A retraction shadows every basis at
+        /// once, but the rung still matters: a person's correction must not be
+        /// quietly undone by the next scan.
+        basis: Source,
+    },
     /// **These two rows are one performance** — #88, and the repair a split
     /// leaves needing.
     ///
@@ -642,6 +670,19 @@ impl Proposal {
             | Proposal::CollectedInto { recording, .. }
             | Proposal::Credited { recording, .. }
             | Proposal::Contributed { recording, .. } => Subject::Recording(*recording),
+            // **Whatever the credit is on**, because that is the row that has
+            // to exist for a withdrawal to mean anything.
+            Proposal::CreditWithdrawn { subject, .. } => match subject {
+                CreditOn::Recording(r) => Subject::Recording(*r),
+                CreditOn::ReleaseGroup(g) => Subject::ReleaseGroup(*g),
+                // **A work and a pressing have no subject to check against.**
+                // Nothing in this library credits either — `ingest` credits
+                // the recording and the group, and #145's joined credits are
+                // on those two. Treated as always-held rather than refused,
+                // because refusing a shape nothing produces would be a rule
+                // written for a case that has never arrived.
+                CreditOn::Work(_) | CreditOn::Release(_) => Subject::Vocabulary,
+            },
             // **The winner**, because that is the row that has to exist for the
             // merge to mean anything. A loser nothing holds is ordinary.
             Proposal::Merged { winner, .. } => Subject::Recording(*winner),
@@ -1368,6 +1409,36 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 return Err("an artist cannot absorb themselves".into());
             }
             vec![Fact::ArtistMerged { loser, winner }]
+        }
+        Proposal::CreditWithdrawn {
+            subject,
+            artist,
+            role,
+            basis,
+        } => {
+            let wanted = role.trim().to_lowercase();
+            // **The same codelist the assertion used.** A withdrawal naming a
+            // role nothing was ever credited under would shadow nothing and
+            // report success, which is the quiet failure this refuses.
+            let Some((canonical, _)) = crate::model::reference::ROLES
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&wanted))
+            else {
+                let known: Vec<_> = crate::model::reference::ROLES
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect();
+                return Err(format!(
+                    "{role:?} is not a role this codelist knows — {}",
+                    known.join(", ")
+                ));
+            };
+            vec![Fact::CreditRetracted {
+                subject,
+                artist,
+                role: Id::<Role>::of_name(canonical),
+                basis,
+            }]
         }
         Proposal::Rated { recording, stars } => {
             vec![Fact::RecordingRated { recording, stars }]
@@ -2786,6 +2857,54 @@ mod merged {
             HELD,
         );
         assert_eq!(unknown.unknown.len(), 1, "{unknown}");
+    }
+
+    /// **A credit can be withdrawn**, which nothing could do before.
+    ///
+    /// A joined credit mints one artist nobody is called and asserts it; #145
+    /// stopped new ones being minted and left 356 already here. The case that
+    /// forced it: merging Luna's two release groups united their credits, so
+    /// the album was credited both to `Stephan Bodzin & Marc Romboy` — one
+    /// artist, joined — and to the real one, and the folder was named after
+    /// both.
+    #[test]
+    fn a_credit_can_be_withdrawn_and_names_a_role_the_codelist_knows() {
+        let joined = Id::<Artist>::of_artist(None, "Stephan Bodzin & Marc Romboy");
+        let good = Proposal::CreditWithdrawn {
+            subject: CreditOn::ReleaseGroup(album()),
+            artist: joined,
+            role: "performer".into(),
+            basis: Source::Manual,
+        };
+        assert_eq!(good.subject(), Subject::ReleaseGroup(album()));
+        let (records, report) = parse(
+            &serde_json::to_string(&good).expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(report.applied, 1, "{report}");
+        assert!(matches!(
+            records.iter().next().map(|r| &r.fact),
+            Some(Fact::CreditRetracted { artist, basis, .. })
+                if *artist == joined && *basis == Source::Manual
+        ));
+
+        // **A role the codelist does not know shadows nothing** and would
+        // report success — the quiet failure this refuses.
+        let nonsense = Proposal::CreditWithdrawn {
+            subject: CreditOn::ReleaseGroup(album()),
+            artist: joined,
+            role: "chief vibes officer".into(),
+            basis: Source::Manual,
+        };
+        let (_, refused) = parse(
+            &serde_json::to_string(&nonsense).expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(refused.refused.len(), 1, "{refused}");
     }
 
     #[test]

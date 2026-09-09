@@ -693,6 +693,37 @@ pub enum Fact {
         join_phrase: Option<String>,
     },
 
+    /// **Somebody has decided this credit is wrong** — and it is the piece
+    /// `merge.rs` and #145 both leave needing.
+    ///
+    /// A joined credit mints one artist nobody is called — `Stephan Bodzin &
+    /// Marc Romboy` as a single act — and asserts it. #145 stopped *new* ones
+    /// being minted and nothing could withdraw the ones already there: 356
+    /// rows in this library are credited to a string naming several people.
+    ///
+    /// The case that forced it: merging Luna's two release groups united their
+    /// credits, so the album was credited both to that joined artist and to
+    /// the real one, and `file_under` produced a folder named after both. The
+    /// merge was right; there was simply no way to say which of the two
+    /// credits it inherited was the mistake.
+    ///
+    /// **Not a delete, because there are none.** The log is append-only and
+    /// merges by union, so a credit is live or not according to whichever of
+    /// assert and retract carries the later stamp — the same shape
+    /// [`Fact::ConceptRetracted`] takes, for the same reasons.
+    ///
+    /// **Keyed one field shorter than what it shadows.** A credit is asserted
+    /// per `Source`, and somebody saying this artist is not on this record is
+    /// answering the question rather than arguing with one asserter. `basis`
+    /// records *whose* answer it was, so a later scan cannot quietly undo a
+    /// person's correction.
+    CreditRetracted {
+        subject: CreditOn,
+        artist: Id<Artist>,
+        role: Id<Role>,
+        basis: Source,
+    },
+
     /// **Which slot this copy sits in** — issue #78.
     ///
     /// `TrackPlaced` says a slot exists on a medium and which recording fills
@@ -1145,6 +1176,10 @@ pub struct Catalogue {
     pub roles: BTreeMap<Id<Role>, (String, RoleClass)>,
     /// Every credit. Keyed by the claim, valued by how it was printed.
     pub credits: BTreeMap<(CreditOn, Id<Artist>, Id<Role>, Source), Credited>,
+    /// Credits somebody has ruled out, and who ruled them out — the shadow
+    /// [`Fact::CreditRetracted`] casts. Keyed without the `Source`, because a
+    /// retraction answers the question rather than one asserter.
+    pub credits_retracted: BTreeMap<(CreditOn, Id<Artist>, Id<Role>), Source>,
     /// Every pressing, by id.
     pub releases: BTreeMap<Id<Release>, Released>,
     /// Every disc, by id.
@@ -1627,6 +1662,10 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 as_credited,
                 join_phrase,
             } => {
+                // **A later assertion lifts the shadow**, because the two
+                // are one question answered twice and the later answer stands.
+                cat.credits_retracted
+                    .remove(&(credit_on(subject), who(artist), *role));
                 cat.credits.insert(
                     // **The artist through the merge**, which is what collapses
                     // the two halves of a split credit into one row rather than
@@ -1651,6 +1690,21 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 // that changes what the file says changes what it claims.
                 cat.claims
                     .insert(*encoding, (artist.clone(), title.clone()));
+            }
+            Fact::CreditRetracted {
+                subject,
+                artist,
+                role,
+                basis,
+            } => {
+                let key = (credit_on(subject), who(artist), *role);
+                // Every basis at once — see the fact's own doc for why it is
+                // keyed one field shorter than the assertion it shadows.
+                cat.credits.retain(|(s, a, r, _), _| (*s, *a, *r) != key);
+                // The strongest voice that ruled it out, so a weaker
+                // retraction arriving later cannot weaken a person's.
+                let at = cat.credits_retracted.entry(key).or_insert(*basis);
+                *at = (*at).max(*basis);
             }
             Fact::EncodingPlaced { encoding, track } => {
                 // Kept in full and resolved below, because the last word is
@@ -2668,6 +2722,89 @@ mod merge_tests {
             },
         ]));
         assert_eq!(cat.placed.get(&copy), Some(&last));
+    }
+
+    /// **A retraction shadows a credit, and a later assertion lifts it.**
+    ///
+    /// The log is append-only and merges by union, so a credit is live or not
+    /// according to whichever of assert and retract carries the later stamp —
+    /// the same rule `ConceptRetracted` follows, and for the same reason: a
+    /// stale replica re-delivering the assertion must not resurrect it.
+    #[test]
+    fn a_withdrawn_credit_stays_withdrawn_until_somebody_asserts_it_again() {
+        use crate::model::entity::{Artist, ReleaseGroup, Role};
+        let album = Id::<ReleaseGroup>::derived(b"luna");
+        let joined = Id::<Artist>::derived(b"stephan bodzin & marc romboy");
+        let performer = Id::<Role>::derived(b"performer");
+        let on = CreditOn::ReleaseGroup(album);
+        let assert = || Fact::CreditAsserted {
+            subject: on,
+            artist: joined,
+            role: performer,
+            basis: Source::TagVariant,
+            position: 0,
+            as_credited: None,
+            join_phrase: None,
+        };
+        let withdraw = || Fact::CreditRetracted {
+            subject: on,
+            artist: joined,
+            role: performer,
+            basis: Source::Manual,
+        };
+
+        let live = fold(&log([assert()]));
+        assert_eq!(live.credits.len(), 1);
+
+        let gone = fold(&log([assert(), withdraw()]));
+        assert!(
+            gone.credits.is_empty(),
+            "the credit survived its retraction"
+        );
+        assert_eq!(
+            gone.credits_retracted.get(&(on, joined, performer)),
+            Some(&Source::Manual),
+            "who ruled it out was not recorded"
+        );
+
+        let again = fold(&log([assert(), withdraw(), assert()]));
+        assert_eq!(again.credits.len(), 1, "a later assertion did not lift it");
+        assert!(again.credits_retracted.is_empty());
+    }
+
+    /// **It shadows every basis at once**, being keyed one field shorter than
+    /// the assertion. Somebody saying this artist is not on this record is
+    /// answering the question, not arguing with one asserter.
+    #[test]
+    fn a_withdrawal_does_not_leave_the_same_credit_standing_on_another_rung() {
+        use crate::model::entity::{Artist, ReleaseGroup, Role};
+        let album = Id::<ReleaseGroup>::derived(b"luna");
+        let joined = Id::<Artist>::derived(b"a joined credit");
+        let performer = Id::<Role>::derived(b"performer");
+        let on = CreditOn::ReleaseGroup(album);
+        let assert = |basis| Fact::CreditAsserted {
+            subject: on,
+            artist: joined,
+            role: performer,
+            basis,
+            position: 0,
+            as_credited: None,
+            join_phrase: None,
+        };
+        let cat = fold(&log([
+            assert(Source::TagVariant),
+            assert(Source::MusicBrainz),
+            Fact::CreditRetracted {
+                subject: on,
+                artist: joined,
+                role: performer,
+                basis: Source::Manual,
+            },
+        ]));
+        assert!(
+            cat.credits.is_empty(),
+            "a credit asserted twice needed retracting twice"
+        );
     }
 
     /// **A retitle changes the label and nothing else** — the fact an
