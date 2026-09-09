@@ -609,6 +609,28 @@ pub enum Fact {
         title: String,
     },
 
+    /// **This album is called that** — the release-group twin of
+    /// [`Fact::RecordingRetitled`], and the fact a group merge leaves needing.
+    ///
+    /// A merge unites what both sides said, and a title is descriptive, so the
+    /// last writer takes it. That is how *21* came to be called
+    /// `21 (Target Bonus Disc)`: three editions of one record, minted as three
+    /// groups because their album *tags* differ, and merging them handed the
+    /// name to whichever was written last.
+    ///
+    /// The same shape has now cost three names — `Various Artists` after an
+    /// artist merge, Luna's credit after a group merge, and this. Two of them
+    /// had a fact to answer with; this did not.
+    ///
+    /// **It outranks a scan**, for the reason [`Fact::RecordingRetitled`]
+    /// does: `populate` re-asserts `ReleaseGroupCatalogued` from the tags on
+    /// every pass, so last-writer-wins would hand the name back to the tag on
+    /// the next read, forever. A retitle is curation and a scan is a reading.
+    ReleaseGroupRetitled {
+        group: Id<ReleaseGroup>,
+        title: String,
+    },
+
     /// **These two ids are one artist** — `merge.rs`, and the split
     /// `of_artist` documents as the price of having a name-derived fallback.
     ///
@@ -1680,7 +1702,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             }
             // Applied in the pass below, because a retitle has to outlast a
             // scan rather than merely follow it.
-            Fact::RecordingRetitled { .. } => {}
+            Fact::RecordingRetitled { .. } | Fact::ReleaseGroupRetitled { .. } => {}
             Fact::EncodingClaimed {
                 encoding,
                 artist,
@@ -1905,10 +1927,18 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     // `Source` encodes for a claim; `RecordingCatalogued` carries no rung, and
     // giving it one is a larger change than this needs.
     for Record { fact, .. } in records {
-        if let Fact::RecordingRetitled { recording, title } = fact
-            && let Some(recorded) = cat.recordings.get_mut(&of(recording))
-        {
-            recorded.title = title.clone();
+        match fact {
+            Fact::RecordingRetitled { recording, title } => {
+                if let Some(recorded) = cat.recordings.get_mut(&of(recording)) {
+                    recorded.title = title.clone();
+                }
+            }
+            Fact::ReleaseGroupRetitled { group, title } => {
+                if let Some(album) = cat.groups.get_mut(&group_of(group)) {
+                    album.title = title.clone();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2835,6 +2865,84 @@ mod merge_tests {
         assert_eq!(
             cat.recordings[&song].artist, blake,
             "a retitle is not a recredit"
+        );
+    }
+
+    /// **An album can be told what it is called, and a merge is why.**
+    ///
+    /// A merge unites what both sides said and a title is descriptive, so the
+    /// last writer takes it. Three editions of *21* are one release group
+    /// holding three releases — the shape `Barton Hollow` settled (#134) — and
+    /// merging them named the album `21 (Target Bonus Disc)`.
+    #[test]
+    fn an_album_can_be_retitled_and_the_retitle_follows_a_merge() {
+        use crate::model::entity::{Artist, ReleaseGroup};
+        let standard = Id::<ReleaseGroup>::derived(b"21");
+        let target = Id::<ReleaseGroup>::derived(b"21 target bonus disc");
+        let adele = Id::<Artist>::derived(b"adele");
+        let catalogued = |group, title: &str| Fact::ReleaseGroupCatalogued {
+            group,
+            title: title.into(),
+            artist: adele,
+            first_released: None,
+            kind: Default::default(),
+            secondary: Default::default(),
+        };
+        let cat = fold(&log([
+            catalogued(standard, "21"),
+            catalogued(target, "21 (Target Bonus Disc)"),
+            // The merge is right and hands the name to whichever was written
+            // last, which is the whole problem.
+            Fact::ReleaseGroupMerged {
+                loser: target,
+                winner: standard,
+            },
+            // Named against the loser, because that is the id a person reading
+            // the merge has in front of them. Redirects resolve on read.
+            Fact::ReleaseGroupRetitled {
+                group: target,
+                title: "21".into(),
+            },
+        ]));
+        assert!(
+            !cat.groups.contains_key(&target),
+            "the album is listed twice"
+        );
+        assert_eq!(cat.groups[&standard].title, "21");
+        assert_eq!(
+            cat.groups[&standard].artist, adele,
+            "a retitle is not a recredit"
+        );
+    }
+
+    /// **And it outlasts a scan**, for the reason a recording's does: every
+    /// read walks the disk and re-asserts `ReleaseGroupCatalogued` from the
+    /// tags, so last-writer-wins would hand the name back to the tag forever.
+    #[test]
+    fn an_album_retitle_is_not_undone_by_the_next_scan() {
+        use crate::model::entity::{Artist, ReleaseGroup};
+        let album = Id::<ReleaseGroup>::derived(b"21");
+        let catalogued = |title: &str| Fact::ReleaseGroupCatalogued {
+            group: album,
+            title: title.into(),
+            artist: Id::<Artist>::derived(b"adele"),
+            first_released: None,
+            kind: Default::default(),
+            secondary: Default::default(),
+        };
+        let mut records = log([
+            catalogued("21 (Target Bonus Disc)"),
+            Fact::ReleaseGroupRetitled {
+                group: album,
+                title: "21".into(),
+            },
+        ]);
+        // The next read, saying what the tags still say — and newer.
+        records.extend(log([catalogued("21 (Target Bonus Disc)")]));
+        assert_eq!(
+            fold(&records).groups[&album].title,
+            "21",
+            "a scan wrote over a title somebody curated"
         );
     }
 

@@ -449,6 +449,23 @@ pub enum Proposal {
         recording: Id<Recording>,
         title: String,
     },
+    /// **This album is called that** — the same repair one level up, and what
+    /// a group merge leaves needing.
+    ///
+    /// Merging unites what both sides said, and a title is descriptive, so the
+    /// last writer takes it. Three editions of *21* — the standard, a bonus
+    /// disc, a Target exclusive — are one release group holding three
+    /// releases, which is the shape `Barton Hollow` settled (#134); merging
+    /// them named the album `21 (Target Bonus Disc)`.
+    ///
+    /// **Not folded into the merge**, for the reason `Retitled` is not folded
+    /// into an identification: a merge says two rows are one thing, and which
+    /// of their names is right is a separate judgement. Most merges want the
+    /// winner's name and should not be asked.
+    GroupRetitled {
+        group: Id<ReleaseGroup>,
+        title: String,
+    },
     /// **The whole tracklist of one medium** — #155.
     ///
     /// The proposal that lets the library hold *what a record is* rather than
@@ -727,6 +744,7 @@ impl Proposal {
             // something held, and a retitle naming a row nothing points at is
             // stale rather than wrong.
             Proposal::Retitled { recording, .. } => Subject::Recording(*recording),
+            Proposal::GroupRetitled { group, .. } => Subject::ReleaseGroup(*group),
             // **The derived recording**, for the reason `Derived` names its
             // `to`: that is the row this is about. The original is checked in
             // the arm below, where a missing one is a reason to refuse rather
@@ -1336,6 +1354,16 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             }
             vec![Fact::RecordingRetitled {
                 recording,
+                title: title.to_string(),
+            }]
+        }
+        Proposal::GroupRetitled { group, title } => {
+            let title = title.trim();
+            if title.is_empty() {
+                return Err("an album needs a title".into());
+            }
+            vec![Fact::ReleaseGroupRetitled {
+                group,
                 title: title.to_string(),
             }]
         }
