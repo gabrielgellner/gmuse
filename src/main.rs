@@ -370,14 +370,18 @@ fn run_library(
             // the audio, so two paths can be one encoding — and retiring the
             // one you meant would retire the one you did not.
             let departed = root_of(roots).join(crate::scan::DEPARTED);
-            let mut elsewhere: std::collections::BTreeMap<_, Vec<&str>> = Default::default();
-            for asserted in cat.holdings.values() {
-                for (id, at) in &asserted.held {
-                    if !std::path::Path::new(at).starts_with(&departed) {
-                        elsewhere.entry(*id).or_default().push(at);
-                    }
-                }
-            }
+            // **Elsewhere means somewhere that is not going.** The guard below
+            // asks whether these bytes survive this retirement, and the files
+            // being retired are not an answer to that — every one of them is
+            // held at its own path, so without this every file reports itself
+            // as the reason it cannot go and `remove` retires nothing at all.
+            //
+            // It could only ever tombstone a file somebody had already moved
+            // into `.departed` by hand, which is the one case the path filter
+            // below happened to exclude.
+            let going: std::collections::BTreeSet<String> =
+                files.iter().map(|f| f.display().to_string()).collect();
+            let elsewhere = surviving_holders(&cat, &departed, &going);
 
             let mut retiring = Vec::new();
             for file in &files {
@@ -1558,9 +1562,148 @@ fn scan_roots(from_catalogs: Vec<PathBuf>, cached: Vec<PathBuf>) -> Vec<PathBuf>
     }
 }
 
+/// **Where each copy is still held after this retirement** — the guard
+/// `shelf remove` refuses on.
+///
+/// Two paths can be one encoding, because identity is the audio: `Early James`
+/// was retired by moving one of two folders holding identical rips, ten of its
+/// twelve files were the same encoding as a file still in the library, and
+/// retiring "the departed copy" retired the live one too. The library went from
+/// 6,648 settled to 6,638 before this existed.
+///
+/// **And `elsewhere` has to mean somewhere that is not going.** The first
+/// version compared against every holding outside `.departed`, which includes
+/// the files being retired — so each one reported itself as the reason it could
+/// not leave, and `remove` retired nothing at all. It could only tombstone a
+/// file somebody had already moved into `.departed` by hand, which is the one
+/// case the path filter happened to exclude. Retiring 32 files reported
+/// `0 to retire`, naming each file's own path as the copy that survived it.
+fn surviving_holders<'a>(
+    cat: &'a crate::model::log::Catalogue,
+    departed: &std::path::Path,
+    going: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeMap<crate::model::id::Id<crate::model::entity::Encoding>, Vec<&'a str>>
+{
+    let mut out: std::collections::BTreeMap<_, Vec<&str>> = Default::default();
+    for asserted in cat.holdings.values() {
+        for (id, at) in &asserted.held {
+            if !std::path::Path::new(at).starts_with(departed) && !going.contains(at) {
+                out.entry(*id).or_default().push(at.as_str());
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A file does not block its own retirement**, and thirty-two of them did.
+    ///
+    /// The guard asks whether these bytes survive this retirement. The files
+    /// being retired are not an answer to that question — each is held at its
+    /// own path — so comparing against every holding outside `.departed` made
+    /// every file report itself as the reason it could not leave. Retiring one
+    /// of two Luna copies reported `0 to retire`, naming each file's own path
+    /// as the copy that outlived it.
+    #[test]
+    fn a_copy_being_retired_is_not_a_copy_that_survives_it() {
+        use crate::model::entity::{Device, Encoding};
+        use crate::model::id::Id;
+        use crate::model::log::{Asserted, Catalogue};
+
+        let going_path = "/m/Bodzin & Romboy/Luna/01 Triton.mp3";
+        let bytes = Id::<Encoding>::derived(b"triton");
+        let mut cat = Catalogue::default();
+        cat.holdings.insert(
+            Id::<Device>::derived(b"laptop"),
+            Asserted {
+                at: crate::model::clock::Stamp {
+                    wall: 1,
+                    counter: 0,
+                    device: Id::<Device>::derived(b"laptop"),
+                },
+                held: [(bytes, going_path.to_string())].into_iter().collect(),
+            },
+        );
+        let going = [going_path.to_string()].into_iter().collect();
+        assert!(
+            !surviving_holders(&cat, std::path::Path::new("/m/.departed"), &going)
+                .contains_key(&bytes),
+            "the file named itself as the reason it could not go"
+        );
+    }
+
+    /// **And the case the guard exists for still fires.** `Early James` was
+    /// retired by moving one of two folders holding identical rips: ten of its
+    /// twelve files were the same encoding as a file still in the library, so
+    /// retiring the departed copy retired the live one too — 6,648 settled to
+    /// 6,638.
+    ///
+    /// A copy that is *not* going still holds those bytes, and still says so.
+    #[test]
+    fn a_live_copy_of_the_same_bytes_still_refuses_the_retirement() {
+        use crate::model::entity::{Device, Encoding};
+        use crate::model::id::Id;
+        use crate::model::log::{Asserted, Catalogue};
+
+        let going_path = "/m/Early James/copy two/01 Blue Pill.mp3";
+        let staying = "/m/Early James/Strange Time/01 Blue Pill.mp3";
+        let bytes = Id::<Encoding>::derived(b"one rip, two folders");
+        let mut cat = Catalogue::default();
+        cat.holdings.insert(
+            Id::<Device>::derived(b"laptop"),
+            Asserted {
+                at: crate::model::clock::Stamp {
+                    wall: 1,
+                    counter: 0,
+                    device: Id::<Device>::derived(b"laptop"),
+                },
+                held: [(bytes, staying.to_string())].into_iter().collect(),
+            },
+        );
+        let going = [going_path.to_string()].into_iter().collect();
+        assert_eq!(
+            surviving_holders(&cat, std::path::Path::new("/m/.departed"), &going).get(&bytes),
+            Some(&vec![staying]),
+            "retiring one folder would have retired the live copy too"
+        );
+    }
+
+    /// **A file already under `.departed` is not a survivor either**, which is
+    /// what lets `remove` tombstone an album somebody retired by hand before
+    /// this command existed.
+    #[test]
+    fn bytes_that_are_only_in_departed_do_not_hold_anything_back() {
+        use crate::model::entity::{Device, Encoding};
+        use crate::model::id::Id;
+        use crate::model::log::{Asserted, Catalogue};
+
+        let bytes = Id::<Encoding>::derived(b"moved by hand");
+        let mut cat = Catalogue::default();
+        cat.holdings.insert(
+            Id::<Device>::derived(b"laptop"),
+            Asserted {
+                at: crate::model::clock::Stamp {
+                    wall: 1,
+                    counter: 0,
+                    device: Id::<Device>::derived(b"laptop"),
+                },
+                held: [(bytes, "/m/.departed/old/01 Gone.mp3".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        assert!(
+            surviving_holders(
+                &cat,
+                std::path::Path::new("/m/.departed"),
+                &Default::default()
+            )
+            .is_empty()
+        );
+    }
 
     /// The documented workflow: scan once with `--library`, then run bare.
     #[test]

@@ -500,6 +500,22 @@ pub struct Slotted {
     /// and so it is what makes the slot converge with a file we later buy.
     pub recording: uuid::Uuid,
     pub title: String,
+    /// **What the sleeve prints here, where that is not the recording's own
+    /// name** — and `None` on nearly every row, which is the point.
+    ///
+    /// MusicBrainz carries both titles and the tool compares them, which is
+    /// what this field is waiting on: it used to be `None` unconditionally
+    /// because "a tracklist read straight off the release cannot tell the
+    /// difference". It can; it just was not looking.
+    ///
+    /// **Sent only for a difference that is not punctuation.** Measured on
+    /// *Luna*, 3 of 34 slots differ and two of those are a non-breaking hyphen
+    /// and a curly apostrophe — `Phobos (Pan‐Pot remix)` against
+    /// `Phobos (Pan-Pot remix)`. Claiming a rename for those would put one on
+    /// rows where MusicBrainz merely normalised a dash. The third is real:
+    /// the recording is `Phobos` and *Luna* prints `Phobos (Synthapella)`.
+    #[serde(default)]
+    pub title_on_release: Option<String>,
     /// Who it is credited to, **in the order the credit names them**.
     ///
     /// A list rather than the joined line, and that is not a nicety. A joined
@@ -1227,12 +1243,13 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     medium,
                     recording,
                     position: listed.position,
-                    // **The recording's title is the slot's title**, so
-                    // nothing is said twice. This field is for a compilation
-                    // that renames a track, and a tracklist read straight off
-                    // the release cannot tell the difference — claiming it
-                    // could would put a rename on every row.
-                    title_on_release: None,
+                    // **What the sleeve prints, where the tool found a real
+                    // difference.** `None` on nearly every row: the tool
+                    // compares the release's title against the recording's and
+                    // sends this only when they differ by more than
+                    // punctuation, so a normalised dash does not read as a
+                    // rename.
+                    title_on_release: listed.title_on_release.clone(),
                 });
             }
             facts
@@ -2375,6 +2392,7 @@ mod merged {
                     recording: uuid::Uuid::from_u128(*mbid),
                     title: (*title).to_string(),
                     artists: vec!["Adele".into()],
+                    title_on_release: None,
                 })
                 .collect(),
         };
@@ -2830,6 +2848,7 @@ mod merged {
                 recording: mbid,
                 title: "Bonkers".into(),
                 artists: who.iter().map(|s| (*s).to_string()).collect(),
+                title_on_release: None,
             }],
         };
         let repair = Proposal::Credited {

@@ -1735,12 +1735,14 @@ mod containment_tests {
                     recording: held,
                     title: "Track 1".into(),
                     artists: vec!["Bodzin".into()],
+                    title_on_release: None,
                 },
                 Slotted {
                     position: 2,
                     recording: missing,
                     title: "The One We Lack".into(),
                     artists: vec!["Bodzin".into()],
+                    title_on_release: None,
                 },
             ],
         };

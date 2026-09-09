@@ -748,14 +748,34 @@ def slots_of(disc: dict[str, Any]) -> list[dict[str, Any]]:
         artists = credit(track.get("artist-credit") or []).names
         if not recording.get("id") or not artists:
             continue
-        out.append(
-            {
-                "position": track["position"],
-                "recording": recording["id"],
-                "title": track.get("title") or recording.get("title") or "",
-                "artists": artists,
-            }
-        )
+        # **The recording's title, not the track's**, because that is the
+        # field the Rust side catalogues the *recording* with. Sending the
+        # track's would have catalogued MusicBrainz recording `7c38270d` — which
+        # is called `Phobos` — as `Phobos (Synthapella)`, the name *Luna* prints
+        # for it. The sleeve's name goes below, where it belongs.
+        slot = {
+            "position": track["position"],
+            "recording": recording["id"],
+            "title": recording.get("title") or track.get("title") or "",
+            "artists": artists,
+        }
+        # **What the sleeve prints, where the release really renames it.**
+        #
+        # MusicBrainz carries both titles and this used to collapse them, so
+        # the Rust side sent `title_on_release: None` on every row with the
+        # note that "a tracklist read straight off the release cannot tell the
+        # difference". It can — it just was not looking.
+        #
+        # **Through `compare_key`, so punctuation is not a rename.** Measured
+        # on *Luna*: 3 of 34 slots differ and two of them are typography — a
+        # non-breaking hyphen in `Phobos (Pan-Pot remix)` and a curly
+        # apostrophe in `Triton (Gaiser's Trial Tone remix)`. The third is
+        # real: the recording is `Phobos` and the release prints
+        # `Phobos (Synthapella)`.
+        printed, called = track.get("title") or "", recording.get("title") or ""
+        if printed and called and compare_key(printed) != compare_key(called):
+            slot["title_on_release"] = printed
+        out.append(slot)
     return out
 
 

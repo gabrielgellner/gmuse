@@ -195,3 +195,43 @@ def test_a_slot_names_the_recording_and_not_the_track() -> None:
             "artists": ["Beirut"],
         }
     ]
+
+
+def test_the_sleeve_title_is_sent_only_when_the_release_really_renames_it() -> None:
+    """MusicBrainz carries both titles, and this used to collapse them.
+
+    The Rust side sent `title_on_release: None` on every row with the note that
+    "a tracklist read straight off the release cannot tell the difference". It
+    can — it just was not looking. Measured on *Luna*, 3 of 34 slots differ and
+    only one is a rename; the other two are a non-breaking hyphen and a curly
+    apostrophe.
+    """
+    from gmuse_tools.ingest import slots_of  # noqa: PLC0415
+
+    def track(n: int, printed: str, called: str) -> dict[str, object]:
+        return {
+            "position": n,
+            "title": printed,
+            "recording": {"id": f"rec-{n}", "title": called},
+            "artist-credit": [{"name": "Stephan Bodzin", "artist": {"id": "a", "name": "Stephan Bodzin"}}],
+        }
+
+    slots = slots_of(
+        {
+            "tracks": [
+                track(9, "Phobos (Synthapella)", "Phobos"),
+                # Typography, not a rename: a non-breaking hyphen and a curly
+                # apostrophe. Claiming these would put a rename on rows where
+                # MusicBrainz merely normalised a dash.
+                track(24, "Phobos (Pan-Pot remix)", "Phobos (Pan‐Pot remix)"),
+                track(34, "Triton (Gaiser's Trial Tone remix)", "Triton (Gaiser’s Trial Tone remix)"),
+            ]
+        }
+    )
+    renamed = {s["position"]: s.get("title_on_release") for s in slots}
+    assert renamed == {9: "Phobos (Synthapella)", 24: None, 34: None}
+
+    # **And the recording's own title is what `title` carries**, because that
+    # is the field the Rust side catalogues the *recording* with. Sending the
+    # track's would have named the recording after the sleeve.
+    assert slots[0]["title"] == "Phobos"
