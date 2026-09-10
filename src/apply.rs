@@ -180,6 +180,25 @@ impl proposal::Holdings for Shelf {
             .or_else(|| self.disk.artist_names.get(&artist))
             .cloned()
     }
+
+    fn artist_named(&self, name: &str) -> Option<Id<crate::model::entity::Artist>> {
+        let wanted = crate::model::ingest::normalise(name);
+        // **Through the merges**, or a name whose two ids were joined last
+        // week looks ambiguous today and mints a third.
+        let found: std::collections::BTreeSet<_> = [&self.log, &self.disk]
+            .into_iter()
+            .flat_map(|cat| {
+                cat.artist_names
+                    .iter()
+                    .filter(|(_, held)| crate::model::ingest::normalise(held) == wanted)
+                    .map(|(id, _)| cat.artist_merges.resolve(*id))
+            })
+            .collect();
+        match found.into_iter().collect::<Vec<_>>().as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
 }
 
 /// What a run did, and what it declined to do.
@@ -424,6 +443,73 @@ mod tests {
     use crate::model::proposal::{Holdings, Subject};
 
     use super::Shelf;
+
+    /// **A name the library already holds does not mint a second row** — #181.
+    ///
+    /// Every artist on the proposal wire is named rather than identified, and
+    /// the minting behind it is `of_artist(None, name)`. An artist that exists
+    /// only under a MusicBrainz-derived id has a *different* id, so crediting
+    /// them by name used to land on a fresh row and hold the person twice. It
+    /// happened once in ten while crediting five albums in !334, and the nine
+    /// that were fine were fine only because an earlier merge had already
+    /// joined their two ids.
+    #[test]
+    fn crediting_by_name_finds_the_artist_the_library_already_holds() {
+        use crate::model::entity::Artist;
+        use crate::model::log::Catalogue;
+
+        let mb = |n: u128| uuid::Uuid::from_u128(n);
+        let from_mb = Id::<Artist>::of_artist(Some(mb(0xd0117)), "Dolly Parton");
+        let from_name = Id::<Artist>::of_artist(None, "Dolly Parton");
+        assert_ne!(
+            from_mb, from_name,
+            "if these ever coincide this test says nothing"
+        );
+
+        let holding = |who: &[(Id<Artist>, &str)]| {
+            let mut cat = Catalogue::default();
+            for (id, name) in who {
+                cat.artist_names.insert(*id, (*name).to_string());
+            }
+            Shelf {
+                disk: Catalogue::default(),
+                log: cat,
+            }
+        };
+
+        let shelf = holding(&[(from_mb, "Dolly Parton")]);
+        assert_eq!(
+            shelf.artist_named("Dolly Parton"),
+            Some(from_mb),
+            "the row already there, not the one a name would mint"
+        );
+        // **After `normalise`**, which is what makes this a resolution rather
+        // than a string compare — and exactly why the caller must not restate
+        // `ArtistNamed` with the spelling it was handed.
+        assert_eq!(shelf.artist_named("dolly  parton"), Some(from_mb));
+        assert_eq!(
+            shelf.artist_named("Linda Ronstadt"),
+            None,
+            "nobody holds it, so the caller mints — which is right"
+        );
+
+        // **A name two people share resolves to neither.** Choosing one is the
+        // error nothing reports afterwards; minting a second row is one
+        // `shelf artists` prints and one merge repairs. Same asymmetry the
+        // rest of the model is built on.
+        let twice = holding(&[
+            (from_mb, "Dolly Parton"),
+            (
+                Id::<Artist>::of_artist(Some(mb(0xd0112)), "Dolly Parton"),
+                "Dolly Parton",
+            ),
+        ]);
+        assert_eq!(
+            twice.artist_named("Dolly Parton"),
+            None,
+            "two people really do share a name"
+        );
+    }
 
     /// **A re-assertion is not a replay** — the bug that silently unwound
     /// curation on the real library.

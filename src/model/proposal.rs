@@ -907,6 +907,22 @@ pub trait Holdings {
     /// Collective absorbed `Campfire Songs` and the moniker a record was
     /// released under became unfindable.
     fn named(&self, artist: Id<Artist>) -> Option<String>;
+    /// **The artist this name already names** — #181.
+    ///
+    /// Every artist on this wire is *named, not identified*, and the minting
+    /// that follows is `of_artist(None, name)` — the name-derived id. Where
+    /// the artist exists only under a MusicBrainz-derived one, that is a
+    /// different id, so the credit lands on a fresh row and the library holds
+    /// the person twice. Crediting five albums in !334 did it once in ten:
+    /// nine names already had a name-derived id merged into the MusicBrainz
+    /// one, and Dolly Parton did not.
+    ///
+    /// **`None` where nothing holds the name, and equally where several do.**
+    /// Two people really do share a name, and choosing between them is the
+    /// error that cannot be seen afterwards — where minting a second row is
+    /// one `shelf artists` reports and one merge repairs. The asymmetry is the
+    /// same one the whole model is built on.
+    fn artist_named(&self, name: &str) -> Option<Id<Artist>>;
 }
 
 /// Where a copy sits, as the library currently records it.
@@ -1346,11 +1362,24 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 class: RoleClass::Performer,
             }];
             for (at, name) in named.iter().enumerate() {
-                let artist = Id::<Artist>::of_artist(None, name);
-                facts.push(Fact::ArtistNamed {
-                    artist,
-                    name: name.clone(),
-                });
+                // **The row this name already names, or a new one** — #181.
+                //
+                // And `ArtistNamed` only where it minted: the fact is a
+                // last-writer register, so restating it for an artist the
+                // library already holds would rename them to whatever spelling
+                // this file happened to use. `artist_named` matches after
+                // `normalise`, so `stephan bodzin` finds Stephan Bodzin — and
+                // must not then relabel him in lower case.
+                let (artist, minted) = match library.artist_named(name) {
+                    Some(held) => (held, false),
+                    None => (Id::<Artist>::of_artist(None, name), true),
+                };
+                if minted {
+                    facts.push(Fact::ArtistNamed {
+                        artist,
+                        name: name.clone(),
+                    });
+                }
                 facts.push(Fact::CreditAsserted {
                     subject: on.subject(),
                     artist,
@@ -1823,31 +1852,39 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 ));
             };
             let role_id = Id::<Role>::of_name(canonical);
-            let who = Id::<Artist>::of_artist(None, name);
-            vec![
-                Fact::RoleDefined {
-                    role: role_id,
-                    name: (*canonical).to_string(),
-                    class: *class,
-                },
-                Fact::ArtistNamed {
+            // **The row this name already names, or a new one** — #181, and
+            // `ArtistNamed` only where it minted, because the fact is a
+            // register and restating it would rename an artist the library
+            // already holds to this file's spelling.
+            let (who, minted) = match library.artist_named(name) {
+                Some(held) => (held, false),
+                None => (Id::<Artist>::of_artist(None, name), true),
+            };
+            let mut facts = vec![Fact::RoleDefined {
+                role: role_id,
+                name: (*canonical).to_string(),
+                class: *class,
+            }];
+            if minted {
+                facts.push(Fact::ArtistNamed {
                     artist: who,
                     name: name.to_string(),
-                },
-                Fact::CreditAsserted {
-                    subject: on.subject(),
-                    artist: who,
-                    role: role_id,
-                    basis,
-                    // **Zero, and it is cosmetic here.** A position orders a
-                    // credit *line*, and `line_of` reads performers only — a
-                    // remixer never appears in one. Two remixers stay distinct
-                    // because the fold keys on the artist.
-                    position: 0,
-                    as_credited: None,
-                    join_phrase: None,
-                },
-            ]
+                });
+            }
+            facts.extend([Fact::CreditAsserted {
+                subject: on.subject(),
+                artist: who,
+                role: role_id,
+                basis,
+                // **Zero, and it is cosmetic here.** A position orders a
+                // credit *line*, and `line_of` reads performers only — a
+                // remixer never appears in one. Two remixers stay distinct
+                // because the fold keys on the artist.
+                position: 0,
+                as_credited: None,
+                join_phrase: None,
+            }]);
+            facts
         }
         Proposal::RecordingDerived { from, to, kind } => {
             let origin = Id::<Recording>::of_basis(&from);
@@ -2084,6 +2121,13 @@ pub(crate) mod tests {
             } else {
                 Some(Basis::MusicBrainz(settled()))
             }
+        }
+
+        /// **A library holding nobody**, so every credit here mints — which
+        /// is what these tests assert about, and #181's resolution is tested
+        /// where it belongs, against a library that holds somebody.
+        fn artist_named(&self, _: &str) -> Option<Id<Artist>> {
+            None
         }
     }
 

@@ -1781,6 +1781,10 @@ mod containment_tests {
             fn named(&self, _: Id<crate::model::entity::Artist>) -> Option<String> {
                 None
             }
+
+            fn artist_named(&self, _: &str) -> Option<Id<crate::model::entity::Artist>> {
+                None
+            }
         }
 
         let listed = proposal::Proposal::Tracklisted {
