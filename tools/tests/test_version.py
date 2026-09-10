@@ -94,7 +94,7 @@ def test_what_a_track_is_is_a_different_axis() -> None:
     That is `facet::FUNCTION` if it is anywhere, and guessing across axes is
     how a taxonomy stops being trustworthy.
     """
-    for other in ("intro", "Outro", "interlude", "bonus track"):
+    for other in ("intro", "Outro", "interlude", "bonus track", "skit"):
         verdict, terms = read(other)
         assert terms == ()
         assert "axis" in verdict

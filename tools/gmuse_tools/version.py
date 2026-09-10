@@ -194,7 +194,7 @@ A_REMIXER: Final = re.compile(r"\b(?:re-?mix|rework|refix|bootleg|vip|mixed by|r
 #: A different axis — `facet::FUNCTION` if anywhere — and guessing across axes
 #: is how a taxonomy stops being trustworthy.
 ANOTHER_AXIS: Final[frozenset[str]] = frozenset(
-    {"intro", "outro", "interlude", "overture", "opening intro", "outrocut", "bonus track", "untitled"}
+    {"intro", "outro", "interlude", "overture", "opening intro", "outrocut", "bonus track", "untitled", "skit"}
 )
 
 #: A numbered take — `take 4`, `take 19`. The one form that cannot be
