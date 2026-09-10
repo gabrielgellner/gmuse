@@ -201,6 +201,17 @@ pub enum Source {
 }
 
 impl Source {
+    /// What a fact written before its rung was recorded must have been.
+    ///
+    /// Every `EncodingPlaced` in a log older than #170 was written by a scan,
+    /// so reading one back as anything stronger would let history outrank a
+    /// decision made today.
+    pub fn of_a_tag() -> Self {
+        Source::TagVariant
+    }
+}
+
+impl Source {
     /// How it is written in a filter and in a proposal file — one spelling,
     /// so `genre[basis=discogs]` matches what a tool wrote (#93).
     pub fn written(self) -> &'static str {

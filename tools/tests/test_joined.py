@@ -8,12 +8,16 @@ reordering. Both flagged `Neko Case & Her Boyfriends`, which is a band.
 
 from __future__ import annotations
 
+import pytest
+
 from gmuse_tools.joined import (
     Verdict,
     all_solo,
+    attribute,
     locally,
     members,
     proposals,
+    remixed,
     reordered,
     resolve,
     shares_members,
@@ -234,3 +238,309 @@ def test_featuring_still_splits_inside_the_list() -> None:
     existed.
     """
     assert members("2Pac feat. Danny Boy, Syke & CPO") == ("2Pac", "Danny Boy", "Syke", "CPO")
+
+
+def rows(*specs: tuple[str, str, str]) -> list[dict[str, str]]:
+    """Work-list rows as `gmuse shelf query` writes them."""
+    return [{"recording": r, "artist": credit, "musicbrainz": mbid} for r, credit, mbid in specs]
+
+
+def test_musicbrainz_naming_several_artists_is_the_split() -> None:
+    """The arbiter #152 wanted and could not have: one artist id per artist.
+
+    `Sante,Sidney Charles` is two people, and MusicBrainz says so without any
+    rule about commas — and corrects the spelling to `Santé` on the way past.
+    """
+    got = attribute(
+        rows(("r1", "Sante,Sidney Charles", "mb1")),
+        {"mb1": ("Santé", "Sidney Charles")}.get,
+    )
+    assert got.splits == [
+        {"fact": "credited", "recording": "r1", "artists": ["Santé", "Sidney Charles"], "basis": "musicbrainz"}
+    ]
+    assert got.disputed == []
+
+
+def test_an_ampersand_inside_a_comma_list_survives_because_nothing_parses_it() -> None:
+    """`Chus & Ceballos` is one act inside a list of two — the case a string rule cannot get right.
+
+    A comma rule splits it into three and an ampersand rule splits it into
+    three differently. MusicBrainz returns two artists because it is reading
+    ids, not punctuation.
+    """
+    got = attribute(
+        rows(("r1", "Chus & Ceballos,DJ Chus,Leonardo Gonnelli", "mb1")),
+        {"mb1": ("Leonardo Gonnelli", "Chus & Ceballos")}.get,
+    )
+    assert got.splits[0]["artists"] == ["Leonardo Gonnelli", "Chus & Ceballos"]
+
+
+def test_one_artist_where_the_credit_names_several_is_reported_not_acted_on() -> None:
+    """#145's mistake, arriving from the other side.
+
+    The tag says two and the authority says one. Splitting is not the danger
+    here — *taking* the authority's answer is, because writing it would drop a
+    credited artist. 48 of the first 90 real answers looked like this.
+    """
+    got = attribute(
+        rows(("r1", "Carl Craig,La Fleur", "mb1")),
+        {"mb1": ("Carl Craig",)}.get,
+    )
+    assert got.splits == [], "nothing may be written from a disagreement"
+    assert len(got.disputed) == 1
+    assert got.disputed[0]["credit"] == "Carl Craig,La Fleur"
+
+
+def test_a_band_name_the_authority_confirms_produces_nothing_at_all() -> None:
+    """`Angus & Julia Stone` is one act, and the right output for that is silence.
+
+    Not a proposal, and not a dispute either: the credit and the authority
+    agree, so there is nothing for anybody to look at.
+    """
+    got = attribute(rows(("r1", "Angus & Julia Stone", "mb1")), {"mb1": ("Angus & Julia Stone",)}.get)
+    assert got.splits == []
+    assert got.disputed == []
+    assert got.asked == 1
+
+
+def test_a_confirmed_band_costs_one_lookup_however_many_recordings_it_has() -> None:
+    """`Angus & Julia Stone` holds 24 recordings here and a first version asked about all of them.
+
+    A credit the authority calls one artist yields no proposal, so the other
+    23 answers could not have changed anything.
+    """
+    asked: list[str] = []
+
+    def ask(mbid: str) -> tuple[str, ...] | None:
+        asked.append(mbid)
+        return ("Angus & Julia Stone",)
+
+    band = "Angus & Julia Stone"
+    attribute(rows(("r1", band, "mb1"), ("r2", band, "mb2"), ("r3", band, "mb3")), ask)
+    assert asked == ["mb1"], "the other two were a rate limit spent to be told the same thing"
+
+
+def test_a_split_credit_is_asked_about_every_recording() -> None:
+    """The opposite case, and why the shortcut is only a shortcut.
+
+    A proposal names one recording, so every recording under a split credit
+    needs its own answer — two recordings sharing a credit string are not
+    obliged to carry the same artists.
+    """
+    answers = {"mb1": ("Okain", "Onno"), "mb2": ("Okain", "Onno", "A Third")}
+    got = attribute(rows(("r1", "Okain,Onno", "mb1"), ("r2", "Okain,Onno", "mb2")), answers.get)
+    assert [line["artists"] for line in got.splits] == [["Okain", "Onno"], ["Okain", "Onno", "A Third"]]
+
+
+def test_a_failed_lookup_is_not_an_empty_credit() -> None:
+    """`None` means no answer was obtained, which is not "nobody is credited".
+
+    The same distinction `bronze` draws by refusing to cache a status of 0: a
+    503 run or a reset must not freeze into a permanent verdict.
+    """
+    got = attribute(rows(("r1", "Okain,Onno", "mb1")), lambda _: None)
+    assert got.splits == []
+    assert got.disputed == []
+    assert got.unanswered == 1
+
+
+def test_a_row_the_library_cannot_look_up_is_not_asked_about() -> None:
+    """No `musicbrainz` means no question to ask — the 7.3% resting on bytes."""
+    got = attribute(
+        [{"recording": "r1", "artist": "Okain,Onno"}],
+        lambda _: pytest.fail("a row with no rung was looked up anyway"),
+    )
+    assert got.asked == 0
+
+
+def remix_rows(*specs: tuple[str, str, str, str]) -> list[dict[str, str]]:
+    """Work-list rows carrying a title, which is the third of the three sources."""
+    return [{"recording": r, "artist": credit, "musicbrainz": mbid, "title": title} for r, credit, mbid, title in specs]
+
+
+def test_a_performer_and_a_remixer_are_two_roles_not_two_performers() -> None:
+    """The shape 47 of 60 disagreements turned out to have.
+
+    MusicBrainz credits the recording to whoever performed it and files the
+    remixer as a relationship, so `Adam Beyer,Tiger Stripes` is not a joined
+    credit at all — it is one performer and one remixer, and the title says
+    which is which.
+    """
+    got = remixed(
+        remix_rows(("r1", "Adam Beyer,Tiger Stripes", "mb1", "Time Flies (Tiger Stripes remix)")),
+        {"mb1": ("Adam Beyer",)}.get,
+    )
+    assert got.lines == [
+        {"fact": "contributed", "recording": "r1", "artist": "Adam Beyer", "role": "performer", "basis": "musicbrainz"},
+        {"fact": "contributed", "recording": "r1", "artist": "Tiger Stripes", "role": "remixer", "basis": "inferred"},
+    ]
+    assert got.left == []
+
+
+def test_the_remixer_is_never_filed_as_a_performer() -> None:
+    """`line_of` reads performers, so the wrong role puts the record in the remixer's folder.
+
+    The bug that made the role filter exist, asserted here because this pass
+    is the one that hands out both roles at once.
+    """
+    got = remixed(
+        remix_rows(("r1", "Dubfire,Joseph Capriati", "mb1", "Roadkill (Joseph Capriati remix)")),
+        {"mb1": ("Dubfire",)}.get,
+    )
+    performers = [line["artist"] for line in got.lines if line["role"] == "performer"]
+    assert performers == ["Dubfire"], "only the artist MusicBrainz credits may perform it"
+
+
+def test_every_other_name_must_be_in_the_title_before_anything_is_written() -> None:
+    """Three sources agree or nothing is written — a two-out-of-three is a guess.
+
+    `Drift (Mr Tophat & Art Alfie Remix)` names both, so both are remixers.
+    A title naming only one of two leaves the credit for a person.
+    """
+    both = remixed(
+        remix_rows(("r1", "Art Alfie,Mr Tophat,Scuba", "mb1", "Drift (Mr Tophat & Art Alfie Remix)")),
+        {"mb1": ("Scuba",)}.get,
+    )
+    assert sorted(x["artist"] for x in both.lines if x["role"] == "remixer") == ["Art Alfie", "Mr Tophat"]
+
+    half = remixed(
+        remix_rows(("r1", "Art Alfie,Mr Tophat,Scuba", "mb1", "Drift (Mr Tophat Remix)")),
+        {"mb1": ("Scuba",)}.get,
+    )
+    assert half.lines == []
+    assert "does not name every other artist" in half.left[0]["why"]
+
+
+def test_a_bare_mix_names_a_version_and_not_a_person() -> None:
+    """`(Original Mix)` is the string this whole distinction exists for.
+
+    The same line `identify.py` draws with `CREDITS_A_PERSON`: without it, a
+    version marker becomes a remixer credit.
+    """
+    got = remixed(
+        remix_rows(("r1", "Kiko,Spencer K", "mb1", "Nagual (Original Mix)")),
+        {"mb1": ("Kiko",)}.get,
+    )
+    assert got.lines == []
+    assert "credits a person" in got.left[0]["why"]
+
+
+def test_a_spelling_difference_in_the_title_still_matches() -> None:
+    """`Leif Müller` is printed `Leif Muller` on the sleeve, and that is not a different person.
+
+    `key` folds accents for comparison and nothing is minted from it, so this
+    cannot make the unrepairable merge the Rust side is careful about.
+    """
+    got = remixed(
+        remix_rows(
+            (
+                "r1",
+                "Anja Schneider,Konstantin Sibold,Leif Müller",
+                "mb1",
+                "Circle Culture (Konstantin Sibold & Leif Muller Remix)",
+            )
+        ),
+        {"mb1": ("Anja Schneider",)}.get,
+    )
+    assert sorted(x["artist"] for x in got.lines if x["role"] == "remixer") == ["Konstantin Sibold", "Leif Müller"]
+
+
+def test_a_credit_musicbrainz_calls_several_is_not_this_pass_s_business() -> None:
+    """A genuine split belongs to `attribute`, and asking twice would write it twice."""
+    got = remixed(
+        remix_rows(("r1", "Okain,Onno", "mb1", "Bruk (Okain & Onno Remix)")),
+        {"mb1": ("Okain", "Onno")}.get,
+    )
+    assert got.lines == []
+    assert got.left == [], "not settled here and not unsettled here either — it is the other pass's row"
+
+
+def test_a_split_is_proposed_on_the_album_as_well_as_the_recording() -> None:
+    """The half of #152 that actually names a folder.
+
+    `ingest` credits the recording *and* the release group from one tag, so a
+    joined credit is written on both — and `file_under` asks the album first
+    (#84). Splitting only the recording made 62 correct splits that moved
+    nothing: 171 release groups stayed credited to the joined string.
+    """
+    rows = [
+        {"recording": "r1", "album": "g1", "artist": "Okain,Onno", "album_artist": "Okain,Onno", "musicbrainz": "mb1"}
+    ]
+    got = attribute(rows, {"mb1": ("Okain", "Onno")}.get)
+    assert got.splits == [
+        {"fact": "credited", "artists": ["Okain", "Onno"], "basis": "musicbrainz", "recording": "r1"},
+        {"fact": "credited", "artists": ["Okain", "Onno"], "basis": "musicbrainz", "album": "g1"},
+    ]
+
+
+def test_a_remix_credit_reaches_the_album_too() -> None:
+    """A remix single's album carries the same joined credit its recording does.
+
+    So the performer and the remixer both have to be said twice, or the folder
+    keeps the name the tag gave it.
+    """
+    rows = [
+        {
+            "recording": "r1",
+            "album": "g1",
+            "artist": "Dubfire,Joseph Capriati",
+            "album_artist": "Dubfire,Joseph Capriati",
+            "musicbrainz": "mb1",
+            "title": "Roadkill (Joseph Capriati remix)",
+        }
+    ]
+    got = remixed(rows, {"mb1": ("Dubfire",)}.get)
+    assert [(x["role"], x.get("recording") or x.get("album")) for x in got.lines] == [
+        ("performer", "r1"),
+        ("performer", "g1"),
+        ("remixer", "r1"),
+        ("remixer", "g1"),
+    ]
+
+
+def test_a_row_on_no_album_still_credits_its_recording() -> None:
+    """A loose recording is an ordinary row, not a reason to skip the split."""
+    got = attribute([{"recording": "r1", "artist": "Okain,Onno", "musicbrainz": "mb1"}], {"mb1": ("Okain", "Onno")}.get)
+    assert [x.get("album") for x in got.splits] == [None]
+    assert got.splits[0]["recording"] == "r1"
+
+
+def test_a_compilation_keeps_its_own_credit() -> None:
+    """The 47 files this guard exists for.
+
+    A Lomax field recording is credited `Sid Hemphill, Lucius Smith` on the
+    performance and `Various Artists` on the album. Those are two different
+    claims, and writing the performers onto the album proposed moving 47 files
+    out of `Various Artists` into a folder named after nine people.
+    """
+    rows = [
+        {
+            "recording": "r1",
+            "album": "g1",
+            "artist": "Sid Hemphill,Lucius Smith",
+            "album_artist": "Various Artists",
+            "musicbrainz": "mb1",
+        }
+    ]
+    got = attribute(rows, {"mb1": ("Sid Hemphill", "Lucius Smith")}.get)
+    assert [x.get("album") for x in got.splits] == [None], "a compilation's credit is not this credit"
+    assert got.splits[0]["recording"] == "r1", "the performance is still split"
+
+
+def test_a_single_credited_the_same_way_at_both_levels_is_corrected_at_both() -> None:
+    """The case correcting the album is the whole point of.
+
+    A remix single carries one joined string on the recording and on the
+    album, so leaving the album alone would make the split invisible.
+    """
+    rows = [
+        {
+            "recording": "r1",
+            "album": "g1",
+            "artist": "Okain,Onno",
+            "album_artist": "Okain,Onno",
+            "musicbrainz": "mb1",
+        }
+    ]
+    got = attribute(rows, {"mb1": ("Okain", "Onno")}.get)
+    assert [x.get("album") for x in got.splits] == [None, "g1"]

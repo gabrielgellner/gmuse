@@ -547,11 +547,18 @@ impl Instance {
                 // that ever knows: it is holding the file whose tags name the
                 // album, and by the time anything else asks, a recording has
                 // several placements and no way to say which one this copy is.
+                //
                 self.append(
                     now,
                     Fact::EncodingPlaced {
                         encoding,
                         track: slot,
+                        // **What a scan can say**, which is the weakest rung
+                        // there is: the tags said so. A seating decided by
+                        // something that read the whole tracklist outranks it
+                        // (#170), and this is what lets the fold tell them
+                        // apart.
+                        basis: Source::TagVariant,
                     },
                 );
                 self.append(
@@ -1723,6 +1730,10 @@ mod containment_tests {
             fn slot(&self, _: Id<crate::model::entity::Encoding>) -> Option<proposal::Slot> {
                 None
             }
+
+            fn sleeve(&self, _: Id<crate::model::entity::Track>) -> Option<String> {
+                None
+            }
         }
 
         let listed = proposal::Proposal::Tracklisted {
@@ -1745,6 +1756,8 @@ mod containment_tests {
                     title_on_release: None,
                 },
             ],
+            album: None,
+            title: None,
         };
         let text = serde_json::to_string(&listed).expect("a proposal serialises");
         let (records, report) =

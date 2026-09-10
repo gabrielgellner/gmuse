@@ -1135,21 +1135,69 @@ impl Librarian {
             .filter_map(|slot| self.spine.tracks.get(slot))
             .map(|t| t.medium.id())
             .collect();
+        // **An empty slot at a position something already fills is not a gap**
+        // — #168.
+        //
+        // A slot is a row when a copy fills it, or when the library holds
+        // something else off that medium — so a record you own eleven of
+        // fifteen tracks of shows four gaps, which is #134's whole point. What
+        // that rule cannot tell on its own is a gap from a *shadow*.
+        //
+        // `Id::<Track>::of_track` seeds a slot from medium and recording, so
+        // two passes disagreeing about which recording sits at a position mint
+        // two ids for it. A relink then re-points the one it finds, both come
+        // to name the same performance, and the two ids remain: the same place
+        // on the same disc, twice, one playable and one not. *21* drew ten of
+        // its fifteen tracks that way. The same shape covers a position still
+        // contested, where the claimants differ and one has the file — and
+        // there too the position is not missing, it is disputed, which is
+        // `shelf slots`' business and not a hole in the record.
+        //
+        // So: a slot with no copy, at a place another slot fills, is not
+        // drawn. A position nothing fills still is, because that is the gap.
+        let filled_at: std::collections::BTreeSet<(Id<crate::model::entity::Medium>, u16)> = self
+            .spine
+            .tracks
+            .values()
+            .filter(|t| copies.contains_key(&t.id))
+            .map(|t| (t.medium.id(), t.position))
+            .collect();
         let ids: Vec<CopyId> = self
             .spine
             .tracks
             .iter()
             .filter(|(id, t)| copies.contains_key(*id) || lived_on.contains(&t.medium.id()))
+            .filter(|(id, t)| {
+                copies.contains_key(*id) || !filled_at.contains(&(t.medium.id(), t.position))
+            })
             .map(|(t, _)| CopyId::On(*t))
             // **A recording on no release is a row too**, which MusicBrainz
             // calls a standalone recording and this library has one of. Minting
             // it a release group to give it a home is what
             // `Various Artists/YouTube Sessions` already is (#20).
+            //
+            // **But something has to hold it** — #168. The slot branch above
+            // already asks this: a slot is a row when a copy fills it, or when
+            // the library holds *something* off that medium, so a part-held
+            // album shows its gaps (#134) and an album nobody owns shows
+            // nothing. A loose recording has no medium to be a gap in, and
+            // without the same question it became a row on no evidence at all.
+            //
+            // What that let through is residue. An identification that moves —
+            // `relink`, 377 of them here — leaves the recording it moved away
+            // from holding no file and sitting in no slot, and 100 such rows
+            // had accumulated, drawn beside the real ones and playable by
+            // nothing. They are not standalone recordings; they are the shadow
+            // of a claim somebody withdrew.
+            //
+            // Any copy, not a copy *here*: a recording held on another device
+            // is an ordinary row and an unplayable one, which is a different
+            // answer from "no such row".
             .chain(
                 self.spine
                     .recordings
                     .keys()
-                    .filter(|r| !appears.contains(r))
+                    .filter(|r| !appears.contains(r) && by.holds(**r))
                     .map(|r| CopyId::Loose(*r)),
             )
             .collect();
@@ -1373,6 +1421,52 @@ impl Librarian {
     pub fn release_of(&self, slot: Option<Id<Track>>) -> Option<Id<crate::model::entity::Release>> {
         let track = self.spine.tracks.get(&slot?)?;
         Some(self.spine.media.get(&track.medium.id())?.release.id())
+    }
+
+    /// How a subject is credited, as printed — #152.
+    ///
+    /// The public door onto `Lookup::line`, so a work list can publish an
+    /// album's credit alongside a recording's. A pass needs both to tell a
+    /// single from a compilation: they carry the same string on a remix single
+    /// and different ones on a Lomax field recording, and only the first may
+    /// have its album credit rewritten.
+    pub fn credited_line(&self, subject: CreditOn) -> String {
+        self.reference.credited_as(subject)
+    }
+
+    /// **Positions on a disc that more than one recording claims** — #168.
+    ///
+    /// A slot is a place on a medium and exactly one thing can be in it, but
+    /// nothing enforced that. `Id::<Track>::of_track` mints a slot from
+    /// **medium and recording**, which is deliberate — keyed by position,
+    /// correcting a tracklist re-mints every row that shifted and strands
+    /// whatever hung off the old ones. Its doc names the cost it accepted: the
+    /// album that plays one recording twice, which folds to one slot.
+    ///
+    /// The other direction was not anticipated. Two recordings claiming one
+    /// position mint two slots and the library holds both without complaint,
+    /// which is how cataloguing 487 MusicBrainz tracklists silently produced
+    /// 183 contested positions across 73 media here.
+    ///
+    /// Returned rather than judged. A disc really can play one recording twice
+    /// and a compilation really can carry two versions of a song, so which
+    /// claimant is right is a question about evidence and not about counting.
+    pub fn contested_slots(
+        &self,
+    ) -> BTreeMap<(Id<crate::model::entity::Medium>, u16), Vec<Id<Recording>>> {
+        let mut at: BTreeMap<(Id<crate::model::entity::Medium>, u16), Vec<Id<Recording>>> =
+            BTreeMap::new();
+        for slot in self.spine.tracks.values() {
+            at.entry((slot.medium.id(), slot.position))
+                .or_default()
+                .push(slot.recording.id());
+        }
+        at.retain(|_, claims| {
+            claims.sort_unstable();
+            claims.dedup();
+            claims.len() > 1
+        });
+        at
     }
 
     /// The album a recording sits on, if any.
@@ -1988,6 +2082,246 @@ mod tests {
             l.counted_of(release),
             Some((2, 3)),
             "the numerator is files and the denominator is slots"
+        );
+    }
+
+    /// **An empty slot at a position something already fills is not a gap** —
+    /// #168.
+    ///
+    /// The gap rule is #134's: a slot with no copy still draws when the
+    /// library holds *something else* off that medium, so a record you own
+    /// eleven of fifteen tracks of shows four holes rather than pretending to
+    /// be complete. What that cannot tell on its own is a hole from a shadow.
+    ///
+    /// `of_track` seeds a slot from medium and recording, so two passes
+    /// disagreeing about which recording sits at a position mint two ids for
+    /// it. A relink re-points the one it finds, both come to name the same
+    /// performance, and both ids remain — the same place on the same disc,
+    /// twice, one playable and one not. *21* drew ten of its fifteen tracks
+    /// that way, which is what made this visible at all.
+    #[test]
+    fn a_slot_shadowing_a_filled_position_is_not_drawn_as_a_hole() {
+        use crate::model::entity::{Encoding, Medium, Release, Track};
+        use crate::model::rows::{CopyId, Listing};
+        use crate::model::spine;
+
+        let release = Id::<Release>::derived(b"21");
+        let medium = Id::<Medium>::of_medium(release, 1);
+        let mut l = Librarian::default();
+
+        let place = |l: &mut Librarian, recording: Id<Recording>, position: u16| -> Id<Track> {
+            let slot = Id::<Track>::of_track(medium, recording);
+            l.spine.tracks.insert(
+                slot,
+                spine::Track {
+                    id: slot,
+                    medium: crate::model::id::Ref::to(medium),
+                    recording: crate::model::id::Ref::to(recording),
+                    position,
+                    title_on_release: None,
+                },
+            );
+            slot
+        };
+
+        // Track 1 is held. Track 2 is a genuine hole. And track 1 also carries
+        // a second slot, minted when a pass disagreed about what sits there.
+        let one = Id::<Recording>::derived(b"track one");
+        let shadow = Id::<Recording>::derived(b"what track one used to be");
+        let missing = Id::<Recording>::derived(b"track two, which we lack");
+        let held = place(&mut l, one, 1);
+        place(&mut l, shadow, 1);
+        place(&mut l, missing, 2);
+
+        let copy = Id::<Encoding>::derived(b"the one file");
+        l.placed.insert(copy, held);
+        l.encodings.encodings.insert(
+            copy,
+            crate::model::encoding::Encoding {
+                id: copy,
+                audio: Default::default(),
+                recording: Some(crate::model::id::Ref::to(one)),
+                format: crate::model::encoding::Format::Flac,
+                bitrate: 900,
+                sample_rate: None,
+                channels: None,
+                length: std::time::Duration::from_secs(200),
+                processed: false,
+                cutoff_hz: None,
+                gain: None,
+                levels: Default::default(),
+                encoder_delay: None,
+            },
+        );
+        for id in [one, shadow, missing] {
+            l.spine.recordings.insert(
+                id,
+                crate::model::spine::Recording {
+                    id,
+                    title: "Whatever".into(),
+                    work: None,
+                    recorded: None,
+                    bpm: None,
+                    length: Default::default(),
+                    pinned: None,
+                },
+            );
+        }
+        l.held = held_index(&l.spine, &l.placed);
+        l.draw();
+
+        let drawn: Vec<_> = Listing::rows(&l);
+        assert!(
+            drawn.contains(&CopyId::On(held)),
+            "the slot with the file is the row"
+        );
+        assert!(
+            drawn.contains(&CopyId::On(Id::<Track>::of_track(medium, missing))),
+            "a position nothing fills is a hole in the record, and #134 wants it shown"
+        );
+        assert!(
+            !drawn.contains(&CopyId::On(Id::<Track>::of_track(medium, shadow))),
+            "track 1 is not missing — it is right there — so a second slot on it \
+             is a shadow and not a hole"
+        );
+    }
+
+    /// **A loose row is a row because a file makes it one** — #168.
+    ///
+    /// A recording on no release is drawn, because a standalone recording is
+    /// real and this library has one. But nothing asked whether anything held
+    /// it, and the slot branch beside it always did: a slot is a row when a
+    /// copy fills it or when the library holds something else off that medium,
+    /// so a part-held album shows its gaps (#134) and an album nobody owns
+    /// shows nothing.
+    ///
+    /// What the missing question let through is residue. An identification
+    /// that moves leaves the recording it moved *from* holding no file and
+    /// sitting in no slot, and 100 of those had accumulated here — drawn
+    /// beside the real rows, playable by nothing, and indistinguishable in the
+    /// list from a track genuinely missing off a record. They are not
+    /// standalone recordings; they are the shadow of a claim withdrawn.
+    #[test]
+    fn a_recording_nothing_holds_and_no_disc_places_is_not_a_row() {
+        use crate::model::entity::Encoding;
+        use crate::model::rows::{CopyId, Listing};
+        use crate::model::spine::Recording as Rec;
+
+        let standalone = Id::<Recording>::derived(b"a real standalone recording");
+        let residue = Id::<Recording>::derived(b"what a relink moved away from");
+
+        let mut l = Librarian::default();
+        for (id, title) in [(standalone, "A One-Off"), (residue, "What It Used To Be")] {
+            l.spine.recordings.insert(
+                id,
+                Rec {
+                    id,
+                    title: title.into(),
+                    work: None,
+                    recorded: None,
+                    bpm: None,
+                    length: Default::default(),
+                    pinned: None,
+                },
+            );
+        }
+        // Only the first has bytes behind it.
+        let copy = Id::<Encoding>::derived(b"a file");
+        l.encodings.encodings.insert(
+            copy,
+            crate::model::encoding::Encoding {
+                id: copy,
+                audio: Default::default(),
+                recording: Some(crate::model::id::Ref::to(standalone)),
+                format: crate::model::encoding::Format::Flac,
+                bitrate: 320,
+                sample_rate: None,
+                channels: None,
+                length: std::time::Duration::from_secs(180),
+                processed: false,
+                cutoff_hz: None,
+                gain: None,
+                levels: Default::default(),
+                encoder_delay: None,
+            },
+        );
+        l.draw();
+
+        let drawn: Vec<_> = Listing::rows(&l);
+        assert!(
+            drawn.contains(&CopyId::Loose(standalone)),
+            "a standalone recording with a file is exactly what a loose row is for"
+        );
+        assert!(
+            !drawn.contains(&CopyId::Loose(residue)),
+            "a recording with no copy and no slot is a row on no evidence at all"
+        );
+    }
+
+    /// **A position on a disc holds one thing, and nothing enforced that** —
+    /// #168.
+    ///
+    /// `of_track` mints a slot from medium *and recording*, deliberately: keyed
+    /// by position, correcting a tracklist re-mints every row that shifted. The
+    /// cost its doc names is one recording in two positions, which folds. The
+    /// cost it missed is two recordings in one position, which does not — they
+    /// are two slots, and the library held 183 such pairs without complaint.
+    ///
+    /// The real one: `Adele/21/11 Someone Like You.mp3` runs 295.4s and was
+    /// identified as MusicBrainz's live Royal Albert Hall recording (294.0s)
+    /// over the studio one (285.0s), on 1.4 seconds against 10. Cataloguing
+    /// *21*'s tracklist then put the studio recording in the same position,
+    /// and the row nobody can play is the one that is right.
+    #[test]
+    fn two_recordings_claiming_one_position_are_reported() {
+        use crate::model::entity::{Medium, Release, Track};
+        use crate::model::spine;
+
+        let release = Id::<Release>::derived(b"21");
+        let medium = Id::<Medium>::of_medium(release, 1);
+        let live = Id::<Recording>::derived(b"royal albert hall");
+        let studio = Id::<Recording>::derived(b"the studio take");
+
+        fn place(l: &mut Librarian, medium: Id<Medium>, recording: Id<Recording>, position: u16) {
+            let slot = Id::<Track>::of_track(medium, recording);
+            l.spine.tracks.insert(
+                slot,
+                spine::Track {
+                    id: slot,
+                    medium: crate::model::id::Ref::to(medium),
+                    recording: crate::model::id::Ref::to(recording),
+                    position,
+                    title_on_release: None,
+                },
+            );
+        }
+
+        let mut l = Librarian::default();
+        place(&mut l, medium, live, 11);
+        assert!(
+            l.contested_slots().is_empty(),
+            "one recording in a position is the ordinary case"
+        );
+
+        // The tracklist arrives and says something else belongs there. Because
+        // the id carries the recording, this is a second slot rather than a
+        // correction of the first — which is the whole defect.
+        place(&mut l, medium, studio, 11);
+        let contested = l.contested_slots();
+        assert_eq!(
+            contested.get(&(medium, 11)).map(Vec::len),
+            Some(2),
+            "two recordings claim track 11 and nothing said so"
+        );
+
+        // One recording in two positions is the case `of_track` documented as
+        // acceptable: it folds to a single slot, so there is nothing to report.
+        let mut l = Librarian::default();
+        place(&mut l, medium, live, 3);
+        place(&mut l, medium, live, 9);
+        assert!(
+            l.contested_slots().is_empty(),
+            "a reprise folds to one slot, which `of_track` accepted on purpose"
         );
     }
 

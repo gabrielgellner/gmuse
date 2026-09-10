@@ -715,6 +715,84 @@ fn run_library(
                 );
             }
         }
+        cli::Shelf::Slots => {
+            use crate::model::entity::{Medium, Recording};
+            use crate::model::id::Id;
+
+            let (log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let cat = log.catalogue();
+            let here = cat.holdings.get(&device);
+
+            // Which recordings this device can actually open, so the report can
+            // say which claimant is the one with a file behind it — that is the
+            // difference between "two versions on one disc" and "the row that
+            // is right is the row nobody can play".
+            let mut playable: std::collections::BTreeMap<Id<Recording>, u32> = Default::default();
+            for encoding in here.map(|a| a.held.keys()).into_iter().flatten() {
+                if !cat.retired.contains(encoding)
+                    && let Some(recording) = cat.bound.get(encoding)
+                {
+                    playable.insert(
+                        *recording,
+                        cat.encodings.get(encoding).map_or(0, |e| e.length_ms),
+                    );
+                }
+            }
+
+            // The finding itself is `Librarian::contested_slots`, so it is
+            // testable and there is one definition of what "contested" means.
+            // What is added here is device-local: which claimant has a file.
+            let library = crate::model::seam::Librarian::from_catalogue(&cat);
+            let mut found = 0usize;
+            let mut media: std::collections::BTreeSet<Id<Medium>> = Default::default();
+            for ((medium, position), claims) in library.contested_slots() {
+                found += 1;
+                media.insert(medium);
+                let album = cat
+                    .media
+                    .get(&medium)
+                    .and_then(|m| cat.releases.get(&m.release))
+                    .map(|r| r.title.as_str())
+                    .unwrap_or("<untitled>");
+                println!("{album} — track {position}");
+                for recording in claims {
+                    let title = cat
+                        .recordings
+                        .get(&recording)
+                        .map(|r| r.title.as_str())
+                        .unwrap_or("<untitled>");
+                    // **Held or not is the whole diagnostic.** Where exactly
+                    // one claimant has a file, the other is what an authority
+                    // says belongs there — and the file is on the wrong
+                    // recording rather than missing.
+                    // **The measured length of the file, where there is one.**
+                    // It is the evidence that decides these: an identification
+                    // matching on duration took the live `Someone Like You` by
+                    // 1.4 seconds over the studio one's 10, and seeing the
+                    // number beside both claimants is what makes that legible.
+                    let (mark, secs) = match playable.get(&recording) {
+                        Some(ms) => ("held", f64::from(*ms) / 1000.0),
+                        None => ("    ", 0.0),
+                    };
+                    println!("  {mark}  {secs:>7.1}s  {recording}  {title}");
+                }
+            }
+            eprintln!(
+                "\n{found} position(s) claimed by more than one recording, across {} medium(s).",
+                media.len()
+            );
+            if found > 0 {
+                eprintln!(
+                    "A slot is minted from medium and recording, not medium and position, so two\n\
+                     claimants are two slots rather than one correction. Where exactly one is held,\n\
+                     the file is bound to the wrong recording and `relink` moves it."
+                );
+            }
+        }
         cli::Shelf::Verify => {
             let (log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,

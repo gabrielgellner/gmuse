@@ -19,6 +19,7 @@ use crate::model::id::Id;
 use crate::model::instance::Instance;
 use crate::model::log::Record;
 use crate::model::proposal::Queried;
+use crate::model::reference::CreditOn;
 use crate::model::seam::Librarian;
 
 /// Which rows to hand over.
@@ -110,6 +111,28 @@ pub fn rows(
                 .map(|(e, _)| e.id)
                 .and_then(|e| catalogue.encodings.get(&e))
                 .and_then(|e| (e.length_ms > 0).then_some(e.length_ms)),
+            // **What the library rests on, where that is MusicBrainz.** The
+            // other rungs are deliberately not published as one: an `External`
+            // key is opaque by design and an `AudioId` names bytes, so neither
+            // is a thing to look up.
+            musicbrainz: match catalogue.identified.get(recording) {
+                Some(Basis::MusicBrainz(id)) => Some(id.to_string()),
+                _ => None,
+            },
+            // By way of the slot this copy is placed in, which is how
+            // `files_under` reaches an album and for the same reason: a
+            // recording is on every release that holds it, and the one that
+            // matters is the one the file is on.
+            album: opened
+                .map(|(e, _)| e.id)
+                .and_then(|e| catalogue.placed.get(&e))
+                .and_then(|slot| library.group_of(Some(*slot))),
+            album_artist: opened
+                .map(|(e, _)| e.id)
+                .and_then(|e| catalogue.placed.get(&e))
+                .and_then(|slot| library.group_of(Some(*slot)))
+                .map(|group| library.credited_line(CreditOn::ReleaseGroup(group)))
+                .filter(|line| !line.is_empty()),
         });
     }
     // **The bytes nothing has named** — #160, on the same list rather than on
@@ -139,6 +162,12 @@ pub fn rows(
                 .encodings
                 .get(encoding)
                 .and_then(|e| (e.length_ms > 0).then_some(e.length_ms)),
+            // Bytes nothing has named rest on nothing, by definition — this is
+            // the list of exactly those rows, and nothing has placed them
+            // either.
+            musicbrainz: None,
+            album: None,
+            album_artist: None,
         });
     }
     out
@@ -274,6 +303,187 @@ mod tests {
         assert!(
             !after.iter().any(|r| r.recording == Some(named)),
             "a recording an authority has named is not work"
+        );
+    }
+
+    /// **The rung the row rests on, where it is one a tool can look up** —
+    /// #152.
+    ///
+    /// Here for the reason `length_ms` is: without it a pass wanting to ask
+    /// MusicBrainz about a row has to *search* for it by title and artist, and
+    /// that is a weaker question than the one it means to ask. `joined.py`
+    /// asks whether an artist exists under a credit string; `The Game`,
+    /// `La Fleur` and `Sonya Elise` all answer yes for somebody. Handed the
+    /// recording id, the same pass asks who is actually credited on that
+    /// recording and gets one artist id per artist.
+    ///
+    /// **Only MusicBrainz.** The other two rungs are not things to look up: an
+    /// `External` key is opaque by design (#89 §5) and an `AudioId` names
+    /// bytes, so publishing either as a lookup handle would be inviting a tool
+    /// to ask a question with no answer.
+    #[test]
+    fn a_row_publishes_the_musicbrainz_id_it_rests_on_and_no_other_rung() {
+        let root = dir("rung");
+        wav(&root.join("a.wav"), 1000);
+
+        let bare = rows(
+            std::slice::from_ref(&root),
+            &BTreeSet::new(),
+            device(),
+            100,
+            Only::Everything,
+        );
+        assert_eq!(bare.len(), 1);
+        assert_eq!(
+            bare[0].musicbrainz, None,
+            "a file resting on its bytes rests on nothing to look up"
+        );
+
+        let mbid = uuid::Uuid::from_u128(7);
+        let named = Id::<Recording>::of_basis(&Basis::MusicBrainz(mbid));
+        let log = records(
+            200,
+            [
+                Fact::RecordingIdentified {
+                    recording: named,
+                    basis: Basis::MusicBrainz(mbid),
+                },
+                Fact::RecordingCatalogued {
+                    recording: named,
+                    title: "Named".into(),
+                    artist: Id::derived(b"someone"),
+                },
+            ],
+        );
+        let after = rows(&[root], &log, device(), 300, Only::Everything);
+        assert_eq!(
+            after
+                .iter()
+                .find(|r| r.recording == Some(named))
+                .and_then(|r| r.musicbrainz.clone()),
+            Some(mbid.to_string()),
+            "the row rests on MusicBrainz and does not say so"
+        );
+
+        // And the field is omitted rather than emitted as null, so a tool can
+        // test for its presence the way it tests for a locator.
+        let bare_json = serde_json::to_string(&bare[0]).expect("serialises");
+        assert!(
+            !bare_json.contains("musicbrainz"),
+            "an absent rung should not appear at all: {bare_json}"
+        );
+        assert!(
+            !bare_json.contains("album"),
+            "a recording in no slot sits on no album: {bare_json}"
+        );
+    }
+
+    /// **The album is on the row because it is the level that names a folder**
+    /// — #152.
+    ///
+    /// `ingest` credits the recording *and* the release group from one tag, so
+    /// a joined credit is written on both; `file_under` asks the album first
+    /// (#84). A pass handed only the recording can make a correct split that
+    /// changes nothing anybody sees, which is exactly what happened: 171
+    /// release groups here stayed credited to `Marc Romboy,Stephan Bodzin`
+    /// after their recordings were split.
+    ///
+    /// **By way of the slot the copy is placed in.** A recording is on every
+    /// release that holds it, so "the" album is a choice — and it is the same
+    /// choice `files_under` makes, because the folder follows the file.
+    #[test]
+    fn a_row_names_the_album_its_copy_sits_on() {
+        use crate::model::entity::{Medium, Release, ReleaseGroup, Track};
+
+        let root = dir("album");
+        let path = root.join("a.wav");
+        wav(&path, 1000);
+
+        // Nothing placed, so nothing to name.
+        let loose = rows(
+            std::slice::from_ref(&root),
+            &BTreeSet::new(),
+            device(),
+            100,
+            Only::Everything,
+        );
+        assert_eq!(loose.len(), 1);
+        assert_eq!(
+            loose[0].album, None,
+            "a recording in no slot is on no album"
+        );
+
+        // The gate holds an untagged file without minting a performance
+        // (#160), so name one before there is anything to place.
+        let encoding = loose[0].encoding.expect("the scan described the bytes");
+        let recording = Id::<Recording>::of_basis(&Basis::MusicBrainz(uuid::Uuid::from_u128(9)));
+        let group = Id::<ReleaseGroup>::derived(b"a group");
+        let release = Id::<Release>::derived(b"a pressing");
+        let medium = Id::<Medium>::of_medium(release, 1);
+        let slot = Id::<Track>::derived(b"a slot");
+        let log = records(
+            200,
+            [
+                Fact::RecordingIdentified {
+                    recording,
+                    basis: Basis::MusicBrainz(uuid::Uuid::from_u128(9)),
+                },
+                Fact::RecordingCatalogued {
+                    recording,
+                    title: "Placed".into(),
+                    artist: Id::derived(b"someone"),
+                },
+                Fact::EncodingBound {
+                    encoding,
+                    from: None,
+                    to: recording,
+                },
+                Fact::ReleaseGroupCatalogued {
+                    group,
+                    title: "An Album".into(),
+                    artist: Id::derived(b"someone"),
+                    first_released: None,
+                    kind: Default::default(),
+                    secondary: Default::default(),
+                },
+                Fact::ReleaseCatalogued {
+                    release,
+                    group,
+                    title: "An Album".into(),
+                    released: None,
+                    label: None,
+                    media: Some(1),
+                },
+                Fact::MediumCatalogued {
+                    medium,
+                    release,
+                    position: 1,
+                    format: None,
+                    tracks: Some(1),
+                },
+                Fact::TrackPlaced {
+                    track: slot,
+                    medium,
+                    recording,
+                    position: 1,
+                    title_on_release: None,
+                },
+                Fact::EncodingPlaced {
+                    encoding,
+                    track: slot,
+                    basis: crate::model::reference::Source::TagVariant,
+                },
+            ],
+        );
+
+        let placed = rows(&[root], &log, device(), 300, Only::Everything);
+        assert_eq!(
+            placed
+                .iter()
+                .find(|r| r.recording == Some(recording))
+                .and_then(|r| r.album),
+            Some(group),
+            "the copy sits in a slot on this album and the row does not say so"
         );
     }
 

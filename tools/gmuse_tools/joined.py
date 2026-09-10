@@ -111,9 +111,7 @@ JOINERS: Final = re.compile(
 #: A `feat.` never is. `2Pac feat. Danny Boy, Syke & CPO` is four people and the
 #: reason `feat.` joined this pattern in the first place, so dropping it here
 #: would trade one bug for the one it replaced.
-WITHIN: Final = re.compile(
-    r"\s+feat\.?\s+|\s+ft\.?\s+|\s+[xX]\s+|\s+vs\.?\s+", re.IGNORECASE
-)
+WITHIN: Final = re.compile(r"\s+feat\.?\s+|\s+ft\.?\s+|\s+[xX]\s+|\s+vs\.?\s+", re.IGNORECASE)
 
 MB_ARTIST: Final = "https://musicbrainz.org/ws/2/artist"
 #: The one status that carries an answer.
@@ -364,6 +362,267 @@ def survey(root: Path, out: Path, *, offline: bool = False) -> None:
     print("nothing was written to the library: a credit stays one artist until somebody says.", file=sys.stderr)
 
 
+MB_LOOKUP: Final = "https://musicbrainz.org/ws/2/recording/{}"
+
+
+def credited_on(con: sqlite3.Connection, mbid: str) -> tuple[str, ...] | None:
+    """Who MusicBrainz says is credited on this **recording**.
+
+    The strongest arbiter this pass has, and it needs no string rule at all.
+    A recording's `artist-credit` is an ordered array with **one artist id per
+    artist**, which is the same thing `Scanned::credit_is_joined` reads out of
+    a Picard `/`-joined tag — arriving by lookup rather than by tag, on exactly
+    the files where the tag never carried it.
+
+    It is a different question from `ask_musicbrainz`, which asks whether an
+    artist exists *under a name*. A name is ambiguous — `The Game`, `La Fleur`
+    and `Sonya Elise` all match somebody — where a recording id is not, so this
+    settles rows that one has to leave to a person.
+
+    Returns `None` when the lookup failed, which is not the same as an empty
+    credit and must not be read as one.
+    """
+    status, body = bronze.get(
+        con,
+        MB_LOOKUP.format(mbid),
+        {"fmt": "json", "inc": "artist-credits"},
+        headers=USER_AGENT,
+    )
+    if status != HTTP_OK or not isinstance(body, dict):
+        return None
+    out = [
+        c["artist"]["name"]
+        for c in body.get("artist-credit", [])
+        if isinstance(c, dict) and isinstance(c.get("artist"), dict) and c["artist"].get("name")
+    ]
+    return tuple(out) or None
+
+
+def on_both(row: dict[str, str], claim: dict[str, object]) -> list[dict[str, object]]:
+    """The same claim about the performance and about the album it is on.
+
+    **They are two claims, not one written twice.** `ingest` credits the
+    recording *and* the release group from a single tag, so a joined credit is
+    written on both — and `file_under` asks the album first (#84), which makes
+    the album's copy the one that names a folder. A pass that corrected only
+    the recording made 62 correct splits that moved nothing and left 171
+    release groups still credited to the joined string.
+
+    **And only where the album carries the very string being corrected**, which
+    is the guard a first version did not have. A remix single is credited
+    `Dubfire,Joseph Capriati` at both levels and correcting the album is the
+    point. A Lomax field recording is credited `Sid Hemphill, Lucius Smith` on
+    the performance and `Various Artists` on the album — two different claims,
+    and writing the performers onto the album proposed moving 47 files out of
+    `Various Artists` into a folder named after nine people. Where the lines
+    differ, a fix for one is not evidence about the other.
+
+    The album is omitted for a row sitting in no slot, which is an ordinary row
+    and not a reason to skip the recording.
+    """
+    out: list[dict[str, object]] = [{**claim, "recording": row["recording"]}]
+    if row.get("album") and key(row.get("album_artist") or "") == key(row.get("artist") or ""):
+        out.append({**claim, "album": row["album"]})
+    return out
+
+
+class Attribution(NamedTuple):
+    """What one run of [`attribute`] concluded."""
+
+    splits: list[dict[str, object]]
+    disputed: list[dict[str, str]]
+    asked: int
+    unanswered: int
+
+
+def attribute(rows: list[dict[str, str]], ask: Callable[[str], tuple[str, ...] | None]) -> Attribution:
+    """Settle each joined-looking credit against who MusicBrainz credits.
+
+    **Two outcomes, and only one of them writes.** Where MusicBrainz names
+    several artists, that is the split and it is proposed. Where it names one
+    while the credit names several, the two authorities *disagree* — and a
+    disagreement goes to a person, because acting on it would drop a credited
+    artist. That is #145's mistake with the costume on the other way round: not
+    inventing an artist from a string, but deleting one because an authority
+    was asked a narrower question than the tag answered. Measured here, 48 of
+    90 cached answers came back as one artist.
+
+    **One recording is asked per credit before any others are.** The answer is
+    genuinely per recording — a proposal names one — but a credit MusicBrainz
+    calls a single artist yields no proposal at all, so asking the rest of its
+    recordings buys nothing. `Angus & Julia Stone` holds 24 recordings here,
+    and a first version spent 24 lookups learning it is one act. Only a credit
+    that comes back as several is fanned out. Over this library that is 123
+    credits asked rather than 223 rows.
+
+    **A bare slash is not a candidate and never reaches here.** `members` does
+    not split `AC/DC`, because `credits.py` settles a `/` by id count and
+    `AC/DC` is the string that rule exists for.
+
+    **A failed lookup is not an empty credit.** `ask` returns `None` for "no
+    answer was obtained", which is counted and never read as "nobody is
+    credited" — the same distinction `bronze` draws by refusing to cache a
+    status of 0.
+    """
+    by_credit: dict[str, list[dict[str, str]]] = collections.defaultdict(list)
+    for row in rows:
+        credit = row.get("artist") or ""
+        if row.get("musicbrainz") and row.get("recording") and len(members(credit)) >= SEVERAL:
+            by_credit[credit].append(row)
+
+    splits: list[dict[str, object]] = []
+    disputed: list[dict[str, str]] = []
+    unanswered = asked = 0
+    for credit, group in sorted(by_credit.items()):
+        first = ask(group[0]["musicbrainz"])
+        if first is None:
+            unanswered += len(group)
+            continue
+        asked += 1
+        if len(first) < SEVERAL:
+            if key(first[0]) != key(credit):
+                disputed.append(
+                    {
+                        "credit": credit,
+                        "musicbrainz": " | ".join(first),
+                        "why": "the credit names several and MusicBrainz names one",
+                        "recording": group[0]["musicbrainz"],
+                    }
+                )
+            continue
+        for row in group:
+            named = first if row is group[0] else ask(row["musicbrainz"])
+            if named is None:
+                unanswered += 1
+            elif len(named) >= SEVERAL:
+                # **Both levels, because `ingest` wrote the joined credit on
+                # both.** `file_under` asks the album first (#84), so splitting
+                # only the recording is a correct change nobody can see: 171
+                # release groups here stayed credited to the joined string
+                # after their recordings were split.
+                splits += on_both(row, {"fact": "credited", "artists": list(named), "basis": "musicbrainz"})
+            else:
+                disputed.append(
+                    {
+                        "credit": credit,
+                        "musicbrainz": " | ".join(named),
+                        "why": "this recording under a split credit names one artist",
+                        "recording": row["musicbrainz"],
+                    }
+                )
+    return Attribution(splits, disputed, asked, unanswered)
+
+
+def attributed(work: Path, out: Path, review: Path) -> None:
+    """Read the work list, ask MusicBrainz, and write the split and the dispute.
+
+    **Only rows the library rests on MusicBrainz for.** `musicbrainz` is absent
+    for the 7.3% resting on bytes, and those stay with `survey`'s
+    corroboration — this pass has nothing to ask about them.
+    """
+    rows = [json.loads(line) for line in work.read_text().splitlines() if line.strip()]
+    con = bronze.open_cache()
+    got = attribute(rows, lambda mbid: credited_on(con, mbid))
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w") as fh:
+        for line in got.splits:
+            fh.write(json.dumps(line) + "\n")
+    write_tsv(review, got.disputed, ["credit", "musicbrainz", "why", "recording"])
+
+    print(f"{len(got.splits)} split(s) over {got.asked} credit(s) asked -> {out}", file=sys.stderr)
+    print(f"{len(got.disputed)} disagreement(s) left to a person -> {review}", file=sys.stderr)
+    if got.unanswered:
+        print(f"{got.unanswered} row(s) MusicBrainz did not answer for; nothing was written.", file=sys.stderr)
+
+
+#: A parenthetical naming a person rather than a version. `CREDITS_A_PERSON`
+#: in `identify.py` draws the same line for the same reason: a bare `mix` names
+#: a version — `(Original Mix)`, `(Club Mix)` — and only these say somebody did
+#: the work.
+REWORKED: Final = re.compile(r"\b(?:re-?mix|rework|bootleg|refix|vip|dub)\b", re.IGNORECASE)
+
+
+def bracketed(title: str) -> str:
+    """Everything in brackets, which is where a version credit is written."""
+    return " ".join(m.group(0) for m in re.finditer(r"\([^)]*\)|\[[^\]]*\]", title))
+
+
+class Remix(NamedTuple):
+    """What one run of [`remixed`] concluded."""
+
+    lines: list[dict[str, object]]
+    settled: int
+    left: list[dict[str, str]]
+
+
+def remixed(rows: list[dict[str, str]], ask: Callable[[str], tuple[str, ...] | None]) -> Remix:
+    """A credit naming a performer and a remixer, where three sources agree.
+
+    **These are not joined credits and treating them as one is the error.**
+    `attribute` asks "which artists does this credit name" and gets back a
+    disagreement: the tag says `Dubfire,Joseph Capriati` and MusicBrainz says
+    `Joseph Capriati`. Neither is wrong. MusicBrainz credits the *recording* to
+    whoever performed the remix and files the other as a relationship, so the
+    right answer is one performer and one remixer — which is `contributed`
+    twice, not `credited` once. Measured here, 47 of 60 such disagreements have
+    a remix-shaped title.
+
+    **Three sources have to agree, and that is what makes this not a
+    heuristic.** MusicBrainz names exactly one artist on the recording; the tag
+    credit names that artist *and* others; and the title's own parenthetical
+    names every one of those others beside a word that credits a person. Any
+    one of the three alone is the kind of rule #145 was burned by — the title
+    alone would read `(Original Mix)` as a person, and the tag alone is the
+    string nobody can parse. Together they are three independent statements of
+    the same shape.
+
+    **The roles are not interchangeable and the whole point is which is which.**
+    `line_of` reads performers, so a remixer filed as one puts the record in
+    the remixer's folder — the bug that made the role filter exist. The
+    performer is asserted on MusicBrainz's authority and spelled as MusicBrainz
+    spells it; the remixer is asserted on the tag and title agreeing, and is
+    spelled as the credit spells it, because that is the source vouching for it.
+
+    Anything the three do not settle is returned rather than dropped, so the
+    residue is a list somebody can read and not a silent gap.
+    """
+    lines: list[dict[str, object]] = []
+    left: list[dict[str, str]] = []
+    settled = 0
+    for row in rows:
+        credit, mbid, rec = row.get("artist") or "", row.get("musicbrainz"), row.get("recording")
+        named = members(credit)
+        if not mbid or not rec or len(named) < SEVERAL:
+            continue
+        answer = ask(mbid)
+        if answer is None or len(answer) != 1:
+            continue
+        performer = answer[0]
+        others = [n for n in named if key(n) != key(performer)]
+        inside = bracketed(row.get("title") or "")
+        why = ""
+        if not others:
+            continue
+        if not REWORKED.search(inside):
+            why = "nothing in the title credits a person"
+        elif not all(key(o) and key(o) in key(inside) for o in others):
+            why = "the title does not name every other artist in the credit"
+        if why:
+            left.append({"credit": credit, "musicbrainz": performer, "why": why, "recording": mbid})
+            continue
+        settled += 1
+        # MusicBrainz's claim about its own recording, on both levels because
+        # `ingest` wrote the joined credit on both and `file_under` asks the
+        # album first.
+        lines += on_both(row, {"fact": "contributed", "artist": performer, "role": "performer", "basis": "musicbrainz"})
+        for other in others:
+            # The tag and the title agreeing, which is a reading of what this
+            # library holds and not something an authority said.
+            lines += on_both(row, {"fact": "contributed", "artist": other, "role": "remixer", "basis": "inferred"})
+    return Remix(lines, settled, left)
+
+
 LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
 OFFLINE = typer.Option(default=False, help="use only what the library itself can corroborate")
 WORK = typer.Argument(Path("work.jsonl"), help="the work list from `gmuse shelf query`")
@@ -382,6 +641,26 @@ def register(app: typer.Typer) -> None:
     def propose_cmd(work: Path = WORK, root: Path = LIB, *, offline: bool = OFFLINE) -> None:
         """Turn the settled verdicts into facts `gmuse shelf apply` can read."""
         propose(work.expanduser(), root.expanduser(), out_path("joined-propose.jsonl"), offline=offline)
+
+    @sub.command("attributed")
+    def attributed_cmd(work: Path = WORK) -> None:
+        """Ask each identified recording who MusicBrainz credits on it, and split on that."""
+        attributed(work.expanduser(), out_path("joined-attributed.jsonl"), out_path("joined-disputed.tsv"))
+
+    @sub.command("remixed")
+    def remixed_cmd(work: Path = WORK) -> None:
+        """Split a performer-and-remixer credit, where MusicBrainz, the tag and the title agree."""
+        rows = [json.loads(line) for line in work.expanduser().read_text().splitlines() if line.strip()]
+        con = bronze.open_cache()
+        got = remixed(rows, lambda mbid: credited_on(con, mbid))
+        out, review = out_path("joined-remixed.jsonl"), out_path("joined-remix-unsettled.tsv")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w") as fh:
+            for line in got.lines:
+                fh.write(json.dumps(line) + "\n")
+        write_tsv(review, got.left, ["credit", "musicbrainz", "why", "recording"])
+        print(f"{len(got.lines)} fact(s) over {got.settled} recording(s) -> {out}", file=sys.stderr)
+        print(f"{len(got.left)} left to a person -> {review}", file=sys.stderr)
 
     app.add_typer(sub, name="joined")
 

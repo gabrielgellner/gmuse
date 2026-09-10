@@ -76,7 +76,24 @@ impl proposal::Holdings for Shelf {
             //
             // One place, for the reason `Recording` above is: `disk` is folded
             // log-first, so it already carries every medium the log knows.
-            Subject::Medium(id) => self.disk.media.contains_key(&id),
+            //
+            // **Or a disc this library has already seated a copy on** — #170.
+            // The rule above reads the *tags*, so a tracklist could only ever
+            // describe a pressing the files already named — which is how one
+            // folder of eighteen Adele files, assembled from three sources,
+            // stayed spread across the three pressings its tags happened to
+            // mention while MusicBrainz had a single eighteen-track edition
+            // that seats all of them. `Placed` is how a copy reaches such a
+            // pressing, and once one has, the library has plainly seen the
+            // disc and may be told how long it is.
+            //
+            // The safety property is unchanged: a tracklist for a record
+            // nothing here connects to is still refused. What is admitted is a
+            // record something here already sits on.
+            Subject::Medium(id) => {
+                self.disk.media.contains_key(&id)
+                    || self.log.tracks.values().any(|t| t.medium == id)
+            }
             // **The winner has to be an album the library holds** — #156. A
             // merge into an id nothing names is a redirect pointing nowhere,
             // and the loser is deliberately not checked: it is the row being
@@ -146,6 +163,14 @@ impl proposal::Holdings for Shelf {
             medium: placed.medium,
             position: placed.position,
         })
+    }
+
+    fn sleeve(&self, track: Id<crate::model::entity::Track>) -> Option<String> {
+        self.log
+            .tracks
+            .get(&track)
+            .or_else(|| self.disk.tracks.get(&track))
+            .and_then(|t| t.title_on_release.clone())
     }
 }
 

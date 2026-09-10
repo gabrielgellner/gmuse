@@ -48,6 +48,7 @@ from gmuse_tools import (
     paths,
     quality,
     tags,
+    version,
 )
 
 # `credits` shadows a builtin, which ruff is right to flag — the module is named
@@ -84,6 +85,7 @@ quality.register(quality_app)
 bronze.register(cache_app)
 credits_pass.register(app)
 joined.register(app)
+version.register(app)
 paths.register(app)
 tags.register(app)
 ingest.register(app)

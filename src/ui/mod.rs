@@ -6801,9 +6801,25 @@ mod tests {
     fn a_track_no_file_is_held_for_is_skipped_rather_than_stopping_playback() {
         use crate::model::log::{Fact, Record};
 
-        // A recording the library knows about and holds nothing of — the
-        // shape a catalogued tracklist produces, minus the album, which is
-        // not what is under test.
+        // A recording the library knows about and holds nothing of, **in a
+        // slot on a record it does hold part of** — which is the shape #155
+        // describes and the only shape that is a gap. The fixture holds two
+        // *Malibu* tracks, so the position after them is the hole, exactly as a
+        // catalogued tracklist leaves one. The scan numbers what it finds
+        // sequentially, so the two files sit at 1 and 2 and the hole is 3.
+        //
+        // The album is not incidental to this. A recording in no slot that
+        // nothing holds is not a gap in anything — it is residue from an
+        // identification that moved away — and since #168 it is not drawn at
+        // all, so building this case without a medium would test nothing.
+        let store = fixture();
+        let l = lib_of(&store);
+        let seat = Listing::rows(l)[0];
+        let filled = l
+            .placed_at(l.shown_copy(seat).expect("the fixture fills it"))
+            .expect("the fixture places its copies");
+        let medium = l.spine.tracks[&filled].medium.id();
+
         let absent = Id::<crate::model::spine::Recording>::derived(b"catalogued only");
         let mut clock = crate::model::clock::HybridClock::new(Id::derived(b"test"));
         let records: std::collections::BTreeSet<Record> = [
@@ -6816,6 +6832,13 @@ mod tests {
                 title: "The One We Lack".into(),
                 artist: Id::of_artist(None, "Anderson .Paak"),
             },
+            Fact::TrackPlaced {
+                track: Id::<crate::model::entity::Track>::of_track(medium, absent),
+                medium,
+                recording: absent,
+                position: 3,
+                title_on_release: None,
+            },
         ]
         .into_iter()
         .map(|fact| Record {
@@ -6824,7 +6847,6 @@ mod tests {
         })
         .collect();
 
-        let store = fixture();
         let library = Box::leak(Box::new(crate::bridge::imported(
             &store,
             &records,

@@ -269,6 +269,33 @@ pub enum Shelf {
     /// both, is not decidable from bitrate alone — a second copy can carry the
     /// better tags, as the `Early James` pair did.
     Copies,
+    /// **Positions on a disc that more than one recording claims** — #168.
+    ///
+    /// A slot is a place on a medium and exactly one thing can be in it. But
+    /// `Id::<Track>::of_track` mints a slot from **medium and recording**, not
+    /// medium and position, and that is deliberate: keyed by position,
+    /// correcting a tracklist re-mints every row that shifted and strands
+    /// whatever hung off the old ones. Its own doc names the cost it accepted
+    /// — the album that plays one recording twice, which folds to one slot.
+    ///
+    /// It did not anticipate the other direction. **Two recordings claiming one
+    /// position** mint two slots, and nothing notices. That is what cataloguing
+    /// 487 MusicBrainz tracklists produced here: 202 positions across 77 media,
+    /// each a place where the library already believed something and the
+    /// tracklist said otherwise.
+    ///
+    /// It is almost always a misidentification, and the shape is legible. Our
+    /// `Adele/21/11 Someone Like You.mp3` runs 295.4s; MusicBrainz's live
+    /// Royal Albert Hall recording runs 294.0s and the studio one 285.0s, so
+    /// an identification matching on length took the live one by 1.4 seconds.
+    /// The tracklist then placed the studio recording in the same slot, and
+    /// the row nobody can play is the one that is right.
+    ///
+    /// **Reported, never decided.** A disc really can play one recording twice
+    /// and a compilation really can carry two versions, so what to do is a
+    /// person's call. What this gives them is the position, both claimants,
+    /// and which of them this device can actually open.
+    Slots,
     /// **Does every file still hash to what the log says it is?**
     ///
     /// Identity here is the audio, so the library's whole account of itself

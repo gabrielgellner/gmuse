@@ -761,6 +761,28 @@ pub enum Fact {
     EncodingPlaced {
         encoding: Id<Encoding>,
         track: Id<Track>,
+        /// **Who says this copy sits here** — #170.
+        ///
+        /// The fold used to rank two placements by a rung it could *compute*:
+        /// a release minted from its group is weaker than one minted from a
+        /// MusicBrainz id, and no fact needed a field to say which. That held
+        /// while the only author was a scan.
+        ///
+        /// It stops holding the moment two placements point at MusicBrainz
+        /// releases and disagree about which one. Adele's *21* is one folder
+        /// of eighteen files whose tags name three pressings; MusicBrainz has
+        /// a single eighteen-track edition that seats all of them. Both are
+        /// id-derived, so the computed rung cannot separate them and recency
+        /// decides — and a scan is always the most recent thing that ran.
+        ///
+        /// So it is recorded. `TagVariant` is what a scan can say; a pass that
+        /// read the whole tracklist and matched it against every file held
+        /// says more than that, and outranks it.
+        ///
+        /// Defaulted for the records written before this existed, which were
+        /// all scans.
+        #[serde(default = "Source::of_a_tag")]
+        basis: Source,
     },
 
     /// **ReplayGain, as the tags claim it.**
@@ -1382,7 +1404,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     let mut bindings: Bindings = BTreeMap::new();
     // Every placement each copy has ever been given, in stamp order, so the
     // pass below can prefer the best-evidenced rather than the last.
-    let mut claimed: BTreeMap<Id<Encoding>, Vec<Id<Track>>> = BTreeMap::new();
+    let mut claimed: BTreeMap<Id<Encoding>, Vec<(Id<Track>, Source)>> = BTreeMap::new();
 
     // **Merges first, in their own pass.** A merge recorded on Tuesday has to
     // move a rating given on Monday, so it cannot be applied as it is reached
@@ -1728,11 +1750,15 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 let at = cat.credits_retracted.entry(key).or_insert(*basis);
                 *at = (*at).max(*basis);
             }
-            Fact::EncodingPlaced { encoding, track } => {
+            Fact::EncodingPlaced {
+                encoding,
+                track,
+                basis,
+            } => {
                 // Kept in full and resolved below, because the last word is
                 // not always the best one — see the pass after this loop.
                 cat.placed.insert(*encoding, *track);
-                claimed.entry(*encoding).or_default().push(*track);
+                claimed.entry(*encoding).or_default().push((*track, *basis));
             }
             // **Last word wins**, because these come in a pair: a copy retired
             // and brought back and retired again is retired, and the set is
@@ -1897,6 +1923,11 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     //
     // Resolved after the loop because a placement can be folded before the
     // release it points at, and the rung is a property of that release.
+    // **And who said so outranks both** — #170. Where two placements name
+    // MusicBrainz-derived releases the computed rung cannot separate them, so
+    // recency decides and a scan is always the most recent thing that ran.
+    // `Source` is what breaks that tie: a pass that read a whole tracklist and
+    // matched it against every file held says more than a tag does.
     for (encoding, tracks) in &claimed {
         let rung = |t: &Id<Track>| {
             cat.tracks
@@ -1905,8 +1936,15 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 .and_then(|m| cat.releases.get(&m.release).map(|r| (m.release, r.group)))
                 .is_some_and(|(release, group)| release != Id::<Release>::of_release(None, group))
         };
-        if let Some(best) = tracks.iter().rev().find(|t| rung(t)) {
-            cat.placed.insert(*encoding, *best);
+        let strongest = tracks.iter().map(|(_, b)| *b).max();
+        if let Some(best) = tracks
+            .iter()
+            .rev()
+            .filter(|(_, b)| Some(*b) == strongest)
+            .find(|(t, _)| rung(t))
+            .or_else(|| tracks.iter().rev().find(|(_, b)| Some(*b) == strongest))
+        {
+            cat.placed.insert(*encoding, best.0);
         }
     }
 
@@ -2707,10 +2745,12 @@ mod merge_tests {
             Fact::EncodingPlaced {
                 encoding: copy,
                 track: here,
+                basis: crate::model::reference::Source::TagVariant,
             },
             Fact::EncodingPlaced {
                 encoding: copy,
                 track: there,
+                basis: crate::model::reference::Source::TagVariant,
             },
         ]));
         assert_eq!(
@@ -2745,10 +2785,12 @@ mod merge_tests {
             Fact::EncodingPlaced {
                 encoding: copy,
                 track: first,
+                basis: crate::model::reference::Source::TagVariant,
             },
             Fact::EncodingPlaced {
                 encoding: copy,
                 track: last,
+                basis: crate::model::reference::Source::TagVariant,
             },
         ]));
         assert_eq!(cat.placed.get(&copy), Some(&last));

@@ -50,6 +50,42 @@ use crate::model::log::{Fact, Record};
 use crate::model::ord::OrdKey;
 use crate::model::reference::{CreditOn, RoleClass, Source};
 
+/// What a credit proposal is **about** — #152.
+///
+/// A credit lands on both levels and they are separate claims. `ingest`
+/// credits the recording *and* the release group from the same tag, so a
+/// joined credit is written twice; and `file_under` asks the album first (#84),
+/// which is why the album's copy is the one that names a folder. Splitting only
+/// the recording leaves 171 release groups here still credited to
+/// `Marc Romboy,Stephan Bodzin` and every folder exactly where it was.
+///
+/// **A sum type rather than two optional ids**, matching [`CreditOn`]'s own
+/// reasoning: "credited to nothing" and "credited to both at once" should not
+/// be writable. Untagged and flattened, so a line reads
+/// `{"fact": "contributed", "recording": "…"}` or `…, "album": "…"}` — and
+/// every proposal file written before this one still parses, because the
+/// recording spelling is unchanged.
+///
+/// Only these two levels. A credit can sit on a `Work` or a `Release` and
+/// nothing proposes one, so admitting them here would be vocabulary written
+/// for a case that has never arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum CreditedOn {
+    Recording { recording: Id<Recording> },
+    Album { album: Id<ReleaseGroup> },
+}
+
+impl CreditedOn {
+    /// The credit subject this names.
+    fn subject(self) -> CreditOn {
+        match self {
+            CreditedOn::Recording { recording } => CreditOn::Recording(recording),
+            CreditedOn::Album { album } => CreditOn::ReleaseGroup(album),
+        }
+    }
+}
+
 /// One assertion, as a tool writes it.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "fact", rename_all = "snake_case")]
@@ -250,7 +286,8 @@ pub enum Proposal {
     /// A split is repaired by a merge (#88); a merge is repaired by nothing,
     /// which is why this proposes rather than the pass deciding.
     Credited {
-        recording: Id<Recording>,
+        #[serde(flatten)]
+        on: CreditedOn,
         /// The artists the credit names, **in the order it names them** — the
         /// position is what `CreditAsserted` keys a row by, so a reordering is
         /// a different set of rows rather than an edit.
@@ -282,7 +319,8 @@ pub enum Proposal {
     /// **Named, not identified**, as every artist on this wire is: minting is
     /// the model's job and a name is what a person reviewing the file reads.
     Contributed {
-        recording: Id<Recording>,
+        #[serde(flatten)]
+        on: CreditedOn,
         artist: String,
         /// `remixer`, `producer`, `featured`, `composer`. One of
         /// [`crate::model::reference::ROLES`].
@@ -520,6 +558,73 @@ pub enum Proposal {
         /// asked for, so a partial list would claim the record is shorter than
         /// it is — which is a worse answer than "nobody said".
         tracks: Vec<Slotted>,
+        /// **The album this pressing is an edition of** — #170, and required
+        /// only to introduce one.
+        ///
+        /// A tracklist has always assumed its release already exists, because
+        /// the medium check guaranteed it: a disc reached the library only by
+        /// being named in a file's tags. That is exactly what kept eighteen
+        /// Adele files spread across the three pressings their tags happened
+        /// to mention while MusicBrainz had one edition seating all of them —
+        /// nothing could describe a pressing the tags had never named.
+        ///
+        /// So a tracklist may now introduce one, and the price is saying what
+        /// album it is. **By id**, because the group already exists and
+        /// minting a second from a string is what #152 was about; `shelf
+        /// query` prints it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        album: Option<Id<ReleaseGroup>>,
+        /// What this pressing is called. Alongside `album`, and for the same
+        /// reason: a release row with no title renders as nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// **This copy sits in this seat on this pressing** — #170.
+    ///
+    /// The gap that made #170 unfixable. `EncodingPlaced` is written by
+    /// exactly one thing — the scan, out of a file's own album tag — and
+    /// `instance.rs` says why: the scan is the only thing that ever knows,
+    /// because by the time anything else asks, a recording has several
+    /// placements and no way to say which one this copy is.
+    ///
+    /// That is true of a *scan* and it stopped being true of everything else.
+    /// A pass that has read a release's whole tracklist and matched it against
+    /// every file the library holds knows exactly which seat each copy is in —
+    /// better than the tags do, which is the case this exists for. Adele's
+    /// *21* is one folder of eighteen files whose tags name three different
+    /// pressings, because they were assembled from three sources; MusicBrainz
+    /// has a single eighteen-track edition that seats all of them.
+    ///
+    /// **Names the pressing, not the slot.** A slot id is minted from medium
+    /// and recording, so a tool naming one would have to mint — and minting is
+    /// the model's job (#152, and the reason `Contributed` takes a name rather
+    /// than an artist id). The release, the disc and the number are what a
+    /// person reading the file can check against the sleeve.
+    ///
+    /// **The encoding must already be bound.** Placing bytes nothing has named
+    /// would mint a seat for a performance that does not exist, which is the
+    /// answer-by-default #160's gate exists to refuse.
+    ///
+    /// Catalogue the pressing first. This asserts a seat on a medium and says
+    /// nothing about how long the record is — [`Proposal::Tracklisted`] is
+    /// what carries the denominator (#134), and a placement arriving without
+    /// it would leave a disc whose length nobody stated.
+    Placed {
+        encoding: Id<Encoding>,
+        /// The MusicBrainz release. Not a group: a seat is on one pressing.
+        release: uuid::Uuid,
+        /// Which disc of it, counting from 1.
+        disc: u16,
+        /// Which track on that disc, counting from 1.
+        position: u16,
+        /// **Who says so** — the rung that lets this outrank a scan (#170).
+        ///
+        /// A scan writes `tag_variant` and runs on every render, so a seating
+        /// recorded at the same rung would be undone by the next one. A pass
+        /// that read the release's whole tracklist and matched it against
+        /// every file the library holds is saying more than the tags do, and
+        /// has to be able to say which.
+        basis: Source,
     },
     /// A rating. Included because it is the simplest possible proposal and
     /// therefore the one worth testing the format against.
@@ -619,6 +724,58 @@ pub struct Queried {
     /// where nothing has been measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub length_ms: Option<u32>,
+    /// **The MusicBrainz recording id, where the library rests on one** —
+    /// #152, and here for the reason `length_ms` is.
+    ///
+    /// A pass that wants to ask MusicBrainz about a row otherwise has to find
+    /// the recording by *searching* for its title and artist, which is a
+    /// different and much weaker question: `joined.py` asks whether an artist
+    /// exists under a credit string, and a common name answers yes for the
+    /// wrong artist. Handed the id, the same pass can ask the recording who is
+    /// actually credited on it and get one artist id per artist — the exact
+    /// arbiter `Scanned::credit_is_joined` uses, arriving by lookup instead of
+    /// by tag, on the files where the tag never had it.
+    ///
+    /// `None` for the 7.3% resting on their bytes or on another authority,
+    /// which is an ordinary row and not a defect (#89 §5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub musicbrainz: Option<String>,
+    /// **The album this copy sits on** — #152, and the level that names a
+    /// folder.
+    ///
+    /// `ingest` credits the recording *and* the release group from one tag, so
+    /// a joined credit is written on both; and `file_under` asks the album
+    /// first (#84). A pass handed only the recording can therefore make a
+    /// correct split that changes nothing anybody sees — 171 release groups
+    /// here stayed credited to `Marc Romboy,Stephan Bodzin` after their
+    /// recordings were split.
+    ///
+    /// **The one this copy is on**, not "the" album: a recording is on every
+    /// release that holds it, and picking the copy's is the same choice
+    /// `files_under` makes, for the same reason — the folder follows the file.
+    ///
+    /// `None` for a recording sitting in no slot, which is an ordinary row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<Id<ReleaseGroup>>,
+    /// **How the album is credited**, which is not always how the recording is.
+    ///
+    /// Here because without it a pass cannot tell a single from a compilation,
+    /// and the difference decides whether an album credit may be touched at
+    /// all. A remix single is credited `Dubfire,Joseph Capriati` at *both*
+    /// levels, and correcting the album is the whole point. A Lomax field
+    /// recording is credited `Sid Hemphill, Lucius Smith` on the performance
+    /// and `Various Artists` on the album — and a pass that wrote the
+    /// performers onto the album would move 47 files out of `Various Artists`
+    /// into a folder named after nine people.
+    ///
+    /// So the rule a tool can now state: **an album credit is corrected only
+    /// where it is the very string being corrected.** Where the two lines
+    /// differ they are different claims, and a fix for one is not evidence
+    /// about the other.
+    ///
+    /// `None` for a recording sitting in no slot, alongside `album`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_artist: Option<String>,
 }
 
 /// What `parse` needs to know about the library it is proposing against.
@@ -656,6 +813,16 @@ pub trait Holdings {
     /// for the rows the gate held back, which is what lets an identification
     /// finish the job instead of leaving a recording with no title.
     fn claim(&self, encoding: Id<Encoding>) -> Option<(String, String)>;
+    /// **What the sleeve prints in this seat, if anything has said** — #170.
+    ///
+    /// Asked by track rather than by encoding, because a placement writes the
+    /// seat it is moving *to* and that is not the one the copy is in.
+    ///
+    /// Here because `TrackPlaced` is taken wholesale: a field left out is a
+    /// field cleared, so a proposal that changes where a copy sits must carry
+    /// forward the name it is not changing. Without it, seating a file would
+    /// silently strip the `(live)` off `The Fox` that !323 exists to keep.
+    fn sleeve(&self, track: Id<Track>) -> Option<String>;
 }
 
 /// Where a copy sits, as the library currently records it.
@@ -696,15 +863,19 @@ pub enum Subject {
 impl Proposal {
     pub fn subject(&self) -> Subject {
         match self {
-            Proposal::Measured { encoding, .. } | Proposal::Identified { encoding, .. } => {
-                Subject::Encoding(*encoding)
-            }
+            Proposal::Measured { encoding, .. }
+            | Proposal::Identified { encoding, .. }
+            | Proposal::Placed { encoding, .. } => Subject::Encoding(*encoding),
             Proposal::GenreAssigned { recording, .. }
             | Proposal::QualifierAssigned { recording, .. }
             | Proposal::Rated { recording, .. }
-            | Proposal::CollectedInto { recording, .. }
-            | Proposal::Credited { recording, .. }
-            | Proposal::Contributed { recording, .. } => Subject::Recording(*recording),
+            | Proposal::CollectedInto { recording, .. } => Subject::Recording(*recording),
+            // **Whichever level the credit names**, so an album credit is
+            // checked against the album that has to exist for it.
+            Proposal::Credited { on, .. } | Proposal::Contributed { on, .. } => match on {
+                CreditedOn::Recording { recording } => Subject::Recording(*recording),
+                CreditedOn::Album { album } => Subject::ReleaseGroup(*album),
+            },
             // **Whatever the credit is on**, because that is the row that has
             // to exist for a withdrawal to mean anything.
             Proposal::CreditWithdrawn { subject, .. } => match subject {
@@ -1035,11 +1206,7 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
         }
         // The collection is named rather than identified, for the reason a
         // genre is: a tool has no way to mint an id and should not.
-        Proposal::Credited {
-            recording,
-            artists,
-            basis,
-        } => {
+        Proposal::Credited { on, artists, basis } => {
             let named: Vec<String> = artists.iter().map(|a| a.trim().to_string()).collect();
             if named.iter().any(String::is_empty) {
                 return Err("an artist needs a name".to_string());
@@ -1075,7 +1242,7 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     name: name.clone(),
                 });
                 facts.push(Fact::CreditAsserted {
-                    subject: CreditOn::Recording(recording),
+                    subject: on.subject(),
                     artist,
                     role,
                     // **Whatever the proposer says**, and never `TagVariant`:
@@ -1241,11 +1408,58 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
         // **The tracklist becomes slots** — #155, and the half that makes the
         // greying visible. Every fact here is derived from the ids the tool
         // sent; nothing is invented and nothing is looked up.
+        Proposal::Placed {
+            encoding,
+            release,
+            disc,
+            position,
+            basis,
+        } => {
+            if disc == 0 || position == 0 {
+                return Err("a disc and a track number count from 1".into());
+            }
+            // **The performance is read, never minted.** A seat holds a
+            // recording, and which one this copy is holding is a fact the
+            // library already has — deriving it from anything a tool sends
+            // would let a placement invent a performance, which #160's gate
+            // exists to refuse.
+            let Some(recording) = library.bound(encoding) else {
+                return Err("nothing has named what these bytes hold".into());
+            };
+            let release = Id::<Release>::of_musicbrainz(release);
+            let medium = Id::<Medium>::of_medium(release, disc);
+            let slot = Id::<Track>::of_track(medium, recording);
+            vec![
+                // Which copy is in the seat. The pairing `instance.rs` says
+                // only a scan could know — and a pass holding the whole
+                // tracklist knows it too, which is the point of this arm.
+                Fact::EncodingPlaced {
+                    encoding,
+                    track: slot,
+                    basis,
+                },
+                Fact::TrackPlaced {
+                    track: slot,
+                    medium,
+                    recording,
+                    position,
+                    // **Carried forward, not restated.** The fold takes this
+                    // row wholesale, so `None` here would clear whatever
+                    // `Tracklisted` printed in the seat — the `(live)` on
+                    // `The Fox` that !323 exists to keep. This proposal is
+                    // about which copy sits where and says nothing about what
+                    // the sleeve calls it.
+                    title_on_release: library.sleeve(slot),
+                },
+            ]
+        }
         Proposal::Tracklisted {
             release,
             position,
             format,
             tracks,
+            album,
+            title,
         } => {
             if tracks.is_empty() {
                 return Err("a tracklist with no tracks says nothing".into());
@@ -1263,6 +1477,32 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             let release = Id::<Release>::of_musicbrainz(release);
             let medium = Id::<Medium>::of_medium(release, position);
             let role = Id::<Role>::of_name("performer");
+            // **The pressing itself, where this is introducing one.**
+            //
+            // Emitted only when named, because `ReleaseCatalogued` is taken
+            // wholesale by the fold: restating a pressing the library already
+            // has would clear its label, its date, and the disc count #134 put
+            // there. Naming an album is how a tool says "this is new"; leaving
+            // it out is how it says "you already have this".
+            let mut opening = Vec::new();
+            if let (Some(group), Some(name)) = (album, title.as_deref()) {
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err("a pressing needs a title".into());
+                }
+                opening.push(Fact::ReleaseCatalogued {
+                    release,
+                    group,
+                    title: name.to_string(),
+                    released: None,
+                    label: None,
+                    // **Not stated.** How many discs the pressing has is a
+                    // fact about the pressing, and this describes one disc of
+                    // it; guessing 1 would tell #134 a two-disc set is
+                    // complete when half of it has never been seen.
+                    media: None,
+                });
+            }
             let mut facts = vec![
                 // **The denominator, and the whole medium re-stated** — the
                 // fold takes this row wholesale, so a field left out is a
@@ -1329,7 +1569,8 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     title_on_release: listed.title_on_release.clone(),
                 });
             }
-            facts
+            opening.extend(facts);
+            opening
         }
         Proposal::Named { artist, name } => {
             let name = name.trim();
@@ -1368,7 +1609,7 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             }]
         }
         Proposal::Contributed {
-            recording,
+            on,
             artist,
             role,
             basis,
@@ -1408,7 +1649,7 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     name: name.to_string(),
                 },
                 Fact::CreditAsserted {
-                    subject: CreditOn::Recording(recording),
+                    subject: on.subject(),
                     artist: who,
                     role: role_id,
                     basis,
@@ -1585,6 +1826,17 @@ pub(crate) mod tests {
         /// exercised where there is a spine to have one.
         fn slot(&self, _encoding: Id<Encoding>) -> Option<Slot> {
             None
+        }
+
+        /// **One seat has a name printed in it**, so a placement can be shown
+        /// carrying it rather than clearing it. The seat is the one encoding 1
+        /// would take on disc 1 of `pressed()`.
+        fn sleeve(&self, track: Id<Track>) -> Option<String> {
+            let seat = Id::<Track>::of_track(
+                Id::<Medium>::of_medium(Id::<Release>::of_musicbrainz(pressed()), 1),
+                rec(1),
+            );
+            (track == seat).then(|| "The Fox (live)".to_string())
         }
 
         /// **The row the gate held back**, so an identification against bytes
@@ -2047,6 +2299,221 @@ pub(crate) mod tests {
     /// **The round trip.** A tool is handed an id and a locator, opens the
     /// locator, and proposes against the id — so it never computes an identity
     /// and never keys anything by a path.
+    /// **A credit lands on both levels, and only one of them names a folder**
+    /// — #152.
+    ///
+    /// `ingest` credits the recording *and* the release group from one tag, so
+    /// a joined credit is written twice; and `file_under` asks the album first
+    /// (#84). Splitting only the recording left 171 release groups here still
+    /// credited to `Marc Romboy,Stephan Bodzin` and every folder exactly where
+    /// it was — the split was correct and invisible.
+    ///
+    /// **The recording spelling is unchanged**, which is the whole reason this
+    /// is a flattened untagged enum rather than a rename: every proposal file
+    /// written before it still parses, and `identify.py` needed no edit.
+    /// **A pass that read the whole tracklist can seat a copy** — #170.
+    ///
+    /// `EncodingPlaced` had exactly one author, the scan, and `instance.rs`
+    /// says why: it is holding the file whose tags name the album, and by the
+    /// time anything else asks, a recording has several placements and no way
+    /// to say which one this copy is.
+    ///
+    /// True of a scan, and it stopped being true of everything else. Adele's
+    /// *21* is one folder of eighteen files whose tags name three different
+    /// pressings, because it was assembled from three sources — and
+    /// MusicBrainz has a single eighteen-track edition that seats every one of
+    /// them. Nothing could say so.
+    #[test]
+    fn a_placement_seats_a_copy_on_a_pressing() {
+        let seat = Proposal::Placed {
+            encoding: enc(1),
+            release: pressed(),
+            disc: 1,
+            position: 7,
+            basis: Source::MusicBrainz,
+        };
+        assert_eq!(seat.subject(), Subject::Encoding(enc(1)));
+
+        let (records, report) = parse(
+            &serde_json::to_string(&seat).expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(report.applied, 1, "{report}");
+
+        let medium = Id::<Medium>::of_medium(Id::<Release>::of_musicbrainz(pressed()), 1);
+        let slot = Id::<Track>::of_track(medium, rec(1));
+        assert!(
+            records.iter().any(|r| r.fact
+                == Fact::EncodingPlaced {
+                    encoding: enc(1),
+                    track: slot,
+                    basis: Source::MusicBrainz,
+                }),
+            "the copy has to be put in the seat, which is the half only a scan could write"
+        );
+        assert!(
+            records.iter().any(|r| matches!(
+                &r.fact,
+                Fact::TrackPlaced { track, position, .. } if *track == slot && *position == 7
+            )),
+            "and the seat has to say which number it is"
+        );
+    }
+
+    /// **A placement carries the sleeve's name rather than clearing it.**
+    ///
+    /// `TrackPlaced` is taken wholesale by the fold — a field left out is a
+    /// field cleared — so a proposal that changes *where* a copy sits has to
+    /// carry forward the name it is not changing. Left out, seating a file
+    /// would strip the `(live)` off `The Fox` that !323 exists to keep, and
+    /// nothing would report it.
+    #[test]
+    fn seating_a_copy_does_not_rub_out_what_the_sleeve_prints() {
+        let (records, _) = parse(
+            &serde_json::to_string(&Proposal::Placed {
+                encoding: enc(1),
+                release: pressed(),
+                disc: 1,
+                position: 7,
+                basis: Source::MusicBrainz,
+            })
+            .expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        let printed = records.iter().find_map(|r| match &r.fact {
+            Fact::TrackPlaced {
+                title_on_release, ..
+            } => Some(title_on_release.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            printed,
+            Some(Some("The Fox (live)".into())),
+            "the seat already had a name printed in it and the placement dropped it"
+        );
+    }
+
+    /// **Bytes nothing has named cannot be seated.**
+    ///
+    /// A seat holds a performance. Placing an unbound encoding would have to
+    /// invent one, which is the answer-by-default #160's gate exists to refuse
+    /// — `enc(4)` is that gate's own case, held and claimed and bound to
+    /// nothing.
+    #[test]
+    fn a_copy_nothing_has_named_cannot_be_seated() {
+        for bad in [
+            Proposal::Placed {
+                encoding: enc(4),
+                release: pressed(),
+                disc: 1,
+                position: 1,
+                basis: Source::MusicBrainz,
+            },
+            Proposal::Placed {
+                encoding: enc(1),
+                release: pressed(),
+                disc: 0,
+                position: 1,
+                basis: Source::MusicBrainz,
+            },
+            Proposal::Placed {
+                encoding: enc(1),
+                release: pressed(),
+                disc: 1,
+                position: 0,
+                basis: Source::MusicBrainz,
+            },
+        ] {
+            let (_, report) = parse(
+                &serde_json::to_string(&bad).expect("serialises"),
+                dev(),
+                100,
+                HELD,
+            );
+            assert_eq!(report.refused.len(), 1, "{bad:?} was allowed: {report}");
+        }
+    }
+
+    #[test]
+    fn a_credit_can_name_the_album_as_well_as_the_performance() {
+        // The old spelling, exactly as files on disk already carry it.
+        let old: Proposal = serde_json::from_str(
+            r#"{"fact":"contributed","recording":"00000000-0000-0000-0000-000000000001",
+                "artist":"Dubfire","role":"performer","basis":"musicbrainz"}"#,
+        )
+        .expect("a line written before this change still parses");
+        assert!(matches!(
+            old,
+            Proposal::Contributed {
+                on: CreditedOn::Recording { .. },
+                ..
+            }
+        ));
+
+        // And the new one, which is the level that names the folder.
+        let on_album = Proposal::Contributed {
+            on: CreditedOn::Album { album: album() },
+            artist: "Dubfire".into(),
+            role: "performer".into(),
+            basis: Source::MusicBrainz,
+        };
+        assert_eq!(
+            on_album.subject(),
+            Subject::ReleaseGroup(album()),
+            "an album credit has to be checked against the album, not a recording"
+        );
+        let wire = serde_json::to_string(&on_album).expect("serialises");
+        assert!(
+            wire.contains("\"album\"") && !wire.contains("\"recording\""),
+            "the two levels must be distinguishable on the wire: {wire}"
+        );
+
+        let (records, report) = parse(&wire, dev(), 100, HELD);
+        assert_eq!(report.applied, 1, "{report}");
+        assert!(
+            records.iter().any(|r| matches!(
+                &r.fact,
+                Fact::CreditAsserted {
+                    subject: CreditOn::ReleaseGroup(g),
+                    ..
+                } if *g == album()
+            )),
+            "the credit was asserted somewhere other than the album"
+        );
+
+        // A split names the album the same way.
+        let split = Proposal::Credited {
+            on: CreditedOn::Album { album: album() },
+            artists: vec!["Marc Romboy".into(), "Stephan Bodzin".into()],
+            basis: Source::MusicBrainz,
+        };
+        let (records, report) = parse(
+            &serde_json::to_string(&split).expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(report.applied, 1, "{report}");
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| matches!(
+                    &r.fact,
+                    Fact::CreditAsserted {
+                        subject: CreditOn::ReleaseGroup(_),
+                        ..
+                    }
+                ))
+                .count(),
+            2,
+            "both artists should be credited on the album"
+        );
+    }
+
     #[test]
     fn a_tool_proposes_against_what_the_query_handed_it() {
         let row = Queried {
@@ -2056,6 +2523,9 @@ pub(crate) mod tests {
             length_ms: Some(320_000),
             title: "Callisto".into(),
             artist: "Bodzin & Romboy".into(),
+            musicbrainz: Some("11f6d0f6-8e35-4d33-8b8b-a94a1a12a9f4".into()),
+            album: Some(album()),
+            album_artist: Some("Bodzin & Romboy".into()),
         };
         let wire = serde_json::to_string(&row).unwrap();
         let back: Queried = serde_json::from_str(&wire).unwrap();
@@ -2142,6 +2612,9 @@ pub(crate) mod tests {
             length_ms: None,
             title: "Wanted".into(),
             artist: "Someone".into(),
+            musicbrainz: None,
+            album: None,
+            album_artist: None,
         };
         let wire = serde_json::to_string(&row).unwrap();
         assert_eq!(serde_json::from_str::<Queried>(&wire).unwrap(), row);
@@ -2514,6 +2987,8 @@ mod merged {
                     title_on_release: None,
                 })
                 .collect(),
+            album: None,
+            title: None,
         };
         serde_json::to_string(&listed).expect("a proposal serialises")
     }
@@ -2611,7 +3086,7 @@ mod merged {
     #[test]
     fn one_person_can_be_credited_in_one_role() {
         let p = Proposal::Contributed {
-            recording: rec(1),
+            on: CreditedOn::Recording { recording: rec(1) },
             artist: "Andhim".into(),
             role: "remixer".into(),
             basis: Source::MusicBrainz,
@@ -2649,7 +3124,7 @@ mod merged {
     fn a_role_nobody_defined_is_refused() {
         for role in ["remixer ", "REMIXER"] {
             let text = serde_json::to_string(&Proposal::Contributed {
-                recording: rec(1),
+                on: CreditedOn::Recording { recording: rec(1) },
                 artist: "Andhim".into(),
                 role: role.into(),
                 basis: Source::MusicBrainz,
@@ -2660,7 +3135,7 @@ mod merged {
         }
         for bad in ["remixxer", "vocalist", ""] {
             let text = serde_json::to_string(&Proposal::Contributed {
-                recording: rec(1),
+                on: CreditedOn::Recording { recording: rec(1) },
                 artist: "Andhim".into(),
                 role: bad.into(),
                 basis: Source::MusicBrainz,
@@ -3017,9 +3492,11 @@ mod merged {
                 artists: who.iter().map(|s| (*s).to_string()).collect(),
                 title_on_release: None,
             }],
+            album: None,
+            title: None,
         };
         let repair = Proposal::Credited {
-            recording,
+            on: CreditedOn::Recording { recording },
             artists: who.iter().map(|s| (*s).to_string()).collect(),
             basis: Source::MusicBrainz,
         };
@@ -3051,6 +3528,8 @@ mod merged {
             position: 2,
             format: None,
             tracks: vec![],
+            album: None,
+            title: None,
         };
         assert_eq!(
             listed.subject(),

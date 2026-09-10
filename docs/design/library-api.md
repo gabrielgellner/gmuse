@@ -181,6 +181,20 @@ same shape `migrate::to_records` already has.
 
 A path that resolves to nothing is reported, never guessed at.
 
+### What a row carries, and why each field is on it — #152
+
+A work-list row is an **id to propose against and a locator to open**, and everything else on it is there because a pass
+would otherwise re-derive it worse:
+
+| field         | why it is not left to the tool                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `length_ms`   | Every pass that wanted a duration was asking a tagging library, which computes one from the Xing header or from `size / bitrate`. That is wrong by up to 26 minutes on this library, and wrong the _same_ way in every tool. `audio_id` counts frames at import, which is exact.                                                                                                                          |
+| `musicbrainz` | Without it a pass wanting to ask MusicBrainz about a row has to **search** for it by title and artist — a weaker question than the one it means to ask. `joined.py` asks whether an artist exists under a credit string, and `The Game`, `La Fleur` and `Sonya Elise` all answer yes for somebody. Handed the id, the same pass asks who is credited on that recording and gets one artist id per artist. |
+
+Only MusicBrainz is published as a rung, and that is deliberate: an `External` key is opaque by design (§89 §5) and an
+`AudioId` names bytes, so publishing either as a lookup handle would invite a tool to ask a question with no answer.
+Both fields are **omitted rather than null** when absent, so a tool tests for presence the way it tests for a locator.
+
 ---
 
 ## 6. The UI edits the library, not the files
