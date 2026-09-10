@@ -169,6 +169,15 @@ pub fn rows(
                 length_ms: encoding
                     .and_then(|e| catalogue.encodings.get(&e))
                     .and_then(|e| (e.length_ms > 0).then_some(e.length_ms)),
+                // **Of the copy this row names**, like the length above: two
+                // encodings of one performance measure differently, and that
+                // difference is the whole reason the fact is keyed by encoding.
+                cutoff_hz: encoding
+                    .and_then(|e| catalogue.measurements.get(&e))
+                    .map(|m| m.cutoff_hz),
+                cliff_db: encoding
+                    .and_then(|e| catalogue.measurements.get(&e))
+                    .and_then(|m| m.cliff_db),
                 // **What the library rests on, where that is MusicBrainz.** The
                 // other rungs are deliberately not published as one: an `External`
                 // key is opaque by design and an `AudioId` names bytes, so neither
@@ -219,6 +228,14 @@ pub fn rows(
                 .encodings
                 .get(encoding)
                 .and_then(|e| (e.length_ms > 0).then_some(e.length_ms)),
+            // **Bytes nothing has named can still have been measured** — the
+            // gate held the file back from a catalogue entry, not from an
+            // analyser.
+            cutoff_hz: catalogue.measurements.get(encoding).map(|m| m.cutoff_hz),
+            cliff_db: catalogue
+                .measurements
+                .get(encoding)
+                .and_then(|m| m.cliff_db),
             // Bytes nothing has named rest on nothing, by definition — this is
             // the list of exactly those rows, and nothing has placed them
             // either.

@@ -1354,7 +1354,7 @@ impl Instance {
         now: i64,
         encoding: Id<Encoding>,
         cutoff_hz: u32,
-        cliff_db: Option<u8>,
+        cliff_db: Option<u16>,
         analyser: u16,
     ) {
         self.append(

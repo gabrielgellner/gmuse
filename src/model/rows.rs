@@ -178,7 +178,7 @@ pub struct Listed<'a> {
     /// **How far it falls above the cutoff**, where anything measured it.
     /// Without this a cutoff cannot be read: an encoder's lowpass is a cliff
     /// and music is a slope, and `cutoff<16000` alone finds both.
-    pub cliff_db: Option<u8>,
+    pub cliff_db: Option<u16>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     /// **Whether the library holds a file for this row at all** — #155.
@@ -227,7 +227,7 @@ pub struct Drawn {
     /// **How far it falls above the cutoff**, where anything measured it.
     /// Without this a cutoff cannot be read: an encoder's lowpass is a cliff
     /// and music is a slope, and `cutoff<16000` alone finds both.
-    pub cliff_db: Option<u8>,
+    pub cliff_db: Option<u16>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     pub held: bool,
@@ -536,7 +536,7 @@ mod tests {
             year: Some(1998),
             bitrate: Some(320),
             cutoff_hz: Some(15_700),
-            cliff_db: Some(52),
+            cliff_db: Some(5_200),
             sample_rate: Some(44_100),
             channels: Some(2),
             held: true,

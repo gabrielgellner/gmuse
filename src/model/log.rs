@@ -51,9 +51,9 @@ pub type ArtistEdge = (Id<Artist>, Id<Artist>, ArtistRelationKind);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Spectrum {
     pub cutoff_hz: u32,
-    /// `None` on a row measured before #184, which is what it is.
+    /// Hundredths of a decibel. `None` on a row measured before #184.
     #[serde(default)]
-    pub cliff_db: Option<u8>,
+    pub cliff_db: Option<u16>,
     pub analyser: u16,
 }
 
@@ -925,8 +925,8 @@ pub enum Fact {
         encoding: Id<Encoding>,
         /// Where the spectrum stops, in Hz.
         cutoff_hz: u32,
-        /// **How far it falls in the kilohertz above — and without it the
-        /// cutoff cannot be read** (#184).
+        /// **How far it falls in the kilohertz above, in hundredths of a
+        /// decibel — and without it the cutoff cannot be read** (#184).
         ///
         /// An encoder's lowpass drops vertically; music rolls off. The cutoff
         /// says *where* the spectrum ends and only this says *why*, so a rule
@@ -945,7 +945,7 @@ pub enum Fact {
         /// admitting the measurement is half. `analyser` is what a re-measure
         /// already targets, so filling them in is the route that exists.
         #[serde(default)]
-        cliff_db: Option<u8>,
+        cliff_db: Option<u16>,
         analyser: u16,
     },
 
@@ -3517,11 +3517,11 @@ mod reachability {
         let now = serde_json::to_string(&Fact::EncodingMeasured {
             encoding: Id::derived(b"e"),
             cutoff_hz: 15_700,
-            cliff_db: Some(52),
+            cliff_db: Some(5_200),
             analyser: 1,
         })
         .expect("serialises");
-        assert!(now.contains("\"cliff_db\":52"), "{now}");
+        assert!(now.contains("\"cliff_db\":5200"), "{now}");
     }
 
     /// Which fact brings a kind into existence, if any.

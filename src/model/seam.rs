@@ -3451,7 +3451,13 @@ mod tests {
         // A quality pass runs — separately, because an FFT over a library is
         // minutes where hashing is seconds.
         let (bad, good) = (Id::of_audio(&lying), Id::of_audio(&honest));
-        i.measured(200, bad, 15_700, Some(52), crate::model::encoding::ANALYSER);
+        i.measured(
+            200,
+            bad,
+            15_700,
+            Some(5_200),
+            crate::model::encoding::ANALYSER,
+        );
         i.measured(
             200,
             good,

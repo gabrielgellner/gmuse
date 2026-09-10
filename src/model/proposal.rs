@@ -105,7 +105,7 @@ pub enum Proposal {
         /// A fact without it says the spectrum was measured and the reason it
         /// stopped was not, which is the truth about 7,210 rows.
         #[serde(default)]
-        cliff_db: Option<u8>,
+        cliff_db: Option<u16>,
         analyser: u16,
     },
     /// A genre, and where it came from. The genre pipeline's output — and the
@@ -808,6 +808,27 @@ pub struct Queried {
     /// where nothing has been measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub length_ms: Option<u32>,
+    /// **What a `quality` pass already found about these bytes** — #184, and
+    /// here for exactly the reason `length_ms` is.
+    ///
+    /// Without it, a pass that wants to rank albums by how bad their source is
+    /// has to re-read every file to recover a number the library already
+    /// holds. That is what building the first 175-album list cost: 7,210
+    /// measurements were in the log and `quality albums` re-measured the
+    /// whole library anyway, because the only way to reach them was through
+    /// the audio.
+    ///
+    /// **Both halves or neither.** The cutoff says where the spectrum stops
+    /// and only the cliff says whether that was an encoder or the music —
+    /// 126 of the 1,100 files under 16 kHz here are recordings with nothing up
+    /// there, and a list built from the cutoff alone calls them transcodes.
+    ///
+    /// `None` until something has measured it, which stays a third answer
+    /// distinct from a low cutoff and from a clean one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutoff_hz: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cliff_db: Option<u16>,
     /// **The MusicBrainz recording id, where the library rests on one** —
     /// #152, and here for the reason `length_ms` is.
     ///
@@ -3016,6 +3037,8 @@ pub(crate) mod tests {
             encoding: Some(enc(1)),
             locator: Some("/m/a.mp3".into()),
             length_ms: Some(320_000),
+            cutoff_hz: Some(15_700),
+            cliff_db: Some(5_200),
             title: "Callisto".into(),
             artist: "Bodzin & Romboy".into(),
             musicbrainz: Some("11f6d0f6-8e35-4d33-8b8b-a94a1a12a9f4".into()),
@@ -3106,6 +3129,8 @@ pub(crate) mod tests {
             encoding: None,
             locator: None,
             length_ms: None,
+            cutoff_hz: None,
+            cliff_db: None,
             title: "Wanted".into(),
             artist: "Someone".into(),
             musicbrainz: None,

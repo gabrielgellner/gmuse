@@ -88,6 +88,10 @@ FLOOR_HZ: Final = 2000
 #: Below this a lossless file is carrying lossy audio, whatever the container.
 LOSSLESS_FLOOR_KHZ: Final = 19.0
 
+#: Containers that promise the audio was not thrown away. The promise is what
+#: `LOSSY SOURCE` exists to check.
+LOSSLESS: Final = {".flac", ".wav", ".aiff", ".alac"}
+
 #: Where to hunt for an encoder's wall. Below 8 kHz nothing lowpasses; above
 #: 22 kHz there is nothing left at 44.1 kHz.
 SEARCH_FROM_HZ: Final = 8000
@@ -256,7 +260,7 @@ def inspect(path_str: str) -> Measured:
 
     codec = type(handle.info).__name__.replace("Info", "").lower()
     bitrate = round(getattr(handle.info, "bitrate", 0) / 1000)
-    lossless = Path(path_str).suffix.lower() in {".flac", ".wav", ".aiff", ".alac"}
+    lossless = Path(path_str).suffix.lower() in LOSSLESS
 
     got = measure(path_str)
     cutoff, cliff = got or (None, None)
@@ -372,6 +376,52 @@ def _worst_album_first(row: dict[str, object]) -> float:
     return -float(str(row["score"]))
 
 
+def measured_rows(rows: Path) -> list[dict[str, object]]:
+    """The library's own measurements, in the shape `albums` reads.
+
+    **From the log rather than from a review file** — #184. `albums` used to
+    read `quality-review.tsv`, so the only way to rank albums was to re-measure
+    the whole library even when every number was already a fact. Building the
+    first 175-album list cost exactly that, twice.
+
+    A row `gmuse shelf query --every-copy` hands over now carries `cutoff_hz`
+    and `cliff_db`, so the verdict is recomputed here from what the library
+    holds. `judge` is the same function the survey uses, which is the point:
+    two doors onto one rule rather than two rules.
+
+    A row with no measurement is skipped rather than judged — nobody has looked
+    is not a verdict, and treating it as one is how 126 sparse recordings would
+    join a replacement list.
+    """
+    out: list[dict[str, object]] = []
+    with rows.open(encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            locator, cutoff = row.get("locator"), row.get("cutoff_hz")
+            if not locator or cutoff is None:
+                continue
+            path = Path(locator)
+            declared = _declared(locator)
+            lossless = path.suffix.lower() in LOSSLESS
+            cutoff_khz = cutoff / 1000
+            cliff = row.get("cliff_db")
+            verdict, _note = judge(
+                declared,
+                lossless=lossless,
+                cutoff=cutoff_khz,
+                cliff=None if cliff is None else cliff / 100,
+            )
+            out.append(
+                {
+                    "verdict": verdict,
+                    "cutoff_khz": f"{cutoff_khz:.1f}",
+                    "declared": declared,
+                    "path": locator,
+                }
+            )
+    return out
+
+
 def albums(review: Path, out: Path, limit: int, under: int | None, min_share: float) -> None:
     """Roll the per-file findings up to albums worth re-acquiring.
 
@@ -400,16 +450,20 @@ def albums(review: Path, out: Path, limit: int, under: int | None, min_share: fl
     files. `carries` counts what would come along for the ride.
     """
     if not review.exists():
-        print(f"no {review.name} — run `survey` first")
+        print(f"no {review.name} — run `survey`, or pass `--rows` from `shelf query --every-copy`")
         return
 
+    found = (
+        measured_rows(review)
+        if review.suffix == ".jsonl"
+        else list(csv.DictReader(review.open(encoding="utf-8"), delimiter="\t"))
+    )
     flagged: dict[Path, list[tuple[float, int]]] = collections.defaultdict(list)
-    with review.open(encoding="utf-8") as handle:
-        for row in csv.DictReader(handle, delimiter="\t"):
-            if row["verdict"] != "TRANSCODE?" or not row["cutoff_khz"]:
-                continue
-            path = Path(row["path"])
-            flagged[path.parent].append((float(row["cutoff_khz"]), int(row["declared"])))
+    for row in found:
+        if row["verdict"] != "TRANSCODE?" or not row["cutoff_khz"]:
+            continue
+        path = Path(str(row["path"]))
+        flagged[path.parent].append((float(str(row["cutoff_khz"])), int(str(row["declared"]))))
 
     rows: list[dict[str, object]] = []
     for folder, found in flagged.items():
@@ -601,7 +655,11 @@ def propose(rows: Path, out: Path, analyser: int) -> None:
                         "fact": "measured",
                         "encoding": encoding,
                         "cutoff_hz": round(cutoff_khz * 1000),
-                        "cliff_db": min(round(cliff), 255) if cliff is not None else None,
+                        # **Hundredths of a decibel**, like ReplayGain, because
+                        # the threshold is an exact comparison: rounded to whole
+                        # dB a cliff of 24.6 became 25 and crossed `CLIFF_DB`,
+                        # which moved two albums from "music" to "an encoder".
+                        "cliff_db": min(round(cliff * 100), 65535) if cliff is not None else None,
                         "analyser": analyser,
                     }
                 )
@@ -636,10 +694,21 @@ def register(app: typer.Typer) -> None:
         limit: int = typer.Option(100),
         under: int | None = typer.Option(None, help="only albums that sound under this bitrate"),
         min_share: float = typer.Option(0.0, help="only albums with at least this share flagged"),
+        rows: Path | None = typer.Option(
+            None, help="jsonl from `gmuse shelf query --every-copy` — the library's own measurements"
+        ),
     ) -> None:
-        """Roll the findings up to albums worth re-acquiring."""
+        """Roll the findings up to albums worth re-acquiring.
+
+        **Prefer `--rows`** — #184. Without it this reads the last survey's
+        review file, which means the ranking is only as durable as a file in
+        `out/`; the 56-album analysis of 2026-09-01 sat there for nine days and
+        the per-file half of it was overwritten. With it, the numbers come from
+        `EncodingMeasured` facts the library holds, and re-running costs a fold
+        rather than an hour of decoding.
+        """
         albums(
-            out_path("quality-review.tsv"),
+            rows if rows is not None else out_path("quality-review.tsv"),
             out_path("quality-albums.tsv"),
             limit,
             under,

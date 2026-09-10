@@ -1836,25 +1836,25 @@ mod tests {
         // sparse recording and a transcode both stop early; only the shape of
         // the fall tells them apart, so the honest query names both.
         drawn.cutoff_hz = Some(8_100);
-        drawn.cliff_db = Some(10); // music, nothing up there
+        drawn.cliff_db = Some(1_000); // 10.00 dB — music, nothing up there
         assert!(
             ask(&drawn, "cutoff<16000"),
             "the cutoff alone still catches it"
         );
         assert!(
-            !ask(&drawn, "cutoff<16000&cliff>25"),
+            !ask(&drawn, "cutoff<16000&cliff>2500"),
             "and the cliff is what says it is not a transcode"
         );
 
         drawn.cutoff_hz = Some(15_700);
-        drawn.cliff_db = Some(52); // an encoder's wall
-        assert!(ask(&drawn, "cutoff<16000&cliff>25"));
+        drawn.cliff_db = Some(5_200); // 52.00 dB — an encoder's wall
+        assert!(ask(&drawn, "cutoff<16000&cliff>2500"));
 
         // Measured before the cliff was recorded: neither answer, which is
         // the third one again.
         drawn.cliff_db = None;
         assert!(!ask(&drawn, "cliff?"));
-        assert!(!ask(&drawn, "cutoff<16000&cliff>25"));
+        assert!(!ask(&drawn, "cutoff<16000&cliff>2500"));
         assert!(
             ask(&drawn, "cutoff?"),
             "the cutoff it does have is still there"

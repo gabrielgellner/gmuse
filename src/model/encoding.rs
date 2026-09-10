@@ -228,7 +228,7 @@ pub struct Encoding {
     ///
     /// `None` where the cutoff was taken before this was recorded, which is
     /// a third answer and not a zero.
-    pub cliff_db: Option<Measured<u8>>,
+    pub cliff_db: Option<Measured<u16>>,
     pub gain: Option<Measured<Gain>>,
     /// ReplayGain as the tags claim it — what a fader applies. Not
     /// [`Encoding::gain`], which is what an analyser found.
