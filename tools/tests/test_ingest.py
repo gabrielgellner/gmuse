@@ -235,3 +235,60 @@ def test_the_sleeve_title_is_sent_only_when_the_release_really_renames_it() -> N
     # is the field the Rust side catalogues the *recording* with. Sending the
     # track's would have named the recording after the sleeve.
     assert slots[0]["title"] == "Phobos"
+
+
+def test_a_track_number_that_is_not_a_number_does_not_end_the_survey() -> None:
+    """One bad file took forty-four albums down with it.
+
+    `int(tag["TRCK"])` is only ever used to order a tracklist for comparison,
+    and the Aphex Twin corpus carries the vinyl side there — `One4`, `A1`,
+    `B2`. The survey crashed on the first of them, losing every rate limit
+    spent reaching it and the review file that made the work legible.
+    """
+    from gmuse_tools.ingest import position  # noqa: PLC0415
+
+    assert position("4") == 4
+    assert position(" 7 ") == 7
+    # A numbered take is still that number.
+    assert position("12a") == 12
+    # And a side is not a position, which is honest rather than clever.
+    for side in ("One4", "A1", "B2", "", "  "):
+        assert position(side) == 0, side
+
+
+def test_the_album_searched_for_is_the_one_the_tags_name(tmp_path: Path) -> None:
+    """A query that cannot match is not absence — lesson 13.
+
+    This corpus files albums as `[1989] Red EP [1993]`, so searching
+    `release:"[1989] Red EP [1993]"` returned nothing for all fifty albums.
+    Fifty rows of `no candidate` that said only that the question was malformed.
+    """
+    from mutagen.flac import FLAC  # noqa: PLC0415
+
+    from gmuse_tools.ingest import tagged_album  # noqa: PLC0415
+
+    folder = album(tmp_path, "[1989] Red EP [1993]", ["1", "2", "3"])
+    for path in sorted(folder.iterdir()):
+        flac = FLAC(path)
+        flac["album"] = ["Red EP"]
+        flac.save()
+    assert tagged_album(sorted(folder.iterdir())) == "Red EP"
+
+
+def test_a_folder_holding_two_records_names_neither(tmp_path: Path) -> None:
+    """A majority, not the first file.
+
+    A tie is the honest answer to a folder that holds two albums, and the
+    folder name then stands — the same refusal `missing_tracks` makes one
+    level up.
+    """
+    from mutagen.flac import FLAC  # noqa: PLC0415
+
+    from gmuse_tools.ingest import tagged_album  # noqa: PLC0415
+
+    folder = album(tmp_path, "Two Records", ["1", "2"])
+    for path, name in zip(sorted(folder.iterdir()), ["One", "Other"], strict=True):
+        flac = FLAC(path)
+        flac["album"] = [name]
+        flac.save()
+    assert tagged_album(sorted(folder.iterdir())) == ""

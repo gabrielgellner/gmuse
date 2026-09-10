@@ -143,8 +143,28 @@ def our_titles(folder: Path) -> list[tuple[Path, str]]:
             tag = ID3(path)
             title = str(tag["TIT2"].text[0]) if "TIT2" in tag else path.stem
             number = str(tag["TRCK"].text[0]).split("/")[0] if "TRCK" in tag else "0"
-        out.append((int(number or 0), path, title))
+        out.append((position(number), path, title))
     return [(p, t) for _, p, t in sorted(out)]
+
+
+def position(number: str) -> int:
+    """The track number a tag claims, or 0 where it does not claim one.
+
+    **A track number is not always a number.** `int()` on the raw tag crashed
+    the whole survey on the Aphex Twin corpus, where a vinyl rip carries the
+    side in `TRCK` — `One4`, `A1`, `B2` — and one bad file took 44 albums down
+    with it. The number is only used to order a tracklist for comparison, so an
+    unreadable one costs the ordering of one file and a crash costs everything.
+
+    Leading digits are kept, because `4/12` is already handled by the caller's
+    split and `12a` is a numbered take rather than a mystery.
+    """
+    digits = ""
+    for ch in number.strip():
+        if not ch.isdigit():
+            break
+        digits += ch
+    return int(digits) if digits else 0
 
 
 def named_release(mbid: str, ours: list[str]) -> Match | None:
@@ -277,13 +297,142 @@ def whole_album(folder: Path) -> bool:
     return False
 
 
+def tagged_album(files: list[Path]) -> str:
+    """What the files agree the album is called, or `""` where they do not.
+
+    **The folder is the weaker source, and here it is the wrong one.** Rule 13:
+    *ask the authority the question in the terms the authority uses; a query
+    that cannot match is not absence.* This corpus files albums as
+    `[1989] Red EP [1993]`, so `release:"[1989] Red EP [1993]"` matched nothing
+    for all fifty albums — fifty rows of `no candidate` that said only that the
+    query was malformed.
+
+    `genre.common.album_key` already keys on tags for the neighbouring reason:
+    comparing folder *names* imported one UMFANG record twice, once as `_Ok_`
+    and once with the fullwidth quotes the naming rule requires.
+
+    **A majority, not the first file**, because a compilation folder carries
+    several album tags and the one that sorts first is not the album. A tie
+    returns nothing and the folder name stands, which is the honest answer to
+    a folder holding two records.
+
+    Note the inversion this corpus produces: the **path** holds the clean
+    artist — `Aphex Twin` — while the **tags** hold `Aphex Twin (aka AFX)`,
+    which is a query that cannot match either. Each rung is evidence and
+    neither is the answer.
+    """
+    seen: collections.Counter[str] = collections.Counter()
+    for path in files:
+        tags = File(path, easy=True)
+        if not tags:
+            continue
+        for name in tags.get("album") or []:
+            if name.strip():
+                seen[name.strip()] += 1
+    ranked = seen.most_common(2)
+    if not ranked:
+        return ""
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return ""
+    return ranked[0][0]
+
+
+#: The library's own moniker convention, written into the artist tag.
+#:
+#: `Aphex Twin (aka AFX)` on 53 files, `(aka Polygon Window)` on 15, and six
+#: more names besides. Twenty years of retagging arrived at the problem #174
+#: models and solved it by writing prose into a field.
+AKA: Final = re.compile(r"\(\s*aka\s+([^)]+)\)", re.IGNORECASE)
+
+
+def monikers(files: list[Path]) -> list[str]:
+    """Other names the tags credit, for asking a question the authority can answer.
+
+    **A search term and never a fact** — the distinction lesson 18 draws, and
+    the reason it matters here is measurable. `Universal Indicator` is the most
+    common `(aka)` in this corpus at 59 files, more than AFX, and MusicBrainz
+    calls it `member of band` rather than `is person`. Reading these into
+    `AliasOf` would be right about 90 files and wrong about 59, and the wrong
+    ones fold a two-person project into one person.
+
+    Shaping a *query* with them is safe in a way asserting them is not, because
+    the tracklist gate corroborates the answer against something the guess did
+    not produce — lesson 1. A wrong moniker finds nothing, or finds a record
+    whose titles do not match, and is discarded either way.
+
+    Why it is needed at all: MusicBrainz files these releases under the
+    moniker. `artist:"Aphex Twin" AND release:"Analogue Bubblebath EP 1"`
+    returns nothing; `artist:"AFX" AND release:"Analogue Bubblebath"` scores
+    100. Lesson 13 — the authority uses `AFX`, so the query must.
+
+    A truncated tag is skipped rather than guessed at: 21 files here read
+    `Aphex Twin (aka Universal Indi`, cut at 30 characters by an ID3v1 block,
+    and the closing bracket is what says the name is whole.
+    """
+    seen: list[str] = []
+    for path in files:
+        tags = File(path, easy=True)
+        if not tags:
+            continue
+        for credited in tags.get("artist") or []:
+            for found in AKA.findall(credited):
+                name = found.strip()
+                if name and name not in seen:
+                    seen.append(name)
+    return seen
+
+
+def best_match(artist: str, album: str, ours: list[str], files: list[Path]) -> tuple[Match | None, str]:
+    """The release this folder holds, and whoever it turned out to be credited to.
+
+    **Asked again as whoever the record was released as** — #178. MusicBrainz
+    files `Analogue Bubblebath` under AFX, so
+    `artist:"Aphex Twin" AND release:"Analogue Bubblebath EP 1"` returns
+    nothing while `artist:"AFX" AND release:"Analogue Bubblebath"` scores 100.
+    The first is not absence; it is a question asked as the wrong person.
+
+    Only where the first ask fell short, so an ordinary album spends no extra
+    rate limit — and the moniker only ever shapes the query. What comes back
+    still has to clear the tracklist gate, which is evidence the guess did not
+    produce.
+    """
+    match = identify(artist, album, ours)
+    if match is not None and match.verdict == "exact":
+        return match, artist
+    credited = artist
+    for other in monikers(files):
+        alt = identify(other, album, ours)
+        if alt is None:
+            continue
+        if match is None or alt.share > match.share:
+            match, credited = alt, other
+        if alt.verdict == "exact":
+            break
+    return match, credited
+
+
 def identify(artist: str, album: str, ours: list[str]) -> Match | None:
     """Find the release, and refuse anything short of an exact tracklist."""
-    query = f'artist:"{artist}" AND release:"{album}"'
     found = asked(
         f"{MB}/release",
-        {"query": query, "fmt": "json", "limit": str(CANDIDATES)},
+        {"query": f'artist:"{artist}" AND release:"{album}"', "fmt": "json", "limit": str(CANDIDATES)},
     )
+    # **A phrase first, and the loose form only where it found nothing** — the
+    # library's album names carry more than the authority's do:
+    # `Selected Ambient Works Vol.1 [85-92]` against `Selected Ambient Works
+    # 85-92` (an en dash there, in fact), and `Come to Daddy EP` against
+    # `Come to Daddy`. As a phrase both
+    # return nothing; unquoted both score 100.
+    #
+    # Loosening the query is safe here and would not be elsewhere: what comes
+    # back is still fetched and compared track by track, so a looser search
+    # widens the *candidates* and never the acceptances. Anything short of an
+    # exact tracklist is reported and nothing is written.
+    if not (found or {}).get("releases"):
+        found = asked(
+            f"{MB}/release",
+            {"query": f'artist:"{artist}" AND release:({album})', "fmt": "json", "limit": str(CANDIDATES)},
+        )
     best: Match | None = None
     for candidate in (found or {}).get("releases", [])[:CANDIDATES]:
         full = asked(f"{MB}/release/{candidate['id']}", {"inc": INC, "fmt": "json"})
@@ -617,6 +766,7 @@ def survey(root: Path, out: Path) -> None:
             continue
         rel = str(d.relative_to(root))
         artist, _, album = rel.partition("/")
+        album = tagged_album(files) or album
         ours = [t for _, t in our_titles(d)]
         print(f"  {i}/{len(albums)} {rel}", file=sys.stderr)
         if short := missing_tracks(d):
@@ -634,7 +784,7 @@ def survey(root: Path, out: Path) -> None:
             )
             continue
         try:
-            match = identify(artist, album, ours)
+            match, credited = best_match(artist, album, ours, files)
         except Exception as e:  # noqa: BLE001 - one album must not end the survey
             # **A long pass has to survive one bad album.** Losing the run
             # means losing every rate limit spent getting to it, and the file
@@ -668,6 +818,12 @@ def survey(root: Path, out: Path) -> None:
             )
             continue
         theirs = [t["title"] for m in match.release.get("media", []) for t in m.get("tracks", [])]
+        # **Say who it matched as, where that is not the folder.** A person
+        # reading this row is being asked to accept a release credited to
+        # somebody the folder does not name, and that is the thing worth
+        # seeing — not a detail. It rides in `differs` rather than in a new
+        # column because `accept` reads this file by name.
+        found_as = "" if credited == artist else f"as {credited}: "
         rows.append(
             {
                 "accept": "y" if match.verdict == "exact" else "",
@@ -677,7 +833,7 @@ def survey(root: Path, out: Path) -> None:
                 "theirs": len(theirs),
                 "album": rel,
                 "release": match.release["id"],
-                "differs": diffs(ours, theirs),
+                "differs": found_as + diffs(ours, theirs),
             }
         )
     # **Ordered by what wants reading**, not alphabetically. A file of 139 rows
