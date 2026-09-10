@@ -176,6 +176,21 @@ pub enum Shelf {
         /// says whether it delivers what its bitrate declares.
         #[arg(long)]
         every_copy: bool,
+        /// **Narrow the list the way `:filter` narrows the browser** — #186.
+        ///
+        /// The same filter language, through the same parser, so a spec the
+        /// `:` line accepts this accepts. The re-buy list #87 asks for is
+        /// `--filter 'cutoff<17000 and cliff>2500' --every-copy`: a cutoff
+        /// alone is not evidence, because a quiet track stops early without an
+        /// encoder having stopped it — measured, that difference is 38 rows
+        /// against 7.
+        ///
+        /// Asked of the copy each row names, which is why it pairs with
+        /// `--every-copy`: the measurements are keyed by encoding, and a
+        /// filter over one copy per recording is asking about whichever file
+        /// `open` picked.
+        #[arg(long, value_name = "EXPR")]
+        filter: Option<String>,
     },
     /// **Catalogue this audio — the declaration a scan no longer makes** (#62).
     ///

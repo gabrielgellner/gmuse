@@ -275,6 +275,21 @@ levels: [year]              by year
 So switching representation happens **in place**. It is not a different screen; it is a setting on the thing being
 looked at, the way `foldmethod` is a setting on a buffer.
 
+**And so does a filter** — `gmuse shelf query --filter 'cutoff<17000 & cliff>2500' --every-copy` (#186). The re-buy list
+#87 asks for is a filter, and until this it could only be run by a person looking at a pane. Same language, same parser,
+so a spec the `:` line accepts the flag accepts.
+
+It is asked of **the copy each row names**, which is why it pairs with `--every-copy` and why it is not one line of
+glue: `Librarian::listed` answers with the _shown_ copy's measurements, and under `Every` that is the wrong copy for
+every row but one. A filter over `cutoff` would then report the canonical copy's spectrum against each of its siblings'
+locators, every row of a recording passing or failing together — precisely the question `EncodingMeasured` was keyed by
+encoding to stop anyone asking. So the per-copy fields are overridden from the row's own encoding, exactly as
+`Queried`'s `length_ms` and `cutoff_hz` already are.
+
+**A cutoff alone is not the predicate.** `cutoff<17000` alone names 1,263 copies; adding `cliff>2500` — a fall steep
+enough to be an encoder's lowpass rather than where the music stopped — is what makes it an answer. Of the 38 recordings
+whose lossless copy measures below a lossy sibling, 31 fail the cliff test and are quiet music, not transcodes.
+
 **And a level has a reading outside the browser** — `gmuse shelf tree --levels 'genre@1,album'` (#182). Until it did,
 the one thing a level decides — which rows fall under which heading — could only be asked _of_ the TUI and only be
 answered _by_ looking at it, so the setting was untestable from anywhere a script or a person could stand. The command

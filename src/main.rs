@@ -1022,6 +1022,7 @@ fn run_library(
                     // A contested seat is a question about the *recording* —
                     // which performance sits here — so one copy answers it.
                     query::Copies::Shown,
+                    None,
                 ) {
                     if row.recording.is_some_and(|r| contested.contains(&r)) {
                         println!("{}", serde_json::to_string(&row)?);
@@ -1635,6 +1636,7 @@ fn run_library(
         cli::Shelf::Query {
             unidentified,
             every_copy,
+            filter,
         } => {
             let (log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
@@ -1651,6 +1653,14 @@ fn run_library(
             } else {
                 query::Copies::Shown
             };
+            // **Parse at the boundary** (§12), through the parser the `:` line
+            // uses. A second reader of the filter language is a second place
+            // for it to drift.
+            let filter = filter
+                .as_deref()
+                .map(crate::filter::Expr::parse)
+                .transpose()
+                .map_err(|e| format!("--filter: {e}"))?;
             for row in query::rows(
                 roots,
                 log.records(),
@@ -1658,6 +1668,7 @@ fn run_library(
                 crate::history::now_ms(),
                 only,
                 copies,
+                filter.as_ref(),
             ) {
                 println!("{}", serde_json::to_string(&row)?);
             }

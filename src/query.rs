@@ -73,6 +73,7 @@ pub fn rows(
     now: i64,
     only: Only,
     copies: Copies,
+    filter: Option<&crate::filter::Expr>,
 ) -> Vec<Queried> {
     // **The log first, then the disk.** `ingest` refuses to mint over a
     // binding somebody made — but only over one it can see, and a scan into an
@@ -104,6 +105,14 @@ pub fn rows(
     crate::model::populate::reconcile(&mut scratch, roots, now);
     let catalogue = scratch.catalogue();
     let library = Librarian::from_catalogue(&catalogue);
+
+    // **Compiled once, not per row.** `Expr::compile` says so in as many
+    // words, and this list runs over the whole library.
+    let env = crate::filter::Env {
+        listened: None,
+        now: now / 1000,
+    };
+    let keep = filter.map(|f| f.compile(env));
 
     let mut out = Vec::new();
     for (recording, recorded) in &catalogue.recordings {
@@ -152,6 +161,41 @@ pub fn rows(
             }
         };
         for (encoding, locator) in each {
+            // **The filter is asked about the copy this row names** — #186,
+            // and the reason it cannot simply be `listed()`: that answers with
+            // the *shown* copy's measurements, which under `Every` is the
+            // wrong copy for every row but one. A row here is a copy, so the
+            // per-copy fields are taken from the encoding this row is about,
+            // exactly as `Queried`'s own `cutoff_hz` and `length_ms` are.
+            //
+            // The rest of the row — title, credit, album, genre — is of the
+            // recording, and `listed()` is right about all of it.
+            if let Some(keep) = &keep {
+                let Some(id) = encoding
+                    .and_then(|e| library.row_of_copy(e))
+                    .or(Some(crate::model::rows::CopyId::Loose(*recording)))
+                else {
+                    continue;
+                };
+                let Some(mut listed) = crate::model::rows::Listing::listed(&library, id) else {
+                    continue;
+                };
+                if let Some(e) = encoding.and_then(|e| library.encodings.encodings.get(&e)) {
+                    listed.bitrate = Some(e.bitrate);
+                    listed.cutoff_hz = e.cutoff_hz.map(|m| m.value);
+                    listed.cliff_db = e.cliff_db.map(|m| m.value);
+                    listed.sample_rate = e.sample_rate;
+                    listed.channels = e.channels;
+                }
+                let subject = crate::model::rows::Subject {
+                    row: listed,
+                    locator: locator.as_deref(),
+                    recording: Some(*recording),
+                };
+                if !keep(&subject) {
+                    continue;
+                }
+            }
             out.push(Queried {
                 recording: Some(*recording),
                 encoding,
@@ -335,6 +379,7 @@ mod tests {
             100,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         assert_eq!(apart.len(), 2, "two recordings until something joins them");
 
@@ -361,6 +406,7 @@ mod tests {
                 300,
                 Only::Everything,
                 copies,
+                None,
             )
         };
         let held = |rs: &[Queried]| -> Vec<Queried> {
@@ -391,6 +437,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **The filter is asked of the copy the row names, not of the shown
+    /// one** — #186, and the reason this is not one line of glue.
+    ///
+    /// `Librarian::listed` answers with the *shown* copy's measurements, which
+    /// under `Every` is the wrong copy for every row but one. So a re-buy list
+    /// filtering on `cutoff` would report the canonical copy's spectrum
+    /// against each of its siblings' locators — every row of a recording
+    /// passing or failing together, which is precisely the question
+    /// `EncodingMeasured` was keyed by encoding to stop anyone asking.
+    #[test]
+    fn a_filter_reads_the_measurement_of_the_copy_the_row_names() {
+        let root = dir("filtered");
+        wav(&root.join("a.wav"), 1000);
+        wav(&root.join("b.wav"), 1200);
+
+        let mut taken = crate::model::instance::Instance::new(device());
+        crate::model::populate::populate(
+            &mut taken,
+            std::slice::from_ref(&root),
+            50,
+            crate::model::populate::Admits::Anything,
+        );
+        let apart = rows(
+            std::slice::from_ref(&root),
+            taken.records(),
+            device(),
+            100,
+            Only::Everything,
+            Copies::Shown,
+            None,
+        );
+        let one = apart[0].recording.expect("minted");
+        let (first, second) = (
+            apart[0].encoding.expect("an encoding"),
+            apart[1].encoding.expect("an encoding"),
+        );
+
+        // One performance, two copies — the shape #159 supports — and they
+        // measure differently, which is the only reason to keep both numbers.
+        let mut log = taken.records().clone();
+        log.extend(records(
+            200,
+            [
+                Fact::EncodingBound {
+                    encoding: second,
+                    from: apart[1].recording,
+                    to: one,
+                },
+                Fact::EncodingMeasured {
+                    encoding: first,
+                    cutoff_hz: 20_000,
+                    cliff_db: Some(400),
+                    analyser: 1,
+                },
+                Fact::EncodingMeasured {
+                    encoding: second,
+                    cutoff_hz: 15_500,
+                    cliff_db: Some(2_800),
+                    analyser: 1,
+                },
+            ],
+        ));
+
+        let ask = |src: &str| -> Vec<Queried> {
+            let expr = crate::filter::Expr::parse(src).expect("it parses");
+            rows(
+                std::slice::from_ref(&root),
+                &log,
+                device(),
+                300,
+                Only::Everything,
+                Copies::Every,
+                Some(&expr),
+            )
+            .into_iter()
+            .filter(|r| r.recording == Some(one))
+            .collect()
+        };
+
+        // The re-buy predicate #87 asks for: a low cutoff **and** a cliff
+        // steep enough to be an encoder rather than where the music stopped.
+        let want = ask("cutoff<17000 & cliff>2500");
+        assert_eq!(want.len(), 1, "one copy of the two measures like that");
+        assert_eq!(
+            want[0].encoding,
+            Some(second),
+            "and it is the copy that was measured low, not whichever one is shown"
+        );
+
+        // The other direction, so this cannot pass by the filter matching
+        // nothing and the shown copy happening to be the one wanted.
+        let good = ask("cutoff>19000");
+        assert_eq!(good.len(), 1, "and the other copy answers the other way");
+        assert_eq!(good[0].encoding, Some(first));
+
+        // **A cutoff alone is not evidence.** A quiet track stops early
+        // without an encoder having stopped it; on the real library that
+        // difference is 38 rows against 7.
+        assert_eq!(
+            ask("cutoff<17000").len(),
+            1,
+            "the cutoff alone still names one copy here"
+        );
+        assert!(
+            ask("cliff>2500 & cutoff>19000").is_empty(),
+            "a steep cliff high up is not a transcode"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A row carries both, and they are not the same thing.** The locator is
     /// good until the file moves; the id is good forever. A tool that had only
     /// the path would have to name its findings by path, which is exactly what
@@ -407,6 +564,7 @@ mod tests {
             100,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].encoding.is_some(), "nothing to propose against");
@@ -433,6 +591,7 @@ mod tests {
             100,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         assert_eq!(all.len(), 2);
         assert_eq!(
@@ -443,6 +602,7 @@ mod tests {
                 100,
                 Only::Unidentified,
                 Copies::Shown,
+                None,
             )
             .len(),
             2,
@@ -473,6 +633,7 @@ mod tests {
             300,
             Only::Unidentified,
             Copies::Shown,
+            None,
         );
         assert_eq!(after.len(), 2, "the two on disk still rest on their bytes");
         assert!(
@@ -508,6 +669,7 @@ mod tests {
             100,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         assert_eq!(bare.len(), 1);
         assert_eq!(
@@ -538,6 +700,7 @@ mod tests {
             300,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         assert_eq!(
             after
@@ -590,6 +753,7 @@ mod tests {
             100,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         assert_eq!(loose.len(), 1);
         assert_eq!(
@@ -667,6 +831,7 @@ mod tests {
             300,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         assert_eq!(
             placed
@@ -727,6 +892,7 @@ mod tests {
             200,
             Only::Unidentified,
             Copies::Shown,
+            None,
         );
         assert_eq!(work.len(), 1, "the held-back file is invisible to a pass");
         let row = &work[0];
@@ -766,6 +932,7 @@ mod tests {
             400,
             Only::Unidentified,
             Copies::Shown,
+            None,
         );
         assert!(
             !after.iter().any(|r| r.recording.is_none()),
@@ -797,6 +964,7 @@ mod tests {
             100,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         let encoding = before[0].encoding.expect("an encoding");
         let minted = before[0]
@@ -828,6 +996,7 @@ mod tests {
             300,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         // **The row holding the file names the identified recording.** Asserted
         // through the encoding rather than by counting rows: the byte-minted
@@ -851,7 +1020,8 @@ mod tests {
                 device(),
                 300,
                 Only::Unidentified,
-                Copies::Shown
+                Copies::Shown,
+                None,
             )
             .iter()
             .any(|r| r.encoding == Some(encoding)),
@@ -885,6 +1055,7 @@ mod tests {
             200,
             Only::Everything,
             Copies::Shown,
+            None,
         );
         let row = rows
             .iter()
