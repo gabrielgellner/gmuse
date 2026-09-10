@@ -201,3 +201,84 @@ release:
         --notes "$NOTES"
 
     echo "Released $TAG to GitLab."
+
+# Copy the library to the archive — `storage-layout.md` §8. Dry run by default.
+[group('dev')]
+archive write="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    LIB="${HOME}/MusicLibrary"
+    NAS="/Volumes/Media/GMuseLibrary"
+
+    # **The archive is the device whose holdings are complete** (§8), so this
+    # mirrors rather than adds: several hundred files are *renamed* in an
+    # ordinary week, rsync cannot see a rename, and without --delete the NAS
+    # keeps both the new path and the old one for every one of them.
+    #
+    # **The log travels with the music** and both halves together: history.toml
+    # is the base and events-*.log is everything since, so copying one without
+    # the other silently loses recent plays and ratings.
+    [ -d "$NAS" ] || { echo "not mounted: $NAS"; exit 1; }
+
+    # **The accented paths always read as "to delete", and they are not.**
+    #
+    # §5 renders every name NFC and the share stores it decomposed, so
+    # `readdir` hands back a decomposed spelling of a name we sent composed,
+    # and rsync does not recognise a name it just wrote. Measured: 104 paths
+    # flagged every run, 180 accented paths on each side, and every one of
+    # them present on both —
+    # the lookup is normalisation-insensitive, so nothing is actually removed.
+    #
+    # `--iconv` does not fix it here and makes it worse: this rsync has no
+    # `UTF8-MAC` (it fails outright, which reads as a clean run because there
+    # is no output to count), and `UTF-8,UTF-8-MAC` mangles 49 names into
+    # paths it then reports as vanished. Left alone deliberately — a false
+    # alarm in a report costs less than a translation that damages names.
+
+    if [ "{{write}}" != "write" ]; then
+        echo "dry run — pass 'write' to copy"
+        { rsync -a --delete --dry-run --itemize-changes "$LIB/" "$NAS/" || [ $? -eq 24 ]; } \
+          | awk '/^\*deleting/ {d++} /^[<>]f/ {s++} END {printf "  %d to send, %d to delete\n", s+0, d+0}'
+        exit 0
+    fi
+
+    # **24 is a warning, not a failure**, and `set -e` treated it as one — so
+    # the pass below never ran and the sync stayed as expensive as the first.
+    # It means a file vanished between the file list and the transfer, which
+    # here is the log being appended to while the copy runs.
+    rsync -a --delete --stats "$LIB/" "$NAS/" || [ $? -eq 24 ]
+
+    # **Then set the times ourselves, because rsync cannot on this share.**
+    #
+    # Measured: `touch` sets an mtime on the mount fine, and `rsync -a` — which
+    # includes -t — leaves every file it *transferred* stamped with the moment
+    # it was copied. A file rsync skips keeps the time it already had, so the
+    # damage is exactly the set that was just written, and the next run sees
+    # all of them as changed and sends them again.
+    #
+    # Left alone that makes every sync cost the whole library: the first run
+    # here moved 34.9 GB and the second would have moved the same 34.9 GB with
+    # nothing at all having changed. This pass is metadata only and takes about
+    # a minute over SMB.
+    python3 - "$LIB" "$NAS" <<'EOF'
+    import os, sys
+    lib, nas = sys.argv[1], sys.argv[2]
+    fixed = 0
+    for root, _, files in os.walk(lib):
+        for f in files:
+            src = os.path.join(root, f)
+            dst = os.path.join(nas, os.path.relpath(src, lib))
+            try:
+                s, d = os.stat(src), os.stat(dst)
+            except OSError:
+                continue
+            # A second of slack: SMB stores whole seconds and the source has
+            # sub-second precision, so an exact comparison never matches.
+            if abs(s.st_mtime - d.st_mtime) > 1:
+                try:
+                    os.utime(dst, (s.st_atime, s.st_mtime)); fixed += 1
+                except OSError:
+                    pass
+    print(f"{fixed} timestamp(s) corrected, so the next sync sends only what changed")
+    EOF
