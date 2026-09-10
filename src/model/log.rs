@@ -32,7 +32,23 @@ use crate::model::facet::{ConceptRecord, Described, FacetRecord};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::ord::OrdKey;
-use crate::model::reference::{AliasKind, Cataloguable, CreditOn, RoleClass, Source};
+use crate::model::reference::{
+    AliasKind, ArtistRelationKind, Cataloguable, CreditOn, RoleClass, Source,
+};
+
+/// One edge in the artist graph: from whom, to whom, and of which kind.
+///
+/// The kind is part of the key rather than a value beside it, because a person
+/// can be both a member of a band and known by its name — `Bradley Strider`
+/// and `Bradley's Beat` — and the two edges answer different questions.
+pub type ArtistEdge = (Id<Artist>, Id<Artist>, ArtistRelationKind);
+
+/// When something held: from a date, until one where anybody said.
+///
+/// Open-ended is the ordinary case, not a gap — a moniker somebody still
+/// records under has no end, and inventing one would be worse than the
+/// absence.
+pub type Period = (PartialDate, Option<PartialDate>);
 use crate::model::spine::PartialDate;
 
 /// One thing a device wrote down.
@@ -931,6 +947,37 @@ pub enum Fact {
         subject: Cataloguable,
         value: String,
     },
+
+    /// One artist to another: a moniker, or a membership — #174.
+    ///
+    /// **Two rows kept, not one made** — which is the whole of the difference
+    /// from [`Fact::ArtistMerged`]. Richard D. James releases as Aphex Twin,
+    /// AFX, Polygon Window and Caustic Window, and both halves are true at
+    /// once: four folders is the right default, because a release is credited
+    /// to a moniker and `{file_under}` is that credit; and one shelf is the
+    /// right question sometimes. Merging AFX into Aphex Twin would answer the
+    /// second by destroying the first.
+    ///
+    /// **Not an alias label either.** [`Fact::AliasAsserted`] says *this
+    /// string is another name for this artist* — one row, several spellings.
+    /// This says *these two rows are one act*, and each keeps its own
+    /// credits, plays and folder.
+    ///
+    /// **Directional, and the direction is the answer to "which is
+    /// primary".** `from` is the moniker and `to` the act behind it. Nothing
+    /// computes that — see [`ArtistRelationKind::AliasOf`] — it is declared,
+    /// the way MusicBrainz declares sixteen `is person` edges rather than
+    /// deriving a root.
+    ///
+    /// Row existence with no last-writer rule, like the aliases above: two
+    /// devices recording one relation union, and a relation somebody stated
+    /// does not stop having been stated.
+    ArtistRelated {
+        from: Id<Artist>,
+        to: Id<Artist>,
+        kind: ArtistRelationKind,
+        period: Option<Period>,
+    },
     /// Somebody has decided a concept does not apply.
     ///
     /// **Not a delete, because there are none.** The log is append-only and
@@ -1163,6 +1210,22 @@ pub struct Catalogue {
     /// disjoint class from `Variant` and the two axes multiply.
     #[serde(default)]
     pub retired_headings: BTreeSet<(Cataloguable, String)>,
+    /// One artist to another — `Fact::ArtistRelated`. Row existence, so two
+    /// devices stating one relation union.
+    ///
+    /// **A graph, not a redirect.** `Merges` resolves a chain and the far end
+    /// replaces the near one; here both ends stay and only a *view* collapses
+    /// them, so the edges are kept as edges.
+    #[serde(default)]
+    pub artist_relations: BTreeSet<ArtistEdge>,
+    /// When a relation held, where anybody said — keyed by the edge.
+    ///
+    /// Apart from the edge itself because it is the one part that can be
+    /// restated: a membership whose end date arrives later is the same edge
+    /// with more known about it, and folding it into the key would make it a
+    /// second edge instead.
+    #[serde(default)]
+    pub relation_periods: BTreeMap<ArtistEdge, Period>,
     /// Every axis of description there is.
     pub facets: BTreeMap<Id<Facet>, FacetRecord>,
     /// Every term, on whichever axis it sits.
@@ -1676,6 +1739,25 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 cat.aliases
                     .insert((*subject, value.clone(), AliasKind::ArtistName));
                 cat.retired_headings.insert((*subject, value.clone()));
+            }
+            Fact::ArtistRelated {
+                from,
+                to,
+                kind,
+                period,
+            } => {
+                // **Both ends resolved through the merges**, because a merge
+                // that ran after the relation was stated would otherwise
+                // leave an edge pointing at a row nothing else uses.
+                let edge = (
+                    cat.artist_merges.resolve(*from),
+                    cat.artist_merges.resolve(*to),
+                    *kind,
+                );
+                cat.artist_relations.insert(edge);
+                if let Some(span) = period {
+                    cat.relation_periods.insert(edge, *span);
+                }
             }
             Fact::ConceptRetracted {
                 subject,

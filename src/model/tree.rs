@@ -94,8 +94,27 @@ fn values_of(
     l: &Librarian,
     level: crate::shelf::Level,
     subject: &crate::model::rows::Subject<'_>,
+    slot: Option<crate::model::id::Id<crate::model::entity::Track>>,
 ) -> Vec<String> {
     let field = level.field;
+    // **An artist level climbs the moniker graph, not the codelist** (#174).
+    // Asked of the librarian rather than resolved here, because the answer is
+    // a credit line and `line_of` is the one place that decides how one reads
+    // — a tree that joined names itself would be a second such place.
+    //
+    // Asked of the **slot** for the reason `files_under` is (#84): a recording
+    // is on every release that holds it, so asking the recording files a
+    // compilation track under whichever release sorted first.
+    if let (Some(at), true) = (level.at, artist_shaped(field))
+        && let Some(recording) = subject.recording
+    {
+        let line = l.filed_under_at(recording, slot, at);
+        return vec![if line.is_empty() {
+            crate::model::seam::UNKNOWN_ARTIST.to_string()
+        } else {
+            line
+        }];
+    }
     // **Two fields ask the model rather than the tags, and the tree wants the
     // model's answer** (#84). `album=` in a filter deliberately asks what the
     // *tag* says — `!album?` has to stay meaningful — but a tree grouping by
@@ -122,6 +141,14 @@ fn values_of(
         }
     }
     out
+}
+
+/// Whether a field names an artist, and so has the moniker graph to climb.
+///
+/// The same three [`crate::sort`] calls artist-shaped for its own reasons, and
+/// for the same reason: they are the fields whose values are people.
+fn artist_shaped(field: Field) -> bool {
+    matches!(field, Field::Artist | Field::AlbumArtist | Field::FileUnder)
 }
 
 /// What to show where a level has no value.
@@ -200,7 +227,7 @@ impl Tree {
                 let Some(subject) = crate::model::rows::Listing::subject(l, *row) else {
                     continue;
                 };
-                let inner_values = values_of(l, levels.1, &subject);
+                let inner_values = values_of(l, levels.1, &subject, slot);
                 // The inner level takes the first value it has: a sub-node is
                 // a place *within* a group, and splitting one row across two
                 // sub-nodes of the same group would be a duplicate nobody
@@ -210,7 +237,7 @@ impl Tree {
 
                 // **Every value, at the outer level.** This is where the
                 // multi-valued case lives, and it is deliberate.
-                for value in values_of(l, levels.0, &subject) {
+                for value in values_of(l, levels.0, &subject, slot) {
                     let key = sort_key(
                         &value,
                         smart_artist_sort && levels.0.field == Field::FileUnder,
@@ -921,6 +948,81 @@ mod tests {
             .map(|a| a.title.clone())
             .collect();
         assert_eq!(titles, ["Aardvark", "Zebra"]);
+    }
+
+    /// **Four folders by default, one shelf on request** — #174.
+    ///
+    /// Richard D. James releases as Aphex Twin and as AFX, and both are true
+    /// at once: *Analogue Bubblebath* belongs under AFX exactly as the sleeve
+    /// says, and "everything he made" is still a thing to ask. The default
+    /// level keeps them apart; `@1` puts them together, and Adele — who has
+    /// no relation and needs none — stays exactly where she was.
+    #[test]
+    fn a_moniker_files_apart_by_default_and_together_at_a_level() {
+        use crate::model::reference::ArtistRelationKind;
+
+        let mut i = Instance::new(Id::derived(b"laptop"));
+        i.ingest(
+            100,
+            &[
+                Scanned {
+                    album: Some("Analogue Bubblebath".into()),
+                    ..scanned("ab", "AFX", None, 1)
+                },
+                Scanned {
+                    album: Some("Selected Ambient Works".into()),
+                    ..scanned("saw", "Aphex Twin", None, 1)
+                },
+                Scanned {
+                    album: Some("21".into()),
+                    ..scanned("21", "Adele", None, 1)
+                },
+            ],
+        );
+        let cat = i.catalogue();
+        let named = |who: &str| {
+            *cat.artist_names
+                .iter()
+                .find(|(_, n)| n.as_str() == who)
+                .expect("ingested")
+                .0
+        };
+        i.relate_artists(
+            101,
+            named("AFX"),
+            named("Aphex Twin"),
+            ArtistRelationKind::AliasOf,
+        );
+        let l = Librarian::from_catalogue(&i.catalogue());
+
+        let shelves = |at: Option<u8>| {
+            let tree = Tree::grouped(
+                &l,
+                (
+                    crate::shelf::Level {
+                        field: Field::FileUnder,
+                        at,
+                    },
+                    Level::of(Field::Album),
+                ),
+                false,
+                &everything(&l),
+            );
+            let mut names: Vec<String> = tree.artist_names.values().cloned().collect();
+            names.sort();
+            names
+        };
+
+        assert_eq!(
+            shelves(None),
+            ["AFX", "Adele", "Aphex Twin"],
+            "the sleeve's own credit is the default, and it should stay one"
+        );
+        assert_eq!(
+            shelves(Some(1)),
+            ["Adele", "Aphex Twin"],
+            "one shelf for the act, and Adele untouched by a graph she is not in"
+        );
     }
 
     /// **Dated before undated, and the date is what decides.** An ordering

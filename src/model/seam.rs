@@ -247,12 +247,19 @@ impl<'a> Lookup<'a> {
     /// (#173). The two differ on exactly the credits that carry an
     /// `as_credited`, and those are the ones where a printed form would put
     /// one artist in two folders.
-    fn filing(&self, subject: CreditOn) -> String {
-        match self {
-            Lookup::Direct(l) => l.reference.files_under(subject),
-            Lookup::Built { l, credits, .. } => credits
+    ///
+    /// `at` climbs the moniker graph before naming anybody — `None` is the
+    /// artist credited and `Some(1)` the act behind it (#174).
+    fn filing(&self, subject: CreditOn, at: Option<u8>) -> String {
+        match (self, at) {
+            (Lookup::Direct(l), None) => l.reference.files_under(subject),
+            (Lookup::Direct(l), Some(at)) => l.reference.files_under_at(subject, at),
+            (Lookup::Built { l, credits, .. }, at) => credits
                 .get(&subject)
-                .map(|found| l.reference.filed_under_of(found))
+                .map(|found| match at {
+                    None => l.reference.filed_under_of(found),
+                    Some(at) => l.reference.filed_under_of_at(found, at),
+                })
                 .unwrap_or_default(),
         }
     }
@@ -425,6 +432,33 @@ impl Librarian {
         slot: Option<Id<Track>>,
         by: &Lookup<'_>,
     ) -> String {
+        self.files_under_at(recording, slot, None, by)
+    }
+
+    /// [`Librarian::files_under`], optionally climbed to the act behind each
+    /// moniker — #174.
+    ///
+    /// **The level belongs here rather than in the tree** because the answer
+    /// is a credit line, and the one place that decides how a credit line
+    /// reads is `line_of`. A tree that resolved artists itself and joined
+    /// their names would be a second such place, differing from the first the
+    /// first time a join phrase mattered.
+    pub fn filed_under_at(
+        &self,
+        recording: Id<Recording>,
+        slot: Option<Id<Track>>,
+        at: u8,
+    ) -> String {
+        self.files_under_at(recording, slot, Some(at), &Lookup::Direct(self))
+    }
+
+    fn files_under_at(
+        &self,
+        recording: Id<Recording>,
+        slot: Option<Id<Track>>,
+        at: Option<u8>,
+        by: &Lookup<'_>,
+    ) -> String {
         let on_release = slot
             .and_then(|s| self.spine.tracks.get(&s))
             .and_then(|t| self.spine.media.get(&t.medium.id()))
@@ -433,7 +467,7 @@ impl Librarian {
 
         // **`filing`, not `line`** — #173. A folder is grouping, and the
         // printed form splits an artist that releases under a moniker.
-        let filing = |subject: CreditOn| by.filing(subject);
+        let filing = |subject: CreditOn| by.filing(subject, at);
         on_release
             .map(filing)
             .filter(|s| !s.is_empty())
@@ -682,6 +716,21 @@ impl Librarian {
             });
             a.name = name.clone();
             a.sort_name = name.clone();
+        }
+        // **The artist graph, kept as edges** — #174. Both ends stay rows;
+        // only a level collapses them, so nothing here redirects.
+        for (from, to, kind) in &cat.artist_relations {
+            l.reference
+                .artist_relations
+                .push(crate::model::reference::ArtistRelation {
+                    from: crate::model::id::Ref::to(*from),
+                    to: crate::model::id::Ref::to(*to),
+                    kind: *kind,
+                    period: cat
+                        .relation_periods
+                        .get(&(*from, *to, *kind))
+                        .map(|(began, ended)| (Some(*began), *ended)),
+                });
         }
         // **A retired copy is not loaded** — #159, and this is the one place
         // it has to be excluded rather than everywhere downstream.

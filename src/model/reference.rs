@@ -342,7 +342,10 @@ enum Form {
     /// What the sleeve printed, which is what a person reads.
     Printed,
     /// Who the artist is, which is what a folder and a filter need.
-    Filing,
+    ///
+    /// `at` climbs the moniker graph first — `None` is the artist credited,
+    /// `Some(1)` the act behind it (#174).
+    Filing { at: Option<u8> },
 }
 
 /// Another name for something.
@@ -360,9 +363,31 @@ pub struct Alias {
     pub basis: Source,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum ArtistRelationKind {
+    /// This artist plays in that one. Thom Yorke in Radiohead.
+    ///
+    /// **The same mechanism and a different question** — and a level that
+    /// followed both would file Radiohead's records under Thom Yorke, which
+    /// is why the kind is on the fact and a view says which it follows.
+    /// MusicBrainz keeps them apart too: `Richard D. James` has sixteen
+    /// `is person` edges and one `member of band`, to Universal Indicator.
     MemberOf,
+    /// This artist is that one under another name. AFX is Aphex Twin.
+    ///
+    /// **Directional, and the direction is the answer to "which is
+    /// primary".** It is declared rather than computed — no rule over the
+    /// graph can elect a root, and one invented for it moves as the library
+    /// grows. MADS/RDF says the same by keeping the named thing apart from
+    /// its names, and MusicBrainz by hanging every moniker off one hub.
+    ///
+    /// **Both rows stay.** The other reading — *this name should not be
+    /// used* — is a merge, which `ArtistMerged` already does. That is MADS's
+    /// `useInstead` against its `hasRelatedAuthority`, and the two are
+    /// already different machinery here: a merge collapses the identity,
+    /// this keeps both and lets a view collapse them.
     AliasOf,
 }
 
@@ -372,7 +397,7 @@ pub enum ArtistRelationKind {
 /// pseudonyms rather than cover originals — `Black Francis` on 40 Pixies files,
 /// `Paul Hartnoll/Phil Hartnoll` on 34 Orbital files, `Marc Leclair` on Akufen.
 /// "Everything by this artist under any name" is a first-order question here.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct ArtistRelation {
     pub from: Ref<Artist>,
     pub to: Ref<Artist>,
@@ -437,6 +462,11 @@ impl Reference {
     /// See [`Self::filed_under_of`] for why the two are different questions.
     pub fn files_under(&self, subject: CreditOn) -> String {
         self.filed_under_of(&self.credits_on(subject))
+    }
+
+    /// [`Self::files_under`], climbed to the act behind each moniker — #174.
+    pub fn files_under_at(&self, subject: CreditOn, at: u8) -> String {
+        self.filed_under_of_at(&self.credits_on(subject), at)
     }
 
     /// The printed line, given the credits already found.
@@ -521,14 +551,18 @@ impl Reference {
         // here took a narrowed view from under 50ms to 92.
         let mut named: Vec<(String, Option<String>)> = Vec::new();
         for credit in credits.iter().filter(|c| performed(c) && c.basis == best) {
-            let filed = || {
+            let filed = |at: Option<u8>| {
+                let who = match at {
+                    None => credit.artist.id(),
+                    Some(at) => self.artist_at_level(credit.artist.id(), at),
+                };
                 self.artists
-                    .get(&credit.artist.id())
+                    .get(&who)
                     .map(|a| a.name.clone())
                     .unwrap_or_default()
             };
             let name = match form {
-                Form::Printed => credit.as_credited.clone().unwrap_or_else(filed),
+                Form::Printed => credit.as_credited.clone().unwrap_or_else(|| filed(None)),
                 // **The artist's own name, and the printed one only where
                 // there is no other.** An artist the catalogue cannot name is
                 // no key at all, and a printed form is a worse key than an
@@ -536,7 +570,7 @@ impl Reference {
                 // where a credit dropped here for being nameless would land.
                 // Two of this library's credited artists have no name (#154),
                 // so this arm is the edge and not the case.
-                Form::Filing => match filed() {
+                Form::Filing { at } => match filed(at) {
                     named if !named.trim().is_empty() => named,
                     _ => credit.as_credited.clone().unwrap_or_default(),
                 },
@@ -587,7 +621,63 @@ impl Reference {
     /// rendered name, the same join phrases. What differs is one name per
     /// credit, which is the whole of the difference.
     pub fn filed_under_of(&self, credits: &[&Credit]) -> String {
-        self.assembled(credits, Form::Filing)
+        self.assembled(credits, Form::Filing { at: None })
+    }
+
+    /// The filing line with each artist climbed to the act behind it — #174.
+    ///
+    /// `at` is [`Self::artist_at_level`]'s, so level 1 is the broadest
+    /// identity and an artist with no moniker recorded stands for itself.
+    pub fn filed_under_of_at(&self, credits: &[&Credit], at: u8) -> String {
+        self.assembled(credits, Form::Filing { at: Some(at) })
+    }
+
+    /// The act behind a moniker, `at` levels down from the broadest — #174.
+    ///
+    /// The artist answer to `Vocabulary::at_level`, and deliberately the same
+    /// sentence about a different graph: `genre@1` is the broadest ancestor of
+    /// a term, `file_under@1` the broadest identity behind a credit. AFX at
+    /// level 1 is Aphex Twin; Aphex Twin at level 1 is itself.
+    ///
+    /// **Only `AliasOf` is climbed.** A member is not a moniker — following
+    /// `MemberOf` too would file Radiohead's records under Thom Yorke, and
+    /// Universal Indicator's under Richard D. James, which MusicBrainz keeps
+    /// apart for the same reason.
+    ///
+    /// **An artist shallower than the level asked for stands for itself**, as
+    /// a ragged genre does. Adele has no relation and needs none; a row
+    /// dropping out of the tree because nobody had recorded a moniker for it
+    /// would be a far worse answer than a repeated one, and it is the
+    /// overwhelming majority of any library.
+    ///
+    /// A cycle stops at the row it returns to. Nothing should write one, and
+    /// a graph a person types into is a graph that will eventually contain
+    /// one.
+    pub fn artist_at_level(&self, artist: Id<Artist>, at: u8) -> Id<Artist> {
+        let up = |a: Id<Artist>| {
+            self.artist_relations
+                .iter()
+                .find(|r| {
+                    r.kind == ArtistRelationKind::AliasOf && r.from.id() == a && r.to.id() != a
+                })
+                .map(|r| r.to.id())
+        };
+        // How far the chain runs, so a depth can be counted from its far end
+        // the way a genre's is counted from its root.
+        let mut chain = vec![artist];
+        while let Some(next) = up(*chain.last().expect("seeded with the artist")) {
+            if chain.contains(&next) {
+                break;
+            }
+            chain.push(next);
+        }
+        // `chain[0]` is the moniker and the last is the act. Level 1 is the
+        // act, level 2 the one under it — so the level indexes from the back.
+        let depth = chain.len() - 1;
+        let Some(climb) = (depth + 1).checked_sub(at as usize) else {
+            return artist;
+        };
+        chain[climb.min(depth)]
     }
 
     #[allow(
@@ -708,6 +798,69 @@ mod tests {
             },
         );
         id
+    }
+
+    fn relate(r: &mut Reference, from: Id<Artist>, to: Id<Artist>, kind: ArtistRelationKind) {
+        r.artist_relations.push(ArtistRelation {
+            from: Ref::to(from),
+            to: Ref::to(to),
+            kind,
+            period: None,
+        });
+    }
+
+    /// **The moniker graph is climbed and the band graph is not** — #174.
+    ///
+    /// Richard D. James releases as Aphex Twin and as AFX, so `@1` puts both
+    /// on one shelf. Thom Yorke plays in Radiohead, which is the same shape
+    /// and a different question: following it would file *OK Computer* under
+    /// Thom Yorke. MusicBrainz keeps the two apart for the same reason — the
+    /// `Richard D. James` hub has sixteen `is person` edges and one
+    /// `member of band`, to Universal Indicator.
+    #[test]
+    fn a_level_climbs_monikers_and_refuses_memberships() {
+        let mut r = Reference::default();
+        let afx = artist(&mut r, "AFX");
+        let aphex = artist(&mut r, "Aphex Twin");
+        let rdj = artist(&mut r, "Richard D. James");
+        relate(&mut r, afx, aphex, ArtistRelationKind::AliasOf);
+        relate(&mut r, aphex, rdj, ArtistRelationKind::AliasOf);
+
+        let yorke = artist(&mut r, "Thom Yorke");
+        let radiohead = artist(&mut r, "Radiohead");
+        relate(&mut r, yorke, radiohead, ArtistRelationKind::MemberOf);
+
+        assert_eq!(r.artist_at_level(afx, 1), rdj, "the far end of the chain");
+        assert_eq!(r.artist_at_level(aphex, 1), rdj);
+        assert_eq!(r.artist_at_level(afx, 2), aphex, "one step down from it");
+        assert_eq!(
+            r.artist_at_level(afx, 3),
+            afx,
+            "a level deeper than the chain is the moniker itself"
+        );
+        assert_eq!(
+            r.artist_at_level(yorke, 1),
+            yorke,
+            "a band is not another name for its member"
+        );
+
+        // **The ragged case, which is almost every row.** Adele has no
+        // relation and needs none; a library where `@1` dropped every artist
+        // nobody had annotated would be useless on the day it shipped.
+        let adele = artist(&mut r, "Adele");
+        assert_eq!(r.artist_at_level(adele, 1), adele);
+    }
+
+    /// A graph a person types into is a graph that will contain a cycle.
+    #[test]
+    fn a_moniker_that_points_back_stops_rather_than_spinning() {
+        let mut r = Reference::default();
+        let a = artist(&mut r, "A");
+        let b = artist(&mut r, "B");
+        relate(&mut r, a, b, ArtistRelationKind::AliasOf);
+        relate(&mut r, b, a, ArtistRelationKind::AliasOf);
+        assert_eq!(r.artist_at_level(a, 1), b, "stops where it came in");
+        assert_eq!(r.artist_at_level(b, 1), a);
     }
 
     fn role(r: &mut Reference, name: &str, class: RoleClass) -> Id<Role> {

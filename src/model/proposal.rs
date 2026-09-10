@@ -671,6 +671,37 @@ pub enum Proposal {
         /// `artist-name`, `search-hint`, `legal-name`, or `retired`.
         kind: String,
     },
+    /// **These two rows are one act, and both stay** — #174.
+    ///
+    /// The other claim [`Proposal::Aliased`] is not. An alias says *this
+    /// string is another name for this artist* — one row, several spellings.
+    /// This says two artists the library holds separately are the same person
+    /// working under two names, each keeping its own credits, folder and
+    /// plays.
+    ///
+    /// **And not [`Proposal::ArtistsMerged`]**, which collapses them. Merging
+    /// AFX into Aphex Twin would take the moniker off the record it was
+    /// released under, and *Analogue Bubblebath* belongs under AFX exactly as
+    /// the sleeve says. What this adds is the ability to *also* ask for one
+    /// shelf, by way of `file_under@1`.
+    ///
+    /// **Identified, not named**, which every other artist on this wire is
+    /// not. A relation is a statement about two rows that already exist, so
+    /// there is nothing to mint and a name would only reintroduce #181's
+    /// second-Dolly-Parton — the case where a name mints a row beside the one
+    /// meant.
+    Related {
+        /// The moniker: AFX, Polygon Window, Caustic Window.
+        from: Id<Artist>,
+        /// The act behind it. **The direction is the answer to "which is
+        /// primary"**, and it is declared here because no rule over the graph
+        /// can elect a root that stays elected as a library grows.
+        to: Id<Artist>,
+        /// `alias-of` or `member-of`. Refused rather than guessed, because a
+        /// member is not a moniker and a view that followed both would file
+        /// Radiohead's records under Thom Yorke.
+        kind: String,
+    },
     /// A rating. Included because it is the simplest possible proposal and
     /// therefore the one worth testing the format against.
     Rated {
@@ -965,6 +996,13 @@ impl Proposal {
             Proposal::ArtistsMerged { winner, .. } => Subject::Artist(*winner),
             Proposal::Named { artist, .. } => Subject::Artist(*artist),
             Proposal::Aliased { artist, .. } => Subject::Artist(*artist),
+            // **The act, not the moniker.** Both rows have to exist and the
+            // check takes one, so it takes the end that has to be there for
+            // the relation to mean anything — the same choice the merges make
+            // in naming their winner. The `from` is checked in the arm that
+            // builds the fact, where a missing one is a refusal with a reason
+            // rather than a subject nobody has heard of.
+            Proposal::Related { to, .. } => Subject::Artist(*to),
             // **The recording has to exist.** A title is a description of
             // something held, and a retitle naming a row nothing points at is
             // stale rather than wrong.
@@ -1697,6 +1735,42 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     }]
                 }
             }
+        }
+        Proposal::Related { from, to, kind } => {
+            use crate::model::reference::ArtistRelationKind;
+            // **A row cannot be a moniker of itself**, and the graph walk
+            // stops at a repeat rather than looping — so this would be a
+            // silent no-op rather than an error, which is the worse kind.
+            if from == to {
+                return Err("an artist is not another name for itself".into());
+            }
+            // The moniker has to exist too. `subject` checks the act, being
+            // the end that has to be there for the relation to mean anything;
+            // this is the other end, and refusing by name beats writing an
+            // edge to a row nothing else mentions.
+            if library.named(from).is_none() {
+                return Err(format!("{from} is not an artist this library holds"));
+            }
+            let kind = match kind.trim().to_lowercase().replace('_', "-").as_str() {
+                "alias-of" => ArtistRelationKind::AliasOf,
+                "member-of" => ArtistRelationKind::MemberOf,
+                other => {
+                    return Err(format!(
+                        "{other:?} is not a kind of relation — alias-of, member-of"
+                    ));
+                }
+            };
+            vec![Fact::ArtistRelated {
+                from,
+                to,
+                kind,
+                // **Not on the wire yet.** `Fact::ArtistRelated` carries a
+                // period because a membership has one and MusicBrainz
+                // publishes it; nothing here has a source for one, and a field
+                // a person must fill with `null` is a field they will fill
+                // wrongly.
+                period: None,
+            }]
         }
         Proposal::Retitled { recording, title } => {
             let title = title.trim();

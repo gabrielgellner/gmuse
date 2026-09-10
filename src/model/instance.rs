@@ -631,6 +631,43 @@ impl Instance {
 
     #[allow(
         dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — a relation is written by `Proposal::Related`, which goes through `facts_of` rather than through here"
+    )]
+    /// **Two artists are one act, and both rows stay** — #174.
+    ///
+    /// Not `merge`, which collapses them: AFX absorbed into Aphex Twin would
+    /// take the moniker off the record it was released under, and *Analogue
+    /// Bubblebath* belongs under AFX exactly as the sleeve says. This adds the
+    /// ability to *also* ask for one shelf, by way of `file_under@1`, without
+    /// giving up the four folders that are the right default.
+    ///
+    /// Not an alias either — [`Fact::AliasAsserted`] says one row goes by
+    /// several names; this says two rows are one person.
+    ///
+    /// **`from` is the moniker and `to` the act.** Nothing derives that: a
+    /// rule over the graph would elect a root that moves as the library grows,
+    /// which is why MusicBrainz declares sixteen `is person` edges rather than
+    /// computing one.
+    pub fn relate_artists(
+        &mut self,
+        now: i64,
+        from: Id<Artist>,
+        to: Id<Artist>,
+        kind: crate::model::reference::ArtistRelationKind,
+    ) {
+        self.append(
+            now,
+            Fact::ArtistRelated {
+                from,
+                to,
+                kind,
+                period: None,
+            },
+        );
+    }
+
+    #[allow(
+        dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
     )]
     /// **Drop records this pass added that the log already said** — #148.

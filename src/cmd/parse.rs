@@ -620,12 +620,16 @@ fn levels_spec(rest: &str) -> Result<crate::shelf::Levels, ParseError> {
     })
 }
 
-/// One level: a field, optionally at a depth in its hierarchy (#79).
+/// One level: a field, optionally at a depth in its hierarchy (#79, #174).
 ///
 /// `genre@1` is the broad term and `genre@2` the specific one — what the
-/// `Broad; Style` tag convention imitates. **A depth is only meaningful on a
-/// facet**, because nothing else in the model has a hierarchy to climb, and
-/// `year@2` is refused rather than silently ignored.
+/// `Broad; Style` tag convention imitates.
+///
+/// **Two kinds of field have a graph to climb, and they are different
+/// graphs.** A facet climbs the codelist; an artist climbs the monikers, so
+/// `file_under@1` is the act behind the credit — AFX and Aphex Twin on one
+/// shelf, Adele on her own because she needs no relation to have one. Nothing
+/// else has either, and `year@2` is refused rather than silently ignored.
 fn level(spec: &str) -> Result<crate::shelf::Level, ParseError> {
     use crate::format::Field;
 
@@ -645,7 +649,11 @@ fn level(spec: &str) -> Result<crate::shelf::Level, ParseError> {
         }
     };
     let field = Field::parse(name).ok_or_else(|| ParseError::Bad(name.into(), "field"))?;
-    if at.is_some() && !matches!(field, Field::Facet(_)) {
+    let climbable = matches!(
+        field,
+        Field::Facet(_) | Field::Artist | Field::AlbumArtist | Field::FileUnder
+    );
+    if at.is_some() && !climbable {
         return Err(ParseError::Bad(
             spec.into(),
             "level on a field with no hierarchy",
