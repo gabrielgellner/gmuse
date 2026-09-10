@@ -682,11 +682,16 @@ fn run_library(
             }
 
             let mut found = 0usize;
+            // What the name rule already said, so the overlap pass below adds
+            // to the report rather than repeating it.
+            let mut reported: Vec<crate::model::id::Id<crate::model::entity::ReleaseGroup>> =
+                Vec::new();
             for ((_, _), mut ids) in by_name {
                 if ids.len() < 2 {
                     continue;
                 }
                 found += 1;
+                reported.extend(ids.iter().copied());
                 // Printed from the winner rather than the folded key, so what
                 // is shown is a title somebody actually wrote.
                 let (who, title) = (
@@ -716,6 +721,175 @@ fn run_library(
                  would join them — **read it first**: two records can share a name, and \
                  `AC/DC — High Voltage` is two."
             );
+
+            // **And the ones a name cannot find** — #185.
+            //
+            // The rule above compares titles, so it misses a record imported
+            // twice under names its tags spelled differently:
+            // `Selected Ambient Works Vol.1 [85-92]` against
+            // `Selected Ambient Works 85–92`, which sat side by side until a
+            // person noticed. Comparing *recordings* corroborates against
+            // something the title rule did not produce — lesson 1 — and needs
+            // no fuzzy matching to do it.
+            let mut of_group: std::collections::BTreeMap<
+                crate::model::id::Id<crate::model::entity::ReleaseGroup>,
+                std::collections::BTreeSet<crate::model::id::Id<crate::model::entity::Recording>>,
+            > = Default::default();
+            for placed in cat.tracks.values() {
+                if let Some(medium) = cat.media.get(&placed.medium)
+                    && let Some(release) = cat.releases.get(&medium.release)
+                {
+                    of_group
+                        .entry(cat.group_merges.resolve(release.group))
+                        .or_default()
+                        .insert(placed.recording);
+                }
+            }
+            let listed: std::collections::BTreeSet<_> = reported.iter().copied().collect();
+            let keys: Vec<_> = of_group
+                .iter()
+                .filter(|(_, recs)| recs.len() >= 2)
+                .map(|(id, _)| *id)
+                .collect();
+            let mut overlaps = Vec::new();
+            for (i, a) in keys.iter().enumerate() {
+                for b in &keys[i + 1..] {
+                    let (left, right) = (&of_group[a], &of_group[b]);
+                    let shared = left.intersection(right).count();
+                    if shared == 0 {
+                        continue;
+                    }
+                    let union = left.len() + right.len() - shared;
+                    // **Two numbers, because they answer different
+                    // questions.** Containment says every track of the
+                    // smaller is on the larger, which a *single inside its
+                    // album* satisfies perfectly — `Come to Daddy Remixed` is
+                    // 100% contained in `Come to Daddy EP` and is a different
+                    // record. Only the share of the *union* separates one
+                    // record held twice from one record inside another.
+                    let contains = shared as f64 / left.len().min(right.len()) as f64;
+                    let both = shared as f64 / union as f64;
+                    if contains < 0.6 || (listed.contains(a) && listed.contains(b)) {
+                        continue;
+                    }
+                    // **Most files wins**, as the name rule above decides it:
+                    // the row that has to exist for the merge to mean
+                    // anything is the one holding the copies.
+                    let (keep, drop) =
+                        if held.get(a).copied().unwrap_or(0) >= held.get(b).copied().unwrap_or(0) {
+                            (*a, *b)
+                        } else {
+                            (*b, *a)
+                        };
+                    overlaps.push((both, contains, keep, drop));
+                }
+            }
+            overlaps.sort_by(|x, y| y.0.total_cmp(&x.0));
+            if !overlaps.is_empty() {
+                println!();
+                for (both, contains, a, b) in &overlaps {
+                    let name = |id| {
+                        format!(
+                            "{} — {}",
+                            library
+                                .reference
+                                .credited_as(crate::model::reference::CreditOn::ReleaseGroup(id)),
+                            cat.groups[&id].title
+                        )
+                    };
+                    println!(
+                        "{:.0}% shared, {:.0}% of the smaller",
+                        both * 100.0,
+                        contains * 100.0
+                    );
+                    for id in [a, b] {
+                        println!(
+                            "  {id}  {:4} file(s)  {}",
+                            held.get(id).copied().unwrap_or(0),
+                            name(*id)
+                        );
+                    }
+                    println!(
+                        "  {}",
+                        serde_json::to_string(&serde_json::json!({
+                            "fact": "groups_merged",
+                            "loser": b.to_string(),
+                            "winner": a.to_string(),
+                        }))?
+                    );
+                }
+                eprintln!(
+                    "\n{} pair(s) share recordings under different names. **The first number \
+                     decides.** A high share of the *union* is one record held twice; a high \
+                     share of the smaller alone is one record inside another — a single on its \
+                     album, an EP inside the edition that absorbed it — and merging those loses \
+                     a record you own.",
+                    overlaps.len()
+                );
+            }
+
+            // **A group holding several releases** — #185, and the split the
+            // name rule cannot see at all because the group is not duplicated.
+            // `Analogue Bubblebath` is one group whose mp3s and flacs sit on
+            // two pressings, so they never share a slot, `shown_copy` never
+            // gets to choose between them, and the tree draws every track
+            // twice in rows that read identically.
+            let mut pressings: std::collections::BTreeMap<_, Vec<_>> = Default::default();
+            for (id, release) in &cat.releases {
+                pressings
+                    .entry(cat.group_merges.resolve(release.group))
+                    .or_insert_with(Vec::new)
+                    .push(*id);
+            }
+            // **Only where two of them hold copies.** A pressing with no
+            // files is the ordinary case and not a split: a tracklist names
+            // the whole record and #155 says a track you do not own is a row
+            // on purpose, so most groups with two releases have one real
+            // pressing and one list. 60 rows of that buries the four that
+            // matter.
+            let files_on = |release: &crate::model::id::Id<crate::model::entity::Release>| {
+                let on: std::collections::BTreeSet<_> = cat
+                    .media
+                    .iter()
+                    .filter(|(_, m)| m.release == *release)
+                    .map(|(id, _)| *id)
+                    .collect();
+                cat.placed
+                    .values()
+                    .filter(|t| cat.tracks.get(t).is_some_and(|p| on.contains(&p.medium)))
+                    .count()
+            };
+            let split: Vec<_> = pressings
+                .iter()
+                .filter(|(_, r)| r.iter().filter(|id| files_on(id) > 0).count() > 1)
+                .collect();
+            if !split.is_empty() {
+                println!();
+                for (group, releases) in &split {
+                    let Some(grouped) = cat.groups.get(group) else {
+                        continue;
+                    };
+                    println!(
+                        "{} — {}   {} pressings",
+                        library
+                            .reference
+                            .credited_as(crate::model::reference::CreditOn::ReleaseGroup(**group)),
+                        grouped.title,
+                        releases.len()
+                    );
+                    for release in *releases {
+                        println!("  {release}  {:4} file(s)", files_on(release));
+                    }
+                }
+                eprintln!(
+                    "\n{} group(s) hold copies on more than one pressing. A CD and a vinyl of \
+                     one record are genuinely two releases — but where the copies are the *same* \
+                     tracks in two formats they never share a slot, so `shown_copy` never gets \
+                     to choose between them and the tree draws each track twice in rows that \
+                     read identically.",
+                    split.len()
+                );
+            }
         }
         cli::Shelf::Copies => {
             let (log, _) = crate::model::instance::Instance::open(
