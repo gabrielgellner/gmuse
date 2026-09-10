@@ -845,6 +845,9 @@ fn run_library(
                     device,
                     crate::history::now_ms(),
                     query::Only::Everything,
+                    // A contested seat is a question about the *recording* —
+                    // which performance sits here — so one copy answers it.
+                    query::Copies::Shown,
                 ) {
                     if row.recording.is_some_and(|r| contested.contains(&r)) {
                         println!("{}", serde_json::to_string(&row)?);
@@ -1361,7 +1364,10 @@ fn run_library(
                 eprintln!("dry run — nothing moved. Add --write.");
             }
         }
-        cli::Shelf::Query { unidentified } => {
+        cli::Shelf::Query {
+            unidentified,
+            every_copy,
+        } => {
             let (log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
@@ -1372,7 +1378,19 @@ fn run_library(
             } else {
                 query::Only::Everything
             };
-            for row in query::rows(roots, log.records(), device, crate::history::now_ms(), only) {
+            let copies = if *every_copy {
+                query::Copies::Every
+            } else {
+                query::Copies::Shown
+            };
+            for row in query::rows(
+                roots,
+                log.records(),
+                device,
+                crate::history::now_ms(),
+                only,
+                copies,
+            ) {
                 println!("{}", serde_json::to_string(&row)?);
             }
         }

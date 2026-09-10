@@ -161,6 +161,21 @@ pub enum Shelf {
         /// limit on.
         #[arg(long)]
         unidentified: bool,
+        /// **One row per copy rather than per recording** — #183.
+        ///
+        /// The default hands over the copy this device would open, which is
+        /// right for a pass about the *performance*: an identification or a
+        /// credit is true of the recording however many files hold it.
+        ///
+        /// A pass about the **bytes** wants this instead. `EncodingMeasured`
+        /// is keyed by encoding, so a library holding one recording as both a
+        /// FLAC and an MP3 — the shape #159 supports — could otherwise only
+        /// ever measure whichever one `open` happened to pick, and the two
+        /// answer different questions: a FLAC's cutoff says whether it is
+        /// really lossless or a transcode in a lossless container, an MP3's
+        /// says whether it delivers what its bitrate declares.
+        #[arg(long)]
+        every_copy: bool,
     },
     /// **Catalogue this audio — the declaration a scan no longer makes** (#62).
     ///

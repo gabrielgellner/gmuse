@@ -39,6 +39,32 @@ pub enum Only {
     Unidentified,
 }
 
+/// How many rows one recording gets.
+///
+/// **A different axis from [`Only`]**, which says *which recordings*. This
+/// says how many copies of each, and the two compose: a pass can want every
+/// copy of the unidentified rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Copies {
+    /// The one this device would open. What a pass about the *recording*
+    /// wants — an identification, a title, a credit — because those are true
+    /// of the performance however many files hold it.
+    Shown,
+    /// Every encoding this device can reach.
+    ///
+    /// **What a pass about the *bytes* wants** — #183. `EncodingMeasured` is
+    /// keyed by encoding, and a library that deliberately holds one recording
+    /// in several formats (#159) could only ever measure whichever copy `open`
+    /// happened to choose.
+    ///
+    /// The two formats do not answer the same question, which is why one is
+    /// not a sample of the other: a FLAC's cutoff says whether it is really
+    /// lossless or a transcode wearing a lossless container, and an MP3's says
+    /// whether it delivers what its bitrate declares. Measuring one leaves the
+    /// other question unasked.
+    Every,
+}
+
 /// Build the work list from this disk and this log.
 pub fn rows(
     roots: &[PathBuf],
@@ -46,6 +72,7 @@ pub fn rows(
     device: Id<Device>,
     now: i64,
     only: Only,
+    copies: Copies,
 ) -> Vec<Queried> {
     // **The log first, then the disk.** `ingest` refuses to mint over a
     // binding somebody made — but only over one it can see, and a scan into an
@@ -92,48 +119,78 @@ pub fn rows(
         // is produced — chosen per device, honouring a pin, refusing what is
         // not reachable. A row with no locator is an ordinary row: something
         // the library knows about and this machine cannot open.
-        let opened = library.open(*recording, &[device], &[]);
-        out.push(Queried {
-            recording: Some(*recording),
-            encoding: opened.map(|(e, _)| e.id),
-            locator: opened.map(|(_, l)| l.to_string()),
-            title: recorded.title.clone(),
-            artist: catalogue
-                .artist_names
-                .get(&recorded.artist)
-                .cloned()
-                .unwrap_or_default(),
-            // **Of the copy this device would open**, not of the recording:
-            // two encodings of one performance can differ by a second of
-            // silence, and a pass checking a duration is checking the file it
-            // has in front of it.
-            length_ms: opened
-                .map(|(e, _)| e.id)
-                .and_then(|e| catalogue.encodings.get(&e))
-                .and_then(|e| (e.length_ms > 0).then_some(e.length_ms)),
-            // **What the library rests on, where that is MusicBrainz.** The
-            // other rungs are deliberately not published as one: an `External`
-            // key is opaque by design and an `AudioId` names bytes, so neither
-            // is a thing to look up.
-            musicbrainz: match catalogue.identified.get(recording) {
-                Some(Basis::MusicBrainz(id)) => Some(id.to_string()),
-                _ => None,
-            },
-            // By way of the slot this copy is placed in, which is how
-            // `files_under` reaches an album and for the same reason: a
-            // recording is on every release that holds it, and the one that
-            // matters is the one the file is on.
-            album: opened
-                .map(|(e, _)| e.id)
-                .and_then(|e| catalogue.placed.get(&e))
-                .and_then(|slot| library.group_of(Some(*slot))),
-            album_artist: opened
-                .map(|(e, _)| e.id)
-                .and_then(|e| catalogue.placed.get(&e))
-                .and_then(|slot| library.group_of(Some(*slot)))
-                .map(|group| library.credited_line(CreditOn::ReleaseGroup(group)))
-                .filter(|line| !line.is_empty()),
-        });
+        //
+        // **Under `Every`, each copy is its own row** (#183), and the locator
+        // is this device's holding of that encoding rather than the one `open`
+        // would have picked. A copy this machine cannot reach yields no row at
+        // all: the point of the list is bytes a pass can read.
+        let shown = library.open(*recording, &[device], &[]);
+        let here = |encoding: Id<crate::model::entity::Encoding>| {
+            library
+                .holdings_of(encoding)
+                .into_iter()
+                .find(|(d, _)| *d == device.to_string())
+                .map(|(_, l)| l)
+        };
+        let each: Vec<(Option<Id<crate::model::entity::Encoding>>, Option<String>)> = match copies {
+            Copies::Shown => vec![(shown.map(|(e, _)| e.id), shown.map(|(_, l)| l.to_string()))],
+            Copies::Every => {
+                let every: Vec<_> = library
+                    .encodings
+                    .of(*recording)
+                    .into_iter()
+                    .filter_map(|e| here(e.id).map(|l| (Some(e.id), Some(l))))
+                    .collect();
+                // **A recording nothing here holds still gets its row**, the
+                // same one `Shown` would give it — the library knows about it
+                // and this machine cannot open it, which is an answer.
+                if every.is_empty() {
+                    vec![(shown.map(|(e, _)| e.id), shown.map(|(_, l)| l.to_string()))]
+                } else {
+                    every
+                }
+            }
+        };
+        for (encoding, locator) in each {
+            out.push(Queried {
+                recording: Some(*recording),
+                encoding,
+                locator,
+                title: recorded.title.clone(),
+                artist: catalogue
+                    .artist_names
+                    .get(&recorded.artist)
+                    .cloned()
+                    .unwrap_or_default(),
+                // **Of the copy this row names**, not of the recording: two
+                // encodings of one performance can differ by a second of silence,
+                // and a pass checking a duration is checking the file it has in
+                // front of it.
+                length_ms: encoding
+                    .and_then(|e| catalogue.encodings.get(&e))
+                    .and_then(|e| (e.length_ms > 0).then_some(e.length_ms)),
+                // **What the library rests on, where that is MusicBrainz.** The
+                // other rungs are deliberately not published as one: an `External`
+                // key is opaque by design and an `AudioId` names bytes, so neither
+                // is a thing to look up.
+                musicbrainz: match catalogue.identified.get(recording) {
+                    Some(Basis::MusicBrainz(id)) => Some(id.to_string()),
+                    _ => None,
+                },
+                // By way of the slot this copy is placed in, which is how
+                // `files_under` reaches an album and for the same reason: a
+                // recording is on every release that holds it, and the one that
+                // matters is the one the file is on.
+                album: encoding
+                    .and_then(|e| catalogue.placed.get(&e))
+                    .and_then(|slot| library.group_of(Some(*slot))),
+                album_artist: encoding
+                    .and_then(|e| catalogue.placed.get(&e))
+                    .and_then(|slot| library.group_of(Some(*slot)))
+                    .map(|group| library.credited_line(CreditOn::ReleaseGroup(group)))
+                    .filter(|line| !line.is_empty()),
+            });
+        }
     }
     // **The bytes nothing has named** — #160, on the same list rather than on
     // one of their own. The library holds them, which is what `Everything`
@@ -226,6 +283,97 @@ mod tests {
             .collect()
     }
 
+    /// **One recording held twice is two rows, or one, and the caller says
+    /// which** — #183.
+    ///
+    /// `EncodingMeasured` is keyed by an encoding, so a pass about the bytes
+    /// needs every copy; a pass about the performance needs one. Two files of
+    /// one recording is the shape #159 supports, and under `Shown` the second
+    /// of them can never be reached.
+    ///
+    /// The two formats do not answer the same question either, which is why
+    /// one is not a sample of the other: a FLAC's cutoff says whether it is
+    /// really lossless or a transcode in a lossless container, an MP3's says
+    /// whether it delivers what its bitrate declares.
+    #[test]
+    fn every_copy_is_a_row_of_its_own_where_the_caller_asks_for_one() {
+        let root = dir("copies");
+        // **Two different files**, because two identical ones are one
+        // encoding — the store is content-addressed, and "two files with
+        // identical bytes are one encoding, so both locators name it".
+        wav(&root.join("a.wav"), 1000);
+        wav(&root.join("b.wav"), 1200);
+
+        let mut taken = crate::model::instance::Instance::new(device());
+        crate::model::populate::populate(
+            &mut taken,
+            std::slice::from_ref(&root),
+            50,
+            crate::model::populate::Admits::Anything,
+        );
+        let apart = rows(
+            std::slice::from_ref(&root),
+            taken.records(),
+            device(),
+            100,
+            Only::Everything,
+            Copies::Shown,
+        );
+        assert_eq!(apart.len(), 2, "two recordings until something joins them");
+
+        // Bind the second copy to the first's recording: one performance, two
+        // encodings, which is the shape #159 supports and a lossless upgrade
+        // arrives as.
+        let one = apart[0].recording.expect("minted");
+        let other = apart[1].recording.expect("minted");
+        let mut log = taken.records().clone();
+        log.extend(records(
+            200,
+            [Fact::EncodingBound {
+                encoding: apart[1].encoding.expect("an encoding"),
+                from: Some(other),
+                to: one,
+            }],
+        ));
+
+        let ask = |copies| {
+            rows(
+                std::slice::from_ref(&root),
+                &log,
+                device(),
+                300,
+                Only::Everything,
+                copies,
+            )
+        };
+        let held = |rs: &[Queried]| -> Vec<Queried> {
+            rs.iter()
+                .filter(|r| r.recording == Some(one))
+                .cloned()
+                .collect()
+        };
+
+        let shown = held(&ask(Copies::Shown));
+        let every = held(&ask(Copies::Every));
+        assert_eq!(shown.len(), 1, "one row for the recording");
+        assert_eq!(every.len(), 2, "one row for each copy of it");
+
+        // **Distinct encodings and distinct locators**, because a pass keyed
+        // by encoding would otherwise measure one file twice and call it two.
+        let ids: BTreeSet<_> = every.iter().map(|r| r.encoding).collect();
+        let paths: BTreeSet<_> = every.iter().map(|r| r.locator.clone()).collect();
+        assert_eq!(ids.len(), 2, "two encodings, not one named twice");
+        assert_eq!(paths.len(), 2, "and each names its own file");
+
+        // **And the length is the copy's own** — two encodings of one
+        // performance differ, and a pass checking a duration is checking the
+        // file in front of it.
+        let lengths: BTreeSet<_> = every.iter().map(|r| r.length_ms).collect();
+        assert_eq!(lengths.len(), 2, "each row measures its own bytes");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A row carries both, and they are not the same thing.** The locator is
     /// good until the file moves; the id is good forever. A tool that had only
     /// the path would have to name its findings by path, which is exactly what
@@ -241,6 +389,7 @@ mod tests {
             device(),
             100,
             Only::Everything,
+            Copies::Shown,
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].encoding.is_some(), "nothing to propose against");
@@ -266,6 +415,7 @@ mod tests {
             device(),
             100,
             Only::Everything,
+            Copies::Shown,
         );
         assert_eq!(all.len(), 2);
         assert_eq!(
@@ -274,7 +424,8 @@ mod tests {
                 &BTreeSet::new(),
                 device(),
                 100,
-                Only::Unidentified
+                Only::Unidentified,
+                Copies::Shown,
             )
             .len(),
             2,
@@ -298,7 +449,14 @@ mod tests {
             ],
         );
 
-        let after = rows(&[root], &log, device(), 300, Only::Unidentified);
+        let after = rows(
+            &[root],
+            &log,
+            device(),
+            300,
+            Only::Unidentified,
+            Copies::Shown,
+        );
         assert_eq!(after.len(), 2, "the two on disk still rest on their bytes");
         assert!(
             !after.iter().any(|r| r.recording == Some(named)),
@@ -332,6 +490,7 @@ mod tests {
             device(),
             100,
             Only::Everything,
+            Copies::Shown,
         );
         assert_eq!(bare.len(), 1);
         assert_eq!(
@@ -355,7 +514,14 @@ mod tests {
                 },
             ],
         );
-        let after = rows(&[root], &log, device(), 300, Only::Everything);
+        let after = rows(
+            &[root],
+            &log,
+            device(),
+            300,
+            Only::Everything,
+            Copies::Shown,
+        );
         assert_eq!(
             after
                 .iter()
@@ -406,6 +572,7 @@ mod tests {
             device(),
             100,
             Only::Everything,
+            Copies::Shown,
         );
         assert_eq!(loose.len(), 1);
         assert_eq!(
@@ -476,7 +643,14 @@ mod tests {
             ],
         );
 
-        let placed = rows(&[root], &log, device(), 300, Only::Everything);
+        let placed = rows(
+            &[root],
+            &log,
+            device(),
+            300,
+            Only::Everything,
+            Copies::Shown,
+        );
         assert_eq!(
             placed
                 .iter()
@@ -535,6 +709,7 @@ mod tests {
             device(),
             200,
             Only::Unidentified,
+            Copies::Shown,
         );
         assert_eq!(work.len(), 1, "the held-back file is invisible to a pass");
         let row = &work[0];
@@ -573,6 +748,7 @@ mod tests {
             device(),
             400,
             Only::Unidentified,
+            Copies::Shown,
         );
         assert!(
             !after.iter().any(|r| r.recording.is_none()),
@@ -603,6 +779,7 @@ mod tests {
             device(),
             100,
             Only::Everything,
+            Copies::Shown,
         );
         let encoding = before[0].encoding.expect("an encoding");
         let minted = before[0]
@@ -633,6 +810,7 @@ mod tests {
             device(),
             300,
             Only::Everything,
+            Copies::Shown,
         );
         // **The row holding the file names the identified recording.** Asserted
         // through the encoding rather than by counting rows: the byte-minted
@@ -650,9 +828,16 @@ mod tests {
             "the scan minted over a decision somebody made"
         );
         assert!(
-            !rows(&[root], &log, device(), 300, Only::Unidentified)
-                .iter()
-                .any(|r| r.encoding == Some(encoding)),
+            !rows(
+                &[root],
+                &log,
+                device(),
+                300,
+                Only::Unidentified,
+                Copies::Shown
+            )
+            .iter()
+            .any(|r| r.encoding == Some(encoding)),
             "an identified file is still on the work list"
         );
     }
@@ -676,7 +861,14 @@ mod tests {
             }],
         );
 
-        let rows = rows(&[root], &log, device(), 200, Only::Everything);
+        let rows = rows(
+            &[root],
+            &log,
+            device(),
+            200,
+            Only::Everything,
+            Copies::Shown,
+        );
         let row = rows
             .iter()
             .find(|r| r.recording == Some(elsewhere))
