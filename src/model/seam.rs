@@ -1400,6 +1400,10 @@ impl Librarian {
             // **Of the copy this row shows**, absent where it shows none: a
             // slot has no bitrate, a file does.
             bitrate: shown.map(|e| e.bitrate),
+            // **What a `quality` pass found, where one has run.** `bitrate` is
+            // what the file claims; this is where its spectrum actually stops,
+            // so a 320 that came from a 128 shows up as the two disagreeing.
+            cutoff_hz: shown.and_then(|e| e.cutoff_hz).map(|m| m.value),
             sample_rate: shown.and_then(|e| e.sample_rate),
             channels: shown.and_then(|e| e.channels),
             // **Of the recording, not of the slot** (#155). `shown` is empty

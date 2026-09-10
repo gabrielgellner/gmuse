@@ -69,6 +69,13 @@ pub enum Field {
     ReleaseHeld,
     Duration,
     Bitrate,
+    /// **Where the spectrum actually stops** — a `quality` measurement, not a
+    /// header. `bitrate` is what the file claims and this is what it turned
+    /// out to be, so the two disagreeing is what "wants replacing" looks like.
+    ///
+    /// `None` until something has measured it, which is a third answer and not
+    /// a zero: nobody has looked is different from it reaches 20 kHz.
+    Cutoff,
     SampleRate,
     Channels,
     Path,
@@ -104,6 +111,7 @@ impl Field {
             | Field::Year
             | Field::Duration
             | Field::Bitrate
+            | Field::Cutoff
             | Field::SampleRate
             | Field::Channels => Kind::Number,
         }
@@ -130,6 +138,7 @@ impl Field {
             "release_held" => Field::ReleaseHeld,
             "duration" => Field::Duration,
             "bitrate" => Field::Bitrate,
+            "cutoff" => Field::Cutoff,
             "samplerate" => Field::SampleRate,
             "channels" => Field::Channels,
             "path" => Field::Path,
@@ -176,6 +185,7 @@ impl Field {
             // What the file is. Nothing to assert, and no honest way to.
             Field::Duration
             | Field::Bitrate
+            | Field::Cutoff
             | Field::SampleRate
             | Field::Channels
             | Field::Path
@@ -227,6 +237,7 @@ impl Field {
             Field::ReleaseHeld => "release_held",
             Field::Duration => "duration",
             Field::Bitrate => "bitrate",
+            Field::Cutoff => "cutoff",
             Field::SampleRate => "samplerate",
             Field::Channels => "channels",
             Field::Path => "path",
@@ -318,6 +329,7 @@ impl Field {
                 format!("{}:{:02}", secs / 60, secs % 60)
             }
             Field::Bitrate => r.bitrate?.to_string(),
+            Field::Cutoff => r.cutoff_hz?.to_string(),
             Field::SampleRate => r.sample_rate?.to_string(),
             Field::Channels => r.channels?.to_string(),
             // Refused at parse time, so this is unreachable rather than blank.

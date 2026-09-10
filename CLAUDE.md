@@ -71,6 +71,25 @@ whichever copy is kept.
 The same rule holds for `shelf slots`: a disc really can play one recording twice, and a compilation really can carry
 two versions.
 
+### A measurement is how a file is marked for replacing — not a reason to move it
+
+`quality` has a `quarantine` that moves flagged album folders to `~/LowQualityMusic`, and it was run once on 56 albums.
+Every one of them is back. That is the right outcome and the wrong mechanism: **the finding was real and the response
+destroyed the thing it was reporting on.**
+
+A quarantined album is out of the library, so nothing can play it, nothing counts it, and the reason it left lives in a
+manifest beside the tool rather than in the log. A file whose spectrum says `looks like a 128k source` is still the only
+copy you have of that record until a better one arrives — and the moment it does, `replace` (#159) is the move, not a
+restore from a folder somebody has to remember exists.
+
+**So the measurement is the record.** `Fact::EncodingMeasured` says what the bytes are, it is keyed by encoding so each
+copy speaks for itself, and it is queryable — which is what "these want replacing" actually needs to be: a filter you
+can run, not a folder you moved things to. `analyser` guards a re-measure, so the answer improves without anything
+moving.
+
+The 56-album analysis of 2026-09-01 existed only as a TSV in `tools/out/spent/` for nine days, because nothing turned it
+into facts. Read `quality-albums.tsv` before assuming the library has never been measured.
+
 ## Workflow
 
 ```sh

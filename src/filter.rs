@@ -1007,6 +1007,7 @@ pub(crate) fn number_of(f: Field, s: &Subject<'_>) -> Option<i64> {
         // Seconds, not the `3:41` the format language renders.
         Field::Duration => r.duration.as_secs() as i64,
         Field::Bitrate => i64::from(r.bitrate?),
+        Field::Cutoff => i64::from(r.cutoff_hz?),
         Field::SampleRate => i64::from(r.sample_rate?),
         Field::Channels => i64::from(r.channels?),
         _ => return None,
@@ -1783,6 +1784,52 @@ mod tests {
         }
         // And the over-match regex would have allowed does not happen.
         assert!(!Glob::new("Anderson .Paak").matches("Anderson XPaak"));
+    }
+
+    /// **What a file claims against what it turned out to be** — the query
+    /// this exists for.
+    ///
+    /// `bitrate` is a header; `cutoff` is a `Fact::EncodingMeasured` somebody
+    /// wrote. The two disagreeing is what "wants replacing" looks like, and
+    /// it has to be a *filter* rather than a folder somebody moved things
+    /// into: 56 albums were quarantined to `~/LowQualityMusic` on this
+    /// evidence and every one is back.
+    #[test]
+    fn a_cutoff_is_queryable_and_absent_is_a_third_answer() {
+        let t = track();
+        let (mut drawn, recording) = subject_of(&t);
+        let ask = |drawn: &crate::model::rows::Drawn, expr: &str| {
+            let subject = Subject {
+                row: drawn.listed(),
+                locator: t.path.to_str(),
+                recording,
+            };
+            Expr::parse(expr)
+                .expect("should parse")
+                .compile(Env::default())(&subject)
+        };
+
+        // Nobody has measured it, which is **not** the same as a low cutoff.
+        assert!(
+            !ask(&drawn, "cutoff<16000"),
+            "unmeasured must not read as bad"
+        );
+        assert!(!ask(&drawn, "cutoff>0"), "nor as good");
+        assert!(!ask(&drawn, "cutoff?"), "and it says so");
+
+        // A 320 that came from a 128 — the Joe Purdy shape, 10 of 10 flagged,
+        // declaring 320k and cutting at 15.7 kHz.
+        drawn.cutoff_hz = Some(15_700);
+        assert!(ask(&drawn, "cutoff?"));
+        assert!(ask(&drawn, "cutoff<16000"));
+        assert!(
+            ask(&drawn, "bitrate>256&cutoff<16000"),
+            "the two disagreeing is the query"
+        );
+
+        // And a file that is what it says stays out of it.
+        drawn.cutoff_hz = Some(20_000);
+        assert!(!ask(&drawn, "bitrate>256&cutoff<16000"));
     }
 
     #[test]

@@ -164,6 +164,17 @@ pub struct Listed<'a> {
     pub release_secondary: &'a std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
     pub year: Option<i32>,
     pub bitrate: Option<u32>,
+    /// **Where the spectrum stops, if anything has measured it.**
+    ///
+    /// The one technical field that is *not* read off the file's header — it
+    /// is a `Fact::EncodingMeasured` somebody wrote, which is why it is
+    /// `None` until a `quality` pass has run. That is the point of it: a
+    /// bitrate is what a file *claims*, and this is what it turned out to be.
+    ///
+    /// Queryable so that "these want replacing" is a filter rather than a
+    /// folder somebody moved things into — see CLAUDE.md, and the 56 albums
+    /// that came back.
+    pub cutoff_hz: Option<u32>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     /// **Whether the library holds a file for this row at all** — #155.
@@ -208,6 +219,7 @@ pub struct Drawn {
     pub release_secondary: std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
     pub year: Option<i32>,
     pub bitrate: Option<u32>,
+    pub cutoff_hz: Option<u32>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     pub held: bool,
@@ -257,6 +269,7 @@ impl Listed<'_> {
             release_secondary: self.release_secondary.clone(),
             year: self.year,
             bitrate: self.bitrate,
+            cutoff_hz: self.cutoff_hz,
             sample_rate: self.sample_rate,
             channels: self.channels,
             held: self.held,
@@ -305,6 +318,7 @@ impl Drawn {
             release_secondary: &self.release_secondary,
             year: self.year,
             bitrate: self.bitrate,
+            cutoff_hz: self.cutoff_hz,
             sample_rate: self.sample_rate,
             channels: self.channels,
             held: self.held,
@@ -511,6 +525,7 @@ mod tests {
                 .collect(),
             year: Some(1998),
             bitrate: Some(320),
+            cutoff_hz: Some(15_700),
             sample_rate: Some(44_100),
             channels: Some(2),
             held: true,
