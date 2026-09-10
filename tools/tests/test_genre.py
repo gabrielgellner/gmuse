@@ -57,3 +57,23 @@ def test_an_ampersand_with_spaces_around_it_was_never_the_problem() -> None:
     """
     for term in ("Drum & Bass", "Rock & Roll", "Stage & Screen", "Melodic House & Techno"):
         assert fix_case(term) == term
+
+
+def test_a_release_id_is_read_under_either_tag_spelling() -> None:
+    """ID3 spells it with spaces and Vorbis with underscores.
+
+    Reading only the first meant every FLAC album reported no release id, so
+    the MusicBrainz link was never followed and each fell through to a Discogs
+    *name* search. `AFX/Chosen Lords` came back `no hit` and took
+    `Electronic; Electronica` off its own tags while MusicBrainz held a Discogs
+    link for it all along.
+    """
+    from gmuse_tools.genre.fetch import album_mbid  # noqa: PLC0415
+
+    mbid = "588c6bc0-7428-4753-8f6d-8e7a9320077a"
+    assert album_mbid({"musicbrainz album id": mbid}) == mbid, "the ID3 spelling"
+    assert album_mbid({"musicbrainz_albumid": mbid}) == mbid, "the Vorbis one"
+    assert album_mbid({"musicbrainz album id": f"  {mbid} "}) == mbid
+    assert album_mbid({}) == ""
+    # An empty value is not an id, and must not shadow a real one beside it.
+    assert album_mbid({"musicbrainz album id": "", "musicbrainz_albumid": mbid}) == mbid

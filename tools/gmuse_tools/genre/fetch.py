@@ -24,7 +24,7 @@ import requests
 import typer
 
 from gmuse_tools import bronze
-from gmuse_tools.genre.common import album_key, out_path, secret, tags_of, tracklist_match, walk
+from gmuse_tools.genre.common import album_key, album_mbid, out_path, secret, tags_of, tracklist_match, walk
 
 USER_AGENT: Final = {"User-Agent": "gmuse-genre-tool/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
 MB_RELEASE: Final = "https://musicbrainz.org/ws/2/release/{}"
@@ -276,7 +276,7 @@ def albums_in(root: Path) -> dict[tuple[str, str], Album]:
     for path in walk(root):
         tags = tags_of(path)
         album = out.setdefault(album_key(tags), Album())
-        album.mbid = album.mbid or (tags.get("musicbrainz album id") or "").strip()
+        album.mbid = album.mbid or album_mbid(tags)
         album.titles.append((tags.get("title") or path.stem).strip())
     return out
 

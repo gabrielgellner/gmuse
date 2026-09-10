@@ -21,7 +21,7 @@ from typing import Final
 import typer
 
 from gmuse_tools.genre import fetch, hierarchy
-from gmuse_tools.genre.common import album_key, fix_case, out_path, tags_of, walk, write_tsv
+from gmuse_tools.genre.common import album_key, album_mbid, fix_case, out_path, tags_of, walk, write_tsv
 
 #: Re-exported from `hierarchy`, which owns the vocabulary (#79).
 BROAD: Final[frozenset[str]] = hierarchy.BROAD
@@ -106,7 +106,7 @@ def survey(root: Path) -> dict[tuple[str, str], Album]:
         album.artists.add((tags.get("artist") or "").strip())
         if genre := (tags.get("genre") or "").strip():
             album.genres.add(genre)
-        album.mbid = album.mbid or (tags.get("musicbrainz album id") or "").strip()
+        album.mbid = album.mbid or album_mbid(tags)
     return albums
 
 

@@ -118,6 +118,28 @@ def walk(root: Path) -> list[Path]:
     )
 
 
+#: What a MusicBrainz release id is called, by tag format.
+#:
+#: **ID3 spells it with spaces and Vorbis with underscores**, and reading only
+#: the first meant every FLAC album reported no release id at all — so the
+#: MusicBrainz link was never followed and each one fell through to a Discogs
+#: *name* search. `AFX/Chosen Lords` and `AFX/Analogue Bubblebath` came back
+#: `no hit` and got `Electronic; Electronica` off their existing tags, while
+#: MusicBrainz held a Discogs link for both all along.
+#:
+#: The same shape as `ingest`'s FLAC gap: a rule written against one
+#: serialisation, silently answering a narrower question on the other.
+ALBUM_MBID: Final = ("musicbrainz album id", "musicbrainz_albumid")
+
+
+def album_mbid(tags: dict[str, str]) -> str:
+    """The MusicBrainz release id a file carries, under whichever name."""
+    for key in ALBUM_MBID:
+        if found := (tags.get(key) or "").strip():
+            return found
+    return ""
+
+
 def album_key(tags: dict[str, str]) -> tuple[str, str]:
     """Identify an album by its tags, which is what the library tree files by.
 
