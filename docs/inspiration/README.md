@@ -18,13 +18,14 @@ a modern TUI it predates.
 **On licences.** Copyright covers expression, not ideas. Adopting "a `g` prefix for go-to commands" or "two levels of
 theme table" creates no obligation. Copying code does. gmuse is GPL-3.0-or-later by choice; nothing here is copied.
 
-| Project                             | Read for                                                                               |
-| ----------------------------------- | -------------------------------------------------------------------------------------- |
-| [eilmeldung](eilmeldung.md)         | Three-pane layout; **driving other panes without leaving focus**; config and theming   |
-| [spotify-player](spotify-player.md) | **Prefix namespaces** (`g n`, `g A`); pages and popups; configurable layout            |
-| [russ](russ.md)                     | Two-pane `hjkl`; modal editing (and why not)                                           |
-| [spotatui](spotatui.md)             | **Presentation as config** — table columns, format templates; and a scope-creep mirror |
-| [trollstov](trollstov.md)           | Tags as the only store; **portable ratings**; light/dark terminal detection            |
+| Project                             | Read for                                                                                       |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [eilmeldung](eilmeldung.md)         | Three-pane layout; **driving other panes without leaving focus**; config and theming           |
+| [spotify-player](spotify-player.md) | **Prefix namespaces** (`g n`, `g A`); pages and popups; configurable layout                    |
+| [russ](russ.md)                     | Two-pane `hjkl`; modal editing (and why not)                                                   |
+| [spotatui](spotatui.md)             | **Presentation as config** — table columns, format templates; and a scope-creep mirror         |
+| [trollstov](trollstov.md)           | Tags as the only store; **portable ratings**; light/dark terminal detection                    |
+| [rmpc](rmpc.md)                     | **A context menu built from typed sections**; template fallback chains; a layout tree declined |
 
 ## What gmuse should take, roughly in order of value
 
@@ -45,6 +46,10 @@ more without running out of alphabet. Needs the chord machinery in #1.
 
 **5. Popups as a first-class UI concept.** spotify-player's "actions" — a menu of secondary commands on the item under
 the cursor. This is the natural answer to "add this album to _which_ playlist", which we cannot express today.
+[rmpc](rmpc.md) §2 has the construction to build it with — a menu is a stack of _typed sections_ (input, select, list,
+multi-action), each knowing how it takes focus — and names why it matters more to us than to a player: the librarian's
+verbs (merge, retire, relate, withdraw a credit) are invoked rarely and precisely, which is the profile a menu serves
+and a keybinding does not.
 
 **6. Configurable page size and pane widths.** We hardcode a 10-row page and a 40/60 split. spotify-player makes both
 settings, and it costs a `SettingKey` each now that settings are data. spotatui goes further and makes them adjustable
