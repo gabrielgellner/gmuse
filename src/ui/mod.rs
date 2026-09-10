@@ -6513,8 +6513,17 @@ mod tests {
         assert!(out.contains("Years"), "{out}");
     }
 
+    /// **A record of more than one disc says where each one starts** — #169.
+    ///
+    /// The ordering was never wrong: `place_of` returns `(disc, track)` and
+    /// the tree has always sorted by it. What was missing was a row, and
+    /// without one a five-disc *Let It Be* draws five track 1s adjacent under
+    /// identical numbering — which reads as the library holding one song five
+    /// times, and is exactly what #168's shadow rows looked like from an
+    /// unrelated cause. Two faults presenting identically is its own argument
+    /// for fixing this one.
     #[test]
-    fn multi_disc_album_does_not_interleave() {
+    fn multi_disc_album_says_which_disc_is_which() {
         let store = fixture();
         let ctx = Context {
             library: lib_of(&store),
@@ -6529,10 +6538,43 @@ mod tests {
             .unwrap();
         expand_to_tracks(&mut ui, &store);
 
+        // **Opening the record is enough.** A disc header exists to say where
+        // a disc starts, not to hide it, so the level opens by itself — two
+        // shut rows would be a keystroke spent to see the thing just asked
+        // for.
         let out = render(&ui, &ctx, 90, 16);
+        let one = out.find("Disc 1").expect(&out);
+        let two = out.find("Disc 2").expect(&out);
+        assert!(one < two, "disc 2 drew before disc 1:\n{out}");
         let first = out.find("First Disc Opener").expect(&out);
         let second = out.find("Second Disc Opener").expect(&out);
         assert!(first < second, "disc 2 sorted before disc 1:\n{out}");
+        assert!(
+            one < first && first < two && two < second,
+            "a track did not sit under its own disc:\n{out}"
+        );
+
+        // And it is still a fold: `h` on a track shuts *its* disc, leaving the
+        // record and the other disc where they were.
+        ui.tree.selected = ui
+            .tree
+            .rows(&ui.library)
+            .iter()
+            .position(|r| r.label().contains("Disc 2"))
+            .expect("disc 2 has a row");
+        let lib = std::mem::take(&mut ui.library);
+        ui.tree.close(&lib);
+        ui.library = lib;
+        let shut = render(&ui, &ctx, 90, 16);
+        assert!(shut.contains("Disc 2"), "the header went with it:\n{shut}");
+        assert!(
+            !shut.contains("Second Disc Opener"),
+            "a shut disc still showed its tracks:\n{shut}"
+        );
+        assert!(
+            shut.contains("First Disc Opener"),
+            "shutting disc 2 shut disc 1 as well:\n{shut}"
+        );
     }
 
     #[test]

@@ -49,6 +49,25 @@ pub struct Shelf {
     /// count, and saying one would print halves that do not belong together.
     album_pressing:
         BTreeMap<(SortKey, SortKey), Option<crate::model::id::Id<crate::model::entity::Release>>>,
+    /// **Which disc of its record each row sits on** — #169.
+    ///
+    /// A five-disc *Let It Be* has five track 1s, and drawn flat they sit
+    /// adjacent under identical numbering, which reads as the library holding
+    /// one song five times. The model has always known better — `place_of`
+    /// returns `(disc, track)` and the tree already sorts by it — so what was
+    /// missing was never the ordering, only a row to say where one disc ends.
+    ///
+    /// Absent for a copy nothing placed, which is an ordinary row.
+    discs: BTreeMap<CopyId, u16>,
+    /// The discs an album's *held* copies span, which is not how many the
+    /// record has. A two-disc set you own half of spans one, and drawing a
+    /// disc header over the only disc present would be a level that opens onto
+    /// everything under it — #135's rule, one level up.
+    album_discs: BTreeMap<(SortKey, SortKey), std::collections::BTreeSet<u16>>,
+    /// `CD`, `12" Vinyl`, `Digital Media` — what the authority called this
+    /// disc, where it said. Carried because a header reading `Disc 2 · CD`
+    /// tells you what the sleeve does and a bare number does not.
+    disc_formats: BTreeMap<(SortKey, SortKey, u16), String>,
     sorted: Vec<CopyId>,
     /// Which two fields this was grouped by (#97).
     levels: Levels,
@@ -254,6 +273,22 @@ impl Shelf {
                     // Copies off two of them have no single answer, so the
                     // group is marked mixed and says nothing rather than
                     // printing halves that do not belong together.
+                    // **Which disc, from the model's own answer** (#169).
+                    // `place_of` is what the tree already sorts by, so the
+                    // header and the order cannot disagree about where a disc
+                    // starts.
+                    let (disc, _) = librarian.place_of(here.slot());
+                    if disc != u16::MAX {
+                        lib.discs.insert(here, disc);
+                        lib.album_discs
+                            .entry((artist_key.clone(), album_key.clone()))
+                            .or_default()
+                            .insert(disc);
+                        if let Some(what) = librarian.medium_format(here.slot()) {
+                            lib.disc_formats
+                                .insert((artist_key.clone(), album_key.clone(), disc), what);
+                        }
+                    }
                     let seen = librarian
                         .shown_copy(here)
                         .and_then(|copy| librarian.release_of(librarian.placed_at(copy)));
@@ -343,6 +378,28 @@ impl Shelf {
         self.album_totals
             .get(&(artist.clone(), album.clone()))
             .copied()
+    }
+
+    /// Which disc a row sits on, where anything placed it — #169.
+    pub fn disc_of(&self, id: CopyId) -> Option<u16> {
+        self.discs.get(&id).copied()
+    }
+
+    /// **How many discs this album's held copies span** — #169, and held is
+    /// the operative word. One means no header: a level that opens onto
+    /// everything beneath it costs a keystroke and says nothing, which is
+    /// #135's rule applied to discs instead of tracks.
+    pub fn album_discs(&self, artist: &SortKey, album: &SortKey) -> usize {
+        self.album_discs
+            .get(&(artist.clone(), album.clone()))
+            .map_or(0, std::collections::BTreeSet::len)
+    }
+
+    /// What the authority called this disc, where it said — #169.
+    pub fn disc_format(&self, artist: &SortKey, album: &SortKey, disc: u16) -> Option<String> {
+        self.disc_formats
+            .get(&(artist.clone(), album.clone(), disc))
+            .cloned()
     }
 
     pub fn artists(&self) -> impl Iterator<Item = (&SortKey, &BTreeMap<SortKey, Vec<CopyId>>)> {

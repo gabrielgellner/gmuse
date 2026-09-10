@@ -33,8 +33,21 @@ pub struct Expansion<K> {
     level: u16,
     /// Opened by hand at or beyond `level`.
     opened: HashSet<Path<K>>,
-    /// Closed by hand shallower than `level`.
+    /// Closed by hand shallower than `level`, or at a depth that opens by
+    /// itself.
     closed: HashSet<Path<K>>,
+    /// **The depth at which folds open by themselves** — #169.
+    ///
+    /// A disc header exists to say where a disc starts, not to hide it:
+    /// opening a record and finding two shut rows is a keystroke spent to see
+    /// the thing you just asked for. So the disc level is open unless somebody
+    /// shuts it, which is the opposite default from artists and albums.
+    ///
+    /// A field rather than a special case in the navigator, because `is_open`
+    /// and `close` both have to agree about it — a level the drawing treats as
+    /// open and the toggle treats as closed makes the first keypress do
+    /// nothing visible.
+    eager: Option<u16>,
 }
 
 /// By hand, not derived: `#[derive(Default)]` would demand `K: Default`, which
@@ -46,6 +59,7 @@ impl<K> Default for Expansion<K> {
             level: 0,
             opened: HashSet::new(),
             closed: HashSet::new(),
+            eager: None,
         }
     }
 }
@@ -66,7 +80,18 @@ impl<K: std::hash::Hash + Eq + Clone> Expansion<K> {
         if Self::depth(path) < self.level {
             return true;
         }
+        if self.eager.is_some_and(|d| Self::depth(path) >= d) {
+            return true;
+        }
         self.opened.contains(path)
+    }
+
+    /// **From this depth down, a fold starts open** — #169.
+    ///
+    /// Set once when the navigator is built. `None` is the ordinary rule and
+    /// what every level above the disc uses.
+    pub fn opening_from(&mut self, depth: u16) {
+        self.eager = Some(depth);
     }
 
     /// `zo`. Recorded as an override only when the level does not already say
@@ -85,7 +110,10 @@ impl<K: std::hash::Hash + Eq + Clone> Expansion<K> {
     /// `zc`.
     pub fn close(&mut self, path: &[K]) {
         self.opened.remove(path);
-        if Self::depth(path) < self.level {
+        // **Recorded where it would otherwise reopen itself.** Below the
+        // level, or at a depth that opens by itself, dropping the override is
+        // not enough — the rule would put it straight back.
+        if Self::depth(path) < self.level || self.eager.is_some_and(|d| Self::depth(path) >= d) {
             self.closed.insert(path.to_vec());
         }
     }

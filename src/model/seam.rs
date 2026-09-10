@@ -1423,6 +1423,15 @@ impl Librarian {
         Some(self.spine.media.get(&track.medium.id())?.release.id())
     }
 
+    /// What the authority called the disc a slot sits on — #169.
+    ///
+    /// `CD`, `12" Vinyl`, `Digital Media`. `None` where nobody said, which is
+    /// every record whose tracklist has not been catalogued.
+    pub fn medium_format(&self, slot: Option<Id<Track>>) -> Option<String> {
+        let track = self.spine.tracks.get(&slot?)?;
+        self.spine.media.get(&track.medium.id())?.format.clone()
+    }
+
     /// How a subject is credited, as printed — #152.
     ///
     /// The public door onto `Lookup::line`, so a work list can publish an

@@ -40,9 +40,32 @@ pub enum Row {
         /// of them.
         of: Option<u16>,
     },
+    /// **One disc of a record that is more than one** — #169.
+    ///
+    /// Drawn only where the album's held copies span several. A five-disc
+    /// *Let It Be* has five track 1s, and without this they sit adjacent under
+    /// identical numbering — which reads as the library holding one song five
+    /// times, and is exactly what #168's shadow rows looked like from a
+    /// completely different cause.
+    ///
+    /// The ordering was never wrong: `place_of` returns `(disc, track)` and
+    /// the tree has always sorted by it. What was missing is a row saying
+    /// where one disc ends.
+    Disc {
+        artist: SortKey,
+        album: SortKey,
+        key: SortKey,
+        number: u16,
+        format: Option<String>,
+        tracks: usize,
+        expanded: bool,
+    },
     Track {
         artist: SortKey,
         album: SortKey,
+        /// The disc this track's row sits under, where one is drawn — #169.
+        /// `None` on a single-disc record, which is nearly all of them.
+        disc: Option<SortKey>,
         id: CopyId,
         /// **This track is the whole of its group, so the group is not drawn**
         /// — #135. It sits where its album row would have been.
@@ -90,7 +113,35 @@ impl Row {
             //
             // `▸` closed, `▾` open, `·` nothing to open. One column, three
             // states, and the widths are unchanged so no row shifts.
-            Row::Track { alone, .. } => if *alone { "  · " } else { "    · " }.to_string(),
+            Row::Disc {
+                number,
+                format,
+                expanded,
+                ..
+            } => {
+                let mark = if *expanded { "▾" } else { "▸" };
+                // `Disc 2 · CD` where the authority said what it was, and
+                // `Disc 2` where nobody did — carried because MusicBrainz has
+                // it and a bare number tells you less than the sleeve does.
+                //
+                // **No count**, matching the album row above it: a bare `1`
+                // beside a header reads as a track number, and the row it sits
+                // under does not print one either.
+                let what = format
+                    .as_deref()
+                    .map_or_else(String::new, |f| format!(" · {f}"));
+                format!("    {mark} Disc {number}{what}")
+            }
+            // Three depths now: standing in for an album (#135), under an
+            // album, and under a disc. The caret column still says the same
+            // three things — `▸` closed, `▾` open, `·` nothing to open — and
+            // only the indent moves.
+            Row::Track { alone, disc, .. } => match (alone, disc) {
+                (true, _) => "  · ",
+                (false, None) => "    · ",
+                (false, Some(_)) => "      · ",
+            }
+            .to_string(),
         }
     }
 
@@ -103,7 +154,9 @@ impl Row {
     /// neither open nor closed, and answers `false`.
     pub fn is_expanded(&self) -> bool {
         match self {
-            Row::Artist { expanded, .. } | Row::Album { expanded, .. } => *expanded,
+            Row::Artist { expanded, .. }
+            | Row::Album { expanded, .. }
+            | Row::Disc { expanded, .. } => *expanded,
             Row::Track { .. } => false,
         }
     }
@@ -117,17 +170,40 @@ pub enum Pane {
     Tracks,
 }
 
-/// How deep the tree goes: artists at depth 0, albums at depth 1. `zR` sets
-/// the level here, and there is nothing below an album but tracks, which are
-/// leaves and have no fold of their own.
-const DEPTH: u16 = 2;
+/// How deep the tree goes: artists at depth 0, albums at depth 1, and a disc
+/// at depth 2 where a record has more than one (#169). `zR` sets the level
+/// here, and there is nothing below a disc but tracks, which are leaves and
+/// have no fold of their own.
+///
+/// **Three even though almost nothing is three deep.** 1,003 of this library's
+/// 1,029 albums hold their copies on one disc and grow no disc row, so `zR`
+/// reaches their tracks at level 2 and the extra level costs them nothing —
+/// `set_level` opens folds that exist, and a level with no folds in it is not
+/// a level anybody has to step through.
+const DEPTH: u16 = 3;
 
-#[derive(Debug, Default)]
+/// The depth a disc row sits at: `[artist, album, disc]` is three keys, which
+/// is depth 2. Folds from here down open by themselves (#169) — a header that
+/// exists to say where a disc starts should not also hide it.
+const DISC_DEPTH: u16 = 2;
+
+#[derive(Debug)]
 pub struct TreeState {
     /// Keyed on the ident path — `[artist]` for an artist, `[artist, album]`
-    /// for an album — so expansion survives a re-sort or a rescan.
+    /// for an album, `[artist, album, disc]` for a disc — so expansion
+    /// survives a re-sort or a rescan.
     folds: Expansion<SortKey>,
     pub selected: usize,
+}
+
+/// By hand, because the fold state is not the plain default: the disc level
+/// opens by itself and something has to say so.
+impl Default for TreeState {
+    fn default() -> Self {
+        let mut folds = Expansion::default();
+        folds.opening_from(DISC_DEPTH);
+        Self { folds, selected: 0 }
+    }
 }
 
 impl TreeState {
@@ -177,6 +253,7 @@ impl TreeState {
                     rows.push(Row::Track {
                         artist: artist_key.clone(),
                         album: album_key.clone(),
+                        disc: None,
                         id: only,
                         alone: true,
                     });
@@ -195,13 +272,75 @@ impl TreeState {
                 if !open {
                     continue;
                 }
-                for id in tracks {
-                    rows.push(Row::Track {
+                // **A disc is a level only when there is more than one** —
+                // #169, and #135's rule one level up: a header that opens onto
+                // everything beneath it costs a keystroke and says nothing.
+                // Measured, 1,003 of this library's 1,029 albums hold their
+                // copies on one disc and grow no row at all.
+                if lib.album_discs(artist_key, album_key) < 2 {
+                    for id in tracks {
+                        rows.push(Row::Track {
+                            artist: artist_key.clone(),
+                            album: album_key.clone(),
+                            disc: None,
+                            id: *id,
+                            alone: false,
+                        });
+                    }
+                    continue;
+                }
+                // The tracks arrive sorted by `(disc, track)` already, so
+                // grouping is a run over them rather than a re-sort — and the
+                // header cannot disagree with the order for the same reason.
+                let mut at = 0;
+                while at < tracks.len() {
+                    let number = lib.disc_of(tracks[at]);
+                    let end = tracks[at..]
+                        .iter()
+                        .position(|id| lib.disc_of(*id) != number)
+                        .map_or(tracks.len(), |n| at + n);
+                    let run = &tracks[at..end];
+                    at = end;
+                    let Some(number) = number else {
+                        // A copy nothing placed has no disc to sit under, so
+                        // it stays where an ordinary track would.
+                        for id in run {
+                            rows.push(Row::Track {
+                                artist: artist_key.clone(),
+                                album: album_key.clone(),
+                                disc: None,
+                                id: *id,
+                                alone: false,
+                            });
+                        }
+                        continue;
+                    };
+                    // Zero-padded, because a `SortKey` orders as text and
+                    // `disc 10` would otherwise sit between 1 and 2.
+                    let key = crate::model::sortkey::sort_key(&format!("{number:03}"), false);
+                    let path = [artist_key.clone(), album_key.clone(), key.clone()];
+                    let disc_open = unfolded || self.folds.is_open(&path);
+                    rows.push(Row::Disc {
                         artist: artist_key.clone(),
                         album: album_key.clone(),
-                        id: *id,
-                        alone: false,
+                        key: key.clone(),
+                        number,
+                        format: lib.disc_format(artist_key, album_key, number),
+                        tracks: run.len(),
+                        expanded: disc_open,
                     });
+                    if !disc_open {
+                        continue;
+                    }
+                    for id in run {
+                        rows.push(Row::Track {
+                            artist: artist_key.clone(),
+                            album: album_key.clone(),
+                            disc: Some(key.clone()),
+                            id: *id,
+                            alone: false,
+                        });
+                    }
                 }
             }
         }
@@ -220,6 +359,10 @@ impl TreeState {
         match row {
             Row::Artist { .. } => {}
             Row::Album { artist, .. } => self.folds.open(std::slice::from_ref(artist)),
+            Row::Disc { artist, album, .. } => {
+                self.folds.open(std::slice::from_ref(artist));
+                self.folds.open(&[artist.clone(), album.clone()]);
+            }
             // A track standing in for its group has only the artist above it.
             Row::Track {
                 artist,
@@ -248,7 +391,11 @@ impl TreeState {
         self.folds.clone()
     }
 
-    pub fn set_folds(&mut self, folds: Expansion<SortKey>) {
+    /// **The disc rule is re-applied**, because a fold state restored from a
+    /// session or a `:view` was built without it and would draw every disc
+    /// shut.
+    pub fn set_folds(&mut self, mut folds: Expansion<SortKey>) {
+        folds.opening_from(DISC_DEPTH);
         self.folds = folds;
     }
 
@@ -257,6 +404,9 @@ impl TreeState {
         match row {
             Row::Artist { key, .. } => Some(vec![key.clone()]),
             Row::Album { artist, key, .. } => Some(vec![artist.clone(), key.clone()]),
+            Row::Disc {
+                artist, album, key, ..
+            } => Some(vec![artist.clone(), album.clone(), key.clone()]),
             Row::Track { .. } => None,
         }
     }
@@ -268,6 +418,9 @@ impl TreeState {
         match row {
             Row::Artist { key, .. } => vec![key.clone()],
             Row::Album { artist, key, .. } => vec![artist.clone(), key.clone()],
+            Row::Disc {
+                artist, album, key, ..
+            } => vec![artist.clone(), album.clone(), key.clone()],
             // **Where the cursor falls back to** — the artist, for a track
             // that replaced its album row, because that album's fold is not a
             // place any more (#135).
@@ -276,6 +429,14 @@ impl TreeState {
                 alone: true,
                 ..
             } => vec![artist.clone()],
+            // **Under its disc where there is one**, so `h` from a track on
+            // disc 2 closes that disc rather than the whole record.
+            Row::Track {
+                artist,
+                album,
+                disc: Some(disc),
+                ..
+            } => vec![artist.clone(), album.clone(), disc.clone()],
             Row::Track { artist, album, .. } => vec![artist.clone(), album.clone()],
         }
     }
@@ -298,6 +459,25 @@ impl TreeState {
                 .find(|(k, _)| *k == artist)
                 .and_then(|(_, albums)| albums.get(key))
                 .cloned()
+                .unwrap_or_default(),
+            // A disc plays the disc, which is what `x` on one should mean.
+            Row::Disc {
+                artist, album, key, ..
+            } => lib
+                .artists()
+                .find(|(k, _)| *k == artist)
+                .and_then(|(_, albums)| albums.get(album))
+                .map(|tracks| {
+                    tracks
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            lib.disc_of(*id).is_some_and(|n| {
+                                crate::model::sortkey::sort_key(&format!("{n:03}"), false) == *key
+                            })
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
             Row::Track { id, .. } => vec![*id],
         }
@@ -393,6 +573,8 @@ impl TreeState {
         match row {
             Row::Artist { .. } => 0,
             Row::Album { .. } => 1,
+            Row::Disc { .. } => 2,
+            Row::Track { disc: Some(_), .. } => 3,
             Row::Track { .. } => 2,
         }
     }
@@ -530,6 +712,21 @@ impl TreeState {
         match row {
             Row::Artist { .. } => Vec::new(),
             Row::Album { artist, .. } => vec![vec![artist.clone()]],
+            Row::Disc { artist, album, .. } => {
+                vec![vec![artist.clone()], vec![artist.clone(), album.clone()]]
+            }
+            // **And its disc where it has one** (#169), or revealing a track
+            // on disc 2 would open the record and stop at the header.
+            Row::Track {
+                artist,
+                album,
+                disc: Some(disc),
+                ..
+            } => vec![
+                vec![artist.clone()],
+                vec![artist.clone(), album.clone()],
+                vec![artist.clone(), album.clone(), disc.clone()],
+            ],
             Row::Track { artist, album, .. } => {
                 vec![vec![artist.clone()], vec![artist.clone(), album.clone()]]
             }
@@ -670,6 +867,8 @@ impl TreeState {
             None => match row {
                 Row::Artist { .. } => return false,
                 Row::Album { artist, .. } => vec![artist.clone()],
+                // A closed disc goes up to its record.
+                Row::Disc { artist, album, .. } => vec![artist.clone(), album.clone()],
                 // **A track standing in for its group closes the artist**, not
                 // the album it stands in for. That album has no row (#135), so
                 // closing it folded something invisible: nothing moved, the
@@ -682,15 +881,18 @@ impl TreeState {
                 Row::Track {
                     artist,
                     album,
+                    disc,
                     alone,
                     ..
-                } => {
-                    if *alone {
-                        vec![artist.clone()]
-                    } else {
-                        vec![artist.clone(), album.clone()]
-                    }
-                }
+                } => match (alone, disc) {
+                    (true, _) => vec![artist.clone()],
+                    // **And a track on disc 2 closes disc 2**, not the record
+                    // — one step up is one step up, and closing the album
+                    // from here would shut four other discs the cursor was
+                    // nowhere near.
+                    (false, Some(disc)) => vec![artist.clone(), album.clone(), disc.clone()],
+                    (false, None) => vec![artist.clone(), album.clone()],
+                },
             },
         };
         self.folds.close(&target);
