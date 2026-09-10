@@ -292,6 +292,21 @@ pub enum Proposal {
         /// position is what `CreditAsserted` keys a row by, so a reordering is
         /// a different set of rows rather than an edit.
         artists: Vec<String>,
+        /// What joins each artist to the next — `" & "`, `" vs. "`, `" and "`.
+        /// One shorter than `artists`, and empty where the proposer has none.
+        ///
+        /// **On the wire because throwing it away loses a fact somebody
+        /// published.** `Credit::join_phrase` has always existed and this
+        /// filled it with `None`, so splitting `Stephan Bodzin vs. Marc
+        /// Romboy` into its two artists rendered `Stephan Bodzin, Marc Romboy`
+        /// — the split was right and the line came back wrong, which read as
+        /// an argument against splitting. MusicBrainz publishes the phrase
+        /// beside the names, so the repair costs a lookup nobody makes twice.
+        ///
+        /// Defaulted, so every tool that wrote this file before keeps working
+        /// and gets the `", "` it already got.
+        #[serde(default)]
+        joins: Vec<String>,
         /// Where the answer came from, on the wire for the reason it is on a
         /// genre: MusicBrainz naming these two and a person typing them are
         /// the same shape and must not become the same fact.
@@ -1245,7 +1260,12 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
         }
         // The collection is named rather than identified, for the reason a
         // genre is: a tool has no way to mint an id and should not.
-        Proposal::Credited { on, artists, basis } => {
+        Proposal::Credited {
+            on,
+            artists,
+            joins,
+            basis,
+        } => {
             let named: Vec<String> = artists.iter().map(|a| a.trim().to_string()).collect();
             if named.iter().any(String::is_empty) {
                 return Err("an artist needs a name".to_string());
@@ -1267,6 +1287,19 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 .find(|a| !seen.insert(crate::model::ingest::normalise(a)))
             {
                 return Err(format!("{twice:?} is credited twice"));
+            }
+            // **One join fewer than there are artists**, because a phrase
+            // joins a credit to the *next* one and the last has no next.
+            // Refused rather than truncated: a caller that miscounted has
+            // miscounted somewhere, and a silently dropped phrase is the bug
+            // this field exists to fix.
+            if !joins.is_empty() && joins.len() != named.len() - 1 {
+                return Err(format!(
+                    "{} artists take {} join phrase(s), and this gives {}",
+                    named.len(),
+                    named.len() - 1,
+                    joins.len()
+                ));
             }
             let role = Id::<Role>::of_name("performer");
             let mut facts = vec![Fact::RoleDefined {
@@ -1291,7 +1324,7 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     basis,
                     position: u8::try_from(at).unwrap_or(u8::MAX),
                     as_credited: None,
-                    join_phrase: None,
+                    join_phrase: joins.get(at).map(|j| j.to_string()),
                 });
             }
             facts
@@ -2612,6 +2645,7 @@ pub(crate) mod tests {
         let split = Proposal::Credited {
             on: CreditedOn::Album { album: album() },
             artists: vec!["Marc Romboy".into(), "Stephan Bodzin".into()],
+            joins: Vec::new(),
             basis: Source::MusicBrainz,
         };
         let (records, report) = parse(
@@ -2635,6 +2669,82 @@ pub(crate) mod tests {
             2,
             "both artists should be credited on the album"
         );
+    }
+
+    /// **A split keeps the word between the names.**
+    ///
+    /// `Credit::join_phrase` has always existed and this filled it with
+    /// `None`, so splitting `Stephan Bodzin vs. Marc Romboy` rendered
+    /// `Stephan Bodzin, Marc Romboy` — the split right and the line wrong,
+    /// which reads as an argument against splitting. MusicBrainz publishes
+    /// the phrase beside the names; the only reason it was lost is that
+    /// nothing carried it across.
+    #[test]
+    fn a_split_keeps_the_phrase_that_joined_the_names() {
+        let split = Proposal::Credited {
+            on: CreditedOn::Album { album: album() },
+            artists: vec!["Stephan Bodzin".into(), "Marc Romboy".into()],
+            joins: vec![" vs. ".into()],
+            basis: Source::MusicBrainz,
+        };
+        let (records, report) = parse(
+            &serde_json::to_string(&split).expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(report.applied, 1, "{report}");
+        let phrases: Vec<_> = records
+            .iter()
+            .filter_map(|r| match &r.fact {
+                Fact::CreditAsserted {
+                    position,
+                    join_phrase,
+                    ..
+                } => Some((*position, join_phrase.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            phrases,
+            vec![(0, Some(" vs. ".to_string())), (1, None)],
+            "the phrase joins a credit to the next, so the last one has none"
+        );
+
+        // **Miscounted is refused, not truncated.** A dropped phrase is the
+        // bug this field exists to fix, so producing one quietly would be the
+        // same failure wearing a repair's clothes. Three artists take two
+        // joins: none at all is the documented default and stays allowed, and
+        // any other count is a caller that has miscounted somewhere.
+        let three = || vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        for (joins, refusals) in [
+            (vec![], 0),
+            (vec![" & ".to_string(), " and ".to_string()], 0),
+            (vec![" & ".to_string()], 1),
+            (
+                vec![" & ".to_string(), " and ".to_string(), " vs. ".to_string()],
+                1,
+            ),
+        ] {
+            let n = joins.len();
+            let (_, report) = parse(
+                &serde_json::to_string(&Proposal::Credited {
+                    on: CreditedOn::Album { album: album() },
+                    artists: three(),
+                    joins,
+                    basis: Source::MusicBrainz,
+                })
+                .expect("serialises"),
+                dev(),
+                100,
+                HELD,
+            );
+            assert_eq!(
+                report.refused.len(),
+                refusals,
+                "three artists and {n} join(s): {report}"
+            );
+        }
     }
 
     /// **A merge keeps the name it retires** — #172.
@@ -3754,6 +3864,7 @@ mod merged {
         let repair = Proposal::Credited {
             on: CreditedOn::Recording { recording },
             artists: who.iter().map(|s| (*s).to_string()).collect(),
+            joins: Vec::new(),
             basis: Source::MusicBrainz,
         };
 

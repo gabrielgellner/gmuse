@@ -331,6 +331,20 @@ impl From<OnceWritten> for AliasKind {
     }
 }
 
+/// Which of the two answers a credit line is being asked for.
+///
+/// Both are wanted, on the same credit, at the same time — so this is a
+/// parameter and not a decision made once. `line_of` stays the only place that
+/// decides how a credit line *reads*; this says which name each credit
+/// contributes to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Form {
+    /// What the sleeve printed, which is what a person reads.
+    Printed,
+    /// Who the artist is, which is what a folder and a filter need.
+    Filing,
+}
+
 /// Another name for something.
 ///
 /// Authority control as libraries have always done it — an authorised heading
@@ -417,12 +431,20 @@ impl Reference {
         self.line_of(&self.credits_on(subject))
     }
 
+    /// The same line with every name resolved through the artist, for a
+    /// caller that is grouping rather than printing.
+    ///
+    /// See [`Self::filed_under_of`] for why the two are different questions.
+    pub fn files_under(&self, subject: CreditOn) -> String {
+        self.filed_under_of(&self.credits_on(subject))
+    }
+
     /// The printed line, given the credits already found.
     ///
     /// Split from [`Self::credited_as`] so a caller holding an index can skip
     /// the scan — and so there is still exactly one place that decides how a
     /// credit line reads.
-    pub fn line_of(&self, credits: &[&Credit]) -> String {
+    fn assembled(&self, credits: &[&Credit], form: Form) -> String {
         // **A credit with no name is not a credit.** An artist the catalogue
         // has no name for resolved to an empty string and still took its join
         // phrase with it, so `Emmylou Harris with The Band` came out as
@@ -499,12 +521,26 @@ impl Reference {
         // here took a narrowed view from under 50ms to 92.
         let mut named: Vec<(String, Option<String>)> = Vec::new();
         for credit in credits.iter().filter(|c| performed(c) && c.basis == best) {
-            let name = credit.as_credited.clone().unwrap_or_else(|| {
+            let filed = || {
                 self.artists
                     .get(&credit.artist.id())
                     .map(|a| a.name.clone())
                     .unwrap_or_default()
-            });
+            };
+            let name = match form {
+                Form::Printed => credit.as_credited.clone().unwrap_or_else(filed),
+                // **The artist's own name, and the printed one only where
+                // there is no other.** An artist the catalogue cannot name is
+                // no key at all, and a printed form is a worse key than an
+                // identity and a better one than `Unknown Artist` — which is
+                // where a credit dropped here for being nameless would land.
+                // Two of this library's credited artists have no name (#154),
+                // so this arm is the edge and not the case.
+                Form::Filing => match filed() {
+                    named if !named.trim().is_empty() => named,
+                    _ => credit.as_credited.clone().unwrap_or_default(),
+                },
+            };
             if name.trim().is_empty() || named.iter().any(|(seen, _)| *seen == name) {
                 continue;
             }
@@ -519,6 +555,39 @@ impl Reference {
             }
         }
         line
+    }
+
+    /// The credit line as the sleeve printed it — `as_credited ?? name`.
+    pub fn line_of(&self, credits: &[&Credit]) -> String {
+        self.assembled(credits, Form::Printed)
+    }
+
+    /// The credit line with every name resolved through the artist.
+    ///
+    /// **What grouping asks, and it is not what display asks** (#173).
+    /// [`Self::line_of`]'s own contract already said so —
+    ///
+    /// > Display reads `as_credited ?? name`; grouping and search always
+    /// > resolve through the reference, so a printed form never fragments the
+    /// > artist dimension.
+    ///
+    /// — and only the first half was true of the grouping that ran, because
+    /// `files_under` called `line_of`. A printed form therefore reached the
+    /// tree, and `storage-layout.md`'s `{file_under}/{album}/{track}` rendered
+    /// it into a folder name.
+    ///
+    /// **A moniker is the case that makes it unavoidable.** Aphex Twin also
+    /// releases as AFX, and the honest record of that is `as_credited: "AFX"`
+    /// on the release's credit — at which point *Analogue Bubblebath* files
+    /// under `AFX/` and *Selected Ambient Works* under `Aphex Twin/`, one
+    /// artist in two folders, from data that is correct.
+    ///
+    /// Everything else is shared with the printed form deliberately: the same
+    /// best-basis rule, the same performers-only filter, the same dedupe by
+    /// rendered name, the same join phrases. What differs is one name per
+    /// credit, which is the whole of the difference.
+    pub fn filed_under_of(&self, credits: &[&Credit]) -> String {
+        self.assembled(credits, Form::Filing)
     }
 
     #[allow(

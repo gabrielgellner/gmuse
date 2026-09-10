@@ -241,6 +241,22 @@ impl<'a> Lookup<'a> {
         }
     }
 
+    /// The same line resolved through the artist, for a caller that groups.
+    ///
+    /// **Not the printed one, which is what `files_under` used to ask for**
+    /// (#173). The two differ on exactly the credits that carry an
+    /// `as_credited`, and those are the ones where a printed form would put
+    /// one artist in two folders.
+    fn filing(&self, subject: CreditOn) -> String {
+        match self {
+            Lookup::Direct(l) => l.reference.files_under(subject),
+            Lookup::Built { l, credits, .. } => credits
+                .get(&subject)
+                .map(|found| l.reference.filed_under_of(found))
+                .unwrap_or_default(),
+        }
+    }
+
     /// Whether the library holds any encoding of this recording.
     fn holds(&self, recording: Id<Recording>) -> bool {
         match self {
@@ -415,12 +431,14 @@ impl Librarian {
             .and_then(|m| self.spine.releases.get(&m.release.id()))
             .map(|r| CreditOn::ReleaseGroup(r.group.id()));
 
-        let line = |subject: CreditOn| by.line(subject);
+        // **`filing`, not `line`** — #173. A folder is grouping, and the
+        // printed form splits an artist that releases under a moniker.
+        let filing = |subject: CreditOn| by.filing(subject);
         on_release
-            .map(line)
+            .map(filing)
             .filter(|s| !s.is_empty())
             .or_else(|| {
-                let by_recording = line(CreditOn::Recording(recording));
+                let by_recording = filing(CreditOn::Recording(recording));
                 (!by_recording.is_empty()).then_some(by_recording)
             })
             .unwrap_or_else(|| UNKNOWN_ARTIST.to_string())
