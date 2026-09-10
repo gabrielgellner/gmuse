@@ -910,6 +910,27 @@ pub enum Fact {
         value: String,
         kind: AliasKind,
     },
+
+    /// A name this subject was authoritatively called, and is not called now.
+    ///
+    /// **A different class from an alias, not a kind of one** (#176). MADS/RDF
+    /// keeps `Variant` and `DeprecatedAuthority` disjoint because a deprecated
+    /// heading was the authorised one once and a variant never was, and the
+    /// distinction earns its keep here twice over: a merge retires the loser's
+    /// label, and a concept rename retires the term it was found under. Both
+    /// are names *this library itself printed*, so they travel in old tags and
+    /// old exports, and reading one back has to recognise it rather than mint
+    /// a second row. A stage name never had that problem.
+    ///
+    /// **It is an alias as well**, and the fold records both: this says what
+    /// happened to the name, `aliases` keeps it findable. Row existence with
+    /// no last-writer rule, the same as [`Fact::AliasAsserted`] — two devices
+    /// retiring one heading union, and a name that stopped being right does
+    /// not start again.
+    HeadingRetired {
+        subject: Cataloguable,
+        value: String,
+    },
     /// Somebody has decided a concept does not apply.
     ///
     /// **Not a delete, because there are none.** The log is append-only and
@@ -1136,6 +1157,12 @@ pub struct Catalogue {
     /// Every other name anything is known by. Row existence, so curation
     /// unions across devices the way `narrows` does.
     pub aliases: BTreeSet<(Cataloguable, String, AliasKind)>,
+    /// Every name anything was authoritatively called and is not called now
+    /// — `Fact::HeadingRetired`. A subset of `aliases`, held apart rather than
+    /// flagged inside it, because MADS/RDF's `DeprecatedAuthority` is a
+    /// disjoint class from `Variant` and the two axes multiply.
+    #[serde(default)]
+    pub retired_headings: BTreeSet<(Cataloguable, String)>,
     /// Every axis of description there is.
     pub facets: BTreeMap<Id<Facet>, FacetRecord>,
     /// Every term, on whichever axis it sits.
@@ -1640,6 +1667,15 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                 kind,
             } => {
                 cat.aliases.insert((*subject, value.clone(), *kind));
+            }
+            // Both, and deliberately: a heading the library retired is still a
+            // name it answers to, so it lands in `aliases` too — as an
+            // `ArtistName`, because it was the authorised one and a printed
+            // name is what it stays.
+            Fact::HeadingRetired { subject, value } => {
+                cat.aliases
+                    .insert((*subject, value.clone(), AliasKind::ArtistName));
+                cat.retired_headings.insert((*subject, value.clone()));
             }
             Fact::ConceptRetracted {
                 subject,

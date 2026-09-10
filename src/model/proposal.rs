@@ -1631,21 +1631,34 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             // three very different claims it is making, and a report that
             // cannot tell a retired name from a stage name is the state this
             // exists to replace.
-            let kind = match kind.trim().to_lowercase().as_str() {
-                "retired" => AliasKind::Retired,
-                "search-hint" | "search_hint" => AliasKind::SearchHint,
-                "legal-name" | "legal_name" => AliasKind::LegalName,
+            //
+            // `retired` still spells the same word on the line and no longer
+            // produces the same kind of thing (#176): it is not one of the
+            // kinds a name can be, it is what happened to a name, so it writes
+            // its own fact.
+            let subject = Cataloguable::Artist(artist);
+            let value = name.to_string();
+            match kind.trim().to_lowercase().as_str() {
+                "retired" => vec![Fact::HeadingRetired { subject, value }],
                 other => {
-                    return Err(format!(
-                        "{other:?} is not a kind of alias — retired, search-hint, legal-name"
-                    ));
+                    // Spelled by the enum rather than beside it, so the words
+                    // a person may type and the words a tool writes cannot
+                    // drift apart — `Source::written` for the same reason.
+                    let spelled = other.replace('_', "-");
+                    let Some(kind) = AliasKind::ALL.into_iter().find(|k| k.written() == spelled)
+                    else {
+                        let known = AliasKind::ALL.map(AliasKind::written).join(", ");
+                        return Err(format!(
+                            "{other:?} is not a kind of alias — {known}, retired"
+                        ));
+                    };
+                    vec![Fact::AliasAsserted {
+                        subject,
+                        value,
+                        kind,
+                    }]
                 }
-            };
-            vec![Fact::AliasAsserted {
-                subject: Cataloguable::Artist(artist),
-                value: name.to_string(),
-                kind,
-            }]
+            }
         }
         Proposal::Retitled { recording, title } => {
             let title = title.trim();
@@ -1773,10 +1786,9 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             if let Some(name) = library.named(loser)
                 && library.named(winner).as_deref() != Some(name.as_str())
             {
-                facts.push(Fact::AliasAsserted {
+                facts.push(Fact::HeadingRetired {
                     subject: crate::model::reference::Cataloguable::Artist(winner),
                     value: name,
-                    kind: crate::model::reference::AliasKind::Retired,
                 });
             }
             facts
@@ -2630,10 +2642,10 @@ pub(crate) mod tests {
     /// only record of what the sleeve said with it.
     ///
     /// The same move `rename_concept` already makes one entity over, and the
-    /// reason `AliasKind::Retired` exists at all.
+    /// reason `Fact::HeadingRetired` exists at all.
     #[test]
     fn a_merge_keeps_the_name_it_retires() {
-        use crate::model::reference::{AliasKind, Cataloguable};
+        use crate::model::reference::Cataloguable;
         let loser = Id::<Artist>::of_artist(None, "Campfire Songs");
         let winner = Id::<Artist>::of_artist(None, "Animal Collective");
 
@@ -2646,10 +2658,9 @@ pub(crate) mod tests {
         assert_eq!(report.applied, 1, "{report}");
         assert!(
             records.iter().any(|r| r.fact
-                == Fact::AliasAsserted {
+                == Fact::HeadingRetired {
                     subject: Cataloguable::Artist(winner),
                     value: "Campfire Songs".into(),
-                    kind: AliasKind::Retired,
                 }),
             "the moniker the record was released under went nowhere"
         );
@@ -2669,24 +2680,30 @@ pub(crate) mod tests {
             HELD,
         );
         assert!(
-            !records
-                .iter()
-                .any(|r| matches!(&r.fact, Fact::AliasAsserted { .. })),
+            !records.iter().any(|r| matches!(
+                &r.fact,
+                Fact::AliasAsserted { .. } | Fact::HeadingRetired { .. }
+            )),
             "an alias that repeats the label is noise"
         );
     }
 
     /// **The kind of alias is a codelist, refused rather than guessed.**
     ///
-    /// A retired name, another spelling the world uses, and a person behind a
-    /// stage name are three different claims. A string does not say which,
-    /// and a report that cannot tell them apart is the state this replaces.
+    /// Another spelling the world uses and the person behind a stage name are
+    /// different claims. A string does not say which, and a report that cannot
+    /// tell them apart is the state this replaces.
+    ///
+    /// `retired` is on the line too and is no longer one of them (#176) — it
+    /// says what happened to a name rather than what kind of name it is, so it
+    /// writes its own fact. `a_merge_keeps_the_name_it_retires` covers that
+    /// side.
     #[test]
     fn an_alias_says_which_kind_of_name_it_is() {
         use crate::model::reference::{AliasKind, Cataloguable};
         let artist = Id::<Artist>::of_artist(None, "Animal Collective");
         for (given, wanted) in [
-            ("retired", AliasKind::Retired),
+            ("artist-name", AliasKind::ArtistName),
             ("search-hint", AliasKind::SearchHint),
             ("legal-name", AliasKind::LegalName),
         ] {
@@ -2709,6 +2726,29 @@ pub(crate) mod tests {
                     kind: wanted,
                 }));
         }
+        // **And `retired` still works from the line, into a different fact.**
+        // The word a person types did not change; what it produces did.
+        let (records, report) = parse(
+            &serde_json::to_string(&Proposal::Aliased {
+                artist,
+                name: "Campfire Songs".into(),
+                kind: "retired".into(),
+            })
+            .expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(report.applied, 1, "{report}");
+        assert!(
+            records.iter().any(|r| r.fact
+                == Fact::HeadingRetired {
+                    subject: Cataloguable::Artist(artist),
+                    value: "Campfire Songs".into(),
+                }),
+            "a retired heading is not a kind of alias, and is still writable"
+        );
+
         for bad in ["nickname", "", "  "] {
             let (_, report) = parse(
                 &serde_json::to_string(&Proposal::Aliased {

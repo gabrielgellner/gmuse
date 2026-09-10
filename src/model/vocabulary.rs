@@ -633,9 +633,17 @@ mod concept_tests {
             cat.aliases.contains(&(
                 Cataloguable::Concept(old),
                 "Minimal".to_string(),
-                AliasKind::Retired
+                AliasKind::ArtistName
             )),
             "the name it was found under stopped being findable"
+        );
+        // **And it says which of the two it is.** A retired heading is also an
+        // alias, so the row above would pass for a search hint somebody typed;
+        // this is the half that says the library itself printed it (#176).
+        assert!(
+            cat.retired_headings
+                .contains(&(Cataloguable::Concept(old), "Minimal".to_string())),
+            "a term the library renamed is a heading it retired, not a variant"
         );
 
         // Elsewhere, somebody meets the new label with no history and mints

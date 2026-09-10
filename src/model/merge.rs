@@ -29,9 +29,10 @@
 //!
 //! ## What this does not do
 //!
-//! A merge usually also mints an `Alias`, so the loser's label stays findable
-//! (#73). That belongs with the reference layer; this module owns identity
-//! alone.
+//! A merge usually also retires the loser's label, so it stays findable
+//! (#73) — a `Fact::HeadingRetired` rather than a kind of alias, since a name
+//! the library itself printed is not a variant of anything (#176). That
+//! belongs with the reference layer; this module owns identity alone.
 
 use std::collections::{HashMap, HashSet};
 

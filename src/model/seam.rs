@@ -2868,6 +2868,11 @@ mod tests {
             "Encoding",
             "Concept",
             "Facet",
+            // On the list for the same reason `Alias` is, and it is the
+            // authority-control word: what a `HeadingRetired` records is the
+            // heading, and the eight things a heading can belong to are
+            // already the `Cataloguable`.
+            "Heading",
             "Hierarchy",
             "Holdings",
             "Label",

@@ -226,21 +226,118 @@ impl Source {
     }
 }
 
+/// What kind of name this is.
+///
+/// **MusicBrainz's own artist alias vocabulary, verbatim** — its three types
+/// are *Artist name*, *Legal name* and *Search hint*. `domain-model.md` §8
+/// says a vocabulary term is MusicBrainz's wherever MusicBrainz has one,
+/// because a borrowed term round-trips on export and an invented synonym does
+/// not.
+///
+/// **A retired heading is not one of these, and used to be** (#176). MADS/RDF
+/// keeps `Variant` and `DeprecatedAuthority` as disjoint classes for an exact
+/// reason — a deprecated heading was the authorised one once and a variant
+/// never was — and the two multiply rather than add, since any kind of name
+/// can be current or retired. [`crate::model::log::Fact::HeadingRetired`]
+/// carries that half; this carries only what kind of name it is.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
+#[serde(from = "OnceWritten")]
 pub enum AliasKind {
-    /// Another way the world spells it.
-    SearchHint,
+    /// Another name the subject is known by, and one worth printing.
+    ArtistName,
+    /// The name on the paperwork, where the working one is not it.
     LegalName,
-    /// The name a merge retired.
+    /// Findable, never printed — a misspelling, a punctuation-free form, the
+    /// string somebody actually types.
+    SearchHint,
+}
+
+impl AliasKind {
+    /// Every kind there is, for a caller that has to name them all.
+    pub const ALL: [AliasKind; 3] = [
+        AliasKind::ArtistName,
+        AliasKind::LegalName,
+        AliasKind::SearchHint,
+    ];
+
+    /// Whether a view prints this name, or only finds by it.
+    ///
+    /// **The display axis, which is not the kind axis.** MADS/RDF refines
+    /// `hasVariant` from `skos:altLabel` and `hasHiddenVariant` from
+    /// `skos:hiddenLabel`, so hidden is a *sibling* of variant rather than a
+    /// sort of one. Answered here once, because every view asks it and none
+    /// of them should each write the arm — `AFX` yes, `aphextwinsucks` no.
+    #[allow(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — the surface that asks this is info-panel.md's \"also known as\", which is a proposal"
+    )]
+    pub fn shown(self) -> bool {
+        match self {
+            AliasKind::ArtistName | AliasKind::LegalName => true,
+            AliasKind::SearchHint => false,
+        }
+    }
+
+    /// How it is written in a proposal file and on the `:` line — one
+    /// spelling, the way [`Source::written`] is one spelling.
+    pub fn written(self) -> &'static str {
+        match self {
+            AliasKind::ArtistName => "artist-name",
+            AliasKind::LegalName => "legal-name",
+            AliasKind::SearchHint => "search-hint",
+        }
+    }
+}
+
+/// What has ever been written in a `kind` position, so that reading one back
+/// cannot fail.
+///
+/// **`Retired` was a kind of alias until #176**, and one fact in the live log
+/// still says so: the `Campfire Songs` an Animal Collective merge left behind.
+/// Refusing it would have `durable.rs` report a damaged line in the *middle*
+/// of a file, where its own doc says damage can only be at the end of one some
+/// process died in — one fact would turn a stated invariant into a lie.
+///
+/// Reading it as `ArtistName` is true and not merely convenient: the name *is*
+/// one Animal Collective is known by. What that reading drops is only that it
+/// was authoritative once, and an append-only log corrects by appending, so a
+/// `HeadingRetired` restates it.
+///
+/// A wire type rather than a hand-written `Deserialize`, because the derived
+/// one already handles a variant arriving as a name (JSON) or as an index
+/// (postcard) and a hand-rolled one quietly handled only the first.
+///
+/// **The first three are in `AliasKind`'s order, and must stay there.**
+/// postcard writes a variant as its index, so reordering these would decode
+/// one kind as another with nothing raised —
+/// `a_kind_written_before_it_moved_still_reads` is what notices.
+#[derive(serde::Deserialize)]
+enum OnceWritten {
+    ArtistName,
+    LegalName,
+    SearchHint,
     Retired,
+}
+
+impl From<OnceWritten> for AliasKind {
+    fn from(written: OnceWritten) -> Self {
+        match written {
+            OnceWritten::ArtistName | OnceWritten::Retired => AliasKind::ArtistName,
+            OnceWritten::LegalName => AliasKind::LegalName,
+            OnceWritten::SearchHint => AliasKind::SearchHint,
+        }
+    }
 }
 
 /// Another name for something.
 ///
 /// Authority control as libraries have always done it — an authorised heading
-/// with see-references — and `skos:altLabel` without the RDF.
+/// with see-references — and `skos:altLabel` without the RDF. MADS/RDF is the
+/// same tradition written down: its `hasVariant` refines exactly that
+/// property, and `domain-model.md` §8 tabulates which of its distinctions are
+/// taken here and under what names.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Alias {
     pub subject: Cataloguable,
@@ -486,7 +583,12 @@ impl Reference {
     /// worse.
     pub fn absorb(&mut self, loser: Id<Artist>, winner: Id<Artist>) {
         if let Some(gone) = self.artists.remove(&loser) {
-            self.add_alias(winner, &gone.name, AliasKind::Retired, Source::Manual);
+            // `ArtistName`, because findability is all this layer is for: the
+            // loser's label was a printed name and stays one. That it *stopped*
+            // being the authorised one is a fact rather than an attribute, and
+            // it lands in `Catalogue::retired_headings` by way of
+            // `Fact::HeadingRetired` (#176).
+            self.add_alias(winner, &gone.name, AliasKind::ArtistName, Source::Manual);
         }
         for alias in &mut self.aliases {
             if alias.subject == Cataloguable::Artist(loser) {
@@ -929,6 +1031,65 @@ mod tests {
             basis: Source::TagVariant,
         });
         assert_eq!(r.credited_as(group), "Various Artists");
+    }
+
+    /// **The one fact written before #176 still reads, and reads as true.**
+    ///
+    /// `Retired` was a kind of alias and is a fact of its own now. The live log
+    /// holds one line saying the old thing — the `Campfire Songs` an Animal
+    /// Collective merge left — and refusing it would put damage in the middle
+    /// of a file `durable.rs` says can only be damaged at the end.
+    #[test]
+    fn a_kind_written_before_it_moved_still_reads() {
+        let back: AliasKind = serde_json::from_str(r#""Retired""#).expect("the log holds one");
+        assert_eq!(
+            back,
+            AliasKind::ArtistName,
+            "a name a merge retired is still a name the winner is known by"
+        );
+        assert_eq!(
+            serde_json::to_string(&back).expect("serialises"),
+            r#""ArtistName""#,
+            "the old spelling reads and is never written again"
+        );
+
+        // **Both encodings, and this is the half that would fail quietly.** A
+        // hand-written reader took the JSON name and refused postcard's index;
+        // worse, `OnceWritten` listing the three current kinds in a different
+        // order than `AliasKind` would round-trip one kind into another with
+        // nothing to say so.
+        for kind in AliasKind::ALL {
+            let bytes = postcard::to_allocvec(&kind).expect("encodes");
+            assert_eq!(
+                postcard::from_bytes::<AliasKind>(&bytes).expect("decodes"),
+                kind,
+                "{kind:?} came back as something else — check OnceWritten's order"
+            );
+        }
+    }
+
+    /// **Findable is not printable, and they are different questions.**
+    ///
+    /// MADS/RDF refines `hasVariant` from `skos:altLabel` and
+    /// `hasHiddenVariant` from `skos:hiddenLabel`, making hidden a sibling of
+    /// variant rather than a sort of one. `AFX` is a name to print;
+    /// `aphextwinsucks` is a MusicBrainz search hint on the same artist and is
+    /// not.
+    #[test]
+    fn a_name_says_whether_it_is_for_finding_or_for_printing() {
+        assert!(AliasKind::ArtistName.shown(), "AFX is worth printing");
+        assert!(
+            AliasKind::LegalName.shown(),
+            "Richard D. James is worth printing"
+        );
+        assert!(
+            !AliasKind::SearchHint.shown(),
+            "a search hint is how somebody types it, not how it reads"
+        );
+        assert!(
+            AliasKind::ALL.iter().any(|k| !k.shown()),
+            "an axis with one answer is not an axis"
+        );
     }
 
     #[test]

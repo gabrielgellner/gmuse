@@ -29,7 +29,7 @@ use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::log::{Catalogue, Fact, Record, compact, fold};
 use crate::model::ord::OrdKey;
-use crate::model::reference::{AliasKind, Cataloguable, CreditOn, RoleClass, Source};
+use crate::model::reference::{Cataloguable, CreditOn, RoleClass, Source};
 use crate::model::spine::PartialDate;
 
 /// What a scan says about one file.
@@ -932,10 +932,9 @@ impl Instance {
         );
         self.append(
             now,
-            Fact::AliasAsserted {
+            Fact::HeadingRetired {
                 subject: Cataloguable::Concept(concept),
                 value: was.trim().to_string(),
-                kind: AliasKind::Retired,
             },
         );
     }
