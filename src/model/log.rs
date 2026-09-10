@@ -43,6 +43,20 @@ use crate::model::reference::{
 /// and `Bradley's Beat` — and the two edges answer different questions.
 pub type ArtistEdge = (Id<Artist>, Id<Artist>, ArtistRelationKind);
 
+/// What a spectrum measurement found.
+///
+/// Named rather than a tuple because it grew a third member the moment the
+/// second was needed to read the first — `cutoff_hz` says where the audio
+/// stops and only `cliff_db` says whether that is an encoder or the music.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Spectrum {
+    pub cutoff_hz: u32,
+    /// `None` on a row measured before #184, which is what it is.
+    #[serde(default)]
+    pub cliff_db: Option<u8>,
+    pub analyser: u16,
+}
+
 /// When something held: from a date, until one where anybody said.
 ///
 /// Open-ended is the ordinary case, not a gap — a moniker somebody still
@@ -911,6 +925,27 @@ pub enum Fact {
         encoding: Id<Encoding>,
         /// Where the spectrum stops, in Hz.
         cutoff_hz: u32,
+        /// **How far it falls in the kilohertz above — and without it the
+        /// cutoff cannot be read** (#184).
+        ///
+        /// An encoder's lowpass drops vertically; music rolls off. The cutoff
+        /// says *where* the spectrum ends and only this says *why*, so a rule
+        /// reading the cutoff alone calls a quiet recording a transcode:
+        ///
+        /// ```text
+        /// Interference  FLAC   8.1 kHz  10 dB   music, nothing up there
+        /// People…       MP3   20.0 kHz  56 dB   an encoder's wall
+        /// ```
+        ///
+        /// It ranks the first as the worse file. It is the better one.
+        ///
+        /// **`None` for the 7,210 written before this**, which is honest
+        /// rather than a gap to paper over: they were taken by a pass that did
+        /// not record it, and pretending to a value would be worse than
+        /// admitting the measurement is half. `analyser` is what a re-measure
+        /// already targets, so filling them in is the route that exists.
+        #[serde(default)]
+        cliff_db: Option<u8>,
         analyser: u16,
     },
 
@@ -1283,7 +1318,7 @@ pub struct Catalogue {
     /// The latest rating per recording. A fold, never a stored number.
     pub ratings: BTreeMap<Id<Recording>, u8>,
     /// Cutoff and the analyser that found it, per encoding.
-    pub measurements: BTreeMap<Id<Encoding>, (u32, u16)>,
+    pub measurements: BTreeMap<Id<Encoding>, Spectrum>,
     pub groups: BTreeMap<Id<ReleaseGroup>, Grouped>,
     /// Which recordings have been folded into which.
     ///
@@ -1960,10 +1995,18 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             Fact::EncodingMeasured {
                 encoding,
                 cutoff_hz,
+                cliff_db,
                 analyser,
             } => {
                 // Last measurement wins, which is what a re-measure means.
-                cat.measurements.insert(*encoding, (*cutoff_hz, *analyser));
+                cat.measurements.insert(
+                    *encoding,
+                    Spectrum {
+                        cutoff_hz: *cutoff_hz,
+                        cliff_db: *cliff_db,
+                        analyser: *analyser,
+                    },
+                );
             }
             Fact::RecordingRated { recording, stars } => {
                 // Records arrive in stamp order, so the last simply wins.
@@ -3446,6 +3489,40 @@ mod merge_tests {
 #[cfg(test)]
 mod reachability {
     use super::*;
+
+    /// **A measurement written before the cliff was recorded still reads** —
+    /// #184, and it is the reason the field is optional rather than a
+    /// migration.
+    ///
+    /// 7,210 of these were in the live log when the field arrived. Refusing
+    /// them would have made `durable.rs` report damage across the middle of a
+    /// file, and defaulting them to a number would claim a measurement nobody
+    /// took.
+    #[test]
+    fn a_measurement_without_a_cliff_reads_back_as_one_without_a_cliff() {
+        let before = r#"{"EncodingMeasured":{"encoding":"00000000-0000-5000-8000-000000000001","cutoff_hz":15700,"analyser":1}}"#;
+        let fact: Fact = serde_json::from_str(before).expect("a fact from before #184");
+        let Fact::EncodingMeasured {
+            cutoff_hz,
+            cliff_db,
+            ..
+        } = fact
+        else {
+            panic!("wrong variant")
+        };
+        assert_eq!(cutoff_hz, 15_700, "the half that was recorded survives");
+        assert_eq!(cliff_db, None, "and the half that was not says so");
+
+        // Written today, both halves travel.
+        let now = serde_json::to_string(&Fact::EncodingMeasured {
+            encoding: Id::derived(b"e"),
+            cutoff_hz: 15_700,
+            cliff_db: Some(52),
+            analyser: 1,
+        })
+        .expect("serialises");
+        assert!(now.contains("\"cliff_db\":52"), "{now}");
+    }
 
     /// Which fact brings a kind into existence, if any.
     ///

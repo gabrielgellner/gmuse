@@ -76,6 +76,10 @@ pub enum Field {
     /// `None` until something has measured it, which is a third answer and not
     /// a zero: nobody has looked is different from it reaches 20 kHz.
     Cutoff,
+    /// **How far the spectrum falls above the cutoff.** An encoder's lowpass
+    /// is a cliff and music is a slope, so this is what separates a transcode
+    /// from a quiet recording — `cutoff<16000` on its own finds both.
+    Cliff,
     SampleRate,
     Channels,
     Path,
@@ -112,6 +116,7 @@ impl Field {
             | Field::Duration
             | Field::Bitrate
             | Field::Cutoff
+            | Field::Cliff
             | Field::SampleRate
             | Field::Channels => Kind::Number,
         }
@@ -139,6 +144,7 @@ impl Field {
             "duration" => Field::Duration,
             "bitrate" => Field::Bitrate,
             "cutoff" => Field::Cutoff,
+            "cliff" => Field::Cliff,
             "samplerate" => Field::SampleRate,
             "channels" => Field::Channels,
             "path" => Field::Path,
@@ -186,6 +192,7 @@ impl Field {
             Field::Duration
             | Field::Bitrate
             | Field::Cutoff
+            | Field::Cliff
             | Field::SampleRate
             | Field::Channels
             | Field::Path
@@ -238,6 +245,7 @@ impl Field {
             Field::Duration => "duration",
             Field::Bitrate => "bitrate",
             Field::Cutoff => "cutoff",
+            Field::Cliff => "cliff",
             Field::SampleRate => "samplerate",
             Field::Channels => "channels",
             Field::Path => "path",
@@ -330,6 +338,7 @@ impl Field {
             }
             Field::Bitrate => r.bitrate?.to_string(),
             Field::Cutoff => r.cutoff_hz?.to_string(),
+            Field::Cliff => r.cliff_db?.to_string(),
             Field::SampleRate => r.sample_rate?.to_string(),
             Field::Channels => r.channels?.to_string(),
             // Refused at parse time, so this is unreachable rather than blank.

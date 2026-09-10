@@ -757,11 +757,18 @@ impl Librarian {
                     channels: d.channels,
                     length: std::time::Duration::from_millis(u64::from(d.length_ms)),
                     processed: cat.processed.contains_key(id),
-                    cutoff_hz: cat.measurements.get(id).map(|(hz, analyser)| {
-                        crate::model::encoding::Measured {
-                            value: *hz,
-                            analyser: *analyser,
-                        }
+                    cutoff_hz: cat
+                        .measurements
+                        .get(id)
+                        .map(|m| crate::model::encoding::Measured {
+                            value: m.cutoff_hz,
+                            analyser: m.analyser,
+                        }),
+                    cliff_db: cat.measurements.get(id).and_then(|m| {
+                        m.cliff_db.map(|db| crate::model::encoding::Measured {
+                            value: db,
+                            analyser: m.analyser,
+                        })
                     }),
                     gain: None,
                     levels: cat.levels.get(id).copied().unwrap_or_default(),
@@ -1404,6 +1411,7 @@ impl Librarian {
             // what the file claims; this is where its spectrum actually stops,
             // so a 320 that came from a 128 shows up as the two disagreeing.
             cutoff_hz: shown.and_then(|e| e.cutoff_hz).map(|m| m.value),
+            cliff_db: shown.and_then(|e| e.cliff_db).map(|m| m.value),
             sample_rate: shown.and_then(|e| e.sample_rate),
             channels: shown.and_then(|e| e.channels),
             // **Of the recording, not of the slot** (#155). `shown` is empty
@@ -2228,6 +2236,7 @@ mod tests {
                 length: std::time::Duration::from_secs(200),
                 processed: false,
                 cutoff_hz: None,
+                cliff_db: None,
                 gain: None,
                 levels: Default::default(),
                 encoder_delay: None,
@@ -2320,6 +2329,7 @@ mod tests {
                 length: std::time::Duration::from_secs(180),
                 processed: false,
                 cutoff_hz: None,
+                cliff_db: None,
                 gain: None,
                 levels: Default::default(),
                 encoder_delay: None,
@@ -3441,8 +3451,14 @@ mod tests {
         // A quality pass runs — separately, because an FFT over a library is
         // minutes where hashing is seconds.
         let (bad, good) = (Id::of_audio(&lying), Id::of_audio(&honest));
-        i.measured(200, bad, 15_700, crate::model::encoding::ANALYSER);
-        i.measured(200, good, 19_800, crate::model::encoding::ANALYSER);
+        i.measured(200, bad, 15_700, Some(52), crate::model::encoding::ANALYSER);
+        i.measured(
+            200,
+            good,
+            19_800,
+            Some(58),
+            crate::model::encoding::ANALYSER,
+        );
 
         let l = Librarian::from_catalogue(&i.catalogue());
         assert_eq!(
@@ -3488,7 +3504,7 @@ mod tests {
                 ..Default::default()
             }],
         );
-        i.measured(200, Id::of_audio(&a), 19_000, ANALYSER - 1);
+        i.measured(200, Id::of_audio(&a), 19_000, None, ANALYSER - 1);
 
         let l = Librarian::from_catalogue(&i.catalogue());
         assert_eq!(l.encodings.stale_measurements(), vec![Id::of_audio(&a)]);

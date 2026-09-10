@@ -1008,6 +1008,7 @@ pub(crate) fn number_of(f: Field, s: &Subject<'_>) -> Option<i64> {
         Field::Duration => r.duration.as_secs() as i64,
         Field::Bitrate => i64::from(r.bitrate?),
         Field::Cutoff => i64::from(r.cutoff_hz?),
+        Field::Cliff => i64::from(r.cliff_db?),
         Field::SampleRate => i64::from(r.sample_rate?),
         Field::Channels => i64::from(r.channels?),
         _ => return None,
@@ -1830,6 +1831,34 @@ mod tests {
         // And a file that is what it says stays out of it.
         drawn.cutoff_hz = Some(20_000);
         assert!(!ask(&drawn, "bitrate>256&cutoff<16000"));
+
+        // **And the cliff is what makes the cutoff readable** — #184. A
+        // sparse recording and a transcode both stop early; only the shape of
+        // the fall tells them apart, so the honest query names both.
+        drawn.cutoff_hz = Some(8_100);
+        drawn.cliff_db = Some(10); // music, nothing up there
+        assert!(
+            ask(&drawn, "cutoff<16000"),
+            "the cutoff alone still catches it"
+        );
+        assert!(
+            !ask(&drawn, "cutoff<16000&cliff>25"),
+            "and the cliff is what says it is not a transcode"
+        );
+
+        drawn.cutoff_hz = Some(15_700);
+        drawn.cliff_db = Some(52); // an encoder's wall
+        assert!(ask(&drawn, "cutoff<16000&cliff>25"));
+
+        // Measured before the cliff was recorded: neither answer, which is
+        // the third one again.
+        drawn.cliff_db = None;
+        assert!(!ask(&drawn, "cliff?"));
+        assert!(!ask(&drawn, "cutoff<16000&cliff>25"));
+        assert!(
+            ask(&drawn, "cutoff?"),
+            "the cutoff it does have is still there"
+        );
     }
 
     #[test]

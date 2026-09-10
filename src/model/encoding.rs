@@ -221,6 +221,14 @@ pub struct Encoding {
     /// are different jobs. What it is for is being *askable*.
     pub processed: bool,
     pub cutoff_hz: Option<Measured<u32>>,
+    /// **How far the spectrum falls above the cutoff** — #184, and the half
+    /// that makes the other half readable. An encoder's lowpass is a cliff and
+    /// music is a slope; `cutoff_hz` alone cannot tell them apart, so a rule
+    /// reading it calls a sparse recording a transcode.
+    ///
+    /// `None` where the cutoff was taken before this was recorded, which is
+    /// a third answer and not a zero.
+    pub cliff_db: Option<Measured<u8>>,
     pub gain: Option<Measured<Gain>>,
     /// ReplayGain as the tags claim it — what a fader applies. Not
     /// [`Encoding::gain`], which is what an analyser found.
@@ -468,6 +476,7 @@ mod tests {
             bitrate,
             sample_rate: Some(44_100),
             channels: Some(2),
+            cliff_db: None,
             length: std::time::Duration::from_secs(200),
             processed: false,
             cutoff_hz: cutoff.map(Measured::now),

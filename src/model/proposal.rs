@@ -98,6 +98,14 @@ pub enum Proposal {
     Measured {
         encoding: Id<Encoding>,
         cutoff_hz: u32,
+        /// How far it falls in the kilohertz above the cutoff — #184.
+        ///
+        /// **Optional on the wire so a tool written before it still applies**,
+        /// and because it is genuinely unknowable for a row measured earlier.
+        /// A fact without it says the spectrum was measured and the reason it
+        /// stopped was not, which is the truth about 7,210 rows.
+        #[serde(default)]
+        cliff_db: Option<u8>,
         analyser: u16,
     },
     /// A genre, and where it came from. The genre pipeline's output — and the
@@ -1201,10 +1209,12 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
         Proposal::Measured {
             encoding,
             cutoff_hz,
+            cliff_db,
             analyser,
         } => vec![Fact::EncodingMeasured {
             encoding,
             cutoff_hz,
+            cliff_db,
             analyser,
         }],
         // The genre is named rather than identified, because a tool has no way
@@ -2152,6 +2162,7 @@ pub(crate) mod tests {
             Fact::EncodingMeasured {
                 encoding: enc(1),
                 cutoff_hz: 15_700,
+                cliff_db: None,
                 analyser: 1,
             }
         );
@@ -3027,6 +3038,7 @@ pub(crate) mod tests {
             Fact::EncodingMeasured {
                 encoding: enc(1),
                 cutoff_hz: 19_800,
+                cliff_db: None,
                 analyser: 1,
             }
         );

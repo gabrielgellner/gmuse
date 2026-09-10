@@ -175,6 +175,10 @@ pub struct Listed<'a> {
     /// folder somebody moved things into — see CLAUDE.md, and the 56 albums
     /// that came back.
     pub cutoff_hz: Option<u32>,
+    /// **How far it falls above the cutoff**, where anything measured it.
+    /// Without this a cutoff cannot be read: an encoder's lowpass is a cliff
+    /// and music is a slope, and `cutoff<16000` alone finds both.
+    pub cliff_db: Option<u8>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     /// **Whether the library holds a file for this row at all** — #155.
@@ -220,6 +224,10 @@ pub struct Drawn {
     pub year: Option<i32>,
     pub bitrate: Option<u32>,
     pub cutoff_hz: Option<u32>,
+    /// **How far it falls above the cutoff**, where anything measured it.
+    /// Without this a cutoff cannot be read: an encoder's lowpass is a cliff
+    /// and music is a slope, and `cutoff<16000` alone finds both.
+    pub cliff_db: Option<u8>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     pub held: bool,
@@ -270,6 +278,7 @@ impl Listed<'_> {
             year: self.year,
             bitrate: self.bitrate,
             cutoff_hz: self.cutoff_hz,
+            cliff_db: self.cliff_db,
             sample_rate: self.sample_rate,
             channels: self.channels,
             held: self.held,
@@ -319,6 +328,7 @@ impl Drawn {
             year: self.year,
             bitrate: self.bitrate,
             cutoff_hz: self.cutoff_hz,
+            cliff_db: self.cliff_db,
             sample_rate: self.sample_rate,
             channels: self.channels,
             held: self.held,
@@ -526,6 +536,7 @@ mod tests {
             year: Some(1998),
             bitrate: Some(320),
             cutoff_hz: Some(15_700),
+            cliff_db: Some(52),
             sample_rate: Some(44_100),
             channels: Some(2),
             held: true,

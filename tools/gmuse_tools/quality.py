@@ -590,13 +590,18 @@ def propose(rows: Path, out: Path, analyser: int) -> None:
             if found is None:
                 skipped += 1
                 continue
-            cutoff_khz, _cliff = found
+            cutoff_khz, cliff = found
+            # **The cliff travels with the cutoff** — #184. It was measured
+            # here and dropped on the floor, so 7,210 facts recorded where a
+            # spectrum stops and not whether that was an encoder or the music,
+            # and `albums` had to re-read every file to say which.
             sink.write(
                 json.dumps(
                     {
                         "fact": "measured",
                         "encoding": encoding,
                         "cutoff_hz": round(cutoff_khz * 1000),
+                        "cliff_db": min(round(cliff), 255) if cliff is not None else None,
                         "analyser": analyser,
                     }
                 )

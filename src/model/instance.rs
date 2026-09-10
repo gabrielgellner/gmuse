@@ -1349,12 +1349,20 @@ impl Instance {
     /// Deliberately not part of `ingest`: measuring is minutes where hashing
     /// is seconds, and the answer only changes when the bytes or the analyser
     /// do.
-    pub fn measured(&mut self, now: i64, encoding: Id<Encoding>, cutoff_hz: u32, analyser: u16) {
+    pub fn measured(
+        &mut self,
+        now: i64,
+        encoding: Id<Encoding>,
+        cutoff_hz: u32,
+        cliff_db: Option<u8>,
+        analyser: u16,
+    ) {
         self.append(
             now,
             Fact::EncodingMeasured {
                 encoding,
                 cutoff_hz,
+                cliff_db,
                 analyser,
             },
         );
