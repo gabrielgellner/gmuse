@@ -91,6 +91,13 @@ CANDIDATES: Final = 5
 #: Short releases are still *reported* as exact. They are simply not marked.
 ENOUGH_TO_TRUST: Final = 4
 
+#: How alike two titles must be before one is taken to name the other.
+#:
+#: `difflib`'s own default for `get_close_matches`, and `diffs` already pairs
+#: with it — so a difference the review file shows as a pair is a difference
+#: `seated` will seat as a pair. Two windows onto one judgement.
+TITLES_AGREE: Final = 0.6
+
 #: Characters no filesystem in this library's life should have to carry. The
 #: library is read on macOS and backed up to a NAS that has seen Windows.
 #: Annotated rather than inlined: `dict.fromkeys` infers a `LiteralString` key
@@ -658,6 +665,71 @@ class Wanted:
     release: str
 
 
+def seated(
+    ours: list[tuple[Path, str]], theirs: list[tuple[dict[str, Any], dict[str, Any]]]
+) -> list[tuple[tuple[Path, str], tuple[dict[str, Any], dict[str, Any]]]]:
+    """Which file becomes which track.
+
+    **By title where a title can say, and by position where it cannot.**
+
+    This was `zip`, and `zip` is wrong in the one case that looks safest.
+    `tracklist_match` computes its verdict on **sets**, so `exact` means every
+    title exists on both sides and says nothing whatever about the order. Two
+    of the thirteen albums accepted from the Aphex Twin review were `exact` at
+    100% and had two tracks transposed against MusicBrainz's running order:
+
+        Hangable Auto Bulb   pos 7  'Every Day'    would have been tagged 'Arched Maid Via RDJ'
+        Dokey Rhubarb EP     pos 2  'Icct Hedral'  would have been tagged 'Vaz Deferenz'
+
+    Silent, and worst on the strongest verdict: a high share is exactly when
+    every title is present on both sides, which is exactly when a reordering
+    leaves no trace in the diff. And `exact` is the verdict `survey` pre-marks
+    for acceptance unread, so the unattended path carried the whole risk.
+
+    **Best pair first, not first-come.** Assigning greedily in our order would
+    let `We Have Arrived (Aphex Twin QQT mix)` claim the `TTQ` track it is
+    nearly as close to; sorting every candidate pair by similarity and taking
+    them strongest-first lets each exact title win before its near-twin gets a
+    chance.
+
+    **Whatever is left falls back to position**, which is the honest answer
+    where titles cannot decide — a release MusicBrainz lists as `[untitled]`
+    throughout, or this corpus's own `(Untitled) Red A1`. That is the case
+    `named_release` exists for, and there position is the only signal there is.
+    """
+    keyed_ours = [compare_key(t) for _, t in ours]
+    keyed_theirs = [compare_key(t["title"]) for _, t in theirs]
+    scored = [
+        (difflib.SequenceMatcher(None, a, b).ratio(), i, j)
+        for i, a in enumerate(keyed_ours)
+        for j, b in enumerate(keyed_theirs)
+    ]
+
+    def strongest(scored_pair: tuple[float, int, int]) -> tuple[float, int, int]:
+        ratio, i, j = scored_pair
+        return (-ratio, i, j)
+
+    scored.sort(key=strongest)
+
+    taken_ours: set[int] = set()
+    taken_theirs: set[int] = set()
+    seats: dict[int, int] = {}
+    for ratio, i, j in scored:
+        if ratio < TITLES_AGREE:
+            break
+        if i in taken_ours or j in taken_theirs:
+            continue
+        seats[i] = j
+        taken_ours.add(i)
+        taken_theirs.add(j)
+
+    spare = [j for j in range(len(theirs)) if j not in taken_theirs]
+    for i in range(len(ours)):
+        if i not in seats and spare:
+            seats[i] = spare.pop(0)
+    return [(ours[i], theirs[j]) for i, j in sorted(seats.items())]
+
+
 def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> None:
     """Identify, tag, rename, and optionally move into the library."""
     pairs = our_titles(folder)
@@ -681,7 +753,7 @@ def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> No
     release = match.release
     tally: collections.Counter[str] = collections.Counter()
     flat = [(m, t) for m in release["media"] for t in m["tracks"]]
-    for (path, _), (disc, track) in zip(pairs, flat, strict=False):
+    for (path, _), (disc, track) in seated(pairs, flat):
         write_tags(path, release, disc, track)
         renamed = path.with_name(safe_name(track["position"], track["title"], path.suffix))
         if renamed != path:
@@ -711,7 +783,7 @@ LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
 RELEASE = typer.Option("", help="a MusicBrainz release id you have checked yourself")
 
 
-def diffs(ours: list[str], theirs: list[str], limit: int = 3) -> str:
+def diffs(ours: list[str], theirs: list[str]) -> list[dict[str, str | None]]:
     """What disagrees, **as a pair**: what we call it and what they call it.
 
     A share says how much disagrees and never what, and a list of our own
@@ -724,28 +796,49 @@ def diffs(ours: list[str], theirs: list[str], limit: int = 3) -> str:
     report every line as a difference. `difflib` is enough here and is already
     in the standard library.
 
-    A title with nothing close on the other side is shown alone, because that
-    is the interesting case: it means the two records really differ rather than
-    one of them being spelled oddly.
+    A title with nothing close on the other side is paired with `None`, because
+    that is the interesting case: it means the two records really differ rather
+    than one of them being spelled oddly.
+
+    **Every one of them, and structured.** This joined the first three with
+    ` · ` and finished `+9 more`, which hid the answer to the only question the
+    row exists to ask. Accepting a release means accepting *all* of its titles,
+    so a reviewer who cannot see all of them is being asked to take the rest on
+    trust — and the rest is where a wrong edition hides.
+
+    Structured rather than a longer line for two reasons. A reader that
+    understands JSON renders twenty pairs as twenty rows; twenty pairs joined
+    by ` · ` are one line nobody reads to the end. And `json.dumps` escapes a
+    tab, where a raw title carrying one makes `write_tsv` refuse the row — so
+    the column that most wants free text becomes the one that cannot break the
+    file.
     """
     theirs_keys = {compare_key(t) for t in theirs}
     ours_keys = {compare_key(t) for t in ours}
     only_ours = [t for t in ours if compare_key(t) not in theirs_keys]
     only_theirs = [t for t in theirs if compare_key(t) not in ours_keys]
 
-    shown: list[str] = []
+    shown: list[dict[str, str | None]] = []
     left = list(only_theirs)
     for mine in only_ours:
         near = difflib.get_close_matches(compare_key(mine), [compare_key(t) for t in left], n=1, cutoff=0.6)
         if near:
             i = next(i for i, t in enumerate(left) if compare_key(t) == near[0])
-            shown.append(f"{mine!r} -> {left.pop(i)!r}")
+            shown.append({"ours": mine, "theirs": left.pop(i)})
         else:
-            shown.append(f"{mine!r} -> (nothing like it)")
-    shown += [f"(nothing like it) -> {t!r}" for t in left]
+            shown.append({"ours": mine, "theirs": None})
+    shown += [{"ours": None, "theirs": t} for t in left]
+    return shown
 
-    head = " · ".join(shown[:limit])
-    return head + (f" · +{len(shown) - limit} more" if len(shown) > limit else "")
+
+def as_cell(found: list[dict[str, object]] | list[dict[str, str | None]]) -> str:
+    r"""One column of structured detail, safe to put in a tab-separated file.
+
+    `ensure_ascii=False` because the titles are the point and an escaped `\u00e9`
+    is not a title anybody can read. The tab and the newline are still escaped,
+    which is the whole reason this is safe here.
+    """
+    return json.dumps(found, ensure_ascii=False) if found else ""
 
 
 def survey(root: Path, out: Path) -> None:
@@ -779,7 +872,8 @@ def survey(root: Path, out: Path) -> None:
                     "theirs": "",
                     "album": rel,
                     "release": "",
-                    "differs": "; ".join(short),
+                    "credited": "",
+                    "differs": as_cell([{"short": line} for line in short]),
                 }
             )
             continue
@@ -799,7 +893,8 @@ def survey(root: Path, out: Path) -> None:
                     "theirs": "",
                     "album": rel,
                     "release": "",
-                    "differs": str(e)[:80],
+                    "credited": "",
+                    "differs": as_cell([{"error": str(e)}]),
                 }
             )
             continue
@@ -813,17 +908,18 @@ def survey(root: Path, out: Path) -> None:
                     "theirs": "",
                     "album": rel,
                     "release": "",
+                    "credited": "",
                     "differs": "",
                 }
             )
             continue
         theirs = [t["title"] for m in match.release.get("media", []) for t in m.get("tracks", [])]
-        # **Say who it matched as, where that is not the folder.** A person
-        # reading this row is being asked to accept a release credited to
-        # somebody the folder does not name, and that is the thing worth
-        # seeing — not a detail. It rides in `differs` rather than in a new
-        # column because `accept` reads this file by name.
-        found_as = "" if credited == artist else f"as {credited}: "
+        # **Say who it matched as, where that is not the folder** — its own
+        # column, because a person reading this row is being asked to accept a
+        # release credited to somebody the folder does not name, and that is a
+        # fact about the row rather than a note about its differences.
+        # `accept` reads this file with `DictReader`, so a column costs it
+        # nothing.
         rows.append(
             {
                 "accept": "y" if match.verdict == "exact" else "",
@@ -833,7 +929,8 @@ def survey(root: Path, out: Path) -> None:
                 "theirs": len(theirs),
                 "album": rel,
                 "release": match.release["id"],
-                "differs": found_as + diffs(ours, theirs),
+                "credited": "" if credited == artist else credited,
+                "differs": as_cell(diffs(ours, theirs)),
             }
         )
     # **Ordered by what wants reading**, not alphabetically. A file of 139 rows

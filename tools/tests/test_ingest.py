@@ -77,7 +77,7 @@ def test_a_difference_shows_both_sides() -> None:
     from gmuse_tools.ingest import diffs  # noqa: PLC0415
 
     got = diffs(["Rolling in the Deep", "I Found a Bot (Bonus Track)"], ["Rolling in the Deep", "I Found a Boy"])
-    assert got == "'I Found a Bot (Bonus Track)' -> 'I Found a Boy'"
+    assert got == [{"ours": "I Found a Bot (Bonus Track)", "theirs": "I Found a Boy"}]
 
 
 def test_pairing_survives_a_different_running_order() -> None:
@@ -85,7 +85,7 @@ def test_pairing_survives_a_different_running_order() -> None:
     from gmuse_tools.ingest import diffs  # noqa: PLC0415
 
     got = diffs(["Tuming Tables", "Someone Like You"], ["Someone Like You", "Turning Tables"])
-    assert got == "'Tuming Tables' -> 'Turning Tables'"
+    assert got == [{"ours": "Tuming Tables", "theirs": "Turning Tables"}]
 
 
 def test_a_title_with_nothing_like_it_is_shown_alone() -> None:
@@ -93,15 +93,49 @@ def test_a_title_with_nothing_like_it_is_shown_alone() -> None:
     from gmuse_tools.ingest import diffs  # noqa: PLC0415
 
     got = diffs(["Need You Now"], ["Hiding My Heart"])
-    assert "'Need You Now' -> (nothing like it)" in got
-    assert "(nothing like it) -> 'Hiding My Heart'" in got
+    assert {"ours": "Need You Now", "theirs": None} in got
+    assert {"ours": None, "theirs": "Hiding My Heart"} in got
 
 
 def test_nothing_differing_says_nothing() -> None:
     """An exact match has no diff to print."""
     from gmuse_tools.ingest import diffs  # noqa: PLC0415
 
-    assert diffs(["One", "Two"], ["One", "Two"]) == ""
+    assert diffs(["One", "Two"], ["One", "Two"]) == []
+
+
+def test_every_difference_is_shown_and_the_cell_cannot_break_the_file() -> None:
+    """All of them, because accepting a release accepts all of its titles.
+
+    This joined the first three and finished `+9 more`, which hid the answer to
+    the only question the row exists to ask — and the hidden tail is where a
+    wrong edition lives.
+    """
+    from gmuse_tools.ingest import as_cell, diffs  # noqa: PLC0415
+
+    # Nothing here pairs — `Ours 3` is not close to `Theirs 3` — so each side
+    # is reported alone, which is 24 entries and the strongest form of the
+    # point: none of them may be dropped.
+    ours = [f"Ours {i}" for i in range(12)]
+    theirs = [f"Theirs {i}" for i in range(12)]
+    got = diffs(ours, theirs)
+    assert len(got) == 24, "every difference, not the first three"
+
+    cell = as_cell(got)
+    assert "more" not in cell
+    assert "Ours 11" in cell
+    assert "Theirs 11" in cell
+
+    # **A tab in a title would otherwise make `write_tsv` refuse the row**, so
+    # the column that most wants free text becomes the one that cannot break
+    # the file.
+    nasty = as_cell(diffs(["A\tB"], ["C\nD"]))
+    assert "\t" not in nasty
+    assert "\n" not in nasty
+
+    # And the titles stay readable, which is the point of them.
+    assert "Me\u2019Shell" not in as_cell(diffs(["Me\u2019Shell"], ["Meshell"]))
+    assert as_cell([]) == ""
 
 
 # ---- #155: what a record has, including what we do not hold ----
@@ -292,3 +326,72 @@ def test_a_folder_holding_two_records_names_neither(tmp_path: Path) -> None:
         flac["album"] = [name]
         flac.save()
     assert tagged_album(sorted(folder.iterdir())) == ""
+
+
+def track(title: str, position: int) -> dict[str, object]:
+    """One MusicBrainz track, in the shape `apply` reads."""
+    return {"title": title, "position": position}
+
+
+def test_an_exact_match_can_still_be_in_a_different_order() -> None:
+    """`exact` is computed on sets and says nothing about the running order.
+
+    Two of the thirteen albums accepted from the Aphex Twin review were `exact`
+    at 100% with two tracks transposed, and `zip` would have tagged each with
+    the other's title. Silent, and worst on the strongest verdict — a high
+    share is exactly when every title is present on both sides, which is
+    exactly when a reordering leaves no trace in the diff.
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    from gmuse_tools.ingest import seated  # noqa: PLC0415
+
+    ours = [(Path("7.mp3"), "Every Day"), (Path("8.mp3"), "Arched Maid Via RDJ")]
+    theirs = [({}, track("Arched Maid Via RDJ", 7)), ({}, track("Every Day", 8))]
+
+    got = [(p.name, t["title"]) for (p, _), (_, t) in seated(ours, theirs)]
+    assert got == [("7.mp3", "Every Day"), ("8.mp3", "Arched Maid Via RDJ")]
+
+
+def test_a_near_twin_does_not_steal_an_exact_title() -> None:
+    """Best pair first, not first-come.
+
+    `We Have Arrived (Aphex Twin QQT mix)` is nearly as close to the `TTQ`
+    track as to its own, so assigning greedily in our order would let the first
+    file claim the wrong one. Taking every candidate strongest-first lets each
+    exact title win before its near-twin gets a chance.
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    from gmuse_tools.ingest import seated  # noqa: PLC0415
+
+    ours = [
+        (Path("a.mp3"), "We Have Arrived (Aphex Twin TTQ mix)"),
+        (Path("b.mp3"), "We Have Arrived (Aphex Twin QQT mix)"),
+    ]
+    theirs = [
+        ({}, track("We Have Arrived (Aphex Twin QQT mix)", 1)),
+        ({}, track("We Have Arrived (Aphex Twin TTQ mix)", 2)),
+    ]
+
+    got = {p.name: t["title"] for (p, _), (_, t) in seated(ours, theirs)}
+    assert got["a.mp3"] == "We Have Arrived (Aphex Twin TTQ mix)"
+    assert got["b.mp3"] == "We Have Arrived (Aphex Twin QQT mix)"
+
+
+def test_titles_that_cannot_decide_fall_back_to_position() -> None:
+    """The case `named_release` exists for.
+
+    MusicBrainz lists every track of `Studio 1 - Variationen` as `[untitled]`,
+    which is the sleeve's own labelling — only the numbering carries meaning.
+    There, position is the only signal there is.
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    from gmuse_tools.ingest import seated  # noqa: PLC0415
+
+    ours = [(Path("1.mp3"), "(Untitled) Red A1"), (Path("2.mp3"), "(Untitled) Red A2")]
+    theirs = [({}, track("[untitled]", 1)), ({}, track("[untitled]", 2))]
+
+    got = [(p.name, t["position"]) for (p, _), (_, t) in seated(ours, theirs)]
+    assert got == [("1.mp3", 1), ("2.mp3", 2)]
