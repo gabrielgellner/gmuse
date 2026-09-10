@@ -295,7 +295,21 @@ pub enum Shelf {
     /// and a compilation really can carry two versions, so what to do is a
     /// person's call. What this gives them is the position, both claimants,
     /// and which of them this device can actually open.
-    Slots,
+    Slots {
+        /// **Hand a tool the copies to listen to** — #169's neighbour.
+        ///
+        /// A contested position is exactly the case a name cannot settle:
+        /// both claimants are called the same thing, both are on the same
+        /// record, and the only difference is which audio is in the seat.
+        /// Measured on the first run over this library, duration alone left
+        /// 36 of 80 undecidable and a fingerprint settled 36 of them.
+        ///
+        /// Emits the same rows `query` does, narrowed to the copies sitting
+        /// at a contested position, so `identify fingerprint` reads it with
+        /// no new vocabulary.
+        #[arg(long)]
+        work: bool,
+    },
     /// **Does every file still hash to what the log says it is?**
     ///
     /// Identity here is the audio, so the library's whole account of itself
@@ -345,6 +359,25 @@ pub enum Shelf {
     /// **A file already under `.departed` is accepted**, because that is the
     /// album somebody retired by hand before this existed, and the tombstone
     /// is the only thing it is missing.
+    /// **Bring a retired copy back** — `storage-layout.md` §6.
+    ///
+    /// The other half of `remove`, and `Fact::EncodingRestored` has existed
+    /// since it was written: *"a step you cannot take back is one nobody
+    /// takes, and §6's whole design is that retiring is reversible and purging
+    /// is not."* Nothing could emit it, so the reversibility was a promise the
+    /// vocabulary made and the command line could not keep.
+    ///
+    /// **The bytes move first, then this.** A retirement puts them under
+    /// `.departed` keeping the path they had, so a restore is a move back —
+    /// and this lifts the tombstone off what is now there. Naming a file the
+    /// library never retired is reported, not guessed at.
+    Restore {
+        /// Files or folders to bring back
+        paths: Vec<PathBuf>,
+        /// Lift the tombstones. Without this, nothing happens
+        #[arg(long)]
+        write: bool,
+    },
     Remove {
         /// Files or folders to retire.
         paths: Vec<PathBuf>,

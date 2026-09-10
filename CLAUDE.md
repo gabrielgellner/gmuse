@@ -45,6 +45,29 @@ rule — **the storage tree may use structural facts only**, who made it and wha
 catalog or tempo, because those are browsing and a tree has one dimension. `{file_under}/{album}/{track} {title}`, and
 nothing else. Read it before writing anything that puts a file somewhere.
 
+## Reported, never decided — do not act on a report
+
+Several surfaces exist to **find** something and explicitly refuse to resolve it: `shelf copies`, `shelf slots`,
+`shelf duplicates`, `shelf names`, `shelf artists`, `joined survey`, and the review files the `tools/` passes write.
+Each says so in its own doc, and it is a design position rather than an unfinished feature — the failure mode is not
+symmetric. A split is one merge from repaired; a wrong merge is not. A retired copy needs a restore; a deleted one needs
+a re-download.
+
+**Their output is a decision brief, not a work list.** Summarise, count, name the trade-off, and let the person choose.
+A bucket that "looks unambiguous" is exactly where this goes wrong, because what looks redundant depends on what the
+library is _for_, which the tool does not know.
+
+**The standing example.** `shelf copies` lists one recording held as several encodings, and names the case in its own
+help: _"a FLAC bought over an MP3 already held… That is a supported shape… which to keep, or whether to keep both, is
+not decidable from bitrate alone."_ Holding one track in several distributions is **wanted** — a FLAC to listen to and
+an MP3 that travels, the same record on an album and on a compilation. 53 files were retired on the reasoning that the
+library never plays the lossy copy, which was a guess about purpose dressed as a fact about quality. `replace` (#159)
+settled that two encodings of one recording is the supported shape, and history hangs off the recording so it crosses
+whichever copy is kept.
+
+The same rule holds for `shelf slots`: a disc really can play one recording twice, and a compilation really can carry
+two versions.
+
 ## Workflow
 
 ```sh

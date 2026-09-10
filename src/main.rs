@@ -334,6 +334,70 @@ fn run_library(
     let machine = crate::events::machine_id(&config::default_state_dir());
     let device = crate::model::id::Id::derived(machine.as_bytes());
     match op {
+        cli::Shelf::Restore { paths, write } => {
+            let mut files: Vec<std::path::PathBuf> = Vec::new();
+            for path in paths {
+                if path.is_dir() {
+                    for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
+                        if entry.file_type().is_file() && crate::scan::is_audio(entry.path()) {
+                            files.push(entry.path().to_path_buf());
+                        }
+                    }
+                } else if crate::scan::is_audio(path) {
+                    files.push(path.clone());
+                }
+            }
+            files.sort();
+            if files.is_empty() {
+                eprintln!("no audio under what was named");
+                return Ok(());
+            }
+
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let cat = log.catalogue();
+            // **Resolved by hashing, like a retirement**, for the same reason:
+            // identity is the audio and a path belongs to one device's copy.
+            // It is what lets the bytes be moved back first and named here by
+            // wherever they now sit.
+            let mut coming = Vec::new();
+            for file in &files {
+                match crate::model::ingest::read(file) {
+                    Ok(scanned) => {
+                        let id = crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(
+                            &scanned.audio,
+                        );
+                        if !cat.retired.contains(&id) {
+                            eprintln!("not retired: {}", file.display());
+                        } else {
+                            coming.push(id);
+                        }
+                    }
+                    Err(why) => eprintln!("unreadable: {} — {why}", file.display()),
+                }
+            }
+
+            let fresh = if *write {
+                let now = crate::history::now_ms();
+                for id in &coming {
+                    log.restore_encoding(now, *id);
+                }
+                log.flush(&loaded.data_dir)?
+            } else {
+                0
+            };
+            eprintln!(
+                "{} file(s), {} to restore, {fresh} record(s) written",
+                files.len(),
+                coming.len()
+            );
+            if !*write && !coming.is_empty() {
+                eprintln!("dry run — nothing written. Add --write.");
+            }
+        }
         cli::Shelf::Remove { paths, write } => {
             // Every audio file under what was named, `.departed` included:
             // an album retired by hand before this existed is exactly the case
@@ -715,7 +779,7 @@ fn run_library(
                 );
             }
         }
-        cli::Shelf::Slots => {
+        cli::Shelf::Slots { work } => {
             use crate::model::entity::{Medium, Recording};
             use crate::model::id::Id;
 
@@ -747,6 +811,31 @@ fn run_library(
             // testable and there is one definition of what "contested" means.
             // What is added here is device-local: which claimant has a file.
             let library = crate::model::seam::Librarian::from_catalogue(&cat);
+            // **The same rows `query` hands out, narrowed to the contest.**
+            // A tool listening to these needs a locator and an id, which is
+            // what a work list is — and building a second shape for it would
+            // be a second thing to keep in step with `Queried`.
+            if *work {
+                let contested: std::collections::BTreeSet<Id<Recording>> = library
+                    .contested_slots()
+                    .into_values()
+                    .flatten()
+                    .filter(|r| playable.contains_key(r))
+                    .collect();
+                for row in query::rows(
+                    roots,
+                    log.records(),
+                    device,
+                    crate::history::now_ms(),
+                    query::Only::Everything,
+                ) {
+                    if row.recording.is_some_and(|r| contested.contains(&r)) {
+                        println!("{}", serde_json::to_string(&row)?);
+                    }
+                }
+                return Ok(());
+            }
+
             let mut found = 0usize;
             let mut media: std::collections::BTreeSet<Id<Medium>> = Default::default();
             for ((medium, position), claims) in library.contested_slots() {

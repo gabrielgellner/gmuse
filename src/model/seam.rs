@@ -2267,6 +2267,105 @@ mod tests {
         );
     }
 
+    /// **Every fact that undoes another has a way to be written.**
+    ///
+    /// Three facts exist to take something back — a copy retired, a concept
+    /// asserted, a narrowing — and each one's own doc says why it must: *"a
+    /// step you cannot take back is one nobody takes"*. That argument is about
+    /// the **operator**, not the fold, so a fact nothing can emit satisfies it
+    /// on paper and not at all.
+    ///
+    /// Found twice by walking into it. `EncodingRestored` was defined,
+    /// documented and folded, and no command or proposal reached it — so
+    /// retiring 53 files was reversible in the model and a manual file move
+    /// plus a hand-written log entry in practice. `ConceptRetracted` is the
+    /// same shape and is still open.
+    ///
+    /// The check is deliberately shallow: somewhere outside `log.rs` names
+    /// this fact. It cannot tell whether the route is *reachable*, only that
+    /// one was written, which is exactly the difference between the two states
+    /// this has caught.
+    #[test]
+    fn a_fact_that_undoes_another_can_be_written() {
+        let elsewhere: Vec<String> = read("src")
+            .into_iter()
+            .filter(|(path, _)| !path.contains("log.rs"))
+            .map(|(_, text)| text)
+            .collect();
+        let emitted = |fact: &str| elsewhere.iter().any(|t| t.contains(fact));
+
+        assert!(
+            emitted("EncodingRestored"),
+            "`storage-layout.md` §6 makes retiring reversible, so something has \
+             to be able to say a copy is back"
+        );
+        assert!(
+            emitted("EncodingRetired"),
+            "and something has to be able to retire one"
+        );
+        assert!(
+            emitted("NarrowingRetracted"),
+            "a narrowing that cannot be withdrawn is a vocabulary nobody can correct"
+        );
+        assert!(
+            emitted("CreditRetracted"),
+            "#145's withdrawal is the only thing that can undo a joined credit"
+        );
+    }
+
+    /// **A contested position is what a fingerprint is for.**
+    ///
+    /// Both claimants are called the same thing, both sit on the same record,
+    /// and the only difference between them is which audio is in the seat —
+    /// so a name settles nothing and a length often cannot either. Measured
+    /// over the first 80 such copies here, duration left 36 undecidable and a
+    /// fingerprint identified 36, of which 16 moved the file to a different
+    /// recording.
+    ///
+    /// This is the half the model owes the pass: the recordings a tool has to
+    /// listen to, which is every claimant something here can actually open.
+    #[test]
+    fn a_contested_position_names_the_copies_to_listen_to() {
+        use crate::model::entity::{Medium, Release, Track};
+        use crate::model::spine;
+
+        let release = Id::<Release>::derived(b"a pressing");
+        let medium = Id::<Medium>::of_medium(release, 1);
+        let one = Id::<Recording>::derived(b"what the file says");
+        let other = Id::<Recording>::derived(b"what the tracklist says");
+        let elsewhere = Id::<Recording>::derived(b"an uncontested seat");
+
+        let mut l = Librarian::default();
+        let mut seat = |recording: Id<Recording>, position: u16| {
+            let slot = Id::<Track>::of_track(medium, recording);
+            l.spine.tracks.insert(
+                slot,
+                spine::Track {
+                    id: slot,
+                    medium: crate::model::id::Ref::to(medium),
+                    recording: crate::model::id::Ref::to(recording),
+                    position,
+                    title_on_release: None,
+                },
+            );
+        };
+        seat(one, 4);
+        seat(other, 4);
+        seat(elsewhere, 5);
+
+        let named: std::collections::BTreeSet<Id<Recording>> =
+            l.contested_slots().into_values().flatten().collect();
+        assert!(
+            named.contains(&one) && named.contains(&other),
+            "both claimants have to be listened to — the point is telling them apart"
+        );
+        assert!(
+            !named.contains(&elsewhere),
+            "a seat nobody disputes is not a question, and fingerprinting it \
+             spends a rate limit to be told what the library already knows"
+        );
+    }
+
     /// **A position on a disc holds one thing, and nothing enforced that** —
     /// #168.
     ///

@@ -20,9 +20,13 @@ a download arrives
   5. shelf import        catalogue, render, place                 <- the declaration
   6. rsgain easy         ReplayGain, on the album in its final home
   7. identify + apply    MusicBrainz for whatever step 2 missed
-  8. joined + apply      is a credit one artist or several
-  9. ingest tracklist    what the record has, including what you do not
- 10. audit               what is still wrong
+  8. identify fingerprint what it sounds like, for what no name reached
+  9. joined + apply      is a credit one artist or several
+ 10. version propose     which rendering of a song this is
+ 11. ingest tracklist    what the record has, including what you do not
+ 12. shelf slots --work
+     + identify fingerprint  which recording is actually in each seat  <- listens twice
+ 13. audit               what is still wrong
 ```
 
 **Two orderings are load-bearing and both were learned by breaking them.**
@@ -41,6 +45,18 @@ a duration reads it off the work list rather than asking a tagging library, whic
 `size / first frame's bitrate` where a file has no Xing header: measured on this library, **34 files wrong by more than
 two seconds, one claiming 1735s for a 287s track**. Duration is what corroborates a MusicBrainz match and what buckets a
 duplicate candidate, so one bad number made a file both unidentifiable and undiscoverable.
+
+**Fingerprinting appears twice, and they are different questions.** At step 8 it asks _what is this_ — the rung for a
+file no name reached, which is why it runs after `identify` rather than instead of it. At step 12 it asks _which of
+these two_ — a contested position (#168) is the one case a name cannot settle at all, because both claimants are called
+the same thing and sit on the same record. Measured over the first 80 such copies here, duration left **36 of 80
+undecidable** and a fingerprint identified 36, of which **16 moved the file to a different recording**.
+`shelf slots --work` emits exactly those copies in the shape `identify fingerprint` already reads.
+
+**Step 12 can only run after step 11**, for the reason step 6 runs after step 5: a position is not contested until a
+tracklist has said what belongs in it. On a clean import nothing reaches step 12 at all — five Die Antwoord albums went
+through this flow and produced no contested seat, because the album match at step 2 named all 57 files and nothing later
+disagreed.
 
 **Step 5 now refuses what nothing has named** (#160). `shelf import` used to catalogue anything readable and rest on
 `Basis::Audio` whatever carried no MusicBrainz id — which is how 479 recordings arrived on their bytes in a single run.

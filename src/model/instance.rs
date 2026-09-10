@@ -688,6 +688,13 @@ impl Instance {
         self.append(now, Fact::EncodingRetired { encoding });
     }
 
+    /// **A retired copy is back.** The other half of the pair, and not
+    /// optional for the reason the fact's own doc gives: a step you cannot
+    /// take back is one nobody takes.
+    pub fn restore_encoding(&mut self, now: i64, encoding: Id<Encoding>) {
+        self.append(now, Fact::EncodingRestored { encoding });
+    }
+
     #[allow(
         dead_code,
         reason = "used by tests; #154 is served by `Proposal::Named`, and a proposal emits its facts rather than calling an `Instance` method — this stays the shortest way for a test to say the same thing"
