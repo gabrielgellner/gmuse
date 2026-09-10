@@ -638,17 +638,22 @@ pub enum Proposal {
     /// is an id because it already exists and minting a second from a string
     /// is what #152 was about, but the alias itself is what a person reads.
     ///
-    /// The kind matters and is not a formality. `retired` is a name this
-    /// library used to use; `search-hint` is another spelling the world uses —
-    /// `Puffy AmiYumi` for `PUFFY`, which `joined.py` refetches from
-    /// MusicBrainz on every run because nothing records it; `legal-name` is a
-    /// person behind a stage name. A report that cannot tell them apart is
-    /// the state this replaces.
+    /// The kind matters and is not a formality. `artist-name` is another name
+    /// the artist is known by — `AFX` for Aphex Twin; `search-hint` is another
+    /// spelling the world uses — `Puffy AmiYumi` for `PUFFY`, which
+    /// `joined.py` refetches from MusicBrainz on every run because nothing
+    /// records it; `legal-name` is the person behind a stage name. A report
+    /// that cannot tell them apart is the state this replaces.
+    ///
+    /// **`retired` is the fourth word and not the fourth kind** (#176). It is
+    /// a name this library used to use, which is what happened to a name
+    /// rather than what kind of name it is, so it writes a
+    /// [`Fact::HeadingRetired`] instead.
     Aliased {
         artist: Id<Artist>,
         /// The other name, as a person would read it.
         name: String,
-        /// `retired`, `search-hint`, or `legal-name`.
+        /// `artist-name`, `search-hint`, `legal-name`, or `retired`.
         kind: String,
     },
     /// A rating. Included because it is the simplest possible proposal and
