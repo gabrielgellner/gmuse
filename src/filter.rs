@@ -972,7 +972,20 @@ pub(crate) fn texts_of(f: Field, s: &Subject<'_>) -> Vec<String> {
     let one = |v: Option<&str>| v.map(|v| vec![v.to_string()]).unwrap_or_default();
     let r = &s.row;
     match f {
-        Field::Artist => one(r.artist),
+        // **Every name the credited identities answer to, not one string** —
+        // #179. `texts_of` returns a list precisely because one field can have
+        // several values, and artist was the second field for which that was
+        // false: `artist="*campfire*"` found nothing though the library knows
+        // Animal Collective is also Campfire Songs and `shelf names` prints it.
+        //
+        // The printed credit first, so the ordinary case is unchanged, then
+        // the names the row does not print — hidden ones included, because a
+        // filter is the caller `AliasKind::shown` does not apply to (#176).
+        // Search should reach `aphextwinsucks`; nothing should ever print it.
+        Field::Artist => one(r.artist)
+            .into_iter()
+            .chain(r.also_known_as.iter().cloned())
+            .collect(),
         Field::AlbumArtist => one(r.album_artist),
         Field::FileUnder => vec![r.file_under.to_string()],
         // The album and title **as tagged**. `r.album` stands a placeholder in
@@ -1785,6 +1798,60 @@ mod tests {
         }
         // And the over-match regex would have allowed does not happen.
         assert!(!Glob::new("Anderson .Paak").matches("Anderson XPaak"));
+    }
+
+    /// **A name the artist also has finds the files** — #179.
+    ///
+    /// `artist=` matched one string, so `artist="*campfire*"` found nothing
+    /// though the library knows Animal Collective is also Campfire Songs —
+    /// the heading a merge retired, which `HeadingRetired` keeps findable in
+    /// as many words. `texts_of` returns a list precisely because one field
+    /// can genuinely have several values, and artist was the second field for
+    /// which that had stopped being true.
+    #[test]
+    fn an_artist_is_found_by_every_name_it_answers_to() {
+        let t = track();
+        let (mut drawn, recording) = subject_of(&t);
+        let ask = |drawn: &crate::model::rows::Drawn, expr: &str| {
+            let subject = Subject {
+                row: drawn.listed(),
+                locator: t.path.to_str(),
+                recording,
+            };
+            Expr::parse(expr)
+                .expect("should parse")
+                .compile(Env::default())(&subject)
+        };
+
+        drawn.artist = Some("Animal Collective".into());
+        assert!(ask(&drawn, "artist=\"Animal Collective\""), "its own name");
+        assert!(
+            !ask(&drawn, "artist=\"*campfire*\""),
+            "and nothing else, while it answers to nothing else"
+        );
+
+        // The retired heading, and a hidden search hint beside it. Both are
+        // findable; only one of them is ever printed.
+        drawn.also_known_as = vec!["Campfire Songs".into(), "animalcollective".into()];
+        assert!(ask(&drawn, "artist=\"*campfire*\""), "the retired heading");
+        assert!(ask(&drawn, "artist=\"Campfire Songs\""), "exactly, too");
+        assert!(
+            ask(&drawn, "artist=\"animalcollective\""),
+            "and a hidden name a filter is exactly the caller for (#176)"
+        );
+
+        // **The printed credit is untouched.** A name that finds is not a name
+        // that shows: the whole point of the display axis being a sibling of
+        // the kind axis rather than a sort of one.
+        assert_eq!(
+            drawn.listed().artist,
+            Some("Animal Collective"),
+            "search reaches the hidden name; nothing prints it"
+        );
+
+        // And the artist's own name still answers, so the extra names are
+        // additive rather than a replacement.
+        assert!(ask(&drawn, "artist=\"Animal Collective\""));
     }
 
     /// **What a file claims against what it turned out to be** — the query

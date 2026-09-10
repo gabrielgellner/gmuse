@@ -214,6 +214,9 @@ enum Lookup<'a> {
         l: &'a Librarian,
         credits: BTreeMap<CreditOn, Vec<&'a crate::model::reference::Credit>>,
         encodings: BTreeMap<Id<Recording>, Vec<&'a crate::model::encoding::Encoding>>,
+        /// Alias values by artist, so #179's extra names are a map lookup per
+        /// row rather than a walk of every alias in the library.
+        aliases: BTreeMap<Id<crate::model::entity::Artist>, Vec<String>>,
     },
 }
 
@@ -224,6 +227,7 @@ impl<'a> Lookup<'a> {
             l,
             credits: l.reference.by_subject(),
             encodings: l.encodings.by_recording(),
+            aliases: l.reference.aliases_by_artist(),
         }
     }
 
@@ -239,6 +243,39 @@ impl<'a> Lookup<'a> {
                 .map(|found| l.reference.line_of(found))
                 .unwrap_or_default(),
         }
+    }
+
+    /// **The other names the artists credited here answer to** — #179.
+    ///
+    /// Names of the *same identity*, and deliberately not of a related one: a
+    /// moniker is its own artist, so `artist="AFX"` finds what was released as
+    /// AFX and does not pull in the rest of Aphex Twin. Following the moniker
+    /// graph is a different question, and #174 gave it a different sentence.
+    ///
+    /// Hidden aliases included — a filter is the caller `AliasKind::shown`
+    /// does not apply to (#176).
+    fn also_known_as(&self, subject: CreditOn) -> Vec<String> {
+        let of = |id| match self {
+            Lookup::Direct(l) => l.reference.names_of(id),
+            Lookup::Built { l, aliases, .. } => {
+                let mut out: Vec<String> = l
+                    .reference
+                    .artists
+                    .get(&id)
+                    .map(|a| vec![a.name.clone()])
+                    .unwrap_or_default();
+                out.extend(aliases.get(&id).into_iter().flatten().cloned());
+                out
+            }
+        };
+        let credits: Vec<_> = match self {
+            Lookup::Direct(l) => l.reference.credits_on(subject),
+            Lookup::Built { credits, .. } => credits.get(&subject).cloned().unwrap_or_default(),
+        };
+        credits
+            .into_iter()
+            .flat_map(|c| of(c.artist.id()))
+            .collect()
     }
 
     /// The same line resolved through the artist, for a caller that groups.
@@ -716,6 +753,27 @@ impl Librarian {
             });
             a.name = name.clone();
             a.sort_name = name.clone();
+        }
+        // **The names, which never crossed before** — #179.
+        //
+        // `cat.aliases` has held them since the fold learned `AliasAsserted`,
+        // and `Reference::aliases` has been the field they belong in, and
+        // nothing carried one to the other. So every reader below this line
+        // saw a library with no aliases in it: `artist_named` resolved only
+        // by artists' own names, `shelf names` printed none, and the single
+        // alias this library holds — the `Campfire Songs` an Animal
+        // Collective merge retired — was unreachable from anywhere.
+        //
+        // The basis is `Manual`: a row that reached the catalogue was written
+        // by something, and the fold does not keep which rung. Weakening it to
+        // `Path` would let a re-import outrank a name a person recorded.
+        for (subject, value, kind) in &cat.aliases {
+            l.reference.aliases.push(crate::model::reference::Alias {
+                subject: *subject,
+                value: value.clone(),
+                kind: *kind,
+                basis: crate::model::reference::Source::Manual,
+            });
         }
         // **The artist graph, kept as edges** — #174. Both ends stay rows;
         // only a level collapses them, so nothing here redirects.
@@ -1349,6 +1407,40 @@ impl Librarian {
         // below are four passes over every credit in the library, per row.
         let line = |subject: CreditOn| by.line(subject);
 
+        // **Only the names this row does not already carry** — #179.
+        //
+        // An artist's own name is usually exactly what the row prints, so
+        // keeping it would put a duplicate string on every row in the library
+        // to serve the few that have a second name. Filtered against the
+        // printed forms, this is empty for almost all of them.
+        //
+        // Normalised for the comparison, which is what `artist_named` resolves
+        // by: a name differing only in case or marks is already carried.
+        //
+        // **Each credit line is formatted once and used twice.** `line_of`
+        // joins credits into a string, and asking it again here to find out
+        // what the row prints would double that work on every row.
+        let credited = line(CreditOn::Recording(recording));
+        let album_line = group.map(|g| line(CreditOn::ReleaseGroup(g)));
+        let also_known_as = {
+            let mut seen: std::collections::BTreeSet<String> = [
+                Some(row.file_under.as_str()),
+                Some(credited.as_str()),
+                album_line.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|p| !p.is_empty())
+            .map(crate::model::ingest::normalise)
+            .collect();
+            let mut names: Vec<String> = std::iter::once(CreditOn::Recording(recording))
+                .chain(group.map(CreditOn::ReleaseGroup))
+                .flat_map(|s| by.also_known_as(s))
+                .collect();
+            names.retain(|n| seen.insert(crate::model::ingest::normalise(n)));
+            names
+        };
+
         Some(Drawn {
             file_under: row.file_under,
             album: row
@@ -1362,17 +1454,15 @@ impl Librarian {
             track: (track != u16::MAX).then_some(u32::from(track)),
             title: row.title.clone(),
             duration: row.length,
-            artist: {
-                let credited = line(CreditOn::Recording(recording));
-                (!credited.is_empty()).then_some(credited)
-            },
-            album_artist: group.map(|g| line(CreditOn::ReleaseGroup(g))),
+            artist: (!credited.is_empty()).then_some(credited),
+            album_artist: album_line,
             // The model's title *is* the tagged one, normalised. There is no
             // file name to fall back to here, which is the point: a row holds
             // no location, so it cannot borrow one for a label.
             title_if_named: (!row.title.is_empty()).then(|| row.title.clone()),
             album_if_named: row.album,
             concepts,
+            also_known_as,
             label: on_release
                 .and_then(|r| r.label)
                 .and_then(|l| self.reference.labels.get(&l.id()))
@@ -3155,6 +3245,114 @@ mod tests {
             shown,
             ["Rock", "Alternative Rock", "Blues Rock"],
             "the genres were not ordered by how broad they are"
+        );
+    }
+
+    /// **The aliases reach the row, which they never did** — #179.
+    ///
+    /// `cat.aliases` has held them since the fold learned `AliasAsserted`, and
+    /// `Reference::aliases` is the field they belong in, and nothing carried
+    /// one to the other. Every reader below `from_catalogue` therefore saw a
+    /// library with no aliases in it — including the single one this library
+    /// actually holds, the `Campfire Songs` an Animal Collective merge
+    /// retired.
+    ///
+    /// **And a moniker is deliberately not followed.** A name of the same
+    /// identity is findable; a *related* identity is a different question, and
+    /// #174 gave it a different sentence. `artist="AFX"` finds what was
+    /// released as AFX and must not pull in the rest of Aphex Twin.
+    #[test]
+    fn a_row_carries_the_other_names_its_artists_answer_to() {
+        use crate::model::instance::{Instance, Scanned};
+        use crate::model::reference::{AliasKind, ArtistRelationKind};
+        use crate::model::rows::Listing;
+
+        let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
+        i.ingest(
+            100,
+            &[Scanned {
+                audio: crate::audio_id::AudioId { scheme: 1, hash: 7 },
+                title: "Queen in My Pictures".into(),
+                artist: "Animal Collective".into(),
+                album: Some("Campfire Songs".into()),
+                ..Default::default()
+            }],
+        );
+
+        let before = Librarian::from_catalogue(&i.catalogue());
+        let artist = before
+            .reference
+            .artist_named("Animal Collective")
+            .expect("the ingest named one");
+        let row_id = *before.rows.keys().next().expect("one row");
+        assert!(
+            before
+                .listed(row_id)
+                .expect("a row")
+                .also_known_as
+                .is_empty(),
+            "nothing has said it answers to anything else yet"
+        );
+
+        // The heading a merge retired, a hidden search hint, and a moniker —
+        // a *separate* identity, related rather than renamed.
+        let other = Id::<crate::model::entity::Artist>::derived(b"avey tare");
+        for fact in [
+            crate::model::log::Fact::HeadingRetired {
+                subject: crate::model::reference::Cataloguable::Artist(artist),
+                value: "Campfire Songs".into(),
+            },
+            crate::model::log::Fact::AliasAsserted {
+                subject: crate::model::reference::Cataloguable::Artist(artist),
+                value: "animalcollective".into(),
+                kind: AliasKind::SearchHint,
+            },
+            crate::model::log::Fact::ArtistNamed {
+                artist: other,
+                name: "Avey Tare".into(),
+            },
+            crate::model::log::Fact::ArtistRelated {
+                from: other,
+                to: artist,
+                kind: ArtistRelationKind::MemberOf,
+                period: None,
+            },
+        ] {
+            i.append_fact(200, fact);
+        }
+
+        let l = Librarian::from_catalogue(&i.catalogue());
+        let row = l.listed(row_id).expect("a row");
+
+        assert!(
+            row.also_known_as.iter().any(|n| n == "Campfire Songs"),
+            "the retired heading never reached the row: {:?}",
+            row.also_known_as
+        );
+        assert!(
+            row.also_known_as.iter().any(|n| n == "animalcollective"),
+            "nor did the hidden name, which is the one a filter is for"
+        );
+
+        // **Its own name is not in here.** It is already printed, and keeping
+        // it would put a duplicate string on every row in the library to serve
+        // the few that have a second name.
+        assert!(
+            !row.also_known_as.iter().any(|n| n == "Animal Collective"),
+            "the printed name must not be repeated: {:?}",
+            row.also_known_as
+        );
+        assert_eq!(
+            row.artist,
+            Some("Animal Collective"),
+            "and what it prints is unchanged"
+        );
+
+        // **The moniker is a row of its own, not a name of this one.**
+        assert!(
+            !row.also_known_as.iter().any(|n| n == "Avey Tare"),
+            "a related identity is a different question (#174): {:?}",
+            row.also_known_as
         );
     }
 

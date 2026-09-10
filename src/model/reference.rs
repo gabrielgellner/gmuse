@@ -680,6 +680,52 @@ impl Reference {
         chain[climb.min(depth)]
     }
 
+    /// Every alias value, grouped by the artist it names — #179.
+    ///
+    /// **Built once for a pass over the library**, the way `by_subject` is.
+    /// `names_of` walks every alias in the library, and a row asking it per
+    /// credit is the four-passes-per-row shape #123 took out of `Lookup`
+    /// arriving through a different door.
+    pub fn aliases_by_artist(&self) -> BTreeMap<Id<Artist>, Vec<String>> {
+        let mut out: BTreeMap<Id<Artist>, Vec<String>> = BTreeMap::new();
+        for alias in &self.aliases {
+            if let Cataloguable::Artist(id) = alias.subject {
+                out.entry(id).or_default().push(alias.value.clone());
+            }
+        }
+        out
+    }
+
+    /// **Every name this artist can be found by** — #179, and the inverse of
+    /// [`Reference::artist_named`].
+    ///
+    /// Its own name first, then every alias, **hidden ones included**. A
+    /// filter is exactly the caller [`AliasKind::shown`] does not apply to:
+    /// search should reach `aphextwinsucks` and nothing should ever print it,
+    /// which is the whole reason the display axis is a sibling of the kind
+    /// axis rather than a sort of one (#176).
+    ///
+    /// Deduplicated by the same normalisation `artist_named` matches on, so a
+    /// name recorded twice under two bases is one name to search by.
+    pub fn names_of(&self, artist: Id<Artist>) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        let mut take = |name: &str| {
+            if seen.insert(crate::model::ingest::normalise(name)) {
+                out.push(name.to_string());
+            }
+        };
+        if let Some(a) = self.artists.get(&artist) {
+            take(&a.name);
+        }
+        for alias in &self.aliases {
+            if alias.subject == Cataloguable::Artist(artist) {
+                take(&alias.value);
+            }
+        }
+        out
+    }
+
     #[allow(
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — alias resolution and credit repair, which no command drives"

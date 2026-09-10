@@ -1142,6 +1142,20 @@ MADS/RDF answers the same question completely — and agrees with MusicBrainz, w
 | two headings both in use    | `hasRelatedAuthority`                   | two artists, related        |
 | one heading superseding one | `useInstead`                            | a merge                     |
 
+**Every one of those names finds the files, and only some of them show** — #179. `artist=` compared one string, so a
+name the artist also answers to found nothing; it now asks the whole set. The display axis is what decides printing and
+it is deliberately not consulted here: a filter is exactly the caller `hasHiddenVariant` exists for, so search reaches
+`aphextwinsucks` and nothing ever prints it.
+
+**A `DeprecatedAuthority` is in that set too.** A heading this library retired is a name it printed once — it travels in
+old tags and old exports — so `HeadingRetired` lands in `aliases` as well, and `artist="*campfire*"` reaches the Animal
+Collective files through the heading a merge retired.
+
+**`hasRelatedAuthority` is not.** A moniker is its own row, so `artist="AFX"` finds what was released as AFX and does
+not pull in the rest of Aphex Twin. Following the graph is a different question and §8 gives it a different sentence —
+`useInstead` collapses two headings and `hasRelatedAuthority` keeps both, and a filter that quietly followed the second
+would be asserting the first.
+
 **`owl:sameAs` is the trap, and it is the obvious move.** It asserts total identity — every statement about one URI
 becomes a statement about the other — so under it _"the AFX discography"_ stops being expressible. Whatever relates two
 monikers here is directional and typed, never an equivalence.
