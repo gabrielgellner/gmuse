@@ -1024,16 +1024,17 @@ expensive to change later.
 
 ## 7. Prior art
 
-| model               | takes                                                                             | leaves                                |
-| ------------------- | --------------------------------------------------------------------------------- | ------------------------------------- |
-| **FRBR / IFLA LRM** | Work / Expression / Manifestation / Item; derivation between works                | strict disjointness                   |
-| **OpenWEMI**        | classes need not be disjoint; an item may stand alone — for incomplete data       | RDF                                   |
-| **Music Ontology**  | derivation between recordings; a track is a manifestation, not a join             | the RDF stack; a dormant vocabulary   |
-| **MusicBrainz**     | the working shape; 92.7% of these files carry its ids                             | its editorial cadence as our identity |
-| **DCAT / DCAT-AP**  | `Distribution` as a representation; themes as concepts in a scheme; CatalogRecord | triples, URIs, open world             |
-| **SDMX**            | codelists; hierarchies separate from lists; the artefact ladder; `Ref`            | XML; versioning as identity           |
-| **Kimball**         | grain, conformed dimensions, SCD types                                            | star-schema denormalisation           |
-| **beets**           | the warning that this can be over-modelled                                        | its two flat tables                   |
+| model               | takes                                                                                | leaves                                         |
+| ------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| **FRBR / IFLA LRM** | Work / Expression / Manifestation / Item; derivation between works                   | strict disjointness                            |
+| **OpenWEMI**        | classes need not be disjoint; an item may stand alone — for incomplete data          | RDF                                            |
+| **Music Ontology**  | derivation between recordings; a track is a manifestation, not a join                | the RDF stack; dormant, and silent on identity |
+| **MusicBrainz**     | the working shape; 92.7% of these files carry its ids                                | its editorial cadence as our identity          |
+| **MADS/RDF**        | an authorised heading with typed variants; the thing named held apart from its names | RDF; the authority-file workflow               |
+| **DCAT / DCAT-AP**  | `Distribution` as a representation; themes as concepts in a scheme; CatalogRecord    | triples, URIs, open world                      |
+| **SDMX**            | codelists; hierarchies separate from lists; the artefact ladder; `Ref`               | XML; versioning as identity                    |
+| **Kimball**         | grain, conformed dimensions, SCD types                                               | star-schema denormalisation                    |
+| **beets**           | the warning that this can be over-modelled                                           | its two flat tables                            |
 
 **Two deliberate departures.** `Recording` is one class where the Music Ontology splits a `Performance` from the
 `Signal` it produced. That split earns its place in classical cataloguing, and MusicBrainz manages thirty million
@@ -1100,6 +1101,50 @@ struct Recording {
 A closed vocabulary is an `enum`, not a string that might be a URI. Ordering is a `position` field, not `rdf:_1 rdf:_2`.
 Extensibility where it is genuinely open — genre, credit role — is a codelist with its own identity. And a subject that
 may be one of four things is a sum type, where RDF would allow all four at once.
+
+### Where a name comes from
+
+The above says what is taken structurally. This says where the _words_ come from, because the failure mode there is
+cheap and quiet: a term gets invented that already existed, and nothing catches it. `ArtistAliased` was nearly added
+while `AliasAsserted` was already in the log, and what stopped it was a comment inside an unrelated test.
+
+Three sources, in precedence order.
+
+**A fact's name is an event-sourcing convention, not an ontology term** — `[Subject][PastTenseVerb]`, stated in `log.rs`
+and followed without exception. A fact records what _happened_; `skos:altLabel` states what _is_. Naming an event after
+a predicate blurs the one distinction the fold exists to draw, so it is `AliasAsserted` and never `ArtistAliased`.
+
+**A vocabulary term is MusicBrainz's**, because it is the authority this library actually reads and 92.7% of these files
+carry its ids. `AliasKind::SearchHint` and `LegalName` are its own alias types verbatim. A borrowed term round-trips on
+export; a synonym invented here does not.
+
+**A distinction may be borrowed from the RDF world, and is then named MusicBrainz's way.** SKOS, MADS/RDF and FRAD have
+decades of thought about an authorised heading with its variants, and about one person holding several bibliographic
+identities. Read them for the distinction and leave the syntax. Where a borrowed distinction has no MusicBrainz name,
+coin one and record which idea it came from — as `Alias` does.
+
+**Two measurements, because they set how much weight each comparator carries here.**
+
+The Music Ontology, asked what it says about an artist with several names, says nothing: 60 classes, 167 properties, and
+zero occurrences of `alias`, `pseudonym`, `nick` or `sameAs`. It models `mo:Signal`, `mo:Master` and the 1977 IFPI Label
+Code, and it cannot say that AFX is also Aphex Twin. It stays a comparator for the recording levels, where it is strong,
+and is not consulted on identity.
+
+MADS/RDF answers the same question completely — and agrees with MusicBrainz, which reached the shape independently:
+
+| the distinction             | MADS/RDF                                | MusicBrainz                 |
+| --------------------------- | --------------------------------------- | --------------------------- |
+| the name that is authorised | `Authority` ⊂ `skos:Concept`            | the artist's name           |
+| a variant of it             | `hasVariant` ⊂ `skos:altLabel`          | alias, type _Artist name_   |
+| a variant not for display   | `hasHiddenVariant` ⊂ `skos:hiddenLabel` | alias, type _Search hint_   |
+| a name no longer authorised | `DeprecatedAuthority`                   | — a merge leaves no heading |
+| the thing the names name    | `RWO`, via `identifiesRWO`              | the `is person` relation    |
+| two headings both in use    | `hasRelatedAuthority`                   | two artists, related        |
+| one heading superseding one | `useInstead`                            | a merge                     |
+
+**`owl:sameAs` is the trap, and it is the obvious move.** It asserts total identity — every statement about one URI
+becomes a statement about the other — so under it _"the AFX discography"_ stops being expressible. Whatever relates two
+monikers here is directional and typed, never an equivalence.
 
 ---
 
@@ -1294,4 +1339,4 @@ Sources: [OpenWEMI](https://journal.code4lib.org/articles/18412) ·
 [ISMIR 2007](https://archives.ismir.net/ismir2007/paper/000417.pdf) · [DCAT 3](https://www.w3.org/TR/vocab-dcat-3/) ·
 [DCAT-AP](https://semiceu.github.io/DCAT-AP/releases/3.0.1/) · [LRMoo](https://cidoc-crm.org/lrmoo) ·
 [MusicBrainz schema](https://musicbrainz.org/doc/MusicBrainz_Database/Schema) ·
-[beets flexible attributes](https://beets.io/blog/flexattr.html)
+[MADS/RDF](https://www.loc.gov/standards/mads/rdf/) · [beets flexible attributes](https://beets.io/blog/flexattr.html)

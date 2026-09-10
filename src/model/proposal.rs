@@ -626,6 +626,31 @@ pub enum Proposal {
         /// has to be able to say which.
         basis: Source,
     },
+    /// **Another name this artist is known by** — #172.
+    ///
+    /// `AliasAsserted` has existed since the vocabulary was written, folds to
+    /// `Catalogue::aliases`, and takes any of eight subjects — and exactly one
+    /// thing wrote one, when a *concept* was renamed. An artist never had a
+    /// route, so a merge lost the name it retired and the world's other
+    /// spellings had nowhere to live.
+    ///
+    /// **Named, not identified**, as every artist on this wire is: the artist
+    /// is an id because it already exists and minting a second from a string
+    /// is what #152 was about, but the alias itself is what a person reads.
+    ///
+    /// The kind matters and is not a formality. `retired` is a name this
+    /// library used to use; `search-hint` is another spelling the world uses —
+    /// `Puffy AmiYumi` for `PUFFY`, which `joined.py` refetches from
+    /// MusicBrainz on every run because nothing records it; `legal-name` is a
+    /// person behind a stage name. A report that cannot tell them apart is
+    /// the state this replaces.
+    Aliased {
+        artist: Id<Artist>,
+        /// The other name, as a person would read it.
+        name: String,
+        /// `retired`, `search-hint`, or `legal-name`.
+        kind: String,
+    },
     /// A rating. Included because it is the simplest possible proposal and
     /// therefore the one worth testing the format against.
     Rated {
@@ -823,6 +848,14 @@ pub trait Holdings {
     /// forward the name it is not changing. Without it, seating a file would
     /// silently strip the `(live)` off `The Fox` that !323 exists to keep.
     fn sleeve(&self, track: Id<Track>) -> Option<String>;
+    /// **What this artist is currently called** — #172.
+    ///
+    /// Asked so a merge can keep the name it is about to retire. `ArtistNamed`
+    /// is a register and the winner's label survives, so without this the
+    /// loser's name leaves the library entirely — which is how Animal
+    /// Collective absorbed `Campfire Songs` and the moniker a record was
+    /// released under became unfindable.
+    fn named(&self, artist: Id<Artist>) -> Option<String>;
 }
 
 /// Where a copy sits, as the library currently records it.
@@ -911,6 +944,7 @@ impl Proposal {
             // side.
             Proposal::ArtistsMerged { winner, .. } => Subject::Artist(*winner),
             Proposal::Named { artist, .. } => Subject::Artist(*artist),
+            Proposal::Aliased { artist, .. } => Subject::Artist(*artist),
             // **The recording has to exist.** A title is a description of
             // something held, and a retitle naming a row nothing points at is
             // stale rather than wrong.
@@ -1586,6 +1620,33 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 name: name.to_string(),
             }]
         }
+        Proposal::Aliased { artist, name, kind } => {
+            use crate::model::reference::{AliasKind, Cataloguable};
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("an alias needs a name".into());
+            }
+            // **The kind is a codelist, refused rather than guessed**, for the
+            // reason `Contributed`'s role is: a string does not say which of
+            // three very different claims it is making, and a report that
+            // cannot tell a retired name from a stage name is the state this
+            // exists to replace.
+            let kind = match kind.trim().to_lowercase().as_str() {
+                "retired" => AliasKind::Retired,
+                "search-hint" | "search_hint" => AliasKind::SearchHint,
+                "legal-name" | "legal_name" => AliasKind::LegalName,
+                other => {
+                    return Err(format!(
+                        "{other:?} is not a kind of alias — retired, search-hint, legal-name"
+                    ));
+                }
+            };
+            vec![Fact::AliasAsserted {
+                subject: Cataloguable::Artist(artist),
+                value: name.to_string(),
+                kind,
+            }]
+        }
         Proposal::Retitled { recording, title } => {
             let title = title.trim();
             if title.is_empty() {
@@ -1695,7 +1756,30 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             if loser == winner {
                 return Err("an artist cannot absorb themselves".into());
             }
-            vec![Fact::ArtistMerged { loser, winner }]
+            let mut facts = vec![Fact::ArtistMerged { loser, winner }];
+            // **The retired name stays findable** — #172, and the same move
+            // `rename_concept` already makes: a concept renamed keeps its old
+            // label as an alias, and an artist absorbed should keep theirs.
+            //
+            // Without it a merge is lossy in a way nothing reports. Animal
+            // Collective released *Campfire Songs* under that moniker;
+            // merging MusicBrainz's `Campfire Songs` artist into the band is
+            // right, and it took the only record of what the sleeve said with
+            // it.
+            //
+            // **Only where the names differ.** 140 of this library's merges
+            // joined two ids spelling one name, and an alias equal to the
+            // label says nothing at all.
+            if let Some(name) = library.named(loser)
+                && library.named(winner).as_deref() != Some(name.as_str())
+            {
+                facts.push(Fact::AliasAsserted {
+                    subject: crate::model::reference::Cataloguable::Artist(winner),
+                    value: name,
+                    kind: crate::model::reference::AliasKind::Retired,
+                });
+            }
+            facts
         }
         Proposal::CreditWithdrawn {
             subject,
@@ -1804,8 +1888,14 @@ pub(crate) mod tests {
                 // and a merge into anything else is stale.
                 Subject::ReleaseGroup(g) => g == album(),
                 // Held, and deliberately nameless: the case #154 exists for
-                // is an artist with a right id and no name.
-                Subject::Artist(a) => a == nameless(),
+                // is an artist with a right id and no name. The two named ones
+                // are #172's, so a merge can be shown keeping the name it
+                // retires.
+                Subject::Artist(a) => {
+                    a == nameless()
+                        || a == Id::<Artist>::of_artist(None, "Campfire Songs")
+                        || a == Id::<Artist>::of_artist(None, "Animal Collective")
+                }
             }
         }
 
@@ -1826,6 +1916,22 @@ pub(crate) mod tests {
         /// exercised where there is a spine to have one.
         fn slot(&self, _encoding: Id<Encoding>) -> Option<Slot> {
             None
+        }
+
+        /// **Two artists with names**, so a merge can be shown carrying the
+        /// one it retires — and shown *not* carrying it where both spell the
+        /// same thing, which is 140 of this library's merges.
+        fn named(&self, artist: Id<Artist>) -> Option<String> {
+            match artist {
+                a if a == nameless() => None,
+                a if a == Id::<Artist>::of_artist(None, "Campfire Songs") => {
+                    Some("Campfire Songs".to_string())
+                }
+                a if a == Id::<Artist>::of_artist(None, "Animal Collective") => {
+                    Some("Animal Collective".to_string())
+                }
+                _ => None,
+            }
         }
 
         /// **One seat has a name printed in it**, so a placement can be shown
@@ -2512,6 +2618,111 @@ pub(crate) mod tests {
             2,
             "both artists should be credited on the album"
         );
+    }
+
+    /// **A merge keeps the name it retires** — #172.
+    ///
+    /// `ArtistNamed` is a register, so the winner's label survives and the
+    /// loser's leaves the library. That is right for a correction — nobody
+    /// wants `UMFANG` back — and wrong for a moniker: Animal Collective
+    /// released *Campfire Songs* under that name, MusicBrainz files it under
+    /// an artist of that name, and merging the two is correct and takes the
+    /// only record of what the sleeve said with it.
+    ///
+    /// The same move `rename_concept` already makes one entity over, and the
+    /// reason `AliasKind::Retired` exists at all.
+    #[test]
+    fn a_merge_keeps_the_name_it_retires() {
+        use crate::model::reference::{AliasKind, Cataloguable};
+        let loser = Id::<Artist>::of_artist(None, "Campfire Songs");
+        let winner = Id::<Artist>::of_artist(None, "Animal Collective");
+
+        let (records, report) = parse(
+            &serde_json::to_string(&Proposal::ArtistsMerged { loser, winner }).expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert_eq!(report.applied, 1, "{report}");
+        assert!(
+            records.iter().any(|r| r.fact
+                == Fact::AliasAsserted {
+                    subject: Cataloguable::Artist(winner),
+                    value: "Campfire Songs".into(),
+                    kind: AliasKind::Retired,
+                }),
+            "the moniker the record was released under went nowhere"
+        );
+
+        // **And not where both spell the same thing.** 140 of this library's
+        // merges joined two ids for one name, and an alias equal to the label
+        // says nothing at all.
+        let same = Id::<Artist>::of_artist(None, "Animal Collective");
+        let (records, _) = parse(
+            &serde_json::to_string(&Proposal::ArtistsMerged {
+                loser: same,
+                winner,
+            })
+            .expect("serialises"),
+            dev(),
+            100,
+            HELD,
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|r| matches!(&r.fact, Fact::AliasAsserted { .. })),
+            "an alias that repeats the label is noise"
+        );
+    }
+
+    /// **The kind of alias is a codelist, refused rather than guessed.**
+    ///
+    /// A retired name, another spelling the world uses, and a person behind a
+    /// stage name are three different claims. A string does not say which,
+    /// and a report that cannot tell them apart is the state this replaces.
+    #[test]
+    fn an_alias_says_which_kind_of_name_it_is() {
+        use crate::model::reference::{AliasKind, Cataloguable};
+        let artist = Id::<Artist>::of_artist(None, "Animal Collective");
+        for (given, wanted) in [
+            ("retired", AliasKind::Retired),
+            ("search-hint", AliasKind::SearchHint),
+            ("legal-name", AliasKind::LegalName),
+        ] {
+            let (records, report) = parse(
+                &serde_json::to_string(&Proposal::Aliased {
+                    artist,
+                    name: "Campfire Songs".into(),
+                    kind: given.into(),
+                })
+                .expect("serialises"),
+                dev(),
+                100,
+                HELD,
+            );
+            assert_eq!(report.applied, 1, "{given}: {report}");
+            assert!(records.iter().any(|r| r.fact
+                == Fact::AliasAsserted {
+                    subject: Cataloguable::Artist(artist),
+                    value: "Campfire Songs".into(),
+                    kind: wanted,
+                }));
+        }
+        for bad in ["nickname", "", "  "] {
+            let (_, report) = parse(
+                &serde_json::to_string(&Proposal::Aliased {
+                    artist,
+                    name: "Campfire Songs".into(),
+                    kind: bad.into(),
+                })
+                .expect("serialises"),
+                dev(),
+                100,
+                HELD,
+            );
+            assert_eq!(report.refused.len(), 1, "{bad:?} was allowed: {report}");
+        }
     }
 
     #[test]

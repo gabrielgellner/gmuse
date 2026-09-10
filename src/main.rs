@@ -579,7 +579,22 @@ fn run_library(
             };
             let mut renamed = 0usize;
             let mut offered = 0usize;
+            let mut declared = 0usize;
             for (artist, names) in said.iter().filter(|(_, n)| n.len() > 1) {
+                // **A name somebody declared an alias is not a name in
+                // dispute** — #172. This report could only ever say "artists
+                // with two real names, and which to use is yours to say",
+                // because the log recorded no reason for the second one.
+                // Where every earlier name has been aliased, the reason is on
+                // the record and there is nothing left to decide.
+                let aliased = cat.aliases.iter().any(|(subject, value, _)| {
+                    *subject == crate::model::reference::Cataloguable::Artist(*artist)
+                        && names.iter().rev().skip(1).any(|n| n == value)
+                });
+                if aliased {
+                    declared += 1;
+                    continue;
+                }
                 renamed += 1;
                 let current = names.last().copied().unwrap_or_default();
                 println!("{artist}");
@@ -611,7 +626,9 @@ fn run_library(
                 "\n{nameless} credited artist(s) have no name, {renamed} have been named more than \
                  once — `->` marks the one in force. {offered} are named for a credit they merely \
                  begin, and the line under each puts the artist's own name back. The rest are \
-                 artists with two real names, and which to use is yours to say."
+                 artists with two real names, and which to use is yours to say.\n\
+                 {declared} more are settled: an earlier name is on the record as an alias, so it \
+                 is a name this artist also has rather than one in dispute."
             );
         }
         cli::Shelf::Duplicates => {

@@ -1741,6 +1741,10 @@ mod containment_tests {
             fn sleeve(&self, _: Id<crate::model::entity::Track>) -> Option<String> {
                 None
             }
+
+            fn named(&self, _: Id<crate::model::entity::Artist>) -> Option<String> {
+                None
+            }
         }
 
         let listed = proposal::Proposal::Tracklisted {

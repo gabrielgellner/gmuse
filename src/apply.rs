@@ -172,6 +172,14 @@ impl proposal::Holdings for Shelf {
             .or_else(|| self.disk.tracks.get(&track))
             .and_then(|t| t.title_on_release.clone())
     }
+
+    fn named(&self, artist: Id<crate::model::entity::Artist>) -> Option<String> {
+        self.log
+            .artist_names
+            .get(&artist)
+            .or_else(|| self.disk.artist_names.get(&artist))
+            .cloned()
+    }
 }
 
 /// What a run did, and what it declined to do.

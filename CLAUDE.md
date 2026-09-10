@@ -38,7 +38,10 @@ library says about one thing and who said it. Read it before adding anything tha
 on is that a claim is never a value.
 
 [`docs/design/domain-model.md`](docs/design/domain-model.md) is a **proposal**, not built: what a library entry is
-versus what a file is. Read it before touching `Store`, `scan.rs` or anything keyed by a path.
+versus what a file is. Read it before touching `Store`, `scan.rs` or anything keyed by a path. **§8 also says where a
+name comes from** — fact names follow the event-sourcing convention, vocabulary terms are MusicBrainz's verbatim, and a
+distinction borrowed from SKOS or MADS/RDF is named MusicBrainz's way. Read it before coining a term; the one that
+already exists is cheap to miss.
 
 [`docs/design/storage-layout.md`](docs/design/storage-layout.md) is **settled design, not built**: where files live. One
 rule — **the storage tree may use structural facts only**, who made it and what release it is on, never genre, era,
