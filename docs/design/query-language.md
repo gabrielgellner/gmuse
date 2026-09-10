@@ -275,6 +275,19 @@ levels: [year]              by year
 So switching representation happens **in place**. It is not a different screen; it is a setting on the thing being
 looked at, the way `foldmethod` is a setting on a buffer.
 
+**And a level has a reading outside the browser** — `gmuse shelf tree --levels 'genre@1,album'` (#182). Until it did,
+the one thing a level decides — which rows fall under which heading — could only be asked _of_ the TUI and only be
+answered _by_ looking at it, so the setting was untestable from anywhere a script or a person could stand. The command
+is read-only and groups through the same `Tree::grouped` with the same member set and the same smart artist sort the UI
+starts with; a disagreement between it and the pane is a bug in one of them rather than a difference in how they were
+asked. `--levels flat` is refused rather than printed: a tree of no levels is one row per track, which is `shelf query`,
+and two ways to answer one question is the shape this project removes (#113).
+
+It reads back what the taxonomy actually holds, which is its first use. `genre@1` names 40 headings and `genre@2` names
+several hundred — but `Acid Techno`, `Alternative Hip Hop` and `Ambient Techno` appear under **both**, because a concept
+shallower than the level asked for stands for itself rather than vanishing. That is the ragged case working as designed,
+and it is also a list of terms nobody has placed yet.
+
 **It does not generalise for free**, and an earlier draft said it did. A recording with two genres appears under two
 branches, so `levels: [genre]` is not a partition — and the navigator's nodes are half-open ranges over one sorted
 array, where a row cannot be in two places at once.

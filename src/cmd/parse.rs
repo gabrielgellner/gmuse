@@ -605,7 +605,7 @@ fn seek_spec(rest: &str) -> Result<SeekSpec, ParseError> {
 /// Empty is the default pair, which is `artist,album`: `:view levels` puts the
 /// tree back rather than being an error, because that is what somebody means
 /// by it.
-fn levels_spec(rest: &str) -> Result<crate::shelf::Levels, ParseError> {
+pub fn levels_spec(rest: &str) -> Result<crate::shelf::Levels, ParseError> {
     if rest.is_empty() {
         return Ok(crate::shelf::Levels::default());
     }
@@ -989,6 +989,45 @@ mod tests {
         assert!(parsed("levels year@2,album").is_err());
         // And a level number has to be one or more — `@0` names nothing.
         assert!(parsed("levels genre@0,album").is_err());
+    }
+
+    /// **The flag and the `:` line are one parser** — #182.
+    ///
+    /// `shelf tree --levels` exists so a level has a reading outside the thing
+    /// being read. That is only worth having if the flag understands exactly
+    /// what `:view levels` understands, and the way to guarantee it is for
+    /// there to be one function rather than two that agree today.
+    #[test]
+    fn the_tree_flag_reads_levels_the_way_the_colon_line_does() {
+        // What `shelf tree` with no flag gives: the browser's own default, so
+        // the command with nothing said draws the tree as it is drawn.
+        assert_eq!(
+            super::levels_spec("").expect("empty is the default"),
+            crate::shelf::Levels::default(),
+        );
+
+        // A depth survives the flag, which is the case the issue is about.
+        assert_eq!(
+            super::levels_spec("genre@1,album")
+                .expect("a depth parses")
+                .written(),
+            "genre@1,album",
+        );
+
+        // And the flag refuses what the line refuses, rather than falling back
+        // to the default and drawing a tree nobody asked for.
+        assert!(super::levels_spec("year@2,album").is_err());
+        assert!(super::levels_spec("nosuchfield,album").is_err());
+
+        // `flat` parses — it is a real `Levels` — and `pair()` is `None`,
+        // which is what the command turns into "that is `shelf query`"
+        // rather than a tree of one level.
+        assert!(
+            super::levels_spec("flat")
+                .expect("flat parses")
+                .pair()
+                .is_none()
+        );
     }
 
     use super::*;

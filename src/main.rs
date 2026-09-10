@@ -1229,6 +1229,100 @@ fn run_library(
                  because it is the rung a second device would also derive."
             );
         }
+        cli::Shelf::Tree { levels, tracks } => {
+            // **Parse at the boundary** (§12): the spec becomes `Levels`
+            // before anything groups by it, through the *same* parser the `:`
+            // line uses. A second reader of `genre@1` is a second place for
+            // the depth syntax to drift, and #79's whole point is that the
+            // compound string stops being load-bearing.
+            let spec =
+                crate::cmd::parse::levels_spec(levels).map_err(|e| format!("--levels: {e}"))?;
+            let Some(pair) = spec.pair() else {
+                // **`flat` is a level list of none**, and a tree of no levels
+                // is one row per track — which `shelf query` already prints.
+                // Two ways to answer one question is the shape this project
+                // removes (#113), so this says where the answer lives rather
+                // than growing a second printer for it.
+                return Err(
+                    "--levels flat is one row per track; that is `gmuse shelf query`".into(),
+                );
+            };
+
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            crate::model::populate::populate(
+                &mut log,
+                roots,
+                crate::history::now_ms(),
+                crate::model::populate::Admits::Identified,
+            );
+            let librarian = crate::model::seam::Librarian::from_catalogue(&log.catalogue());
+
+            // Every row the library holds. The browser groups its *members* —
+            // whatever the active filter left — and a filter is a separate
+            // sentence from a level, so this asks the levels question against
+            // the whole shelf and says how many rows that was.
+            let members: std::collections::HashSet<_> = {
+                use crate::model::rows::Listing as _;
+                librarian.rows().into_iter().collect()
+            };
+
+            // `true` because that is what the UI starts with — the point is to
+            // read what the browser would draw, not a second arrangement of it.
+            let tree = crate::model::tree::Tree::grouped(&librarian, pair, true, &members);
+
+            let (outer, inner) = pair;
+            println!("# levels: {},{}", outer.written(), inner.written());
+            let mut headings = 0usize;
+            let mut albums = 0usize;
+            let mut rows = 0usize;
+            for (key, under) in tree.artists() {
+                headings += 1;
+                println!("{}", tree.artist_name(key));
+                for album in under.values() {
+                    albums += 1;
+                    let year = album
+                        .first_released
+                        .map_or_else(String::new, |d| format!(" ({})", d.year));
+                    println!("  {}{year}  [{} track(s)]", album.title, album.tracks.len());
+                    rows += album.tracks.len();
+                    if *tracks {
+                        for listing in &album.tracks {
+                            let Some(row) = librarian.row_of(listing.recording, listing.copy)
+                            else {
+                                continue;
+                            };
+                            // The **row** is the appearance (#155), so the
+                            // slot comes off it and not off the recording: a
+                            // song on an album and on a compilation is two
+                            // rows with two positions, not one with a guess.
+                            let slot = match listing.row {
+                                crate::model::rows::CopyId::On(track) => Some(track),
+                                crate::model::rows::CopyId::Loose(_) => None,
+                            };
+                            let (disc, no) = librarian.place_of(slot);
+                            // **`u16::MAX` is `place_of`'s "no position"**,
+                            // picked so an unnumbered track sorts last rather
+                            // than first — a gap in what is known is not a
+                            // position. Printing the sentinel would read as a
+                            // claim the tags never made.
+                            let place = |n: u16| {
+                                if n == u16::MAX {
+                                    "--".to_string()
+                                } else {
+                                    format!("{n:02}")
+                                }
+                            };
+                            println!("    {}/{}  {}", place(disc), place(no), row.title);
+                        }
+                    }
+                }
+            }
+            eprintln!("{headings} heading(s), {albums} album(s), {rows} row(s)");
+        }
         cli::Shelf::Unfiled => {
             let (mut log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,

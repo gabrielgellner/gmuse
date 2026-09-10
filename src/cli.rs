@@ -414,6 +414,29 @@ pub enum Shelf {
     /// Nothing else prints an artist id, so without this neither is fixable by
     /// hand.
     Names,
+    /// **What the tree would draw** — the levels, without a terminal (#182).
+    ///
+    /// `:view levels genre@1,album` reshapes the browser, and until now that
+    /// sentence could only be said *to* the TUI and only be answered *by*
+    /// looking at it. So the one thing a level does — decide which rows fall
+    /// under which heading — had no reading outside the thing being read.
+    ///
+    /// Read-only, and it groups exactly what the browser groups: same
+    /// `Tree::grouped`, same member set, same smart artist sort the UI starts
+    /// with. A disagreement between this and the pane is a bug in one of them
+    /// rather than a difference in how they were asked.
+    Tree {
+        /// `outer,inner` — the two fields to group by, as `:view levels`
+        /// takes them. Empty is the default pair, `file_under,album`.
+        ///
+        /// A level may name a depth: `genre@1` is the broadest ancestor,
+        /// `genre@2` the one under it (#79).
+        #[arg(long, value_name = "SPEC", default_value = "")]
+        levels: String,
+        /// Print each album's tracks too, not just the two headings.
+        #[arg(long)]
+        tracks: bool,
+    },
 }
 
 impl Cli {
