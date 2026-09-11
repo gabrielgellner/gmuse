@@ -136,7 +136,7 @@ pub struct PlaylistTable {
     #[serde(default, rename = "where")]
     pub filter: Option<String>,
     /// A sort order. Omitted means the library's own — see
-    /// [`crate::sort::Sort::library_order`].
+    /// [`crate::query::sort::Sort::library_order`].
     #[serde(default)]
     pub sort: Option<String>,
 }
@@ -178,11 +178,11 @@ pub struct Loaded {
     pub commands: Vec<Command>,
     pub theme: Theme,
     /// Parsed once, here, so the status line never parses while rendering.
-    pub now_playing: crate::format::Template,
+    pub now_playing: crate::query::format::Template,
     /// The transport panel's headline, same discipline.
-    pub transport: crate::format::Template,
+    pub transport: crate::query::format::Template,
     /// How a track row reads in the library tree.
-    pub track_line: Option<crate::format::Template>,
+    pub track_line: Option<crate::query::format::Template>,
     /// Where the music is, from `library`. **The only source of scan roots**
     /// now that a catalog has none (#94).
     pub library: Vec<PathBuf>,
@@ -210,7 +210,7 @@ pub struct Loaded {
 pub fn parse_text(text: &str) -> Loaded {
     let mut out = Loaded {
         theme: Theme::default(),
-        transport: crate::format::Template::transport_default(),
+        transport: crate::query::format::Template::transport_default(),
         ..Default::default()
     };
 
@@ -295,7 +295,7 @@ pub fn parse_text(text: &str) -> Loaded {
     // Parsed here, at the boundary, so a bad template is a reported config
     // problem rather than something the status line discovers per frame.
     if let Some(source) = &config.format.now_playing {
-        match crate::format::Template::parse(source) {
+        match crate::query::format::Template::parse(source) {
             Ok(t) => out.now_playing = t,
             Err(e) => out.errors.push(ConfigError {
                 where_: "format.now_playing".into(),
@@ -304,7 +304,7 @@ pub fn parse_text(text: &str) -> Loaded {
         }
     }
     if let Some(source) = &config.format.transport {
-        match crate::format::Template::parse(source) {
+        match crate::query::format::Template::parse(source) {
             Ok(t) => out.transport = t,
             Err(e) => out.errors.push(ConfigError {
                 where_: "format.transport".into(),
@@ -313,7 +313,7 @@ pub fn parse_text(text: &str) -> Loaded {
         }
     }
     if let Some(source) = &config.format.track {
-        match crate::format::Template::parse(source) {
+        match crate::query::format::Template::parse(source) {
             Ok(t) => out.track_line = Some(t),
             Err(e) => out.errors.push(ConfigError {
                 where_: "format.track".into(),
@@ -384,7 +384,7 @@ pub fn parse_text(text: &str) -> Loaded {
         };
         // Both languages parse here, at the boundary, so a bad expression
         // names the playlist it came from rather than failing in a redraw.
-        let filter = match crate::filter::Filter::parse(src) {
+        let filter = match crate::query::filter::Filter::parse(src) {
             Ok(f) => f,
             Err(e) => {
                 out.errors.push(ConfigError {
@@ -394,7 +394,7 @@ pub fn parse_text(text: &str) -> Loaded {
                 continue;
             }
         };
-        let sort = match table.sort.as_deref().map(crate::sort::Sort::parse) {
+        let sort = match table.sort.as_deref().map(crate::query::sort::Sort::parse) {
             Some(Ok(s)) => Some(s),
             None => None,
             Some(Err(e)) => {
@@ -728,7 +728,7 @@ mod tests {
         // An omitted sort falls back rather than erroring.
         assert_eq!(
             loaded.playlists.get("neglected").unwrap().sort,
-            crate::sort::Sort::library_order()
+            crate::query::sort::Sort::library_order()
         );
     }
 

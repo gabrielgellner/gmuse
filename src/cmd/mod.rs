@@ -772,7 +772,7 @@ pub enum Command {
     ///
     /// Transient and anonymous, as against a catalog, which is the same idea
     /// named and persistent — see §7.
-    Filter(Option<crate::filter::Filter>),
+    Filter(Option<crate::query::filter::Filter>),
     /// **One verb and three operators** — `query-language.md` §2.
     ///
     /// Spelled `:view` too, and the verb dispatches on its argument: a bare

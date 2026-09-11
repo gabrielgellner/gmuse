@@ -2396,7 +2396,7 @@ where
     out
 }
 
-impl crate::filter::Listened for Catalogue {
+impl crate::query::filter::Listened for Catalogue {
     fn plays(&self, recording: Id<Recording>) -> u32 {
         self.plays.get(&recording).copied().unwrap_or(0)
     }
@@ -2513,9 +2513,9 @@ impl crate::filter::Listened for Catalogue {
 #[cfg(test)]
 mod closure_tests {
     use super::*;
-    use crate::filter::Listened;
     use crate::model::entity::{Device, Hierarchy};
     use crate::model::instance::Instance;
+    use crate::query::filter::Listened;
 
     fn built(edges: &[(&str, &str)]) -> Catalogue {
         let mut i = Instance::new(Id::<Device>::derived(b"test"));
@@ -2544,8 +2544,8 @@ mod closure_tests {
     /// unbounded walk hangs the render; this answers.
     #[test]
     fn a_derivation_cycle_answers_rather_than_hanging() {
-        use crate::filter::Listened;
         use crate::model::spine::RecordingDerivationKind::Remix;
+        use crate::query::filter::Listened;
 
         let song = |n: u8| Id::<Recording>::derived(&[n]);
         let mut i = crate::model::instance::Instance::new(Id::derived(b"laptop"));
@@ -2568,8 +2568,8 @@ mod closure_tests {
     /// out of the walk without deleting the fact.
     #[test]
     fn a_derivation_walk_reports_hops_and_respects_a_retraction() {
-        use crate::filter::Listened;
         use crate::model::spine::RecordingDerivationKind::{Edit, Remix};
+        use crate::query::filter::Listened;
 
         let song = |n: u8| Id::<Recording>::derived(&[n]);
         let mut i = crate::model::instance::Instance::new(Id::derived(b"laptop"));

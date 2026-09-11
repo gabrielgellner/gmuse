@@ -19,10 +19,8 @@ mod config;
 mod datadir;
 mod edit;
 mod events;
-mod filter;
 #[cfg(test)]
 mod fixture;
-mod format;
 mod guides;
 mod history;
 mod lock;
@@ -36,7 +34,6 @@ mod scan;
 mod session;
 mod shelf;
 mod smart;
-mod sort;
 mod storage;
 mod text;
 mod ui;
@@ -1680,7 +1677,7 @@ fn run_library(
             // for it to drift.
             let filter = filter
                 .as_deref()
-                .map(crate::filter::Expr::parse)
+                .map(crate::query::filter::Expr::parse)
                 .transpose()
                 .map_err(|e| format!("--filter: {e}"))?;
             // **Kept between runs** — #188. Both walks below ask the same
@@ -1914,7 +1911,7 @@ fn run_tui(
         .resolve(
             &library_view,
             &listened,
-            crate::filter::Env {
+            crate::query::filter::Env {
                 listened: Some(&listened),
                 now,
             },

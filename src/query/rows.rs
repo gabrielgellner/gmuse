@@ -83,7 +83,7 @@ pub fn rows(
     now: i64,
     only: Only,
     copies: Copies,
-    filter: Option<&crate::filter::Expr>,
+    filter: Option<&crate::query::filter::Expr>,
     // **One cache across both walks below** — #188. They ask the same question
     // of the same files: `populate` to mint and `reconcile` to publish
     // holdings. Sharing it makes the second walk a `stat` per file; persisting
@@ -125,7 +125,7 @@ pub fn rows(
 
     // **Compiled once, not per row.** `Expr::compile` says so in as many
     // words, and this list runs over the whole library.
-    let env = crate::filter::Env {
+    let env = crate::query::filter::Env {
         listened: None,
         now: now / 1000,
     };
@@ -523,7 +523,7 @@ mod tests {
         ));
 
         let ask = |src: &str| -> Vec<Queried> {
-            let expr = crate::filter::Expr::parse(src).expect("it parses");
+            let expr = crate::query::filter::Expr::parse(src).expect("it parses");
             rows(
                 std::slice::from_ref(&root),
                 &log,

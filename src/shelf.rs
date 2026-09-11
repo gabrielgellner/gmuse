@@ -23,7 +23,7 @@ use crate::model::seam::Librarian;
 /// Re-exported so callers keep saying `shelf::SortKey`. It lives in the
 /// model now, because how a library orders its own names is a librarian
 /// question rather than a player one (#84).
-pub use crate::model::sortkey::{SortKey, sort_key};
+pub use crate::model::sortkey::SortKey;
 
 /// Views 1 and 2. Same membership, two shapes.
 #[derive(Debug, Default)]
@@ -108,13 +108,13 @@ pub enum Levels {
 /// would be a worse answer than a repeated one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Level {
-    pub field: crate::format::Field,
+    pub field: crate::query::format::Field,
     /// `None` is the value itself — every level before #79 was this.
     pub at: Option<u8>,
 }
 
 impl Level {
-    pub fn of(field: crate::format::Field) -> Self {
+    pub fn of(field: crate::query::format::Field) -> Self {
         Level { field, at: None }
     }
 
@@ -130,8 +130,8 @@ impl Level {
 impl Default for Levels {
     fn default() -> Self {
         Levels::By {
-            outer: Level::of(crate::format::Field::FileUnder),
-            inner: Level::of(crate::format::Field::Album),
+            outer: Level::of(crate::query::format::Field::FileUnder),
+            inner: Level::of(crate::query::format::Field::Album),
         }
     }
 }
@@ -166,7 +166,7 @@ impl Levels {
             self,
             Levels::By {
                 outer: Level {
-                    field: crate::format::Field::Facet(_),
+                    field: crate::query::format::Field::Facet(_),
                     ..
                 },
                 ..
@@ -499,8 +499,12 @@ impl Shelf {
 
 #[cfg(test)]
 mod tests {
+    // **From where it lives, not from this module's re-export** — #191. The
+    // query layer sorts by it and had been reaching up through `shelf` to get
+    // at something that sits below both, which the boundary test caught.
     use super::*;
     use crate::fixture::Tagged as Track;
+    use crate::model::sortkey::sort_key;
     use crate::scan::Holdings as Scan;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -770,13 +774,13 @@ mod projection {
         let by_artist = Shelf::grouped(&l, members.clone(), Levels::default(), false);
         assert_eq!(by_artist.artist_count(), 2, "two artists");
 
-        let genre = crate::format::Field::parse("genre").unwrap();
+        let genre = crate::query::format::Field::parse("genre").unwrap();
         let by_genre = Shelf::grouped(
             &l,
             members,
             Levels::By {
                 outer: Level::of(genre),
-                inner: Level::of(crate::format::Field::Album),
+                inner: Level::of(crate::query::format::Field::Album),
             },
             false,
         );
@@ -824,14 +828,14 @@ mod projection {
         l.here(crate::fixture::device());
         let members: HashSet<CopyId> = Listing::rows(&l).into_iter().collect();
 
-        let genre = crate::format::Field::parse("genre").unwrap();
+        let genre = crate::query::format::Field::parse("genre").unwrap();
         let names = |at: Option<u8>| {
             let shelf = Shelf::grouped(
                 &l,
                 members.clone(),
                 Levels::By {
                     outer: Level { field: genre, at },
-                    inner: Level::of(crate::format::Field::Album),
+                    inner: Level::of(crate::query::format::Field::Album),
                 },
                 false,
             );
@@ -858,7 +862,7 @@ mod projection {
                     field: genre,
                     at: Some(1),
                 },
-                inner: Level::of(crate::format::Field::Album),
+                inner: Level::of(crate::query::format::Field::Album),
             },
             false,
         );
@@ -900,8 +904,8 @@ mod projection {
         let id = *members.iter().next().unwrap();
 
         let levels = Levels::By {
-            outer: Level::of(crate::format::Field::parse("genre").unwrap()),
-            inner: Level::of(crate::format::Field::Album),
+            outer: Level::of(crate::query::format::Field::parse("genre").unwrap()),
+            inner: Level::of(crate::query::format::Field::Album),
         };
         assert!(levels.outer_is_multi(), "genre must declare itself multi");
         let lib = Shelf::grouped(&l, members, levels, false);
@@ -1155,7 +1159,7 @@ mod perf {
         let l = library(200, 650);
         let rows = Listing::rows(&l).len();
         let listened = crate::model::log::Catalogue::default();
-        let env = crate::filter::Env {
+        let env = crate::query::filter::Env {
             listened: Some(&listened),
             now: 1_700_000_000,
         };

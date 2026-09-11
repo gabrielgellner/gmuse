@@ -30,7 +30,7 @@ pub enum ParseError {
     #[error("{0}")]
     Key(#[from] keys::KeyParseError),
     #[error("{0}")]
-    Filter(#[from] crate::filter::FilterError),
+    Filter(#[from] crate::query::filter::FilterError),
 }
 
 /// Every verb `command` accepts, aliases included.
@@ -351,7 +351,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "filter" => Command::Filter(if rest.is_empty() {
             None
         } else {
-            Some(crate::filter::Filter::parse(rest)?)
+            Some(crate::query::filter::Filter::parse(rest)?)
         }),
         "help" => Command::Help,
         "quit" | "q" => Command::Quit,
@@ -527,7 +527,9 @@ fn source(expr: &str) -> Result<crate::view::What, ParseError> {
     {
         return Err(ParseError::Bare(expr.to_string()));
     }
-    Ok(What::Where(Box::new(crate::filter::Filter::parse(expr)?)))
+    Ok(What::Where(Box::new(crate::query::filter::Filter::parse(
+        expr,
+    )?)))
 }
 
 /// `key="value"` or `key=value`, if this is that key.
@@ -631,7 +633,7 @@ pub fn levels_spec(rest: &str) -> Result<crate::shelf::Levels, ParseError> {
 /// shelf, Adele on her own because she needs no relation to have one. Nothing
 /// else has either, and `year@2` is refused rather than silently ignored.
 fn level(spec: &str) -> Result<crate::shelf::Level, ParseError> {
-    use crate::format::Field;
+    use crate::query::format::Field;
 
     let spec = spec.trim();
     let (name, at) = match spec.split_once('@') {

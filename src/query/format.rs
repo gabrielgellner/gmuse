@@ -668,7 +668,7 @@ mod tests {
     /// dragging a recording into it must not rewrite a release date.
     #[test]
     fn every_field_says_whether_a_person_authors_it() {
-        use crate::format::Authorship;
+        use crate::query::format::Authorship;
 
         for name in Field::names() {
             let f = Field::parse(name).unwrap_or_else(|| panic!("{name} does not parse"));

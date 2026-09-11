@@ -22,10 +22,10 @@
 //! active set" because crossing themes is the point of one; a smart playlist
 //! inherits that rather than being a special case.
 
-use crate::filter::Filter;
 use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
-use crate::sort::{Sort, SortEnv};
+use crate::query::filter::Filter;
+use crate::query::sort::{Sort, SortEnv};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SmartPlaylist {
@@ -96,11 +96,11 @@ impl SmartPlaylists {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::Env;
     use crate::fixture::Tagged as Track;
     use crate::model::rows::Listing;
+    use crate::query::filter::Env;
+    use crate::query::sort::Sort;
     use crate::scan::Holdings as Scan;
-    use crate::sort::Sort;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -177,7 +177,7 @@ mod tests {
         let mut set = SmartPlaylists::default();
         set.define(
             "p",
-            crate::filter::Filter::parse(where_).unwrap(),
+            crate::query::filter::Filter::parse(where_).unwrap(),
             sort.map(|s| Sort::parse(s).unwrap()),
         );
         set.get("p").unwrap().clone()
@@ -256,10 +256,14 @@ mod tests {
     #[test]
     fn defining_the_same_name_twice_replaces_it() {
         let mut set = SmartPlaylists::default();
-        set.define("p", crate::filter::Filter::parse("year>0").unwrap(), None);
         set.define(
             "p",
-            crate::filter::Filter::parse("year>2000").unwrap(),
+            crate::query::filter::Filter::parse("year>0").unwrap(),
+            None,
+        );
+        set.define(
+            "p",
+            crate::query::filter::Filter::parse("year>2000").unwrap(),
             None,
         );
         assert_eq!(set.names(), ["p"]);

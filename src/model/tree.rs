@@ -44,12 +44,12 @@
 
 use std::collections::BTreeMap;
 
-use crate::format::Field;
 use crate::model::entity::ReleaseGroup;
 use crate::model::id::Id;
 use crate::model::seam::{Librarian, Listing};
 use crate::model::sortkey::{SortKey, sort_key};
 use crate::model::spine::PartialDate;
+use crate::query::format::Field;
 
 /// One album under one artist.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +120,7 @@ fn values_of(
     // *tag* says — `!album?` has to stay meaningful — but a tree grouping by
     // album must group two pressings of one record together, which only the
     // release group can say. Same for who it files under.
-    let held = crate::filter::texts_of(field, subject);
+    let held = crate::query::filter::texts_of(field, subject);
     if held.is_empty() {
         return vec![stand_in(field)];
     }

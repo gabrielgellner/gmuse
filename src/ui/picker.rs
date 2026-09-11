@@ -197,7 +197,7 @@ pub fn split(input: &str) -> (Option<String>, String, Option<String>) {
         if head.is_empty() {
             break;
         }
-        if crate::filter::Filter::parse(&head).is_ok() {
+        if crate::query::filter::Filter::parse(&head).is_ok() {
             return (Some(head), words[take..].join(" "), None);
         }
     }

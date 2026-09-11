@@ -245,7 +245,7 @@ fn render_with(status: &Status, template: &str) -> String {
         // string for it rather than a word it then has to filter out.
         return String::new();
     };
-    match crate::format::Template::parse(template) {
+    match crate::query::format::Template::parse(template) {
         Ok(t) => t.render(&track.listed()),
         Err(e) => format!("err {e}"),
     }

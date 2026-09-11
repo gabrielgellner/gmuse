@@ -441,19 +441,19 @@ pub struct Ui {
     pub theme: theme::Theme,
     /// How the now-playing description is written. Parsed at config load; the
     /// status line only renders it.
-    pub now_playing: crate::format::Template,
+    pub now_playing: crate::query::format::Template,
     /// Which track the remote snapshot last carried a clone of.
     ///
     /// So the clone happens when the track changes rather than on every tick.
     remote_track: Option<crate::model::rows::CopyId>,
     /// The transport panel's headline (#34).
-    pub transport_line: crate::format::Template,
+    pub transport_line: crate::query::format::Template,
     /// How a track row is written in the library tree.
     ///
     /// Its own template because a track sits beside an artist row there and
     /// has to read differently — the same reason a file explorer icons files
     /// apart from folders.
-    pub track_line: crate::format::Template,
+    pub track_line: crate::query::format::Template,
     /// The library projection. Owned rather than borrowed, because changing
     /// the active catalogs — or `smart_artist_sort` — rebuilds it.
     pub library: Shelf,
@@ -631,17 +631,19 @@ impl Ui {
             body_height: std::cell::Cell::new(0),
             guide_pane: Pane::Tree,
             theme: theme::Theme::default(),
-            now_playing: crate::format::Template::default(),
+            now_playing: crate::query::format::Template::default(),
             remote_track: None,
-            transport_line: crate::format::Template::transport_default(),
+            transport_line: crate::query::format::Template::transport_default(),
             // **The track number is grouped, so a single does not pay for a
             // column it has no value for.** A field with no value renders
             // nothing, but its separator is literal text and stays — so a
             // track with a number read `20  After Dark` and one without read
             // `  Trilogy`, two spellings of the same row. `[...]` drops the
             // literal with the field, which is what grouping is for.
-            track_line: crate::format::Template::parse("[{track:2}  ]{display_title}  {duration}")
-                .expect("a literal template"),
+            track_line: crate::query::format::Template::parse(
+                "[{track:2}  ]{display_title}  {duration}",
+            )
+            .expect("a literal template"),
             library,
             composed: crate::view::Stack::default(),
             continue_playing: true,
@@ -655,9 +657,9 @@ impl Ui {
 
     /// What completion can offer, from the running application.
     /// History, the clock, and the shuffle seed, for the sort language.
-    pub fn sort_env(&self) -> crate::sort::SortEnv<'_> {
-        crate::sort::SortEnv {
-            env: crate::filter::Env {
+    pub fn sort_env(&self) -> crate::query::sort::SortEnv<'_> {
+        crate::query::sort::SortEnv {
+            env: crate::query::filter::Env {
                 listened: Some(&self.listened),
                 now: crate::history::now(),
             },
@@ -1882,9 +1884,9 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
             // makes the two halves compose rather than compete.
             let matches = predicate
                 .as_deref()
-                .and_then(|src| crate::filter::Filter::parse(src).ok())
+                .and_then(|src| crate::query::filter::Filter::parse(src).ok())
                 .map(|f| {
-                    let env = crate::filter::Env {
+                    let env = crate::query::filter::Env {
                         listened: Some(&ui.listened),
                         now: crate::history::now(),
                     };
@@ -3642,7 +3644,7 @@ fn freeze(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         ));
         return;
     };
-    let env = crate::filter::Env {
+    let env = crate::query::filter::Env {
         listened: Some(&ui.listened),
         now: crate::history::now(),
     };
@@ -3801,7 +3803,7 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     }
 
     let resolved = {
-        let env = crate::filter::Env {
+        let env = crate::query::filter::Env {
             listened: Some(&ui.listened),
             now: crate::history::now(),
         };
@@ -3877,7 +3879,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     let (members, order_lost, problems) = {
         // Scoped so the borrows of `history` and `filter` end before the
         // library is replaced below.
-        let env = crate::filter::Env {
+        let env = crate::query::filter::Env {
             listened: Some(&ui.listened),
             now: crate::history::now(),
         };
@@ -4054,9 +4056,9 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
 ///   classification. `year>=2015` translates perfectly well and must not
 ///   rewrite a release date because somebody dragged a row.
 fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
-    use crate::format::Authorship;
     use crate::model::entity::Collection;
     use crate::model::view::Op;
+    use crate::query::format::Authorship;
 
     let terms = ui.composed.terms();
     if terms.is_empty() {
@@ -4190,7 +4192,7 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
 fn unplaced_level(_ui: &Ui, ctx: &Context<'_>, levels: crate::shelf::Levels) -> Option<String> {
     let (outer, inner) = levels.pair()?;
     [outer, inner].into_iter().find_map(|level| {
-        let crate::format::Field::Facet(facet) = level.field else {
+        let crate::query::format::Field::Facet(facet) = level.field else {
             return None;
         };
         level.at?;
@@ -4237,11 +4239,11 @@ impl Assert {
 /// naming no single value to assert. Conflating the two is what an earlier
 /// draft of this did, and it made a year read as observed.
 fn sole_authored_field(
-    f: &crate::filter::Filter,
-) -> Option<(crate::format::Authorship, String, Option<Assert>)> {
-    use crate::filter::{Expr, Op, Quant, Reach, Selector, Value};
+    f: &crate::query::filter::Filter,
+) -> Option<(crate::query::format::Authorship, String, Option<Assert>)> {
+    use crate::query::filter::{Expr, Op, Quant, Reach, Selector, Value};
 
-    type Named = (crate::format::Authorship, String, Option<Assert>);
+    type Named = (crate::query::format::Authorship, String, Option<Assert>);
 
     fn walk(e: &Expr, found: &mut Vec<Named>, bad: &mut bool) {
         match e {
@@ -4281,7 +4283,7 @@ fn sole_authored_field(
                     // has to reach the history fields, not only the row's.
                     Selector::History(h) => {
                         let write = literal
-                            .filter(|_| *h == crate::filter::HistoryField::Rating)
+                            .filter(|_| *h == crate::query::filter::HistoryField::Rating)
                             .and_then(|v| v.parse::<u8>().ok())
                             .filter(|stars| (1..=5).contains(stars))
                             .map(Assert::Rating);
@@ -7090,12 +7092,12 @@ mod tests {
         let mut ui = ui_of(store, true);
         ui.playlists.define(
             "electronic",
-            crate::filter::Filter::parse("genre=\"electronic\"").unwrap(),
-            Some(crate::sort::Sort::parse("title").unwrap()),
+            crate::query::filter::Filter::parse("genre=\"electronic\"").unwrap(),
+            Some(crate::query::sort::Sort::parse("title").unwrap()),
         );
         ui.playlists.define(
             "good",
-            crate::filter::Filter::parse("rating>=4").unwrap(),
+            crate::query::filter::Filter::parse("rating>=4").unwrap(),
             None,
         );
         ui.data_dir = Some(scratch("smart-playlists"));
@@ -10088,7 +10090,7 @@ mod tests {
         assert!(loaded.errors[0].message.contains("nosuchfield"));
         assert_eq!(
             loaded.now_playing,
-            crate::format::Template::default(),
+            crate::query::format::Template::default(),
             "a rejected template should leave the default in place"
         );
     }

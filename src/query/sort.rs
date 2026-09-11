@@ -11,7 +11,7 @@
 //!
 //! The keys are the field names the format and filter languages already use.
 //! That is the whole design: **one vocabulary, now for a third purpose**, so
-//! adding a field to [`crate::format::Field`] gives all three of them.
+//! adding a field to [`crate::query::format::Field`] gives all three of them.
 //!
 //! foobar2000 instead sorts by an arbitrary title-format pattern
 //! (`SORT BY %album%|$num(%tracknumber%,2)`), which is more general and makes
@@ -21,13 +21,13 @@
 
 use std::cmp::Ordering;
 
-use crate::filter::Env;
-use crate::format::{Field, Kind};
 use crate::model::entity::Recording;
 use crate::model::id::Id;
 use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
-use crate::shelf::sort_key;
+use crate::model::sortkey::sort_key;
+use crate::query::filter::Env;
+use crate::query::format::{Field, Kind};
 
 /// What one sort key looks at.
 ///
@@ -110,7 +110,7 @@ pub struct Term {
 
 /// A parsed sort order, and the text it was written as.
 ///
-/// The source is kept for the same reason [`crate::filter::Filter`] keeps its
+/// The source is kept for the same reason [`crate::query::filter::Filter`] keeps its
 /// own: §6 wants a command to round-trip through text, and rendering the terms
 /// back would normalise away the spacing someone chose.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,7 +270,7 @@ fn flip(ord: Ordering, descending: bool) -> Ordering {
 fn listened_of<'a>(
     t: &crate::model::rows::Subject<'_>,
     env: &SortEnv<'a>,
-) -> Option<(&'a dyn crate::filter::Listened, Id<Recording>)> {
+) -> Option<(&'a dyn crate::query::filter::Listened, Id<Recording>)> {
     let listened = env.env.listened?;
     // The library's binding, not the one a file's tags imply — the same
     // correction the filter took (#86).
@@ -287,14 +287,14 @@ fn cell(key: Key, id: CopyId, t: &crate::model::rows::Subject<'_>, env: &SortEnv
             // The **first** value where a field has several: sorting is a
             // total order over one key, and a genre tag naming three terms
             // sorts under the first, which is the broadest (#86).
-            Kind::Text => match crate::filter::texts_of(f, t).into_iter().next() {
+            Kind::Text => match crate::query::filter::texts_of(f, t).into_iter().next() {
                 Some(v) if !v.trim().is_empty() => {
                     let smart = env.smart_artist_sort && is_artist(f);
                     Cell::Text(sort_key(&v, smart).as_str().to_string())
                 }
                 _ => Cell::Missing,
             },
-            Kind::Number => match crate::filter::number_of(f, t) {
+            Kind::Number => match crate::query::filter::number_of(f, t) {
                 Some(v) => Cell::Num(v),
                 None => Cell::Missing,
             },
@@ -501,9 +501,9 @@ mod tests {
     /// And the reverse, so neither language leaves you guessing.
     #[test]
     fn a_sorts_date_spelling_is_refused_by_the_filter() {
-        let e = crate::filter::Filter::parse("added>3").unwrap_err();
+        let e = crate::query::filter::Filter::parse("added>3").unwrap_err();
         assert!(e.to_string().contains("use `days_since_added`"), "{e}");
-        let e = crate::filter::Filter::parse("last_played>3").unwrap_err();
+        let e = crate::query::filter::Filter::parse("last_played>3").unwrap_err();
         assert!(e.to_string().contains("use `days_since_played`"), "{e}");
     }
 

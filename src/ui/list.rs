@@ -10,9 +10,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
 use super::theme::{Role, Theme};
-use crate::format::NO_DURATION;
 use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
+use crate::query::format::NO_DURATION;
 
 /// One drawn line.
 #[derive(Debug, Clone, PartialEq)]

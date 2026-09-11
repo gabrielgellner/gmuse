@@ -64,7 +64,7 @@ pub enum What {
     // one thing, free to drift, which is the failure #90 talked us out of one
     // layer down.
     /// A predicate typed at the line.
-    Where(Box<crate::filter::Filter>),
+    Where(Box<crate::query::filter::Filter>),
     /// A collection's entries: **a sequence**, so it carries an order and its
     /// duplicates until something widens it.
     ///
@@ -381,7 +381,7 @@ impl Stack {
         &self,
         librarian: &dyn Listing,
         defs: &dyn Definitions,
-        env: crate::filter::Env<'_>,
+        env: crate::query::filter::Env<'_>,
     ) -> Resolved {
         let all: Vec<CopyId> = Listing::rows(librarian);
         if self.terms.is_empty() {
@@ -430,7 +430,7 @@ impl Stack {
         librarian: &dyn Listing,
         defs: &dyn Definitions,
         all: &[CopyId],
-        env: crate::filter::Env<'_>,
+        env: crate::query::filter::Env<'_>,
         entering: &mut Vec<String>,
         problems: &mut Vec<Problem>,
     ) -> Rows {
@@ -498,7 +498,7 @@ impl Stack {
         librarian: &dyn Listing,
         defs: &dyn Definitions,
         all: &[CopyId],
-        env: crate::filter::Env<'_>,
+        env: crate::query::filter::Env<'_>,
         entering: &mut Vec<String>,
         problems: &mut Vec<Problem>,
     ) -> Rows {
@@ -939,11 +939,11 @@ mod tests {
         assert_eq!(back.label(), stack.label());
     }
 
-    use crate::filter::Filter;
     use crate::model::entity::Device;
     use crate::model::instance::{Instance, Scanned};
     use crate::model::ord::OrdKey;
     use crate::model::seam::Librarian;
+    use crate::query::filter::Filter;
 
     fn scanned(title: &str, artist: &str, genre: &str, hash: u128) -> Scanned {
         Scanned {
@@ -983,8 +983,8 @@ mod tests {
         )
     }
 
-    fn env() -> crate::filter::Env<'static> {
-        crate::filter::Env {
+    fn env() -> crate::query::filter::Env<'static> {
+        crate::query::filter::Env {
             listened: None,
             now: 1_000_000,
         }

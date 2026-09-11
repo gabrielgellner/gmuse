@@ -7,10 +7,10 @@
 //! metadata is made of regex metacharacters and regex fails *silently* on it:
 //! see the Decision Log for the counts that decided this.
 
-use crate::format::{Field, Kind};
 use crate::model::entity::Recording;
 use crate::model::id::Id;
 use crate::model::rows::Subject;
+use crate::query::format::{Field, Kind};
 
 /// What a filter can see besides the track itself.
 ///
@@ -271,8 +271,8 @@ pub enum HistoryField {
 
 impl HistoryField {
     /// Which of #96's three categories this is.
-    pub fn authorship(self) -> crate::format::Authorship {
-        use crate::format::Authorship;
+    pub fn authorship(self) -> crate::query::format::Authorship {
+        use crate::query::format::Authorship;
         match self {
             // A judgement, and the one this player exists to collect.
             HistoryField::Rating => Authorship::Authored,
