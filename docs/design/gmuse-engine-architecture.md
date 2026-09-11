@@ -1102,6 +1102,22 @@ A control-plane `param.set` counts as a touch for precedence purposes.
 
 ## 15. Phased implementation plan
 
+**Built as milestone "The engine" (#206-#219)**, which is this plan at finer grain and in a different order. Two
+departures worth knowing about, because the issues are the authority on sequencing and this list is the authority on
+content:
+
+- **The boundaries come before the crates.** Phase 1 here opens with the crate split; the milestone puts it seventh
+  (#213). A split proves nothing about the design and makes every later diff harder to read while the lines are still
+  moving. Doing the librarian thread, the single appender and the fold rule in-process first (#206-#209) means the code
+  being moved already does not reach across the lines being drawn, so the split becomes a rename. That is how the lib
+  split landed at the end of the access-layers milestone, and it was uneventful for the same reason.
+- **The null backend comes before the socket.** Everything from #214 on needs an engine a test can start and assert
+  against, so #210 is a prerequisite rather than part of the testing phase.
+
+Three natural points to stop and judge the chain of control, rather than one at the end: after **#209** the
+library/control split can be judged in-process; after **#217** the protocol can be operated from a shell with no TUI,
+which is where an awkward command is cheapest to find; after **#219** the whole thing.
+
 Each phase ends with its tests passing. Earlier phases MUST NOT take shortcuts that violate the invariants, even
 temporarily; in particular, the TUI never gets in-process access.
 
