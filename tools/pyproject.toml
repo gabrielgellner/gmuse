@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Out-of-tree passes that measure, enrich and identify a gmuse library"
 requires-python = ">=3.13"
 dependencies = [
+    # **The library, not a file** — #197. A tool asks the library what it holds
+    # and hands back typed proposals; it no longer parses a work list somebody
+    # produced or hand-builds JSON that `apply` might refuse.
+    "gmuse-core",
     "mutagen>=1.47",
     "numpy>=2.0",
     "requests>=2.32",
@@ -32,3 +36,8 @@ packages = ["gmuse_tools"]
 # Tests live beside nothing else: they are the only thing in `tests/`, and the
 # package is importable because `uv sync` installs it.
 testpaths = ["tests"]
+
+[tool.uv.sources]
+# Built from the Rust crate in the parent directory by maturin. `just wheel-dev`
+# puts it in this environment.
+gmuse-core = { path = "..", editable = false }

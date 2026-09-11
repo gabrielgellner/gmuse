@@ -19,6 +19,6 @@ dynamic = ["version"]
 # need rebuilding per interpreter, which matters for a tool nobody is going to
 # remember to rebuild.
 features = ["pyo3/extension-module", "python"]
-module-name = "gmuse_core"
+module-name = "gmuse_core.gmuse_core"
 # The stubs travel with the wheel, so the tools keep their type checking.
 python-source = "python"

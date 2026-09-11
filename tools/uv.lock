@@ -145,10 +145,15 @@ wheels = [
 ]
 
 [[package]]
+name = "gmuse-core"
+source = { directory = "../" }
+
+[[package]]
 name = "gmuse-tools"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "gmuse-core" },
     { name = "mutagen" },
     { name = "numpy" },
     { name = "requests" },
@@ -165,6 +170,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "gmuse-core", directory = "../" },
     { name = "mutagen", specifier = ">=1.47" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "requests", specifier = ">=2.32" },

@@ -50,6 +50,7 @@ import unicodedata as u
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import gmuse_core
 import typer
 
 from gmuse_tools.genre.common import out_path, write_tsv
@@ -286,21 +287,31 @@ def survey(rows: Iterable[dict[str, str]]) -> tuple[list[dict[str, object]], lis
     return lines, review
 
 
-def run(work: Path, out: Path, review: Path) -> None:
-    """Read the work list, propose the versions, report the rest."""
-    rows = [json.loads(line) for line in work.read_text().splitlines() if line.strip()]
+def run(out: Path, review: Path) -> None:
+    """Ask the library what it holds, propose the versions, report the rest.
+
+    **The library rather than a file** — #198. This read a work list somebody
+    had produced with `gmuse shelf query` and redirected into a file, then
+    hand-built JSON that `gmuse shelf apply` would accept or refuse hours later.
+    Both halves are gone: `Library.query` is the same evaluator the `:` line
+    uses, and `Library.propose` deserialises every line into the `Proposal` the
+    apply pass reads, so a malformed one fails **here**, naming the row.
+
+    Nothing else changes. `survey` still takes rows and still decides nothing a
+    person has not curated — a bracket is a title until a vocabulary term says
+    otherwise.
+    """
+    lib = gmuse_core.Library.open()
+    rows = lib.query()
     lines, unknown = survey(rows)
+
     out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w") as fh:
-        for line in lines:
-            fh.write(json.dumps(line) + "\n")
+    lib.propose([json.dumps(line) for line in lines], out)
+
     write_tsv(review, unknown, ["form", "seen"])
     print(f"\n{len(lines)} version fact(s) -> {out}", file=sys.stderr)
     print(f"{len(unknown)} form(s) the vocabulary does not know -> {review}", file=sys.stderr)
     print("Nothing was written for them: a bracket is a title until a curated term says otherwise.", file=sys.stderr)
-
-
-WORK = typer.Argument(Path("work.jsonl"), help="the work list from `gmuse shelf query`")
 
 
 def register(app: typer.Typer) -> None:
@@ -308,8 +319,11 @@ def register(app: typer.Typer) -> None:
     sub = typer.Typer(help=__doc__, no_args_is_help=True)
 
     @sub.command("propose")
-    def propose_cmd(work: Path = WORK) -> None:
-        """Assert which version a recording is, for the terms the vocabulary knows."""
-        run(work.expanduser(), out_path("version-propose.jsonl"), out_path("version-unknown.tsv"))
+    def propose_cmd() -> None:
+        """Assert which version a recording is, for the terms the vocabulary knows.
+
+        **Takes no work list.** It asks the library directly (#198).
+        """
+        run(out_path("version-propose.jsonl"), out_path("version-unknown.tsv"))
 
     app.add_typer(sub, name="version")
