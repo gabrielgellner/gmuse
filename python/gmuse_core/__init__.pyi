@@ -64,6 +64,21 @@ class Library:
         """
         ...
 
+    def release_from_musicbrainz(self, mbid: str) -> str:
+        """The library's id for a MusicBrainz release.
+
+        Ids here are convergent — a UUIDv5 over the mbid — so two machines that
+        never spoke mint the same one. It is **one-way**, which is why the
+        library cannot hand an mbid back and why a pass that wants to look a
+        release up still reads one from a tag.
+
+        What this is for is checking that tag before believing it: derive the
+        id it claims, compare it to the `release` on the row, and a
+        disagreement is a row to skip rather than a fact written against
+        somebody else's pressing.
+        """
+        ...
+
     def check(self, items: list[str]) -> int:
         """Check proposals without writing them, for a pass that writes as it goes.
 

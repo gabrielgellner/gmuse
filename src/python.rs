@@ -168,6 +168,30 @@ impl Library {
         Some(crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&audio).to_string())
     }
 
+    /// **The id a MusicBrainz release mbid derives to** — #203.
+    ///
+    /// Ids here are convergent: `Id::<Release>::of_musicbrainz` is a UUIDv5
+    /// over the mbid, so two machines that never spoke mint the same id for
+    /// the same release. It is **one-way**, which is why the library cannot
+    /// hand an mbid back and why a pass that wants to look a release up still
+    /// reads one from a tag.
+    ///
+    /// What this is for is checking that tag before believing it: derive the
+    /// id it claims, compare it to the `release` on the row, and a
+    /// disagreement is a row to skip rather than a `tracklisted` fact written
+    /// against somebody else's pressing.
+    ///
+    /// The same shape as `encoding_at`: the outside world offers a candidate
+    /// and the library confirms the identity.
+    fn release_from_musicbrainz(&self, mbid: &str) -> PyResult<String> {
+        let parsed = uuid::Uuid::parse_str(mbid)
+            .map_err(|e| PyValueError::new_err(format!("not a MusicBrainz id: {e}")))?;
+        Ok(
+            crate::model::id::Id::<crate::model::entity::Release>::of_musicbrainz(parsed)
+                .to_string(),
+        )
+    }
+
     /// **Check proposals without writing them** — for a pass that writes as it
     /// goes.
     ///

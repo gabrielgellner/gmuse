@@ -785,6 +785,23 @@ pub struct Queried {
     /// The encoding a tool would measure — the canonical one, unless the query
     /// asked for something else.
     pub encoding: Option<Id<Encoding>>,
+    /// **The pressing this copy sits on** — #203.
+    ///
+    /// By way of the slot, like `album` above, and for the same reason: a
+    /// recording is on every release that holds it and the one that matters is
+    /// the one the file is on.
+    ///
+    /// It is the **library's** id, not MusicBrainz's, and that is not an
+    /// oversight — `Id::<Release>::of_musicbrainz` is a UUIDv5 derivation and
+    /// one-way, so the mbid is not recoverable and the library does not keep
+    /// it. A pass that wants to *look a release up* still reads the mbid from
+    /// a tag; what this lets it do is **check that tag against the library**
+    /// before believing it, by deriving the same id and comparing.
+    ///
+    /// Which is the shape #199 settled on: the outside world offers a
+    /// candidate, the library confirms the identity, and a disagreement is a
+    /// row to skip rather than a fact to write.
+    pub release: Option<Id<crate::model::entity::Release>>,
     /// Where this machine can open it, if it can. Absent for a recording
     /// nothing here holds, which is an ordinary row.
     pub locator: Option<String>,

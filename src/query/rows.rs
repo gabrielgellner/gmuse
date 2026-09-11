@@ -232,6 +232,12 @@ pub fn rows(
                 album: encoding
                     .and_then(|e| catalogue.placed.get(&e))
                     .and_then(|slot| library.group_of(Some(*slot))),
+                // The pressing rather than the record — #203, and the one a
+                // tracklist is about: a tracklist belongs to a release, not to
+                // the group that release is one of.
+                release: encoding
+                    .and_then(|e| catalogue.placed.get(&e))
+                    .and_then(|slot| library.release_of(Some(*slot))),
                 album_artist: encoding
                     .and_then(|e| catalogue.placed.get(&e))
                     .and_then(|slot| library.group_of(Some(*slot)))
@@ -280,6 +286,7 @@ pub fn rows(
             // either.
             musicbrainz: None,
             album: None,
+            release: None,
             album_artist: None,
         });
     }

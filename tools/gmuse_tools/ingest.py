@@ -1115,6 +1115,41 @@ def slots_of(disc: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def releases_held(lib: gmuse_core.Library) -> dict[str, str]:
+    """Which release the library says each folder's copies sit on — #203.
+
+    By folder, because that is the unit a tracklist is about and the unit the
+    tags are read from. A folder holding copies from two releases has no single
+    answer and gets whichever came last; that is a folder [`missing_tracks`]
+    already treats as suspect.
+    """
+    held: dict[str, str] = {}
+    for row in lib.query(every_copy=True):
+        locator, release = row.get("locator"), row.get("release")
+        if locator and release:
+            held[str(Path(locator).parent)] = release
+    return held
+
+
+def agrees(lib: gmuse_core.Library, held: dict[str, str], folder: Path, mbid: str) -> bool:
+    """Whether the tag's release is the one the library holds these copies on.
+
+    **The tag is a candidate, not an identity** — #203, and #199's shape. A
+    `tracklisted` fact names a release; taking that release from whatever a
+    tagger last wrote means a stale tag writes a *permanent* fact against
+    somebody else's pressing, in a log that only forgets by being superseded.
+
+    So the id the tag claims is derived and compared to what the library says.
+    A disagreement is a folder to skip, not a fact to write.
+
+    **True for a folder the library holds nothing from**, which is the ordinary
+    case for a download being prepared: there is nothing to disagree with yet,
+    and refusing it would stop this pass working on exactly what it is for.
+    """
+    says = held.get(str(folder))
+    return says is None or lib.release_from_musicbrainz(mbid) == says
+
+
 def tracklist(root: Path, out: Path) -> None:
     """Write a proposal cataloguing the whole tracklist of every identified album.
 
@@ -1130,6 +1165,7 @@ def tracklist(root: Path, out: Path) -> None:
     establish.
     """
     lib = gmuse_core.Library.open()
+    held = releases_held(lib)
     folders = sorted({f.parent for f in walk(root)})
     lines: list[str] = []
     tally: collections.Counter[str] = collections.Counter()
@@ -1144,6 +1180,10 @@ def tracklist(root: Path, out: Path) -> None:
         mbid, discs = held_discs(folder)
         if not mbid:
             tally["no release id in the tags"] += 1
+            continue
+
+        if not agrees(lib, held, folder, mbid):
+            tally["the tag names a different release than the library holds"] += 1
             continue
         release = asked(f"{MB}/release/{mbid}", {"inc": INC, "fmt": "json"})
         if not release:
