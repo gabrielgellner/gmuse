@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from gmuse_tools.ingest import missing_tracks
+from gmuse_tools.ingest import duration_share, missing_tracks, placeholders
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -395,3 +395,40 @@ def test_titles_that_cannot_decide_fall_back_to_position() -> None:
 
     got = [(p.name, t["position"]) for (p, _), (_, t) in seated(ours, theirs)]
     assert got == [("1.mp3", 1), ("2.mp3", 2)]
+
+
+def test_a_placeholder_title_is_not_a_disagreement() -> None:
+    """**A share of 0% means two different things** — #178.
+
+    `(Untitled) Peel Session 01` disagrees with every real title, so a
+    tracklist gate reports no agreement — but it has found nothing, rather than
+    found a conflict. The same distinction `Held` draws between "I do not hold
+    it" and "I do not know how many there are", and a person reading the row
+    needs it to know which kind of nothing they are looking at.
+    """
+    assert placeholders(["(Untitled) Red A1", "(Untitled) Analogue Bubblebath 05"]) == 2
+    assert placeholders(["Track 3", "untitled", "Track"]) == 3
+    # A real title is never one, including one that merely contains the word.
+    assert placeholders(["Windowlicker", "Untitled Love Song", "Girl/Boy Song"]) == 0
+
+
+def test_duration_is_a_second_opinion_and_not_a_gate() -> None:
+    """**Measured over 34 Aphex discs: 6 better, 6 worse, 22 the same** — #178.
+
+    That is noise, so nothing here decides on it. It earns its column on the
+    rows where the titles are placeholders and there is no other evidence at
+    all — `A Live Collection` shares no title with its release and matches
+    every length.
+    """
+    release = {"media": [{"tracks": [{"length": 60_000}, {"length": 125_000}]}]}
+    assert duration_share([60.0, 125.0], release) == 1.0
+    # Within the tolerance, because a tagger's number is not exact: 34 files on
+    # this library are wrong by more than two seconds.
+    assert duration_share([61.5, 123.0], release) == 1.0
+    assert duration_share([90.0, 200.0], release) == 0.0
+    # **Held against the longer side**, so holding half a record cannot read as
+    # a whole agreement.
+    assert duration_share([60.0], release) == 0.5
+    # Nothing to compare is not zero agreement.
+    assert duration_share([60.0], {"media": []}) is None
+    assert duration_share([], release) is None

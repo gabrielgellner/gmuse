@@ -841,6 +841,73 @@ def as_cell(found: list[dict[str, object]] | list[dict[str, str | None]]) -> str
     return json.dumps(found, ensure_ascii=False) if found else ""
 
 
+#: How far two durations may sit apart and still be the same track, in seconds.
+#:
+#: Generous on purpose. A tagger computes `size / first frame's bitrate` where
+#: a file carries no Xing header — measured on this library, 34 files wrong by
+#: more than two seconds and one claiming 1735s for a 287s track. This is a
+#: second opinion offered to a person, so a false *disagreement* costs more
+#: than a loose match.
+DURATION_TOL: Final = 3.0
+
+
+def our_seconds(files: list[Path]) -> list[float | None]:
+    """How long each file plays, as its tags compute it.
+
+    **Not what `shelf import` measures.** `audio_id` counts packets and is
+    exact; this runs before import, where that number does not exist yet.
+    """
+    out: list[float | None] = []
+    for p in sorted(files):
+        try:
+            f = File(p)
+            out.append(f.info.length if f is not None and f.info else None)
+        except Exception:  # noqa: BLE001 - a duration is a nicety, never a gate
+            out.append(None)
+    return out
+
+
+def duration_share(ours: list[float | None], release: dict[str, Any]) -> float | None:
+    """How much of the tracklist agrees by *length* rather than by name.
+
+    **A second opinion, and deliberately not a gate** — #178 measured it. Over
+    the 34 Aphex discs the title gate could not confirm, duration agreed more
+    on 6, less on 6, and about the same on 22. That is noise, not a signal, and
+    a rule reading it would have accepted two releases and rejected six the
+    titles had right.
+
+    It earns its column on the two it settles outright. `A Live Collection` and
+    `Sonar Live` share **no** title with their release and match every length:
+    our titles there are local placeholders — `(Untitled) Peel Session 01` —
+    so the title gate is not reporting disagreement, it is reporting that it
+    has nothing to compare. Duration is the only evidence in the row.
+    """
+    theirs = [t.get("length") for m in release.get("media", []) for t in m.get("tracks", [])]
+    theirs = [ms / 1000 for ms in theirs if ms]
+    if not theirs or not ours:
+        return None
+    # **`strict=False` on purpose**: the two lists differ in length whenever
+    # we hold part of a record, which is the ordinary case here. The extra
+    # tracks are counted by the denominator below rather than raised — holding
+    # 6 of 8 is 75% agreement at best, never 100%.
+    hit = sum(1 for a, b in zip(ours, theirs, strict=False) if a and abs(a - b) <= DURATION_TOL)
+    return hit / max(len(ours), len(theirs))
+
+
+#: What a title looks like when it names nothing — a local placeholder.
+#:
+#: `(Untitled) Analogue Bubblebath 05`, `(Untitled) Red A1`. A share of 0%
+#: against these is **not evidence against the release**: there was nothing to
+#: compare. Flagged so a person reading the row knows which kind of nothing it
+#: is, which is the same distinction `Held` draws for a part-held release.
+PLACEHOLDER: Final = re.compile(r"^\s*\(untitled\)|^\s*(?:track|untitled)\s*\d*\s*$", re.IGNORECASE)
+
+
+def placeholders(titles: list[str]) -> int:
+    """How many of our titles name nothing."""
+    return sum(1 for t in titles if PLACEHOLDER.match(t or ""))
+
+
 def survey(root: Path, out: Path) -> None:
     """Identify every album that carries no MusicBrainz id. Writes no tags.
 
@@ -868,6 +935,8 @@ def survey(root: Path, out: Path) -> None:
                     "accept": "",
                     "verdict": "part of an album",
                     "share": "",
+                    "dur": "",
+                    "blank": "",
                     "ours": len(ours),
                     "theirs": "",
                     "album": rel,
@@ -889,6 +958,8 @@ def survey(root: Path, out: Path) -> None:
                     "accept": "",
                     "verdict": "error",
                     "share": "",
+                    "dur": "",
+                    "blank": "",
                     "ours": len(ours),
                     "theirs": "",
                     "album": rel,
@@ -904,6 +975,8 @@ def survey(root: Path, out: Path) -> None:
                     "accept": "",
                     "verdict": "no candidate",
                     "share": "",
+                    "dur": "",
+                    "blank": "",
                     "ours": len(ours),
                     "theirs": "",
                     "album": rel,
@@ -920,11 +993,20 @@ def survey(root: Path, out: Path) -> None:
         # fact about the row rather than a note about its differences.
         # `accept` reads this file with `DictReader`, so a column costs it
         # nothing.
+        # **Two more columns of evidence, and neither is a gate.** `accept`
+        # still turns on the tracklist alone; these say what *else* is true of
+        # a row somebody is being asked to read. `blank` is the one that
+        # changes how a 0% reads — no agreement against placeholder titles is
+        # not disagreement, it is nothing to compare.
+        dur = duration_share(our_seconds(files), match.release)
+        blank = placeholders(ours)
         rows.append(
             {
                 "accept": "y" if match.verdict == "exact" else "",
                 "verdict": match.verdict,
                 "share": f"{match.share:.0%}",
+                "dur": "" if dur is None else f"{dur:.0%}",
+                "blank": blank or "",
                 "ours": len(ours),
                 "theirs": len(theirs),
                 "album": rel,
