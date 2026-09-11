@@ -585,7 +585,7 @@ mod tests {
 
     /// One track, held, with a genre asserted twice and a third ruled out.
     fn library() -> (Librarian, Id<Recording>) {
-        let mut held = crate::scan::Holdings::new();
+        let mut held = crate::operations::scan::Holdings::new();
         held.upsert(crate::fixture::Tagged {
             path: "/m/Dance/Luna/01 Callisto.flac".into(),
             title: Some("Callisto".into()),
@@ -852,7 +852,7 @@ mod tests {
     fn a_derived_copy_knows_it_can_be_remade() {
         // Two copies of one performance: the file that was acquired, and one
         // made out of it.
-        let mut held = crate::scan::Holdings::new();
+        let mut held = crate::operations::scan::Holdings::new();
         for path in [
             "/m/Dance/Luna/01 Callisto.flac",
             "/m/Dance/Luna/01 Callisto.opus",

@@ -6346,7 +6346,7 @@ fn highlight(theme: &theme::Theme, focused: bool) -> Style {
 mod tests {
     use super::*;
     use crate::fixture::Tagged as Track;
-    use crate::scan::Holdings as Scan;
+    use crate::operations::scan::Holdings as Scan;
     use ratatui::backend::TestBackend;
     use std::time::{Duration, Instant};
 
@@ -10338,7 +10338,7 @@ mod tests {
 
         // The same audio, renumbered on disk — which is exactly what stranded
         // a four-star rating when history was keyed by path.
-        let mut renamed = crate::scan::Holdings::new();
+        let mut renamed = crate::operations::scan::Holdings::new();
         let moved = store.get(&moved_from).expect("the file").clone();
         renamed.take(
             moved_from.with_file_name("99 renumbered.mp3"),

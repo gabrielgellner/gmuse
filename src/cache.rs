@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::scan::Holdings;
+use crate::operations::scan::Holdings;
 
 /// Bump on any change to `Held`, `Holdings`, `Scanned`, or this envelope.
 const FORMAT_VERSION: u32 = 9;
@@ -361,7 +361,7 @@ pub fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::Held;
+    use crate::operations::scan::Held;
 
     /// **A cache the writer knows is wrong is thrown away, not corrected.**
     ///

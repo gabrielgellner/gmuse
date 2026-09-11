@@ -9,7 +9,6 @@
 //! Nothing else changes. `access-layers.md`'s layers are the same modules in
 //! the same order, and the boundary tests still walk the same directories.
 
-pub mod apply;
 pub mod audio;
 pub mod audio_id;
 pub mod audit;
@@ -30,15 +29,14 @@ pub mod lock;
 pub mod m3u;
 pub mod model;
 pub mod next;
+pub mod operations;
 pub mod playlist;
 pub mod projection;
 pub mod query;
 pub mod remote;
-pub mod scan;
 pub mod session;
 pub mod shelf;
 pub mod smart;
-pub mod storage;
 pub mod text;
 pub mod ui;
 pub mod undo;

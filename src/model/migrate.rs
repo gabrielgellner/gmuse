@@ -456,7 +456,7 @@ mod tests {
     #[test]
     #[ignore = "needs the real library and its log"]
     fn converts_the_real_log() {
-        use crate::model::populate;
+        use crate::operations::populate;
 
         let home = PathBuf::from(std::env::var("HOME").unwrap());
         let (root, data) = (home.join("MusicLibrary"), home.join("MusicLibrary/.gmuse"));
@@ -524,7 +524,7 @@ mod tests {
 #[derive(Debug)]
 pub struct Outcome {
     /// What the scan had to say, since the conversion is only as good as it.
-    pub scan: crate::model::populate::Report,
+    pub scan: crate::operations::populate::Report,
     pub report: Report,
     /// Entries whose acquisition date was carried over from `history.toml`.
     pub acquired: usize,
@@ -574,7 +574,8 @@ pub fn run(
 ) -> Result<Outcome, crate::model::durable::LogError> {
     let device = Id::<Device>::derived(device_name.as_bytes());
     let events = crate::events::events_in(data_dir);
-    let (scanned_instance, scan) = crate::model::populate::read_library(device_name, roots, now);
+    let (scanned_instance, scan) =
+        crate::operations::populate::read_library(device_name, roots, now);
     let folded = scanned_instance.catalogue();
     let census = crate::model::basis::Census::of(folded.identified.iter());
     let artists = folded.artist_names.len();

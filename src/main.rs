@@ -13,7 +13,7 @@ use clap::Parser;
 
 use gmuse::audio::PlayerHandle;
 use gmuse::cli::Cli;
-use gmuse::scan::Holdings;
+use gmuse::operations::scan::Holdings;
 use gmuse::shelf::Shelf;
 
 /// Everything the prompt operates on.
@@ -28,7 +28,7 @@ struct App {
     ///
     /// Carried here because the scan runs before the history is loaded, and
     /// the history is what most needs to know (#25).
-    moves: Vec<gmuse::scan::Move>,
+    moves: Vec<gmuse::operations::scan::Move>,
     /// Files that looked like audio and could not be read at all.
     ///
     /// Carried for the same reason as `moves`: the scan happens before the TUI
@@ -215,7 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.store = Holdings::new();
         }
         let roots = app.roots.clone();
-        let report = gmuse::scan::scan(&mut app.store, &roots);
+        let report = gmuse::operations::scan::scan(&mut app.store, &roots);
         println!("library: {report}");
         report_errors(&report);
         app.moves = report.moves.clone();
@@ -320,11 +320,13 @@ fn run_library(
             for path in paths {
                 if path.is_dir() {
                     for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
-                        if entry.file_type().is_file() && gmuse::scan::is_audio(entry.path()) {
+                        if entry.file_type().is_file()
+                            && gmuse::operations::scan::is_audio(entry.path())
+                        {
                             files.push(entry.path().to_path_buf());
                         }
                     }
-                } else if gmuse::scan::is_audio(path) {
+                } else if gmuse::operations::scan::is_audio(path) {
                     files.push(path.clone());
                 }
             }
@@ -387,11 +389,13 @@ fn run_library(
             for path in paths {
                 if path.is_dir() {
                     for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
-                        if entry.file_type().is_file() && gmuse::scan::is_audio(entry.path()) {
+                        if entry.file_type().is_file()
+                            && gmuse::operations::scan::is_audio(entry.path())
+                        {
                             files.push(entry.path().to_path_buf());
                         }
                     }
-                } else if gmuse::scan::is_audio(path) {
+                } else if gmuse::operations::scan::is_audio(path) {
                     files.push(path.clone());
                 }
             }
@@ -414,7 +418,7 @@ fn run_library(
             // **Where every device says it holds each copy.** Identity is
             // the audio, so two paths can be one encoding — and retiring the
             // one you meant would retire the one you did not.
-            let departed = root_of(roots).join(gmuse::scan::DEPARTED);
+            let departed = root_of(roots).join(gmuse::operations::scan::DEPARTED);
             // **Elsewhere means somewhere that is not going.** The guard below
             // asks whether these bytes survive this retirement, and the files
             // being retired are not an answer to that — every one of them is
@@ -459,7 +463,7 @@ fn run_library(
             }
 
             let root = root_of(roots);
-            let done = gmuse::storage::retire(
+            let done = gmuse::operations::storage::retire(
                 &root,
                 &retiring.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>(),
                 *write,
@@ -484,7 +488,7 @@ fn run_library(
                 files.len(),
                 retiring.len(),
                 done.moved,
-                gmuse::scan::DEPARTED,
+                gmuse::operations::scan::DEPARTED,
                 done.failed.len(),
             );
             if *write {
@@ -502,7 +506,7 @@ fn run_library(
             );
             let before = log.records().len();
             let mut reads = gmuse::cache::load_measurements(&gmuse::cache::measurements_path());
-            let report = gmuse::model::populate::reconcile(
+            let report = gmuse::operations::populate::reconcile(
                 &mut log,
                 roots,
                 gmuse::history::now_ms(),
@@ -616,11 +620,11 @@ fn run_library(
                 device,
                 gmuse::history::now_ms(),
             );
-            gmuse::model::populate::populate(
+            gmuse::operations::populate::populate(
                 &mut log,
                 roots,
                 gmuse::history::now_ms(),
-                gmuse::model::populate::Admits::Identified,
+                gmuse::operations::populate::Admits::Identified,
                 &mut gmuse::model::ingest::Reads::default(),
             );
             let cat = log.catalogue();
@@ -735,11 +739,11 @@ fn run_library(
                 device,
                 gmuse::history::now_ms(),
             );
-            gmuse::model::populate::populate(
+            gmuse::operations::populate::populate(
                 &mut log,
                 roots,
                 gmuse::history::now_ms(),
-                gmuse::model::populate::Admits::Identified,
+                gmuse::operations::populate::Admits::Identified,
                 &mut gmuse::model::ingest::Reads::default(),
             );
             let cat = log.catalogue();
@@ -1234,11 +1238,11 @@ fn run_library(
                 device,
                 gmuse::history::now_ms(),
             );
-            gmuse::model::populate::populate(
+            gmuse::operations::populate::populate(
                 &mut log,
                 roots,
                 gmuse::history::now_ms(),
-                gmuse::model::populate::Admits::Identified,
+                gmuse::operations::populate::Admits::Identified,
                 &mut gmuse::model::ingest::Reads::default(),
             );
             let cat = log.catalogue();
@@ -1353,11 +1357,11 @@ fn run_library(
                 device,
                 gmuse::history::now_ms(),
             );
-            gmuse::model::populate::populate(
+            gmuse::operations::populate::populate(
                 &mut log,
                 roots,
                 gmuse::history::now_ms(),
-                gmuse::model::populate::Admits::Identified,
+                gmuse::operations::populate::Admits::Identified,
                 &mut gmuse::model::ingest::Reads::default(),
             );
             let librarian = gmuse::model::seam::Librarian::from_catalogue(&log.catalogue());
@@ -1430,11 +1434,11 @@ fn run_library(
                 device,
                 gmuse::history::now_ms(),
             );
-            let report = gmuse::model::populate::populate(
+            let report = gmuse::operations::populate::populate(
                 &mut log,
                 roots,
                 gmuse::history::now_ms(),
-                gmuse::model::populate::Admits::Identified,
+                gmuse::operations::populate::Admits::Identified,
                 &mut gmuse::model::ingest::Reads::default(),
             );
             let mut lines = 0usize;
@@ -1474,7 +1478,7 @@ fn run_library(
             // with no arguments: the scan already said which files it did not
             // recognise, and importing them is the answer to that offer.
             let targets: Vec<std::path::PathBuf> = if paths.is_empty() {
-                let seen = gmuse::model::populate::reconcile(
+                let seen = gmuse::operations::populate::reconcile(
                     &mut log,
                     roots,
                     gmuse::history::now_ms(),
@@ -1514,14 +1518,14 @@ fn run_library(
                 return Ok(());
             }
 
-            let report = gmuse::model::populate::populate(
+            let report = gmuse::operations::populate::populate(
                 &mut log,
                 &targets,
                 gmuse::history::now_ms(),
                 if *unidentified {
-                    gmuse::model::populate::Admits::Anything
+                    gmuse::operations::populate::Admits::Anything
                 } else {
-                    gmuse::model::populate::Admits::Identified
+                    gmuse::operations::populate::Admits::Identified
                 },
                 &mut gmuse::model::ingest::Reads::default(),
             );
@@ -1607,7 +1611,7 @@ fn run_library(
                 // moved five.
                 let mut walk: Vec<std::path::PathBuf> = roots.to_vec();
                 walk.extend(targets.iter().cloned());
-                gmuse::model::populate::reconcile(
+                gmuse::operations::populate::reconcile(
                     &mut log,
                     &walk,
                     gmuse::history::now_ms(),
@@ -1630,8 +1634,8 @@ fn run_library(
                     .filter_map(|at| gmuse::model::ingest::read(at).ok())
                     .map(|s| gmuse::model::id::Id::of_audio(&s.audio))
                     .collect();
-                let plan = gmuse::storage::plan_of(&placed, &root, &taken);
-                let done = gmuse::storage::carry_out(&plan, &root, true);
+                let plan = gmuse::operations::storage::plan_of(&placed, &root, &taken);
+                let done = gmuse::operations::storage::carry_out(&plan, &root, true);
                 for (at, why) in &done.failed {
                     eprintln!("could not place {}: {why}", at.display());
                 }
@@ -1650,7 +1654,7 @@ fn run_library(
                 // where it is". Walking the roots alone drops its holding and
                 // turns a playable row into a greyed one.
                 if done.moved > 0 {
-                    gmuse::model::populate::reconcile(
+                    gmuse::operations::populate::reconcile(
                         &mut log,
                         &walk,
                         gmuse::history::now_ms(),
@@ -1710,7 +1714,7 @@ fn run_library(
                 gmuse::model::seam::Librarian::from_catalogue(&library_log.catalogue());
             library.here(device);
             let root = roots.first().cloned().unwrap_or_default();
-            let plan = gmuse::storage::plan(&library, &root);
+            let plan = gmuse::operations::storage::plan(&library, &root);
 
             for (_, from, to) in &plan.moves {
                 println!("{}\t{}", from.display(), root.join(to).display());
@@ -1718,7 +1722,7 @@ fn run_library(
             for (copy, why) in &plan.refused {
                 eprintln!("refused: {copy} — {why}");
             }
-            let done = gmuse::storage::carry_out(&plan, &root, *write);
+            let done = gmuse::operations::storage::carry_out(&plan, &root, *write);
             for (at, why) in &done.failed {
                 eprintln!("could not move {}: {why}", at.display());
             }
@@ -1735,7 +1739,7 @@ fn run_library(
                 // **The locators follow the bytes.** Identity is the audio, so
                 // a moved file is the same encoding at a new place — and the
                 // holdings fact is what carries that.
-                gmuse::model::populate::reconcile(
+                gmuse::operations::populate::reconcile(
                     &mut library_log,
                     roots,
                     gmuse::history::now_ms(),
@@ -1805,7 +1809,7 @@ fn run_library(
             }
         }
         gmuse::cli::Shelf::Apply { file, write } => {
-            let outcome = gmuse::apply::run(
+            let outcome = gmuse::operations::apply::run(
                 file,
                 &loaded.data_dir,
                 roots,
@@ -2195,7 +2199,7 @@ fn run_tui(
                 // and reads no tags it has not been asked for, and the refold
                 // below is what turns that into rows.
                 let roots = app.roots.clone();
-                let report = gmuse::scan::scan(&mut app.store, &roots);
+                let report = gmuse::operations::scan::scan(&mut app.store, &roots);
                 state.audit.line("rescan", &report.to_string());
                 state.notify(format!("rescan: {report}"));
                 app.unreadable = report.errors.iter().map(|(p, _)| p.clone()).collect();
@@ -2280,7 +2284,7 @@ fn save_cache(app: &App) {
 
 /// Show the first few failures rather than a wall of them; a systematically
 /// broken library produces thousands of identical lines otherwise.
-fn report_errors(report: &gmuse::scan::ScanReport) {
+fn report_errors(report: &gmuse::operations::scan::ScanReport) {
     for (path, err) in report.errors.iter().take(5) {
         println!("  skipped {}: {err}", path.display());
     }

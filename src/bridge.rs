@@ -65,7 +65,7 @@ use crate::model::seam::Librarian;
 /// `Instance` the model uses everywhere else means the ladder that chooses a
 /// recording's identity lives in exactly one place.
 pub fn librarian(
-    held: &crate::scan::Holdings,
+    held: &crate::operations::scan::Holdings,
     records: &BTreeSet<Record>,
     device: Id<Device>,
     now: i64,
@@ -124,7 +124,7 @@ pub fn librarian(
 /// by the fold, in one call.
 #[cfg(test)]
 pub fn imported(
-    held: &crate::scan::Holdings,
+    held: &crate::operations::scan::Holdings,
     records: &BTreeSet<Record>,
     device: Id<Device>,
     now: i64,
@@ -187,7 +187,7 @@ mod forget_and_relink {
 
         // The scan now sees the same audio with different tags — somebody
         // retagged it, or a tool did.
-        let mut held = crate::scan::Holdings::new();
+        let mut held = crate::operations::scan::Holdings::new();
         held.take(
             std::path::PathBuf::from("/m/Luna/01 Callisto.flac"),
             0,
@@ -213,7 +213,7 @@ mod forget_and_relink {
     /// `import`.
     #[test]
     fn a_file_on_disk_that_nothing_imported_is_not_in_the_library() {
-        let mut held = crate::scan::Holdings::new();
+        let mut held = crate::operations::scan::Holdings::new();
         held.take(
             std::path::PathBuf::from("/m/Stranger.flac"),
             0,
@@ -245,7 +245,7 @@ mod forget_and_relink {
     use crate::model::clock::HybridClock;
     use crate::model::encoding::Format;
     use crate::model::spine::Recording;
-    use crate::scan::Holdings;
+    use crate::operations::scan::Holdings;
 
     /// **A file, as the tags a fixture means** — #141. A holding carries the
     /// audio id alone now, so what a test says about a file is a `Scanned` and
@@ -468,7 +468,7 @@ mod opening {
     use crate::model::basis::Basis;
     use crate::model::encoding::Format;
     use crate::model::spine::Recording;
-    use crate::scan::Holdings;
+    use crate::operations::scan::Holdings;
 
     fn store_with(path: &str, hash: u128) -> Holdings {
         let mut s = Holdings::new();
@@ -706,7 +706,7 @@ mod tests {
     use crate::model::basis::Basis;
     use crate::model::encoding::Format;
     use crate::model::entity::Recording;
-    use crate::scan::Holdings;
+    use crate::operations::scan::Holdings;
     use std::path::PathBuf;
 
     fn track(path: &str, title: &str, artist: &str, hash: u128) -> (PathBuf, Scanned) {
@@ -821,7 +821,7 @@ mod tests {
         std::fs::write(dir.join("99 Broken.wav"), b"RIFF not really").unwrap();
 
         let mut store = Holdings::new();
-        let report = crate::scan::scan(&mut store, std::slice::from_ref(&dir));
+        let report = crate::operations::scan::scan(&mut store, std::slice::from_ref(&dir));
 
         assert_eq!(store.len(), 0, "it is not a holding");
         assert_eq!(report.errors.len(), 1, "and it is named, not dropped");

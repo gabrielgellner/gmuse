@@ -347,8 +347,8 @@ fn mix(id: u64, seed: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::fixture::Tagged as Track;
+    use crate::operations::scan::Holdings as Scan;
     use crate::projection::catalogue::Catalogue;
-    use crate::scan::Holdings as Scan;
     use std::path::PathBuf;
     use std::time::Duration;
 

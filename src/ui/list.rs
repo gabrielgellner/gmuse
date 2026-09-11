@@ -301,7 +301,7 @@ pub fn fmt_duration(d: std::time::Duration) -> String {
 mod tests {
     use super::*;
     use crate::fixture::Tagged as Track;
-    use crate::scan::Holdings as Scan;
+    use crate::operations::scan::Holdings as Scan;
     use std::path::PathBuf;
     use std::time::Duration;
 

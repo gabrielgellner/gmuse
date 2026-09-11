@@ -309,23 +309,23 @@ mod tests {
     /// it happened — which is the honest shape: a scan is an event with a time,
     /// and it always was.
     fn scanned_at(root: &std::path::Path, now: i64) -> BTreeSet<Record> {
-        admitting(root, now, crate::model::populate::Admits::Anything)
+        admitting(root, now, crate::operations::populate::Admits::Anything)
     }
 
     fn admitting(
         root: &std::path::Path,
         now: i64,
-        admits: crate::model::populate::Admits,
+        admits: crate::operations::populate::Admits,
     ) -> BTreeSet<Record> {
         let mut i = crate::model::instance::Instance::new(device());
-        crate::model::populate::populate(
+        crate::operations::populate::populate(
             &mut i,
             &[root.to_path_buf()],
             now,
             admits,
             &mut crate::model::ingest::Reads::default(),
         );
-        crate::model::populate::reconcile(
+        crate::operations::populate::reconcile(
             &mut i,
             &[root.to_path_buf()],
             now + 10,
@@ -893,7 +893,7 @@ mod tests {
     /// no new vocabulary to act on it.
     #[test]
     fn bytes_the_gate_held_back_are_work_a_pass_can_see() {
-        use crate::model::populate::Admits;
+        use crate::operations::populate::Admits;
 
         let root = dir("held-back");
         let path = root.join("a.wav");
@@ -901,7 +901,7 @@ mod tests {
 
         // The gate: nothing named it, so nothing catalogued it.
         let mut i = crate::model::instance::Instance::new(device());
-        let report = crate::model::populate::populate(
+        let report = crate::operations::populate::populate(
             &mut i,
             std::slice::from_ref(&root),
             100,
@@ -909,7 +909,7 @@ mod tests {
             &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(report.unidentified.len(), 1, "the gate did not hold it");
-        crate::model::populate::reconcile(
+        crate::operations::populate::reconcile(
             &mut i,
             std::slice::from_ref(&root),
             100,
@@ -988,11 +988,11 @@ mod tests {
         // Taken in unidentified: this is the only way anything mints a
         // recording from bytes, and it is the state the test is about.
         let mut i = crate::model::instance::Instance::new(device());
-        crate::model::populate::populate(
+        crate::operations::populate::populate(
             &mut i,
             std::slice::from_ref(&root),
             50,
-            crate::model::populate::Admits::Anything,
+            crate::operations::populate::Admits::Anything,
             &mut crate::model::ingest::Reads::default(),
         );
         let minted = *crate::projection::Projected::rebuild(i.records())
@@ -1033,11 +1033,11 @@ mod tests {
         );
 
         // **And now a scan.** Gated, so it holds the bytes and mints nothing.
-        crate::model::populate::populate(
+        crate::operations::populate::populate(
             &mut i,
             std::slice::from_ref(&root),
             300,
-            crate::model::populate::Admits::Identified,
+            crate::operations::populate::Admits::Identified,
             &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(

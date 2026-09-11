@@ -285,11 +285,11 @@ fn shelf(log: &Instance, roots: &[std::path::PathBuf], device: Id<Device>, now: 
     // `bound` then reports that invented row as what an identification is
     // moving *from* — so the proposal would carry a merge redirecting an id
     // that exists nowhere. Gated, `from` is `None`, which is the truth.
-    crate::model::populate::populate(
+    crate::operations::populate::populate(
         &mut scanned,
         roots,
         now,
-        crate::model::populate::Admits::Identified,
+        crate::operations::populate::Admits::Identified,
         &mut crate::model::ingest::Reads::default(),
     );
     Shelf {
@@ -681,11 +681,11 @@ mod tests {
         // And scanning first is the bug, which is what makes this a test: the
         // bytes re-mint a different id and the log's is nowhere.
         let mut wrong = Instance::new(device);
-        crate::model::populate::populate(
+        crate::operations::populate::populate(
             &mut wrong,
             std::slice::from_ref(&dir),
             300,
-            crate::model::populate::Admits::Anything,
+            crate::operations::populate::Admits::Anything,
             &mut crate::model::ingest::Reads::default(),
         );
         let scanned_only = Shelf {

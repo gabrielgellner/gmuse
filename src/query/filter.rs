@@ -1425,7 +1425,7 @@ mod tests {
     /// it and it has to outlive the comparison.
     fn subject_of(t: &Track) -> (crate::model::rows::Drawn, Option<Id<Recording>>) {
         use crate::model::rows::Listing;
-        let mut h = crate::scan::Holdings::new();
+        let mut h = crate::operations::scan::Holdings::new();
         h.upsert(t.clone());
         let l = crate::fixture::from_holdings(&h);
         let id = crate::model::id::Id::of_audio(&t.held().audio);
@@ -1457,7 +1457,7 @@ mod tests {
         use crate::model::key::Key;
         use crate::model::reference::Source;
 
-        let mut s = crate::scan::Holdings::new();
+        let mut s = crate::operations::scan::Holdings::new();
         s.upsert(crate::fixture::Tagged {
             path: "/m/Band/Record/1.mp3".into(),
             artist: Some("Band".into()),
@@ -1507,7 +1507,7 @@ mod tests {
     /// all of them.
     #[test]
     fn a_partly_held_album_can_be_asked_for() {
-        let drawn_of = |s: &crate::scan::Holdings| {
+        let drawn_of = |s: &crate::operations::scan::Holdings| {
             let l = crate::fixture::from_holdings(s);
             let id = crate::model::rows::Listing::rows(&l)[0];
             crate::model::rows::Listing::listed(&l, id)
@@ -1516,7 +1516,7 @@ mod tests {
         };
 
         // Two tracks of a record the tags say has three.
-        let mut short = crate::scan::Holdings::new();
+        let mut short = crate::operations::scan::Holdings::new();
         for (n, title) in [(1u32, "One"), (2, "Two")] {
             short.upsert(crate::fixture::Tagged {
                 path: format!("/m/Band/Record/{n}.mp3").into(),
@@ -1542,7 +1542,7 @@ mod tests {
         // **The third answer shows itself.** Without a total the library
         // cannot tell short from whole, and saying "complete" would be the one
         // wrong answer that loses the question.
-        let mut quiet = crate::scan::Holdings::new();
+        let mut quiet = crate::operations::scan::Holdings::new();
         quiet.upsert(crate::fixture::Tagged {
             path: "/m/Band/Other/1.mp3".into(),
             artist: Some("Band".into()),
@@ -1688,7 +1688,7 @@ mod tests {
         // And the axis the `Dance` folder was on. Nothing on disk says a
         // recording is for dancing, so this is asserted the way a curation
         // pass would assert it.
-        let mut held = crate::scan::Holdings::new();
+        let mut held = crate::operations::scan::Holdings::new();
         held.upsert(instrumental.clone());
         let bare = crate::fixture::from_holdings(&held);
         let copy = crate::model::id::Id::of_audio(&instrumental.held().audio);

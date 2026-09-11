@@ -223,6 +223,21 @@ The one thing a readable tree buys that a content-addressed one does not is **re
 `{file_under}/{album}/{track} {title}` is self-describing where a hash is opaque. That is a hedge worth keeping, and it
 is not a dependency.
 
+**They live in `src/operations/` and it is asserted.** They did not have a home: `storage`, `scan` and `apply` sat at
+the crate root and `populate` sat inside `src/model/`, doing 32 filesystem operations from the one directory whose whole
+rule is that it is the domain and knows about nothing else. The layering held because of how those files happened to be
+written.
+
+The rule is now stated in **both** directions, which is what was missing — three tests said "no `std::fs` under this
+directory" and none said where it _was_ allowed, so a prohibition with nowhere to point let `populate` sit in the model
+without breaking anything:
+
+- **these may open a file, and are the only things that may** — and the test fails if one of them _stops_, because an
+  operation that no longer touches the filesystem has quietly moved somewhere else
+- **they read downward and never reach an adapter** — the direction rule, for the layer beside the others
+
+Both were checked by breaking them.
+
 They sit **beside** the layers rather than inside them: they take an L0 handle and the roots, and they are commands, not
 functions something calls on the way to answering a question. `library-api.md` already says this — _"a scan reconciles
 holdings and reads no tags"_, _"import, relink and forget are named operations"_. This makes the code match.

@@ -7,6 +7,26 @@
 use std::path::Path;
 
 /// Every `.rs` file in a directory, with its text.
+/// Everything before a file's **test module**.
+///
+/// Not before the first `#[cfg(test)]`: that attribute also marks test-only
+/// items in the middle of a file, and cutting there silently skipped the rest.
+/// `scan.rs` has three of them by line 110 and 400 lines of production code
+/// after, so a rule scoped this way was reading a fifth of the file and
+/// passing.
+fn production(text: &str) -> &str {
+    let mut at = 0;
+    while let Some(found) = text[at..].find("#[cfg(test)]") {
+        let here = at + found;
+        let rest = text[here..].trim_start_matches("#[cfg(test)]").trim_start();
+        if rest.starts_with("mod ") {
+            return &text[..here];
+        }
+        at = here + "#[cfg(test)]".len();
+    }
+    text
+}
+
 fn read(dir: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut stack = vec![Path::new(dir).to_path_buf()];
@@ -58,7 +78,7 @@ fn the_query_layer_opens_no_music() {
         "lofty",
         "symphonia",
         "crate::audio_id",
-        "crate::scan",
+        "crate::operations::scan",
     ];
 
     // **One test fixture reaches sideways, and it is named rather than
@@ -66,7 +86,7 @@ fn the_query_layer_opens_no_music() {
     // scanner type; nothing is read from disk and no production line does it.
     // Listed so that a *second* one fails, which a blanket `#[cfg(test)]`
     // exemption would have let through silently.
-    let tolerated = ["src/query/sort.rs: use crate::scan::Holdings as Scan;"];
+    let tolerated = ["src/query/sort.rs: use crate::operations::scan::Holdings as Scan;"];
 
     let mut leaks = Vec::new();
     for (file, line) in imports("src/query") {
@@ -139,10 +159,7 @@ fn the_query_layer_opens_no_file_at_all() {
         if file.ends_with("boundary.rs") {
             continue;
         }
-        let production = match text.find("#[cfg(test)]") {
-            Some(at) => &text[..at],
-            None => &text[..],
-        };
+        let production = production(&text);
         for line in production.lines().map(str::trim) {
             if line.starts_with("//") {
                 continue;

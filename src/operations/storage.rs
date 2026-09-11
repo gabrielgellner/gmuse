@@ -458,7 +458,7 @@ pub fn carry_out(plan: &Plan, root: &Path, write: bool) -> Moved {
 /// tombstone is the only thing it is missing.
 pub fn retire(root: &Path, files: &[PathBuf], write: bool) -> Moved {
     let mut out = Moved::default();
-    let departed = root.join(crate::scan::DEPARTED);
+    let departed = root.join(crate::operations::scan::DEPARTED);
     let mut emptied: std::collections::BTreeSet<PathBuf> = Default::default();
     for from in files {
         if from.starts_with(&departed) {
@@ -525,7 +525,7 @@ fn carry_assets(was: &Path, now: &Path) -> usize {
         .map(|e| e.path())
         .filter(|p| p.is_file())
         .collect();
-    if left.iter().any(|p| crate::scan::is_audio(p)) {
+    if left.iter().any(|p| crate::operations::scan::is_audio(p)) {
         return 0;
     }
     let mut moved = 0;
@@ -563,7 +563,7 @@ fn prune(from: Option<&Path>, root: &Path) -> usize {
 mod tests {
     use super::*;
     use crate::fixture::Tagged;
-    use crate::scan::Holdings;
+    use crate::operations::scan::Holdings;
 
     fn library(files: &[Tagged]) -> Librarian {
         let mut held = Holdings::new();

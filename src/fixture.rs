@@ -132,9 +132,9 @@ impl Tagged {
         }
     }
 
-    pub fn held(&self) -> crate::scan::Held {
+    pub fn held(&self) -> crate::operations::scan::Held {
         let seen = self.scanned();
-        crate::scan::Held {
+        crate::operations::scan::Held {
             at: self.path.clone(),
             mtime: self.mtime,
             size: self.size,
@@ -164,7 +164,7 @@ fn format_of(path: &std::path::Path) -> Option<Format> {
     )
 }
 
-impl crate::scan::Holdings {
+impl crate::operations::scan::Holdings {
     /// Take in a fixture file, and say which **copy** it became. **Tests only.**
     ///
     /// A copy rather than a row: a row is an appearance (#155) and this takes
@@ -190,7 +190,7 @@ pub fn row_of(l: &Librarian, copy: Id<Encoding>) -> Option<crate::model::rows::C
     l.row_of_copy(copy)
 }
 
-pub fn from_holdings(held: &crate::scan::Holdings) -> Librarian {
+pub fn from_holdings(held: &crate::operations::scan::Holdings) -> Librarian {
     from_holdings_and(held, &std::collections::BTreeSet::new())
 }
 
@@ -199,7 +199,7 @@ pub fn from_holdings(held: &crate::scan::Holdings) -> Librarian {
 /// Collections are the case: nothing on disk says a recording is in one, so a
 /// test about a catalog defined by one has to hand the fold some records.
 pub fn from_holdings_and(
-    held: &crate::scan::Holdings,
+    held: &crate::operations::scan::Holdings,
     records: &std::collections::BTreeSet<crate::facts::Record>,
 ) -> Librarian {
     // **Imported, not merely present** (#140). A scan no longer catalogues
@@ -218,7 +218,7 @@ impl Tagged {
     /// Goes through the fold rather than assembling a `Listed` by hand, so a
     /// fixture cannot assert a row the library could not produce.
     pub fn drawn(&self) -> crate::model::rows::Drawn {
-        let mut h = crate::scan::Holdings::new();
+        let mut h = crate::operations::scan::Holdings::new();
         h.upsert(self.clone());
         let l = from_holdings(&h);
         let id = row_of(&l, Id::<Encoding>::of_audio(&self.held().audio)).expect("a copy's row");

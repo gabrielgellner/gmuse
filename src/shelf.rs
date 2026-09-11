@@ -505,7 +505,7 @@ mod tests {
     use super::*;
     use crate::fixture::Tagged as Track;
     use crate::model::sortkey::sort_key;
-    use crate::scan::Holdings as Scan;
+    use crate::operations::scan::Holdings as Scan;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -1027,8 +1027,8 @@ mod the_two_projections {
             return;
         }
 
-        let mut held = crate::scan::Holdings::new();
-        let report = crate::scan::scan(&mut held, std::slice::from_ref(&root));
+        let mut held = crate::operations::scan::Holdings::new();
+        let report = crate::operations::scan::scan(&mut held, std::slice::from_ref(&root));
         assert_eq!(report.errors.len(), 0);
         let l = crate::bridge::imported(
             &held,

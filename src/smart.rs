@@ -98,9 +98,9 @@ mod tests {
     use super::*;
     use crate::fixture::Tagged as Track;
     use crate::model::rows::Listing;
+    use crate::operations::scan::Holdings as Scan;
     use crate::query::filter::Env;
     use crate::query::sort::Sort;
-    use crate::scan::Holdings as Scan;
     use std::path::PathBuf;
     use std::time::Duration;
 

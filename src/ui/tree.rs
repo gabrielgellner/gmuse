@@ -957,7 +957,7 @@ pub fn stands_for(lib: &Shelf, row: &Row, title: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::fixture::Tagged as Track;
-    use crate::scan::Holdings as Scan;
+    use crate::operations::scan::Holdings as Scan;
     use std::path::PathBuf;
 
     fn store_with(rows: &[(&str, &str, &str, &str)]) -> Scan {

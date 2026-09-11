@@ -365,7 +365,7 @@ impl Playback {
 mod tests {
     use super::*;
     use crate::fixture::Tagged as Track;
-    use crate::scan::Holdings as Scan;
+    use crate::operations::scan::Holdings as Scan;
     use std::path::PathBuf;
 
     /// Three artists: A with two albums (2 + 1 tracks), B with one (2), C with

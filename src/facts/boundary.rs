@@ -7,6 +7,26 @@
 
 use std::path::Path;
 
+/// Everything before a file's **test module**.
+///
+/// Not before the first `#[cfg(test)]`: that attribute also marks test-only
+/// items in the middle of a file, and cutting there silently skipped the rest.
+/// `scan.rs` has three of them by line 110 and 400 lines of production code
+/// after, so a rule scoped this way was reading a fifth of the file and
+/// passing.
+fn production(text: &str) -> &str {
+    let mut at = 0;
+    while let Some(found) = text[at..].find("#[cfg(test)]") {
+        let here = at + found;
+        let rest = text[here..].trim_start_matches("#[cfg(test)]").trim_start();
+        if rest.starts_with("mod ") {
+            return &text[..here];
+        }
+        at = here + "#[cfg(test)]".len();
+    }
+    text
+}
+
 fn read(dir: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut stack = vec![Path::new(dir).to_path_buf()];
@@ -129,10 +149,7 @@ fn neither_layer_reads_the_filesystem() {
             if file.ends_with("boundary.rs") {
                 continue;
             }
-            let production = match text.find("#[cfg(test)]") {
-                Some(at) => &text[..at],
-                None => &text[..],
-            };
+            let production = production(&text);
             for line in production.lines().map(str::trim) {
                 if line.starts_with("//") {
                     continue;

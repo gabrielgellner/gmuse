@@ -242,14 +242,14 @@ impl std::fmt::Display for Report {
 /// report, which is how a 311-track library came to announce 622 (#21).
 pub fn audio_files(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    for root in crate::scan::prune_nested(roots) {
+    for root in crate::operations::scan::prune_nested(roots) {
         for entry in walkdir::WalkDir::new(&root)
             .follow_links(false)
             .into_iter()
-            .filter_entry(crate::scan::worth_entering)
+            .filter_entry(crate::operations::scan::worth_entering)
             .filter_map(Result::ok)
         {
-            if entry.file_type().is_file() && crate::scan::is_audio(entry.path()) {
+            if entry.file_type().is_file() && crate::operations::scan::is_audio(entry.path()) {
                 found.push(entry.path().to_path_buf());
             }
         }
@@ -734,7 +734,7 @@ pub fn read_library(device_name: &str, roots: &[PathBuf], now: i64) -> (Instance
 /// Whether a path is one this pass would look at. Exposed so a caller can ask
 /// without walking.
 pub fn is_audio(path: &Path) -> bool {
-    crate::scan::is_audio(path)
+    crate::operations::scan::is_audio(path)
 }
 
 #[cfg(test)]

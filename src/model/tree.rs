@@ -380,7 +380,7 @@ mod tests {
     fn everything(l: &Librarian) -> std::collections::HashSet<crate::model::rows::CopyId> {
         crate::model::rows::Listing::rows(l).into_iter().collect()
     }
-    use crate::model::populate::read_library;
+    use crate::operations::populate::read_library;
     use crate::shelf::Level;
 
     /// The tree flattened — artist, then album, then disc and track.

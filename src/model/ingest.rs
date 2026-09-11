@@ -427,7 +427,7 @@ pub fn read(path: &Path) -> Result<Scanned, IngestError> {
         label: Some(get(ItemKey::Label))
             .filter(|s| !s.is_empty())
             .or_else(|| Some(get(ItemKey::Publisher)).filter(|s| !s.is_empty())),
-        genres: crate::scan::split_genres(Some(&get(ItemKey::Genre))),
+        genres: crate::operations::scan::split_genres(Some(&get(ItemKey::Genre))),
         levels: crate::model::encoding::Levels {
             track_cdb: cdb(&get(ItemKey::ReplayGainTrackGain)),
             track_peak_e4: peak_e4(&get(ItemKey::ReplayGainTrackPeak)),
