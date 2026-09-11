@@ -122,7 +122,10 @@ impl Projected {
     /// **Fold from nothing.** Always available, which is the invariant that
     /// makes every later change to the projection's shape a version bump
     /// rather than a migration.
-    pub fn rebuild(records: &BTreeSet<Record>) -> Self {
+    /// **Crate-private, so `advance` is the only way in.** A caller that
+    /// folded straight from the log would be folding without asking whether
+    /// it needed to, which is the whole of what a position is for.
+    pub(crate) fn rebuild(records: &BTreeSet<Record>) -> Self {
         Projected {
             catalogue: fold(records),
             at: Position::of(records),

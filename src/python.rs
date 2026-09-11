@@ -58,18 +58,9 @@ impl Library {
         let machine = crate::events::machine_id(&crate::config::default_state_dir());
         let device = Id::derived(machine.as_bytes());
 
-        let (log, _) =
-            crate::model::instance::Instance::open(&data_dir, device, crate::history::now_ms());
-        let at = crate::cache::projection_path();
-        let print = crate::cache::LogPrint::of(&data_dir);
-        let projection = match crate::cache::current_projection(&at, &print) {
-            Some(ready) => ready,
-            None => {
-                let folded = crate::projection::Projected::rebuild(log.records());
-                crate::cache::save_projection(&at, &print, &folded);
-                folded
-            }
-        };
+        // The same read path the CLI takes, and for the same reason: the
+        // print decides, so a tool that is caught up never opens the log.
+        let projection = crate::librarian::reading(&data_dir, device, crate::history::now_ms());
         Ok(Library {
             projection,
             reads: std::sync::Mutex::new(crate::cache::load_measurements(

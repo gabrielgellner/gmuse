@@ -23,12 +23,14 @@
 //! is how it finds out. [`Desk::settled`] is for the two places that must
 //! wait — a test, and quitting.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Sender, unbounded};
 
+use crate::facts::{Blast, Record, Touched};
 use crate::model::durable::LogError;
 use crate::model::entity::Device;
 use crate::model::id::Id;
@@ -53,6 +55,11 @@ pub struct Answer {
     /// this — the UI's rating and play lookups — can keep it without pinning
     /// the whole fold.
     pub listened: Arc<Catalogue>,
+    /// What moved to produce this answer, relative to the one before it.
+    ///
+    /// A reader that keeps its own derived state — a rendered list, a filtered
+    /// selection — reads this to find out how much of it to throw away.
+    pub changed: Changed,
 }
 
 /// A change to the log, or a reason to publish again.
@@ -97,7 +104,15 @@ impl Desk {
         now: i64,
         data_dir: Option<PathBuf>,
     ) -> Desk {
-        let current = Arc::new(ArcSwap::from_pointee(fold(&log, &held, device, now)));
+        // The first answer is everything arriving at once, which is a rebuild
+        // from the point of view of anyone holding derived state.
+        let current = Arc::new(ArcSwap::from_pointee(fold(
+            &log,
+            &held,
+            device,
+            now,
+            Changed::Rebuild,
+        )));
         let (tx, rx) = unbounded::<Job>();
         let published = Arc::clone(&current);
 
@@ -107,9 +122,16 @@ impl Desk {
                 let mut log = log;
                 let mut held = held;
                 for job in rx {
+                    // **Measured against the log before the job**, so what is
+                    // published is what this job did rather than what the log
+                    // happens to hold. A scan that appends nothing is not a
+                    // change, however many files it walked.
+                    let before = log.records().clone();
+                    let mut moved = Changed::Nothing;
                     let settled = match job {
                         Job::Say(say) => {
                             say(&mut log);
+                            moved = Changed::of(log.records().difference(&before));
                             if let Some(dir) = &data_dir {
                                 // A failed commit is not fatal: the in-memory
                                 // log is still right, and refusing the fact
@@ -120,13 +142,16 @@ impl Desk {
                             None
                         }
                         Job::Holdings(fresh) => {
+                            // Not a log change, but every locator may have
+                            // moved and none of them is named here.
+                            moved = Changed::Wide;
                             held = fresh;
                             None
                         }
                         Job::Advance => None,
                         Job::Settled(reply) => Some(reply),
                     };
-                    published.store(Arc::new(fold(&log, &held, device, now)));
+                    published.store(Arc::new(fold(&log, &held, device, now, moved)));
                     if let Some(reply) = settled {
                         // Dropped receiver means the waiter gave up, which is
                         // not this thread's problem.
@@ -204,6 +229,68 @@ impl Drop for Desk {
     }
 }
 
+/// What moved, at the coarsest grain that is still true.
+///
+/// A notification saying only "something changed" makes every reader re-read
+/// everything, which at 7,271 rows is the same as saying nothing. `Fact::blast`
+/// already classifies each fact; this is that classification carried to
+/// whoever is watching.
+///
+/// **A lattice**, which is what makes coalescing well-defined: merging two
+/// notifications can only ever move up it, so a reader that missed some is
+/// told something weaker than the truth and never something stronger.
+///
+/// ```text
+/// Nothing  <  These(ids)  <  Wide  <  Rebuild
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Changed {
+    /// Nothing arrived.
+    #[default]
+    Nothing,
+    /// Exactly these entries, and nothing else.
+    These(BTreeSet<Touched>),
+    /// Something arrived whose reach is not derivable from the facts. Re-query
+    /// whatever you display.
+    Wide,
+    /// Start again.
+    Rebuild,
+}
+
+impl Changed {
+    /// What a batch of records moved.
+    pub fn of<'a>(records: impl IntoIterator<Item = &'a Record>) -> Changed {
+        let mut out = Changed::Nothing;
+        for record in records {
+            out = out.and(match record.fact.blast() {
+                Blast::Narrow => Changed::These(record.fact.touches().into_iter().collect()),
+                Blast::Wide => Changed::Wide,
+                Blast::Rebuild => Changed::Rebuild,
+            });
+        }
+        out
+    }
+
+    /// Join, which is the coalescing rule: up the lattice, never down.
+    ///
+    /// Two sets union. Anything meeting `Wide` is `Wide`, because a reader
+    /// cannot act on a partial list once part of the change is unlocatable —
+    /// telling it the ids it *could* see would be worse than telling it to
+    /// re-query, since it would stop looking.
+    #[must_use]
+    pub fn and(self, other: Changed) -> Changed {
+        match (self, other) {
+            (Changed::Rebuild, _) | (_, Changed::Rebuild) => Changed::Rebuild,
+            (Changed::Wide, _) | (_, Changed::Wide) => Changed::Wide,
+            (Changed::Nothing, one) | (one, Changed::Nothing) => one,
+            (Changed::These(mut a), Changed::These(b)) => {
+                a.extend(b);
+                Changed::These(a)
+            }
+        }
+    }
+}
+
 /// Persist what a named operation appended. **The one door.**
 ///
 /// [`Instance::flush`] is crate-private, so this is the only way facts reach
@@ -238,8 +325,12 @@ pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Proj
     match crate::cache::current_projection(&at, &print) {
         Some(ready) => ready,
         None => {
+            // **Through `advance`, not a bare fold.** It is the only entry
+            // point, so the caught-up case costs one comparison per device
+            // rather than being a fold nobody checked the need for.
             let (log, _) = Instance::open(data_dir, device, now);
-            let folded = Projected::rebuild(log.records());
+            let mut folded = Projected::default();
+            folded.advance(log.records());
             crate::cache::save_projection(&at, &print, &folded);
             folded
         }
@@ -247,10 +338,11 @@ pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Proj
 }
 
 /// The one fold, and the only place it happens.
-fn fold(log: &Instance, held: &Holdings, device: Id<Device>, now: i64) -> Answer {
+fn fold(log: &Instance, held: &Holdings, device: Id<Device>, now: i64, changed: Changed) -> Answer {
     Answer {
         library: crate::bridge::librarian(held, log.records(), device, now),
         listened: Arc::new(log.catalogue()),
+        changed,
     }
 }
 
@@ -422,5 +514,106 @@ mod tests {
             )),
             "a fact queued at quit never reached the disk"
         );
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    //! The lattice, and what a fact says it reached.
+
+    use super::*;
+    use crate::facts::Fact;
+    use crate::model::entity::{Artist, Recording};
+
+    fn rec(n: u128) -> Touched {
+        Touched::Recording(Id::from_uuid(uuid::Uuid::from_u128(n)))
+    }
+
+    fn these(ids: impl IntoIterator<Item = Touched>) -> Changed {
+        Changed::These(ids.into_iter().collect())
+    }
+
+    /// One edge per case, because the join is what makes coalescing safe and
+    /// a wrong edge is silent: a reader told `These` when the truth was `Wide`
+    /// stops looking for what it was not told about.
+    #[test]
+    fn the_join_only_ever_moves_up_the_lattice() {
+        assert_eq!(Changed::Nothing.and(Changed::Nothing), Changed::Nothing);
+        assert_eq!(Changed::Nothing.and(these([rec(1)])), these([rec(1)]));
+        assert_eq!(these([rec(1)]).and(Changed::Nothing), these([rec(1)]));
+        assert_eq!(
+            these([rec(1)]).and(these([rec(2)])),
+            these([rec(1), rec(2)]),
+            "two sets union"
+        );
+        assert_eq!(these([rec(1)]).and(Changed::Wide), Changed::Wide);
+        assert_eq!(Changed::Wide.and(these([rec(1)])), Changed::Wide);
+        assert_eq!(Changed::Wide.and(Changed::Wide), Changed::Wide);
+        assert_eq!(Changed::Wide.and(Changed::Rebuild), Changed::Rebuild);
+        assert_eq!(these([rec(1)]).and(Changed::Rebuild), Changed::Rebuild);
+        assert_eq!(Changed::Rebuild.and(Changed::Nothing), Changed::Rebuild);
+    }
+
+    /// **A narrow fact names what it reached**, which is the definition of
+    /// narrow rather than a property of it.
+    #[test]
+    fn a_narrow_fact_names_exactly_what_it_touched() {
+        let song = Id::<Recording>::from_uuid(uuid::Uuid::from_u128(7));
+        let fact = Fact::RecordingRated {
+            recording: song,
+            stars: Some(4),
+        };
+        assert_eq!(fact.blast(), Blast::Narrow);
+        assert_eq!(fact.touches(), vec![Touched::Recording(song)]);
+    }
+
+    /// **And a wide one does not claim to.** `ArtistMerged` hands over two ids
+    /// and leaves "every row crediting the loser" to be found, so a
+    /// notification built from it must send the reader back to the library
+    /// rather than handing it a list that looks complete.
+    #[test]
+    fn a_wide_fact_is_reported_wide_however_many_ids_it_mentions() {
+        let fact = Fact::ArtistMerged {
+            loser: Id::<Artist>::derived(b"afx"),
+            winner: Id::<Artist>::derived(b"aphex twin"),
+        };
+        assert_eq!(fact.blast(), Blast::Wide);
+        assert!(
+            !fact.touches().is_empty(),
+            "it does mention ids — that is the trap"
+        );
+
+        let clock = crate::model::clock::HybridClock::new(Id::derived(b"laptop"));
+        let mut clock = clock;
+        let records: BTreeSet<Record> = [fact]
+            .into_iter()
+            .map(|fact| Record {
+                stamp: clock.stamp(1_000),
+                fact,
+            })
+            .collect();
+        assert_eq!(
+            Changed::of(&records),
+            Changed::Wide,
+            "the ids it mentions were reported as the ids it changed"
+        );
+    }
+
+    /// The largest fact in the log is narrow, and this is why: it names every
+    /// encoding it touches.
+    #[test]
+    fn holdings_names_every_encoding_it_asserts() {
+        let one = Id::<crate::model::entity::Encoding>::derived(b"one");
+        let two = Id::<crate::model::entity::Encoding>::derived(b"two");
+        let fact = Fact::HoldingsAsserted {
+            device: Id::derived(b"laptop"),
+            held: [(one, "/a".to_string()), (two, "/b".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(fact.blast(), Blast::Narrow);
+        let touched = fact.touches();
+        assert!(touched.contains(&Touched::Encoding(one)));
+        assert!(touched.contains(&Touched::Encoding(two)));
     }
 }

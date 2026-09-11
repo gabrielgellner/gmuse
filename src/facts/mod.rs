@@ -1156,6 +1156,225 @@ pub enum Blast {
     Rebuild,
 }
 
+/// One entry a fact reaches.
+///
+/// Wider than [`Cataloguable`], which is the eight kinds a heading can hang
+/// off: a fact also touches encodings, collections, media and the rest, and a
+/// change notification has to be able to name any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Touched {
+    Artist(Id<Artist>),
+    Recording(Id<Recording>),
+    Encoding(Id<Encoding>),
+    Collection(Id<Collection>),
+    View(Id<crate::model::entity::View>),
+    Facet(Id<Facet>),
+    Concept(Id<Concept>),
+    Hierarchy(Id<Hierarchy>),
+    Work(Id<Work>),
+    Device(Id<Device>),
+    ReleaseGroup(Id<ReleaseGroup>),
+    Release(Id<Release>),
+    Medium(Id<Medium>),
+    Track(Id<Track>),
+    Role(Id<Role>),
+    Label(Id<Label>),
+}
+
+impl From<Cataloguable> for Touched {
+    fn from(c: Cataloguable) -> Self {
+        match c {
+            Cataloguable::Work(id) => Touched::Work(id),
+            Cataloguable::Recording(id) => Touched::Recording(id),
+            Cataloguable::Release(id) => Touched::Release(id),
+            Cataloguable::ReleaseGroup(id) => Touched::ReleaseGroup(id),
+            Cataloguable::Artist(id) => Touched::Artist(id),
+            Cataloguable::Concept(id) => Touched::Concept(id),
+            Cataloguable::Role(id) => Touched::Role(id),
+            Cataloguable::Label(id) => Touched::Label(id),
+        }
+    }
+}
+
+impl From<Described> for Touched {
+    fn from(d: Described) -> Self {
+        match d {
+            Described::ReleaseGroup(id) => Touched::ReleaseGroup(id),
+            Described::Recording(id) => Touched::Recording(id),
+        }
+    }
+}
+
+impl From<CreditOn> for Touched {
+    fn from(c: CreditOn) -> Self {
+        match c {
+            CreditOn::Work(id) => Touched::Work(id),
+            CreditOn::Recording(id) => Touched::Recording(id),
+            CreditOn::ReleaseGroup(id) => Touched::ReleaseGroup(id),
+            CreditOn::Release(id) => Touched::Release(id),
+        }
+    }
+}
+
+impl Fact {
+    /// Which entries folding this fact can reach, **named**.
+    ///
+    /// Only meaningful for [`Blast::Narrow`], and that is the definition of
+    /// narrow rather than a caveat: a wide fact is wide precisely because the
+    /// set it affects is not derivable from it, so what this returns for one
+    /// is the ids it *mentions* and not the ids it changes. A notification
+    /// built from it must say `Wide` and let the reader re-query.
+    ///
+    /// Exhaustive on purpose, like [`Fact::blast`]. A new fact does not
+    /// compile until somebody says what it reaches, which is the only thing
+    /// that stops this drifting quietly out of step with the fold.
+    pub fn touches(&self) -> Vec<Touched> {
+        match self {
+            Fact::ArtistNamed { artist, .. } | Fact::ArtistMerged { winner: artist, .. } => {
+                vec![Touched::Artist(*artist)]
+            }
+            Fact::ArtistRelated { from, to, .. } => {
+                vec![Touched::Artist(*from), Touched::Artist(*to)]
+            }
+            Fact::RecordingIdentified { recording, .. }
+            | Fact::RecordingCatalogued { recording, .. }
+            | Fact::RecordingRetitled { recording, .. }
+            | Fact::RecordingRated { recording, .. }
+            | Fact::RecordingPlayed { recording, .. }
+            | Fact::RecordingAcquired { recording, .. } => vec![Touched::Recording(*recording)],
+            Fact::RecordingMerged { loser, winner } => {
+                vec![Touched::Recording(*loser), Touched::Recording(*winner)]
+            }
+            Fact::RecordingDerived { from, to, .. }
+            | Fact::RecordingDerivationRetracted { from, to, .. } => {
+                vec![Touched::Recording(*from), Touched::Recording(*to)]
+            }
+            Fact::WorkPerformed { recording, work } => {
+                vec![Touched::Recording(*recording), Touched::Work(*work)]
+            }
+            Fact::WorkCatalogued { work, .. } => vec![Touched::Work(*work)],
+            Fact::WorkDerived { from, to, .. } | Fact::WorkDerivationRetracted { from, to, .. } => {
+                vec![Touched::Work(*from), Touched::Work(*to)]
+            }
+            Fact::EncodingClaimed { encoding, .. }
+            | Fact::EncodingDescribed { encoding, .. }
+            | Fact::EncodingProcessed { encoding, .. }
+            | Fact::EncodingRetired { encoding }
+            | Fact::EncodingRestored { encoding }
+            | Fact::EncodingLevelled { encoding, .. }
+            | Fact::EncodingMeasured { encoding, .. } => vec![Touched::Encoding(*encoding)],
+            // **The recordings too**, because binding moves the encoding from
+            // one to the other and both rows change.
+            Fact::EncodingBound { encoding, from, to } => {
+                let mut out = vec![Touched::Encoding(*encoding), Touched::Recording(*to)];
+                out.extend(from.map(Touched::Recording));
+                out
+            }
+            Fact::EncodingPlaced {
+                encoding, track, ..
+            } => {
+                vec![Touched::Encoding(*encoding), Touched::Track(*track)]
+            }
+            Fact::EncodingDerived { from, to } | Fact::EncodingDerivationRetracted { from, to } => {
+                vec![Touched::Encoding(*from), Touched::Encoding(*to)]
+            }
+            Fact::CollectionNamed { collection, .. }
+            | Fact::CollectionFrozen { collection, .. } => vec![Touched::Collection(*collection)],
+            Fact::CollectionEntryAdded {
+                collection,
+                recording,
+                ..
+            }
+            | Fact::CollectionEntryRemoved {
+                collection,
+                recording,
+                ..
+            } => vec![
+                Touched::Collection(*collection),
+                Touched::Recording(*recording),
+            ],
+            Fact::ViewSaved { view, .. } | Fact::ViewDropped { view } => vec![Touched::View(*view)],
+            Fact::FacetDefined { facet, .. } => vec![Touched::Facet(*facet)],
+            Fact::ConceptCatalogued { facet, concept, .. } => {
+                vec![Touched::Facet(*facet), Touched::Concept(*concept)]
+            }
+            Fact::HierarchyDefined { hierarchy, .. } => vec![Touched::Hierarchy(*hierarchy)],
+            Fact::HierarchyNarrowed {
+                hierarchy,
+                parent,
+                child,
+            }
+            | Fact::HierarchyNarrowRetracted {
+                hierarchy,
+                parent,
+                child,
+            } => vec![
+                Touched::Hierarchy(*hierarchy),
+                Touched::Concept(*parent),
+                Touched::Concept(*child),
+            ],
+            Fact::ConceptAsserted { subject, .. } | Fact::ConceptRetracted { subject, .. } => {
+                vec![Touched::from(*subject)]
+            }
+            Fact::CreditAsserted {
+                subject,
+                artist,
+                role,
+                ..
+            }
+            | Fact::CreditRetracted {
+                subject,
+                artist,
+                role,
+                ..
+            } => vec![
+                Touched::from(*subject),
+                Touched::Artist(*artist),
+                Touched::Role(*role),
+            ],
+            Fact::AliasAsserted { subject, .. } | Fact::HeadingRetired { subject, .. } => {
+                vec![Touched::from(*subject)]
+            }
+            // **Every encoding it names**, which is the whole of why the
+            // largest fact in the log is narrow.
+            Fact::HoldingsAsserted { device, held } => {
+                let mut out = vec![Touched::Device(*device)];
+                out.extend(held.keys().copied().map(Touched::Encoding));
+                out
+            }
+            Fact::ReleaseGroupCatalogued { group, artist, .. } => {
+                vec![Touched::ReleaseGroup(*group), Touched::Artist(*artist)]
+            }
+            Fact::ReleaseGroupRetitled { group, .. } => vec![Touched::ReleaseGroup(*group)],
+            Fact::ReleaseGroupMerged { loser, winner } => vec![
+                Touched::ReleaseGroup(*loser),
+                Touched::ReleaseGroup(*winner),
+            ],
+            Fact::ReleaseIdentified { release, .. } => vec![Touched::Release(*release)],
+            Fact::ReleaseCatalogued { release, group, .. } => {
+                vec![Touched::Release(*release), Touched::ReleaseGroup(*group)]
+            }
+            Fact::MediumCatalogued {
+                medium, release, ..
+            } => {
+                vec![Touched::Medium(*medium), Touched::Release(*release)]
+            }
+            Fact::TrackPlaced {
+                track,
+                medium,
+                recording,
+                ..
+            } => vec![
+                Touched::Track(*track),
+                Touched::Medium(*medium),
+                Touched::Recording(*recording),
+            ],
+            Fact::RoleDefined { role, .. } => vec![Touched::Role(*role)],
+            Fact::LabelNamed { label, .. } => vec![Touched::Label(*label)],
+        }
+    }
+}
+
 impl Fact {
     /// What folding this fact can reach.
     #[allow(

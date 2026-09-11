@@ -626,7 +626,10 @@ fn run_library(
                 device,
                 gmuse::history::now_ms(),
             );
-            let projection = gmuse::projection::Projected::rebuild(log.records());
+            // The snapshot for the fold; the log above is open because this
+            // arm walks **facts**, which the projection does not carry.
+            let projection =
+                gmuse::librarian::reading(&loaded.data_dir, device, gmuse::history::now_ms());
             let cat = projection.catalogue();
 
             // Every name each id has ever been given, in log order, so the
@@ -1070,18 +1073,11 @@ fn run_library(
             use gmuse::model::entity::{Medium, Recording};
             use gmuse::model::id::Id;
 
-            // **A read, so no scan** — #220. Walking the disk here answered
-            // with what the tags say over what the library recorded, which is
-            // the one thing the library exists to settle.
-            //
-            // The log itself is opened, because this arm reads **facts** and
-            // not only the fold: a read may derive, it may not discover.
-            let (log, _) = gmuse::model::instance::Instance::open(
-                &loaded.data_dir,
-                device,
-                gmuse::history::now_ms(),
-            );
-            let projection = gmuse::projection::Projected::rebuild(log.records());
+            // **A read, so the snapshot and never a scan** — #220. Walking the
+            // disk here answered with what the tags say over what the library
+            // recorded, which is the one thing the library exists to settle.
+            let projection =
+                gmuse::librarian::reading(&loaded.data_dir, device, gmuse::history::now_ms());
             let cat = projection.catalogue();
             let here = cat.holdings.get(&device);
 
@@ -1244,7 +1240,10 @@ fn run_library(
                 device,
                 gmuse::history::now_ms(),
             );
-            let projection = gmuse::projection::Projected::rebuild(log.records());
+            // The snapshot for the fold; the log above is open because this
+            // arm walks **facts**, which the projection does not carry.
+            let projection =
+                gmuse::librarian::reading(&loaded.data_dir, device, gmuse::history::now_ms());
             let cat = projection.catalogue();
 
             // **Every name an id has ever held, not just the one in force.**
