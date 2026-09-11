@@ -54,6 +54,7 @@ pub mod migrate;
 pub mod mint;
 pub mod ord;
 pub mod populate;
+pub mod projection;
 pub mod proposal;
 pub mod provenance;
 pub mod qualifier;
