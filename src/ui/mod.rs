@@ -892,6 +892,7 @@ where
         serve_remote(ui, ctx);
         note_play_progress(ui, ctx);
         audit_underruns(ui, ctx);
+        note_finished_scans(ui);
         ui.expire_status();
     }
     Ok(Stop::Quit)
@@ -1089,6 +1090,21 @@ pub fn record(
     // the fold's semantics rather than a slice of it.
     ui.desk.settled();
     ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
+}
+
+/// Say what a background scan found, once it has finished.
+///
+/// Drained from the draw loop for the same reason underruns are: the work
+/// happens on another thread and this is the one that can say so. Nothing
+/// here blocks — an empty channel is the ordinary case.
+fn note_finished_scans(ui: &mut Ui) {
+    while let Ok(report) = ui.desk.scans.try_recv() {
+        ui.audit.line("rescan", &report.to_string());
+        ui.notify(format!("rescan: {report}"));
+        // The scan replaced the holdings, so every locator may have moved.
+        let answer = ui.desk.current();
+        ui.listened = std::sync::Arc::clone(&answer.listened);
+    }
 }
 
 /// Record any underruns since the last tick.

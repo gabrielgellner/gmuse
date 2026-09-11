@@ -24,11 +24,6 @@ struct App {
     cache_path: Option<PathBuf>,
     /// The view in force, as its source line.
     view: Option<String>,
-    /// Files recognised at a new path by a scan, when one ran.
-    ///
-    /// Carried here because the scan runs before the history is loaded, and
-    /// the history is what most needs to know (#25).
-    moves: Vec<gmuse::operations::scan::Move>,
     /// Files that looked like audio and could not be read at all.
     ///
     /// Carried for the same reason as `moves`: the scan happens before the TUI
@@ -194,44 +189,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         roots,
         cache_path,
         view,
-        moves: Vec::new(),
         unreadable: Vec::new(),
     };
 
-    // **The library is not rebuilt because the app opened.** Scanning on every
-    // launch made the library a function of gmuse having been run, which is
-    // backwards: the library is the thing, and the player reads it. A file
-    // appearing on disk is a change to the library, and a change to the library
-    // is something you make, not something a launch notices on your behalf.
+    // **Reconciled at start, on the librarian thread.** The 2026-09-10 entry
+    // settled that a launch scans: the tree is an output the library owns, so
+    // a scan cannot find news, only drift — a file moved, removed or replaced
+    // by something outside the system.
     //
-    // Two cases still scan, and only two. `--rescan` is the deliberate ask.
-    // An empty store is a first run, where the alternative is an empty library
-    // and no way to tell why — the cache stays derivable, which keeps the
-    // 2026-08-27 decision that it may be discarded at any time.
-    let first_run = app.store.is_empty();
-    if !app.roots.is_empty() && (args.rescan || first_run) {
-        if args.rescan {
-            // Forget mtimes so every file is re-read.
-            app.store = Holdings::new();
-        }
-        let roots = app.roots.clone();
-        let report = gmuse::operations::scan::scan(&mut app.store, &roots);
-        println!("library: {report}");
-        report_errors(&report);
-        app.moves = report.moves.clone();
-        app.unreadable = report.errors.iter().map(|(p, _)| p.clone()).collect();
-        save_cache(&app);
-    } else if !app.store.is_empty() {
-        println!(
-            "library: {} tracks — `gmuse --rescan` to take in changes on disk",
-            app.store.len()
-        );
-    } else {
+    // The scan itself is issued once the desk exists, and nothing waits on it.
+    // The rows are already there: holdings come from the cached store and from
+    // the log, so this closes drift rather than supplying the library.
+    if args.rescan {
+        // Forget mtimes so every file is re-read rather than settled by a stat.
+        app.store = Holdings::new();
+    }
+    if app.roots.is_empty() {
         println!(
             "library: empty — scan one with `gmuse --library <dir>`, or set\n\
              `library = [\"~/Music\"]` in {}",
             gmuse::config::default_path().display()
         );
+    } else {
+        println!("library: {} tracks, reconciling on start", app.store.len());
     }
 
     if args.migrate_log {
@@ -1957,6 +1937,16 @@ fn run_tui(
         now_ms,
         Some(loaded.data_dir.clone()),
     );
+    // **Reconciled at start, and not waited on** — the 2026-09-10 decision
+    // that a stale cache is the worse failure, now that it costs nothing to
+    // act on. The library is already usable: holdings come from the cached
+    // store and the log, so this closes drift rather than supplying the rows.
+    //
+    // Warm it is ~0.3s, because the read cache settles 7,266 of 7,267 files
+    // with a `stat`. Cold it re-reads everything, which is why it is a job.
+    if !app.roots.is_empty() {
+        desk.scan(app.roots.clone(), app.cache_path.clone());
+    }
     let library_view = desk.current();
     let known = library_view.library.recordings().count();
     println!(
@@ -2189,17 +2179,11 @@ fn run_tui(
         match stop {
             gmuse::ui::Stop::Quit => break Ok(()),
             gmuse::ui::Stop::Rescan => {
-                // The disk first, then the log — a scan reconciles holdings
-                // and reads no tags it has not been asked for, and the refold
-                // is what turns that into rows.
-                let roots = app.roots.clone();
-                let report = gmuse::operations::scan::scan(&mut app.store, &roots);
-                state.audit.line("rescan", &report.to_string());
-                state.notify(format!("rescan: {report}"));
-                app.unreadable = report.errors.iter().map(|(p, _)| p.clone()).collect();
-                save_cache(app);
-                state.desk.holdings(app.store.clone());
-                state.desk.settled();
+                // **Asked for, not waited on.** A cold pass re-reads every
+                // file, and this thread is the one drawing. What it found
+                // arrives on `desk.scans`, which the draw loop drains.
+                state.desk.scan(app.roots.clone(), app.cache_path.clone());
+                state.notify("rescan: started".to_string());
                 library_view = state.desk.current();
             }
             gmuse::ui::Stop::Refold => {
@@ -2261,32 +2245,6 @@ fn run_tui(
     }
     result?;
     Ok(())
-}
-
-fn save_cache(app: &App) {
-    // Never write an empty cache. With no roots there is nothing to record,
-    // and overwriting a good cache with an empty one loses the roots stored in
-    // it — which is exactly how a working library turns into an empty one
-    // after a format bump.
-    if app.store.is_empty() && app.roots.is_empty() {
-        return;
-    }
-    if let Some(path) = &app.cache_path
-        && let Err(e) = gmuse::cache::save(path, &app.store, &app.roots, app.view.as_deref())
-    {
-        eprintln!("cache: {e}");
-    }
-}
-
-/// Show the first few failures rather than a wall of them; a systematically
-/// broken library produces thousands of identical lines otherwise.
-fn report_errors(report: &gmuse::operations::scan::ScanReport) {
-    for (path, err) in report.errors.iter().take(5) {
-        println!("  skipped {}: {err}", path.display());
-    }
-    if report.errors.len() > 5 {
-        println!("  ... and {} more", report.errors.len() - 5);
-    }
 }
 
 /// `mm:ss.mmm` — millisecond resolution, because second resolution cannot show

@@ -60,6 +60,13 @@ pub struct Answer {
     /// A reader that keeps its own derived state — a rendered list, a filtered
     /// selection — reads this to find out how much of it to throw away.
     pub changed: Changed,
+    /// What this device holds, as the last scan left it.
+    ///
+    /// Published rather than kept privately because the caller persists it:
+    /// the scan runs here, so this is the only place its result exists.
+    pub holdings: Arc<Holdings>,
+    /// A scan is running. Display only — nothing waits on it.
+    pub scanning: bool,
 }
 
 /// A change to the log, or a reason to publish again.
@@ -69,6 +76,14 @@ enum Job {
     Say(Box<dyn FnOnce(&mut Instance) + Send>),
     /// A scan reconciled the disk; these are the holdings now.
     Holdings(Holdings),
+    /// Reconcile the disk under these roots, here rather than on the caller's
+    /// thread.
+    Scan {
+        roots: Vec<PathBuf>,
+        /// Where to persist what it found, so the next launch starts warm.
+        /// `None` writes nothing, which is what a test wants.
+        cache: Option<PathBuf>,
+    },
     /// Nothing changed here — fold and publish anyway.
     Advance,
     /// Reply when everything queued before this has been published.
@@ -88,6 +103,9 @@ enum Job {
 pub struct Desk {
     device: Id<Device>,
     current: Arc<ArcSwap<Answer>>,
+    /// What finished scans had to say. Drained when the caller feels like it;
+    /// nothing here waits on a reader.
+    pub scans: crossbeam_channel::Receiver<crate::operations::scan::ScanReport>,
     jobs: Sender<Job>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -106,14 +124,17 @@ impl Desk {
     ) -> Desk {
         // The first answer is everything arriving at once, which is a rebuild
         // from the point of view of anyone holding derived state.
+        let held = Arc::new(held);
         let current = Arc::new(ArcSwap::from_pointee(fold(
             &log,
             &held,
             device,
             now,
             Changed::Rebuild,
+            false,
         )));
         let (tx, rx) = unbounded::<Job>();
+        let (reports, scans) = unbounded();
         let published = Arc::clone(&current);
 
         let thread = std::thread::Builder::new()
@@ -128,6 +149,7 @@ impl Desk {
                     // change, however many files it walked.
                     let before = log.records().clone();
                     let mut moved = Changed::Nothing;
+                    let mut scanned = None;
                     let settled = match job {
                         Job::Say(say) => {
                             say(&mut log);
@@ -145,13 +167,61 @@ impl Desk {
                             // Not a log change, but every locator may have
                             // moved and none of them is named here.
                             moved = Changed::Wide;
-                            held = fresh;
+                            held = Arc::new(fresh);
+                            None
+                        }
+                        // **The scan runs here, and nothing waits on it.** It
+                        // is the one job that can take tens of seconds — a
+                        // cold pass re-reads every file — and the caller is a
+                        // thread with a deadline.
+                        //
+                        // Published twice on purpose: once to say it started,
+                        // so a view can show it, and once with the result.
+                        Job::Scan { roots, cache } => {
+                            published.store(Arc::new(fold(
+                                &log,
+                                &held,
+                                device,
+                                now,
+                                Changed::Nothing,
+                                true,
+                            )));
+                            let mut fresh = (*held).clone();
+                            let report = crate::operations::scan::scan(&mut fresh, &roots);
+                            // **Persisted here, because the holdings are
+                            // produced here.** Without it every launch is a
+                            // cold pass: the read cache is what turns 24s into
+                            // 0.3s, and it only exists if somebody wrote it.
+                            //
+                            // Never an empty one over a good one — that is how
+                            // a working library becomes an empty one after a
+                            // format bump, taking the roots with it.
+                            if let Some(path) = &cache
+                                && !(fresh.is_empty() && roots.is_empty())
+                                && let Err(e) = crate::cache::save(path, &fresh, &roots, None)
+                            {
+                                eprintln!("cache: {e}");
+                            }
+                            scanned = Some(report);
+                            moved = Changed::Wide;
+                            held = Arc::new(fresh);
                             None
                         }
                         Job::Advance => None,
                         Job::Settled(reply) => Some(reply),
                     };
-                    published.store(Arc::new(fold(&log, &held, device, now, moved)));
+                    // **Only when something moved.** A job that changed
+                    // nothing — a settle, an advance that was already caught
+                    // up — must not republish, because `changed` describes the
+                    // publication it rides on and republishing `Nothing` would
+                    // erase what the job before it had to say. A reader that
+                    // looked between the two would be told nothing happened.
+                    if moved != Changed::Nothing {
+                        published.store(Arc::new(fold(&log, &held, device, now, moved, false)));
+                    }
+                    if let Some(report) = scanned {
+                        let _ = reports.send(report);
+                    }
                     if let Some(reply) = settled {
                         // Dropped receiver means the waiter gave up, which is
                         // not this thread's problem.
@@ -164,6 +234,7 @@ impl Desk {
         Desk {
             device,
             current,
+            scans,
             jobs: tx,
             thread: Some(thread),
         }
@@ -194,9 +265,18 @@ impl Desk {
         let _ = self.jobs.send(Job::Say(Box::new(say)));
     }
 
-    /// A scan happened. These are the holdings now.
+    /// A scan happened elsewhere. These are the holdings now.
     pub fn holdings(&self, held: Holdings) {
         let _ = self.jobs.send(Job::Holdings(held));
+    }
+
+    /// Reconcile the disk, off this thread.
+    ///
+    /// Returns immediately, which is the point: a cold pass re-reads every
+    /// file. The caller learns it started from [`Answer::scanning`] and learns
+    /// what it found from [`Desk::scans`].
+    pub fn scan(&self, roots: Vec<PathBuf>, cache: Option<PathBuf>) {
+        let _ = self.jobs.send(Job::Scan { roots, cache });
     }
 
     /// Publish again without changing anything.
@@ -338,11 +418,20 @@ pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Proj
 }
 
 /// The one fold, and the only place it happens.
-fn fold(log: &Instance, held: &Holdings, device: Id<Device>, now: i64, changed: Changed) -> Answer {
+fn fold(
+    log: &Instance,
+    held: &Arc<Holdings>,
+    device: Id<Device>,
+    now: i64,
+    changed: Changed,
+    scanning: bool,
+) -> Answer {
     Answer {
         library: crate::bridge::librarian(held, log.records(), device, now),
         listened: Arc::new(log.catalogue()),
         changed,
+        holdings: Arc::clone(held),
+        scanning,
     }
 }
 
@@ -358,6 +447,98 @@ mod tests {
 
     fn desk() -> Desk {
         Desk::detached(device())
+    }
+
+    /// **A job that changed nothing does not erase what the last one said.**
+    ///
+    /// `changed` rides on the publication it describes, so a settle or a
+    /// caught-up advance republishing `Nothing` would tell a reader that
+    /// looked between them that nothing had happened. Found by a test that
+    /// asserted the scan's `Wide` and got `Nothing`, because `settled` had
+    /// published over it.
+    #[test]
+    fn a_no_op_job_does_not_overwrite_what_moved() {
+        let desk = desk();
+        let song = Id::<Recording>::from_uuid(uuid::Uuid::from_u128(11));
+        desk.say(move |log| {
+            log.append_fact(
+                1_000,
+                Fact::RecordingRated {
+                    recording: song,
+                    stars: Some(5),
+                },
+            );
+        });
+        desk.settled();
+
+        // Several no-ops, any one of which used to wipe it.
+        desk.advance();
+        desk.settled();
+        desk.advance();
+        desk.settled();
+
+        assert_eq!(
+            desk.current().changed,
+            Changed::These([Touched::Recording(song)].into_iter().collect()),
+            "a no-op job republished over the rating"
+        );
+    }
+
+    /// A scan runs on the librarian thread and reports back through a
+    /// channel, leaving its result in the published holdings.
+    ///
+    /// **That it does not block is structural, not asserted here.** `scan`
+    /// returns `()` and the report arrives on `scans`, so there is nothing a
+    /// caller could wait on by accident. A test that tried to prove the
+    /// timing would either race the thread or need a root big enough to be
+    /// slow, and a racy test is worse than a stated one.
+    #[test]
+    fn a_scan_reports_through_the_channel_and_lands_in_the_holdings() {
+        let dir = std::env::temp_dir().join("gmuse-librarian-scan");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let desk = desk();
+        assert!(desk.scans.try_recv().is_err(), "nothing has scanned yet");
+
+        desk.scan(vec![dir.clone()], None);
+        desk.settled();
+
+        assert!(
+            desk.scans.try_recv().is_ok(),
+            "the scan never reported, so it never ran"
+        );
+        let answer = desk.current();
+        assert!(!answer.scanning, "it finished, so it should say so");
+        assert_eq!(
+            answer.changed,
+            Changed::Wide,
+            "a scan may move any locator and names none of them"
+        );
+    }
+
+    /// **A scan with nowhere to write leaves no cache.** The guard that
+    /// matters is the other one — never an empty cache over a good one — but
+    /// this is the half a test can reach without a real library.
+    #[test]
+    fn a_scan_with_no_cache_path_writes_nothing() {
+        let dir = std::env::temp_dir().join("gmuse-librarian-nocache");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let desk = desk();
+        desk.scan(vec![dir.clone()], None);
+        desk.settled();
+
+        let wrote: Vec<_> = std::fs::read_dir(&dir)
+            .expect("readable")
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(
+            wrote.is_empty(),
+            "a scan wrote {wrote:?} with no cache path"
+        );
     }
 
     /// **One appender, and the compiler holds most of it.** `Instance::flush`
