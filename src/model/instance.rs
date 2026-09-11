@@ -520,16 +520,24 @@ impl Instance {
                     );
                     id
                 });
+                // **What the id was derived from, said separately** — #204.
+                // Its own fact because it is immutable given the id, where the
+                // pressing's title and label are descriptive and revisable.
+                if let Some(mbid) = s.mb_release {
+                    self.append(
+                        now,
+                        Fact::ReleaseIdentified {
+                            release,
+                            musicbrainz: mbid,
+                        },
+                    );
+                }
                 self.append(
                     now,
                     Fact::ReleaseCatalogued {
                         release,
                         group,
                         title: album.clone(),
-                        // The id the tags carried, kept rather than derived
-                        // away — #203. `None` where they carried none, which
-                        // is the same case `of_release` mints from the group.
-                        musicbrainz: s.mb_release,
                         released: s.released,
                         label,
                         media: s.disc_total,
@@ -1768,6 +1776,7 @@ mod containment_tests {
                     Subject::Encoding(id) => self.0.encodings.contains_key(&id),
                     Subject::Recording(id) => self.0.recordings.contains_key(&id),
                     Subject::Medium(id) => self.0.media.contains_key(&id),
+                    Subject::Release(id) => self.0.releases.contains_key(&id),
                     Subject::ReleaseGroup(id) => self.0.groups.contains_key(&id),
                     Subject::Artist(id) => self.0.artist_names.contains_key(&id),
                     Subject::Vocabulary => true,

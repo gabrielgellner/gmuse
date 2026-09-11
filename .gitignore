@@ -8,3 +8,7 @@
 # macOS Keychain; this is the backstop for when a token lands here anyway.
 .env
 .env.*
+
+# maturin writes the extension beside its Python source in a mixed layout, so
+# it lands in the tree rather than under /target.
+python/gmuse_core/*.so

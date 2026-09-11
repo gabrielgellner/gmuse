@@ -853,32 +853,38 @@ pub enum Fact {
     /// about a *release*, and with only a group to hang it on there was
     /// nowhere to put it. The group is the work-shaped thing — *Kid A* — and
     /// the release is the object you own.
+    /// **What a release's id was derived from** — #204.
+    ///
+    /// Its own fact rather than a field on [`Fact::ReleaseCatalogued`], for
+    /// the reason [`Fact::RecordingIdentified`] gives for recordings and which
+    /// applies here word for word: **immutable given the id**, because the id
+    /// is a function of it. `ReleaseCatalogued` is descriptive and taken
+    /// wholesale — restating a pressing clears its label, its date and the
+    /// disc count #134 put there — so a retitle would drag the basis along
+    /// with it, and a basis is not the sort of thing a retitle revises.
+    ///
+    /// #203 put it on `ReleaseCatalogued` and that was wrong on both counts:
+    /// a retitle would have carried it, and a pass that knew only the mbid
+    /// could not record one without restating everything else.
+    ///
+    /// **Why it has to be recorded at all.** `Id::<Release>::of_musicbrainz`
+    /// is a UUIDv5 over the mbid — convergent, so two machines mint the same
+    /// id without speaking, and one-way, so the mbid is not recoverable. The
+    /// derivation settles *identity* and says nothing about *lookup*, and a
+    /// pass that wants to ask MusicBrainz about a pressing needs the second.
+    ///
+    /// **Row existence, never superseded.** Two devices identifying one
+    /// pressing union; nothing here can disagree, because an id derives from
+    /// exactly one mbid.
+    ReleaseIdentified {
+        release: Id<Release>,
+        musicbrainz: uuid::Uuid,
+    },
+
     ReleaseCatalogued {
         release: Id<Release>,
         group: Id<ReleaseGroup>,
         title: String,
-        /// **Which MusicBrainz release this is, where one named it** — #203.
-        ///
-        /// The id above is `Id::derived(mbid.as_bytes())`, a UUIDv5: convergent,
-        /// so two machines that never spoke mint the same one — and **one-way**,
-        /// so the mbid is not recoverable from it. Without this the library can
-        /// say *which release a copy sits on* and cannot say *which MusicBrainz
-        /// release that is*, which is everything a pass needs to look one up
-        /// again.
-        ///
-        /// Identity and lookup are different needs, and the derivation only
-        /// ever served the first. A recording has recorded its `Basis` since
-        /// #89 for the same reason; this is that, for a pressing.
-        ///
-        /// **`None` is a real answer**: `Id::<Release>::of_release` mints from
-        /// the release group where no mbid exists, and a pressing nobody named
-        /// is an ordinary pressing.
-        ///
-        /// Not a `Basis`, because a release cannot rest on its bytes — a
-        /// pressing is not a thing you can hash — and a type admitting a state
-        /// that cannot happen is a type that invites handling it.
-        #[serde(default)]
-        musicbrainz: Option<uuid::Uuid>,
         /// When this pressing came out, which is **not** when the album did.
         /// #59's reissue trap is exactly this distinction: a 2015 pressing of
         /// a 1982 album sorts by 1982, and only the group knows that.
@@ -1197,6 +1203,10 @@ impl Fact {
             // gains rows only when a track is placed on it, which is its own
             // fact.
             Fact::WorkCatalogued { .. }
+            // One entry, and the one the fact names. It is additive and never
+            // superseded — an id derives from exactly one mbid — so it cannot
+            // reach past the pressing it identifies.
+            | Fact::ReleaseIdentified { .. }
             | Fact::ReleaseGroupCatalogued { .. }
             | Fact::ReleaseCatalogued { .. }
             | Fact::MediumCatalogued { .. } => Blast::Narrow,

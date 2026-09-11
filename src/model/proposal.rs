@@ -566,6 +566,26 @@ pub enum Proposal {
     /// it has — and a wrong release now **invents slots for tracks that are
     /// not on your edition** rather than merely mistagging files you own.
     /// That is the price of a `close` match accepted by hand.
+    /// **Which MusicBrainz release a pressing was minted from** — #204.
+    ///
+    /// The backfill, and the shape that makes it safe. It carries the mbid
+    /// *only*: the release id is `Id::<Release>::of_musicbrainz` of it, so a
+    /// proposal cannot name a pressing its mbid does not derive to. There is
+    /// no pair of fields here to disagree with each other.
+    ///
+    /// That turns the issue's check into the ordinary subject check. A tool
+    /// reads an mbid out of a tag and offers it; the library holds the release
+    /// it derives to, or it does not, and a tag naming somebody else's
+    /// pressing is refused by `Holdings` without the tool having to reason
+    /// about it. **The proof is in the check, not in the pass.**
+    ///
+    /// Additive, so it cannot clobber: `ReleaseCatalogued` is taken wholesale
+    /// and re-emitting it to add an id would clear the label, the date and the
+    /// disc count #134 put there.
+    ReleaseIdentified {
+        /// The MusicBrainz release id the tag claims.
+        release: uuid::Uuid,
+    },
     Tracklisted {
         /// The MusicBrainz release. Not a group: a tracklist belongs to one
         /// pressing, which is the whole reason #134 put the level in.
@@ -1004,6 +1024,11 @@ pub enum Subject {
     /// **An album** — #156. Its own subject rather than a recording's,
     /// because a merge at this level says nothing about the songs on it.
     ReleaseGroup(Id<ReleaseGroup>),
+    /// **One pressing** — #204. A release the library holds, which is what
+    /// makes a tag's claim checkable: the mbid derives to an id, and either
+    /// the library already minted that one or the tag is about a different
+    /// edition.
+    Release(Id<Release>),
     /// **A disc of a pressing** — #155, and the only subject that is not a
     /// thing you can play.
     ///
@@ -1090,6 +1115,11 @@ impl Proposal {
             // the arm below, where a missing one is a reason to refuse rather
             // than a subject nobody has heard of.
             Proposal::RecordingDerived { to, .. } => Subject::Recording(*to),
+            // **The release the mbid derives to**, which is the whole check:
+            // the proposal names no id of its own to disagree with.
+            Proposal::ReleaseIdentified { release } => {
+                Subject::Release(Id::<Release>::of_musicbrainz(*release))
+            }
             Proposal::Tracklisted {
                 release, position, ..
             } => Subject::Medium(Id::<Medium>::of_medium(
@@ -1688,6 +1718,14 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             // there. Naming an album is how a tool says "this is new"; leaving
             // it out is how it says "you already have this".
             let mut opening = Vec::new();
+            // **What the id was derived from** — #204, and always known here:
+            // a tracklist names a MusicBrainz release by definition. Said
+            // whether or not the pressing is being introduced, because
+            // identifying one and describing it are different acts.
+            opening.push(Fact::ReleaseIdentified {
+                release,
+                musicbrainz: named,
+            });
             if let (Some(group), Some(name)) = (album, title.as_deref()) {
                 let name = name.trim();
                 if name.is_empty() {
@@ -1697,10 +1735,6 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     release,
                     group,
                     title: name.to_string(),
-                    // **The id this was derived from** — #203. A tracklist
-                    // always names a MusicBrainz release, so this is always
-                    // `Some` here; it is the one place that knew and dropped it.
-                    musicbrainz: Some(named),
                     released: None,
                     label: None,
                     // **Not stated.** How many discs the pressing has is a
@@ -1889,6 +1923,12 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             vec![Fact::ReleaseGroupRetitled {
                 group,
                 title: title.to_string(),
+            }]
+        }
+        Proposal::ReleaseIdentified { release } => {
+            vec![Fact::ReleaseIdentified {
+                release: Id::<Release>::of_musicbrainz(release),
+                musicbrainz: release,
             }]
         }
         Proposal::Contributed {
@@ -2113,6 +2153,8 @@ pub(crate) mod tests {
                 // refused for a record the library has never seen, and that
                 // refusal is the safety property worth having a double for.
                 Subject::Medium(m) => m == Id::<Medium>::of_medium(pressing(), 1),
+                // The one pressing this fixture holds — #204.
+                Subject::Release(r) => r == pressing(),
                 // The double holds one album, so a merge into it is reachable
                 // and a merge into anything else is stale.
                 Subject::ReleaseGroup(g) => g == album(),
@@ -3165,6 +3207,7 @@ pub(crate) mod tests {
     fn a_row_with_no_copy_here_is_still_a_row() {
         let row = Queried {
             recording: Some(rec(2)),
+            musicbrainz: None,
             encoding: None,
             locator: None,
             length_ms: None,
@@ -3172,7 +3215,6 @@ pub(crate) mod tests {
             cliff_db: None,
             title: "Wanted".into(),
             artist: "Someone".into(),
-            musicbrainz: None,
             album: None,
             release: None,
             release_musicbrainz: None,
@@ -4101,5 +4143,40 @@ mod merged {
                 2
             ))
         );
+    }
+
+    /// **A tag the derivation confirms** — #204. The library minted this
+    /// pressing from this mbid, so the id derives back to the one it holds and
+    /// there is nothing left to trust.
+    #[test]
+    fn an_mbid_that_derives_to_a_held_release_is_recorded() {
+        let line = format!(
+            r#"{{"fact":"release_identified","release":"{}"}}"#,
+            pressed()
+        );
+        let (records, report) = parse(&line, dev(), 100, HELD);
+
+        assert_eq!(report.applied, 1, "{report}");
+        assert_eq!(
+            records.iter().next().unwrap().fact,
+            Fact::ReleaseIdentified {
+                release: Id::<Release>::of_musicbrainz(pressed()),
+                musicbrainz: pressed(),
+            }
+        );
+    }
+
+    /// **The three folders that disagree**, and where they are stopped. A tag
+    /// naming an edition the library never minted derives to an id nothing
+    /// holds, so it is refused by the subject check — the pass that read the
+    /// tag never had to know.
+    #[test]
+    fn an_mbid_for_a_release_nothing_holds_is_refused() {
+        let elsewhere = uuid::Uuid::from_u128(0xDEAD_BEEF);
+        let line = format!(r#"{{"fact":"release_identified","release":"{elsewhere}"}}"#);
+        let (records, report) = parse(&line, dev(), 100, HELD);
+
+        assert!(records.is_empty(), "a tag was believed over the library");
+        assert_eq!(report.unknown.len(), 1, "{report}");
     }
 }

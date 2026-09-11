@@ -1252,6 +1252,59 @@ def tracklist(root: Path, out: Path) -> None:
     )
 
 
+def basis(root: Path, out: Path) -> None:
+    """Record which MusicBrainz release each pressing was minted from — #204.
+
+    Every release here was catalogued before the library kept the id it was
+    derived from, so 7,021 rows answer `None` for which pressing they are.
+    `Id::<Release>::of_musicbrainz` is one-way and the library cannot recover
+    it — but it is **checkable**, and that is the whole pass: the tag offers a
+    candidate, the derivation either lands on the id the library already minted
+    or it does not, and nothing else derives to that id.
+
+    So this is not "believe the tags". A `release_identified` proposal carries
+    the **mbid alone** — the release id is derived from it — and the library
+    refuses one whose derivation names a pressing it does not hold. The three
+    folders measured as disagreeing are stopped by that check rather than by
+    anything decided here.
+
+    Touches no network, unlike the rest of `ingest`: the answer is already in
+    the tags, and what was missing was a fact to put it in.
+    """
+    lib = gmuse_core.Library.open()
+    named, held = releases_named(lib), releases_held(lib)
+    folders = sorted({f.parent for f in walk(root)})
+    lines: list[str] = []
+    tally: collections.Counter[str] = collections.Counter()
+    for folder in folders:
+        # **Already recorded**, by a tracklist run or an earlier pass of this
+        # one. `apply` would drop the duplicate fact, but a proposal file whose
+        # lines are mostly no-ops is a worse brief to read.
+        if named.get(str(folder)):
+            tally["already identified"] += 1
+            continue
+        tagged, _ = held_discs(folder)
+        if not tagged:
+            tally["no release id in the tags"] += 1
+            continue
+        if str(folder) not in held:
+            # Nothing here sits on a release, so there is no pressing for the
+            # mbid to identify and `apply` would report it `unknown`.
+            tally["the library holds no copies from this folder"] += 1
+            continue
+        if not agrees(lib, held, folder, tagged):
+            tally["the tag names a different release than the library holds"] += 1
+            continue
+        lines.append(json.dumps({"fact": "release_identified", "release": tagged}))
+        tally["identified"] += 1
+
+    lib.propose(lines, out)
+    for key, n in sorted(tally.items()):
+        print(f"{n:6d}  {key}", file=sys.stderr)
+    print(f"\n{len(lines)} proposal(s) -> {out}", file=sys.stderr)
+    print("Apply with `gmuse library apply --write`.", file=sys.stderr)
+
+
 def accept(root: Path, review: Path, *, write: bool) -> None:
     """Bring in every album the review marks `y`, on the release it names."""
     rows = [r for r in csv.DictReader(review.open(), delimiter="\t") if r["accept"].strip().lower() == "y"]
@@ -1283,6 +1336,11 @@ def register(app: typer.Typer) -> None:
     def tracklist_cmd(root: Path = LIB) -> None:
         """Catalogue the whole tracklist of every identified album — #155."""
         tracklist(root.expanduser(), out_path("tracklists.jsonl"))
+
+    @ingest_app.command("basis")
+    def basis_cmd(root: Path = LIB) -> None:
+        """Record which MusicBrainz release each pressing was minted from — #204."""
+        basis(root.expanduser(), out_path("release-basis.jsonl"))
 
     @ingest_app.command("accept")
     def accept_cmd(

@@ -90,6 +90,12 @@ impl proposal::Holdings for Shelf {
             // The safety property is unchanged: a tracklist for a record
             // nothing here connects to is still refused. What is admitted is a
             // record something here already sits on.
+            // **A pressing the library already holds** — #204. The
+            // identification derives its id from the mbid, so this arm is
+            // where a tag naming a different edition is refused: three of the
+            // 1,043 folders measured claim one the library never minted, and
+            // they land here rather than in the pass.
+            Subject::Release(id) => self.disk.releases.contains_key(&id),
             Subject::Medium(id) => {
                 self.disk.media.contains_key(&id)
                     || self.log.tracks.values().any(|t| t.medium == id)

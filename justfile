@@ -95,9 +95,16 @@ wheel:
     uvx maturin build --release
 
 # Build it into the tools' environment, for working on them.
+#
+# **`uv sync`, not `maturin develop`.** `tools/pyproject.toml` depends on the
+# crate as a path with `editable = false`, so every `uv run` resyncs the
+# environment and reinstalls its own cached build of gmuse-core — quietly
+# undoing anything maturin put there. That looks exactly like a Rust change
+# not taking effect, and it cost three debugging rounds on #204. Rebuilding
+# through uv means the thing that resyncs is the thing that built it.
 [group('build')]
 wheel-dev:
-    cd tools && uvx maturin develop --release --manifest-path ../Cargo.toml
+    cd tools && uv sync --reinstall-package gmuse-core
 
 # Run the test suite
 [group('test')]

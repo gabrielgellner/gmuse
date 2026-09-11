@@ -841,7 +841,6 @@ mod tests {
                 },
                 Fact::ReleaseCatalogued {
                     release,
-                    musicbrainz: None,
                     group,
                     title: "An Album".into(),
                     released: None,

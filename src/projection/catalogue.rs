@@ -289,6 +289,14 @@ pub struct Catalogue {
     pub credits_retracted: BTreeMap<(CreditOn, Id<Artist>, Id<Role>), Source>,
     /// Every pressing, by id.
     pub releases: BTreeMap<Id<Release>, Released>,
+    /// **An identification that arrived before its pressing** — #204.
+    ///
+    /// The two facts are independent and a log has no order to lean on: a
+    /// `ReleaseIdentified` can be folded before the `ReleaseCatalogued` it
+    /// belongs to, and dropping it then would make the answer depend on which
+    /// order two devices happened to write in. Held here and read when the
+    /// pressing lands.
+    pub release_basis: BTreeMap<Id<Release>, uuid::Uuid>,
     /// Every disc, by id.
     pub media: BTreeMap<Id<Medium>, Pressed>,
     /// Every slot: which medium, which recording, which number.
@@ -875,9 +883,23 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             Fact::LabelNamed { label, name } => {
                 cat.label_names.insert(*label, name.clone());
             }
-            Fact::ReleaseCatalogued {
+            // **Additive, and never superseded** — #204. An id derives from
+            // exactly one mbid, so two devices saying so union and nothing
+            // here can disagree.
+            Fact::ReleaseIdentified {
                 release,
                 musicbrainz,
+            } => {
+                let at = *release;
+                if let Some(pressing) = cat.releases.get_mut(&at) {
+                    pressing.musicbrainz = Some(*musicbrainz);
+                } else {
+                    cat.release_basis.insert(at, *musicbrainz);
+                }
+            }
+
+            Fact::ReleaseCatalogued {
+                release,
                 group,
                 title,
                 released,
@@ -894,7 +916,14 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         // releases together would lose the difference.
                         group: group_of(group),
                         title: title.clone(),
-                        musicbrainz: *musicbrainz,
+                        // **Kept across a restatement** — #204. The pressing
+                        // is taken wholesale, and the id it was derived from
+                        // is not the sort of thing a retitle revises.
+                        musicbrainz: cat
+                            .releases
+                            .get(release)
+                            .and_then(|r| r.musicbrainz)
+                            .or_else(|| cat.release_basis.get(release).copied()),
                         released: *released,
                         label: *label,
                         media: *media,
@@ -1774,7 +1803,6 @@ mod merge_tests {
         };
         let pressing = |release| Fact::ReleaseCatalogued {
             release,
-            musicbrainz: None,
             group,
             title: "Luna".into(),
             released: None,
@@ -1836,7 +1864,6 @@ mod merge_tests {
         let cat = fold(&log([
             Fact::ReleaseCatalogued {
                 release: named,
-                musicbrainz: None,
                 group,
                 title: "A Record".into(),
                 released: None,
@@ -2253,7 +2280,6 @@ mod merge_tests {
             },
             Fact::ReleaseCatalogued {
                 release: standard,
-                musicbrainz: None,
                 group: new,
                 title: "Barton Hollow".into(),
                 released: None,
@@ -2262,7 +2288,6 @@ mod merge_tests {
             },
             Fact::ReleaseCatalogued {
                 release: deluxe,
-                musicbrainz: None,
                 group: old,
                 title: "Barton Hollow".into(),
                 released: None,
@@ -2385,5 +2410,105 @@ mod merge_tests {
             &r.fact,
             Fact::RecordingRated { recording, .. } if *recording == rec(1)
         )));
+    }
+}
+
+#[cfg(test)]
+mod identification_tests {
+    //! **A basis is not the sort of thing a retitle revises** — #204.
+    //!
+    //! `ReleaseCatalogued` is descriptive and taken wholesale: the last writer
+    //! supplies every field, so anything carried *on* it is re-supplied on
+    //! every restatement. The MusicBrainz id a pressing was derived from is
+    //! not re-derivable from a title, which is why it moved to a fact of its
+    //! own — the same argument `RecordingIdentified` already makes.
+
+    use super::*;
+    use crate::facts::Blast;
+    use crate::model::clock::HybridClock;
+
+    fn log(facts: impl IntoIterator<Item = Fact>) -> BTreeSet<Record> {
+        let mut clock = HybridClock::new(Id::derived(b"laptop"));
+        facts
+            .into_iter()
+            .map(|fact| Record {
+                stamp: clock.stamp(1_000),
+                fact,
+            })
+            .collect()
+    }
+
+    fn pressing(release: Id<Release>, title: &str) -> Fact {
+        Fact::ReleaseCatalogued {
+            release,
+            group: Id::derived(b"selected ambient works"),
+            title: title.into(),
+            released: None,
+            label: None,
+            media: Some(1),
+        }
+    }
+
+    /// **The reason the field moved.** A retitle is an ordinary edit and it
+    /// restates the whole pressing; if the basis rode along on that fact, an
+    /// edit that says nothing about identity would erase it.
+    #[test]
+    fn a_retitle_does_not_drop_the_identification() {
+        let release = Id::<Release>::from_uuid(uuid::Uuid::from_u128(7));
+        let mbid = uuid::Uuid::from_u128(99);
+
+        let cat = fold(&log([
+            pressing(release, "Selected Ambient Works 85-92"),
+            Fact::ReleaseIdentified {
+                release,
+                musicbrainz: mbid,
+            },
+            pressing(release, "Selected Ambient Works 85–92"),
+        ]));
+
+        let held = cat.releases.get(&release).expect("the pressing is listed");
+        assert_eq!(held.title, "Selected Ambient Works 85–92", "the retitle");
+        assert_eq!(
+            held.musicbrainz,
+            Some(mbid),
+            "**a retitle revised a basis** — the field is riding on the wrong fact"
+        );
+    }
+
+    /// **Two facts, and a log has no order to lean on.** They are independent,
+    /// so either can land first — and which one did is an accident of how two
+    /// devices happened to write, not something an answer may depend on.
+    #[test]
+    fn an_identification_that_arrives_first_is_not_lost() {
+        let release = Id::<Release>::from_uuid(uuid::Uuid::from_u128(8));
+        let mbid = uuid::Uuid::from_u128(100);
+
+        let cat = fold(&log([
+            Fact::ReleaseIdentified {
+                release,
+                musicbrainz: mbid,
+            },
+            pressing(release, "Drukqs"),
+        ]));
+
+        assert_eq!(
+            cat.releases.get(&release).and_then(|r| r.musicbrainz),
+            Some(mbid),
+            "the identification was folded before its pressing and dropped"
+        );
+    }
+
+    /// **Narrow, and for the reason narrow means** — the fact names its
+    /// subject, and one pressing is the whole of what folding it can reach.
+    #[test]
+    fn identifying_a_release_reaches_one_entry() {
+        assert_eq!(
+            Fact::ReleaseIdentified {
+                release: Id::from_uuid(uuid::Uuid::from_u128(9)),
+                musicbrainz: uuid::Uuid::from_u128(101),
+            }
+            .blast(),
+            Blast::Narrow,
+        );
     }
 }
