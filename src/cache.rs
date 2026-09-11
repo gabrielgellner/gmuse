@@ -62,38 +62,57 @@ pub fn measurements_path() -> PathBuf {
     default_path().with_file_name("measurements.postcard")
 }
 
-/// Bump on any change to `Measurements` or `Measured`.
-const MEASUREMENTS_VERSION: u32 = 1;
+/// Bump on any change to `Reads`, `Seen` or `Scanned`.
+///
+/// 2 — the cache holds a whole [`crate::model::ingest::Scanned`] rather than
+/// just the audio measurement (#190), so a v1 file describes a different
+/// shape entirely.
+const READS_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
-struct MeasurementsEnvelope {
+struct ReadsEnvelope {
     version: u32,
-    seen: crate::audio_id::Measurements,
+    seen: crate::model::ingest::Reads,
 }
 
-/// Load what earlier runs measured. A cache that cannot be read is not an
-/// error — it is a slow first run, which is the trade this module already
-/// makes everywhere else.
-pub fn load_measurements(path: &Path) -> crate::audio_id::Measurements {
+/// Load what earlier runs read. A cache that cannot be read is not an error —
+/// it is a slow first run, which is the trade this module already makes
+/// everywhere else.
+pub fn load_measurements(path: &Path) -> crate::model::ingest::Reads {
     let Ok(bytes) = std::fs::read(path) else {
         return Default::default();
     };
     if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
         return Default::default();
     }
-    match postcard::from_bytes::<MeasurementsEnvelope>(&bytes[MAGIC.len()..]) {
-        Ok(env) if env.version == MEASUREMENTS_VERSION => env.seen,
-        Ok(_) | Err(_) => Default::default(),
+    let body = &bytes[MAGIC.len()..];
+
+    // **The version is read before the payload, not after it.** postcard is
+    // not self-describing, so parsing a v1 file as the current shape is not
+    // reliably an error — it can succeed and hand back nonsense, and nonsense
+    // here is a *wrong* row rather than a slow one. The envelope puts the
+    // version first, so taking that one field settles it before anything is
+    // trusted.
+    //
+    // This was the other way round and it worked only because a shape change
+    // happened to fail to parse. That is luck, and #190 is exactly the change
+    // that would have spent it.
+    let Ok((version, rest)) = postcard::take_from_bytes::<u32>(body) else {
+        return Default::default();
+    };
+    if version != READS_VERSION {
+        return Default::default();
     }
+    postcard::from_bytes::<crate::model::ingest::Reads>(rest).unwrap_or_default()
 }
 
 /// Keep what this run learned. **Never fatal**: failing to write a cache must
 /// not fail the command that filled it, because nothing here is the answer —
 /// it is only how fast the next answer arrives.
-pub fn save_measurements(path: &Path, seen: &crate::audio_id::Measurements) {
-    let envelope = MeasurementsEnvelope {
-        version: MEASUREMENTS_VERSION,
-        seen: crate::audio_id::Measurements::clone_of(seen),
+pub fn save_measurements(path: &Path, seen: &crate::model::ingest::Reads) {
+    let envelope = ReadsEnvelope {
+        version: READS_VERSION,
+        seen: crate::model::ingest::Reads::clone_of(seen),
     };
     let Ok(body) = postcard::to_allocvec(&envelope) else {
         return;

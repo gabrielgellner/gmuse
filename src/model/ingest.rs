@@ -125,26 +125,155 @@ pub fn processed(path: &Path) -> bool {
         .is_some_and(|stem| stem.ends_with(PROCESSED_MARKER))
 }
 
-pub fn read(path: &Path) -> Result<Scanned, IngestError> {
-    read_with(path, &mut crate::audio_id::Measurements::default())
+/// What reading a file already told us, so a later pass need not read it again
+/// — #188, widened to the whole read by #190.
+///
+/// **The expensive answer, guarded by a cheap question.** Reading a file costs
+/// twice: `audio_id::measure` walks every packet, because identity here is the
+/// audio and a tag edit must not change it; and `lofty` parses the tags. On
+/// this library that is 59 GB and ~0.33ms a file respectively, and `shelf
+/// query` did both twice — once to mint and once to publish holdings — so an
+/// `artist=` filter returning four rows spent three seconds discovering
+/// nothing.
+///
+/// Nothing was being discovered because the log already records all of it. The
+/// tags were consumed at import and the design holds that they are never
+/// consulted again; re-reading them answers *"is what the log says still
+/// true"*, which is a real question and is `shelf verify`'s, where it is a
+/// deliberate act rather than the cost of asking anything at all.
+///
+/// So: `stat` first. A path whose length and mtime are unchanged since we last
+/// read it holds what we last read from it. That is what every
+/// content-addressed store keeps beside its hashes, and why they stay fast.
+///
+/// **One cache, not two.** A [`Scanned`] carries its own [`AudioId`], so the
+/// walk that wants a whole scan and the walk that wants only the identity are
+/// answered from the same entry. They are the two walks in `query::rows`, and
+/// before this they each paid separately.
+///
+/// **Derived, and disposable.** This is not a fact and must never become one —
+/// the log records claims about music, and "this file was 4.2 MB at 10:03" is
+/// not one. Same trade as `cache.rs`: private format, no compatibility story,
+/// thrown away and rebuilt whenever it cannot be read.
+///
+/// **What it deliberately cannot do is notice a replaced file that kept its
+/// size and mtime.** Nothing outside gmuse does that by accident, and the one
+/// thing that would — a restore preserving timestamps — is what `shelf verify`
+/// exists to catch. The guarantee here is speed, not truth; `verify` still
+/// reads every byte.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Reads {
+    seen: std::collections::BTreeMap<std::path::PathBuf, Seen>,
+    /// Counted so a caller can say what a walk cost, which is the number that
+    /// made this worth building.
+    #[serde(skip)]
+    hits: u64,
+    #[serde(skip)]
+    misses: u64,
 }
 
-/// [`read`], answered from a previous read where the file has not changed —
-/// #188.
+/// One remembered read: what the file looked like, and what it held.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Seen {
+    len: u64,
+    /// Milliseconds since the epoch. An `i64` because a clock can predate it,
+    /// and a file restored from an archive routinely does.
+    modified_ms: i64,
+    scanned: Scanned,
+}
+
+/// How a file looks without opening it — the cheap question.
 ///
-/// The tags are read either way: they are a small read at one end of the file
-/// and the hash is the whole of it, so this is where the cost is. A caller
-/// walking the library passes one of these and reads the bytes of what is new.
-pub fn read_with(
-    path: &Path,
-    measurements: &mut crate::audio_id::Measurements,
-) -> Result<Scanned, IngestError> {
+/// `None` where it cannot be asked at all, which is treated as a miss: a file
+/// we cannot `stat` is one we are about to fail to open anyway, and guessing
+/// would be the one failure mode this must not have.
+fn glance(path: &Path) -> Option<(u64, i64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let ms = match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_millis()).ok()?,
+        // Before the epoch, which an archived file really can be.
+        Err(e) => -i64::try_from(e.duration().as_millis()).ok()?,
+    };
+    Some((meta.len(), ms))
+}
+
+impl Reads {
+    /// [`read`], answered from a previous read where the file is unchanged.
+    pub fn scanned(&mut self, path: &Path) -> Result<Scanned, IngestError> {
+        let now = glance(path);
+        if let Some((len, modified_ms)) = now
+            && let Some(seen) = self.seen.get(path)
+            && seen.len == len
+            && seen.modified_ms == modified_ms
+        {
+            self.hits += 1;
+            return Ok(seen.scanned.clone());
+        }
+        self.misses += 1;
+        let scanned = read(path)?;
+        // **Stored against the glance taken *before* the read**, not after.
+        // Taking it after would record the state of a file that changed while
+        // we were reading it as though we had read the new bytes, which is the
+        // one way a cache like this goes quietly wrong.
+        if let Some((len, modified_ms)) = now {
+            self.seen.insert(
+                path.to_path_buf(),
+                Seen {
+                    len,
+                    modified_ms,
+                    scanned: scanned.clone(),
+                },
+            );
+        }
+        Ok(scanned)
+    }
+
+    /// Just the identity, for the walk that publishes holdings.
+    ///
+    /// **The same entry as [`Reads::scanned`]**, because a `Scanned` carries
+    /// its `AudioId`. A path this has not seen is read whole rather than
+    /// hashed alone: the two walks always run together, so the tags are wanted
+    /// a moment later anyway, and keeping one guard is worth more than saving
+    /// a tag parse on a file that is new.
+    pub fn audio(&mut self, path: &Path) -> Result<crate::audio_id::AudioId, IngestError> {
+        self.scanned(path).map(|s| s.audio)
+    }
+
+    /// How much of the last walk was answered without opening a file.
+    pub fn tally(&self) -> (u64, u64) {
+        (self.hits, self.misses)
+    }
+
+    /// A copy for the writer, because serialising takes a value and the caller
+    /// owns theirs. Cheap relative to what it saves re-reading.
+    pub fn clone_of(other: &Reads) -> Reads {
+        Reads {
+            seen: other.seen.clone(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Forget files that are no longer there, so the cache cannot grow for
+    /// ever.
+    ///
+    /// **Every import renames what it places**, so a library that is worked on
+    /// leaves dead paths behind at a steady rate and nothing else would remove
+    /// them. A `stat` each is the same cheap question the cache is built on,
+    /// and it runs once per command rather than per file read.
+    pub fn prune_missing(&mut self) {
+        self.seen.retain(|path, _| path.exists());
+    }
+}
+
+pub fn read(path: &Path) -> Result<Scanned, IngestError> {
     let bad = |message: String| IngestError::Unreadable {
         path: path.display().to_string(),
         message,
     };
 
-    let measured = measurements.of(path).map_err(|e| bad(e.to_string()))?;
+    let measured = crate::audio_id::measure(path).map_err(|e| bad(e.to_string()))?;
     let audio = measured.audio;
     let stem = || {
         path.file_stem()
@@ -574,6 +703,116 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// **A remembered read is used only while the file has not moved
+    /// underneath it** — #188, widened by #190.
+    ///
+    /// The cache exists because reading a file costs a walk of every packet
+    /// plus a tag parse, and a library that has not changed should not be
+    /// re-read to discover that. What it must never do is hand back a stale
+    /// answer for a file that *has* changed, so the `stat` is the whole of its
+    /// correctness and this is the test of it.
+    #[test]
+    fn a_read_is_kept_only_while_the_file_is_unchanged() {
+        let d = dir("reads");
+        let path = d.join("a.wav");
+        wav(&path, 1000);
+
+        let mut reads = Reads::default();
+        let first = reads.scanned(&path).expect("it reads");
+        assert_eq!(reads.tally(), (0, 1), "nothing was known yet");
+
+        // Asked again, unchanged: answered without opening the file.
+        let again = reads.scanned(&path).expect("it answers");
+        assert_eq!(again, first, "the same file reads the same");
+        assert_eq!(reads.tally(), (1, 1), "and it did not open it again");
+
+        // **The identity comes off the same entry**, which is the whole reason
+        // one cache serves both walks: `populate` wants the scan and
+        // `reconcile` wants only the id, and before this they each paid.
+        assert_eq!(reads.audio(&path).expect("cached"), first.audio);
+        assert_eq!(reads.tally(), (2, 1), "the second walk is free");
+
+        // **Different audio, and the identity changes with it.** A rewrite is
+        // what the cache must notice, and the point of noticing is that the id
+        // is different: a stale hit here would have the library naming bytes
+        // that are not there.
+        wav(&path, 2000);
+        let rewritten = reads.scanned(&path).expect("it reads again");
+        assert_eq!(reads.tally(), (2, 2), "a changed file is read");
+        assert_ne!(
+            rewritten.audio, first.audio,
+            "different audio must not keep the old id"
+        );
+        assert_ne!(
+            rewritten.length_ms, first.length_ms,
+            "nor the old length, which is what a tracklist match turns on"
+        );
+
+        // **A file that cannot be looked at is a miss, never a hit.** Guessing
+        // here is the one failure this must not have, and a deleted file must
+        // surface as the error it is rather than as a remembered answer.
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            reads.scanned(&path).is_err(),
+            "a gone file is not still known"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A cache from an older shape is ignored, not misread** — #190.
+    ///
+    /// postcard is not self-describing, so parsing yesterday's bytes as
+    /// today's type is not reliably an error: it can succeed and hand back
+    /// nonsense. Nonsense here is a *wrong* row rather than a slow one, which
+    /// is the one failure this whole mechanism must not have.
+    ///
+    /// So the version is taken from the front of the envelope before the
+    /// payload is trusted. This was the other way round and worked only
+    /// because a shape change happened to fail to parse — which is luck, and
+    /// widening the cache to hold a whole `Scanned` is exactly the change that
+    /// would have spent it.
+    #[test]
+    fn a_cache_written_by_an_older_shape_is_ignored() {
+        let d = dir("reads-version");
+        let path = d.join("a.wav");
+        wav(&path, 1500);
+
+        let mut reads = Reads::default();
+        let scanned = reads.scanned(&path).expect("it reads");
+
+        let at = d.join("reads.postcard");
+        crate::cache::save_measurements(&at, &reads);
+        let mut back = crate::cache::load_measurements(&at);
+        assert_eq!(
+            back.scanned(&path).expect("it answers"),
+            scanned,
+            "a round trip did not survive"
+        );
+        assert_eq!(back.tally(), (1, 0), "and it answered without reading");
+
+        // A file whose envelope says some other version: ignored outright,
+        // whatever its payload happens to contain.
+        let stale = {
+            let mut bytes = b"gmuse".to_vec();
+            bytes.extend_from_slice(&postcard::to_allocvec(&1u32).expect("a version"));
+            bytes.extend_from_slice(&[0xff; 64]);
+            bytes
+        };
+        std::fs::write(&at, &stale).unwrap();
+        let mut older = crate::cache::load_measurements(&at);
+        assert_eq!(older.tally(), (0, 0), "a v1 file must not be believed");
+        older.scanned(&path).expect("it reads from scratch");
+        assert_eq!(older.tally(), (0, 1), "nothing was trusted from it");
+
+        // And plain rubbish is the same answer: a slow run, never a wrong one.
+        std::fs::write(&at, b"not a cache at all").unwrap();
+        let empty = crate::cache::load_measurements(&at);
+        assert_eq!(empty.tally(), (0, 0));
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// **What only the filename knows, read at the last moment it exists** —

@@ -524,7 +524,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
-                &mut crate::audio_id::Measurements::default(),
+                &mut crate::model::ingest::Reads::default(),
             );
             let cat = log.catalogue();
 
@@ -643,7 +643,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
-                &mut crate::audio_id::Measurements::default(),
+                &mut crate::model::ingest::Reads::default(),
             );
             let cat = log.catalogue();
             let library = crate::model::seam::Librarian::from_catalogue(&cat);
@@ -1025,7 +1025,7 @@ fn run_library(
                     // which performance sits here — so one copy answers it.
                     query::Copies::Shown,
                     None,
-                    &mut crate::audio_id::Measurements::default(),
+                    &mut crate::model::ingest::Reads::default(),
                 ) {
                     if row.recording.is_some_and(|r| contested.contains(&r)) {
                         println!("{}", serde_json::to_string(&row)?);
@@ -1144,7 +1144,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
-                &mut crate::audio_id::Measurements::default(),
+                &mut crate::model::ingest::Reads::default(),
             );
             let cat = log.catalogue();
 
@@ -1263,7 +1263,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
-                &mut crate::audio_id::Measurements::default(),
+                &mut crate::model::ingest::Reads::default(),
             );
             let librarian = crate::model::seam::Librarian::from_catalogue(&log.catalogue());
 
@@ -1340,7 +1340,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
-                &mut crate::audio_id::Measurements::default(),
+                &mut crate::model::ingest::Reads::default(),
             );
             let mut lines = 0usize;
             for (folder, held) in &report.unfiled {
@@ -1383,7 +1383,7 @@ fn run_library(
                     &mut log,
                     roots,
                     crate::history::now_ms(),
-                    &mut crate::audio_id::Measurements::default(),
+                    &mut crate::model::ingest::Reads::default(),
                 );
                 // **A duplicate is a filesystem accident, and must not be
                 // silent** — `Report::duplicates` has said so since it was
@@ -1428,7 +1428,7 @@ fn run_library(
                 } else {
                     crate::model::populate::Admits::Identified
                 },
-                &mut crate::audio_id::Measurements::default(),
+                &mut crate::model::ingest::Reads::default(),
             );
             for (path, recording) in &report.identified {
                 println!("{recording}\t{}", path.display());
@@ -1516,7 +1516,7 @@ fn run_library(
                     &mut log,
                     &walk,
                     crate::history::now_ms(),
-                    &mut crate::audio_id::Measurements::default(),
+                    &mut crate::model::ingest::Reads::default(),
                 );
 
                 // Import is strict, so anything that got this far is
@@ -1559,7 +1559,7 @@ fn run_library(
                         &mut log,
                         &walk,
                         crate::history::now_ms(),
-                        &mut crate::audio_id::Measurements::default(),
+                        &mut crate::model::ingest::Reads::default(),
                     );
                 }
                 // **Filed as it is brought in** (#94). The collection is a
@@ -1644,7 +1644,7 @@ fn run_library(
                     &mut library_log,
                     roots,
                     crate::history::now_ms(),
-                    &mut crate::audio_id::Measurements::default(),
+                    &mut crate::model::ingest::Reads::default(),
                 );
                 let n = library_log.flush(&loaded.data_dir)?;
                 eprintln!("{} folder(s) pruned, {n} record(s) written", done.emptied);

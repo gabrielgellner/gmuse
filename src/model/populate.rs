@@ -22,7 +22,6 @@ use std::collections::BTreeMap;
 
 use crate::model::entity::{Encoding, Recording};
 use crate::model::id::Id;
-use crate::model::ingest;
 use crate::model::instance::Instance;
 
 /// **Who may be catalogued** — #160, and `library-api.md` §7 states the rule:
@@ -285,7 +284,7 @@ pub fn reconcile(
     instance: &mut Instance,
     roots: &[PathBuf],
     now: i64,
-    measurements: &mut crate::audio_id::Measurements,
+    reads: &mut crate::model::ingest::Reads,
 ) -> Report {
     let started = Instant::now();
     let paths = audio_files(roots);
@@ -297,7 +296,7 @@ pub fn reconcile(
     let mut held = BTreeMap::new();
 
     for path in paths {
-        let audio = match measurements.of(&path).map(|m| m.audio) {
+        let audio = match reads.audio(&path) {
             Ok(audio) => audio,
             Err(e) => {
                 report.unreadable.push((path, e.to_string()));
@@ -434,7 +433,7 @@ pub fn populate(
     // **What a previous walk already read** — #188. Empty is the old
     // behaviour: every file measured. A caller that keeps one between calls
     // pays for the bytes that changed and not for the rest.
-    measurements: &mut crate::audio_id::Measurements,
+    reads: &mut crate::model::ingest::Reads,
 ) -> Report {
     let started = Instant::now();
     let paths = audio_files(roots);
@@ -462,7 +461,7 @@ pub fn populate(
         instance.catalogue().bound.keys().copied().collect();
 
     for path in paths {
-        match ingest::read_with(&path, measurements) {
+        match reads.scanned(&path) {
             Ok(s) => {
                 // **The gate** — #160. Nothing named this performance, so
                 // cataloguing it would mint a recording out of its own bytes
@@ -723,7 +722,7 @@ pub fn read_library(device_name: &str, roots: &[PathBuf], now: i64) -> (Instance
         roots,
         now,
         Admits::Anything,
-        &mut crate::audio_id::Measurements::default(),
+        &mut crate::model::ingest::Reads::default(),
     );
     (instance, report)
 }
@@ -763,7 +762,7 @@ mod tests {
             std::slice::from_ref(&dir),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert!(first.written > 0, "the first pass has to write something");
         let after = i.records().len();
@@ -773,7 +772,7 @@ mod tests {
             std::slice::from_ref(&dir),
             200,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(again.ingested, 2, "both files were still read");
         assert_eq!(again.written, 0, "a second pass wrote facts the log had");
@@ -798,7 +797,7 @@ mod tests {
             std::slice::from_ref(&dir),
             100,
             Admits::Identified,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(report.ingested, 0, "it was catalogued anyway");
         assert_eq!(report.provisional, 0, "nothing may rest on its bytes here");
@@ -845,7 +844,7 @@ mod tests {
             std::slice::from_ref(&dir),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(report.ingested, 1);
         assert_eq!(report.provisional, 1, "it rests on its bytes, as asked");
@@ -869,7 +868,7 @@ mod tests {
             std::slice::from_ref(&dir),
             100,
             Admits::Identified,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(strict.confirmed, 1);
         assert!(strict.unidentified.is_empty());
@@ -880,7 +879,7 @@ mod tests {
             std::slice::from_ref(&dir),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(open.confirmed, 1, "the gate changed a file it should not");
         assert_eq!(strict.written, open.written);
@@ -914,7 +913,7 @@ mod tests {
             std::slice::from_ref(&dir),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
 
         assert_eq!(report.contradicts.len(), 1, "{:?}", report.contradicts);
@@ -943,14 +942,14 @@ mod tests {
             std::slice::from_ref(&dir),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         let again = populate(
             &mut i,
             std::slice::from_ref(&dir),
             200,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(again.contradicts.len(), 0);
         assert_eq!(again.written, 0);
@@ -982,13 +981,13 @@ mod tests {
             std::slice::from_ref(&root),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         reconcile(
             &mut i,
             std::slice::from_ref(&root),
             150,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         let held = |i: &Instance| {
             i.catalogue()
@@ -1005,7 +1004,7 @@ mod tests {
             &[root.join("A")],
             200,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(
             held(&i),
@@ -1080,14 +1079,14 @@ mod tests {
             std::slice::from_ref(&known),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
 
         let report = reconcile(
             &mut i,
             std::slice::from_ref(&root),
             200,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(report.files, 2);
         assert_eq!(
@@ -1115,13 +1114,13 @@ mod tests {
             &report.unknown,
             300,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         let after = reconcile(
             &mut i,
             std::slice::from_ref(&root),
             400,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert!(after.unknown.is_empty(), "still unknown after an import");
         assert_eq!(after.ingested, 2);
@@ -1149,7 +1148,7 @@ mod tests {
             std::slice::from_ref(&root),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
 
         // Somebody else rewrites the tags. The audio is untouched.
@@ -1158,7 +1157,7 @@ mod tests {
             &mut i,
             std::slice::from_ref(&root),
             200,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert!(
             report.unknown.is_empty(),
@@ -1200,7 +1199,7 @@ mod tests {
             std::slice::from_ref(&root),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         let recording =
             crate::model::rows::Listing::rows(&Librarian::from_catalogue(&i.catalogue()))[0];
@@ -1211,7 +1210,7 @@ mod tests {
             &mut i,
             std::slice::from_ref(&root),
             200,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert!(report.unknown.is_empty(), "a moved file became a stranger");
 
@@ -1261,7 +1260,7 @@ mod tests {
             std::slice::from_ref(&root),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(
             report.unfiled.keys().collect::<Vec<_>>(),
@@ -1286,7 +1285,7 @@ mod tests {
             std::slice::from_ref(&root),
             300,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(
             again.unfiled.keys().collect::<Vec<_>>(),
@@ -1372,7 +1371,7 @@ mod tests {
             std::slice::from_ref(&first),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert!(
             one.joins.is_empty(),
@@ -1384,7 +1383,7 @@ mod tests {
             std::slice::from_ref(&second),
             200,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(
             two.joins.len(),
@@ -1414,14 +1413,14 @@ mod tests {
             std::slice::from_ref(&dir),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         let again = populate(
             &mut i,
             std::slice::from_ref(&dir),
             200,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(again.ingested, 1, "the file was still read");
         assert!(
@@ -1443,14 +1442,14 @@ mod tests {
             std::slice::from_ref(&held),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         let new = populate(
             &mut i,
             std::slice::from_ref(&other),
             200,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert!(
             new.joins.is_empty(),
@@ -1694,13 +1693,13 @@ mod tests {
             std::slice::from_ref(&dir),
             100,
             Admits::Anything,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         reconcile(
             &mut i,
             std::slice::from_ref(&dir),
             110,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(i.catalogue().holdings[&i.device()].held.len(), 2);
 
@@ -1709,7 +1708,7 @@ mod tests {
             &mut i,
             &[dir],
             200,
-            &mut crate::audio_id::Measurements::default(),
+            &mut crate::model::ingest::Reads::default(),
         );
 
         assert_eq!(
