@@ -65,6 +65,7 @@ from operator import attrgetter
 from pathlib import Path
 from typing import Final
 
+import gmuse_core
 import mutagen
 import typer
 
@@ -488,20 +489,22 @@ def register(app: typer.Typer) -> None:
     # does not arise for something only ever called from a shell.
     # FBT001/FBT003: a Typer flag is declared as a boolean parameter with a
     # boolean default, which is the framework's only spelling for one.
-    def duplicates_cmd(  # noqa: PLR0913, PLR0917
-        work: Path = typer.Argument(..., help="work list from `gmuse shelf query`"),
+    def duplicates_cmd(
         root: Path = typer.Option(None, "--root", help="trim this prefix off reported paths"),
         workers: int = typer.Option(8, "--workers", help="parallel fpcalc processes"),
         floor: float = typer.Option(FLOOR, "--floor", help="lowest fingerprint score to list"),
         any_artist: bool = typer.Option(False, "--any-artist", help="the same music, whoever the tags say made it"),  # noqa: FBT001, FBT003
         as_json: bool = typer.Option(False, "--json", help="one suspect per line, for a script"),  # noqa: FBT001, FBT003
     ) -> None:
-        """Same music held twice, scored, with the evidence. Changes nothing."""
-        rows = [
-            json.loads(line)
-            for line in work.expanduser().read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.startswith("#")
-        ]
+        """Same music held twice, scored, with the evidence. Changes nothing.
+
+        **Every copy** — #183, #198. This is a pass about *files*: it opens each
+        one and fingerprints it, so one row per recording would hide exactly
+        what it is looking for. It used to take whatever work list somebody
+        handed it, which meant a list built without `--every-copy` could not
+        find a second copy however hard it looked.
+        """
+        rows = gmuse_core.Library.open().query(every_copy=True)
         copies = [c for c in (read(row) for row in rows) if c is not None]
         found = examine(copies, workers=workers, floor=floor, any_artist=any_artist)
         if as_json:
