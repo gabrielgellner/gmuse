@@ -3127,6 +3127,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   "invalidates every event ever recorded", and #63 has not settled whether events should name an entry or a encoding.
   The id exists, is cached, and is used where it already pays.
 
+- **2026-09-10** **Squash off. Every commit on a branch lands on `main`.** The project merged fast-forward with
+  `squash_option: always`, which turned each MR into one commit taking its subject from the **MR title** and discarding
+  every body. Now `squash_option: never`; the merge method is unchanged, so history stays linear and a branch behind
+  `main` still needs a rebase.
+
+  **The bodies were the reason.** This repository keeps its reasoning in commit messages — what was measured, what was
+  tried and failed, the rule that came out of being wrong — and squash kept a single subject line of it. The commits
+  here are individually well-typed, so ten of them are ten changelog entries and ten explanations rather than one of
+  each. git-cliff reads every commit; it was being handed one.
+
+  **What it costs.** Every commit must now be a well-formed Conventional Commit, not just the MR title, because
+  `filter_unconventional` drops a bad one silently and that risk moves from per-MR to per-commit. And the MR title stops
+  being load-bearing, which removes one failure mode and adds a smaller one.
+
+  **What prompted it.** `ddd51bb` is titled _"every fact says how much of a projection it can change"_ and contains
+  that, plus `shelf compact`, plus `durable::rewrite`, plus six design-doc commits — because three MRs were opened
+  against one long-lived branch and the third squash took everything still on it. Not repairable: rewriting a merged
+  commit is a force-push and `main` is protected. The branching was the proximate error and **one branch per issue, cut
+  from `main`** is the rule that prevents it; squash is what made the error unrecoverable rather than untidy.
+
 - **2026-09-10** **The reason a launch does not scan is void: the tree is an output of the library, not an input.**
   Supersedes the 2026-09-01 entry below, whose rationale was that "a file appearing on disk is a change to the
   _library_, and a change to the library is something you make". That described a world where the music folder was an

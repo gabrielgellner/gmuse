@@ -134,21 +134,28 @@ The initial commit predates this convention and is filtered out of the changelog
 ### Merge requests
 
 `main` is protected: **push access is "No one"**, so every change lands through an MR. The project is set to
-fast-forward merges with squash always on, and source branches delete themselves. Branch names follow the commit type:
+fast-forward merges, **squash off**, and source branches delete themselves. Branch names follow the commit type:
 `feat/…`, `fix/…`, `docs/…`, `chore/…`.
 
 Because merges are fast-forward, an MR that has fallen behind `main` needs a rebase before it can merge.
 
-**The MR title must itself be a Conventional Commit**, because squash-on-merge uses the _title_ and throws the commit
-body away. A well-typed commit under a bare title lands on `main` untyped, and `filter_unconventional` then drops it
-from the changelog without a word — the same silent failure the section above describes, arriving by a different door.
-It has happened once (`8b84fd3`, the #151 fix), and it is not repairable through an MR: rewriting a merged commit is a
-force-push by definition, and `main` is protected precisely so that cannot happen. **So the title is the last moment
-this is fixable, and after the merge the entry is simply gone.**
+**Every commit on the branch lands on `main`, so every commit must be a well-formed Conventional Commit** — not just the
+MR title. `filter_unconventional = true` drops a badly typed one from the changelog without a word, and that is now a
+per-commit risk rather than a per-MR one.
 
-That is a cost worth accepting rather than working around. The initial commit is already filtered out for the same
-reason, and a `cliff.toml` preprocessor special-casing one subject line would be a permanent wart describing a
-historical accident.
+In exchange, **the bodies survive**. This repository puts its reasoning in commit messages — the measurement, the thing
+that was tried and did not work, the rule that came out of being wrong — and squash kept only the subject line. Ten
+well-typed commits are ten changelog entries and ten explanations, rather than one of each.
+
+**One branch per issue, cut from `main`.** Under squash this was a tidiness preference; now it is not, because a branch
+carrying two issues' work lands as two sets of commits with no MR boundary between them in the history. Reusing a
+long-lived branch for successive MRs is how `ddd51bb` came to contain `shelf compact` and six design-doc commits under a
+title about blast radii — which was unfixable, for the reason below.
+
+**A merged commit cannot be corrected.** Rewriting one is a force-push by definition and `main` is protected precisely
+so that cannot happen. It has bitten twice: `8b84fd3` (the #151 fix, an untyped title) and `ddd51bb` (a squash that
+swallowed a whole branch). That is a cost worth accepting rather than working around — a `cliff.toml` preprocessor
+special-casing a subject line would be a permanent wart describing a historical accident.
 
 ### Configuration and theming
 
