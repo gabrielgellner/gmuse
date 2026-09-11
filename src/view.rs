@@ -115,7 +115,7 @@ impl Definitions for NoDefinitions {
     }
 }
 
-impl Definitions for crate::model::log::Catalogue {
+impl Definitions for crate::projection::catalogue::Catalogue {
     fn source_of(&self, name: &str) -> Option<String> {
         self.views
             .get(&Id::<crate::model::entity::View>::of_name(name))

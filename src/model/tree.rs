@@ -466,13 +466,13 @@ mod tests {
         let unheld = Id::<crate::model::entity::Recording>::derived(b"a track we do not own");
         let slot = Id::<crate::model::entity::Track>::derived(b"slot 9 of back in black");
         let mut clock = crate::model::clock::HybridClock::new(Id::derived(b"laptop"));
-        let unfilled: std::collections::BTreeSet<crate::model::log::Record> = [
-            crate::model::log::Fact::RecordingCatalogued {
+        let unfilled: std::collections::BTreeSet<crate::facts::Record> = [
+            crate::facts::Fact::RecordingCatalogued {
                 recording: unheld,
                 title: "Rock and Roll Ain't Noise Pollution".into(),
                 artist: Id::derived(b"acdc"),
             },
-            crate::model::log::Fact::TrackPlaced {
+            crate::facts::Fact::TrackPlaced {
                 track: slot,
                 medium,
                 recording: unheld,
@@ -481,7 +481,7 @@ mod tests {
             },
         ]
         .into_iter()
-        .map(|fact| crate::model::log::Record {
+        .map(|fact| crate::facts::Record {
             stamp: clock.stamp(200),
             fact,
         })
@@ -820,13 +820,13 @@ mod tests {
         let unheld = Id::<crate::model::entity::Recording>::derived(b"two");
         let slot = Id::<crate::model::entity::Track>::derived(b"slot two");
         let mut clock = crate::model::clock::HybridClock::new(Id::derived(b"laptop"));
-        let records: std::collections::BTreeSet<crate::model::log::Record> = [
-            crate::model::log::Fact::RecordingCatalogued {
+        let records: std::collections::BTreeSet<crate::facts::Record> = [
+            crate::facts::Fact::RecordingCatalogued {
                 recording: unheld,
                 title: "Two".into(),
                 artist: Id::of_artist(None, "Laurie Anderson"),
             },
-            crate::model::log::Fact::TrackPlaced {
+            crate::facts::Fact::TrackPlaced {
                 track: slot,
                 medium,
                 recording: unheld,
@@ -835,7 +835,7 @@ mod tests {
             },
         ]
         .into_iter()
-        .map(|fact| crate::model::log::Record {
+        .map(|fact| crate::facts::Record {
             stamp: clock.stamp(200),
             fact,
         })

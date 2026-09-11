@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::audio_id::AudioId;
+use crate::facts::{Fact, Record, compact};
 use crate::model::basis::Basis;
 use crate::model::clock::{Drift, HybridClock, Stamp};
 use crate::model::durable::{self, Damage, LogError};
@@ -27,10 +28,10 @@ use crate::model::entity::{
 use crate::model::facet::{self, Described};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
-use crate::model::log::{Catalogue, Fact, Record, compact, fold};
 use crate::model::ord::OrdKey;
 use crate::model::reference::{Cataloguable, CreditOn, RoleClass, Source};
 use crate::model::spine::PartialDate;
+use crate::projection::catalogue::{Catalogue, fold};
 
 /// What a scan says about one file.
 ///
@@ -1750,7 +1751,7 @@ mod containment_tests {
         );
 
         /// Just enough of a library for `parse` to check a subject against.
-        struct Shelf(crate::model::log::Catalogue);
+        struct Shelf(crate::projection::catalogue::Catalogue);
         impl Holdings for Shelf {
             fn claim(
                 &self,

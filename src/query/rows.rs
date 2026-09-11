@@ -13,11 +13,11 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use crate::facts::Record;
 use crate::model::basis::Basis;
 use crate::model::entity::Device;
 use crate::model::id::Id;
 use crate::model::instance::Instance;
-use crate::model::log::Record;
 use crate::model::proposal::Queried;
 use crate::model::reference::CreditOn;
 use crate::model::seam::Librarian;
@@ -315,8 +315,8 @@ pub fn rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facts::Fact;
     use crate::model::entity::Recording;
-    use crate::model::log::Fact;
     use std::io::Write;
 
     fn dir(name: &str) -> PathBuf {

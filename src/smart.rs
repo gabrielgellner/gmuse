@@ -140,13 +140,13 @@ mod tests {
     ///
     /// A real `Catalogue` rather than a stub, because it is the thing the
     /// player actually asks and its fields are the fold's own output.
-    fn listening() -> crate::model::log::Catalogue {
-        crate::model::log::Catalogue::default()
+    fn listening() -> crate::projection::catalogue::Catalogue {
+        crate::projection::catalogue::Catalogue::default()
     }
 
     /// Note a play against whatever recording `path` is, the way the log would.
     fn played(
-        cat: &mut crate::model::log::Catalogue,
+        cat: &mut crate::projection::catalogue::Catalogue,
         l: &crate::model::seam::Librarian,
         path: &str,
         at: i64,
@@ -162,7 +162,7 @@ mod tests {
         cat.last_played.insert(recording, at);
     }
 
-    fn env(h: &crate::model::log::Catalogue) -> SortEnv<'_> {
+    fn env(h: &crate::projection::catalogue::Catalogue) -> SortEnv<'_> {
         SortEnv {
             env: Env {
                 listened: Some(h),

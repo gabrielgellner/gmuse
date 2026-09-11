@@ -37,6 +37,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::facts::{Fact, Record};
 use crate::model::basis::Basis;
 use crate::model::clock::HybridClock;
 use crate::model::entity::{
@@ -46,7 +47,6 @@ use crate::model::entity::{
 use crate::model::facet::{self, Described};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
-use crate::model::log::{Fact, Record};
 use crate::model::ord::OrdKey;
 use crate::model::reference::{CreditOn, RoleClass, Source};
 

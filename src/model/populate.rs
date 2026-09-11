@@ -388,7 +388,7 @@ fn named_in(credit: &str) -> std::collections::BTreeSet<String> {
 /// `report.identified` is: the ladder that chooses these ids lives in one
 /// place, and asking the question a second way is how two answers to it get
 /// into the codebase.
-fn already_placed(cat: &crate::model::log::Catalogue) -> Vec<(Id<Encoding>, Placement)> {
+fn already_placed(cat: &crate::projection::catalogue::Catalogue) -> Vec<(Id<Encoding>, Placement)> {
     let mut out = Vec::new();
     for (encoding, track) in &cat.placed {
         let Some(slot) = cat.tracks.get(track) else {
@@ -575,7 +575,7 @@ pub fn populate(
     //
     // Same shape as the `Early James` retirement (`surviving_holders`): two
     // paths are one encoding, and the second one to be looked at wins.
-    for (encoding, placement) in already_placed(&crate::model::log::fold(&before)) {
+    for (encoding, placement) in already_placed(&crate::projection::catalogue::fold(&before)) {
         wanted.insert(
             encoding,
             (placement, PathBuf::from("(what the library already held)")),
@@ -643,7 +643,7 @@ pub fn populate(
     // from an encoding to a recording is decided by the ladder in `ingest`,
     // and asking a second copy of that question is how two answers to it get
     // into the codebase. One extra fold, on a command a person runs by hand.
-    let was = crate::model::log::fold(&before);
+    let was = crate::projection::catalogue::fold(&before);
     let mut already: BTreeMap<Id<Recording>, usize> = BTreeMap::new();
     for recording in was.bound.values() {
         *already.entry(*recording).or_default() += 1;

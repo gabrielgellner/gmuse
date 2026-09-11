@@ -19,6 +19,7 @@ mod config;
 mod datadir;
 mod edit;
 mod events;
+mod facts;
 #[cfg(test)]
 mod fixture;
 mod guides;
@@ -28,6 +29,7 @@ mod m3u;
 mod model;
 mod next;
 mod playlist;
+mod projection;
 mod query;
 mod remote;
 mod scan;
@@ -526,7 +528,7 @@ fn run_library(
             let dropped = before.len() - after.len();
             // Bytes as they sit on disk, so the number reported is the number
             // a person can check with `ls`.
-            let weigh = |rs: &std::collections::BTreeSet<crate::model::log::Record>| -> usize {
+            let weigh = |rs: &std::collections::BTreeSet<crate::facts::Record>| -> usize {
                 rs.iter()
                     .filter_map(|r| serde_json::to_string(r).ok())
                     .map(|l| l.len() + 1)
@@ -594,7 +596,7 @@ fn run_library(
             // as being in doubt about a name it no longer owns.
             let mut said: std::collections::BTreeMap<_, Vec<&str>> = Default::default();
             for record in log.records() {
-                if let crate::model::log::Fact::ArtistNamed { artist, name } = &record.fact {
+                if let crate::facts::Fact::ArtistNamed { artist, name } = &record.fact {
                     let seen: &mut Vec<&str> =
                         said.entry(cat.artist_merges.resolve(*artist)).or_default();
                     if seen.last() != Some(&name.as_str()) {
@@ -1215,7 +1217,7 @@ fn run_library(
                 crate::model::id::Id<crate::model::entity::Artist>,
             > = Default::default();
             for record in log.records() {
-                if let crate::model::log::Fact::ArtistNamed { artist, name } = &record.fact
+                if let crate::facts::Fact::ArtistNamed { artist, name } = &record.fact
                     && crate::model::id::Id::<crate::model::entity::Artist>::of_artist(None, name)
                         == *artist
                 {
@@ -1629,7 +1631,7 @@ fn run_library(
                         crate::model::id::Id::<crate::model::entity::Collection>::of_name(name);
                     log.append_fact(
                         now,
-                        crate::model::log::Fact::CollectionNamed {
+                        crate::facts::Fact::CollectionNamed {
                             collection,
                             name: name.trim().to_string(),
                             // A set somebody curated, not a running order —
@@ -1640,7 +1642,7 @@ fn run_library(
                     for recording in report.identified.values() {
                         log.append_fact(
                             now,
-                            crate::model::log::Fact::CollectionEntryAdded {
+                            crate::facts::Fact::CollectionEntryAdded {
                                 collection,
                                 recording: *recording,
                                 ord: crate::model::ord::OrdKey::first(),
@@ -2323,7 +2325,7 @@ fn still_holds(at: &str, said: crate::model::id::Id<crate::model::entity::Encodi
 /// case the path filter happened to exclude. Retiring 32 files reported
 /// `0 to retire`, naming each file's own path as the copy that survived it.
 fn surviving_holders<'a>(
-    cat: &'a crate::model::log::Catalogue,
+    cat: &'a crate::projection::catalogue::Catalogue,
     departed: &std::path::Path,
     going: &std::collections::BTreeSet<String>,
 ) -> std::collections::BTreeMap<crate::model::id::Id<crate::model::entity::Encoding>, Vec<&'a str>>
@@ -2471,7 +2473,7 @@ mod tests {
     fn a_copy_being_retired_is_not_a_copy_that_survives_it() {
         use crate::model::entity::{Device, Encoding};
         use crate::model::id::Id;
-        use crate::model::log::{Asserted, Catalogue};
+        use crate::projection::catalogue::{Asserted, Catalogue};
 
         let going_path = "/m/Bodzin & Romboy/Luna/01 Triton.mp3";
         let bytes = Id::<Encoding>::derived(b"triton");
@@ -2506,7 +2508,7 @@ mod tests {
     fn a_live_copy_of_the_same_bytes_still_refuses_the_retirement() {
         use crate::model::entity::{Device, Encoding};
         use crate::model::id::Id;
-        use crate::model::log::{Asserted, Catalogue};
+        use crate::projection::catalogue::{Asserted, Catalogue};
 
         let going_path = "/m/Early James/copy two/01 Blue Pill.mp3";
         let staying = "/m/Early James/Strange Time/01 Blue Pill.mp3";
@@ -2538,7 +2540,7 @@ mod tests {
     fn bytes_that_are_only_in_departed_do_not_hold_anything_back() {
         use crate::model::entity::{Device, Encoding};
         use crate::model::id::Id;
-        use crate::model::log::{Asserted, Catalogue};
+        use crate::projection::catalogue::{Asserted, Catalogue};
 
         let bytes = Id::<Encoding>::derived(b"moved by hand");
         let mut cat = Catalogue::default();

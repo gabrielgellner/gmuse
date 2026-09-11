@@ -36,12 +36,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::facts::Record;
 use crate::model::entity::{Device, Encoding};
 use crate::model::id::Id;
 use crate::model::instance::Instance;
 #[cfg(test)]
 use crate::model::instance::Scanned;
-use crate::model::log::Record;
 use crate::model::seam::Librarian;
 
 // **`scanned()` and `format_of()` lived here and are gone** (#86).
@@ -240,10 +240,10 @@ mod forget_and_relink {
     }
     use super::*;
     use crate::audio_id::AudioId;
+    use crate::facts::Fact;
     use crate::model::basis::Basis;
     use crate::model::clock::HybridClock;
     use crate::model::encoding::Format;
-    use crate::model::log::Fact;
     use crate::model::spine::Recording;
     use crate::scan::Holdings;
 
@@ -628,8 +628,8 @@ mod opening {
     /// would then say a listen came from bytes this device has never read.
     #[test]
     fn the_copy_that_opens_is_not_always_the_canonical_one() {
+        use crate::facts::Fact;
         use crate::model::clock::HybridClock;
-        use crate::model::log::Fact;
 
         let mine = Id::<Device>::derived(b"laptop");
         let nas = Id::<Device>::derived(b"asnas");

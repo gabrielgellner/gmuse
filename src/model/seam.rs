@@ -29,13 +29,13 @@ use crate::model::ingest::Confidence;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::facet::Described;
-use crate::model::log::{Catalogue, Collected};
 use crate::model::ord::OrdKey;
 use crate::model::provenance::Provenance;
 use crate::model::reference::{CreditOn, Reference};
 use crate::model::rows::Drawn;
 use crate::model::spine::Spine;
 use crate::model::vocabulary::Vocabulary;
+use crate::projection::catalogue::{Catalogue, Collected};
 
 /// What the player is allowed to ask, and what it is allowed to ask for.
 ///
@@ -124,7 +124,7 @@ pub struct Librarian {
     /// files mints some 160,000 facts every launch, with this launch's stamps;
     /// showing those beside the handful somebody actually wrote would drown
     /// the ones worth reading in noise that says only "the disk was walked".
-    pub records: std::collections::BTreeSet<crate::model::log::Record>,
+    pub records: std::collections::BTreeSet<crate::facts::Record>,
     /// Every collection entry, in list order — see [`Catalogue::entries`].
     collected: BTreeSet<(Id<Collection>, OrdKey, Id<Recording>)>,
     /// Which slot each copy sits in — issue #78.
@@ -2922,7 +2922,7 @@ mod tests {
     /// cannot.
     #[test]
     fn the_projection_reads_the_spine_and_does_not_invent_it() {
-        use crate::model::log::{Catalogue, Grouped};
+        use crate::projection::catalogue::{Catalogue, Grouped};
 
         let mut cat = Catalogue::default();
         let group = Id::<crate::model::entity::ReleaseGroup>::derived(b"luna");
@@ -2941,7 +2941,7 @@ mod tests {
         let rec = Id::<Recording>::derived(b"callisto");
         cat.recordings.insert(
             rec,
-            crate::model::log::Recorded {
+            crate::projection::catalogue::Recorded {
                 title: "Callisto".into(),
                 artist: Id::derived(b"bodzin"),
             },
@@ -3045,10 +3045,10 @@ mod tests {
             "Work",
         ];
 
-        let (_, text) = read("src/model")
+        let (_, text) = read("src/facts")
             .into_iter()
-            .find(|(f, _)| f.ends_with("log.rs"))
-            .expect("log.rs");
+            .find(|(f, _)| f.ends_with("mod.rs"))
+            .expect("the facts module");
         let start = text.find("pub enum Fact {").expect("the Fact enum");
         let body = &text[start..text[start..].find("\n}\n").unwrap() + start];
 
@@ -3283,20 +3283,20 @@ mod tests {
         // a *separate* identity, related rather than renamed.
         let other = Id::<crate::model::entity::Artist>::derived(b"avey tare");
         for fact in [
-            crate::model::log::Fact::HeadingRetired {
+            crate::facts::Fact::HeadingRetired {
                 subject: crate::model::reference::Cataloguable::Artist(artist),
                 value: "Campfire Songs".into(),
             },
-            crate::model::log::Fact::AliasAsserted {
+            crate::facts::Fact::AliasAsserted {
                 subject: crate::model::reference::Cataloguable::Artist(artist),
                 value: "animalcollective".into(),
                 kind: AliasKind::SearchHint,
             },
-            crate::model::log::Fact::ArtistNamed {
+            crate::facts::Fact::ArtistNamed {
                 artist: other,
                 name: "Avey Tare".into(),
             },
-            crate::model::log::Fact::ArtistRelated {
+            crate::facts::Fact::ArtistRelated {
                 from: other,
                 to: artist,
                 kind: ArtistRelationKind::MemberOf,

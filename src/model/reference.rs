@@ -238,7 +238,7 @@ impl Source {
 /// keeps `Variant` and `DeprecatedAuthority` as disjoint classes for an exact
 /// reason — a deprecated heading was the authorised one once and a variant
 /// never was — and the two multiply rather than add, since any kind of name
-/// can be current or retired. [`crate::model::log::Fact::HeadingRetired`]
+/// can be current or retired. [`crate::facts::Fact::HeadingRetired`]
 /// carries that half; this carries only what kind of name it is.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,

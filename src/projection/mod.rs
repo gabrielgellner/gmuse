@@ -2,7 +2,7 @@
 //!
 //! `access-layers.md` §3. The librarian's read model: derived from the log,
 //! disposable, and rebuildable from nothing. What it adds over calling
-//! [`crate::model::log::fold`] is that it **knows where it got to**, which is
+//! [`crate::projection::catalogue::fold`] is that it **knows where it got to**, which is
 //! the whole of staleness and the thing that lets a read cost an integer
 //! comparison instead of a fold.
 //!
@@ -43,12 +43,15 @@
     reason = "L1's contract lands before its callers — #194 persists it, #195 reads through it"
 )]
 
+pub mod catalogue;
+
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::facts::Record;
 use crate::model::clock::Stamp;
 use crate::model::entity::Device;
 use crate::model::id::Id;
-use crate::model::log::{Catalogue, Record, fold};
+use crate::projection::catalogue::{Catalogue, fold};
 
 /// How far a projection has folded, per device.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -167,10 +170,10 @@ impl Projected {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facts::Fact;
     use crate::model::clock::HybridClock;
     use crate::model::entity::Artist;
     use crate::model::instance::{Instance, Scanned};
-    use crate::model::log::Fact;
 
     fn device(n: u128) -> Id<Device> {
         Id::from_uuid(uuid::Uuid::from_u128(n))

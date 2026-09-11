@@ -414,7 +414,7 @@ mod tests {
     /// neither is a modifier a terminal may ignore.
     #[test]
     fn a_track_nothing_fills_is_greyed_and_shows_no_duration() {
-        use crate::model::log::{Fact, Record};
+        use crate::facts::{Fact, Record};
         use crate::model::rows::Listing as _;
 
         let (l, ids, store) = store_and_scan(&[("A", "One", None, "t1")]);

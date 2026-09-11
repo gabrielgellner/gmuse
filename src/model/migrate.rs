@@ -29,10 +29,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::events::{Event, Kind};
+use crate::facts::{Fact, Record};
 use crate::model::clock::{HybridClock, Stamp};
 use crate::model::entity::{Device, Recording};
 use crate::model::id::Id;
-use crate::model::log::{Fact, Record};
 
 /// What a conversion did, and what it could not do.
 #[derive(Debug, Default)]
@@ -291,7 +291,9 @@ mod tests {
         ];
         let (records, _) = to_records(&events, dev(), known);
         assert_eq!(
-            crate::model::log::fold(&records).acquired.get(&rec(1)),
+            crate::projection::catalogue::fold(&records)
+                .acquired
+                .get(&rec(1)),
             Some(&100)
         );
     }

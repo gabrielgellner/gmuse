@@ -372,7 +372,7 @@ pub struct Ui {
     pub log: crate::model::instance::Instance,
     /// The fold, refreshed after every fact. Held so the UI answers a rating
     /// immediately; what makes it durable is the record appended beside it.
-    pub listened: crate::model::log::Catalogue,
+    pub listened: crate::projection::catalogue::Catalogue,
     /// Where the log lives. `None` disables recording entirely.
     pub data_dir: Option<PathBuf>,
     /// The current track has already been counted, so a long listen does not
@@ -616,7 +616,7 @@ impl Ui {
             log: crate::model::instance::Instance::new(crate::model::id::Id::derived(
                 b"unconfigured",
             )),
-            listened: crate::model::log::Catalogue::default(),
+            listened: crate::projection::catalogue::Catalogue::default(),
             data_dir: None,
             counted_current: false,
             resuming: false,
@@ -6848,7 +6848,7 @@ mod tests {
     /// passed.
     #[test]
     fn a_track_no_file_is_held_for_is_skipped_rather_than_stopping_playback() {
-        use crate::model::log::{Fact, Record};
+        use crate::facts::{Fact, Record};
 
         // A recording the library knows about and holds nothing of, **in a
         // slot on a record it does hold part of** — which is the shape #155
@@ -11851,8 +11851,8 @@ mod tests {
     /// redirects a rating through a merge where there is one.
     #[test]
     fn rating_a_relinked_file_rates_what_it_is_now() {
+        use crate::facts::{Fact, Record};
         use crate::model::basis::Basis;
-        use crate::model::log::{Fact, Record};
 
         let store = fixture();
         let l = lib_of(&store);

@@ -41,10 +41,10 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use crate::facts::Record;
 use crate::model::clock::Stamp;
 use crate::model::entity::Device;
 use crate::model::id::Id;
-use crate::model::log::Record;
 
 /// The prefix every log file shares, so `logs_in` can find them.
 const PREFIX: &str = "log-";
@@ -247,9 +247,9 @@ pub fn high_water(records: &BTreeSet<Record>, device: Id<Device>) -> Option<Stam
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facts::Fact;
     use crate::model::clock::HybridClock;
     use crate::model::entity::{Artist, Recording};
-    use crate::model::log::Fact;
 
     fn dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("gmuse-durable-{name}"));

@@ -14,6 +14,7 @@
 use std::collections::BTreeSet;
 
 use crate::audio_id::AudioId;
+use crate::facts::Record;
 use crate::model::basis::Basis;
 use crate::model::entity::Concept;
 use crate::model::entity::{Artist, Device, Encoding, Recording};
@@ -21,7 +22,6 @@ use crate::model::facet::{self, Described};
 use crate::model::id::Id;
 use crate::model::ingest::Confidence;
 use crate::model::instance::{Instance, Scanned};
-use crate::model::log::Record;
 use crate::model::reference::Source;
 
 fn device(n: u128) -> Id<Device> {

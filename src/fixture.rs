@@ -200,7 +200,7 @@ pub fn from_holdings(held: &crate::scan::Holdings) -> Librarian {
 /// test about a catalog defined by one has to hand the fold some records.
 pub fn from_holdings_and(
     held: &crate::scan::Holdings,
-    records: &std::collections::BTreeSet<crate::model::log::Record>,
+    records: &std::collections::BTreeSet<crate::facts::Record>,
 ) -> Librarian {
     // **Imported, not merely present** (#140). A scan no longer catalogues
     // what it walks past, so a fixture that means "these files are in the

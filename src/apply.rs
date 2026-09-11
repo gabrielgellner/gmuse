@@ -47,8 +47,8 @@ pub enum ApplyError {
 /// decision somebody recorded and a scan cannot see one. Reading the binding
 /// off the disk instead would let an identification quietly undo the last one.
 struct Shelf {
-    disk: crate::model::log::Catalogue,
-    log: crate::model::log::Catalogue,
+    disk: crate::projection::catalogue::Catalogue,
+    log: crate::projection::catalogue::Catalogue,
 }
 
 impl proposal::Holdings for Shelf {
@@ -255,8 +255,8 @@ type PairKey = (
     Id<crate::model::entity::Concept>,
 );
 
-fn paired(fact: &crate::model::log::Fact) -> Option<(PairKey, bool)> {
-    use crate::model::log::Fact;
+fn paired(fact: &crate::facts::Fact) -> Option<(PairKey, bool)> {
+    use crate::facts::Fact;
     match fact {
         Fact::HierarchyNarrowed {
             hierarchy,
@@ -363,7 +363,7 @@ pub fn run(
             last_for_pair.insert(pair, asserting);
         }
     }
-    let redundant = |fact: &crate::model::log::Fact| match paired(fact) {
+    let redundant = |fact: &crate::facts::Fact| match paired(fact) {
         None => false,
         Some((pair, asserting)) => {
             // Superseded within this file, or the state already says it.
@@ -384,8 +384,8 @@ pub fn run(
     // Judged by what the fold currently says, so a name that is already the
     // answer is still `already known` and a run over an unchanged library
     // still writes nothing.
-    let restates_the_name = |fact: &crate::model::log::Fact| match fact {
-        crate::model::log::Fact::ArtistNamed { artist, name } => {
+    let restates_the_name = |fact: &crate::facts::Fact| match fact {
+        crate::facts::Fact::ArtistNamed { artist, name } => {
             Some(cat.artist_names.get(artist).map(String::as_str) == Some(name.as_str()))
         }
         _ => None,
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn crediting_by_name_finds_the_artist_the_library_already_holds() {
         use crate::model::entity::Artist;
-        use crate::model::log::Catalogue;
+        use crate::projection::catalogue::Catalogue;
 
         let mb = |n: u128| uuid::Uuid::from_u128(n);
         let from_mb = Id::<Artist>::of_artist(Some(mb(0xd0117)), "Dolly Parton");
@@ -650,19 +650,19 @@ mod tests {
         // Built as records and merged, because `append` is the instance's own
         // and a relink arriving from elsewhere is exactly what this is about.
         let mut clock = crate::model::clock::HybridClock::new(device);
-        let relink: std::collections::BTreeSet<crate::model::log::Record> = [
-            crate::model::log::Fact::RecordingIdentified {
+        let relink: std::collections::BTreeSet<crate::facts::Record> = [
+            crate::facts::Fact::RecordingIdentified {
                 recording: relinked,
                 basis: named.clone(),
             },
-            crate::model::log::Fact::EncodingBound {
+            crate::facts::Fact::EncodingBound {
                 encoding,
                 from: None,
                 to: relinked,
             },
         ]
         .into_iter()
-        .map(|fact| crate::model::log::Record {
+        .map(|fact| crate::facts::Record {
             stamp: clock.stamp(200),
             fact,
         })
