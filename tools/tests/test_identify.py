@@ -12,14 +12,13 @@ artist of a joined credit — are tested in `src/model/ingest.rs`.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from gmuse_tools.identify import (
     SAME_MIX,
     SAME_RECORDING,
     SIBLING_SPAN,
+    as_work,
     best,
     first_artist,
     has_recording_id,
@@ -28,7 +27,6 @@ from gmuse_tools.identify import (
     unasked_qualifier,
     variance,
     verdict,
-    work_list,
 )
 
 
@@ -207,49 +205,47 @@ class TestWorkList:
     them could be applied: a path names nothing the library knows about.
     """
 
-    def write(self, tmp_path: Path, *lines: str) -> Path:
-        """A work list on disk, as `gmuse library query` would leave one."""
-        p = tmp_path / "work.jsonl"
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return p
-
-    def test_a_row_keeps_both_the_id_and_the_path(self, tmp_path: Path) -> None:
+    def test_a_row_keeps_both_the_id_and_the_path(self) -> None:
         """The two have different lifetimes and both are needed."""
-        rows = work_list(
-            self.write(
-                tmp_path,
-                '{"recording":"r1","encoding":"e1","locator":"/m/a.mp3","title":"A","artist":"B"}',
-            )
+        rows = as_work(
+            [
+                {
+                    "recording": "r1",
+                    "encoding": "e1",
+                    "locator": "/m/a.mp3",
+                    "title": "A",
+                    "artist": "B",
+                }
+            ]
         )
         assert len(rows) == 1
         assert rows[0].encoding == "e1"
         assert rows[0].locator == "/m/a.mp3"
 
-    def test_a_row_this_machine_cannot_open_is_left_out(self, tmp_path: Path) -> None:
+    def test_a_row_this_machine_cannot_open_is_left_out(self) -> None:
         """An ordinary row, and nothing this pass can act on.
 
         The library knows about it and this disk does not hold it, so there is
         no audio to read and no locator to open.
         """
-        rows = work_list(
-            self.write(
-                tmp_path,
-                '{"recording":"r1","encoding":null,"locator":null,"title":"On the NAS","artist":"B"}',
-            )
+        rows = as_work(
+            [
+                {
+                    "recording": "r1",
+                    "encoding": None,
+                    "locator": None,
+                    "title": "On the NAS",
+                    "artist": "B",
+                }
+            ]
         )
         assert rows == []
 
-    def test_blank_lines_and_comments_are_skipped(self, tmp_path: Path) -> None:
-        """A work list is a file somebody may have been editing."""
-        rows = work_list(
-            self.write(
-                tmp_path,
-                "# a note",
-                "",
-                '{"recording":"r1","encoding":"e1","locator":"/m/a.mp3","title":"A","artist":"B"}',
-            )
-        )
-        assert len(rows) == 1
+    # **Blank lines and comments stopped being a concern** — #198. They were a
+    # property of a file somebody might have been editing, and there is no file
+    # any more: the rows come from `Library.query`. What survives is the rule
+    # above, which is about the rows themselves and is now testable without
+    # either a file or a library.
 
 
 def test_a_remix_is_never_the_top_hit_and_the_window_must_hold_it() -> None:

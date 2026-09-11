@@ -70,11 +70,13 @@ import json
 import re
 import subprocess
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+import gmuse_core
 import mutagen
 import typer
 
@@ -856,19 +858,37 @@ class Work:
     artist: str
 
 
-def work_list(path: Path, *, limit: int | None = None) -> list[Work]:
-    """Read what gmuse handed us, keeping only rows this machine can open.
+def work_list(*, limit: int | None = None, unidentified: bool = True) -> list[Work]:
+    """Ask the library, keeping only rows this machine can open.
+
+    **Each pass says what it needs** — #198. This read a file somebody had
+    produced with `gmuse shelf query --unidentified`, and every caller trusted
+    that they had remembered the flag. They do not all want the same rows:
+    `fetch`, `propose` and `by_sound` are for what no authority has named, and
+    `derivations` is for rows already settled — it asks for everything and
+    filters. Getting that from an argument meant a mistyped invocation quietly
+    changed which recordings a pass proposed against, and
+    `ingestion-flow.md` records what that costs: of 43 confident proposals for
+    tracks whose MP3 was already tagged, 19 agreed with the held id and 4 did
+    not.
 
     A row with no locator is an ordinary row — something the library knows
     about and this disk does not hold — and there is nothing for a pass that
     reads audio to do with one.
     """
-    rows = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        raw = json.loads(line)
+    return as_work(gmuse_core.Library.open().query(unidentified=unidentified), limit=limit)
+
+
+def as_work(rows: Iterable[dict[str, object]], *, limit: int | None = None) -> list[Work]:
+    """Rows into `Work`, keeping only what this machine can open.
+
+    **Separate from the asking, so the rule can be tested without a library.**
+    A row with no locator is an ordinary one — the library knows about it and
+    this disk does not hold it — and there is nothing for a pass that reads
+    audio to do with it.
+    """
+    out = []
+    for raw in rows:
         ms = raw.get("length_ms")
         row = Work(
             recording=raw.get("recording"),
@@ -879,8 +899,8 @@ def work_list(path: Path, *, limit: int | None = None) -> list[Work]:
             artist=raw.get("artist", ""),
         )
         if row.locator and row.encoding:
-            rows.append(row)
-    return rows[:limit] if limit is not None else rows
+            out.append(row)
+    return out[:limit] if limit is not None else out
 
 
 def unreadable(todo: list[tuple[Path, dict[str, str]]]) -> str | None:
@@ -905,7 +925,7 @@ def unreadable(todo: list[tuple[Path, dict[str, str]]]) -> str | None:
     return None
 
 
-def fetch(work: Path, *, limit: int | None) -> None:
+def fetch(*, limit: int | None) -> None:
     """Look up every recording in the work list that no authority has named.
 
     The list comes from `gmuse library query --unidentified`, so which files
@@ -913,10 +933,10 @@ def fetch(work: Path, *, limit: int | None) -> None:
     and the two cannot disagree about it.
     """
     con = bronze.open_cache()
-    rows = work_list(work, limit=limit)
+    rows = work_list(limit=limit)
     todo = [(Path(row.locator or ""), read(Path(row.locator or ""))[0]) for row in rows]
 
-    print(f"{len(rows)} recordings to look up, from {work}")
+    print(f"{len(rows)} recording(s) the library says nothing has named")
     if problem := unreadable(todo):
         print(f"refusing to ask MusicBrainz: {problem}")
         return
@@ -936,7 +956,7 @@ def fetch(work: Path, *, limit: int | None) -> None:
     print(f"done: {asked} asked, {cached} already cached")
 
 
-def derivations(work: Path, out: Path, *, limit: int | None) -> None:
+def derivations(out: Path, *, limit: int | None) -> None:
     """What the *already identified* remixes established and nobody kept — #162.
 
     `propose` learns three things at once and `also` writes all three, but it
@@ -962,7 +982,9 @@ def derivations(work: Path, out: Path, *, limit: int | None) -> None:
     con = bronze.open_cache()
     counts = {"derived": 0, "credited": 0, "unsure": 0, "no candidates": 0}
     with out.open("w", encoding="utf-8") as sink:
-        for row in work_list(work, limit=limit):
+        # **Everything, not the unidentified list** — this command is for rows
+        # already settled, and says so above. It filters below.
+        for row in work_list(limit=limit, unidentified=False):
             # **Skip what the library has not named** — #160. This command is
             # for rows already settled against MusicBrainz; a held-back row has
             # no recording, so `also` can say nothing about it and the search
@@ -995,7 +1017,7 @@ def derivations(work: Path, out: Path, *, limit: int | None) -> None:
     print(f"  {counts['unsure']} said nothing new, {counts['no candidates']} had no candidate at all")
 
 
-def propose(work: Path, out: Path, *, limit: int | None) -> None:
+def propose(out: Path, *, limit: int | None) -> None:
     """Turn the cache into a file `gmuse library apply` can read.
 
     **One file, two readers.** Every line carries the proposal fields gmuse
@@ -1010,7 +1032,7 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
     """
     con = bronze.open_cache()
     todo = []
-    for row in work_list(work, limit=limit):
+    for row in work_list(limit=limit):
         path = Path(row.locator or "")
         # **The tags from the file, the length from the library.** The file is
         # still where the artist and title come from; the duration is not, for
@@ -1092,7 +1114,6 @@ def propose(work: Path, out: Path, *, limit: int | None) -> None:
     print(f"      gmuse library apply {out} --write")
 
 
-WORK = typer.Argument(help="the work list from `gmuse library query --unidentified`")
 LIMIT = typer.Option(None, help="stop after this many rows")
 OUT = typer.Option(None, help="where to write the proposals")
 
@@ -1271,7 +1292,7 @@ def listened(
     return best, chosen, ""
 
 
-def by_sound(work: Path, out: Path, *, limit: int | None) -> None:
+def by_sound(out: Path, *, limit: int | None) -> None:
     """Identify by what the file sounds like — #57, and the rung #160 was missing.
 
     The ladder `library-api.md` §7 describes runs `MusicBrainz id → fingerprint
@@ -1312,7 +1333,7 @@ def by_sound(work: Path, out: Path, *, limit: int | None) -> None:
     counts = collections.Counter()
     renamed = 0
     with out.open("w", encoding="utf-8") as sink:
-        for row in work_list(work, limit=limit):
+        for row in work_list(limit=limit):
             path = Path(row.locator or "")
             if not path.exists():
                 counts["no copy on this device"] += 1
@@ -1408,39 +1429,39 @@ def register(app: typer.Typer) -> None:
     """Attach this pass's commands to the tool."""
 
     @app.command("fetch")
-    def fetch_cmd(work: Path = WORK, limit: int | None = LIMIT) -> None:
+    def fetch_cmd(limit: int | None = LIMIT) -> None:
         """Ask MusicBrainz about the recordings gmuse says are unidentified."""
-        fetch(existing(work), limit=limit)
+        fetch(limit=limit)
 
     @app.command("derivations")
     def derivations_cmd(
-        work: Path = WORK,
         out: Path | None = OUT,
         limit: int | None = LIMIT,
     ) -> None:
         """What the already-identified remixes established: a remixer, and an original."""
-        work = existing(work)
-        default = out_path(f"derivations-{work.stem.lower()}.jsonl")
-        derivations(work, out.expanduser() if out else default, limit=limit)
+        # **Named for the pass, not for a file** — there is no work list to
+        # take a stem from any more (#198).
+        default = out_path("derivations.jsonl")
+        derivations(out.expanduser() if out else default, limit=limit)
 
     @app.command("fingerprint")
     def fingerprint_cmd(
-        work: Path = WORK,
         out: Path | None = OUT,
         limit: int | None = LIMIT,
     ) -> None:
         """Identify by what the file sounds like, not by what its tags claim."""
-        work = existing(work)
-        default = out_path(f"fingerprint-{work.stem.lower()}.jsonl")
-        by_sound(work, out.expanduser() if out else default, limit=limit)
+        # **Named for the pass, not for a file** — there is no work list to
+        # take a stem from any more (#198).
+        default = out_path("fingerprint.jsonl")
+        by_sound(out.expanduser() if out else default, limit=limit)
 
     @app.command("propose")
     def propose_cmd(
-        work: Path = WORK,
         out: Path | None = OUT,
         limit: int | None = LIMIT,
     ) -> None:
         """Turn the cache into a file `gmuse library apply` can read."""
-        work = existing(work)
-        default = out_path(f"identify-{work.stem.lower()}.jsonl")
-        propose(work, out.expanduser() if out else default, limit=limit)
+        # **Named for the pass, not for a file** — there is no work list to
+        # take a stem from any more (#198).
+        default = out_path("identify.jsonl")
+        propose(out.expanduser() if out else default, limit=limit)
