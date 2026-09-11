@@ -34,6 +34,12 @@ pub mod operations;
 pub mod playlist;
 pub mod projection;
 pub mod query;
+/// The allocation guard, in the test binary only — #211.
+#[cfg(test)]
+pub mod rt_guard;
+#[cfg(test)]
+#[global_allocator]
+static RT_GUARD: rt_guard::Guarded = rt_guard::Guarded;
 pub mod remote;
 pub mod session;
 pub mod shelf;

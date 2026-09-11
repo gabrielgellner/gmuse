@@ -364,6 +364,89 @@ mod tests {
     /// 8ms at 48k.
     const RAMP_FRAMES: usize = 384;
 
+    /// **The render step allocates nothing, on any path it can take** — I2.
+    ///
+    /// Not a review and not a comment: a global allocator counts, and this
+    /// drives every branch `process` has — the seek handshake, silence, a fed
+    /// ring, and a starved one. The starved path is the one worth having,
+    /// because it is the branch that runs when something has already gone
+    /// wrong and is the least likely to be exercised by hand.
+    #[test]
+    fn the_render_step_allocates_nothing() {
+        use crate::audio::State;
+        use std::sync::atomic::Ordering;
+
+        const CHANNELS: usize = 2;
+        const PERIOD: usize = 256;
+
+        let (mut producer, consumer) = crate::audio::ring::new(RATE, CHANNELS);
+        let shared = Arc::new(crate::audio::Shared::new());
+        let mut rt = Rt::new(consumer, Arc::clone(&shared), CHANNELS, RATE);
+        // Allocated here, so the guarded region below does not have to.
+        let mut out = vec![0.0f32; PERIOD * CHANNELS];
+
+        // Fill the ring outside the guard; the decoder is not the RT side.
+        let audio = vec![0.25f32; PERIOD * CHANNELS * 4];
+        if let Ok(chunk) = producer.write_chunk_uninit(audio.len()) {
+            chunk.fill_from_iter(audio.iter().copied());
+        }
+
+        shared.state.store(State::Playing as u8, Ordering::Relaxed);
+
+        let (_, violations) = crate::rt_guard::forbidden(|| {
+            // A fed ring.
+            process(&mut rt, &mut out);
+            // A seek: the flush handshake discards and repositions.
+            shared.flush_seq.fetch_add(1, Ordering::Release);
+            process(&mut rt, &mut out);
+            // Starved: the ring is empty now, so this takes the fade-to-silence
+            // path and bumps the underrun counter.
+            process(&mut rt, &mut out);
+            process(&mut rt, &mut out);
+            // Paused, then fully silent: the early return.
+            shared.state.store(State::Paused as u8, Ordering::Relaxed);
+            for _ in 0..64 {
+                process(&mut rt, &mut out);
+            }
+        });
+
+        assert_eq!(
+            violations, 0,
+            "the render step allocated, which is a click waiting to happen"
+        );
+    }
+
+    /// **And none of those paths panics.** A panic crossing the cpal FFI
+    /// boundary is undefined behaviour, which is why the rule lists it — and
+    /// why it is worth driving the branches rather than trusting that an
+    /// index is in range.
+    #[test]
+    fn the_render_step_survives_an_empty_ring_and_a_seek() {
+        use crate::audio::State;
+        use std::sync::atomic::Ordering;
+
+        const CHANNELS: usize = 2;
+        let (_producer, consumer) = crate::audio::ring::new(RATE, CHANNELS);
+        let shared = Arc::new(crate::audio::Shared::new());
+        let mut rt = Rt::new(consumer, Arc::clone(&shared), CHANNELS, RATE);
+
+        // Buffer sizes a device might actually pick, including one frame.
+        for period in [1usize, 64, 256, 1024] {
+            let mut out = vec![0.0f32; period * CHANNELS];
+            shared.state.store(State::Playing as u8, Ordering::Relaxed);
+            process(&mut rt, &mut out);
+            shared.flush_seq.fetch_add(1, Ordering::Release);
+            process(&mut rt, &mut out);
+            shared.state.store(State::Stopped as u8, Ordering::Relaxed);
+            process(&mut rt, &mut out);
+        }
+
+        assert!(
+            shared.underruns.load(Ordering::Relaxed) > 0,
+            "an empty ring should have been reported, not silently tolerated"
+        );
+    }
+
     fn ones(frames: usize, channels: usize) -> Vec<f32> {
         vec![1.0; frames * channels]
     }

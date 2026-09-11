@@ -556,6 +556,56 @@ mod tests {
         }
     }
 
+    /// **Underruns are zero across a playback run** — the standing measurement
+    /// rule, and until #210 there was no way to assert it without a sound card.
+    ///
+    /// At `RealTime` the virtual clock asks for a buffer every buffer's worth
+    /// of wall time, exactly as a device does, so the decoder has the same
+    /// deadline it has in production. A starved ring here means a starved ring
+    /// there.
+    ///
+    /// (`Pace::Fast` would underrun by construction: the renderer outruns the
+    /// decoder on purpose, which is what makes it fast.)
+    #[test]
+    fn a_real_time_run_starves_nothing() {
+        let dir = std::env::temp_dir().join("gmuse-null-underruns");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let track = dir.join("tone.wav");
+        wav(&track, 48_000);
+
+        let player = PlayerHandle::headless(
+            PlayerConfig {
+                device: None,
+                rate: None,
+                resample: resample::Quality::Fast,
+                volume: 1.0,
+            },
+            null::Pace::RealTime,
+        )
+        .expect("a player with no device");
+
+        player.load(TrackSource::plain(&track));
+        player.play();
+
+        // Half a second of the one-second tone: long enough for the ring to
+        // have been drained many times, short enough not to dominate the suite.
+        let until = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            player.position() > Duration::ZERO,
+            "nothing played, so nothing was measured"
+        );
+        assert_eq!(
+            player.underruns(),
+            0,
+            "the ring starved during ordinary playback"
+        );
+    }
+
     /// **A track plays through with no audio device** — #210, and the reason
     /// everything after it can be tested at all.
     ///
