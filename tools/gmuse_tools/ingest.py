@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+import gmuse_core
 import typer
 from mutagen import File
 from mutagen.flac import FLAC
@@ -1128,6 +1129,7 @@ def tracklist(root: Path, out: Path) -> None:
     folders that look incomplete would mean trusting the count we are trying to
     establish.
     """
+    lib = gmuse_core.Library.open()
     folders = sorted({f.parent for f in walk(root)})
     lines: list[str] = []
     tally: collections.Counter[str] = collections.Counter()
@@ -1166,6 +1168,11 @@ def tracklist(root: Path, out: Path) -> None:
                     "tracks": tracks,
                 }
             )
+            # **Checked before it is written, not after** — #198. The whole
+            # file cannot be validated at the end because it is written as it
+            # goes, for the reason above: an interrupted hour should keep what
+            # it learned. `check` is `propose` without the writing.
+            lib.check([line])
             handle.write(line + "\n")
             handle.flush()
             lines.append(line)

@@ -51,6 +51,16 @@ class Library:
         """
         ...
 
+    def check(self, items: list[str]) -> int:
+        """Check proposals without writing them, for a pass that writes as it goes.
+
+        `propose` is right for a pass that finishes. One that may be
+        interrupted — `ingest tracklist` takes an hour — writes each line as it
+        settles it, so holding them back to validate together would lose what
+        an interrupted run had learned. Same check, no file.
+        """
+        ...
+
     @property
     def data_dir(self) -> Path: ...
     @property

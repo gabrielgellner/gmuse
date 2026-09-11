@@ -134,6 +134,27 @@ impl Library {
         Ok(items.len())
     }
 
+    /// **Check proposals without writing them** — for a pass that writes as it
+    /// goes.
+    ///
+    /// `propose` takes the whole list and writes the file, which is right for
+    /// a pass that finishes. `ingest tracklist` does not: MusicBrainz answers
+    /// a heavy `inc` in anything from 0.4 to 25 seconds, so it is an hour on a
+    /// library this size and the temptation to interrupt it is constant. It
+    /// writes each line as it is settled, so an interrupted run keeps what it
+    /// learned — and holding the lines back to validate them together would
+    /// take that away.
+    ///
+    /// So: the same check, without the writing. Raises on the first one that
+    /// is not a `Proposal`, naming it.
+    fn check(&self, items: Vec<String>) -> PyResult<usize> {
+        for (n, raw) in items.iter().enumerate() {
+            serde_json::from_str::<crate::model::proposal::Proposal>(raw)
+                .map_err(|e| PyValueError::new_err(format!("proposal {}: {e}", n + 1)))?;
+        }
+        Ok(items.len())
+    }
+
     /// Where this library keeps its log and what it calls its roots, so a tool
     /// stops guessing at either.
     #[getter]
