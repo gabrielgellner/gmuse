@@ -33,6 +33,11 @@ with the measurement that killed it. §16 is the rules in one place.
 [`docs/design/layers.md`](docs/design/layers.md) says which system may talk to which — the librarian, the player, the
 scanner and the `tools/` scripts. Read it before adding a caller in either direction.
 
+[`docs/design/access-layers.md`](docs/design/access-layers.md) is a **proposal**, not built: which layer inside the
+librarian may talk to which — the log, the projection, the query, the adapters. Read it before adding anything to a read
+path. The rule it turns on is that **a read never touches the filesystem and never folds the log**; today's
+`shelf query` does both, which is why an `artist=` filter returning four rows re-reads 7,267 files' tags.
+
 [`docs/design/info-panel.md`](docs/design/info-panel.md) is a **proposal**, not built: the surface that shows what the
 library says about one thing and who said it. Read it before adding anything that displays metadata — the rule it turns
 on is that a claim is never a value.

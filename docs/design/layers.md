@@ -231,6 +231,7 @@ answers everything it asks (#77–#79).
 
 ## 7. Related
 
-`domain-model.md` — what the entities are · `library-sync-design.md` — how the log merges · `tree-view-design.md` — what
-a view asks for · #62 (mutation API) · #77 (the seam) · #82 (one log) · #86 (delete the store) · #87 (a bad copy is a
-row)
+`access-layers.md` — which **layer inside the librarian** may talk to which, which is a different cut from this one and
+the one not being kept today · `domain-model.md` — what the entities are · `library-sync-design.md` — how the log merges
+· `tree-view-design.md` — what a view asks for · #62 (mutation API) · #77 (the seam) · #82 (one log) · #86 (delete the
+store) · #87 (a bad copy is a row)
