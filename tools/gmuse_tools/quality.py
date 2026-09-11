@@ -638,7 +638,7 @@ def propose(out: Path, analyser: int) -> None:
     """
     lib = gmuse_core.Library.open()
     lines: list[str] = []
-    skipped = 0
+    skipped = moved = 0
     for row in lib.query(every_copy=True):
         encoding, locator = row.get("encoding"), row.get("locator")
         if not encoding or not locator:
@@ -649,6 +649,24 @@ def propose(out: Path, analyser: int) -> None:
         if found is None:
             skipped += 1
             continue
+
+        # **Name the bytes that were just measured, not the row that pointed
+        # here** — #199. They are the same encoding until the file changed
+        # underneath the query, and then naming the row's would record this
+        # spectrum against somebody else's audio — a false fact in a log that
+        # only forgets by being superseded, and nothing would surface it.
+        #
+        # Asking costs a `stat` for a file that has not changed. A file that
+        # has gets hashed, which is the point: the id comes back different and
+        # `apply` reports it as not held rather than believing it.
+        measured_as = lib.encoding_at(locator)
+        if measured_as is None:
+            skipped += 1
+            continue
+        if measured_as != encoding:
+            moved += 1
+            continue
+
         cutoff_khz, cliff = found
         # **The cliff travels with the cutoff** — #184. It was measured here
         # and dropped on the floor, so 7,210 facts recorded where a spectrum
@@ -678,6 +696,11 @@ def propose(out: Path, analyser: int) -> None:
     print(f"{len(lines)} measurement(s) -> {out}")
     if skipped:
         print(f"  {skipped} row(s) had nothing to measure and were left out, not proposed as zero")
+    if moved:
+        print(
+            f"  {moved} file(s) are not the bytes the library says live there — "
+            "measured and not proposed. Run `gmuse shelf scan --write`."
+        )
     print(f"\nreview it, then: gmuse shelf apply {out}")
 
 

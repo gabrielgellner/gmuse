@@ -51,6 +51,19 @@ class Library:
         """
         ...
 
+    def encoding_at(self, path: Path | str) -> str | None:
+        """Which encoding the bytes at this path *are*.
+
+        A tool that opens a file and then proposes a fact about it has two ways
+        to name what it measured: the encoding a work list said lives there, or
+        the encoding the bytes it actually read are. Those agree until the file
+        changed, and then the first is a false fact in an append-only log.
+
+        `None` for a file that cannot be read — a row to skip, not a run to
+        end. Guarded by a `stat`, so an unchanged file costs no re-read.
+        """
+        ...
+
     def check(self, items: list[str]) -> int:
         """Check proposals without writing them, for a pass that writes as it goes.
 

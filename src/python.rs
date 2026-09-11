@@ -34,6 +34,14 @@ use crate::model::id::Id;
 #[pyclass]
 pub struct Library {
     projection: crate::projection::Projected,
+    /// What reading a file already told us, so `encoding_at` is a `stat` for
+    /// everything that has not changed. Loaded once; not written back, because
+    /// a tool asking which bytes it just read should not be rewriting a cache
+    /// the library's own passes maintain.
+    //
+    // A `Mutex` rather than a `RefCell`: pyo3 requires a `#[pyclass]` to be
+    // `Sync`, because Python may hand the same object to another thread.
+    reads: std::sync::Mutex<crate::model::ingest::Reads>,
     device: Id<Device>,
     roots: Vec<std::path::PathBuf>,
     data_dir: std::path::PathBuf,
@@ -64,6 +72,9 @@ impl Library {
         };
         Ok(Library {
             projection,
+            reads: std::sync::Mutex::new(crate::cache::load_measurements(
+                &crate::cache::measurements_path(),
+            )),
             device,
             roots: loaded.library.clone(),
             data_dir,
@@ -132,6 +143,29 @@ impl Library {
         }
         std::fs::write(&path, lines).map_err(|e| PyIOError::new_err(e.to_string()))?;
         Ok(items.len())
+    }
+
+    /// **Which encoding are the bytes at this path?** — #199.
+    ///
+    /// A tool that opens a file and then proposes a fact about it has two ways
+    /// to name what it measured: the encoding the work list said lives there,
+    /// or the encoding the bytes it actually read *are*. Those are the same
+    /// thing right up until the file changed, and then the first one is a
+    /// **false fact in an append-only log** — permanent, repairable only by
+    /// another fact, and nothing would surface it.
+    ///
+    /// So: ask. The hash is over Symphonia's packet boundaries and a tool
+    /// cannot compute it — `quality.py` says so in as many words — which is
+    /// why this belongs here rather than being reimplemented anywhere.
+    ///
+    /// **`None` for a file that cannot be read.** Not an error: a pass over
+    /// seven thousand files meets some it cannot open, and that is a row to
+    /// skip rather than a run to end.
+    ///
+    /// Guarded by a `stat`, so an unchanged file costs no re-read.
+    fn encoding_at(&self, path: std::path::PathBuf) -> Option<String> {
+        let audio = self.reads.lock().ok()?.audio(&path).ok()?;
+        Some(crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&audio).to_string())
     }
 
     /// **Check proposals without writing them** — for a pass that writes as it
