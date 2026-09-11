@@ -290,6 +290,7 @@ fn shelf(log: &Instance, roots: &[std::path::PathBuf], device: Id<Device>, now: 
         roots,
         now,
         crate::model::populate::Admits::Identified,
+        &mut crate::audio_id::Measurements::default(),
     );
     Shelf {
         // What the disk says exists, which is what "holds" asks about:
@@ -685,6 +686,7 @@ mod tests {
             std::slice::from_ref(&dir),
             300,
             crate::model::populate::Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
         );
         let scanned_only = Shelf {
             disk: wrong.catalogue(),

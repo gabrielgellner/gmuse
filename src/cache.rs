@@ -50,6 +50,62 @@ pub fn default_path() -> PathBuf {
     base.join("gmuse").join("library.postcard")
 }
 
+/// Where the measurement cache lives, beside the scan cache — #188.
+///
+/// Its own file rather than a field in [`Envelope`], because the two are
+/// dropped for different reasons and on different schedules. The scan cache is
+/// discarded whenever gmuse moves music, since the paths it names are stale;
+/// the measurements are keyed by path *and validated by a `stat`*, so a moved
+/// file simply misses and nothing is wrong. Folding them together would throw
+/// away 59 GB of correct answers every time an import renamed one album.
+pub fn measurements_path() -> PathBuf {
+    default_path().with_file_name("measurements.postcard")
+}
+
+/// Bump on any change to `Measurements` or `Measured`.
+const MEASUREMENTS_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct MeasurementsEnvelope {
+    version: u32,
+    seen: crate::audio_id::Measurements,
+}
+
+/// Load what earlier runs measured. A cache that cannot be read is not an
+/// error — it is a slow first run, which is the trade this module already
+/// makes everywhere else.
+pub fn load_measurements(path: &Path) -> crate::audio_id::Measurements {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Default::default();
+    };
+    if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
+        return Default::default();
+    }
+    match postcard::from_bytes::<MeasurementsEnvelope>(&bytes[MAGIC.len()..]) {
+        Ok(env) if env.version == MEASUREMENTS_VERSION => env.seen,
+        Ok(_) | Err(_) => Default::default(),
+    }
+}
+
+/// Keep what this run learned. **Never fatal**: failing to write a cache must
+/// not fail the command that filled it, because nothing here is the answer —
+/// it is only how fast the next answer arrives.
+pub fn save_measurements(path: &Path, seen: &crate::audio_id::Measurements) {
+    let envelope = MeasurementsEnvelope {
+        version: MEASUREMENTS_VERSION,
+        seen: crate::audio_id::Measurements::clone_of(seen),
+    };
+    let Ok(body) = postcard::to_allocvec(&envelope) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut bytes = MAGIC.to_vec();
+    bytes.extend_from_slice(&body);
+    let _ = std::fs::write(path, bytes);
+}
+
 /// What came back from a cache read.
 #[derive(Debug)]
 pub enum Outcome {

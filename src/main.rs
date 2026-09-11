@@ -524,6 +524,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
+                &mut crate::audio_id::Measurements::default(),
             );
             let cat = log.catalogue();
 
@@ -642,6 +643,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
+                &mut crate::audio_id::Measurements::default(),
             );
             let cat = log.catalogue();
             let library = crate::model::seam::Librarian::from_catalogue(&cat);
@@ -1023,6 +1025,7 @@ fn run_library(
                     // which performance sits here — so one copy answers it.
                     query::Copies::Shown,
                     None,
+                    &mut crate::audio_id::Measurements::default(),
                 ) {
                     if row.recording.is_some_and(|r| contested.contains(&r)) {
                         println!("{}", serde_json::to_string(&row)?);
@@ -1141,6 +1144,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
+                &mut crate::audio_id::Measurements::default(),
             );
             let cat = log.catalogue();
 
@@ -1259,6 +1263,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
+                &mut crate::audio_id::Measurements::default(),
             );
             let librarian = crate::model::seam::Librarian::from_catalogue(&log.catalogue());
 
@@ -1335,6 +1340,7 @@ fn run_library(
                 roots,
                 crate::history::now_ms(),
                 crate::model::populate::Admits::Identified,
+                &mut crate::audio_id::Measurements::default(),
             );
             let mut lines = 0usize;
             for (folder, held) in &report.unfiled {
@@ -1373,8 +1379,12 @@ fn run_library(
             // with no arguments: the scan already said which files it did not
             // recognise, and importing them is the answer to that offer.
             let targets: Vec<std::path::PathBuf> = if paths.is_empty() {
-                let seen =
-                    crate::model::populate::reconcile(&mut log, roots, crate::history::now_ms());
+                let seen = crate::model::populate::reconcile(
+                    &mut log,
+                    roots,
+                    crate::history::now_ms(),
+                    &mut crate::audio_id::Measurements::default(),
+                );
                 // **A duplicate is a filesystem accident, and must not be
                 // silent** — `Report::duplicates` has said so since it was
                 // written, and nothing printed it. Two paths holding one set
@@ -1418,6 +1428,7 @@ fn run_library(
                 } else {
                     crate::model::populate::Admits::Identified
                 },
+                &mut crate::audio_id::Measurements::default(),
             );
             for (path, recording) in &report.identified {
                 println!("{recording}\t{}", path.display());
@@ -1501,7 +1512,12 @@ fn run_library(
                 // moved five.
                 let mut walk: Vec<std::path::PathBuf> = roots.to_vec();
                 walk.extend(targets.iter().cloned());
-                crate::model::populate::reconcile(&mut log, &walk, crate::history::now_ms());
+                crate::model::populate::reconcile(
+                    &mut log,
+                    &walk,
+                    crate::history::now_ms(),
+                    &mut crate::audio_id::Measurements::default(),
+                );
 
                 // Import is strict, so anything that got this far is
                 // describable — every row has a credit and a title, because
@@ -1539,7 +1555,12 @@ fn run_library(
                 // where it is". Walking the roots alone drops its holding and
                 // turns a playable row into a greyed one.
                 if done.moved > 0 {
-                    crate::model::populate::reconcile(&mut log, &walk, crate::history::now_ms());
+                    crate::model::populate::reconcile(
+                        &mut log,
+                        &walk,
+                        crate::history::now_ms(),
+                        &mut crate::audio_id::Measurements::default(),
+                    );
                 }
                 // **Filed as it is brought in** (#94). The collection is a
                 // judgement a person made, and this is the moment they made
@@ -1623,6 +1644,7 @@ fn run_library(
                     &mut library_log,
                     roots,
                     crate::history::now_ms(),
+                    &mut crate::audio_id::Measurements::default(),
                 );
                 let n = library_log.flush(&loaded.data_dir)?;
                 eprintln!("{} folder(s) pruned, {n} record(s) written", done.emptied);
@@ -1661,6 +1683,11 @@ fn run_library(
                 .map(crate::filter::Expr::parse)
                 .transpose()
                 .map_err(|e| format!("--filter: {e}"))?;
+            // **Kept between runs** — #188. Both walks below ask the same
+            // question of the same files, and every run before this one asked
+            // it too. A `stat` says whether the answer still holds.
+            let seen_path = crate::cache::measurements_path();
+            let mut seen = crate::cache::load_measurements(&seen_path);
             for row in query::rows(
                 roots,
                 log.records(),
@@ -1669,9 +1696,16 @@ fn run_library(
                 only,
                 copies,
                 filter.as_ref(),
+                &mut seen,
             ) {
                 println!("{}", serde_json::to_string(&row)?);
             }
+            let (hit, read) = seen.tally();
+            if read > 0 || hit > 0 {
+                eprintln!("{hit} file(s) unchanged, {read} read");
+            }
+            seen.prune_missing();
+            crate::cache::save_measurements(&seen_path, &seen);
         }
         cli::Shelf::Apply { file, write } => {
             let outcome = apply::run(

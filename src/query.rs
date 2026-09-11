@@ -66,6 +66,16 @@ pub enum Copies {
 }
 
 /// Build the work list from this disk and this log.
+/// Eight, and each one is a separate question this has to be told rather than
+/// guess: where to look, what the log says, which device is asking, when, how
+/// much to admit, one row per recording or per copy, what to keep, and what is
+/// already known about the bytes. Bundling them into a struct would move the
+/// same eight names one layer out and add a type whose only job is to hold
+/// them.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight independent inputs, not a bundle"
+)]
 pub fn rows(
     roots: &[PathBuf],
     records: &BTreeSet<Record>,
@@ -74,6 +84,12 @@ pub fn rows(
     only: Only,
     copies: Copies,
     filter: Option<&crate::filter::Expr>,
+    // **One cache across both walks below** — #188. They ask the same question
+    // of the same files: `populate` to mint and `reconcile` to publish
+    // holdings. Sharing it makes the second walk a `stat` per file; persisting
+    // it between runs makes the first one that too, for everything that has
+    // not changed.
+    measurements: &mut crate::audio_id::Measurements,
 ) -> Vec<Queried> {
     // **The log first, then the disk.** `ingest` refuses to mint over a
     // binding somebody made — but only over one it can see, and a scan into an
@@ -97,12 +113,13 @@ pub fn rows(
         roots,
         now,
         crate::model::populate::Admits::Identified,
+        measurements,
     );
     // **And publish what is here** (#145). A work list hands a tool an id and
     // a **locator**, so the holdings are half of the answer — and cataloguing
     // stopped asserting them, because a partial import must not unpublish the
     // rest of the library.
-    crate::model::populate::reconcile(&mut scratch, roots, now);
+    crate::model::populate::reconcile(&mut scratch, roots, now, measurements);
     let catalogue = scratch.catalogue();
     let library = Librarian::from_catalogue(&catalogue);
 
@@ -371,6 +388,7 @@ mod tests {
             std::slice::from_ref(&root),
             50,
             crate::model::populate::Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
         );
         let apart = rows(
             std::slice::from_ref(&root),
@@ -380,6 +398,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(apart.len(), 2, "two recordings until something joins them");
 
@@ -407,6 +426,7 @@ mod tests {
                 Only::Everything,
                 copies,
                 None,
+                &mut crate::audio_id::Measurements::default(),
             )
         };
         let held = |rs: &[Queried]| -> Vec<Queried> {
@@ -458,6 +478,7 @@ mod tests {
             std::slice::from_ref(&root),
             50,
             crate::model::populate::Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
         );
         let apart = rows(
             std::slice::from_ref(&root),
@@ -467,6 +488,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         let one = apart[0].recording.expect("minted");
         let (first, second) = (
@@ -510,6 +532,7 @@ mod tests {
                 Only::Everything,
                 Copies::Every,
                 Some(&expr),
+                &mut crate::audio_id::Measurements::default(),
             )
             .into_iter()
             .filter(|r| r.recording == Some(one))
@@ -565,6 +588,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].encoding.is_some(), "nothing to propose against");
@@ -592,6 +616,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(all.len(), 2);
         assert_eq!(
@@ -603,6 +628,7 @@ mod tests {
                 Only::Unidentified,
                 Copies::Shown,
                 None,
+                &mut crate::audio_id::Measurements::default(),
             )
             .len(),
             2,
@@ -634,6 +660,7 @@ mod tests {
             Only::Unidentified,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(after.len(), 2, "the two on disk still rest on their bytes");
         assert!(
@@ -670,6 +697,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(bare.len(), 1);
         assert_eq!(
@@ -701,6 +729,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(
             after
@@ -754,6 +783,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(loose.len(), 1);
         assert_eq!(
@@ -832,6 +862,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(
             placed
@@ -881,9 +912,15 @@ mod tests {
             std::slice::from_ref(&root),
             100,
             Admits::Identified,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(report.unidentified.len(), 1, "the gate did not hold it");
-        crate::model::populate::reconcile(&mut i, std::slice::from_ref(&root), 100);
+        crate::model::populate::reconcile(
+            &mut i,
+            std::slice::from_ref(&root),
+            100,
+            &mut crate::audio_id::Measurements::default(),
+        );
 
         let work = rows(
             std::slice::from_ref(&root),
@@ -893,6 +930,7 @@ mod tests {
             Only::Unidentified,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert_eq!(work.len(), 1, "the held-back file is invisible to a pass");
         let row = &work[0];
@@ -933,6 +971,7 @@ mod tests {
             Only::Unidentified,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         assert!(
             !after.iter().any(|r| r.recording.is_none()),
@@ -956,6 +995,7 @@ mod tests {
             std::slice::from_ref(&root),
             50,
             crate::model::populate::Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
         );
         let before = rows(
             std::slice::from_ref(&root),
@@ -965,6 +1005,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         let encoding = before[0].encoding.expect("an encoding");
         let minted = before[0]
@@ -997,6 +1038,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         // **The row holding the file names the identified recording.** Asserted
         // through the encoding rather than by counting rows: the byte-minted
@@ -1022,6 +1064,7 @@ mod tests {
                 Only::Unidentified,
                 Copies::Shown,
                 None,
+                &mut crate::audio_id::Measurements::default(),
             )
             .iter()
             .any(|r| r.encoding == Some(encoding)),
@@ -1056,6 +1099,7 @@ mod tests {
             Only::Everything,
             Copies::Shown,
             None,
+            &mut crate::audio_id::Measurements::default(),
         );
         let row = rows
             .iter()

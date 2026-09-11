@@ -126,12 +126,25 @@ pub fn processed(path: &Path) -> bool {
 }
 
 pub fn read(path: &Path) -> Result<Scanned, IngestError> {
+    read_with(path, &mut crate::audio_id::Measurements::default())
+}
+
+/// [`read`], answered from a previous read where the file has not changed —
+/// #188.
+///
+/// The tags are read either way: they are a small read at one end of the file
+/// and the hash is the whole of it, so this is where the cost is. A caller
+/// walking the library passes one of these and reads the bytes of what is new.
+pub fn read_with(
+    path: &Path,
+    measurements: &mut crate::audio_id::Measurements,
+) -> Result<Scanned, IngestError> {
     let bad = |message: String| IngestError::Unreadable {
         path: path.display().to_string(),
         message,
     };
 
-    let measured = crate::audio_id::measure(path).map_err(|e| bad(e.to_string()))?;
+    let measured = measurements.of(path).map_err(|e| bad(e.to_string()))?;
     let audio = measured.audio;
     let stem = || {
         path.file_stem()

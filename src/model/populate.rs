@@ -281,7 +281,12 @@ pub fn audio_files(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// to mean if it means anything — an external retag changes nothing here, and
 /// a rescan stops opening 6,500 files to ask what they claim about
 /// themselves.
-pub fn reconcile(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report {
+pub fn reconcile(
+    instance: &mut Instance,
+    roots: &[PathBuf],
+    now: i64,
+    measurements: &mut crate::audio_id::Measurements,
+) -> Report {
     let started = Instant::now();
     let paths = audio_files(roots);
     let mut report = Report {
@@ -292,7 +297,7 @@ pub fn reconcile(instance: &mut Instance, roots: &[PathBuf], now: i64) -> Report
     let mut held = BTreeMap::new();
 
     for path in paths {
-        let audio = match crate::audio_id::of(&path) {
+        let audio = match measurements.of(&path).map(|m| m.audio) {
             Ok(audio) => audio,
             Err(e) => {
                 report.unreadable.push((path, e.to_string()));
@@ -421,7 +426,16 @@ fn claims(s: &crate::model::instance::Scanned) -> Option<Placement> {
 /// Catalogue what is under `roots`, admitting only what `admits` allows.
 ///
 /// See [`Admits`] for why the gate is here and not in the command.
-pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64, admits: Admits) -> Report {
+pub fn populate(
+    instance: &mut Instance,
+    roots: &[PathBuf],
+    now: i64,
+    admits: Admits,
+    // **What a previous walk already read** — #188. Empty is the old
+    // behaviour: every file measured. A caller that keeps one between calls
+    // pays for the bytes that changed and not for the rest.
+    measurements: &mut crate::audio_id::Measurements,
+) -> Report {
     let started = Instant::now();
     let paths = audio_files(roots);
     let mut report = Report {
@@ -448,7 +462,7 @@ pub fn populate(instance: &mut Instance, roots: &[PathBuf], now: i64, admits: Ad
         instance.catalogue().bound.keys().copied().collect();
 
     for path in paths {
-        match ingest::read(&path) {
+        match ingest::read_with(&path, measurements) {
             Ok(s) => {
                 // **The gate** — #160. Nothing named this performance, so
                 // cataloguing it would mint a recording out of its own bytes
@@ -704,7 +718,13 @@ fn folder_of(path: &Path, roots: &[PathBuf]) -> Option<String> {
 /// taking one in, and the gate is about the front door.
 pub fn read_library(device_name: &str, roots: &[PathBuf], now: i64) -> (Instance, Report) {
     let mut instance = Instance::new(Id::derived(device_name.as_bytes()));
-    let report = populate(&mut instance, roots, now, Admits::Anything);
+    let report = populate(
+        &mut instance,
+        roots,
+        now,
+        Admits::Anything,
+        &mut crate::audio_id::Measurements::default(),
+    );
     (instance, report)
 }
 
@@ -738,11 +758,23 @@ mod tests {
         let dir = library("idempotent", &[("Callisto", None), ("Luna", None)]);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        let first = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
+        let first = populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert!(first.written > 0, "the first pass has to write something");
         let after = i.records().len();
 
-        let again = populate(&mut i, std::slice::from_ref(&dir), 200, Admits::Anything);
+        let again = populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            200,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(again.ingested, 2, "both files were still read");
         assert_eq!(again.written, 0, "a second pass wrote facts the log had");
         assert_eq!(i.records().len(), after, "the log grew on a no-op import");
@@ -761,7 +793,13 @@ mod tests {
         let dir = library("ungated", &[("Callisto", None)]);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        let report = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Identified);
+        let report = populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            100,
+            Admits::Identified,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(report.ingested, 0, "it was catalogued anyway");
         assert_eq!(report.provisional, 0, "nothing may rest on its bytes here");
         assert_eq!(report.unidentified.len(), 1);
@@ -802,7 +840,13 @@ mod tests {
         let dir = library("hatch", &[("Callisto", None)]);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        let report = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
+        let report = populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(report.ingested, 1);
         assert_eq!(report.provisional, 1, "it rests on its bytes, as asked");
         assert!(report.unidentified.is_empty(), "nothing was refused");
@@ -820,12 +864,24 @@ mod tests {
         );
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        let strict = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Identified);
+        let strict = populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            100,
+            Admits::Identified,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(strict.confirmed, 1);
         assert!(strict.unidentified.is_empty());
 
         let mut j = Instance::new(Id::derived(b"laptop"));
-        let open = populate(&mut j, std::slice::from_ref(&dir), 100, Admits::Anything);
+        let open = populate(
+            &mut j,
+            std::slice::from_ref(&dir),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(open.confirmed, 1, "the gate changed a file it should not");
         assert_eq!(strict.written, open.written);
     }
@@ -853,7 +909,13 @@ mod tests {
         write_placed(&second, "Callisto", "A Completely Different Album");
 
         let mut i = Instance::new(Id::derived(b"laptop"));
-        let report = populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
+        let report = populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
 
         assert_eq!(report.contradicts.len(), 1, "{:?}", report.contradicts);
         assert_eq!(
@@ -876,8 +938,20 @@ mod tests {
         write_placed(&at, "Callisto", "Luna");
 
         let mut i = Instance::new(Id::derived(b"laptop"));
-        populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
-        let again = populate(&mut i, std::slice::from_ref(&dir), 200, Admits::Anything);
+        populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
+        let again = populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            200,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(again.contradicts.len(), 0);
         assert_eq!(again.written, 0);
     }
@@ -903,8 +977,19 @@ mod tests {
         }
 
         let mut i = Instance::new(crate::fixture::device());
-        populate(&mut i, std::slice::from_ref(&root), 100, Admits::Anything);
-        reconcile(&mut i, std::slice::from_ref(&root), 150);
+        populate(
+            &mut i,
+            std::slice::from_ref(&root),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
+        reconcile(
+            &mut i,
+            std::slice::from_ref(&root),
+            150,
+            &mut crate::audio_id::Measurements::default(),
+        );
         let held = |i: &Instance| {
             i.catalogue()
                 .holdings
@@ -915,7 +1000,13 @@ mod tests {
         assert_eq!(held(&i), 2, "both were imported and both are held");
 
         // Import one folder again — a correction, a retag, a re-run.
-        populate(&mut i, &[root.join("A")], 200, Admits::Anything);
+        populate(
+            &mut i,
+            &[root.join("A")],
+            200,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(
             held(&i),
             2,
@@ -984,9 +1075,20 @@ mod tests {
 
         // One of them is imported — declared — and the other is merely there.
         let mut i = Instance::new(crate::fixture::device());
-        populate(&mut i, std::slice::from_ref(&known), 100, Admits::Anything);
+        populate(
+            &mut i,
+            std::slice::from_ref(&known),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
 
-        let report = reconcile(&mut i, std::slice::from_ref(&root), 200);
+        let report = reconcile(
+            &mut i,
+            std::slice::from_ref(&root),
+            200,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(report.files, 2);
         assert_eq!(
             report.unknown,
@@ -1008,8 +1110,19 @@ mod tests {
         );
 
         // And importing it is the answer to the offer.
-        populate(&mut i, &report.unknown, 300, Admits::Anything);
-        let after = reconcile(&mut i, std::slice::from_ref(&root), 400);
+        populate(
+            &mut i,
+            &report.unknown,
+            300,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
+        let after = reconcile(
+            &mut i,
+            std::slice::from_ref(&root),
+            400,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert!(after.unknown.is_empty(), "still unknown after an import");
         assert_eq!(after.ingested, 2);
     }
@@ -1031,11 +1144,22 @@ mod tests {
         write_tags(&at, "Callisto", "Stephan Bodzin", None);
 
         let mut i = Instance::new(crate::fixture::device());
-        populate(&mut i, std::slice::from_ref(&root), 100, Admits::Anything);
+        populate(
+            &mut i,
+            std::slice::from_ref(&root),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
 
         // Somebody else rewrites the tags. The audio is untouched.
         write_tags(&at, "Something Else Entirely", "Not Bodzin", None);
-        let report = reconcile(&mut i, std::slice::from_ref(&root), 200);
+        let report = reconcile(
+            &mut i,
+            std::slice::from_ref(&root),
+            200,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert!(
             report.unknown.is_empty(),
             "a retag made the file a stranger — the audio did not change"
@@ -1071,13 +1195,24 @@ mod tests {
         write_tags(&was, "Callisto", "Stephan Bodzin", None);
 
         let mut i = Instance::new(crate::fixture::device());
-        populate(&mut i, std::slice::from_ref(&root), 100, Admits::Anything);
+        populate(
+            &mut i,
+            std::slice::from_ref(&root),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         let recording =
             crate::model::rows::Listing::rows(&Librarian::from_catalogue(&i.catalogue()))[0];
 
         let now = to.join("07 Renamed Entirely.wav");
         std::fs::rename(&was, &now).unwrap();
-        let report = reconcile(&mut i, std::slice::from_ref(&root), 200);
+        let report = reconcile(
+            &mut i,
+            std::slice::from_ref(&root),
+            200,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert!(report.unknown.is_empty(), "a moved file became a stranger");
 
         let mut l = Librarian::from_catalogue(&i.catalogue());
@@ -1121,7 +1256,13 @@ mod tests {
         write_tags(&root.join("loose.wav"), "Loose", "An Artist", None);
 
         let mut i = Instance::new(Id::derived(b"test"));
-        let report = populate(&mut i, std::slice::from_ref(&root), 100, Admits::Anything);
+        let report = populate(
+            &mut i,
+            std::slice::from_ref(&root),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(
             report.unfiled.keys().collect::<Vec<_>>(),
             ["Classical", "Dance"],
@@ -1140,7 +1281,13 @@ mod tests {
         i.name_collection(200, list, "Classical", false);
         i.add_to_collection(200, list, recording, crate::model::ord::OrdKey::first());
 
-        let again = populate(&mut i, std::slice::from_ref(&root), 300, Admits::Anything);
+        let again = populate(
+            &mut i,
+            std::slice::from_ref(&root),
+            300,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(
             again.unfiled.keys().collect::<Vec<_>>(),
             ["Dance"],
@@ -1220,13 +1367,25 @@ mod tests {
         let second = re_encoded("joins-second", 8820);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        let one = populate(&mut i, std::slice::from_ref(&first), 100, Admits::Anything);
+        let one = populate(
+            &mut i,
+            std::slice::from_ref(&first),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert!(
             one.joins.is_empty(),
             "nothing was held before the first pass"
         );
 
-        let two = populate(&mut i, std::slice::from_ref(&second), 200, Admits::Anything);
+        let two = populate(
+            &mut i,
+            std::slice::from_ref(&second),
+            200,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(
             two.joins.len(),
             1,
@@ -1250,8 +1409,20 @@ mod tests {
         let dir = re_encoded("joins-again", 4410);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
-        let again = populate(&mut i, std::slice::from_ref(&dir), 200, Admits::Anything);
+        populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
+        let again = populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            200,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(again.ingested, 1, "the file was still read");
         assert!(
             again.joins.is_empty(),
@@ -1267,8 +1438,20 @@ mod tests {
         let other = library("joins-other", &[("Atlas", None)]);
         let mut i = Instance::new(Id::derived(b"laptop"));
 
-        populate(&mut i, std::slice::from_ref(&held), 100, Admits::Anything);
-        let new = populate(&mut i, std::slice::from_ref(&other), 200, Admits::Anything);
+        populate(
+            &mut i,
+            std::slice::from_ref(&held),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
+        let new = populate(
+            &mut i,
+            std::slice::from_ref(&other),
+            200,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert!(
             new.joins.is_empty(),
             "a different recording: {:?}",
@@ -1506,12 +1689,28 @@ mod tests {
     fn a_second_pass_drops_what_is_no_longer_there() {
         let dir = library("deleted", &[("Callisto", None), ("Luna", None)]);
         let mut i = Instance::new(Id::derived(b"laptop"));
-        populate(&mut i, std::slice::from_ref(&dir), 100, Admits::Anything);
-        reconcile(&mut i, std::slice::from_ref(&dir), 110);
+        populate(
+            &mut i,
+            std::slice::from_ref(&dir),
+            100,
+            Admits::Anything,
+            &mut crate::audio_id::Measurements::default(),
+        );
+        reconcile(
+            &mut i,
+            std::slice::from_ref(&dir),
+            110,
+            &mut crate::audio_id::Measurements::default(),
+        );
         assert_eq!(i.catalogue().holdings[&i.device()].held.len(), 2);
 
         std::fs::remove_file(dir.join("02 Luna.wav")).unwrap();
-        reconcile(&mut i, &[dir], 200);
+        reconcile(
+            &mut i,
+            &[dir],
+            200,
+            &mut crate::audio_id::Measurements::default(),
+        );
 
         assert_eq!(
             i.catalogue().holdings[&i.device()].held.len(),
