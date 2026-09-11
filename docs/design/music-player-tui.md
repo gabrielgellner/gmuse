@@ -198,6 +198,21 @@ thread exists to _protect_ the three rather than to dilute them.
 
 The callback rules below are untouched and remain absolute.
 
+### The count is retired, the property is not — revised 2026-09-11
+
+The rule above says three, the amendment above says four, and
+[`gmuse-engine-architecture.md`](gmuse-engine-architecture.md) says roughly thirteen roles across two processes. The UI
+thread leaves the process and becomes the engine's **control thread**; the TUI attaches over a socket like every other
+view. Recorded in §13 (2026-09-11), which is what authorises it.
+
+What the count was shorthand for is unchanged and now stated directly: **nothing with a deadline shares a thread with
+work that can stall.** Every audio-carrying path still has the shape it has here — something decodes off the RT thread,
+hands frames over an SPSC ring, the callback drains it — and **ordinary playback still streams, one song at a time,
+exactly as described above.** Full-decode decks are an additional path for DJ mode, not a replacement for this one.
+
+The trade is that three threads could be verified by reading the code and a property cannot, so the tests named in that
+document are the enforcement. The callback rules below are untouched and remain absolute.
+
 ### Rules for the audio callback — **INVARIANT**
 
 The cpal callback runs on a real-time thread. Inside it, the following are forbidden without exception:
@@ -3126,6 +3141,57 @@ Append here as decisions are made. Format: date, decision, rationale.
   Deliberately **not** done: `history.toml` and the event log still name paths. Migrating them is the step that
   "invalidates every event ever recorded", and #63 has not settled whether events should name an entry or a encoding.
   The id exists, is cached, and is used where it already pays.
+
+- **2026-09-11** **The three-thread INVARIANT becomes a set of properties, and the UI thread leaves the process.**
+  Authorises `docs/design/gmuse-engine-architecture.md` (v0.2), which is the argument; this entry is what makes it so,
+  on the standard the 2026-08-31 amendment set — a boundary may move to a principled place and may not erode by
+  increments. That entry named this boundary in advance, as one of three then under pressure.
+
+  **What §3 was for.** It is stated as a count, and the sentence after it gives the purpose: _"it is what determines
+  whether playback is glitch-free"_. The property underneath is one thing — **nothing with a deadline shares a thread
+  with work that can stall**. Decoding is expensive and variable, so it is off the callback; terminal input blocks, so
+  it is off the decoder. Three was the number of threads it took to say that when the program was one process with one
+  output.
+
+  **What moves.** Four things, and only the first is new in kind:
+
+  1. **One of the original three leaves the process.** The UI thread becomes the **control thread** inside an engine
+     daemon, and the TUI becomes a separate process attaching over a socket. This is not the 2026-09-01 socket amendment
+     again: that added a fourth thread _beside_ the three and argued it protected them. This moves one of them out.
+  2. **The UI thread stops owning the `Store`.** §3's diagram says "owns Store/views". Library state moves to a
+     librarian thread; the control thread holds an `Arc` to a projection and folds nothing.
+  3. **The count goes from four to roughly thirteen roles** — control, librarian, scanner, loader, RT, IPC acceptor,
+     per-client readers and writers, MIDI input, query workers, analysis, collector, recorder.
+  4. **Two decks** means the audio path is no longer a single decoder→ring→callback chain.
+
+  **What does not move, which is the larger half.** The callback rules stay absolute and get stricter: the engine
+  document's I2 adds the retire-ring discipline, so heap objects the RT side drops are freed on another thread rather
+  than being an allocation in disguise. The shape of every audio-carrying path is unchanged — something decodes off the
+  RT thread, hands frames over an SPSC ring, the callback drains it — there are simply more chains. Nothing added shares
+  anything with the callback.
+
+  **And the streaming player is kept.** Decks decode fully into RAM because continuous varispeed, jog and reverse over a
+  forward-streaming decoder cannot be made to work. That is a price **DJ mode alone pays**. Ordinary playback keeps
+  streaming exactly as it does today, and the deck path is a second way to fill a ring rather than a replacement for the
+  first. One song at a time, streamed, is what §1 asks for; the DJ work is not a migration away from it.
+
+  **Why the count has to go.** Its purpose is not being traded away — it is being strengthened. What is retired is the
+  literal form, which was a proxy. With several views, MIDI, two decks and a librarian, counting threads no longer says
+  the thing it was shorthand for, so the enforcement moves onto the properties themselves: the callback rules, "the
+  control thread does only cheap state transitions", one producer per ring with a stated policy for a full one, and the
+  control thread never folding.
+
+  The library work forced this independently of DJ mode, which is worth recording because it means the revision is not
+  merely the price of an ambition. Query performance drove the access-layer split; that split put the projection behind
+  an `Arc`; and a librarian that folds for hundreds of milliseconds cannot live on the thread that renders a UI.
+  Separately, "playback continues while views attach and detach" is incompatible with the UI thread being in the process
+  at all.
+
+  **The cost, named so it cannot erode quietly.** "Three threads, not negotiable" is checkable by reading the code.
+  "These properties hold" is not. Enforcement moves from a countable fact to a tested one — which is why the allocation
+  guard in debug builds, the null audio backend, and the sample-accurate scheduling assertions across buffer sizes are
+  load-bearing rather than garnish. **A property nobody tests is a property nobody has**, and that is the way this
+  particular boundary would erode by increments.
 
 - **2026-09-11** **`pyo3` and `maturin`, and the crate becomes a library.** The tools reach the library through a
   boundary already — a work list from `shelf query`, a proposal file for `shelf apply` — and what it lacked was a

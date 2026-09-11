@@ -937,18 +937,22 @@ the command is accepted before the target bar.
 
 ### 11.2 Decode strategy (settled in direction, deferred in detail)
 
-- DJ operations (loops, cue jumps, reverse playback, scratching) need random access to decoded audio around the
-  playhead, which a forward-streaming decoder doesn't provide.
+DJ operations (loops, cue jumps, reverse playback, scratching) need random access to decoded audio around the playhead,
+which a forward-streaming decoder doesn't provide. **So there are two audio paths, and the existing one is kept.**
+
+- **Ordinary library playback streams**, exactly as it does today: symphonia demuxes and decodes, rubato resamples,
+  frames go to the ring, the callback drains it. This is the player. It is not a stopgap on the way to decks, it is not
+  deprecated by them, and **nothing in the DJ work may be allowed to replace it** — one song at a time, streamed, is
+  what the program is for and what §1-§5 of `music-player-tui.md` settled. Long tracks and whole albums make full
+  decoding wasteful, and none of the random-access operations apply to them.
 - **Decks fully decode into RAM at load**, on the loader thread. A 6-minute stereo track at 48 kHz is about 138 MB as
   f32, or about 69 MB as i16. This is not a leaning: continuous varispeed, jog and reverse over a streaming decoder is
-  not a thing that can be made to work, so the memory is the price of the feature.
-- **Ordinary library playback streams.** Long tracks and full albums make full decoding wasteful, and none of the
-  random-access operations apply.
-- The two paths are therefore different, and the decoder thread's design must not harden around streaming only.
+  not a thing that can be made to work, so the memory is the price of the feature — and it is a price only DJ mode pays.
+- So the deck path is **additive**: a second way to get frames into a ring, alongside the first, chosen per source. The
+  decoder thread's design must not harden around streaming only, and equally must not be rebuilt around full decode.
 - **Everything else about two-deck DJ mode — buffer lifecycle, scratch modelling, what a deck _is_ — is its own design
-  phase and is deliberately not settled here.** What this document fixes is that the engine has room for it: decks own
-  their buffers, buffers are allocated off the RT thread, and `retire_ring` already exists to take them back.
-- Deck buffers are allocated off the RT thread, handed over through `ctl_ring` as owned pointers, and returned through
+  phase and is deliberately not settled here.** What this document fixes is that the engine has room for it: deck
+  buffers are allocated off the RT thread, handed over through `ctl_ring` as owned pointers, and returned through
   `retire_ring` to the collector (I2).
 
 ### 11.3 Rate, varispeed, scratch
