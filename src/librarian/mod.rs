@@ -34,6 +34,7 @@ use crate::model::id::Id;
 use crate::model::instance::Instance;
 use crate::model::seam::Librarian;
 use crate::operations::scan::Holdings;
+use crate::projection::Projected;
 use crate::projection::catalogue::Catalogue;
 
 /// What the desk hands back when you ask: everything derived from the log,
@@ -198,6 +199,31 @@ impl Drop for Desk {
         drop(std::mem::replace(&mut self.jobs, unbounded().0));
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+    }
+}
+
+/// The projection as it stands, for a read.
+///
+/// **Snapshot first.** A print of the log files is one `stat` each and decides
+/// on its own whether the fold is current, so a caught-up read never opens the
+/// log — parsing is the expensive half and caching only the fold would cache
+/// the cheap one.
+///
+/// **It never scans.** A fold is a derivation and a read may do it; a scan is
+/// a discovery and a read may not (`access-layers.md` §3a). A read that walks
+/// the disk answers with what the tags say rather than what the library
+/// recorded, which is the one thing the library is for.
+pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Projected {
+    let at = crate::cache::projection_path();
+    let print = crate::cache::LogPrint::of(data_dir);
+    match crate::cache::current_projection(&at, &print) {
+        Some(ready) => ready,
+        None => {
+            let (log, _) = Instance::open(data_dir, device, now);
+            let folded = Projected::rebuild(log.records());
+            crate::cache::save_projection(&at, &print, &folded);
+            folded
         }
     }
 }

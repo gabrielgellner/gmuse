@@ -615,19 +615,19 @@ fn run_library(
             }
         }
         gmuse::cli::Shelf::Names => {
-            let (mut log, _) = gmuse::model::instance::Instance::open(
+            // **A read, so no scan** — #220. Walking the disk here answered
+            // with what the tags say over what the library recorded, which is
+            // the one thing the library exists to settle.
+            //
+            // The log itself is opened, because this arm reads **facts** and
+            // not only the fold: a read may derive, it may not discover.
+            let (log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
                 gmuse::history::now_ms(),
             );
-            gmuse::operations::populate::populate(
-                &mut log,
-                roots,
-                gmuse::history::now_ms(),
-                gmuse::operations::populate::Admits::Identified,
-                &mut gmuse::model::ingest::Reads::default(),
-            );
-            let cat = log.catalogue();
+            let projection = gmuse::projection::Projected::rebuild(log.records());
+            let cat = projection.catalogue();
 
             // Every name each id has ever been given, in log order, so the
             // last one — the one in force — reads last.
@@ -734,20 +734,13 @@ fn run_library(
             );
         }
         gmuse::cli::Shelf::Duplicates => {
-            let (mut log, _) = gmuse::model::instance::Instance::open(
-                &loaded.data_dir,
-                device,
-                gmuse::history::now_ms(),
-            );
-            gmuse::operations::populate::populate(
-                &mut log,
-                roots,
-                gmuse::history::now_ms(),
-                gmuse::operations::populate::Admits::Identified,
-                &mut gmuse::model::ingest::Reads::default(),
-            );
-            let cat = log.catalogue();
-            let library = gmuse::model::seam::Librarian::from_catalogue(&cat);
+            // **A read, so the snapshot and never a scan** — #220. Walking the
+            // disk here answered with what the tags say over what the library
+            // recorded, which is the one thing the library exists to settle.
+            let projection =
+                gmuse::librarian::reading(&loaded.data_dir, device, gmuse::history::now_ms());
+            let cat = projection.catalogue();
+            let library = gmuse::model::seam::Librarian::from_catalogue(cat);
 
             // How many files sit on each album, which is what tells a dead
             // duplicate from a real split. A group with none is an identity
@@ -995,12 +988,12 @@ fn run_library(
             }
         }
         gmuse::cli::Shelf::Copies => {
-            let (log, _) = gmuse::model::instance::Instance::open(
-                &loaded.data_dir,
-                device,
-                gmuse::history::now_ms(),
-            );
-            let cat = log.catalogue();
+            // **A read, so the snapshot and never a scan** — #220. Walking the
+            // disk here answered with what the tags say over what the library
+            // recorded, which is the one thing the library exists to settle.
+            let projection =
+                gmuse::librarian::reading(&loaded.data_dir, device, gmuse::history::now_ms());
+            let cat = projection.catalogue();
             let here = cat.holdings.get(&device);
             let at: std::collections::BTreeMap<_, &String> = here
                 .map(|a| a.held.iter().map(|(id, path)| (*id, path)).collect())
@@ -1077,12 +1070,19 @@ fn run_library(
             use gmuse::model::entity::{Medium, Recording};
             use gmuse::model::id::Id;
 
+            // **A read, so no scan** — #220. Walking the disk here answered
+            // with what the tags say over what the library recorded, which is
+            // the one thing the library exists to settle.
+            //
+            // The log itself is opened, because this arm reads **facts** and
+            // not only the fold: a read may derive, it may not discover.
             let (log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
                 gmuse::history::now_ms(),
             );
-            let cat = log.catalogue();
+            let projection = gmuse::projection::Projected::rebuild(log.records());
+            let cat = projection.catalogue();
             let here = cat.holdings.get(&device);
 
             // Which recordings this device can actually open, so the report can
@@ -1104,7 +1104,7 @@ fn run_library(
             // The finding itself is `Librarian::contested_slots`, so it is
             // testable and there is one definition of what "contested" means.
             // What is added here is device-local: which claimant has a file.
-            let library = gmuse::model::seam::Librarian::from_catalogue(&cat);
+            let library = gmuse::model::seam::Librarian::from_catalogue(cat);
             // **The same rows `query` hands out, narrowed to the contest.**
             // A tool listening to these needs a locator and an id, which is
             // what a work list is — and building a second shape for it would
@@ -1117,7 +1117,7 @@ fn run_library(
                     .filter(|r| playable.contains_key(r))
                     .collect();
                 for row in gmuse::query::rows(
-                    &gmuse::projection::Projected::rebuild(log.records()),
+                    &projection,
                     device,
                     gmuse::history::now_ms(),
                     gmuse::query::Only::Everything,
@@ -1180,12 +1180,12 @@ fn run_library(
             }
         }
         gmuse::cli::Shelf::Verify => {
-            let (log, _) = gmuse::model::instance::Instance::open(
-                &loaded.data_dir,
-                device,
-                gmuse::history::now_ms(),
-            );
-            let cat = log.catalogue();
+            // **A read, so the snapshot and never a scan** — #220. Walking the
+            // disk here answered with what the tags say over what the library
+            // recorded, which is the one thing the library exists to settle.
+            let projection =
+                gmuse::librarian::reading(&loaded.data_dir, device, gmuse::history::now_ms());
+            let cat = projection.catalogue();
             // **This device's holdings.** A locator another machine published
             // names a path that is not here, and hashing it is not something
             // this run can do or should claim to have done.
@@ -1233,19 +1233,19 @@ fn run_library(
             }
         }
         gmuse::cli::Shelf::Artists => {
-            let (mut log, _) = gmuse::model::instance::Instance::open(
+            // **A read, so no scan** — #220. Walking the disk here answered
+            // with what the tags say over what the library recorded, which is
+            // the one thing the library exists to settle.
+            //
+            // The log itself is opened, because this arm reads **facts** and
+            // not only the fold: a read may derive, it may not discover.
+            let (log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
                 gmuse::history::now_ms(),
             );
-            gmuse::operations::populate::populate(
-                &mut log,
-                roots,
-                gmuse::history::now_ms(),
-                gmuse::operations::populate::Admits::Identified,
-                &mut gmuse::model::ingest::Reads::default(),
-            );
-            let cat = log.catalogue();
+            let projection = gmuse::projection::Projected::rebuild(log.records());
+            let cat = projection.catalogue();
 
             // **Every name an id has ever held, not just the one in force.**
             // A name-derived id can be renamed afterwards — `Flume & Chet
@@ -1352,19 +1352,12 @@ fn run_library(
                 );
             };
 
-            let (mut log, _) = gmuse::model::instance::Instance::open(
-                &loaded.data_dir,
-                device,
-                gmuse::history::now_ms(),
-            );
-            gmuse::operations::populate::populate(
-                &mut log,
-                roots,
-                gmuse::history::now_ms(),
-                gmuse::operations::populate::Admits::Identified,
-                &mut gmuse::model::ingest::Reads::default(),
-            );
-            let librarian = gmuse::model::seam::Librarian::from_catalogue(&log.catalogue());
+            // **A read, so the snapshot and never a scan** — #220. Walking the
+            // disk here answered with what the tags say over what the library
+            // recorded, which is the one thing the library exists to settle.
+            let projection =
+                gmuse::librarian::reading(&loaded.data_dir, device, gmuse::history::now_ms());
+            let librarian = gmuse::model::seam::Librarian::from_catalogue(projection.catalogue());
 
             // Every row the library holds. The browser groups its *members* —
             // whatever the active filter left — and a filter is a separate
@@ -1759,11 +1752,6 @@ fn run_library(
             every_copy,
             filter,
         } => {
-            let (log, _) = gmuse::model::instance::Instance::open(
-                &loaded.data_dir,
-                device,
-                gmuse::history::now_ms(),
-            );
             let only = if *unidentified {
                 gmuse::query::Only::Unidentified
             } else {
@@ -1782,21 +1770,8 @@ fn run_library(
                 .map(gmuse::query::filter::Expr::parse)
                 .transpose()
                 .map_err(|e| format!("--filter: {e}"))?;
-            // **The snapshot, and the log only if it moved** — #194, #195.
-            //
-            // A print of the log files costs 17.5µs; loading the fold costs
-            // 9.5ms. Parsing and folding the log costs 216ms, and is now only
-            // paid when something has actually been appended.
-            let at = gmuse::cache::projection_path();
-            let print = gmuse::cache::LogPrint::of(&loaded.data_dir);
-            let projection = match gmuse::cache::current_projection(&at, &print) {
-                Some(ready) => ready,
-                None => {
-                    let folded = gmuse::projection::Projected::rebuild(log.records());
-                    gmuse::cache::save_projection(&at, &print, &folded);
-                    folded
-                }
-            };
+            let projection =
+                gmuse::librarian::reading(&loaded.data_dir, device, gmuse::history::now_ms());
             for row in gmuse::query::rows(
                 &projection,
                 device,
@@ -2408,6 +2383,57 @@ fn surviving_holders<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A read never scans** — `access-layers.md` §3a calls this the absolute
+    /// rule, and it was being broken by four subcommands.
+    ///
+    /// A scan is a *discovery*: it walks the disk, reads tags and mints facts.
+    /// A read that does one answers with what a tagger last wrote instead of
+    /// what the library recorded — `shelf tree` showed `Analogue Bubblebath 4`
+    /// over the library's `Analogue Bubblebath EP4`, and counted a file on
+    /// disk that had never been imported as though it were held.
+    ///
+    /// Asserted against the source because there is no type that could carry
+    /// it: `populate` is an ordinary function and any arm can call one.
+    /// `verify` is the exception and says so — reading the bytes back is the
+    /// whole of what it does.
+    #[test]
+    fn no_read_subcommand_walks_the_disk() {
+        let src = include_str!("main.rs");
+        let body = match src.find("#[cfg(test)]") {
+            Some(at) => &src[..at],
+            None => src,
+        };
+
+        let mut offender = None;
+        let mut arm = "";
+        for line in body.lines() {
+            if let Some(at) = line.find("gmuse::cli::Shelf::") {
+                arm = line[at + "gmuse::cli::Shelf::".len()..]
+                    .split(|c: char| !c.is_alphanumeric())
+                    .next()
+                    .unwrap_or("");
+            }
+            const READS: &[&str] = &[
+                "Query",
+                "Render",
+                "Duplicates",
+                "Copies",
+                "Slots",
+                "Artists",
+                "Names",
+                "Tree",
+            ];
+            if READS.contains(&arm) && line.contains("populate::populate") {
+                offender = Some(arm);
+            }
+        }
+
+        assert_eq!(
+            offender, None,
+            "a read subcommand walks the disk, so it answers with tags over the library"
+        );
+    }
 
     /// A tiny real WAV, so there is audio to hash.
     fn wav(path: &std::path::Path, frames: usize) {
