@@ -1080,8 +1080,13 @@ pub fn record(
     }
     ui.desk.say(say);
     // Waits, because the screen must show the rating it just took and a
-    // rating that has not been recorded yet must not appear. The cost is a
-    // whole fold today; #208's position-driven fold makes it one comparison.
+    // rating that has not been recorded yet must not appear.
+    //
+    // The cost is a whole fold. An advance that is caught up is one
+    // comparison, but this one never is — it just appended. What shrinks the
+    // wait is applying the fact to the projection rather than refolding the
+    // gap, which `projection/mod.rs` explains is a second implementation of
+    // the fold's semantics rather than a slice of it.
     ui.desk.settled();
     ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
 }
