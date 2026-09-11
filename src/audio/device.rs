@@ -195,94 +195,142 @@ pub(super) fn fill_output(
 /// **INVARIANT (DESIGN §3).** Inside the callback: no allocation, no locking,
 /// no syscalls, no panics, no unbounded loops. It reads the ring, applies gain,
 /// writes the output slice, and updates atomics. Nothing else, ever.
+/// Everything the render step owns between callbacks.
+///
+/// Callback-local state, held here rather than captured in a closure so the
+/// step can be driven by something other than cpal — a virtual clock, in a
+/// test with no audio device.
+pub struct Rt {
+    consumer: rtrb::Consumer<f32>,
+    shared: Arc<Shared>,
+    channels: usize,
+    /// The last flush the render step has serviced. Not an atomic: only this
+    /// step reads or writes it.
+    serviced: u64,
+    fade: Fade,
+}
+
+impl Rt {
+    /// **The two numbers, not a cpal config.** A device supplies them, but
+    /// nothing about rendering needs to know that — and a signature naming
+    /// `StreamConfig` would put cpal back on the headless path.
+    pub fn new(
+        consumer: rtrb::Consumer<f32>,
+        shared: Arc<Shared>,
+        channels: usize,
+        rate: u32,
+    ) -> Rt {
+        Rt {
+            consumer,
+            channels,
+            fade: Fade::new(rate),
+            shared,
+            serviced: 0,
+        }
+    }
+}
+
+/// Render one buffer.
+///
+/// **INVARIANT (DESIGN §3).** No allocation, no locking, no syscalls, no
+/// panics, no unbounded loops. It reads the ring, applies gain, writes the
+/// output slice, and updates atomics. Nothing else, ever.
+///
+/// A free function taking `&mut Rt` rather than a closure, so the same code
+/// runs under cpal and under a virtual clock. Nothing in the signature names
+/// cpal, which is what makes the headless path the *same* renderer rather
+/// than a second one that drifts.
+pub fn process(rt: &mut Rt, out: &mut [f32]) {
+    // Seek/stop handshake: discard buffered audio and adopt the new
+    // position. `read_chunk(..).commit_all()` moves an index; it does
+    // not copy or free, so this is safe in the RT context.
+    let requested = rt.shared.flush_seq.load(Ordering::Acquire);
+    if requested != rt.serviced {
+        let stale = rt.consumer.slots();
+        if stale > 0
+            && let Ok(chunk) = rt.consumer.read_chunk(stale)
+        {
+            chunk.commit_all();
+        }
+        rt.shared.position_frames.store(
+            rt.shared.flush_position.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        rt.serviced = requested;
+        rt.shared.flush_ack.store(requested, Ordering::Release);
+        // Audio either side of a seek is unrelated; fade in rather
+        // than splice, or the seek itself clicks.
+        rt.fade.cut();
+        out.fill(0.0);
+        return;
+    }
+
+    // Paused and stopped both hold the device open and emit silence.
+    // Stopping the stream instead would risk a click on resume, and
+    // would drop the ring contents we want to resume from.
+    let target = if State::from_u8(rt.shared.state.load(Ordering::Relaxed)) == State::Playing {
+        1.0
+    } else {
+        0.0
+    };
+
+    // Fully faded out: emit silence without touching the ring, so a
+    // pause holds its place rather than draining.
+    if rt.fade.is_silent(target) {
+        out.fill(0.0);
+        return;
+    }
+
+    let want = out.len();
+    let got = match rt.consumer.read_chunk(want.min(rt.consumer.slots())) {
+        Ok(chunk) => {
+            let n = chunk.len();
+            let (a, b) = chunk.as_slices();
+            out[..a.len()].copy_from_slice(a);
+            out[a.len()..a.len() + b.len()].copy_from_slice(b);
+            chunk.commit_all();
+            n
+        }
+        Err(_) => 0,
+    };
+
+    let volume = f32::from_bits(rt.shared.volume.load(Ordering::Relaxed));
+    // The fade still runs — the gap is entered smoothly either way —
+    // but a drain at end-of-track is expected and is not counted.
+    if fill_output(out, got, rt.channels, target, volume, &mut rt.fade)
+        && !rt.shared.draining.load(Ordering::Relaxed)
+    {
+        rt.shared.underruns.fetch_add(1, Ordering::Relaxed);
+        // How short, not just that it happened: an occasional handful
+        // of frames is a different problem from a whole period.
+        rt.shared
+            .last_short_frames
+            .store(((want - got) / rt.channels) as u32, Ordering::Relaxed);
+    }
+
+    rt.shared
+        .position_frames
+        .fetch_add((got / rt.channels) as u64, Ordering::Relaxed);
+}
+
+/// Build the output stream.
 pub(super) fn build_stream(
     device: &cpal::Device,
     config: StreamConfig,
-    mut consumer: rtrb::Consumer<f32>,
+    consumer: rtrb::Consumer<f32>,
     shared: Arc<Shared>,
 ) -> Result<cpal::Stream, AudioError> {
-    let channels = config.channels as usize;
-    let sample_rate = config.sample_rate;
     let err_shared = Arc::clone(&shared);
-
-    // The last flush the callback has serviced. Callback-local, so no atomic.
-    let mut serviced: u64 = 0;
-    let mut fade = Fade::new(sample_rate);
+    let mut rt = Rt::new(
+        consumer,
+        shared,
+        config.channels as usize,
+        config.sample_rate,
+    );
 
     let stream = device.build_output_stream(
         config,
-        move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            // Seek/stop handshake: discard buffered audio and adopt the new
-            // position. `read_chunk(..).commit_all()` moves an index; it does
-            // not copy or free, so this is safe in the RT context.
-            let requested = shared.flush_seq.load(Ordering::Acquire);
-            if requested != serviced {
-                let stale = consumer.slots();
-                if stale > 0
-                    && let Ok(chunk) = consumer.read_chunk(stale)
-                {
-                    chunk.commit_all();
-                }
-                shared.position_frames.store(
-                    shared.flush_position.load(Ordering::Relaxed),
-                    Ordering::Relaxed,
-                );
-                serviced = requested;
-                shared.flush_ack.store(requested, Ordering::Release);
-                // Audio either side of a seek is unrelated; fade in rather
-                // than splice, or the seek itself clicks.
-                fade.cut();
-                out.fill(0.0);
-                return;
-            }
-
-            // Paused and stopped both hold the device open and emit silence.
-            // Stopping the stream instead would risk a click on resume, and
-            // would drop the ring contents we want to resume from.
-            let target = if State::from_u8(shared.state.load(Ordering::Relaxed)) == State::Playing {
-                1.0
-            } else {
-                0.0
-            };
-
-            // Fully faded out: emit silence without touching the ring, so a
-            // pause holds its place rather than draining.
-            if fade.is_silent(target) {
-                out.fill(0.0);
-                return;
-            }
-
-            let want = out.len();
-            let got = match consumer.read_chunk(want.min(consumer.slots())) {
-                Ok(chunk) => {
-                    let n = chunk.len();
-                    let (a, b) = chunk.as_slices();
-                    out[..a.len()].copy_from_slice(a);
-                    out[a.len()..a.len() + b.len()].copy_from_slice(b);
-                    chunk.commit_all();
-                    n
-                }
-                Err(_) => 0,
-            };
-
-            let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
-            // The fade still runs — the gap is entered smoothly either way —
-            // but a drain at end-of-track is expected and is not counted.
-            if fill_output(out, got, channels, target, volume, &mut fade)
-                && !shared.draining.load(Ordering::Relaxed)
-            {
-                shared.underruns.fetch_add(1, Ordering::Relaxed);
-                // How short, not just that it happened: an occasional handful
-                // of frames is a different problem from a whole period.
-                shared
-                    .last_short_frames
-                    .store(((want - got) / channels) as u32, Ordering::Relaxed);
-            }
-
-            shared
-                .position_frames
-                .fetch_add((got / channels) as u64, Ordering::Relaxed);
-        },
+        move |out: &mut [f32], _: &cpal::OutputCallbackInfo| process(&mut rt, out),
         move |err| {
             // **Never print from here.** The TUI owns the alternate screen, so
             // anything written to stdout or stderr lands on top of the drawn

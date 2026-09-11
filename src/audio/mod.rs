@@ -12,7 +12,8 @@
 //! ```
 
 mod decode;
-mod device;
+pub mod device;
+pub mod null;
 pub mod resample;
 mod ring;
 
@@ -203,7 +204,7 @@ pub fn gain_for(position: f32) -> f32 {
 ///
 /// **INVARIANT (DESIGN §3):** the callback may touch nothing but these atomics
 /// and the ring buffer. No allocation, no locks, no syscalls, no panics.
-pub(crate) struct Shared {
+pub struct Shared {
     /// Authoritative playback position, in device-rate frames, counted since
     /// the last flush rather than since the start of the current track.
     ///
@@ -280,6 +281,22 @@ pub enum AudioError {
     Stream(#[from] cpal::Error),
 }
 
+/// Where rendered audio goes.
+///
+/// An enum rather than a trait, and deliberately: §12 asks for explicit typed
+/// layers, the two cases are a closed set, and `cpal::Stream` is not `Send` on
+/// every platform — which a `Box<dyn _>` would have to pretend about. The
+/// renderer itself is shared either way; this only decides what drives it.
+enum Sink {
+    /// A real device. Dropping it stops the stream.
+    ///
+    /// Held and never read: the value *is* the effect, and dropping it is what
+    /// stops rendering.
+    Device(#[allow(dead_code, reason = "held to keep the stream alive")] cpal::Stream),
+    /// A virtual clock, for headless runs and tests. Held for the same reason.
+    Null(#[allow(dead_code, reason = "held to keep the renderer running")] null::Sink),
+}
+
 /// The handle the rest of the application uses to drive playback.
 ///
 /// Dropping it shuts the decoder thread down and tears the stream down.
@@ -291,8 +308,8 @@ pub struct PlayerHandle {
     events: Receiver<PlayerEvent>,
     shared: Arc<Shared>,
     device_rate: u32,
-    /// Kept alive: dropping the stream stops the device.
-    _stream: cpal::Stream,
+    /// Kept alive: dropping it stops rendering.
+    _sink: Sink,
     decoder: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -317,6 +334,7 @@ impl PlayerHandle {
 
         let stream = device::build_stream(&device, config, consumer, Arc::clone(&shared))?;
         cpal::traits::StreamTrait::play(&stream)?;
+        let sink = Sink::Device(stream);
 
         // Bounded: a UI that spams commands should never grow this without
         // limit. Sends are non-blocking (see `send`).
@@ -344,7 +362,64 @@ impl PlayerHandle {
             events: evt_rx,
             shared,
             device_rate,
-            _stream: stream,
+            _sink: sink,
+            decoder: Some(decoder),
+        })
+    }
+
+    /// A player with **no audio device**, rendering into nothing — #210.
+    ///
+    /// The same decoder, ring and render step as [`PlayerHandle::new`]; only
+    /// what drives the render step differs. That is the whole value: a test
+    /// that loads a track and watches the position advance is exercising the
+    /// code that ships, not a mock of it.
+    ///
+    /// `pace` decides whether the virtual clock runs at wall speed or as fast
+    /// as it can. A headless engine wants the first, because everything
+    /// downstream reads positions as time. A test wants the second, because
+    /// six minutes is six minutes.
+    pub fn headless(cfg: PlayerConfig, pace: null::Pace) -> Result<Self, AudioError> {
+        // A device would tell us these. Nothing is listening, so they are
+        // only the units the rest of the player works in.
+        const RATE: u32 = 48_000;
+        const CHANNELS: usize = 2;
+        const PERIOD: usize = 512;
+
+        let (mut producer, consumer) = ring::new(RATE, CHANNELS);
+        let shared = Arc::new(Shared::new());
+        let position = cfg.volume.clamp(0.0, MAX_POSITION);
+        shared.position.store(position.to_bits(), Ordering::Relaxed);
+        shared
+            .volume
+            .store(gain_for(position).to_bits(), Ordering::Relaxed);
+
+        let rt = device::Rt::new(consumer, Arc::clone(&shared), CHANNELS, RATE);
+        let sink = Sink::Null(null::Sink::start(rt, CHANNELS, RATE, PERIOD, pace));
+
+        let (cmd_tx, cmd_rx) = bounded::<PlayerCmd>(64);
+        let (evt_tx, evt_rx) = bounded::<PlayerEvent>(64);
+        let dec_shared = Arc::clone(&shared);
+        let decoder = std::thread::Builder::new()
+            .name("gmuse-decode".into())
+            .spawn(move || {
+                decode::run(
+                    cmd_rx,
+                    evt_tx,
+                    &mut producer,
+                    dec_shared,
+                    RATE,
+                    CHANNELS,
+                    cfg.resample,
+                );
+            })
+            .expect("failed to spawn decoder thread");
+
+        Ok(Self {
+            cmds: cmd_tx,
+            events: evt_rx,
+            shared,
+            device_rate: RATE,
+            _sink: sink,
             decoder: Some(decoder),
         })
     }
@@ -456,6 +531,74 @@ impl Drop for PlayerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real WAV, so there is audio to decode rather than a stub to mock.
+    fn wav(path: &std::path::Path, frames: usize) {
+        use std::io::Write;
+        let bytes = 4 * frames;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(b"RIFF").unwrap();
+        f.write_all(&((36 + bytes) as u32).to_le_bytes()).unwrap();
+        f.write_all(b"WAVEfmt ").unwrap();
+        f.write_all(&16u32.to_le_bytes()).unwrap();
+        f.write_all(&1u16.to_le_bytes()).unwrap();
+        f.write_all(&2u16.to_le_bytes()).unwrap();
+        f.write_all(&48_000u32.to_le_bytes()).unwrap();
+        f.write_all(&192_000u32.to_le_bytes()).unwrap();
+        f.write_all(&4u16.to_le_bytes()).unwrap();
+        f.write_all(&16u16.to_le_bytes()).unwrap();
+        f.write_all(b"data").unwrap();
+        f.write_all(&(bytes as u32).to_le_bytes()).unwrap();
+        for n in 0..frames {
+            let v = ((n as f32 * 0.01).sin() * 8000.0) as i16;
+            f.write_all(&v.to_le_bytes()).unwrap();
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+    }
+
+    /// **A track plays through with no audio device** — #210, and the reason
+    /// everything after it can be tested at all.
+    ///
+    /// Nothing here is a mock. The decoder, the ring and the render step are
+    /// the ones that ship; only what drives the render step differs, so a
+    /// position that advances is the real counter being advanced by the real
+    /// renderer draining the real ring.
+    #[test]
+    fn a_track_plays_through_with_no_device() {
+        let dir = std::env::temp_dir().join("gmuse-null-audio");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let track = dir.join("tone.wav");
+        // A quarter second at 48k, which is several hundred buffers of 512.
+        wav(&track, 12_000);
+
+        let player = PlayerHandle::headless(
+            PlayerConfig {
+                device: None,
+                rate: None,
+                resample: resample::Quality::Fast,
+                volume: 1.0,
+            },
+            null::Pace::Fast,
+        )
+        .expect("a player with no device");
+
+        player.load(TrackSource::plain(&track));
+        player.play();
+
+        // The renderer runs flat out, so this is bounded by the decoder rather
+        // than by the audio's duration.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while player.position() == Duration::ZERO && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+
+        assert!(
+            player.position() > Duration::ZERO,
+            "nothing was rendered, so the position never moved"
+        );
+        assert_eq!(player.state(), State::Playing);
+    }
 
     fn db(gain: f32) -> f32 {
         20.0 * gain.log10()
