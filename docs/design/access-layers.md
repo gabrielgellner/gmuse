@@ -402,6 +402,21 @@ The folded log, against the real library — 7,271 recordings, 7,351 encodings, 
 So the whole library, fully assembled, is **5.9 MB on disk and ~25 MB in memory**, and a process can have it ready in
 **9ms** rather than 272ms — while using a seventh of the memory, because it never holds the 279,349 records at all.
 
+**Built by #194, and the measurement held.** The snapshot is 5.9 MB, loads in **9.5ms**, and saves in 3.2ms.
+
+One thing the plan had missed, found while building it: **`advance` takes the records, so asking "am I behind" meant
+parsing 184ms of log to learn the answer was no.** The snapshot is only worth having if a caller can tell it is current
+_without_ reading the log. So the same trade as the read cache — `stat` the log files and compare — which costs
+**17.5µs** for the whole library.
+
+|                            | today                               | with the snapshot |
+| -------------------------- | ----------------------------------- | ----------------- |
+| know whether it is current | —                                   | 17.5µs            |
+| have the projection        | 181ms parse + 35ms fold = **216ms** | 9.5ms             |
+
+**The print lives in `cache.rs`, not on the projection.** L1 may not touch the filesystem, which is the rule this whole
+document turns on, so the staleness check belongs to the adapter that owns the cache — exactly where `Reads` sits.
+
 **That settles it for now: a postcard snapshot.** No new dependency, the pattern `cache.rs` already uses, and it is not
 close — 9ms is below the threshold where a store's cleverness could repay its complexity. SQLite would buy nothing
 measurable at this size.

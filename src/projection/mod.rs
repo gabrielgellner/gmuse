@@ -112,7 +112,7 @@ pub enum Advanced {
 }
 
 /// A folded catalogue that knows how far it folded.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Projected {
     catalogue: Catalogue,
     at: Position,
@@ -191,6 +191,127 @@ mod tests {
                 },
             })
             .collect()
+    }
+
+    /// **A snapshot round-trips, and a caught-up one needs no fold** — #194.
+    ///
+    /// The whole of what persistence buys: a process that starts from a
+    /// snapshot is already where the last one got to, so `advance` is one
+    /// comparison per device rather than a fold of the log.
+    #[test]
+    fn a_snapshot_comes_back_where_it_was_left() {
+        let dir = std::env::temp_dir().join("gmuse-projection-snapshot");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("projection.postcard");
+
+        let records = authored(device(1), 8, 1_000);
+        let folded = Projected::rebuild(&records);
+        crate::cache::save_projection(&at, &crate::cache::LogPrint::default(), &folded);
+
+        let mut back = crate::cache::current_projection(&at, &crate::cache::LogPrint::default())
+            .unwrap_or_default();
+        assert_eq!(back.position(), folded.position(), "it came back behind");
+        assert_eq!(
+            back.catalogue(),
+            folded.catalogue(),
+            "and saying something else"
+        );
+        assert_eq!(
+            back.advance(&records),
+            Advanced::AlreadyThere,
+            "a loaded snapshot should already cover what made it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Missing, corrupt and stale are one answer, and it is a fold.**
+    ///
+    /// A snapshot is derived, so the only thing it can cost is time. What it
+    /// must never do is hand back something that parses but is not what was
+    /// written — which postcard makes possible, because it is not
+    /// self-describing, and which is why the version is read before the
+    /// payload (#190).
+    #[test]
+    fn a_snapshot_that_cannot_be_trusted_is_not_used() {
+        let dir = std::env::temp_dir().join("gmuse-projection-bad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("projection.postcard");
+
+        // Nothing there.
+        assert!(
+            crate::cache::current_projection(&at, &crate::cache::LogPrint::default())
+                .unwrap_or_default()
+                .position()
+                .is_empty()
+        );
+
+        // Rubbish.
+        std::fs::write(&at, b"not a snapshot").unwrap();
+        assert!(
+            crate::cache::current_projection(&at, &crate::cache::LogPrint::default())
+                .unwrap_or_default()
+                .position()
+                .is_empty()
+        );
+
+        // Right magic, wrong version, payload that would otherwise parse.
+        let records = authored(device(1), 3, 1_000);
+        crate::cache::save_projection(
+            &at,
+            &crate::cache::LogPrint::default(),
+            &Projected::rebuild(&records),
+        );
+        let good = std::fs::read(&at).unwrap();
+        let mut stale = b"gmuse".to_vec();
+        stale.extend_from_slice(&postcard::to_allocvec(&99_u32).unwrap());
+        stale.extend_from_slice(&good[5 + 1..]);
+        std::fs::write(&at, &stale).unwrap();
+        assert!(
+            crate::cache::current_projection(&at, &crate::cache::LogPrint::default())
+                .unwrap_or_default()
+                .position()
+                .is_empty(),
+            "a snapshot from another version must not be believed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A snapshot older than the log is caught up, not thrown away.**
+    ///
+    /// The ordinary case once this is wired in: something appended since the
+    /// last run, and the gap is what gets folded rather than the whole log.
+    #[test]
+    fn a_snapshot_behind_the_log_advances_to_it() {
+        let dir = std::env::temp_dir().join("gmuse-projection-behind");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("projection.postcard");
+
+        let d = device(1);
+        let first = authored(d, 4, 1_000);
+        crate::cache::save_projection(
+            &at,
+            &crate::cache::LogPrint::default(),
+            &Projected::rebuild(&first),
+        );
+
+        let mut both = first.clone();
+        both.extend(authored(d, 9, 5_000));
+
+        let mut back = crate::cache::current_projection(&at, &crate::cache::LogPrint::default())
+            .unwrap_or_default();
+        assert_eq!(back.advance(&both), Advanced::Folded);
+        assert_eq!(
+            back.catalogue(),
+            Projected::rebuild(&both).catalogue(),
+            "advancing from a snapshot did not land where rebuilding would"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A caught-up projection does no work, and that is the point.**

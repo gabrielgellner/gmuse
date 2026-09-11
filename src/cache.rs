@@ -125,6 +125,136 @@ pub fn save_measurements(path: &Path, seen: &crate::model::ingest::Reads) {
     let _ = std::fs::write(path, bytes);
 }
 
+#[allow(
+    dead_code,
+    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
+)]
+/// Where the folded projection lives — #194.
+///
+/// Its own file beside the others, for the reason the measurement cache has
+/// one: they are dropped for different reasons. The scan cache goes whenever
+/// gmuse moves music; the measurements go when a file changes; this goes when
+/// the fold's shape changes. Sharing a file would throw all three away
+/// whenever any one of them needed to go.
+pub fn projection_path() -> PathBuf {
+    default_path().with_file_name("projection.postcard")
+}
+
+#[allow(
+    dead_code,
+    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
+)]
+/// Bump on any change to `Catalogue`, `Position` or anything they hold.
+///
+/// **Which is often**, and deliberately cheap: the snapshot is derived, so a
+/// bump costs one slow run and never a migration. That is the invariant that
+/// makes changing the projection's shape ordinary rather than dangerous.
+const PROJECTION_VERSION: u32 = 1;
+
+#[allow(
+    dead_code,
+    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
+)]
+/// **What the logs looked like when a snapshot was taken** — #194.
+///
+/// The snapshot is only worth having if a caller can tell it is current
+/// **without reading the log**, and the obvious check cannot: `advance` takes
+/// the records, so asking "am I behind" means parsing 184ms of log to find out
+/// the answer was no.
+///
+/// So the same trade as the read cache: `stat` first. A log whose files are
+/// the length and age they were when the fold happened has nothing new in it.
+///
+/// **This lives here and not on the projection.** L1 may not touch the
+/// filesystem — that is the rule the whole of `access-layers.md` turns on — so
+/// the staleness check belongs to the adapter that owns the cache, the way
+/// `Reads` does.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LogPrint(Vec<(PathBuf, u64, i64)>);
+
+impl LogPrint {
+    /// Take a print of every log in a data directory. Cheap: one `stat` each,
+    /// and there is one file per device.
+    #[allow(dead_code, reason = "read by #195, measured and tested here")]
+    pub fn of(data_dir: &Path) -> Self {
+        let mut out = Vec::new();
+        for path in crate::model::durable::logs_in(data_dir) {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|d| i64::try_from(d.as_millis()).ok())
+                .unwrap_or_default();
+            out.push((path, meta.len(), age));
+        }
+        out.sort();
+        LogPrint(out)
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
+)]
+/// Load a folded projection **only if the logs have not changed since**.
+///
+/// `None` means fold: missing, corrupt, from another version, or taken before
+/// somebody appended. All four are the same answer and none of them is an
+/// error.
+pub fn current_projection(path: &Path, now: &LogPrint) -> Option<crate::projection::Projected> {
+    let (print, projected) = load_projection(path)?;
+    (print == *now).then_some(projected)
+}
+
+/// Load a folded projection. `None` for anything but a snapshot this version
+/// wrote — missing, corrupt and stale are the same answer, which is a fold.
+fn load_projection(path: &Path) -> Option<(LogPrint, crate::projection::Projected)> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
+        return None;
+    }
+    // **Version before payload**, the lesson of #190: postcard is not
+    // self-describing, so parsing an older shape is not reliably an error — it
+    // can succeed and hand back nonsense, and nonsense here is a library that
+    // says the wrong thing rather than one that is slow to answer.
+    let (version, rest) = postcard::take_from_bytes::<u32>(&bytes[MAGIC.len()..]).ok()?;
+    if version != PROJECTION_VERSION {
+        return None;
+    }
+    postcard::from_bytes(rest).ok()
+}
+
+#[allow(
+    dead_code,
+    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
+)]
+/// Keep a folded projection, with the print of the logs it was folded from.
+/// Never fatal — it is a cache.
+pub fn save_projection(path: &Path, print: &LogPrint, projected: &crate::projection::Projected) {
+    let Ok(mut body) = postcard::to_allocvec(&PROJECTION_VERSION) else {
+        return;
+    };
+    let Ok(payload) = postcard::to_allocvec(&(print, projected)) else {
+        return;
+    };
+    body.extend_from_slice(&payload);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut bytes = MAGIC.to_vec();
+    bytes.extend_from_slice(&body);
+    // **Beside, then rename**, like `durable::rewrite`: a crash mid-write
+    // leaves the old snapshot or the new one, never half of one that would
+    // then be read as a library.
+    let beside = path.with_extension("postcard.writing");
+    if std::fs::write(&beside, bytes).is_ok() {
+        let _ = std::fs::rename(&beside, path);
+    }
+}
+
 /// What came back from a cache read.
 #[derive(Debug)]
 pub enum Outcome {
