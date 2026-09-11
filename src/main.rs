@@ -1972,10 +1972,10 @@ fn run_tui(
     // the librarian is what it is moving to (#77), and building both from the
     // same pass is what keeps them from disagreeing.
     let assembling = std::time::Instant::now();
-    // **The log crosses here and does not come back** — #206, I16. From this
-    // point the only thing that folds is the librarian thread, and what this
-    // side holds is whatever it last published. `Desk::open` folds once
-    // synchronously, so nothing below sees an empty library.
+    // The log crosses here and does not come back: from this point the only
+    // thing that folds is the librarian thread (I16), and this side holds
+    // whatever it last published. `Desk::open` folds once synchronously, so
+    // nothing below sees an empty library.
     let desk = gmuse::librarian::Desk::open(
         log,
         app.store.clone(),
@@ -2025,9 +2025,8 @@ fn run_tui(
         .as_deref()
         .and_then(|src| gmuse::view::Stack::parse(src).ok())
         .unwrap_or_default();
-    // Read from what the desk published rather than folded again here — #206.
-    // There was a second `log.catalogue()` at open, and two folds of one log
-    // are two chances to disagree about what it says.
+    // From the same fold the librarian published, so this and the view it is
+    // resolved against cannot disagree about what the log says.
     let listened = &*library_view.listened;
     let members = composed
         .resolve(
@@ -2130,8 +2129,7 @@ fn run_tui(
     // import rather than being invented by whichever machine noticed the file
     // first. Nothing is stamped here.
     {
-        // Counted from what the desk published rather than from the log,
-        // which is on the other side of the channel by now — #206.
+        // From the published fold; the log is on the far side of the channel.
         let held = desk.current();
         let records = held.library.records.len();
         let known = held.listened.ratings.len() + held.listened.plays.len();

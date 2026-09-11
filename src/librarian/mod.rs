@@ -1,43 +1,27 @@
-//! **The librarian thread** — #206, `gmuse-engine-architecture.md` §8.5, I16.
+//! **The librarian thread.** It owns the log and the projection; everything
+//! else holds a pointer to the last thing it published.
 //!
-//! The log and the fold move off the thread that renders, and what the rest of
-//! the program holds is a pointer to the last thing published.
+//! `gmuse-engine-architecture.md` §8.5 is the design.
 //!
-//! ## What this ends
+//! ## The control thread never folds
 //!
-//! The fold ran on the UI thread, and the borrow checker was what made it
-//! safe: `run_tui` owned the `Librarian`, lent it to the draw loop, and the
-//! loop had to **return** — with a `Stop::Refold` — before anything could
-//! rebuild it, because the borrow outlived every command. That is why a
-//! rating, a rescan and a `:view` change all unwound the loop and re-entered
-//! it.
-//!
-//! An [`Arc`] has no such problem. A reader holds one and keeps holding it
-//! while the next one is published beside it, so the control path never has to
-//! stop to be given a fresh answer. The unwinding was never about the UI; it
-//! was about who owned the fold.
-//!
-//! ## The rule this exists to make true
-//!
-//! **I16: the control thread never folds.** A full fold is hundreds of
-//! milliseconds on this library — the log parse alone is 314ms after
-//! compaction — which I6 does not permit on a thread with a deadline.
+//! A full fold is hundreds of milliseconds on this library — the log parse
+//! alone is 314ms — which I6 does not permit on a thread with a deadline.
 //!
 //! Nothing enforces that by construction: a fold is an ordinary function call
-//! and any thread can make one. What makes it hold is that the [`Desk`] hands
-//! out `Arc<Held>` and no `&mut` to anything foldable, so the only code that
-//! *can* fold is the code on the other side of the channel.
+//! and any thread can make one. What keeps it true is that [`Desk`] hands out
+//! `Arc<Held>` and no `&mut` to anything foldable, so the only code that *can*
+//! fold is on the far side of the channel.
 //!
-//! ## Why a job queue rather than a lock
+//! ## Writes are sent, not taken
 //!
-//! A `Mutex<Instance>` would be smaller and would put every writer back on the
-//! caller's thread — which is the thing being removed. A rating taken while a
-//! scan holds the lock would block the render, and that is exactly I6's
-//! head-of-line blocking wearing a different hat.
+//! A `Mutex<Instance>` would be smaller, and would put every writer back on
+//! the caller's thread. A rating taken while a scan held the lock would block
+//! the render, which is I6's head-of-line blocking wearing a different hat.
 //!
-//! So writes are **sent**, not taken: the caller appends to a queue and
-//! carries on, and the next publication is how it finds out. [`Desk::settled`]
-//! exists for the two places that genuinely must wait — a test, and quitting.
+//! So a write goes on a queue and the caller carries on; the next publication
+//! is how it finds out. [`Desk::settled`] is for the two places that must
+//! wait — a test, and quitting.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,10 +38,8 @@ use crate::projection::catalogue::Catalogue;
 
 /// One published answer: everything derived from the log, folded together.
 ///
-/// The two travel as a pair because they are one fold. They were separate
-/// fields updated at separate moments — `library_view` rebuilt on `Refold`,
-/// `ui.listened` on every appended fact — and a pair that is only sometimes
-/// refreshed together is a pair that can disagree about what the log says.
+/// The two travel as a pair because they are one fold. Refreshing them at
+/// separate moments would let them disagree about what the log says.
 #[derive(Default)]
 pub struct Held {
     /// What the player is allowed to ask (#77's seam).
@@ -72,11 +54,8 @@ pub struct Held {
 
 /// A change to the log, or a reason to publish again.
 enum Job {
-    /// Apply this to the log, flush it, and publish.
-    ///
-    /// Boxed because it crosses a thread: the closure form is what every
-    /// caller of `ui::record` already writes, and keeping it means this is a
-    /// change of *where* the work happens rather than of how it is expressed.
+    /// Apply this to the log, flush it, and publish. Boxed because it
+    /// crosses a thread.
     Say(Box<dyn FnOnce(&mut Instance) + Send>),
     /// A scan reconciled the disk; these are the holdings now.
     Held(Holdings),
@@ -101,9 +80,8 @@ pub struct Desk {
 impl Desk {
     /// Start the thread and publish the first fold.
     ///
-    /// The first fold happens **here, synchronously**, so a caller never sees
-    /// an empty library before the thread has caught up. Every fold after it
-    /// is on the thread.
+    /// The first fold happens here, synchronously, so a caller never sees an
+    /// empty library. Every fold after it is on the thread.
     pub fn open(
         log: Instance,
         held: Holdings,
@@ -125,11 +103,10 @@ impl Desk {
                         Job::Say(say) => {
                             say(&mut log);
                             if let Some(dir) = &data_dir {
-                                // **Flushed here, and a failure is not fatal.**
-                                // The in-memory log is still right, and the
-                                // alternative — refusing the fact because the
-                                // disk refused it — loses the rating as well
-                                // as the file.
+                                // A failed flush is not fatal: the in-memory
+                                // log is still right, and refusing the fact
+                                // because the disk refused it would lose the
+                                // rating as well as the write.
                                 let _ = log.flush(dir);
                             }
                             None
@@ -164,9 +141,8 @@ impl Desk {
         Desk::open(Instance::new(device), Holdings::default(), device, 0, None)
     }
 
-    /// Which device this is. Held here because the log is, and a caller that
-    /// needs it has no other honest source — `Instance` is on the far side of
-    /// the channel now.
+    /// Which device this is. Held here because the log is, and `Instance` is
+    /// on the far side of the channel.
     pub fn device(&self) -> Id<Device> {
         self.device
     }
@@ -178,9 +154,9 @@ impl Desk {
 
     /// Append to the log, off this thread.
     ///
-    /// Returns immediately. The caller finds out through the next
-    /// [`Desk::current`], which is the same way every other reader does — a
-    /// writer is not privileged just because it was the one who wrote.
+    /// Returns immediately. The caller learns the result through the next
+    /// [`Desk::current`], like every other reader: a writer is not privileged
+    /// just because it was the one who wrote.
     pub fn say(&self, say: impl FnOnce(&mut Instance) + Send + 'static) {
         let _ = self.jobs.send(Job::Say(Box::new(say)));
     }
@@ -197,10 +173,9 @@ impl Desk {
 
     /// Block until everything queued so far has been published.
     ///
-    /// For the two places that must wait: a test asserting on what a write
-    /// did, and quitting, where the last rating has to reach the disk. Not for
-    /// ordinary reads — a read that waits has put the fold back on the
-    /// caller's thread by another route.
+    /// For a test asserting on what a write did, and for quitting, where the
+    /// last rating has to reach the disk. Not for ordinary reads: a read that
+    /// waits has put the fold back on the caller's thread by another route.
     pub fn settled(&self) {
         let (tx, rx) = unbounded();
         if self.jobs.send(Job::Settled(tx)).is_ok() {
@@ -210,12 +185,10 @@ impl Desk {
 }
 
 impl Drop for Desk {
-    /// Close the queue and join, so a rating queued a moment before quit is
-    /// not lost to the process exiting.
     fn drop(&mut self) {
-        // Dropping the last sender is what ends the thread's `for job in rx`,
-        // and it drains first — so a rating queued a moment before quit still
-        // reaches the disk.
+        // Dropping the last sender ends the thread's `for job in rx`, and it
+        // drains first — so a rating queued a moment before quit still reaches
+        // the disk. The join is what makes that ordering observable.
         drop(std::mem::replace(&mut self.jobs, unbounded().0));
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -245,9 +218,8 @@ mod tests {
         Desk::detached(device())
     }
 
-    /// **A reader holds its answer while the next one is published.** This is
-    /// the property the whole change is for: the draw loop used to have to
-    /// unwind so the borrow would end before anything could rebuild.
+    /// A reader holds its answer while the next one is published beside it.
+    /// This is what lets the draw loop take a fold and keep drawing from it.
     #[test]
     fn an_answer_already_taken_survives_the_next_publication() {
         let desk = desk();
@@ -309,10 +281,9 @@ mod tests {
         );
     }
 
-    /// **Quitting does not lose what was queued.** A rating is appended and
-    /// the program exits a moment later; the write is on another thread by
-    /// then, so the only thing standing between it and the disk is `Drop`
-    /// draining the queue before it joins.
+    /// Quitting does not lose what was queued. A rating appended a moment
+    /// before exit is still on the librarian thread, so `Drop` draining the
+    /// queue before it joins is the only thing between it and the disk.
     #[test]
     fn dropping_the_desk_flushes_what_was_still_queued() {
         let dir = std::env::temp_dir().join("gmuse-librarian-drop");

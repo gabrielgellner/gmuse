@@ -364,11 +364,11 @@ pub struct Ui {
     pub audit: crate::audit::Audit,
     /// Where to write "where I was". `None` disables resumption entirely.
     pub session_path: Option<PathBuf>,
-    /// The library's own log, and the one this device appends to.
+    /// Where the library is asked and told. Owns the log and the fold; this
+    /// thread only ever sends to it and reads what it published.
     ///
-    /// Ratings and plays are facts about a **recording**, not about a file. A
-    /// renumber used to strand them because the key was a path (#81); a
-    /// recording's id does not move when the file does.
+    /// Ratings and plays are facts about a **recording**, not a file, so a
+    /// renumber cannot strand them (#81).
     pub desk: crate::librarian::Desk,
     /// The fold, refreshed after every fact. Held so the UI answers a rating
     /// immediately; what makes it durable is the record appended beside it.
@@ -1079,18 +1079,9 @@ pub fn record(
         return;
     }
     ui.desk.say(say);
-    // **Waited on, and that is not a regression** — #206.
-    //
-    // This was synchronous before: append, fold, flush, all on this thread,
-    // because "the UI answers a rating immediately" is the whole reason the
-    // fold is held. What changed is *who* folds, not whether this waits — the
-    // work moved to the librarian and this blocks until it lands.
-    //
-    // The wait is what #208 removes. A position-driven fold that is already
-    // caught up costs one integer comparison per device, so settling after a
-    // single appended fact stops meaning "refold 279,000 records" and starts
-    // meaning "apply one". Making it asynchronous *here* instead would be the
-    // wrong repair: it would show a rating that has not been recorded yet.
+    // Waits, because the screen must show the rating it just took and a
+    // rating that has not been recorded yet must not appear. The cost is a
+    // whole fold today; #208's position-driven fold makes it one comparison.
     ui.desk.settled();
     ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
 }
@@ -10410,9 +10401,8 @@ mod tests {
         let mut ui = ui_of(store, true);
         let dir = scratch(name);
         let device = crate::model::id::Id::derived(b"test");
-        // **The dir goes to the desk, not just to `ui`** — #206. Flushing is
-        // the librarian's now, so a desk opened without one records nothing
-        // however much the UI thinks it has a data directory.
+        // The desk needs the directory, not just `ui`: flushing is the
+        // librarian's, so a desk opened without one records nothing.
         ui.desk = crate::librarian::Desk::open(
             crate::model::instance::Instance::new(device),
             crate::operations::scan::Holdings::default(),
