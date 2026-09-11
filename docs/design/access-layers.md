@@ -358,6 +358,11 @@ is a fact whose blast radius can be computed.
 
 ## 4. How the boundaries are held
 
+**Built, by #193's split.** `src/facts/` and `src/projection/` now exist and carry these tests; `src/query/` has had
+them since #191. What blocked it until now was that `model/log.rs` held `Record` and `Fact` at the top and `Catalogue`
+and `fold` below them, in one 3,917-line file — the boundary ran through the middle of a file, so there was nothing for
+a wrong line to cross.
+
 Documented boundaries rot. This project already has the answer and it is `the_model_does_not_know_the_player_exists` — a
 test that walks `src/model/`, reads every `use` line, and fails on a forbidden import. It has caught two live mistakes.
 
