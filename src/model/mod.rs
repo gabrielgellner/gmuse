@@ -16,7 +16,7 @@
 //! **The attribute an item carries classifies it**, and the two are not
 //! interchangeable:
 //!
-//! - `#[expect(dead_code, reason = …)]` — **nothing** references this, tests
+//! - `#[allow(dead_code, reason = …)]` — **nothing** references this, tests
 //!   included. It is a declaration waiting for its first use. `expect` is
 //!   right because it is self-retiring: the day something calls it, the
 //!   expectation is unfulfilled and the build says so, and the attribute has

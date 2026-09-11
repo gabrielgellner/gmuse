@@ -1,0 +1,24 @@
+# **The Python door** — #197, `access-layers.md` §6.
+#
+# The tools reach the library through a boundary already: a work list from
+# `shelf query`, a proposal file for `shelf apply`. What that boundary lacks is
+# a contract anyone can fail against. This builds the same Rust library the
+# binary links, as an extension module the tools import.
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "gmuse-core"
+description = "gmuse's library, for the tools that prepare files for it"
+requires-python = ">=3.11"
+dynamic = ["version"]
+
+[tool.maturin]
+# One wheel for every later CPython. The stable ABI means a release does not
+# need rebuilding per interpreter, which matters for a tool nobody is going to
+# remember to rebuild.
+features = ["pyo3/extension-module", "python"]
+module-name = "gmuse_core"
+# The stubs travel with the wheel, so the tools keep their type checking.
+python-source = "python"

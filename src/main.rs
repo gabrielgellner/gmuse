@@ -7,49 +7,14 @@
 //! Verification target from DESIGN §9: seek is sample-accurate and the
 //! position display does not jump on seek.
 
-mod apply;
-mod audio;
-mod audio_id;
-mod audit;
-mod bridge;
-mod cache;
-mod cli;
-mod cmd;
-mod config;
-mod datadir;
-mod edit;
-mod events;
-mod facts;
-#[cfg(test)]
-mod fixture;
-mod guides;
-mod history;
-mod lock;
-mod m3u;
-mod model;
-mod next;
-mod playlist;
-mod projection;
-mod query;
-mod remote;
-mod scan;
-mod session;
-mod shelf;
-mod smart;
-mod storage;
-mod text;
-mod ui;
-mod undo;
-mod view;
-
 use std::path::PathBuf;
 
 use clap::Parser;
 
-use audio::PlayerHandle;
-use cli::Cli;
-use scan::Holdings;
-use shelf::Shelf;
+use gmuse::audio::PlayerHandle;
+use gmuse::cli::Cli;
+use gmuse::scan::Holdings;
+use gmuse::shelf::Shelf;
 
 /// Everything the prompt operates on.
 struct App {
@@ -63,7 +28,7 @@ struct App {
     ///
     /// Carried here because the scan runs before the history is loaded, and
     /// the history is what most needs to know (#25).
-    moves: Vec<scan::Move>,
+    moves: Vec<gmuse::scan::Move>,
     /// Files that looked like audio and could not be read at all.
     ///
     /// Carried for the same reason as `moves`: the scan happens before the TUI
@@ -78,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Before the lock, and before anything is opened: a remote client is not a
     // player. It writes one line to the running player and prints the reply.
     if let Some(line) = &args.remote {
-        return match remote::send(&remote::default_path(), line) {
+        return match gmuse::remote::send(&gmuse::remote::default_path(), line) {
             Ok(reply) => {
                 println!("{reply}");
                 // A refusal from the player is the client's failure too, or a
@@ -105,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // it opens no device and writes only the log, so refusing it because a
     // player is running would make `import` and `apply` unusable exactly when
     // somebody is listening to the library they are editing.
-    if let Some(cli::Command::Shelf(op)) = &args.command {
+    if let Some(gmuse::cli::Command::Shelf(op)) = &args.command {
         let loaded = if args.no_config {
             // **`--no-config` still keeps the log where the log lives.**
             // `Loaded::default()` leaves `data_dir` empty, and an empty path
@@ -113,12 +78,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // well relative to the working directory — so a library operation
             // silently started a fresh log in whatever folder it was run from
             // and wrote it there.
-            config::Loaded {
-                data_dir: config::default_data_dir(),
-                ..config::Loaded::default()
+            gmuse::config::Loaded {
+                data_dir: gmuse::config::default_data_dir(),
+                ..gmuse::config::Loaded::default()
             }
         } else {
-            config::load(&args.config.clone().unwrap_or_else(config::default_path))
+            gmuse::config::load(
+                &args
+                    .config
+                    .clone()
+                    .unwrap_or_else(gmuse::config::default_path),
+            )
         };
         let roots = if args.library.is_empty() {
             loaded.library.clone()
@@ -134,9 +104,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _lock = if args.no_lock {
         None
     } else {
-        match lock::acquire(&lock::default_path()) {
+        match gmuse::lock::acquire(&gmuse::lock::default_path()) {
             Ok(held) => Some(held),
-            Err(err @ lock::LockError::Held { .. }) => {
+            Err(err @ gmuse::lock::LockError::Held { .. }) => {
                 eprintln!("{err}");
                 eprintln!(
                     "\nTwo players share one audio device and one session.toml, so this one\n\
@@ -164,18 +134,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read the config first: it defines the catalogs, which decide what to
     // scan.
     let loaded = if args.no_config {
-        config::Loaded::default()
+        gmuse::config::Loaded::default()
     } else {
-        config::load(&args.config.clone().unwrap_or_else(config::default_path))
+        gmuse::config::load(
+            &args
+                .config
+                .clone()
+                .unwrap_or_else(gmuse::config::default_path),
+        )
     };
 
-    let cache_path =
-        (!args.no_cache).then(|| args.cache.clone().unwrap_or_else(cache::default_path));
+    let cache_path = (!args.no_cache).then(|| {
+        args.cache
+            .clone()
+            .unwrap_or_else(gmuse::cache::default_path)
+    });
 
     // Load the cached library, then reconcile it with the roots we were given.
-    let (store, cached_roots, cached_view) = match cache_path.as_deref().map(cache::load) {
-        Some(Ok(cache::Outcome::Loaded { store, roots, view })) => (store, roots, view),
-        Some(Ok(cache::Outcome::Discarded)) => {
+    let (store, cached_roots, cached_view) = match cache_path.as_deref().map(gmuse::cache::load) {
+        Some(Ok(gmuse::cache::Outcome::Loaded { store, roots, view })) => (store, roots, view),
+        Some(Ok(gmuse::cache::Outcome::Discarded)) => {
             // Costs a rescan, so say so. Silently starting from nothing is how
             // a library appears to vanish.
             eprintln!("cache: discarded (wrong version or corrupt); rescanning");
@@ -237,7 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.store = Holdings::new();
         }
         let roots = app.roots.clone();
-        let report = scan::scan(&mut app.store, &roots);
+        let report = gmuse::scan::scan(&mut app.store, &roots);
         println!("library: {report}");
         report_errors(&report);
         app.moves = report.moves.clone();
@@ -252,17 +230,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "library: empty — scan one with `gmuse --library <dir>`, or set\n\
              `library = [\"~/Music\"]` in {}",
-            config::default_path().display()
+            gmuse::config::default_path().display()
         );
     }
 
     if args.migrate_log {
-        let machine = crate::events::machine_id(&config::default_state_dir());
-        match crate::model::migrate::run(
+        let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+        match gmuse::model::migrate::run(
             &loaded.data_dir,
             &app.roots,
             &machine,
-            crate::history::now(),
+            gmuse::history::now(),
         ) {
             Ok(outcome) => {
                 println!("{outcome}");
@@ -297,8 +275,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// `None` when the run was told not to use one, so `--no-cache` means what it
 /// says at both ends.
-fn stale_cache(args: &cli::Cli) -> Option<std::path::PathBuf> {
-    (!args.no_cache).then(|| args.cache.clone().unwrap_or_else(cache::default_path))
+fn stale_cache(args: &gmuse::cli::Cli) -> Option<std::path::PathBuf> {
+    (!args.no_cache).then(|| {
+        args.cache
+            .clone()
+            .unwrap_or_else(gmuse::cache::default_path)
+    })
 }
 
 /// Throw away a cache this command has just made wrong.
@@ -317,7 +299,7 @@ fn root_of(roots: &[std::path::PathBuf]) -> std::path::PathBuf {
 
 fn drop_cache(path: Option<&std::path::Path>) {
     if let Some(path) = path
-        && let Err(e) = cache::discard(path)
+        && let Err(e) = gmuse::cache::discard(path)
     {
         eprintln!("cache: {e}");
     }
@@ -325,24 +307,24 @@ fn drop_cache(path: Option<&std::path::Path>) {
 
 /// One library operation, and then exit.
 fn run_library(
-    op: &cli::Shelf,
-    loaded: &config::Loaded,
+    op: &gmuse::cli::Shelf,
+    loaded: &gmuse::config::Loaded,
     roots: &[std::path::PathBuf],
     cache_path: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let machine = crate::events::machine_id(&config::default_state_dir());
-    let device = crate::model::id::Id::derived(machine.as_bytes());
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
     match op {
-        cli::Shelf::Restore { paths, write } => {
+        gmuse::cli::Shelf::Restore { paths, write } => {
             let mut files: Vec<std::path::PathBuf> = Vec::new();
             for path in paths {
                 if path.is_dir() {
                     for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
-                        if entry.file_type().is_file() && crate::scan::is_audio(entry.path()) {
+                        if entry.file_type().is_file() && gmuse::scan::is_audio(entry.path()) {
                             files.push(entry.path().to_path_buf());
                         }
                     }
-                } else if crate::scan::is_audio(path) {
+                } else if gmuse::scan::is_audio(path) {
                     files.push(path.clone());
                 }
             }
@@ -352,10 +334,10 @@ fn run_library(
                 return Ok(());
             }
 
-            let (mut log, _) = crate::model::instance::Instance::open(
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             let cat = log.catalogue();
             // **Resolved by hashing, like a retirement**, for the same reason:
@@ -364,9 +346,9 @@ fn run_library(
             // wherever they now sit.
             let mut coming = Vec::new();
             for file in &files {
-                match crate::model::ingest::read(file) {
+                match gmuse::model::ingest::read(file) {
                     Ok(scanned) => {
-                        let id = crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(
+                        let id = gmuse::model::id::Id::<gmuse::model::entity::Encoding>::of_audio(
                             &scanned.audio,
                         );
                         if !cat.retired.contains(&id) {
@@ -380,7 +362,7 @@ fn run_library(
             }
 
             let fresh = if *write {
-                let now = crate::history::now_ms();
+                let now = gmuse::history::now_ms();
                 for id in &coming {
                     log.restore_encoding(now, *id);
                 }
@@ -397,7 +379,7 @@ fn run_library(
                 eprintln!("dry run — nothing written. Add --write.");
             }
         }
-        cli::Shelf::Remove { paths, write } => {
+        gmuse::cli::Shelf::Remove { paths, write } => {
             // Every audio file under what was named, `.departed` included:
             // an album retired by hand before this existed is exactly the case
             // that wants a tombstone and no move.
@@ -405,11 +387,11 @@ fn run_library(
             for path in paths {
                 if path.is_dir() {
                     for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
-                        if entry.file_type().is_file() && crate::scan::is_audio(entry.path()) {
+                        if entry.file_type().is_file() && gmuse::scan::is_audio(entry.path()) {
                             files.push(entry.path().to_path_buf());
                         }
                     }
-                } else if crate::scan::is_audio(path) {
+                } else if gmuse::scan::is_audio(path) {
                     files.push(path.clone());
                 }
             }
@@ -419,10 +401,10 @@ fn run_library(
                 return Ok(());
             }
 
-            let (mut log, _) = crate::model::instance::Instance::open(
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             let cat = log.catalogue();
             // **Resolved by hashing, not by path.** A retirement is about
@@ -432,7 +414,7 @@ fn run_library(
             // **Where every device says it holds each copy.** Identity is
             // the audio, so two paths can be one encoding — and retiring the
             // one you meant would retire the one you did not.
-            let departed = root_of(roots).join(crate::scan::DEPARTED);
+            let departed = root_of(roots).join(gmuse::scan::DEPARTED);
             // **Elsewhere means somewhere that is not going.** The guard below
             // asks whether these bytes survive this retirement, and the files
             // being retired are not an answer to that — every one of them is
@@ -448,9 +430,9 @@ fn run_library(
 
             let mut retiring = Vec::new();
             for file in &files {
-                match crate::model::ingest::read(file) {
+                match gmuse::model::ingest::read(file) {
                     Ok(scanned) => {
-                        let id = crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(
+                        let id = gmuse::model::id::Id::<gmuse::model::entity::Encoding>::of_audio(
                             &scanned.audio,
                         );
                         if !cat.encodings.contains_key(&id) {
@@ -477,7 +459,7 @@ fn run_library(
             }
 
             let root = root_of(roots);
-            let done = crate::storage::retire(
+            let done = gmuse::storage::retire(
                 &root,
                 &retiring.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>(),
                 *write,
@@ -487,7 +469,7 @@ fn run_library(
             }
 
             let fresh: usize = if *write {
-                let now = crate::history::now_ms();
+                let now = gmuse::history::now_ms();
                 let before = log.records().len();
                 for (_, id) in &retiring {
                     log.retire_encoding(now, *id);
@@ -502,7 +484,7 @@ fn run_library(
                 files.len(),
                 retiring.len(),
                 done.moved,
-                crate::scan::DEPARTED,
+                gmuse::scan::DEPARTED,
                 done.failed.len(),
             );
             if *write {
@@ -512,18 +494,18 @@ fn run_library(
                 eprintln!("dry run — nothing written. Add --write.");
             }
         }
-        cli::Shelf::Scan { write } => {
-            let (mut log, _) = crate::model::instance::Instance::open(
+        gmuse::cli::Shelf::Scan { write } => {
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             let before = log.records().len();
-            let mut reads = crate::cache::load_measurements(&crate::cache::measurements_path());
-            let report = crate::model::populate::reconcile(
+            let mut reads = gmuse::cache::load_measurements(&gmuse::cache::measurements_path());
+            let report = gmuse::model::populate::reconcile(
                 &mut log,
                 roots,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
                 &mut reads,
             );
 
@@ -561,18 +543,18 @@ fn run_library(
                     log.records().len() - before
                 );
                 reads.prune_missing();
-                crate::cache::save_measurements(&crate::cache::measurements_path(), &reads);
+                gmuse::cache::save_measurements(&gmuse::cache::measurements_path(), &reads);
                 // The locators moved, so anything holding old ones is stale.
                 drop_cache(cache_path.as_deref());
             } else {
                 eprintln!("dry run — nothing written. Add --write.");
             }
         }
-        cli::Shelf::Compact { write } => {
-            let (mut log, _) = crate::model::instance::Instance::open(
+        gmuse::cli::Shelf::Compact { write } => {
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             let before = log.records().clone();
             // Through the instance rather than the free function, so there is
@@ -584,7 +566,7 @@ fn run_library(
             let dropped = before.len() - after.len();
             // Bytes as they sit on disk, so the number reported is the number
             // a person can check with `ls`.
-            let weigh = |rs: &std::collections::BTreeSet<crate::facts::Record>| -> usize {
+            let weigh = |rs: &std::collections::BTreeSet<gmuse::facts::Record>| -> usize {
                 rs.iter()
                     .filter_map(|r| serde_json::to_string(r).ok())
                     .map(|l| l.len() + 1)
@@ -607,7 +589,7 @@ fn run_library(
                 // is safe — the fold is the same either way — which is what
                 // makes this per-file rather than an all-or-nothing rewrite.
                 let mut devices: std::collections::BTreeSet<
-                    crate::model::id::Id<crate::model::entity::Device>,
+                    gmuse::model::id::Id<gmuse::model::entity::Device>,
                 > = std::collections::BTreeSet::new();
                 for record in &after {
                     devices.insert(record.stamp.device);
@@ -619,8 +601,8 @@ fn run_library(
                         .filter(|r| r.stamp.device == each)
                         .cloned()
                         .collect();
-                    let path = crate::model::durable::log_path(&loaded.data_dir, each);
-                    total += crate::model::durable::rewrite(&path, &mine)?;
+                    let path = gmuse::model::durable::log_path(&loaded.data_dir, each);
+                    total += gmuse::model::durable::rewrite(&path, &mine)?;
                 }
                 eprintln!("{total} record(s) kept, logs rewritten");
                 // The player's cache names paths and nothing here moved a
@@ -628,18 +610,18 @@ fn run_library(
                 // command in this block drops it.
             }
         }
-        cli::Shelf::Names => {
-            let (mut log, _) = crate::model::instance::Instance::open(
+        gmuse::cli::Shelf::Names => {
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
-            crate::model::populate::populate(
+            gmuse::model::populate::populate(
                 &mut log,
                 roots,
-                crate::history::now_ms(),
-                crate::model::populate::Admits::Identified,
-                &mut crate::model::ingest::Reads::default(),
+                gmuse::history::now_ms(),
+                gmuse::model::populate::Admits::Identified,
+                &mut gmuse::model::ingest::Reads::default(),
             );
             let cat = log.catalogue();
 
@@ -652,7 +634,7 @@ fn run_library(
             // as being in doubt about a name it no longer owns.
             let mut said: std::collections::BTreeMap<_, Vec<&str>> = Default::default();
             for record in log.records() {
-                if let crate::facts::Fact::ArtistNamed { artist, name } = &record.fact {
+                if let gmuse::facts::Fact::ArtistNamed { artist, name } = &record.fact {
                     let seen: &mut Vec<&str> =
                         said.entry(cat.artist_merges.resolve(*artist)).or_default();
                     if seen.last() != Some(&name.as_str()) {
@@ -704,7 +686,7 @@ fn run_library(
                 // Where every earlier name has been aliased, the reason is on
                 // the record and there is nothing left to decide.
                 let aliased = cat.aliases.iter().any(|(subject, value, _)| {
-                    *subject == crate::model::reference::Cataloguable::Artist(*artist)
+                    *subject == gmuse::model::reference::Cataloguable::Artist(*artist)
                         && names.iter().rev().skip(1).any(|n| n == value)
                 });
                 if aliased {
@@ -747,21 +729,21 @@ fn run_library(
                  is a name this artist also has rather than one in dispute."
             );
         }
-        cli::Shelf::Duplicates => {
-            let (mut log, _) = crate::model::instance::Instance::open(
+        gmuse::cli::Shelf::Duplicates => {
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
-            crate::model::populate::populate(
+            gmuse::model::populate::populate(
                 &mut log,
                 roots,
-                crate::history::now_ms(),
-                crate::model::populate::Admits::Identified,
-                &mut crate::model::ingest::Reads::default(),
+                gmuse::history::now_ms(),
+                gmuse::model::populate::Admits::Identified,
+                &mut gmuse::model::ingest::Reads::default(),
             );
             let cat = log.catalogue();
-            let library = crate::model::seam::Librarian::from_catalogue(&cat);
+            let library = gmuse::model::seam::Librarian::from_catalogue(&cat);
 
             // How many files sit on each album, which is what tells a dead
             // duplicate from a real split. A group with none is an identity
@@ -781,7 +763,7 @@ fn run_library(
             for (id, group) in &cat.groups {
                 let who = library
                     .reference
-                    .credited_as(crate::model::reference::CreditOn::ReleaseGroup(*id));
+                    .credited_as(gmuse::model::reference::CreditOn::ReleaseGroup(*id));
                 // **Folded, because capitalisation is a typo and not a
                 // distinction.** `normalise` folds case when it mints a group
                 // id for exactly that reason, so a report that compares titles
@@ -791,8 +773,8 @@ fn run_library(
                 // this listed neither.
                 by_name
                     .entry((
-                        crate::model::ingest::normalise(&who),
-                        crate::model::ingest::normalise(&group.title),
+                        gmuse::model::ingest::normalise(&who),
+                        gmuse::model::ingest::normalise(&group.title),
                     ))
                     .or_default()
                     .push(*id);
@@ -801,7 +783,7 @@ fn run_library(
             let mut found = 0usize;
             // What the name rule already said, so the overlap pass below adds
             // to the report rather than repeating it.
-            let mut reported: Vec<crate::model::id::Id<crate::model::entity::ReleaseGroup>> =
+            let mut reported: Vec<gmuse::model::id::Id<gmuse::model::entity::ReleaseGroup>> =
                 Vec::new();
             for ((_, _), mut ids) in by_name {
                 if ids.len() < 2 {
@@ -814,7 +796,7 @@ fn run_library(
                 let (who, title) = (
                     library
                         .reference
-                        .credited_as(crate::model::reference::CreditOn::ReleaseGroup(ids[0])),
+                        .credited_as(gmuse::model::reference::CreditOn::ReleaseGroup(ids[0])),
                     cat.groups[&ids[0]].title.clone(),
                 );
                 // Most files first, so the obvious winner reads first.
@@ -849,8 +831,8 @@ fn run_library(
             // something the title rule did not produce — lesson 1 — and needs
             // no fuzzy matching to do it.
             let mut of_group: std::collections::BTreeMap<
-                crate::model::id::Id<crate::model::entity::ReleaseGroup>,
-                std::collections::BTreeSet<crate::model::id::Id<crate::model::entity::Recording>>,
+                gmuse::model::id::Id<gmuse::model::entity::ReleaseGroup>,
+                std::collections::BTreeSet<gmuse::model::id::Id<gmuse::model::entity::Recording>>,
             > = Default::default();
             for placed in cat.tracks.values() {
                 if let Some(medium) = cat.media.get(&placed.medium)
@@ -910,7 +892,7 @@ fn run_library(
                             "{} — {}",
                             library
                                 .reference
-                                .credited_as(crate::model::reference::CreditOn::ReleaseGroup(id)),
+                                .credited_as(gmuse::model::reference::CreditOn::ReleaseGroup(id)),
                             cat.groups[&id].title
                         )
                     };
@@ -964,7 +946,7 @@ fn run_library(
             // on purpose, so most groups with two releases have one real
             // pressing and one list. 60 rows of that buries the four that
             // matter.
-            let files_on = |release: &crate::model::id::Id<crate::model::entity::Release>| {
+            let files_on = |release: &gmuse::model::id::Id<gmuse::model::entity::Release>| {
                 let on: std::collections::BTreeSet<_> = cat
                     .media
                     .iter()
@@ -990,7 +972,7 @@ fn run_library(
                         "{} — {}   {} pressings",
                         library
                             .reference
-                            .credited_as(crate::model::reference::CreditOn::ReleaseGroup(**group)),
+                            .credited_as(gmuse::model::reference::CreditOn::ReleaseGroup(**group)),
                         grouped.title,
                         releases.len()
                     );
@@ -1008,11 +990,11 @@ fn run_library(
                 );
             }
         }
-        cli::Shelf::Copies => {
-            let (log, _) = crate::model::instance::Instance::open(
+        gmuse::cli::Shelf::Copies => {
+            let (log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             let cat = log.catalogue();
             let here = cat.holdings.get(&device);
@@ -1087,14 +1069,14 @@ fn run_library(
                 );
             }
         }
-        cli::Shelf::Slots { work } => {
-            use crate::model::entity::{Medium, Recording};
-            use crate::model::id::Id;
+        gmuse::cli::Shelf::Slots { work } => {
+            use gmuse::model::entity::{Medium, Recording};
+            use gmuse::model::id::Id;
 
-            let (log, _) = crate::model::instance::Instance::open(
+            let (log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             let cat = log.catalogue();
             let here = cat.holdings.get(&device);
@@ -1118,7 +1100,7 @@ fn run_library(
             // The finding itself is `Librarian::contested_slots`, so it is
             // testable and there is one definition of what "contested" means.
             // What is added here is device-local: which claimant has a file.
-            let library = crate::model::seam::Librarian::from_catalogue(&cat);
+            let library = gmuse::model::seam::Librarian::from_catalogue(&cat);
             // **The same rows `query` hands out, narrowed to the contest.**
             // A tool listening to these needs a locator and an id, which is
             // what a work list is — and building a second shape for it would
@@ -1130,14 +1112,14 @@ fn run_library(
                     .flatten()
                     .filter(|r| playable.contains_key(r))
                     .collect();
-                for row in query::rows(
-                    &crate::projection::Projected::rebuild(log.records()),
+                for row in gmuse::query::rows(
+                    &gmuse::projection::Projected::rebuild(log.records()),
                     device,
-                    crate::history::now_ms(),
-                    query::Only::Everything,
+                    gmuse::history::now_ms(),
+                    gmuse::query::Only::Everything,
                     // A contested seat is a question about the *recording* —
                     // which performance sits here — so one copy answers it.
-                    query::Copies::Shown,
+                    gmuse::query::Copies::Shown,
                     None,
                 ) {
                     if row.recording.is_some_and(|r| contested.contains(&r)) {
@@ -1193,11 +1175,11 @@ fn run_library(
                 );
             }
         }
-        cli::Shelf::Verify => {
-            let (log, _) = crate::model::instance::Instance::open(
+        gmuse::cli::Shelf::Verify => {
+            let (log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             let cat = log.catalogue();
             // **This device's holdings.** A locator another machine published
@@ -1206,7 +1188,7 @@ fn run_library(
             let mine = cat.holdings.get(&device);
             let held: Vec<(
                 &String,
-                crate::model::id::Id<crate::model::entity::Encoding>,
+                gmuse::model::id::Id<gmuse::model::entity::Encoding>,
             )> = mine
                 .map(|a| a.held.iter().map(|(id, at)| (at, *id)).collect())
                 .unwrap_or_default();
@@ -1246,18 +1228,18 @@ fn run_library(
                 );
             }
         }
-        cli::Shelf::Artists => {
-            let (mut log, _) = crate::model::instance::Instance::open(
+        gmuse::cli::Shelf::Artists => {
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
-            crate::model::populate::populate(
+            gmuse::model::populate::populate(
                 &mut log,
                 roots,
-                crate::history::now_ms(),
-                crate::model::populate::Admits::Identified,
-                &mut crate::model::ingest::Reads::default(),
+                gmuse::history::now_ms(),
+                gmuse::model::populate::Admits::Identified,
+                &mut gmuse::model::ingest::Reads::default(),
             );
             let cat = log.catalogue();
 
@@ -1268,11 +1250,11 @@ fn run_library(
             // merge the wrong way. So an id is name-derived if *any* name it
             // has ever been given mints it.
             let mut from_name: std::collections::BTreeSet<
-                crate::model::id::Id<crate::model::entity::Artist>,
+                gmuse::model::id::Id<gmuse::model::entity::Artist>,
             > = Default::default();
             for record in log.records() {
-                if let crate::facts::Fact::ArtistNamed { artist, name } = &record.fact
-                    && crate::model::id::Id::<crate::model::entity::Artist>::of_artist(None, name)
+                if let gmuse::facts::Fact::ArtistNamed { artist, name } = &record.fact
+                    && gmuse::model::id::Id::<gmuse::model::entity::Artist>::of_artist(None, name)
                         == *artist
                 {
                     from_name.insert(*artist);
@@ -1290,7 +1272,7 @@ fn run_library(
             let mut by_name: std::collections::BTreeMap<String, Vec<_>> = Default::default();
             for (id, name) in &cat.artist_names {
                 by_name
-                    .entry(crate::model::ingest::normalise(name))
+                    .entry(gmuse::model::ingest::normalise(name))
                     .or_default()
                     .push(*id);
             }
@@ -1347,14 +1329,14 @@ fn run_library(
                  because it is the rung a second device would also derive."
             );
         }
-        cli::Shelf::Tree { levels, tracks } => {
+        gmuse::cli::Shelf::Tree { levels, tracks } => {
             // **Parse at the boundary** (§12): the spec becomes `Levels`
             // before anything groups by it, through the *same* parser the `:`
             // line uses. A second reader of `genre@1` is a second place for
             // the depth syntax to drift, and #79's whole point is that the
             // compound string stops being load-bearing.
             let spec =
-                crate::cmd::parse::levels_spec(levels).map_err(|e| format!("--levels: {e}"))?;
+                gmuse::cmd::parse::levels_spec(levels).map_err(|e| format!("--levels: {e}"))?;
             let Some(pair) = spec.pair() else {
                 // **`flat` is a level list of none**, and a tree of no levels
                 // is one row per track — which `shelf query` already prints.
@@ -1366,32 +1348,32 @@ fn run_library(
                 );
             };
 
-            let (mut log, _) = crate::model::instance::Instance::open(
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
-            crate::model::populate::populate(
+            gmuse::model::populate::populate(
                 &mut log,
                 roots,
-                crate::history::now_ms(),
-                crate::model::populate::Admits::Identified,
-                &mut crate::model::ingest::Reads::default(),
+                gmuse::history::now_ms(),
+                gmuse::model::populate::Admits::Identified,
+                &mut gmuse::model::ingest::Reads::default(),
             );
-            let librarian = crate::model::seam::Librarian::from_catalogue(&log.catalogue());
+            let librarian = gmuse::model::seam::Librarian::from_catalogue(&log.catalogue());
 
             // Every row the library holds. The browser groups its *members* —
             // whatever the active filter left — and a filter is a separate
             // sentence from a level, so this asks the levels question against
             // the whole shelf and says how many rows that was.
             let members: std::collections::HashSet<_> = {
-                use crate::model::rows::Listing as _;
+                use gmuse::model::rows::Listing as _;
                 librarian.rows().into_iter().collect()
             };
 
             // `true` because that is what the UI starts with — the point is to
             // read what the browser would draw, not a second arrangement of it.
-            let tree = crate::model::tree::Tree::grouped(&librarian, pair, true, &members);
+            let tree = gmuse::model::tree::Tree::grouped(&librarian, pair, true, &members);
 
             let (outer, inner) = pair;
             println!("# levels: {},{}", outer.written(), inner.written());
@@ -1419,8 +1401,8 @@ fn run_library(
                             // song on an album and on a compilation is two
                             // rows with two positions, not one with a guess.
                             let slot = match listing.row {
-                                crate::model::rows::CopyId::On(track) => Some(track),
-                                crate::model::rows::CopyId::Loose(_) => None,
+                                gmuse::model::rows::CopyId::On(track) => Some(track),
+                                gmuse::model::rows::CopyId::Loose(_) => None,
                             };
                             let (disc, no) = librarian.place_of(slot);
                             // **`u16::MAX` is `place_of`'s "no position"**,
@@ -1442,18 +1424,18 @@ fn run_library(
             }
             eprintln!("{headings} heading(s), {albums} album(s), {rows} row(s)");
         }
-        cli::Shelf::Unfiled => {
-            let (mut log, _) = crate::model::instance::Instance::open(
+        gmuse::cli::Shelf::Unfiled => {
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
-            let report = crate::model::populate::populate(
+            let report = gmuse::model::populate::populate(
                 &mut log,
                 roots,
-                crate::history::now_ms(),
-                crate::model::populate::Admits::Identified,
-                &mut crate::model::ingest::Reads::default(),
+                gmuse::history::now_ms(),
+                gmuse::model::populate::Admits::Identified,
+                &mut gmuse::model::ingest::Reads::default(),
             );
             let mut lines = 0usize;
             for (folder, held) in &report.unfiled {
@@ -1476,27 +1458,27 @@ fn run_library(
                 report.unfiled.len()
             );
         }
-        cli::Shelf::Import {
+        gmuse::cli::Shelf::Import {
             paths,
             write,
             into,
             unidentified,
         } => {
-            let (mut log, _) = crate::model::instance::Instance::open(
+            let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             // **Named paths, or whatever a scan found that nothing knows.**
             // The second is the common case and the reason this can be run
             // with no arguments: the scan already said which files it did not
             // recognise, and importing them is the answer to that offer.
             let targets: Vec<std::path::PathBuf> = if paths.is_empty() {
-                let seen = crate::model::populate::reconcile(
+                let seen = gmuse::model::populate::reconcile(
                     &mut log,
                     roots,
-                    crate::history::now_ms(),
-                    &mut crate::model::ingest::Reads::default(),
+                    gmuse::history::now_ms(),
+                    &mut gmuse::model::ingest::Reads::default(),
                 );
                 // **A duplicate is a filesystem accident, and must not be
                 // silent** — `Report::duplicates` has said so since it was
@@ -1532,16 +1514,16 @@ fn run_library(
                 return Ok(());
             }
 
-            let report = crate::model::populate::populate(
+            let report = gmuse::model::populate::populate(
                 &mut log,
                 &targets,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
                 if *unidentified {
-                    crate::model::populate::Admits::Anything
+                    gmuse::model::populate::Admits::Anything
                 } else {
-                    crate::model::populate::Admits::Identified
+                    gmuse::model::populate::Admits::Identified
                 },
-                &mut crate::model::ingest::Reads::default(),
+                &mut gmuse::model::ingest::Reads::default(),
             );
             for (path, recording) in &report.identified {
                 println!("{recording}\t{}", path.display());
@@ -1625,11 +1607,11 @@ fn run_library(
                 // moved five.
                 let mut walk: Vec<std::path::PathBuf> = roots.to_vec();
                 walk.extend(targets.iter().cloned());
-                crate::model::populate::reconcile(
+                gmuse::model::populate::reconcile(
                     &mut log,
                     &walk,
-                    crate::history::now_ms(),
-                    &mut crate::model::ingest::Reads::default(),
+                    gmuse::history::now_ms(),
+                    &mut gmuse::model::ingest::Reads::default(),
                 );
 
                 // Import is strict, so anything that got this far is
@@ -1640,16 +1622,16 @@ fn run_library(
                 // it is, because the library's contents must not depend on
                 // path lengths.
                 let root = roots.first().cloned().unwrap_or_default();
-                let mut placed = crate::model::seam::Librarian::from_catalogue(&log.catalogue());
+                let mut placed = gmuse::model::seam::Librarian::from_catalogue(&log.catalogue());
                 placed.here(device);
                 let taken: Vec<_> = report
                     .identified
                     .keys()
-                    .filter_map(|at| crate::model::ingest::read(at).ok())
-                    .map(|s| crate::model::id::Id::of_audio(&s.audio))
+                    .filter_map(|at| gmuse::model::ingest::read(at).ok())
+                    .map(|s| gmuse::model::id::Id::of_audio(&s.audio))
                     .collect();
-                let plan = crate::storage::plan_of(&placed, &root, &taken);
-                let done = crate::storage::carry_out(&plan, &root, true);
+                let plan = gmuse::storage::plan_of(&placed, &root, &taken);
+                let done = gmuse::storage::carry_out(&plan, &root, true);
                 for (at, why) in &done.failed {
                     eprintln!("could not place {}: {why}", at.display());
                 }
@@ -1668,11 +1650,11 @@ fn run_library(
                 // where it is". Walking the roots alone drops its holding and
                 // turns a playable row into a greyed one.
                 if done.moved > 0 {
-                    crate::model::populate::reconcile(
+                    gmuse::model::populate::reconcile(
                         &mut log,
                         &walk,
-                        crate::history::now_ms(),
-                        &mut crate::model::ingest::Reads::default(),
+                        gmuse::history::now_ms(),
+                        &mut gmuse::model::ingest::Reads::default(),
                     );
                 }
                 // **Filed as it is brought in** (#94). The collection is a
@@ -1680,12 +1662,12 @@ fn run_library(
                 // it — deriving it afterwards from the folder is the
                 // inference the collection model exists to replace.
                 if let Some(name) = into {
-                    let now = crate::history::now_ms();
+                    let now = gmuse::history::now_ms();
                     let collection =
-                        crate::model::id::Id::<crate::model::entity::Collection>::of_name(name);
+                        gmuse::model::id::Id::<gmuse::model::entity::Collection>::of_name(name);
                     log.append_fact(
                         now,
-                        crate::facts::Fact::CollectionNamed {
+                        gmuse::facts::Fact::CollectionNamed {
                             collection,
                             name: name.trim().to_string(),
                             // A set somebody curated, not a running order —
@@ -1696,10 +1678,10 @@ fn run_library(
                     for recording in report.identified.values() {
                         log.append_fact(
                             now,
-                            crate::facts::Fact::CollectionEntryAdded {
+                            gmuse::facts::Fact::CollectionEntryAdded {
                                 collection,
                                 recording: *recording,
-                                ord: crate::model::ord::OrdKey::first(),
+                                ord: gmuse::model::ord::OrdKey::first(),
                             },
                         );
                     }
@@ -1718,17 +1700,17 @@ fn run_library(
                 eprintln!("dry run — nothing written. Add --write.");
             }
         }
-        cli::Shelf::Render { write } => {
-            let (mut library_log, _) = crate::model::instance::Instance::open(
+        gmuse::cli::Shelf::Render { write } => {
+            let (mut library_log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             let mut library =
-                crate::model::seam::Librarian::from_catalogue(&library_log.catalogue());
+                gmuse::model::seam::Librarian::from_catalogue(&library_log.catalogue());
             library.here(device);
             let root = roots.first().cloned().unwrap_or_default();
-            let plan = crate::storage::plan(&library, &root);
+            let plan = gmuse::storage::plan(&library, &root);
 
             for (_, from, to) in &plan.moves {
                 println!("{}\t{}", from.display(), root.join(to).display());
@@ -1736,7 +1718,7 @@ fn run_library(
             for (copy, why) in &plan.refused {
                 eprintln!("refused: {copy} — {why}");
             }
-            let done = crate::storage::carry_out(&plan, &root, *write);
+            let done = gmuse::storage::carry_out(&plan, &root, *write);
             for (at, why) in &done.failed {
                 eprintln!("could not move {}: {why}", at.display());
             }
@@ -1753,11 +1735,11 @@ fn run_library(
                 // **The locators follow the bytes.** Identity is the audio, so
                 // a moved file is the same encoding at a new place — and the
                 // holdings fact is what carries that.
-                crate::model::populate::reconcile(
+                gmuse::model::populate::reconcile(
                     &mut library_log,
                     roots,
-                    crate::history::now_ms(),
-                    &mut crate::model::ingest::Reads::default(),
+                    gmuse::history::now_ms(),
+                    &mut gmuse::model::ingest::Reads::default(),
                 );
                 let n = library_log.flush(&loaded.data_dir)?;
                 eprintln!("{} folder(s) pruned, {n} record(s) written", done.emptied);
@@ -1768,32 +1750,32 @@ fn run_library(
                 eprintln!("dry run — nothing moved. Add --write.");
             }
         }
-        cli::Shelf::Query {
+        gmuse::cli::Shelf::Query {
             unidentified,
             every_copy,
             filter,
         } => {
-            let (log, _) = crate::model::instance::Instance::open(
+            let (log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
             );
             let only = if *unidentified {
-                query::Only::Unidentified
+                gmuse::query::Only::Unidentified
             } else {
-                query::Only::Everything
+                gmuse::query::Only::Everything
             };
             let copies = if *every_copy {
-                query::Copies::Every
+                gmuse::query::Copies::Every
             } else {
-                query::Copies::Shown
+                gmuse::query::Copies::Shown
             };
             // **Parse at the boundary** (§12), through the parser the `:` line
             // uses. A second reader of the filter language is a second place
             // for it to drift.
             let filter = filter
                 .as_deref()
-                .map(crate::query::filter::Expr::parse)
+                .map(gmuse::query::filter::Expr::parse)
                 .transpose()
                 .map_err(|e| format!("--filter: {e}"))?;
             // **The snapshot, and the log only if it moved** — #194, #195.
@@ -1801,20 +1783,20 @@ fn run_library(
             // A print of the log files costs 17.5µs; loading the fold costs
             // 9.5ms. Parsing and folding the log costs 216ms, and is now only
             // paid when something has actually been appended.
-            let at = crate::cache::projection_path();
-            let print = crate::cache::LogPrint::of(&loaded.data_dir);
-            let projection = match crate::cache::current_projection(&at, &print) {
+            let at = gmuse::cache::projection_path();
+            let print = gmuse::cache::LogPrint::of(&loaded.data_dir);
+            let projection = match gmuse::cache::current_projection(&at, &print) {
                 Some(ready) => ready,
                 None => {
-                    let folded = crate::projection::Projected::rebuild(log.records());
-                    crate::cache::save_projection(&at, &print, &folded);
+                    let folded = gmuse::projection::Projected::rebuild(log.records());
+                    gmuse::cache::save_projection(&at, &print, &folded);
                     folded
                 }
             };
-            for row in query::rows(
+            for row in gmuse::query::rows(
                 &projection,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
                 only,
                 copies,
                 filter.as_ref(),
@@ -1822,13 +1804,13 @@ fn run_library(
                 println!("{}", serde_json::to_string(&row)?);
             }
         }
-        cli::Shelf::Apply { file, write } => {
-            let outcome = apply::run(
+        gmuse::cli::Shelf::Apply { file, write } => {
+            let outcome = gmuse::apply::run(
                 file,
                 &loaded.data_dir,
                 roots,
                 device,
-                crate::history::now_ms(),
+                gmuse::history::now_ms(),
                 *write,
             )?;
             println!("{outcome}");
@@ -1869,7 +1851,7 @@ fn run_library(
 fn run_tui(
     app: &mut App,
     smart_artist_sort: bool,
-    loaded: config::Loaded,
+    loaded: gmuse::config::Loaded,
     log_path: Option<PathBuf>,
     resume: bool,
     migrate_data: bool,
@@ -1878,10 +1860,10 @@ fn run_tui(
     // by `play_count` or `days_since_added`, and building the projection
     // without it would silently give the wrong membership until something
     // happened to trigger a rebuild.
-    let history_path = crate::history::path_in(&loaded.data_dir);
+    let history_path = gmuse::history::path_in(&loaded.data_dir);
     // Before the first read, so an upgrade finds the ratings rather than an
     // empty file that looks exactly like having lost them.
-    if let Some(from) = crate::history::migrate(&history_path) {
+    if let Some(from) = gmuse::history::migrate(&history_path) {
         println!(
             "history: moved {} -> {}",
             from.display(),
@@ -1890,16 +1872,16 @@ fn run_tui(
     }
     // Did `data_dir` move out from under the data? Checked before the first
     // read, so an empty history is explained rather than merely reported.
-    let state_dir = config::default_state_dir();
-    match datadir::check(
-        datadir::remembered(&state_dir).as_deref(),
+    let state_dir = gmuse::config::default_state_dir();
+    match gmuse::datadir::check(
+        gmuse::datadir::remembered(&state_dir).as_deref(),
         &loaded.data_dir,
-        datadir::has_data,
+        gmuse::datadir::has_data,
     ) {
-        datadir::Check::Fine => datadir::remember(&state_dir, &loaded.data_dir),
-        datadir::Check::Stranded { from } => {
+        gmuse::datadir::Check::Fine => gmuse::datadir::remember(&state_dir, &loaded.data_dir),
+        gmuse::datadir::Check::Stranded { from } => {
             if migrate_data {
-                match datadir::move_data(&from, &loaded.data_dir) {
+                match gmuse::datadir::move_data(&from, &loaded.data_dir) {
                     Ok(moved) => {
                         println!(
                             "data_dir: moved {} item(s) from {}",
@@ -1926,7 +1908,7 @@ fn run_tui(
                         // Remembered only when nothing was left: otherwise the
                         // next launch should say so again.
                         if moved.left.is_empty() {
-                            datadir::remember(&state_dir, &loaded.data_dir);
+                            gmuse::datadir::remember(&state_dir, &loaded.data_dir);
                         }
                     }
                     Err(e) => eprintln!("data_dir: {e}"),
@@ -1951,11 +1933,11 @@ fn run_tui(
     // path-keyed history attached to files that move, and neither has anything
     // to do now that a fact names a recording (#81). A rename is invisible to
     // the log, which is the point.
-    let machine = crate::events::machine_id(&config::default_state_dir());
-    let device = crate::model::id::Id::derived(machine.as_bytes());
-    let now = crate::history::now();
-    let now_ms = crate::history::now_ms();
-    let (log, damage) = crate::model::instance::Instance::open(&loaded.data_dir, device, now_ms);
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+    let now = gmuse::history::now();
+    let now_ms = gmuse::history::now_ms();
+    let (log, damage) = gmuse::model::instance::Instance::open(&loaded.data_dir, device, now_ms);
     let listened = log.catalogue();
     if !log.records().is_empty() {
         println!("history: {} records", log.records().len());
@@ -1975,7 +1957,7 @@ fn run_tui(
     // A socket that will not bind is a warning, not a failure: the player is
     // still a player without one, and refusing to start over a missing remote
     // would be the tail wagging the dog.
-    let server = match remote::serve(&remote::default_path()) {
+    let server = match gmuse::remote::serve(&gmuse::remote::default_path()) {
         Ok(server) => Some(server),
         Err(err) => {
             eprintln!("warning: {err}; --remote will not reach this player");
@@ -1987,7 +1969,7 @@ fn run_tui(
     // the librarian is what it is moving to (#77), and building both from the
     // same pass is what keeps them from disagreeing.
     let assembling = std::time::Instant::now();
-    let library_view = crate::bridge::librarian(&app.store, log.records(), device, now_ms);
+    let library_view = gmuse::bridge::librarian(&app.store, log.records(), device, now_ms);
     let known = library_view.recordings().count();
     println!(
         "librarian: {known} recordings in {:.1}s",
@@ -2005,7 +1987,7 @@ fn run_tui(
     let strangers = app
         .store
         .iter()
-        .filter(|h| !library_view.holds_encoding(crate::model::id::Id::of_audio(&h.audio)))
+        .filter(|h| !library_view.holds_encoding(gmuse::model::id::Id::of_audio(&h.audio)))
         .count();
     if strangers > 0 {
         println!(
@@ -2023,13 +2005,13 @@ fn run_tui(
     let composed = app
         .view
         .as_deref()
-        .and_then(|src| view::Stack::parse(src).ok())
+        .and_then(|src| gmuse::view::Stack::parse(src).ok())
         .unwrap_or_default();
     let members = composed
         .resolve(
             &library_view,
             &listened,
-            crate::query::filter::Env {
+            gmuse::query::filter::Env {
                 listened: Some(&listened),
                 named: None,
                 now,
@@ -2043,17 +2025,17 @@ fn run_tui(
     let library = Shelf::project(&library_view, members, smart_artist_sort);
 
     let mut library_view = library_view;
-    let ctx = ui::Context {
+    let ctx = gmuse::ui::Context {
         library: &library_view,
         player: Some(&app.player),
         remote: server.as_ref(),
     };
-    let mut state = ui::Ui::new(library);
+    let mut state = gmuse::ui::Ui::new(library);
     state.playlists = loaded.playlists.clone();
 
     // Opened before the terminal is taken over, so a failure is visible.
     if let Some(path) = log_path {
-        match audit::Audit::open(&path) {
+        match gmuse::audit::Audit::open(&path) {
             Ok(mut audit) => {
                 audit.line("device", &format!("{} Hz output", app.player.device_rate()));
                 audit.line(
@@ -2071,7 +2053,7 @@ fn run_tui(
         }
     }
 
-    state.set_leader(loaded.leader.unwrap_or_else(config::default_leader));
+    state.set_leader(loaded.leader.unwrap_or_else(gmuse::config::default_leader));
     state.theme = loaded.theme;
     state.now_playing = loaded.now_playing.clone();
     if let Some(t) = loaded.track_line.clone() {
@@ -2083,11 +2065,11 @@ fn run_tui(
     // setting in config.toml should take effect immediately rather than being
     // shadowed by whatever a stale session file remembers. Collected before
     // the commands are consumed below.
-    let fixed: std::collections::HashSet<cmd::SettingKey> = loaded
+    let fixed: std::collections::HashSet<gmuse::cmd::SettingKey> = loaded
         .commands
         .iter()
         .filter_map(|c| match c {
-            cmd::Command::Set { key, .. } => Some(*key),
+            gmuse::cmd::Command::Set { key, .. } => Some(*key),
             _ => None,
         })
         .collect();
@@ -2096,7 +2078,7 @@ fn run_tui(
     // same execute() a keypress does — there is no second configuration path
     // to keep in step.
     for cmd in loaded.commands {
-        ui::execute(&mut state, &ctx, cmd);
+        gmuse::ui::execute(&mut state, &ctx, cmd);
     }
     // Said in the TUI, not just on the terminal it replaced. A file gmuse
     // cannot read is a song missing from the library, and the one place that
@@ -2145,9 +2127,9 @@ fn run_tui(
     // means something; before the settings summary, so the summary reports
     // what is actually in force.
     if resume {
-        let path = session::default_path();
-        if let Some(saved) = session::load(&path) {
-            ui::restore_session(&mut state, &ctx, &saved, &fixed);
+        let path = gmuse::session::default_path();
+        if let Some(saved) = gmuse::session::load(&path) {
+            gmuse::ui::restore_session(&mut state, &ctx, &saved, &fixed);
             state.audit.line(
                 "session",
                 &format!(
@@ -2194,12 +2176,12 @@ fn run_tui(
     let mut terminal = ratatui::init();
     let result = loop {
         let stop = {
-            let ctx = ui::Context {
+            let ctx = gmuse::ui::Context {
                 library: &library_view,
                 player: Some(&app.player),
                 remote: server.as_ref(),
             };
-            match ui::run(&mut terminal, &mut state, &ctx) {
+            match gmuse::ui::run(&mut terminal, &mut state, &ctx) {
                 Ok(stop) => stop,
                 Err(e) => break Err(e),
             }
@@ -2207,30 +2189,30 @@ fn run_tui(
         // Every borrow of `library_view` has ended here, which is the whole
         // reason the loop returns rather than acting in place.
         match stop {
-            ui::Stop::Quit => break Ok(()),
-            ui::Stop::Rescan => {
+            gmuse::ui::Stop::Quit => break Ok(()),
+            gmuse::ui::Stop::Rescan => {
                 // The disk first, then the log — a scan reconciles holdings
                 // and reads no tags it has not been asked for, and the refold
                 // below is what turns that into rows.
                 let roots = app.roots.clone();
-                let report = scan::scan(&mut app.store, &roots);
+                let report = gmuse::scan::scan(&mut app.store, &roots);
                 state.audit.line("rescan", &report.to_string());
                 state.notify(format!("rescan: {report}"));
                 app.unreadable = report.errors.iter().map(|(p, _)| p.clone()).collect();
                 save_cache(app);
                 library_view =
-                    crate::bridge::librarian(&app.store, state.log.records(), device, now_ms);
+                    gmuse::bridge::librarian(&app.store, state.log.records(), device, now_ms);
             }
-            ui::Stop::Refold => {
+            gmuse::ui::Stop::Refold => {
                 library_view =
-                    crate::bridge::librarian(&app.store, state.log.records(), device, now_ms);
+                    gmuse::bridge::librarian(&app.store, state.log.records(), device, now_ms);
             }
             // **Outside the draw loop, which is the whole point of the trip
             // out here** (#99): the editor wants the terminal, so the screen
             // is given back before it runs and taken again after.
-            ui::Stop::Edit => {
+            gmuse::ui::Stop::Edit => {
                 ratatui::restore();
-                let said = match edit::edit(&state.composed, state.data_dir.as_deref()) {
+                let said = match gmuse::edit::edit(&state.composed, state.data_dir.as_deref()) {
                     Ok(back) => {
                         let label = back.label();
                         state.composed = back;
@@ -2253,23 +2235,23 @@ fn run_tui(
         // The shelf is a projection of the librarian, so it goes too — through
         // the same door a `:view` change uses, or refiltering would file
         // things a second way (#84).
-        let ctx = ui::Context {
+        let ctx = gmuse::ui::Context {
             library: &library_view,
             player: Some(&app.player),
             remote: server.as_ref(),
         };
-        ui::refresh_library(&mut state, &ctx);
+        gmuse::ui::refresh_library(&mut state, &ctx);
     };
     ratatui::restore();
     // Written after the terminal is restored, so a failure is visible.
     // A fresh borrow of whatever the last refold produced, not the one the
     // setup above took: that one is long gone, and it named an older fold.
-    let ctx = ui::Context {
+    let ctx = gmuse::ui::Context {
         library: &library_view,
         player: Some(&app.player),
         remote: server.as_ref(),
     };
-    ui::save_session(&mut state, &ctx);
+    gmuse::ui::save_session(&mut state, &ctx);
     // Written after the terminal is restored, so the summary is visible.
     if state.audit.is_enabled() {
         let underruns = app.player.underruns();
@@ -2290,7 +2272,7 @@ fn save_cache(app: &App) {
         return;
     }
     if let Some(path) = &app.cache_path
-        && let Err(e) = cache::save(path, &app.store, &app.roots, app.view.as_deref())
+        && let Err(e) = gmuse::cache::save(path, &app.store, &app.roots, app.view.as_deref())
     {
         eprintln!("cache: {e}");
     }
@@ -2298,7 +2280,7 @@ fn save_cache(app: &App) {
 
 /// Show the first few failures rather than a wall of them; a systematically
 /// broken library produces thousands of identical lines otherwise.
-fn report_errors(report: &scan::ScanReport) {
+fn report_errors(report: &gmuse::scan::ScanReport) {
     for (path, err) in report.errors.iter().take(5) {
         println!("  skipped {}: {err}", path.display());
     }
@@ -2333,7 +2315,7 @@ enum Holds {
     /// It hashes to something else — the bytes were replaced without the
     /// library being told, and every id derived from the old ones now names
     /// audio that is not there.
-    Changed(crate::model::id::Id<crate::model::entity::Encoding>),
+    Changed(gmuse::model::id::Id<gmuse::model::entity::Encoding>),
     /// It is there and will not decode.
     Unreadable(String),
     /// The holding names a path that no longer exists.
@@ -2345,15 +2327,15 @@ enum Holds {
 /// Identity here is the audio, so one claim per copy carries the library's
 /// whole account of itself: these bytes produce this `AudioId`. Nothing
 /// checked it until this existed.
-fn still_holds(at: &str, said: crate::model::id::Id<crate::model::entity::Encoding>) -> Holds {
+fn still_holds(at: &str, said: gmuse::model::id::Id<gmuse::model::entity::Encoding>) -> Holds {
     let path = std::path::Path::new(at);
     if !path.exists() {
         return Holds::Gone;
     }
-    match crate::model::ingest::read(path) {
+    match gmuse::model::ingest::read(path) {
         Ok(scanned) => {
             let now =
-                crate::model::id::Id::<crate::model::entity::Encoding>::of_audio(&scanned.audio);
+                gmuse::model::id::Id::<gmuse::model::entity::Encoding>::of_audio(&scanned.audio);
             if now == said {
                 Holds::Agrees
             } else {
@@ -2381,10 +2363,10 @@ fn still_holds(at: &str, said: crate::model::id::Id<crate::model::entity::Encodi
 /// case the path filter happened to exclude. Retiring 32 files reported
 /// `0 to retire`, naming each file's own path as the copy that survived it.
 fn surviving_holders<'a>(
-    cat: &'a crate::projection::catalogue::Catalogue,
+    cat: &'a gmuse::projection::catalogue::Catalogue,
     departed: &std::path::Path,
     going: &std::collections::BTreeSet<String>,
-) -> std::collections::BTreeMap<crate::model::id::Id<crate::model::entity::Encoding>, Vec<&'a str>>
+) -> std::collections::BTreeMap<gmuse::model::id::Id<gmuse::model::entity::Encoding>, Vec<&'a str>>
 {
     let mut out: std::collections::BTreeMap<_, Vec<&str>> = Default::default();
     for asserted in cat.holdings.values() {
@@ -2429,8 +2411,8 @@ mod tests {
     /// the wrong thing — silently, because nothing ever read the bytes again.
     #[test]
     fn verify_notices_bytes_that_were_replaced_in_place() {
-        use crate::model::entity::Encoding;
-        use crate::model::id::Id;
+        use gmuse::model::entity::Encoding;
+        use gmuse::model::id::Id;
 
         let dir = std::env::temp_dir().join("gmuse-verify");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2439,7 +2421,7 @@ mod tests {
         wav(&at, 1000);
 
         let said =
-            Id::<Encoding>::of_audio(&crate::model::ingest::read(&at).expect("readable").audio);
+            Id::<Encoding>::of_audio(&gmuse::model::ingest::read(&at).expect("readable").audio);
         let path = at.display().to_string();
         assert_eq!(still_holds(&path, said), Holds::Agrees);
 
@@ -2460,8 +2442,8 @@ mod tests {
     /// somebody looking for a corruption that is not there.
     #[test]
     fn a_holding_with_no_file_is_its_own_answer() {
-        use crate::model::entity::Encoding;
-        use crate::model::id::Id;
+        use gmuse::model::entity::Encoding;
+        use gmuse::model::id::Id;
         assert_eq!(
             still_holds("/nowhere/at/all.mp3", Id::<Encoding>::derived(b"x")),
             Holds::Gone
@@ -2478,8 +2460,8 @@ mod tests {
     /// **216 recordings held twice**, 67 of them a FLAC beside its MP3.
     #[test]
     fn copies_of_one_recording_are_grouped_and_the_rest_are_not() {
-        use crate::model::entity::{Encoding, Recording};
-        use crate::model::id::Id;
+        use gmuse::model::entity::{Encoding, Recording};
+        use gmuse::model::id::Id;
 
         let song = Id::<Recording>::derived(b"closing in");
         let alone = Id::<Recording>::derived(b"a song held once");
@@ -2527,9 +2509,9 @@ mod tests {
     /// as the copy that outlived it.
     #[test]
     fn a_copy_being_retired_is_not_a_copy_that_survives_it() {
-        use crate::model::entity::{Device, Encoding};
-        use crate::model::id::Id;
-        use crate::projection::catalogue::{Asserted, Catalogue};
+        use gmuse::model::entity::{Device, Encoding};
+        use gmuse::model::id::Id;
+        use gmuse::projection::catalogue::{Asserted, Catalogue};
 
         let going_path = "/m/Bodzin & Romboy/Luna/01 Triton.mp3";
         let bytes = Id::<Encoding>::derived(b"triton");
@@ -2537,7 +2519,7 @@ mod tests {
         cat.holdings.insert(
             Id::<Device>::derived(b"laptop"),
             Asserted {
-                at: crate::model::clock::Stamp {
+                at: gmuse::model::clock::Stamp {
                     wall: 1,
                     counter: 0,
                     device: Id::<Device>::derived(b"laptop"),
@@ -2562,9 +2544,9 @@ mod tests {
     /// A copy that is *not* going still holds those bytes, and still says so.
     #[test]
     fn a_live_copy_of_the_same_bytes_still_refuses_the_retirement() {
-        use crate::model::entity::{Device, Encoding};
-        use crate::model::id::Id;
-        use crate::projection::catalogue::{Asserted, Catalogue};
+        use gmuse::model::entity::{Device, Encoding};
+        use gmuse::model::id::Id;
+        use gmuse::projection::catalogue::{Asserted, Catalogue};
 
         let going_path = "/m/Early James/copy two/01 Blue Pill.mp3";
         let staying = "/m/Early James/Strange Time/01 Blue Pill.mp3";
@@ -2573,7 +2555,7 @@ mod tests {
         cat.holdings.insert(
             Id::<Device>::derived(b"laptop"),
             Asserted {
-                at: crate::model::clock::Stamp {
+                at: gmuse::model::clock::Stamp {
                     wall: 1,
                     counter: 0,
                     device: Id::<Device>::derived(b"laptop"),
@@ -2594,16 +2576,16 @@ mod tests {
     /// this command existed.
     #[test]
     fn bytes_that_are_only_in_departed_do_not_hold_anything_back() {
-        use crate::model::entity::{Device, Encoding};
-        use crate::model::id::Id;
-        use crate::projection::catalogue::{Asserted, Catalogue};
+        use gmuse::model::entity::{Device, Encoding};
+        use gmuse::model::id::Id;
+        use gmuse::projection::catalogue::{Asserted, Catalogue};
 
         let bytes = Id::<Encoding>::derived(b"moved by hand");
         let mut cat = Catalogue::default();
         cat.holdings.insert(
             Id::<Device>::derived(b"laptop"),
             Asserted {
-                at: crate::model::clock::Stamp {
+                at: gmuse::model::clock::Stamp {
                     wall: 1,
                     counter: 0,
                     device: Id::<Device>::derived(b"laptop"),

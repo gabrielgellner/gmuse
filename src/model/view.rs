@@ -113,6 +113,15 @@ impl Rows {
         }
     }
 
+    /// **Whether the view found nothing**, which is an answer — a filter that
+    /// matches no row is not a filter that failed.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Rows::Set(s) => s.is_empty(),
+            Rows::Sequence(v) => v.is_empty(),
+        }
+    }
+
     /// Combine with another view.
     ///
     /// Narrowing keeps the left operand's shape, because the result is a

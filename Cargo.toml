@@ -6,6 +6,13 @@ license = "GPL-3.0-or-later"
 description = "Gabriel's MUSical Experience — a cmus-shaped terminal music player"
 repository = "https://gitlab.com/gabrielgellner/gmuse"
 
+[lib]
+name = "gmuse"
+# **`rlib` for the binary, `cdylib` for Python** — #197. One library, two
+# consumers: `src/main.rs` links it as a Rust crate, and `gmuse_core` loads it
+# as an extension module. Without the second, the tools have no door but files.
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 clap = { version = "4.6.6", features = ["derive", "env"] }
 cpal = "0.18.2"
@@ -14,6 +21,7 @@ crossterm = "0.29.0"
 lofty = "0.25.1"
 nucleo-matcher = "0.3"
 postcard = { version = "1.1.3", features = ["use-std"] }
+pyo3 = { version = "0.29.2", features = ["extension-module", "abi3-py311"], optional = true }
 ratatui = "0.30.2"
 rtrb = "0.4.0"
 rubato = "5.0.0"
@@ -38,3 +46,7 @@ default = ["opus"]
 # Opus support. Compiles and statically links libopus; needs `cmake` at build
 # time. The only C dependency in the project.
 opus = ["dep:symphonia-adapter-libopus"]
+# **The Python door** — #197. Off by default, so an ordinary `cargo build`
+# neither needs a Python interpreter nor links against one; `maturin` turns it
+# on. The tools speak to the library through this rather than through files.
+python = ["dep:pyo3"]

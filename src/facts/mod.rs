@@ -1098,7 +1098,7 @@ pub enum Fact {
 /// is leaves the projection *wrong*, which is a different kind of bad from
 /// leaving it slow. Nothing here should ever be guessed downward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
+#[allow(
     dead_code,
     reason = "the model is tested ahead of its callers; classified now so the projector cannot be built without it — #193 is the caller"
 )]
@@ -1130,7 +1130,7 @@ pub enum Blast {
 
 impl Fact {
     /// What folding this fact can reach.
-    #[expect(
+    #[allow(
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, and #193's `advance` is what will read it"
     )]

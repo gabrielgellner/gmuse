@@ -136,6 +136,17 @@ impl OrdKey {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
+    /// **Whether it says anything at all.** A key of no bytes sorts before
+    /// every other, which is a position and not an absence — worth being able
+    /// to ask apart, and clippy is right that a public `len` owes it.
+    #[allow(
+        dead_code,
+        reason = "the companion to len, written with it; nothing asks yet"
+    )]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl fmt::Display for OrdKey {

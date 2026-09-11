@@ -1369,7 +1369,7 @@ impl Instance {
         self.append(now, Fact::RecordingRated { recording, stars });
     }
 
-    #[expect(
+    #[allow(
         dead_code,
         reason = "RecordingAcquired is folded and the migration writes it; no command asserts one yet"
     )]

@@ -83,6 +83,22 @@ fmt-check:
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
+# Build the Python extension module — #197.
+#
+# `cargo` cannot link it: an extension module's Python symbols resolve at load
+# time inside the interpreter, so a plain `cargo build --features python` fails
+# at the link step. `maturin` passes the flags that make that fine. `just ci`
+# still *type-checks* it, through `clippy --all-features`, which is what stops
+# it rotting between builds.
+[group('build')]
+wheel:
+    uvx maturin build --release
+
+# Build it into the tools' environment, for working on them.
+[group('build')]
+wheel-dev:
+    cd tools && uvx maturin develop --release --manifest-path ../Cargo.toml
+
 # Run the test suite
 [group('test')]
 test:

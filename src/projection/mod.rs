@@ -38,7 +38,7 @@
 // **The model ahead of its callers**, which is this project's ordinary
 // sequence: #194 persists a projection and is the first thing that has to ask
 // where it got to, #195 is the first read that trusts the answer.
-#![expect(
+#![allow(
     dead_code,
     reason = "L1's contract lands before its callers — #194 persists it, #195 reads through it"
 )]

@@ -63,7 +63,6 @@ macro_rules! tags {
 }
 
 tags! {
-    #[expect(dead_code, reason = "a tag type for an entity the domain model proposes and nothing mints yet — fields with #75")]
     /// A copy of an encoding, on one device. Fields with #75.
     Holding,
     /// A machine that holds copies. Fields with #75.
@@ -104,16 +103,15 @@ tags! {
     /// transformation between them is one-way and already exists — freezing a
     /// view by value produces a collection, which is what `:collect` writes.
     View,
-    #[expect(dead_code, reason = "proposed by the domain model, minted by nothing — fields with #73")]
     /// An artist on a work, recording, release group or release. Fields with #73.
     Credit,
-    #[expect(
+    #[allow(
         dead_code,
         reason = "an entry is a row and not an entity (#92): the fold keys it by (collection, position, recording), which is what lets one recording appear twice. The tag stays because domain-model.md names it and something may yet want to derive from it"
     )]
     /// One recording's membership of one collection.
     CollectionEntry,
-    #[expect(
+    #[allow(
         dead_code,
         reason = "an assertion is a row and not an entity (#117): the fold keys it by (subject, concept, basis), which is what lets two sources agree without one overwriting the other. The tag stays because domain-model.md names it"
     )]

@@ -188,7 +188,7 @@ impl<T> Merges<T> {
             .map(|(&from, _)| (from, self.resolve(from)))
     }
 
-    #[expect(
+    #[allow(
         dead_code,
         reason = "the companion to len, written with it; nothing asks"
     )]

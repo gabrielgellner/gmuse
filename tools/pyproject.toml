@@ -14,7 +14,12 @@ dependencies = [
 gmuse-tools = "gmuse_tools.cli:app"
 
 [dependency-groups]
-dev = ["ruff>=0.14", "pyrefly>=0.40", "pytest>=8.0"]
+dev = [
+    "ruff>=0.14",
+    "pyrefly>=0.40",
+    "pytest>=8.0",
+    "maturin>=1.15.0",
+]
 
 [build-system]
 requires = ["hatchling"]

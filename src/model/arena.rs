@@ -60,7 +60,7 @@ impl<T> Arena<T> {
         Self::default()
     }
 
-    #[expect(
+    #[allow(
         dead_code,
         reason = "arena bookkeeping written with the type; every caller reaches an arena through a handle and none has needed to ask"
     )]

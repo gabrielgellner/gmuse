@@ -3127,6 +3127,28 @@ Append here as decisions are made. Format: date, decision, rationale.
   "invalidates every event ever recorded", and #63 has not settled whether events should name an entry or a encoding.
   The id exists, is cached, and is used where it already pays.
 
+- **2026-09-11** **`pyo3` and `maturin`, and the crate becomes a library.** The tools reach the library through a
+  boundary already — a work list from `shelf query`, a proposal file for `shelf apply` — and what it lacked was a
+  contract anyone could fail against. A tool wrote JSONL by hand and found out three hours later, in `apply`, whether
+  the fields were the ones it reads; two spellings of one album id cost eight albums their genre.
+
+  **`pyo3` 0.29 with `abi3-py311`**, so one wheel covers every later CPython and a release does not need rebuilding per
+  interpreter. **`maturin`** builds it, because `cargo` cannot: an extension module's Python symbols resolve at load
+  time inside the interpreter, so a plain `cargo build` fails at the link step. Both are behind a `python` feature that
+  is **off by default**, so an ordinary build needs no interpreter and links against none.
+
+  `just ci` still type-checks it, through `clippy --all-features`, which is what stops the binding rotting between
+  builds — the one real risk of a target nobody compiles.
+
+  **The crate is now a lib plus a bin**, which a `cdylib` requires. `src/lib.rs` holds the module declarations and
+  `src/main.rs` became what it always described itself as: an adapter that parses a command line and calls in. Nothing
+  moved and nothing changed — output is byte-identical over all 7,271 rows.
+
+  It had one consequence worth recording: **items that were crate-private are public now, so public-API lints apply to
+  them**, and sixteen `#[expect(dead_code)]` annotations stopped being fulfilled. They were apologising for a
+  binary-crate artefact. `expect` asserts a lint _will_ fire and in a library that depends on the consumer, so they are
+  `allow` now — which is the correct tool rather than a way around the error.
+
 - **2026-09-10** **Squash off. Every commit on a branch lands on `main`.** The project merged fast-forward with
   `squash_option: always`, which turned each MR into one commit taking its subject from the **MR title** and discarding
   every body. Now `squash_option: never`; the merge method is unchanged, so history stays linear and a branch behind

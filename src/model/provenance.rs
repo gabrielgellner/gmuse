@@ -176,7 +176,7 @@ impl Provenance {
         self.records.len()
     }
 
-    #[expect(
+    #[allow(
         dead_code,
         reason = "the companion to len, written with it; nothing asks"
     )]

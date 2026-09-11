@@ -727,7 +727,7 @@ pub fn read_library(device_name: &str, roots: &[PathBuf], now: i64) -> (Instance
     (instance, report)
 }
 
-#[expect(
+#[allow(
     dead_code,
     reason = "exposed so a caller can ask without walking, and no caller has"
 )]

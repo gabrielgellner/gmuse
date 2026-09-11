@@ -201,7 +201,7 @@ impl ReleaseGroup {
     /// **Asked of the secondary set**, because that is where MusicBrainz puts
     /// it: an `album/compilation` is both, and a flat enum that had to choose
     /// would answer "album" and lose the rule (#133).
-    #[expect(
+    #[allow(
         dead_code,
         reason = "the #74 rule that a compilation's genre loses to an album's is not wired up"
     )]
@@ -376,7 +376,7 @@ pub struct Track {
     pub title_on_release: Option<String>,
 }
 
-#[expect(
+#[allow(
     dead_code,
     reason = "the mix model, proposed in domain-model.md; nothing mints one"
 )]
@@ -417,7 +417,7 @@ pub enum RecordingDerivationKind {
     Sample,
 }
 
-#[expect(
+#[allow(
     dead_code,
     reason = "the derivation model, proposed in domain-model.md; nothing mints one"
 )]
@@ -428,7 +428,7 @@ pub struct WorkDerivation {
     pub kind: WorkDerivationKind,
 }
 
-#[expect(
+#[allow(
     dead_code,
     reason = "the edge is minted now — `identify derivations` writes it — but it lands in `Catalogue::derived` as a tuple; nothing yet reads one back out in this shape"
 )]
