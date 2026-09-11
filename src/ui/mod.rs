@@ -369,10 +369,10 @@ pub struct Ui {
     /// Ratings and plays are facts about a **recording**, not about a file. A
     /// renumber used to strand them because the key was a path (#81); a
     /// recording's id does not move when the file does.
-    pub log: crate::model::instance::Instance,
+    pub desk: crate::librarian::Desk,
     /// The fold, refreshed after every fact. Held so the UI answers a rating
     /// immediately; what makes it durable is the record appended beside it.
-    pub listened: crate::projection::catalogue::Catalogue,
+    pub listened: std::sync::Arc<crate::projection::catalogue::Catalogue>,
     /// Where the log lives. `None` disables recording entirely.
     pub data_dir: Option<PathBuf>,
     /// The current track has already been counted, so a long listen does not
@@ -613,10 +613,8 @@ impl Ui {
             relative_numbers: false,
             pending_next: None,
             session_path: None,
-            log: crate::model::instance::Instance::new(crate::model::id::Id::derived(
-                b"unconfigured",
-            )),
-            listened: crate::projection::catalogue::Catalogue::default(),
+            desk: crate::librarian::Desk::detached(crate::model::id::Id::derived(b"unconfigured")),
+            listened: std::sync::Arc::default(),
             data_dir: None,
             counted_current: false,
             resuming: false,
@@ -660,7 +658,7 @@ impl Ui {
     pub fn sort_env(&self) -> crate::query::sort::SortEnv<'_> {
         crate::query::sort::SortEnv {
             env: crate::query::filter::Env {
-                listened: Some(&self.listened),
+                listened: Some(&*self.listened),
                 named: None,
                 now: crate::history::now(),
             },
@@ -997,7 +995,7 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
     // device's reach makes them differ, and the whole reason a play names an
     // encoding is to answer which of several copies it was.
     let encoding = ui.playback.playing;
-    record(ui, now, |log| log.play_maybe(now, recording, encoding));
+    record(ui, now, move |log| log.play_maybe(now, recording, encoding));
     let plays = ui.listened.plays.get(&recording).copied().unwrap_or(0);
     ui.audit
         .line("played", &format!("{} (play {plays})", row.title));
@@ -1051,7 +1049,7 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
         _ => 0,
     };
     let now = crate::history::now_ms();
-    record(ui, now, |log| {
+    record(ui, now, move |log| {
         log.rate(now, recording, (stars > 0).then_some(stars));
     });
 
@@ -1072,16 +1070,29 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
 ///
 /// Written immediately rather than at exit: a rating is worth more than a play
 /// count, and losing one to a crash would be worse than the cost of an open.
-pub fn record(ui: &mut Ui, _now: i64, say: impl FnOnce(&mut crate::model::instance::Instance)) {
-    let Some(dir) = ui.data_dir.clone() else {
+pub fn record(
+    ui: &mut Ui,
+    _now: i64,
+    say: impl FnOnce(&mut crate::model::instance::Instance) + Send + 'static,
+) {
+    if ui.data_dir.is_none() {
         return;
-    };
-    say(&mut ui.log);
-    // Refold before flushing, so the screen is right even if the disk is not.
-    ui.listened = ui.log.catalogue();
-    if let Err(e) = ui.log.flush(&dir) {
-        ui.audit.line("history", &format!("could not record: {e}"));
     }
+    ui.desk.say(say);
+    // **Waited on, and that is not a regression** — #206.
+    //
+    // This was synchronous before: append, fold, flush, all on this thread,
+    // because "the UI answers a rating immediately" is the whole reason the
+    // fold is held. What changed is *who* folds, not whether this waits — the
+    // work moved to the librarian and this blocks until it lands.
+    //
+    // The wait is what #208 removes. A position-driven fold that is already
+    // caught up costs one integer comparison per device, so settling after a
+    // single appended fact stops meaning "refold 279,000 records" and starts
+    // meaning "apply one". Making it asynchronous *here* instead would be the
+    // wrong repair: it would show a rating that has not been recorded yet.
+    ui.desk.settled();
+    ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
 }
 
 /// Record any underruns since the last tick.
@@ -1509,7 +1520,7 @@ fn source_for(
     // discipline the tree follows, because a library is used while it is being
     // catalogued.
     let chosen = recording_of(ctx, id)
-        .and_then(|r| ctx.library.open(r, &[ui.log.device()], &[]))
+        .and_then(|r| ctx.library.open(r, &[ui.desk.device()], &[]))
         .map(|(e, locator)| (locator.to_string(), Some(e.id), e.levels));
     // **How loud comes from the library too** (#109). It is per *copy* — two
     // rips of one recording are mastered differently and carry different
@@ -1888,7 +1899,7 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
                 .and_then(|src| crate::query::filter::Filter::parse(src).ok())
                 .map(|f| {
                     let env = crate::query::filter::Env {
-                        listened: Some(&ui.listened),
+                        listened: Some(&*ui.listened),
                         named: None,
                         now: crate::history::now(),
                     };
@@ -3273,8 +3284,9 @@ fn new_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     // what an empty playlist is.
     let id = crate::model::id::Id::<crate::model::entity::Collection>::of_name(name);
     let now = crate::history::now_ms();
-    record(ui, now, |log| {
-        log.name_collection(now, id, name, true);
+    let named = name.to_string();
+    record(ui, now, move |log| {
+        log.name_collection(now, id, &named, true);
     });
     ui.playlist.clear();
     ui.playlist_sel = 0;
@@ -3367,7 +3379,7 @@ fn persist_open(ui: &mut Ui, ctx: &Context<'_>) {
         return;
     }
     let now = crate::history::now_ms();
-    record(ui, now, |log| {
+    record(ui, now, move |log| {
         for (ord, recording) in &drops {
             log.remove_from_collection(now, id, *recording, ord.clone());
         }
@@ -3402,8 +3414,9 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let id = crate::model::id::Id::<crate::model::entity::Collection>::of_name(name);
     let now = crate::history::now_ms();
     let filed = members.len();
-    record(ui, now, |log| {
-        log.name_collection(now, id, name, true);
+    let named = name.to_string();
+    record(ui, now, move |log| {
+        log.name_collection(now, id, &named, true);
         // **Spread keys, because the order is the point.** A fractional index
         // means inserting between two entries later mints a key between theirs
         // and rewrites nothing — see `model/ord.rs`.
@@ -3580,8 +3593,9 @@ fn save_view(ui: &mut Ui, name: &str) {
     let id = crate::model::id::Id::<crate::model::entity::View>::of_name(name);
     let now = crate::history::now_ms();
     let stored = source.clone();
-    record(ui, now, |log| {
-        log.save_view(now, id, name, &stored);
+    let named = name.to_string();
+    record(ui, now, move |log| {
+        log.save_view(now, id, &named, &stored);
     });
     ui.audit.line("view", &format!("saved {name} as {source}"));
     ui.notify(format!("saved {name}: {source}"));
@@ -3647,11 +3661,11 @@ fn freeze(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         return;
     };
     let env = crate::query::filter::Env {
-        listened: Some(&ui.listened),
+        listened: Some(&*ui.listened),
         named: None,
         now: crate::history::now(),
     };
-    let resolved = stack.resolve(ctx.library, &ui.listened, env);
+    let resolved = stack.resolve(ctx.library, &*ui.listened, env);
     if let Some(problem) = resolved.problems.first() {
         ui.notify(format!("{name}: {problem}"));
         return;
@@ -3686,7 +3700,7 @@ fn freeze(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     }
     let stamp = crate::history::now_ms();
     let (n_added, n_gone) = (added.len(), gone.len());
-    record(ui, stamp, |log| {
+    record(ui, stamp, move |log| {
         for (ord, recording) in &gone {
             log.remove_from_collection(stamp, id, *recording, ord.clone());
         }
@@ -3744,12 +3758,14 @@ fn freeze_open_rule(ui: &mut Ui, ctx: &Context<'_>, name: &str, rule: &str) {
     let id = Id::<Collection>::of_name(name);
     let now = crate::history::now_ms();
     let filed = members.len();
-    record(ui, now, |log| {
+    let named = name.to_string();
+    let frozen = source.clone();
+    record(ui, now, move |log| {
         // **Ordered**, because a rule carries a sort and freezing keeps what
         // was on screen. That order is a fact now and will diverge from the
         // rule's the moment either changes — which is the point of freezing.
-        log.name_collection(now, id, name, true);
-        log.froze(now, id, &source);
+        log.name_collection(now, id, &named, true);
+        log.froze(now, id, &frozen);
         let mut key: Option<OrdKey> = None;
         for recording in &members {
             let k = OrdKey::between(key.as_ref(), None);
@@ -3807,11 +3823,11 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
 
     let resolved = {
         let env = crate::query::filter::Env {
-            listened: Some(&ui.listened),
+            listened: Some(&*ui.listened),
             named: None,
             now: crate::history::now(),
         };
-        ui.composed.resolve(ctx.library, &ui.listened, env)
+        ui.composed.resolve(ctx.library, &*ui.listened, env)
     };
     let ordered = resolved.rows.is_sequence();
     let members: Vec<_> = resolved.rows.iter().collect();
@@ -3827,9 +3843,12 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     // what makes drift answerable, and what makes re-freezing a keystroke
     // rather than a retype.
     let source = ui.composed.label();
-    record(ui, now, |log| {
-        log.name_collection(now, id, name, ordered);
-        log.froze(now, id, &source);
+    let named = name.to_string();
+    let frozen = source.clone();
+    let filed = members.len();
+    record(ui, now, move |log| {
+        log.name_collection(now, id, &named, ordered);
+        log.froze(now, id, &frozen);
         // **Keys spread only for a sequence.** A set has no running order, so
         // giving each entry a distinct key would invent one — and an arbitrary
         // order that looks meaningful is worse than none. Entries stay
@@ -3848,7 +3867,7 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     });
 
     let shape = if ordered { "in order" } else { "unordered" };
-    let said = format!("collected {} into {name} ({shape})", members.len());
+    let said = format!("collected {filed} into {name} ({shape})");
     ui.audit.line("collect", &said);
     ui.notify(said);
     // **A catalog defined by this collection now selects differently**, and
@@ -3884,14 +3903,14 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         // Scoped so the borrows of `history` and `filter` end before the
         // library is replaced below.
         let env = crate::query::filter::Env {
-            listened: Some(&ui.listened),
+            listened: Some(&*ui.listened),
             named: None,
             now: crate::history::now(),
         };
         // **One fold over one stack** (#94). This used to union the active
         // catalogs and then intersect the filter, with both operators baked
         // into their nouns — so `-` had nowhere to live.
-        let resolved = ui.composed.resolve(ctx.library, &ui.listened, env);
+        let resolved = ui.composed.resolve(ctx.library, &*ui.listened, env);
         // §2: `+` on a hand-made list has no defensible order, so it gives
         // the order up — and says which term did it rather than leaving
         // somebody to notice.
@@ -4149,8 +4168,11 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
                 ui.notify(format!("nothing selected — would {}", write.names()));
                 return;
             }
+            // Taken before the closure, which owns both from here on.
+            let names = write.names().to_string();
+            let count = songs.len();
             let now = crate::history::now_ms();
-            record(ui, now, |log| match &write {
+            record(ui, now, move |log| match &write {
                 Assert::Member(name) => {
                     let id = Id::<Collection>::of_name(name);
                     for song in &songs {
@@ -4185,7 +4207,7 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
             // **The confirmation names the fact, not the list.** "Added to
             // list" hides what was written; the point of going further than
             // iTunes is that the translation can be shown.
-            ui.notify(format!("{} {}", write.names(), songs.len()));
+            ui.notify(format!("{names} {count}"));
         }
     }
 }
@@ -6672,7 +6694,7 @@ mod tests {
         Context {
             library: Box::leak(Box::new(crate::bridge::imported(
                 store,
-                ui.log.records(),
+                &ui.desk.current().library.records,
                 crate::model::id::Id::derived(b"test"),
                 0,
             ))),
@@ -7106,7 +7128,7 @@ mod tests {
             None,
         );
         ui.data_dir = Some(scratch("smart-playlists"));
-        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
+        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"));
         ui
     }
 
@@ -7238,7 +7260,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = with_playlists(&store);
         ui.data_dir = Some(scratch("freeze-rule"));
-        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
+        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"));
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist open electronic");
@@ -7308,7 +7330,7 @@ mod tests {
         // Freezing renames what is open rather than closing it: the answer
         // has somewhere to live now, which is the name it takes (#95).
         ui.data_dir = Some(scratch("freeze-title"));
-        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
+        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"));
         execute(&mut ui, &ctx, Command::Freeze("kept".into()));
         let out = render(&ui, &ctx, 90, 10);
         assert!(out.contains("kept"), "{out}");
@@ -7343,9 +7365,11 @@ mod tests {
         fresh.data_dir = ui.data_dir.clone();
         // A relaunch folds the same log off disk — a playlist is facts now
         // (#118) — so the fixture merges the records rather than sharing state.
-        fresh.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test2"));
-        fresh.log.merge(200, ui.log.records());
-        fresh.listened = fresh.log.catalogue();
+        fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
+        let carried = ui.desk.current().library.records.clone();
+        fresh.desk.say(move |log| log.merge(200, &carried));
+        fresh.desk.settled();
+        fresh.listened = std::sync::Arc::clone(&fresh.desk.current().listened);
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
         assert_eq!(
             fresh.open.as_ref().map(Open::name),
@@ -7376,9 +7400,11 @@ mod tests {
         fresh.data_dir = ui.data_dir.clone();
         // A relaunch folds the same log off disk — a playlist is facts now
         // (#118) — so the fixture merges the records rather than sharing state.
-        fresh.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test2"));
-        fresh.log.merge(200, ui.log.records());
-        fresh.listened = fresh.log.catalogue();
+        fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
+        let carried = ui.desk.current().library.records.clone();
+        fresh.desk.say(move |log| log.merge(200, &carried));
+        fresh.desk.settled();
+        fresh.listened = std::sync::Arc::clone(&fresh.desk.current().listened);
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
 
         assert_eq!(fresh.view, View::Guide, "it landed on the playlist view");
@@ -7419,9 +7445,11 @@ mod tests {
         fresh.data_dir = ui.data_dir.clone();
         // A relaunch folds the same log off disk — a playlist is facts now
         // (#118) — so the fixture merges the records rather than sharing state.
-        fresh.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test2"));
-        fresh.log.merge(200, ui.log.records());
-        fresh.listened = fresh.log.catalogue();
+        fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
+        let carried = ui.desk.current().library.records.clone();
+        fresh.desk.say(move |log| log.merge(200, &carried));
+        fresh.desk.settled();
+        fresh.listened = std::sync::Arc::clone(&fresh.desk.current().listened);
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
         assert!(fresh.open.as_ref().is_some_and(Open::is_rule));
         assert_eq!(fresh.playlist.len(), 2, "the rule was not re-evaluated");
@@ -7446,7 +7474,7 @@ mod tests {
         let dir = scratch(name);
         let mut ui = with_playlists(store);
         ui.data_dir = Some(dir.clone());
-        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
+        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"));
         (ui, dir)
     }
 
@@ -7522,7 +7550,7 @@ mod tests {
         let elsewhere = Id::<Recording>::derived(b"held on the NAS");
         let id = Id::<Collection>::of_name("partial");
         let now = 100;
-        record(&mut ui, now, |log| {
+        record(&mut ui, now, move |log| {
             log.name_collection(now, id, "partial", true);
             let first = crate::model::ord::OrdKey::between(None, None);
             log.add_to_collection(now, id, here, first.clone());
@@ -8997,7 +9025,13 @@ mod tests {
             ("va", r#"album="YouTube Sessions""#),
         ] {
             let id = crate::model::id::Id::<crate::model::entity::View>::of_name(name);
-            record(&mut ui, 100, |log| log.save_view(100, id, name, source));
+            {
+                let named = name.to_string();
+                let src = source.to_string();
+                record(&mut ui, 100, move |log| {
+                    log.save_view(100, id, &named, &src)
+                });
+            }
         }
         ui
     }
@@ -10201,7 +10235,9 @@ mod tests {
         let mut ui = ui_with_history(&store, "union");
         for (name, source) in [("none", "year>9999"), ("all_of_them", "duration>=0")] {
             let id = crate::model::id::Id::<crate::model::entity::View>::of_name(name);
-            record(&mut ui, 100, |log| log.save_view(100, id, name, source));
+            record(&mut ui, 100, move |log| {
+                log.save_view(100, id, name, source)
+            });
         }
 
         select_view(&mut ui, &ctx, "none");
@@ -10313,7 +10349,7 @@ mod tests {
         ui.playback.current = Some(id);
         record_play_if_earned(&mut ui, &ctx, Duration::from_secs(9999));
         assert!(ui.listened.plays.is_empty());
-        assert!(ui.log.records().is_empty());
+        assert!(ui.desk.current().library.records.is_empty());
     }
 
     /// **The bug this whole model exists to end.** A file is renumbered, and
@@ -10372,8 +10408,19 @@ mod tests {
 
     fn ui_with_history(store: &Scan, name: &str) -> Ui {
         let mut ui = ui_of(store, true);
-        ui.data_dir = Some(scratch(name));
-        ui.log = crate::model::instance::Instance::new(crate::model::id::Id::derived(b"test"));
+        let dir = scratch(name);
+        let device = crate::model::id::Id::derived(b"test");
+        // **The dir goes to the desk, not just to `ui`** — #206. Flushing is
+        // the librarian's now, so a desk opened without one records nothing
+        // however much the UI thinks it has a data directory.
+        ui.desk = crate::librarian::Desk::open(
+            crate::model::instance::Instance::new(device),
+            crate::operations::scan::Holdings::default(),
+            device,
+            0,
+            Some(dir.clone()),
+        );
+        ui.data_dir = Some(dir);
         ui
     }
 
@@ -10456,15 +10503,18 @@ mod tests {
             )
             .expect("a fixture row is a recording")
         };
-        ui.log.assert_concept(
-            1,
-            Described::Recording(seeded),
-            "genre",
-            "techno",
-            crate::model::reference::Source::TagVariant,
-            crate::model::ingest::Confidence::Matched,
-        );
-        ui.listened = ui.log.catalogue();
+        ui.desk.say(move |log| {
+            log.assert_concept(
+                1,
+                Described::Recording(seeded),
+                "genre",
+                "techno",
+                crate::model::reference::Source::TagVariant,
+                crate::model::ingest::Confidence::Matched,
+            );
+        });
+        ui.desk.settled();
+        ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
         // The librarian is what a facet comparison reads, so the seed has to
         // go through a refold — which is what `main` does on `Stop::Refold`.
         let ctx = refolded(&store, &ui);

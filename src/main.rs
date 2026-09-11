@@ -1942,7 +1942,6 @@ fn run_tui(
     let now = gmuse::history::now();
     let now_ms = gmuse::history::now_ms();
     let (log, damage) = gmuse::model::instance::Instance::open(&loaded.data_dir, device, now_ms);
-    let listened = log.catalogue();
     if !log.records().is_empty() {
         println!("history: {} records", log.records().len());
     }
@@ -1973,8 +1972,19 @@ fn run_tui(
     // the librarian is what it is moving to (#77), and building both from the
     // same pass is what keeps them from disagreeing.
     let assembling = std::time::Instant::now();
-    let library_view = gmuse::bridge::librarian(&app.store, log.records(), device, now_ms);
-    let known = library_view.recordings().count();
+    // **The log crosses here and does not come back** — #206, I16. From this
+    // point the only thing that folds is the librarian thread, and what this
+    // side holds is whatever it last published. `Desk::open` folds once
+    // synchronously, so nothing below sees an empty library.
+    let desk = gmuse::librarian::Desk::open(
+        log,
+        app.store.clone(),
+        device,
+        now_ms,
+        Some(loaded.data_dir.clone()),
+    );
+    let library_view = desk.current();
+    let known = library_view.library.recordings().count();
     println!(
         "librarian: {known} recordings in {:.1}s",
         assembling.elapsed().as_secs_f64()
@@ -1991,7 +2001,11 @@ fn run_tui(
     let strangers = app
         .store
         .iter()
-        .filter(|h| !library_view.holds_encoding(gmuse::model::id::Id::of_audio(&h.audio)))
+        .filter(|h| {
+            !library_view
+                .library
+                .holds_encoding(gmuse::model::id::Id::of_audio(&h.audio))
+        })
         .count();
     if strangers > 0 {
         println!(
@@ -2011,26 +2025,30 @@ fn run_tui(
         .as_deref()
         .and_then(|src| gmuse::view::Stack::parse(src).ok())
         .unwrap_or_default();
+    // Read from what the desk published rather than folded again here — #206.
+    // There was a second `log.catalogue()` at open, and two folds of one log
+    // are two chances to disagree about what it says.
+    let listened = &*library_view.listened;
     let members = composed
         .resolve(
-            &library_view,
-            &listened,
+            &library_view.library,
+            listened,
             gmuse::query::filter::Env {
-                listened: Some(&listened),
+                listened: Some(listened),
                 named: None,
                 now,
             },
         )
-        .copies(&library_view);
+        .copies(&library_view.library);
 
     // **Grouped by what the model says, not by what the tags carry** (#84).
     // The librarian has to exist first, which is why this sits below rather
     // than beside the membership it is built from.
-    let library = Shelf::project(&library_view, members, smart_artist_sort);
+    let library = Shelf::project(&library_view.library, members, smart_artist_sort);
 
     let mut library_view = library_view;
     let ctx = gmuse::ui::Context {
-        library: &library_view,
+        library: &library_view.library,
         player: Some(&app.player),
         remote: server.as_ref(),
     };
@@ -2112,10 +2130,14 @@ fn run_tui(
     // import rather than being invented by whichever machine noticed the file
     // first. Nothing is stamped here.
     {
-        let records = log.records().len();
-        let known = listened.ratings.len() + listened.plays.len();
-        state.log = log;
-        state.listened = listened;
+        // Counted from what the desk published rather than from the log,
+        // which is on the other side of the channel by now — #206.
+        let held = desk.current();
+        let records = held.library.records.len();
+        let known = held.listened.ratings.len() + held.listened.plays.len();
+        drop(held);
+        state.desk = desk;
+        state.listened = std::sync::Arc::clone(&state.desk.current().listened);
         state.data_dir = Some(loaded.data_dir.clone());
         state.audit.line(
             "history",
@@ -2142,7 +2164,7 @@ fn run_tui(
                     saved
                         .current
                         .as_ref()
-                        .and_then(|p| library_view.row_of(p.recording, p.copy))
+                        .and_then(|p| library_view.library.row_of(p.recording, p.copy))
                         .map(|row| {
                             format!(
                                 "at {:.1}s in {} — {}",
@@ -2181,7 +2203,7 @@ fn run_tui(
     let result = loop {
         let stop = {
             let ctx = gmuse::ui::Context {
-                library: &library_view,
+                library: &library_view.library,
                 player: Some(&app.player),
                 remote: server.as_ref(),
             };
@@ -2197,19 +2219,21 @@ fn run_tui(
             gmuse::ui::Stop::Rescan => {
                 // The disk first, then the log — a scan reconciles holdings
                 // and reads no tags it has not been asked for, and the refold
-                // below is what turns that into rows.
+                // is what turns that into rows.
                 let roots = app.roots.clone();
                 let report = gmuse::operations::scan::scan(&mut app.store, &roots);
                 state.audit.line("rescan", &report.to_string());
                 state.notify(format!("rescan: {report}"));
                 app.unreadable = report.errors.iter().map(|(p, _)| p.clone()).collect();
                 save_cache(app);
-                library_view =
-                    gmuse::bridge::librarian(&app.store, state.log.records(), device, now_ms);
+                state.desk.holdings(app.store.clone());
+                state.desk.settled();
+                library_view = state.desk.current();
             }
             gmuse::ui::Stop::Refold => {
-                library_view =
-                    gmuse::bridge::librarian(&app.store, state.log.records(), device, now_ms);
+                state.desk.advance();
+                state.desk.settled();
+                library_view = state.desk.current();
             }
             // **Outside the draw loop, which is the whole point of the trip
             // out here** (#99): the editor wants the terminal, so the screen
@@ -2240,7 +2264,7 @@ fn run_tui(
         // the same door a `:view` change uses, or refiltering would file
         // things a second way (#84).
         let ctx = gmuse::ui::Context {
-            library: &library_view,
+            library: &library_view.library,
             player: Some(&app.player),
             remote: server.as_ref(),
         };
@@ -2251,7 +2275,7 @@ fn run_tui(
     // A fresh borrow of whatever the last refold produced, not the one the
     // setup above took: that one is long gone, and it named an older fold.
     let ctx = gmuse::ui::Context {
-        library: &library_view,
+        library: &library_view.library,
         player: Some(&app.player),
         remote: server.as_ref(),
     };

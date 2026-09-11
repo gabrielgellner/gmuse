@@ -14,6 +14,7 @@ name = "gmuse"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+arc-swap = "1.7.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 cpal = "0.18.2"
 crossbeam-channel = "0.5.16"

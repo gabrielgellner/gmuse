@@ -3142,6 +3142,33 @@ Append here as decisions are made. Format: date, decision, rationale.
   "invalidates every event ever recorded", and #63 has not settled whether events should name an entry or a encoding.
   The id exists, is cached, and is used where it already pays.
 
+- **2026-09-11** **`arc-swap`, and the librarian gets a thread.** #206, the first of milestone "The engine". The fold
+  moves off the thread that renders, and what the rest of the program holds is a pointer to the last thing published.
+
+  **What it replaces is a control-flow trick.** `run_tui` owned the `Librarian`, lent it to the draw loop, and the loop
+  had to _return_ — with a `Stop::Refold` — before anything could rebuild it, because the borrow outlived every command.
+  A rating, a rescan and a `:view` change all unwound the loop and re-entered it. That was never about the UI; it was
+  about who owned the fold. An `Arc` has no such problem: a reader keeps the one it took while the next is published
+  beside it.
+
+  **`arc-swap` 1.7** for the publication. A `Mutex<Arc<_>>` would do for today's single reader and was rejected on what
+  comes next: §5.2 of the engine document has the MIDI input thread reading the mapping table the same way, and that
+  thread may not take a lock. Adding the lock-free primitive once is cheaper than adding a mutex and removing it.
+
+  **Writes are sent, not taken.** A `Mutex<Instance>` would be smaller and would put every writer back on the caller's
+  thread, which is the thing being removed — a rating taken while a scan held the lock would block the render, which is
+  I6's head-of-line blocking wearing a different hat. So a write goes on a queue and the next publication is how the
+  caller finds out. `Desk::settled` exists for the two places that genuinely must wait: a test, and quitting.
+
+  **`ui::record` still waits, and that is not a regression.** It was synchronous before — append, fold, flush, all on
+  the render thread — because "the UI answers a rating immediately" is the whole reason the fold is held. What changed
+  is _who_ folds. Removing the wait is #208's job: a position-driven fold that is already caught up costs one integer
+  comparison per device, so settling after one appended fact stops meaning "refold 279,000 records". Making it
+  asynchronous here instead would be the wrong repair — it would show a rating that has not been recorded yet.
+
+  One fold was also deleted rather than moved. `run_tui` called `log.catalogue()` at open and `bridge::librarian`
+  separately, so two folds of one log ran a few lines apart with two chances to disagree about what it said.
+
 - **2026-09-11** **The three-thread INVARIANT becomes a set of properties, and the UI thread leaves the process.**
   Authorises `docs/design/gmuse-engine-architecture.md` (v0.2), which is the argument; this entry is what makes it so,
   on the standard the 2026-08-31 amendment set — a boundary may move to a principled place and may not erode by

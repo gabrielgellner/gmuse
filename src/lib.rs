@@ -25,6 +25,7 @@ pub mod facts;
 pub mod fixture;
 pub mod guides;
 pub mod history;
+pub mod librarian;
 pub mod lock;
 pub mod m3u;
 pub mod model;
