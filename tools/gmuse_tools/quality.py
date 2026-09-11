@@ -53,6 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+import gmuse_core
 import numpy as np
 import typer
 from mutagen import File as MutagenFile
@@ -376,7 +377,7 @@ def _worst_album_first(row: dict[str, object]) -> float:
     return -float(str(row["score"]))
 
 
-def measured_rows(rows: Path) -> list[dict[str, object]]:
+def measured_rows() -> list[dict[str, object]]:
     """The library's own measurements, in the shape `albums` reads.
 
     **From the log rather than from a review file** — #184. `albums` used to
@@ -392,37 +393,41 @@ def measured_rows(rows: Path) -> list[dict[str, object]]:
     A row with no measurement is skipped rather than judged — nobody has looked
     is not a verdict, and treating it as one is how 126 sparse recordings would
     join a replacement list.
+
+    **Asked of the library, and of every copy** — #198, #183. This read a work
+    list somebody had produced, which meant the answer depended on how they had
+    produced it: a measurement is keyed by an *encoding*, so a list of one row
+    per recording can only ever reach whichever copy `open` picked. Asking for
+    every copy is the question this pass is actually about.
     """
     out: list[dict[str, object]] = []
-    with rows.open(encoding="utf-8") as handle:
-        for line in handle:
-            row = json.loads(line)
-            locator, cutoff = row.get("locator"), row.get("cutoff_hz")
-            if not locator or cutoff is None:
-                continue
-            path = Path(locator)
-            declared = _declared(locator)
-            lossless = path.suffix.lower() in LOSSLESS
-            cutoff_khz = cutoff / 1000
-            cliff = row.get("cliff_db")
-            verdict, _note = judge(
-                declared,
-                lossless=lossless,
-                cutoff=cutoff_khz,
-                cliff=None if cliff is None else cliff / 100,
-            )
-            out.append(
-                {
-                    "verdict": verdict,
-                    "cutoff_khz": f"{cutoff_khz:.1f}",
-                    "declared": declared,
-                    "path": locator,
-                }
-            )
+    for row in gmuse_core.Library.open().query(every_copy=True):
+        locator, cutoff = row.get("locator"), row.get("cutoff_hz")
+        if not locator or cutoff is None:
+            continue
+        path = Path(locator)
+        declared = _declared(locator)
+        lossless = path.suffix.lower() in LOSSLESS
+        cutoff_khz = cutoff / 1000
+        cliff = row.get("cliff_db")
+        verdict, _note = judge(
+            declared,
+            lossless=lossless,
+            cutoff=cutoff_khz,
+            cliff=None if cliff is None else cliff / 100,
+        )
+        out.append(
+            {
+                "verdict": verdict,
+                "cutoff_khz": f"{cutoff_khz:.1f}",
+                "declared": declared,
+                "path": locator,
+            }
+        )
     return out
 
 
-def albums(review: Path, out: Path, limit: int, under: int | None, min_share: float) -> None:
+def albums(review: Path | None, out: Path, limit: int, under: int | None, min_share: float) -> None:
     """Roll the per-file findings up to albums worth re-acquiring.
 
     Ranked by `share x deficit`, and both halves matter. An album with one bad
@@ -449,15 +454,17 @@ def albums(review: Path, out: Path, limit: int, under: int | None, min_share: fl
     2 of 11, which is not a bad rip, it is a mostly-good album with two odd
     files. `carries` counts what would come along for the ride.
     """
-    if not review.exists():
-        print(f"no {review.name} — run `survey`, or pass `--rows` from `shelf query --every-copy`")
-        return
-
-    found = (
-        measured_rows(review)
-        if review.suffix == ".jsonl"
-        else list(csv.DictReader(review.open(encoding="utf-8"), delimiter="\t"))
-    )
+    # **The library, or a survey TSV.** `--rows` used to name a jsonl work list
+    # somebody produced; it now means "ask the library", which is the same
+    # question without the file in between (#198). A TSV is still read from
+    # disk, because a survey is this tool's own output and not the library's.
+    if review is None:
+        found = measured_rows()
+    else:
+        if not review.exists():
+            print(f"no {review.name} — run `survey`, or `--rows` to ask the library")
+            return
+        found = list(csv.DictReader(review.open(encoding="utf-8"), delimiter="\t"))
     flagged: dict[Path, list[tuple[float, int]]] = collections.defaultdict(list)
     for row in found:
         if row["verdict"] != "TRANSCODE?" or not row["cutoff_khz"]:
@@ -608,69 +615,70 @@ def unquarantine(manifest: Path, *, write: bool) -> None:
         print("dry run — pass --write to actually restore")
 
 
-def propose(rows: Path, out: Path, analyser: int) -> None:
-    """Turn a survey into facts the library will take.
+def propose(out: Path, analyser: int) -> None:
+    """Measure what the library holds, and say what the bytes are.
 
-    **Reads the query output, not the survey TSV.** The survey names files by
-    path, and a path is not an identifier: it is a property of one device's
-    copy, stale the moment a file moves and meaningless on another machine.
+    **Asked of the library rather than of a file** — #198. This read what
+    `gmuse shelf query` had been redirected into, which carried both halves it
+    needs: the `encoding` to propose against and the `locator` to open. It
+    still needs both, and now it asks for them.
 
-    So the input is what `gmuse library query --format jsonl` handed us, which
-    carries both halves — the `encoding` id to propose against and the
-    `locator` to open. This tool never computes an identity and should not:
-    `audio_id` is a hash over Symphonia's packet boundaries.
+    **Every copy, explicitly** (#183). `EncodingMeasured` is keyed by an
+    encoding, so a library holding one recording as a FLAC and an MP3 has two
+    answers and one of them was unreachable whenever the work list had been
+    produced without `--every-copy`. Which it was depended on what somebody
+    typed, and now it does not.
+
+    This tool never computes an identity and should not: `audio_id` is a hash
+    over Symphonia's packet boundaries, and the id comes from the library.
 
     Files that could not be measured are **skipped rather than proposed as
     zero**. A missing measurement and a measurement of nothing are different
     facts, and only one of them is true.
     """
-    if not rows.exists():
-        print(f"no {rows.name} — run `gmuse library query … --format jsonl` first")
-        return
-
-    written = skipped = 0
-    with rows.open(encoding="utf-8") as handle, out.open("w", encoding="utf-8") as sink:
-        for raw in handle:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            row = json.loads(line)
-            encoding, locator = row.get("encoding"), row.get("locator")
-            if not encoding or not locator:
-                # Nothing here holds a copy, so there is nothing to measure.
-                skipped += 1
-                continue
-            found = measure(locator)
-            if found is None:
-                skipped += 1
-                continue
-            cutoff_khz, cliff = found
-            # **The cliff travels with the cutoff** — #184. It was measured
-            # here and dropped on the floor, so 7,210 facts recorded where a
-            # spectrum stops and not whether that was an encoder or the music,
-            # and `albums` had to re-read every file to say which.
-            sink.write(
-                json.dumps(
-                    {
-                        "fact": "measured",
-                        "encoding": encoding,
-                        "cutoff_hz": round(cutoff_khz * 1000),
-                        # **Hundredths of a decibel**, like ReplayGain, because
-                        # the threshold is an exact comparison: rounded to whole
-                        # dB a cliff of 24.6 became 25 and crossed `CLIFF_DB`,
-                        # which moved two albums from "music" to "an encoder".
-                        "cliff_db": min(round(cliff * 100), 65535) if cliff is not None else None,
-                        "analyser": analyser,
-                    }
-                )
-                + "\n"
+    lib = gmuse_core.Library.open()
+    lines: list[str] = []
+    skipped = 0
+    for row in lib.query(every_copy=True):
+        encoding, locator = row.get("encoding"), row.get("locator")
+        if not encoding or not locator:
+            # Nothing here holds a copy, so there is nothing to measure.
+            skipped += 1
+            continue
+        found = measure(locator)
+        if found is None:
+            skipped += 1
+            continue
+        cutoff_khz, cliff = found
+        # **The cliff travels with the cutoff** — #184. It was measured here
+        # and dropped on the floor, so 7,210 facts recorded where a spectrum
+        # stops and not whether that was an encoder or the music, and `albums`
+        # had to re-read every file to say which.
+        lines.append(
+            json.dumps(
+                {
+                    "fact": "measured",
+                    "encoding": encoding,
+                    "cutoff_hz": round(cutoff_khz * 1000),
+                    # **Hundredths of a decibel**, like ReplayGain, because the
+                    # threshold is an exact comparison: rounded to whole dB a
+                    # cliff of 24.6 became 25 and crossed `CLIFF_DB`, which
+                    # moved two albums from "music" to "an encoder".
+                    "cliff_db": min(round(cliff * 100), 65535) if cliff is not None else None,
+                    "analyser": analyser,
+                }
             )
-            written += 1
+        )
 
-    print(f"{written} measurement(s) -> {out}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # Checked on the way out: a malformed one fails here, naming the row,
+    # rather than in `apply` after a pass that opened seven thousand files.
+    lib.propose(lines, out)
+
+    print(f"{len(lines)} measurement(s) -> {out}")
     if skipped:
         print(f"  {skipped} row(s) had nothing to measure and were left out, not proposed as zero")
-    print(f"\nreview it, then: gmuse library apply {out}")
+    print(f"\nreview it, then: gmuse shelf apply {out}")
 
 
 LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
@@ -694,21 +702,26 @@ def register(app: typer.Typer) -> None:
         limit: int = typer.Option(100),
         under: int | None = typer.Option(None, help="only albums that sound under this bitrate"),
         min_share: float = typer.Option(0.0, help="only albums with at least this share flagged"),
-        rows: Path | None = typer.Option(
-            None, help="jsonl from `gmuse shelf query --every-copy` — the library's own measurements"
+        rows: bool = typer.Option(  # noqa: FBT001
+            True,  # noqa: FBT003
+            "--rows/--survey",
+            help="rank from the library's own measurements, or from the last survey's TSV",
         ),
     ) -> None:
         """Roll the findings up to albums worth re-acquiring.
 
-        **Prefer `--rows`** — #184. Without it this reads the last survey's
-        review file, which means the ranking is only as durable as a file in
-        `out/`; the 56-album analysis of 2026-09-01 sat there for nine days and
-        the per-file half of it was overwritten. With it, the numbers come from
-        `EncodingMeasured` facts the library holds, and re-running costs a fold
-        rather than an hour of decoding.
+        **From the library by default** — #184 argued for it and #198 made it
+        the easy thing: the numbers come from `EncodingMeasured` facts, every
+        copy of them, and re-running costs a fold rather than an hour of
+        decoding.
+
+        `--survey` reads the last survey's TSV instead, which is only as
+        durable as a file in `out/` — the 56-album analysis of 2026-09-01 sat
+        there for nine days and the per-file half of it was overwritten. It is
+        kept for the case the library has not been measured yet.
         """
         albums(
-            rows if rows is not None else out_path("quality-review.tsv"),
+            None if rows else out_path("quality-review.tsv"),
             out_path("quality-albums.tsv"),
             limit,
             under,
@@ -717,20 +730,22 @@ def register(app: typer.Typer) -> None:
 
     @app.command("propose")
     def propose_cmd(
-        rows: Path = typer.Argument(..., help="jsonl from `gmuse library query --format jsonl`"),
         out: Path = typer.Option(Path("quality-proposals.jsonl")),
         analyser: int = typer.Option(
             1,
             help="must match model::encoding::ANALYSER, so a re-measure can find stale rows",
         ),
     ) -> None:
-        """Measure what a query listed, and say so as proposed facts.
+        """Measure every copy the library holds, and say so as proposed facts.
+
+        **Takes no work list.** It asks the library, for every copy, because a
+        measurement is keyed by an encoding (#183, #198).
 
         The output is **not** under `out_path`: a proposal is a work product
         rather than this tool's state, so it goes where the caller says and
         defaults to the working directory — `library-api.md` §7.
         """
-        propose(rows.expanduser(), out.expanduser(), analyser)
+        propose(out.expanduser(), analyser)
 
     @app.command("quarantine")
     def quarantine_cmd(
