@@ -29,6 +29,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Sender, unbounded};
 
+use crate::model::durable::LogError;
 use crate::model::entity::Device;
 use crate::model::id::Id;
 use crate::model::instance::Instance;
@@ -110,11 +111,11 @@ impl Desk {
                         Job::Say(say) => {
                             say(&mut log);
                             if let Some(dir) = &data_dir {
-                                // A failed flush is not fatal: the in-memory
+                                // A failed commit is not fatal: the in-memory
                                 // log is still right, and refusing the fact
                                 // because the disk refused it would lose the
                                 // rating as well as the write.
-                                let _ = log.flush(dir);
+                                let _ = commit(&mut log, dir);
                             }
                             None
                         }
@@ -203,6 +204,23 @@ impl Drop for Desk {
     }
 }
 
+/// Persist what a named operation appended. **The one door.**
+///
+/// [`Instance::flush`] is crate-private, so this is the only way facts reach
+/// disk: the binary crate cannot write at all except by calling this, which
+/// makes "one appender" a property of the build rather than of everyone's
+/// good intentions.
+///
+/// It deliberately does **not** refresh the projection snapshot, though that
+/// is where such a thing would belong. The snapshot lives at one fixed path
+/// under the cache directory while the log is named by a parameter, so a
+/// write against any other data directory — every test that applies a
+/// proposal — would overwrite the snapshot of the real library with its own.
+/// Refreshing here needs the snapshot keyed by the log it describes first.
+pub fn commit(log: &mut Instance, data_dir: &std::path::Path) -> Result<usize, LogError> {
+    log.flush(data_dir)
+}
+
 /// The projection as it stands, for a read.
 ///
 /// **Snapshot first.** A print of the log files is one `stat` each and decides
@@ -248,6 +266,57 @@ mod tests {
 
     fn desk() -> Desk {
         Desk::detached(device())
+    }
+
+    /// **One appender, and the compiler holds most of it.** `Instance::flush`
+    /// is crate-private, so `src/main.rs` — a separate crate — cannot write at
+    /// all except through `commit`. What the compiler cannot hold is the
+    /// inside of this crate, where `flush` is still reachable, so that half is
+    /// asserted here.
+    ///
+    /// Against the source, because no type can carry it: `flush` is an
+    /// ordinary method and any module could call one.
+    #[test]
+    fn nothing_but_commit_puts_facts_on_disk() {
+        let mut offenders = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src is readable").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                // The log's own module defines `flush`; this one is the door.
+                let name = path.to_string_lossy().replace('\\', "/");
+                if name.ends_with("model/instance.rs") || name.ends_with("librarian/mod.rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("readable");
+                let body = match text.find("#[cfg(test)]") {
+                    Some(at) => &text[..at],
+                    None => &text[..],
+                };
+                for (n, line) in body.lines().enumerate() {
+                    // `flush` is also a resampler method and a writer method;
+                    // only the log's takes a data directory.
+                    if line.contains(".flush(data_dir")
+                        || line.contains(".flush(&loaded.data_dir")
+                        || line.contains(".flush(&dir)")
+                    {
+                        offenders.push(format!("{name}:{}", n + 1));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these write to the log without going through `commit`: {offenders:?}"
+        );
     }
 
     /// A reader holds its answer while the next one is published beside it.

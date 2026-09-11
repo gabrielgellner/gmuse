@@ -414,7 +414,7 @@ pub fn run(
 
     let written = if write {
         log.merge(now, &fresh);
-        log.flush(data_dir)?
+        crate::librarian::commit(&mut log, data_dir)?
     } else {
         0
     };

@@ -368,7 +368,7 @@ fn run_library(
                 for id in &coming {
                     log.restore_encoding(now, *id);
                 }
-                log.flush(&loaded.data_dir)?
+                gmuse::librarian::commit(&mut log, &loaded.data_dir)?
             } else {
                 0
             };
@@ -479,7 +479,7 @@ fn run_library(
                     log.retire_encoding(now, *id);
                 }
                 let _ = before;
-                log.flush(&loaded.data_dir)?
+                gmuse::librarian::commit(&mut log, &loaded.data_dir)?
             } else {
                 0
             };
@@ -541,7 +541,7 @@ fn run_library(
             );
 
             if *write {
-                let n = log.flush(&loaded.data_dir)?;
+                let n = gmuse::librarian::commit(&mut log, &loaded.data_dir)?;
                 eprintln!(
                     "{n} record(s) written ({} new)",
                     log.records().len() - before
@@ -1502,7 +1502,7 @@ fn run_library(
                 // record that says a file moved — and files move, by hand and
                 // by `render`.
                 if *write {
-                    let n = log.flush(&loaded.data_dir)?;
+                    let n = gmuse::librarian::commit(&mut log, &loaded.data_dir)?;
                     if n > 0 {
                         eprintln!("{n} record(s) written: the holdings moved");
                         drop_cache(cache_path.as_deref());
@@ -1684,7 +1684,7 @@ fn run_library(
                     }
                     eprintln!("{} filed into {name}", report.identified.len());
                 }
-                let n = log.flush(&loaded.data_dir)?;
+                let n = gmuse::librarian::commit(&mut log, &loaded.data_dir)?;
                 eprintln!("{n} record(s) written");
                 // **Only when something actually changed.** A re-run that
                 // moves nothing and writes nothing has not made the cache
@@ -1738,7 +1738,7 @@ fn run_library(
                     gmuse::history::now_ms(),
                     &mut gmuse::model::ingest::Reads::default(),
                 );
-                let n = library_log.flush(&loaded.data_dir)?;
+                let n = gmuse::librarian::commit(&mut library_log, &loaded.data_dir)?;
                 eprintln!("{} folder(s) pruned, {n} record(s) written", done.emptied);
                 if done.moved > 0 || n > 0 {
                     drop_cache(cache_path.as_deref());

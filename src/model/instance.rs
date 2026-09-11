@@ -1473,7 +1473,11 @@ impl Instance {
     /// The watermark makes this cheap: our own stamps strictly increase, so
     /// "ours, above the mark" is exactly "ours, not yet written" without
     /// re-reading anything.
-    pub fn flush(&mut self, data_dir: &Path) -> Result<usize, LogError> {
+    /// **Crate-private, so `librarian::commit` is the only door.** A write
+    /// that went around it would leave the projection snapshot describing a
+    /// log that has moved, and the binary crate could put facts on disk
+    /// without any named operation having been asked for.
+    pub(crate) fn flush(&mut self, data_dir: &Path) -> Result<usize, LogError> {
         let device = self.clock.device();
         let pending: BTreeSet<Record> = self
             .records
