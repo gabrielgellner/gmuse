@@ -416,6 +416,31 @@ pub enum Shelf {
         #[arg(long)]
         write: bool,
     },
+    /// **Drop the holdings assertions nothing reads any more** — #201.
+    ///
+    /// A `HoldingsAsserted` carries the **whole map** of what a device holds,
+    /// and one is written every time anything moves — an import, a render, a
+    /// retire, a rescan. Only the newest per device says anything: holdings
+    /// are last-writer-wins, so every earlier snapshot is superseded outright.
+    ///
+    /// Measured on this library, 62 of them are **54 MB — 42% of a 128 MB
+    /// log** — against 35,468 `ConceptAsserted` at 10 MB. The largest thing in
+    /// the log is the one part of it nothing keys off.
+    ///
+    /// **This is the only event type that may be dropped**, and the asymmetry
+    /// is the whole of why: a superseded assertion carries nothing the later
+    /// one does not, where a superseded play still carries a listen and a
+    /// superseded rating still carries what somebody once thought.
+    ///
+    /// Safe whenever: folding a compacted log gives exactly what folding the
+    /// original gives, and a compacted record arriving back from a stale
+    /// replica is simply superseded again. **A dry run unless given
+    /// `--write`**, like every other command here that changes something.
+    Compact {
+        /// Rewrite the logs. Without this, nothing is touched.
+        #[arg(long)]
+        write: bool,
+    },
     /// **Artists whose name is in doubt** — #154.
     ///
     /// Two shapes, and they are the two ends of one guard. An artist with a

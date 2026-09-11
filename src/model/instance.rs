@@ -693,10 +693,6 @@ impl Instance {
         });
     }
 
-    #[allow(
-        dead_code,
-        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
-    )]
     /// Drop this instance's superseded holdings assertions.
     ///
     /// Safe at any moment, because folding a compacted log gives exactly what

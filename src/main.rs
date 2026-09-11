@@ -510,6 +510,66 @@ fn run_library(
                 eprintln!("dry run — nothing written. Add --write.");
             }
         }
+        cli::Shelf::Compact { write } => {
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let before = log.records().clone();
+            // Through the instance rather than the free function, so there is
+            // one way to compact and the in-memory set matches what is about
+            // to be on disk.
+            log.compact();
+            let after = log.records().clone();
+
+            let dropped = before.len() - after.len();
+            // Bytes as they sit on disk, so the number reported is the number
+            // a person can check with `ls`.
+            let weigh = |rs: &std::collections::BTreeSet<crate::model::log::Record>| -> usize {
+                rs.iter()
+                    .filter_map(|r| serde_json::to_string(r).ok())
+                    .map(|l| l.len() + 1)
+                    .sum()
+            };
+            let (was, now) = (weigh(&before), weigh(&after));
+            eprintln!(
+                "{dropped} superseded holdings assertion(s), {:.1} MB of {:.1} MB",
+                (was - now) as f64 / 1e6,
+                was as f64 / 1e6,
+            );
+
+            if !*write {
+                eprintln!("dry run — nothing written. Add --write.");
+            } else if dropped == 0 {
+                eprintln!("nothing to drop.");
+            } else {
+                // **Each device's log holds that device's records**, so each is
+                // rewritten with its own share. Compacting one and not another
+                // is safe — the fold is the same either way — which is what
+                // makes this per-file rather than an all-or-nothing rewrite.
+                let mut devices: std::collections::BTreeSet<
+                    crate::model::id::Id<crate::model::entity::Device>,
+                > = std::collections::BTreeSet::new();
+                for record in &after {
+                    devices.insert(record.stamp.device);
+                }
+                let mut total = 0usize;
+                for each in devices {
+                    let mine: std::collections::BTreeSet<_> = after
+                        .iter()
+                        .filter(|r| r.stamp.device == each)
+                        .cloned()
+                        .collect();
+                    let path = crate::model::durable::log_path(&loaded.data_dir, each);
+                    total += crate::model::durable::rewrite(&path, &mine)?;
+                }
+                eprintln!("{total} record(s) kept, logs rewritten");
+                // The player's cache names paths and nothing here moved a
+                // file, so it stays valid. Said out loud because every other
+                // command in this block drops it.
+            }
+        }
         cli::Shelf::Names => {
             let (mut log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,

@@ -1079,6 +1079,182 @@ pub enum Fact {
     },
 }
 
+/// **How much of a projection one fact can change** — #192.
+///
+/// `advance()` has to apply a *single* fact to a projection that already
+/// exists. If the only move is `rebuild`, a keystroke in the TUI costs a replay
+/// of 279,349 records and the design of `access-layers.md` collapses back to
+/// what it replaced.
+///
+/// So every fact declares its blast radius, and the declaration is an
+/// exhaustive `match` rather than a list somebody maintains: a new variant does
+/// not compile until it has one.
+///
+/// **When it is not obvious, the answer is [`Blast::Wide`].** `Narrow` is the
+/// optimisation and `Wide` is the safe one — a fact classified narrower than it
+/// is leaves the projection *wrong*, which is a different kind of bad from
+/// leaving it slow. Nothing here should ever be guessed downward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    dead_code,
+    reason = "the model is tested ahead of its callers; classified now so the projector cannot be built without it — #193 is the caller"
+)]
+pub enum Blast {
+    /// **The fact names what it affects**, so applying it is a lookup.
+    ///
+    /// Size is not the question. A fact naming seven thousand encodings is
+    /// narrow if it names them; a fact naming two ids is wide if the rows it
+    /// reaches have to be searched for.
+    Narrow,
+    /// **The affected set is not derivable from the fact**, so applying it
+    /// means searching the projection for what it hit.
+    ///
+    /// `ArtistMerged` hands over two ids and leaves "every row crediting the
+    /// loser" to be found. That search is what costs — **not** the size of the
+    /// fact: `HoldingsAsserted` is the largest fact this log holds and is
+    /// narrow, because it names every encoding it touches.
+    ///
+    /// Still incremental: a query over the projection, never a replay of the
+    /// log.
+    Wide,
+    /// Cannot be localised at all: replay.
+    ///
+    /// **This should stay empty**, and it is. A fact that quietly needs a
+    /// rebuild is a stutter nobody can predict; one that is *documented* to
+    /// need it is a cost a person can be told about.
+    Rebuild,
+}
+
+impl Fact {
+    /// What folding this fact can reach.
+    #[expect(
+        dead_code,
+        reason = "the model is tested ahead of its callers; exercised by tests, and #193's `advance` is what will read it"
+    )]
+    pub fn blast(&self) -> Blast {
+        match self {
+            // ---- narrow: the fact names its subject and that is the extent --
+
+            // One recording, one encoding, one slot, one rating. The ordinary
+            // case, and the reason `every_fact_names_its_subject` is a useful
+            // neighbour: **a fact that names its subject is a fact whose blast
+            // radius can be computed.**
+            Fact::RecordingIdentified { .. }
+            | Fact::RecordingCatalogued { .. }
+            | Fact::RecordingRetitled { .. }
+            | Fact::RecordingRated { .. }
+            | Fact::RecordingPlayed { .. }
+            | Fact::RecordingAcquired { .. }
+            | Fact::EncodingClaimed { .. }
+            | Fact::EncodingDescribed { .. }
+            | Fact::EncodingProcessed { .. }
+            | Fact::EncodingLevelled { .. }
+            | Fact::EncodingMeasured { .. }
+            | Fact::EncodingPlaced { .. }
+            | Fact::EncodingRetired { .. }
+            | Fact::EncodingRestored { .. }
+            | Fact::TrackPlaced { .. }
+            | Fact::WorkPerformed { .. } => Blast::Narrow,
+
+            // **Two recordings, not one** — the encoding leaves `from` and
+            // joins `to`, so both sides are touched. Still bounded by the fact.
+            Fact::EncodingBound { .. } => Blast::Narrow,
+
+            // Pairs, each naming both ends.
+            Fact::EncodingDerived { .. }
+            | Fact::EncodingDerivationRetracted { .. }
+            | Fact::RecordingDerived { .. }
+            | Fact::RecordingDerivationRetracted { .. }
+            | Fact::WorkDerived { .. }
+            | Fact::WorkDerivationRetracted { .. } => Blast::Narrow,
+
+            // Catalogue entries for things no row has yet. A release group
+            // gains rows only when a track is placed on it, which is its own
+            // fact.
+            Fact::WorkCatalogued { .. }
+            | Fact::ReleaseGroupCatalogued { .. }
+            | Fact::ReleaseCatalogued { .. }
+            | Fact::MediumCatalogued { .. } => Blast::Narrow,
+
+            // Names. `ArtistNamed` and `LabelNamed` are last-writer-wins on a
+            // label, and a row shows the name of the artist it credits — so
+            // this is `Wide` in principle and `Narrow` only if the projection
+            // stores the id and resolves the name at draw time. It stores the
+            // name, so: wide. Listed here to say that the answer follows the
+            // projection's shape and not the fact's.
+            Fact::ArtistNamed { .. } | Fact::LabelNamed { .. } => Blast::Wide,
+
+            // Vocabulary. Defining a facet, a concept, a role or a hierarchy
+            // adds a term; it does not assert anything about a row.
+            Fact::FacetDefined { .. }
+            | Fact::ConceptCatalogued { .. }
+            | Fact::HierarchyDefined { .. }
+            | Fact::RoleDefined { .. } => Blast::Narrow,
+
+            // Collections and views. A collection entry names one recording;
+            // a view is not a row at all.
+            Fact::CollectionNamed { .. }
+            | Fact::CollectionFrozen { .. }
+            | Fact::CollectionEntryAdded { .. }
+            | Fact::CollectionEntryRemoved { .. }
+            | Fact::ViewSaved { .. }
+            | Fact::ViewDropped { .. } => Blast::Narrow,
+
+            // One subject's assertion on one axis.
+            Fact::ConceptAsserted { .. } | Fact::ConceptRetracted { .. } => Blast::Narrow,
+
+            // ---- wide: bounded by what it hit, not by what it says --------
+
+            // **A merge rewrites every row of the loser.** The canonical
+            // example, and the reason `Wide` exists as a tier rather than being
+            // folded into `Rebuild`: it is a query over the projection for the
+            // loser's rows, which is incremental, just broader.
+            Fact::RecordingMerged { .. }
+            | Fact::ReleaseGroupMerged { .. }
+            | Fact::ArtistMerged { .. } => Blast::Wide,
+
+            // A credit on a release group is the album-level credit, so it
+            // decides `file_under` for **every track on that record** (#84).
+            // Asserted on a recording it is narrow — but one arm cannot be two
+            // answers, and guessing downward is the mistake this tier exists to
+            // prevent.
+            Fact::CreditAsserted { .. } | Fact::CreditRetracted { .. } => Blast::Wide,
+
+            // **A retitle of a group renames the album on every row of it.**
+            Fact::ReleaseGroupRetitled { .. } => Blast::Wide,
+
+            // **The hierarchy is what `genre@1` climbs** (#79). Changing one
+            // narrower-of edge moves every row whose concept sits under it, and
+            // that is a set the fact does not name.
+            Fact::HierarchyNarrowed { .. } | Fact::HierarchyNarrowRetracted { .. } => Blast::Wide,
+
+            // **Every name an artist answers to is on its rows** (#179), so a
+            // new one reaches all of them. Same for a retired heading, which is
+            // an alias as well as a tombstone.
+            Fact::AliasAsserted { .. } | Fact::HeadingRetired { .. } => Blast::Wide,
+
+            // A moniker edge is what a filing level climbs (#174), so adding
+            // one moves every row filed under either end.
+            Fact::ArtistRelated { .. } => Blast::Wide,
+
+            // **Big, and not wide** — the distinction the tiers turn on.
+            //
+            // `HoldingsAsserted` carries every encoding a device holds, so
+            // applying one is a lot of work: 62 of them account for 54 MB, 42%
+            // of this library's log, because each is a full snapshot. But the
+            // affected set is **exactly the keys of the map**, which the fact
+            // hands over. It is N narrow updates arriving together, and a
+            // projector needs no search to apply it.
+            //
+            // Wide means the affected set is *not derivable from the fact* —
+            // `ArtistMerged` gives two ids and leaves "every row crediting the
+            // loser" to be found. That is the thing that costs, and size is
+            // not it.
+            Fact::HoldingsAsserted { .. } => Blast::Narrow,
+        }
+    }
+}
+
 /// Fold one assignment, by the two tiers an assignment has.
 ///
 /// The key is the claim's **identity** and it names who says so, so a second
@@ -2301,10 +2477,6 @@ impl Catalogue {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
-)]
 /// Drop the holdings assertions nothing reads any more.
 ///
 /// **The one event type that may be compacted.** A superseded assertion
@@ -3488,6 +3660,94 @@ mod merge_tests {
 
 #[cfg(test)]
 mod reachability {
+    /// **The rebuild tier is empty, and a test is what keeps it that way** —
+    /// #192.
+    ///
+    /// A fact that quietly needs a full replay is a stutter nobody can predict.
+    /// One that is *documented* to need it is a cost a person can be told
+    /// about — so `Blast::Rebuild` may exist, and putting a fact in it is a
+    /// decision somebody makes on purpose and has to change this test to make.
+    #[test]
+    fn no_fact_needs_a_rebuild() {
+        let body = blast_body();
+        assert!(
+            !body.contains("Blast::Rebuild"),
+            "a fact was classified as needing a full replay. That may be right, \
+             but it is a cost the TUI pays on a keystroke, so say so here and in \
+             access-layers.md rather than only in the match."
+        );
+    }
+
+    /// **No wildcard arm, so the compiler's exhaustiveness check stays real.**
+    ///
+    /// `blast()` is enforced by being an exhaustive `match`: a new `Fact` does
+    /// not compile until it has a tier. A single `_ => Blast::Narrow` would end
+    /// that silently — and would classify every future fact as the *cheapest*
+    /// tier, which is the one direction that leaves a projection wrong rather
+    /// than slow.
+    #[test]
+    fn no_fact_is_classified_by_a_wildcard() {
+        let body = blast_body();
+        for line in body.lines().map(str::trim) {
+            assert!(
+                !line.starts_with("_ =>") && !line.starts_with("_ |"),
+                "a wildcard arm would classify every future fact without anyone \
+                 deciding: {line}"
+            );
+        }
+    }
+
+    /// **Every variant is named, so a grouping cannot swallow one.**
+    ///
+    /// The compiler proves the match is exhaustive; it does not prove that
+    /// each variant was *considered*. Comparing the two lists is what says
+    /// somebody looked at each one.
+    #[test]
+    fn every_fact_names_its_blast_radius() {
+        let text = std::fs::read_to_string("src/model/log.rs").expect("log.rs");
+        let start = text.find("pub enum Fact {").expect("the Fact enum");
+        let body = &text[start..text[start..].find("\n}\n").unwrap() + start];
+        let mut variants = Vec::new();
+        for line in body.lines() {
+            let Some(rest) = line.strip_prefix("    ") else {
+                continue;
+            };
+            let name: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+            if name.is_empty() || !name.starts_with(char::is_uppercase) {
+                continue;
+            }
+            if rest.starts_with(&format!("{name} {{")) || rest == format!("{name},") {
+                variants.push(name);
+            }
+        }
+        assert!(variants.len() > 40, "the enum was not parsed: {variants:?}");
+
+        let blast = blast_body();
+        let missing: Vec<_> = variants
+            .iter()
+            .filter(|v| {
+                !blast.contains(&format!("Fact::{v} ")) && !blast.contains(&format!("Fact::{v}{{"))
+            })
+            .cloned()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these facts are matched by a grouping rather than by name, so nobody \
+             decided their blast radius: {missing:?}"
+        );
+    }
+
+    /// The body of `Fact::blast`, read from source.
+    fn blast_body() -> String {
+        let text = std::fs::read_to_string("src/model/log.rs").expect("log.rs");
+        let start = text
+            .find("    pub fn blast(&self) -> Blast {")
+            .expect("blast()");
+        let rest = &text[start..];
+        let end = rest.find("\n    }\n").expect("the end of blast()");
+        rest[..end].to_string()
+    }
+
     use super::*;
 
     /// **A measurement written before the cliff was recorded still reads** —

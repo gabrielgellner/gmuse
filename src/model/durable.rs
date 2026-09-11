@@ -179,6 +179,57 @@ pub fn append(path: &Path, records: &BTreeSet<Record>) -> Result<usize, LogError
     Ok(records.len())
 }
 
+/// **Replace a log with a smaller set of the same meaning** — #201.
+///
+/// The only operation here that removes anything, and the only one that can
+/// lose a library. So it does not edit the log: it writes a new one beside it,
+/// **reads that back and checks it says what it should**, and only then swaps
+/// it in with a rename, which is atomic on every filesystem this runs on. A
+/// crash at any point leaves either the old log or the new one, never a torn
+/// one, and never a gap.
+///
+/// The read-back is not ceremony. `append` is careful to write one buffer so a
+/// crash cannot tear a line, but a rewrite can fail in a way an append cannot:
+/// a full disk takes the *whole* log rather than the tail of it. Verifying
+/// before the swap is what makes the difference between a slow day and a lost
+/// library.
+///
+/// Compaction is the only caller and the only thing that should ever be one.
+/// `compact` drops superseded holdings assertions and nothing else — a
+/// superseded play still carries a listen.
+pub fn rewrite(path: &Path, records: &BTreeSet<Record>) -> Result<usize, LogError> {
+    let beside = path.with_extension("jsonl.compacting");
+    let _ = std::fs::remove_file(&beside);
+
+    // Written through `append` to a fresh path, so there is one encoder and
+    // one place that decides what a line looks like.
+    let written = append(&beside, records)?;
+
+    // **Read it back before trusting it.** A rewrite that lost records is the
+    // failure this whole function is shaped around, and it is cheap to rule
+    // out: the set that comes back has to be the set that went in.
+    let (back, damage) = read(&beside);
+    if !damage.is_empty() || back != *records {
+        let _ = std::fs::remove_file(&beside);
+        return Err(LogError::Append {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!(
+                "the rewritten log did not read back: {} record(s) in, {} out, {} damaged — \
+                 the original is untouched",
+                records.len(),
+                back.len(),
+                damage.len(),
+            )),
+        });
+    }
+
+    std::fs::rename(&beside, path).map_err(|source| LogError::Append {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(written)
+}
+
 /// The highest stamp `device` wrote, or `None` if it has written nothing.
 ///
 /// This is the watermark an instance flushes from. It works because a hybrid
@@ -227,6 +278,84 @@ mod tests {
                 fact: some_fact(i),
             })
             .collect()
+    }
+
+    /// **A rewrite replaces the log and loses nothing** — #201.
+    ///
+    /// The only operation here that removes anything, so this asserts the two
+    /// properties that make it survivable: what is on disk afterwards is
+    /// exactly what was handed over, and the scratch file it writes through
+    /// does not survive.
+    #[test]
+    fn a_rewrite_replaces_the_log_with_exactly_what_it_was_given() {
+        let dir = dir("rewrite");
+        let d = device(7);
+        let path = log_path(&dir, d);
+
+        let all = authored(d, 20);
+        append(&path, &all).unwrap();
+        let full = std::fs::metadata(&path).unwrap().len();
+
+        // Keep five of the twenty, the way compaction keeps one snapshot.
+        let keep: BTreeSet<Record> = all.iter().take(5).cloned().collect();
+        assert_eq!(rewrite(&path, &keep).unwrap(), 5);
+
+        let (back, damage) = read(&path);
+        assert!(damage.is_empty(), "a rewritten log must not be damaged");
+        assert_eq!(back, keep, "the log is not what it was handed");
+        assert!(
+            std::fs::metadata(&path).unwrap().len() < full,
+            "the file did not actually shrink"
+        );
+
+        // **No scratch file left behind.** It sits beside the log inside the
+        // data directory, so one that survives is one a later read could trip
+        // over.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("compacting"))
+            .collect();
+        assert!(leftovers.is_empty(), "scratch left behind: {leftovers:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A rewrite that cannot be written leaves the original alone.**
+    ///
+    /// The failure this function is shaped around: a rewrite can fail in a way
+    /// an append cannot, because a full disk takes the *whole* log rather than
+    /// the tail of it. The new log is written beside, verified and only then
+    /// renamed over — so a failure anywhere before the rename is a slow day
+    /// rather than a lost library.
+    #[test]
+    fn a_failed_rewrite_does_not_touch_the_log() {
+        let dir = dir("rewrite-fails");
+        let d = device(8);
+        let path = log_path(&dir, d);
+
+        let all = authored(d, 12);
+        append(&path, &all).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        // A directory where the scratch file wants to be, so writing it fails.
+        std::fs::create_dir_all(path.with_extension("jsonl.compacting")).unwrap();
+
+        let keep: BTreeSet<Record> = all.iter().take(3).cloned().collect();
+        assert!(
+            rewrite(&path, &keep).is_err(),
+            "it should not have succeeded"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the original log was touched by a rewrite that failed"
+        );
+        let (back, _) = read(&path);
+        assert_eq!(back, all, "and it still says everything it said");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The whole point: what went to disk is what comes back.

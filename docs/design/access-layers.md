@@ -183,6 +183,35 @@ These are the only things that read bytes, and each is a sentence a person says:
 | `render`  | the filesystem        | `HoldingsAsserted` for what it moved |
 | `retire`  | the filesystem        | tombstones                           |
 
+**`render` is the one that writes the tree**, and it is why the tree is an output rather than an input. A fact never
+touches the filesystem: it changes what the tree _should_ be, and `render` makes it so and records where things went.
+
+That leaves three states and two gaps, which are not the same job:
+
+|                              |                                                |
+| ---------------------------- | ---------------------------------------------- |
+| where a file **should** be   | derived from the facts and `storage-layout.md` |
+| where a file **is**          | `HoldingsAsserted`, in the log                 |
+| where a file **actually** is | the disk                                       |
+
+**Only the second is a gap.** `is ≠ actually` is **drift**: a holding pointing at bytes that are not there, which costs
+the ability to open the file, and which `scan` closes. `should ≠ is` is **rendering lag**, and it is _cosmetic_ — the
+folder names are out of date, and nothing in the library is wrong, nothing is unreachable, and no query answers
+differently.
+
+**The layout carries no meaning.** `reconcile` hashes the audio, derives the encoding, and stores the path as a value;
+the path is never consulted for identity, and `populate.rs` says so in as many words — _"known by its bytes, not by
+where it sits. A file that moved is the same encoding at a new locator, which is why a move needs no operation and
+cannot lose anything."_ A library of `<uuid>.flac` would bind every holding identically.
+
+So `render` is for **people, and for other software that reads folders** — a phone, a DJ tool, a share somebody browses
+— rather than something the library needs. `storage-layout.md`'s one rule is a presentation decision, which is exactly
+why it says a tree has one dimension and genre is for browsing.
+
+The one thing a readable tree buys that a content-addressed one does not is **recovery**: lose the log, and
+`{file_under}/{album}/{track} {title}` is self-describing where a hash is opaque. That is a hedge worth keeping, and it
+is not a dependency.
+
 They sit **beside** the layers rather than inside them: they take an L0 handle and the roots, and they are commands, not
 functions something calls on the way to answering a question. `library-api.md` already says this — _"a scan reconciles
 holdings and reads no tags"_, _"import, relink and forget are named operations"_. This makes the code match.
@@ -270,11 +299,46 @@ per-fact application is a requirement and not an optimisation, and it has three 
 | **wide**    | `ArtistMerged`, `RecordingMerged`                     | touch every row crediting the loser — still incremental, just broader |
 | **rebuild** | a fact whose effect cannot be localised at all        | a full replay                                                         |
 
-**The third tier should be empty, and if it is not, its members are named.** A fact that quietly needs a rebuild is a
-stutter nobody can predict; a fact that is _documented_ to need one is a known cost a person can be told about. Deciding
-which tier each `Fact` variant sits in is work this plan owes before step 3, and it is exactly the kind of thing the
-`every_fact_names_its_subject` test already asserts in a neighbouring register — a fact that names its subject is a fact
-whose blast radius can be computed.
+**Provisional on §5a, and the third tier is empty.** Eight facts are wide _because a row stores something derived_; a
+normalised projection makes most of them narrow. The classification below describes the projection as it is built today,
+and #193 is where it is re-read against the shape it ends up with. That dependency is the useful finding: **a fact's
+blast radius is a property of the projection, not of the fact.**
+
+**Settled, and the third tier is empty.** All 53 variants are classified by `Fact::blast()`, an exhaustive `match` — so
+a new fact does not compile until it has a tier, which is a stronger guarantee than a list somebody maintains.
+
+The wide ones, and why each is wider than it looks:
+
+| fact                                                    | why it is not narrow                                                                                        |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `RecordingMerged`, `ReleaseGroupMerged`, `ArtistMerged` | every row of the loser                                                                                      |
+| `CreditAsserted`, `CreditRetracted`                     | a credit on a release group decides `file_under` for every track on it (#84)                                |
+| `ReleaseGroupRetitled`                                  | renames the album on every row of it                                                                        |
+| `HierarchyNarrowed`, `HierarchyNarrowRetracted`         | the hierarchy is what `genre@1` climbs (#79), so one edge moves every row beneath it                        |
+| `AliasAsserted`, `HeadingRetired`                       | every name an artist answers to is on its rows (#179)                                                       |
+| `ArtistRelated`                                         | a moniker edge is what a filing level climbs (#174)                                                         |
+| `ArtistNamed`, `LabelNamed`                             | a row stores the name, not the id — **so the answer follows the projection's shape rather than the fact's** |
+| ~~`HoldingsAsserted`~~                                  | **not wide** — it names every encoding it touches, so it is _big_ rather than wide                          |
+
+**Wide means the affected set is not derivable from the fact**, and size is not the question. `ArtistMerged` hands over
+two ids and leaves _"every row crediting the loser"_ to be found; that search is the cost. `HoldingsAsserted` is the
+largest fact this log holds — 62 of them are 54 MB, 42% of it, because each is a full snapshot — and it is **narrow**,
+because the affected set is exactly the keys of the map it carries. N narrow updates arriving together is not a wide
+fact.
+
+**When it is not obvious, the answer is wide.** `Narrow` is the optimisation; a fact classified narrower than it is
+leaves the projection _wrong_, which is a different kind of bad from leaving it slow.
+
+Three tests hold it, and each was checked by breaking it: the rebuild tier is empty; no arm is a wildcard, so the
+compiler's exhaustiveness check stays meaningful and a future fact cannot be silently classified as the cheapest tier;
+and every variant is named rather than swallowed by a grouping, because the compiler proves the match is _exhaustive_
+and not that each variant was _considered_.
+
+**If the third tier ever gains a member, it is named here as well as in the match.** A fact that quietly needs a rebuild
+is a stutter nobody can predict; a fact that is _documented_ to need one is a known cost a person can be told about.
+Deciding which tier each `Fact` variant sits in is work this plan owes before step 3, and it is exactly the kind of
+thing the `every_fact_names_its_subject` test already asserts in a neighbouring register — a fact that names its subject
+is a fact whose blast radius can be computed.
 
 ---
 
@@ -361,6 +425,126 @@ already share one parser precisely so that there is one. Pushing predicates into
 answer one question"_ at the largest scale available. So L2 stays in Rust over the projection's rows. Pushing a
 particular predicate down to an index is an optimisation to measure later, per field, and never a second dialect.
 
+---
+
+## 5a. The shape of the projection
+
+**Normalised, and close to the shape the log already has.** `Catalogue` holds `credits`, `assertions`, `aliases`,
+`artist_relations` and `narrows` as association tables; it is the fold into `Drawn` that flattens them into rows
+carrying assembled strings. Normalising the projection is mostly a matter of **not doing that**.
+
+A dimensional reading fits, and the vocabulary is worth borrowing because it names the two places a naive star goes
+wrong here.
+
+### There is not one fact table — there are four grains
+
+This is the refinement that matters most, because conflating two of them is a bug this project has already paid for.
+`EncodingMeasured` is keyed by an encoding, and a work list handing out one row per _recording_ could never reach the
+second copy — #183, and 53 files were retired on the strength of a related confusion.
+
+| grain                  | one row is                        | what hangs off it                              |
+| ---------------------- | --------------------------------- | ---------------------------------------------- |
+| **recording**          | a performance                     | identification, rating, plays, acquisition     |
+| **appearance** (track) | a recording in a slot on a medium | position, sleeve title, which release          |
+| **encoding**           | one set of bytes                  | format, bitrate, length, cutoff, cliff, levels |
+| **holding**            | `(device, encoding)`              | the locator, and nothing else                  |
+
+They share conformed dimensions and they are **not** collapsible. A recording held as a FLAC and an MP3 is one
+recording, two encodings, and possibly two holdings; a song on an album and on a compilation is one recording and two
+appearances. `CopyId::On(track)` versus `CopyId::Loose(recording)` is this distinction already visible in the row
+identity (#155).
+
+**A query names its grain.** `--every-copy` (#183) is that choice made explicit at the CLI, and it exists because the
+default — one row per recording — is the right grain for a question about the _performance_ and the wrong one for a
+question about the _bytes_.
+
+### Dimensions, and the two that are not simple
+
+**Simple:** release, medium, release group, label, work. Foreign keys, nothing to argue about.
+
+**Bridges, because the relationship is many-to-many and carries its own attributes:**
+
+- `credit(subject, artist, role, position, as_credited, join_phrase)` — already exactly this. It is what makes _"every
+  album this artist is on, including ones where they are one of several"_ a join rather than a string search, and it is
+  why the printed line must not be the stored thing: `line_of` is a **rendering** of the bridge, not a column.
+- `assertion(subject, concept, source, confidence)` — many concepts per subject per axis, with lineage. Already this.
+
+**Ragged hierarchies, and there are two of them with the same shape:**
+
+- **genre**, via `narrows(hierarchy, broader, narrower)` — what `genre@1` climbs (#79)
+- **monikers**, via `artist_relations(from, to, kind)` — what `file_under@1` climbs (#174)
+
+Both are queried _by depth_, and both are walked today — `artist_at_level` climbs a chain per call. The standard answer
+is a **closure table**: `(ancestor, descendant, depth)`, derived like everything else in the projection, which turns a
+walk into a lookup and serves both hierarchies with one mechanism. A concept shallower than the level asked for stands
+for itself, which the closure expresses as a depth-0 row rather than as a special case in a walk.
+
+**Alias as a dimension attribute set**, not a column: `artist_name(artist, value, kind)`. That is what #179 needed and
+what `also_known_as` on a row is a flattening of — search should reach `aphextwinsucks` and nothing should print it,
+which is a property of the _name_, not of the row.
+
+### The target, stated plainly
+
+> **A row carries ids. Every string a person reads is assembled by the query layer, and none of it is stored.**
+
+No credit lines, no artist names, no genre labels on a row. The projection mirrors the log; the query layer renders.
+
+### Why this is faster, and not slower, for the queries actually run
+
+I argued the other way earlier on the strength of #123, and that was wrong: #123 measured the **absence of an index** —
+"four passes over every credit in the library, per row" — and the fix was `Lookup::Built`, a map built once. It measured
+nothing about assembly.
+
+Take `artist="*campfire*"`, which is the shape most filters have:
+
+|                                             | strings matched                     |
+| ------------------------------------------- | ----------------------------------- |
+| flattened — build every row, then glob each | 7,272 rows × their names            |
+| normalised — glob the dimension, then join  | **~1,430** names over 1,399 artists |
+
+Filtering a dimension and joining to the facts is strictly less work than materialising every row and scanning it, and
+it gets better as the library grows, because dimensions grow far more slowly than rows. The same holds for `genre=`,
+`label=` and anything else whose values are shared.
+
+**Where normalisation does cost** is rendering, and sorting by something derived: a tree sorted by `file_under` has to
+assemble every line. Two things bound it — the TUI draws a screenful rather than 7,272 rows, and a per-query memo (the
+descendant of `Lookup::Built`) **cannot go stale**, because it lives for one query rather than being maintained across
+facts.
+
+### And it is a representation argument before it is a performance one
+
+**A flattened projection can represent a state that is wrong by definition.** A row holding `file_under = "Aphex Twin"`
+while the artist table holds `AFX` is expressible, and nothing in the type forbids it. Invalidation is then a
+_discipline_ keeping the model out of states its own shape permits — and a discipline is what this project keeps
+replacing with structure.
+
+Normalised, the name lives in one place. The disagreeing state is **not expressible**: there is nothing to invalidate,
+nothing to test, and nothing to get out of step.
+
+This is not a new principle here, it is the same one applied a layer down:
+
+| the second source that could disagree   | what was done                                                                                                        |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| a path, as a second identity for a file | identity became the **audio**, and `history.toml` keyed by path cost a four-star rating on a file that still existed |
+| tags, as a second account of a library  | tags became a **serialisation**, consumed at import and never consulted again                                        |
+| a gain compared approximately           | stored as an **integer** in hundredths, because a value that compares approximately cannot be a key                  |
+
+**What is honest about the alternative:** a flattened projection with correct invalidation is not wrong at rest, and
+`advance(p, facts) ≡ rebuild(facts)` is directly assertable — `Catalogue` derives `PartialEq` and a rebuild is 44ms. It
+is a real test and it belongs in #193 either way. But it is true _by test_ over sequences of facts, where the normalised
+version is true _by construction_, and the test space is combinatorial rather than 53 cases.
+
+The coupling is the sharper problem. `ArtistNamed` is wide **because a row stores the name** — a dependency between two
+files with nothing linking them. Change what the projection stores and a classification elsewhere becomes wrong,
+silently, with every test still green.
+
+**The rule is not "never derive".** A closure table is derived and stored, and that is fine. The rule is **never patch a
+derivation incrementally**: a closure rebuilt whole whenever `narrows` changes cannot drift, and one patched edge by
+edge can.
+
+It also dissolves most of §3a's tier problem: `ArtistNamed`, `LabelNamed`, `ReleaseGroupRetitled` and the credit facts
+are wide **only because** something derived is stored on the row. Normalised, they are narrow, and `Blast` stops being
+something anyone has to maintain with care.
 ---
 
 ## 6. The Python boundary

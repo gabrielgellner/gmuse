@@ -3127,6 +3127,51 @@ Append here as decisions are made. Format: date, decision, rationale.
   "invalidates every event ever recorded", and #63 has not settled whether events should name an entry or a encoding.
   The id exists, is cached, and is used where it already pays.
 
+- **2026-09-10** **The reason a launch does not scan is void: the tree is an output of the library, not an input.**
+  Supersedes the 2026-09-01 entry below, whose rationale was that "a file appearing on disk is a change to the
+  _library_, and a change to the library is something you make". That described a world where the music folder was an
+  input the player read, and it is no longer the world.
+
+  **A file cannot appear.** `shelf import` is the only door in, and it is a declaration a person makes (#94).
+  `shelf render` places what is imported, under `{file_under}/{album}/{track} {title}` and nothing else
+  (`storage-layout.md`). #160's gate refuses to catalogue anything no authority has named. Tools move files from
+  _outside_ the library to _inside_ it; nothing watches a folder and ingests on its own. So every file under the root is
+  there because the library put it there.
+
+  **The tree is an output that moves, and `render` is what moves it.** A fact never touches the filesystem: renaming an
+  artist or correcting an album changes what the tree _should_ be, and `shelf render` is the operation that makes it so
+  and records `HoldingsAsserted` for what it moved. So there are three states and two different gaps between them:
+
+  |                              |                                                |
+  | ---------------------------- | ---------------------------------------------- |
+  | where a file **should** be   | derived from the facts and `storage-layout.md` |
+  | where a file **is**          | `HoldingsAsserted`, in the log                 |
+  | where a file **actually** is | the disk                                       |
+
+  **Only the second is a gap.** `is ≠ actually` is drift, and a scan closes it. `should ≠ is` is rendering lag and it is
+  _cosmetic_: the folder names are out of date, nothing is unreachable, and no query answers differently. `reconcile`
+  binds by hashing the audio and stores the path as a value — a library of `<uuid>.flac` would bind every holding
+  identically. So `render` is for people and for other software that reads folders, and the readable layout's one
+  non-cosmetic value is recovery: lose the log and a named tree is self-describing where a hash is opaque.
+
+  **Which means a scan is not discovery.** It cannot find news, because there is no news to find — only drift: a file
+  moved, removed or replaced by something outside the system. Reconciling a tree the library owns does not make the
+  library "a function of gmuse having been run", because the run cannot teach it anything it did not already know. That
+  was the whole of the objection, and it does not apply to this operation.
+
+  Two further things changed underneath it. `reconcile` is no longer the old whole-library rebuild — it asserts
+  `HoldingsAsserted` and nothing else, so its entire effect is to say where known bytes currently sit. And it is now
+  cheap: the read cache (#188, #190) makes a warm reconcile **~1.3s against a cold 24s**, because a `stat` settles every
+  unchanged file.
+
+  **What this does not decide** is that a launch _should_ scan — only that "it would make the library a function of
+  having run the player" is no longer a reason it must not. The remaining question is whether a second of work at
+  startup is worth catching drift eagerly rather than when somebody asks, and it belongs with #196, where the scan gets
+  a working door at last (#64).
+
+  **Unchanged:** the cache stays derivable and may be discarded at any time (2026-08-27); `--rescan` remains the
+  deliberate ask; #160's gate is untouched, so a scan still catalogues nothing.
+
 - **2026-09-01** **A launch does not scan.** Startup rebuilt the library from disk every time, which made the library a
   function of gmuse having been run. That is backwards under #63's reading: the library is the thing and the player
   reads it. A file appearing on disk is a change to the _library_, and a change to the library is something you make —
