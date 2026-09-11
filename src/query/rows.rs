@@ -10,14 +10,9 @@
 //! The two fields have deliberately different lifetimes. The **locator** is
 //! good until the file moves; the **id** is good forever.
 
-use std::collections::BTreeSet;
-use std::path::PathBuf;
-
-use crate::facts::Record;
 use crate::model::basis::Basis;
 use crate::model::entity::Device;
 use crate::model::id::Id;
-use crate::model::instance::Instance;
 use crate::model::proposal::Queried;
 use crate::model::reference::CreditOn;
 use crate::model::seam::Librarian;
@@ -66,62 +61,41 @@ pub enum Copies {
 }
 
 /// Build the work list from this disk and this log.
-/// Eight, and each one is a separate question this has to be told rather than
-/// guess: where to look, what the log says, which device is asking, when, how
-/// much to admit, one row per recording or per copy, what to keep, and what is
-/// already known about the bytes. Bundling them into a struct would move the
-/// same eight names one layer out and add a type whose only job is to hold
-/// them.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "eight independent inputs, not a bundle"
-)]
+/// Seven, each a separate question this has to be told rather than guess: the
+/// projection, what the log says, which device is asking, when, how much to
+/// admit, one row per recording or per copy, and what to keep. **`roots` is
+/// gone** — a read does not open anything, so it has no use for where the
+/// library sits on disk (#195), and losing that argument is the clearest sign
+/// the cut landed.
 pub fn rows(
-    roots: &[PathBuf],
-    records: &BTreeSet<Record>,
+    // **The projection, handed in, and first** — #195. A read is a function of
+    // it: whoever owns the snapshot supplies it, and this stops knowing where
+    // the library is kept or what it is folded from.
+    projection: &crate::projection::Projected,
     device: Id<Device>,
     now: i64,
     only: Only,
     copies: Copies,
     filter: Option<&crate::query::filter::Expr>,
-    // **One cache across both walks below** — #188. They ask the same question
-    // of the same files: `populate` to mint and `reconcile` to publish
-    // holdings. Sharing it makes the second walk a `stat` per file; persisting
-    // it between runs makes the first one that too, for everything that has
-    // not changed.
-    measurements: &mut crate::model::ingest::Reads,
 ) -> Vec<Queried> {
-    // **The log first, then the disk.** `ingest` refuses to mint over a
-    // binding somebody made — but only over one it can see, and a scan into an
-    // empty instance sees nothing. Scanning first re-minted every relinked
-    // recording from its bytes, so 377 identifications applied cleanly and the
-    // work list did not move.
-    let mut scratch = Instance::new(device);
-    scratch.merge(now, records);
-    // **Gated, like the front door** — #160, and `Anything` here was wrong.
-    // Reading does not persist anything, so exempting it looked free; but
-    // `populate` under `Anything` does not merely *show* what exists, it mints
-    // a recording out of the file's own bytes. Doing that in the scratch
-    // recreated exactly the row the gate had refused, and a pass reading this
-    // list would then propose an identification whose `from` names a recording
-    // that never existed anywhere but here.
+    // **The log, and only the log** — #195.
     //
-    // Gated, a held-back file arrives as what it is: an encoding, a claim, and
-    // no performance.
-    crate::model::populate::populate(
-        &mut scratch,
-        roots,
-        now,
-        crate::model::populate::Admits::Identified,
-        measurements,
-    );
-    // **And publish what is here** (#145). A work list hands a tool an id and
-    // a **locator**, so the holdings are half of the answer — and cataloguing
-    // stopped asserting them, because a partial import must not unpublish the
-    // rest of the library.
-    crate::model::populate::reconcile(&mut scratch, roots, now, measurements);
-    let catalogue = scratch.catalogue();
-    let library = Librarian::from_catalogue(&catalogue);
+    // This walked the library twice: `populate` to mint whatever was on disk
+    // and `reconcile` to publish holdings. Both are gone, and with them the
+    // last read path that opened a music file.
+    //
+    // What that cost was not only time. A work list assembled partly from the
+    // log and partly from the disk answers differently depending on what a
+    // tagger last wrote, and nothing in the signature said so. Now a read is a
+    // function of the log: the same records give the same rows, on any machine,
+    // whatever is on disk that nobody has declared.
+    //
+    // **The filesystem has a door of its own** (#196). `shelf scan` reconciles
+    // holdings and reads no tags, which is what `library-api.md` always said a
+    // scan was; a file that moved is the same encoding at a new locator and
+    // the scan carries that into the log. A read no longer does it uninvited.
+    let catalogue = projection.catalogue();
+    let library = Librarian::from_catalogue(catalogue);
 
     // **Compiled once, not per row.** `Expr::compile` says so in as many
     // words, and this list runs over the whole library.
@@ -315,9 +289,63 @@ pub fn rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facts::Record;
+    use std::collections::BTreeSet;
+    /// **What a scan does, for a test that needs one** — #195.
+    ///
+    /// A read no longer walks, so a file on disk reaches a row only once
+    /// something has taken it in and published where it sits. These tests used
+    /// to get that for free from `rows` itself, which is exactly the coupling
+    /// #195 removed.
+    fn scanned_in(root: &std::path::Path) -> BTreeSet<Record> {
+        scanned_at(root, 50)
+    }
+
+    /// **A scan at a given moment**, because when it happened matters now.
+    ///
+    /// `rows` used to populate at the caller's `now`, so a scan always came
+    /// *after* whatever facts a test had appended. It does not scan at all any
+    /// more, so a test that relinks a copy has to say when the scan that found
+    /// it happened — which is the honest shape: a scan is an event with a time,
+    /// and it always was.
+    fn scanned_at(root: &std::path::Path, now: i64) -> BTreeSet<Record> {
+        admitting(root, now, crate::model::populate::Admits::Anything)
+    }
+
+    fn admitting(
+        root: &std::path::Path,
+        now: i64,
+        admits: crate::model::populate::Admits,
+    ) -> BTreeSet<Record> {
+        let mut i = crate::model::instance::Instance::new(device());
+        crate::model::populate::populate(
+            &mut i,
+            &[root.to_path_buf()],
+            now,
+            admits,
+            &mut crate::model::ingest::Reads::default(),
+        );
+        crate::model::populate::reconcile(
+            &mut i,
+            &[root.to_path_buf()],
+            now + 10,
+            &mut crate::model::ingest::Reads::default(),
+        );
+        i.records().clone()
+    }
+
+    /// A scan's records, plus facts a test then asserts.
+    fn scanned_plus(root: &std::path::Path, more: &BTreeSet<Record>) -> BTreeSet<Record> {
+        let mut all = scanned_in(root);
+        all.extend(more.iter().cloned());
+        all
+    }
+
     use crate::facts::Fact;
     use crate::model::entity::Recording;
+    use crate::projection::Projected;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("gmuse-query-{name}"));
@@ -386,23 +414,14 @@ mod tests {
         wav(&root.join("a.wav"), 1000);
         wav(&root.join("b.wav"), 1200);
 
-        let mut taken = crate::model::instance::Instance::new(device());
-        crate::model::populate::populate(
-            &mut taken,
-            std::slice::from_ref(&root),
-            50,
-            crate::model::populate::Admits::Anything,
-            &mut crate::model::ingest::Reads::default(),
-        );
+        let scanned = scanned_in(&root);
         let apart = rows(
-            std::slice::from_ref(&root),
-            taken.records(),
+            &Projected::rebuild(&scanned),
             device(),
             100,
             Only::Everything,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(apart.len(), 2, "two recordings until something joins them");
 
@@ -411,7 +430,7 @@ mod tests {
         // arrives as.
         let one = apart[0].recording.expect("minted");
         let other = apart[1].recording.expect("minted");
-        let mut log = taken.records().clone();
+        let mut log = scanned.clone();
         log.extend(records(
             200,
             [Fact::EncodingBound {
@@ -423,14 +442,12 @@ mod tests {
 
         let ask = |copies| {
             rows(
-                std::slice::from_ref(&root),
-                &log,
+                &Projected::rebuild(&scanned_plus(&root, &log)),
                 device(),
                 300,
                 Only::Everything,
                 copies,
                 None,
-                &mut crate::model::ingest::Reads::default(),
             )
         };
         let held = |rs: &[Queried]| -> Vec<Queried> {
@@ -476,23 +493,14 @@ mod tests {
         wav(&root.join("a.wav"), 1000);
         wav(&root.join("b.wav"), 1200);
 
-        let mut taken = crate::model::instance::Instance::new(device());
-        crate::model::populate::populate(
-            &mut taken,
-            std::slice::from_ref(&root),
-            50,
-            crate::model::populate::Admits::Anything,
-            &mut crate::model::ingest::Reads::default(),
-        );
+        let scanned = scanned_in(&root);
         let apart = rows(
-            std::slice::from_ref(&root),
-            taken.records(),
+            &Projected::rebuild(&scanned),
             device(),
             100,
             Only::Everything,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         let one = apart[0].recording.expect("minted");
         let (first, second) = (
@@ -502,7 +510,7 @@ mod tests {
 
         // One performance, two copies — the shape #159 supports — and they
         // measure differently, which is the only reason to keep both numbers.
-        let mut log = taken.records().clone();
+        let mut log = scanned.clone();
         log.extend(records(
             200,
             [
@@ -529,14 +537,12 @@ mod tests {
         let ask = |src: &str| -> Vec<Queried> {
             let expr = crate::query::filter::Expr::parse(src).expect("it parses");
             rows(
-                std::slice::from_ref(&root),
-                &log,
+                &Projected::rebuild(&scanned_plus(&root, &log)),
                 device(),
                 300,
                 Only::Everything,
                 Copies::Every,
                 Some(&expr),
-                &mut crate::model::ingest::Reads::default(),
             )
             .into_iter()
             .filter(|r| r.recording == Some(one))
@@ -585,14 +591,12 @@ mod tests {
         wav(&root.join("a.wav"), 1000);
 
         let rows = rows(
-            std::slice::from_ref(&root),
-            &BTreeSet::new(),
+            &Projected::rebuild(&scanned_in(&root)),
             device(),
             100,
             Only::Everything,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].encoding.is_some(), "nothing to propose against");
@@ -613,26 +617,22 @@ mod tests {
         wav(&root.join("b.wav"), 2000);
 
         let all = rows(
-            std::slice::from_ref(&root),
-            &BTreeSet::new(),
+            &Projected::rebuild(&scanned_in(&root)),
             device(),
             100,
             Only::Everything,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(all.len(), 2);
         assert_eq!(
             rows(
-                std::slice::from_ref(&root),
-                &BTreeSet::new(),
+                &Projected::rebuild(&scanned_in(&root)),
                 device(),
                 100,
                 Only::Unidentified,
                 Copies::Shown,
                 None,
-                &mut crate::model::ingest::Reads::default(),
             )
             .len(),
             2,
@@ -657,14 +657,12 @@ mod tests {
         );
 
         let after = rows(
-            &[root],
-            &log,
+            &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             300,
             Only::Unidentified,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(after.len(), 2, "the two on disk still rest on their bytes");
         assert!(
@@ -694,14 +692,12 @@ mod tests {
         wav(&root.join("a.wav"), 1000);
 
         let bare = rows(
-            std::slice::from_ref(&root),
-            &BTreeSet::new(),
+            &Projected::rebuild(&scanned_in(&root)),
             device(),
             100,
             Only::Everything,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(bare.len(), 1);
         assert_eq!(
@@ -726,14 +722,12 @@ mod tests {
             ],
         );
         let after = rows(
-            &[root],
-            &log,
+            &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             300,
             Only::Everything,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(
             after
@@ -780,14 +774,12 @@ mod tests {
 
         // Nothing placed, so nothing to name.
         let loose = rows(
-            std::slice::from_ref(&root),
-            &BTreeSet::new(),
+            &Projected::rebuild(&scanned_in(&root)),
             device(),
             100,
             Only::Everything,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(loose.len(), 1);
         assert_eq!(
@@ -859,14 +851,12 @@ mod tests {
         );
 
         let placed = rows(
-            &[root],
-            &log,
+            &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             300,
             Only::Everything,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(
             placed
@@ -927,14 +917,12 @@ mod tests {
         );
 
         let work = rows(
-            std::slice::from_ref(&root),
-            i.records(),
+            &Projected::rebuild(i.records()),
             device(),
             200,
             Only::Unidentified,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert_eq!(work.len(), 1, "the held-back file is invisible to a pass");
         let row = &work[0];
@@ -968,117 +956,102 @@ mod tests {
             ],
         ));
         let after = rows(
-            std::slice::from_ref(&root),
-            &log,
+            &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             400,
             Only::Unidentified,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         assert!(
             !after.iter().any(|r| r.recording.is_none()),
             "a named file is still being offered as work"
         );
     }
-
-    /// showed up.
+    /// **A scan does not mint over an identification** — the relink case.
+    ///
+    /// A file taken in unidentified mints a recording from its bytes; somebody
+    /// then identifies it and the encoding moves to the named recording. A
+    /// later scan must not put it back, and the gate (#160) is what stops it:
+    /// under `Admits::Identified` a file nothing names is **held** — bytes
+    /// described, claim recorded — and no performance is minted.
+    ///
+    /// **Asserted against `populate`, which is whose behaviour this is.** It
+    /// used to be asserted through `rows`, because a read scanned on the way
+    /// past; #195 took that out, and a test that reached the gate through a
+    /// query was only ever reaching it by accident.
     #[test]
     fn a_scan_does_not_mint_over_an_identification() {
         let root = dir("relink");
         wav(&root.join("a.wav"), 1000);
 
-        // What the file mints when somebody takes it unidentified — which
-        // since #160 is the only way it mints anything, and is the state this
-        // test is about: a byte-minted recording that a later identification
-        // moves off. A scan can no longer produce one by itself.
-        let mut taken = crate::model::instance::Instance::new(device());
+        // Taken in unidentified: this is the only way anything mints a
+        // recording from bytes, and it is the state the test is about.
+        let mut i = crate::model::instance::Instance::new(device());
         crate::model::populate::populate(
-            &mut taken,
+            &mut i,
             std::slice::from_ref(&root),
             50,
             crate::model::populate::Admits::Anything,
             &mut crate::model::ingest::Reads::default(),
         );
-        let before = rows(
-            std::slice::from_ref(&root),
-            taken.records(),
-            device(),
-            100,
-            Only::Everything,
-            Copies::Shown,
-            None,
-            &mut crate::model::ingest::Reads::default(),
-        );
-        let encoding = before[0].encoding.expect("an encoding");
-        let minted = before[0]
-            .recording
+        let minted = *crate::projection::Projected::rebuild(i.records())
+            .catalogue()
+            .recordings
+            .keys()
+            .next()
             .expect("taking it unidentified mints one");
+        let encoding = *crate::projection::Projected::rebuild(i.records())
+            .catalogue()
+            .encodings
+            .keys()
+            .next()
+            .expect("and describes its bytes");
 
         // Somebody identifies it, exactly as `apply` writes one.
         let named = Id::<Recording>::of_basis(&Basis::MusicBrainz(uuid::Uuid::from_u128(1)));
-        let mut log = taken.records().clone();
-        log.extend(records(
-            200,
-            [
-                Fact::RecordingIdentified {
-                    recording: named,
-                    basis: Basis::MusicBrainz(uuid::Uuid::from_u128(1)),
-                },
-                Fact::EncodingBound {
-                    encoding,
-                    from: Some(minted),
-                    to: named,
-                },
-            ],
-        ));
+        for fact in [
+            Fact::RecordingIdentified {
+                recording: named,
+                basis: Basis::MusicBrainz(uuid::Uuid::from_u128(1)),
+            },
+            Fact::EncodingBound {
+                encoding,
+                from: Some(minted),
+                to: named,
+            },
+        ] {
+            i.append_fact(200, fact);
+        }
+        assert_eq!(
+            crate::projection::Projected::rebuild(i.records())
+                .catalogue()
+                .bound
+                .get(&encoding),
+            Some(&named),
+            "the relink did not take"
+        );
 
-        let after = rows(
+        // **And now a scan.** Gated, so it holds the bytes and mints nothing.
+        crate::model::populate::populate(
+            &mut i,
             std::slice::from_ref(&root),
-            &log,
-            device(),
             300,
-            Only::Everything,
-            Copies::Shown,
-            None,
+            crate::model::populate::Admits::Identified,
             &mut crate::model::ingest::Reads::default(),
         );
-        // **The row holding the file names the identified recording.** Asserted
-        // through the encoding rather than by counting rows: the byte-minted
-        // recording is in the log now — it is what the relink moved *off* — and
-        // a recording nothing holds a copy of is an ordinary row (#155), not a
-        // second copy of this file.
-        let holding: Vec<_> = after
-            .iter()
-            .filter(|r| r.encoding == Some(encoding))
-            .collect();
-        assert_eq!(holding.len(), 1, "the file is offered twice");
         assert_eq!(
-            holding[0].recording,
-            Some(named),
-            "the scan minted over a decision somebody made"
+            crate::projection::Projected::rebuild(i.records())
+                .catalogue()
+                .bound
+                .get(&encoding),
+            Some(&named),
+            "a scan minted over an identification and took the copy back"
         );
-        assert!(
-            !rows(
-                &[root],
-                &log,
-                device(),
-                300,
-                Only::Unidentified,
-                Copies::Shown,
-                None,
-                &mut crate::model::ingest::Reads::default(),
-            )
-            .iter()
-            .any(|r| r.encoding == Some(encoding)),
-            "an identified file is still on the work list"
-        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A recording the log knows about and this disk does not hold is an
-    /// ordinary row with nothing to open — §1 is explicit that a wishlist
-    /// entry is exactly one of those, so it is listed rather than dropped.
     #[test]
     fn something_not_here_is_a_row_with_no_locator() {
         let root = dir("absent");
@@ -1096,14 +1069,12 @@ mod tests {
         );
 
         let rows = rows(
-            &[root],
-            &log,
+            &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             200,
             Only::Everything,
             Copies::Shown,
             None,
-            &mut crate::model::ingest::Reads::default(),
         );
         let row = rows
             .iter()

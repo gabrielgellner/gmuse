@@ -512,6 +512,62 @@ fn run_library(
                 eprintln!("dry run — nothing written. Add --write.");
             }
         }
+        cli::Shelf::Scan { write } => {
+            let (mut log, _) = crate::model::instance::Instance::open(
+                &loaded.data_dir,
+                device,
+                crate::history::now_ms(),
+            );
+            let before = log.records().len();
+            let mut reads = crate::cache::load_measurements(&crate::cache::measurements_path());
+            let report = crate::model::populate::reconcile(
+                &mut log,
+                roots,
+                crate::history::now_ms(),
+                &mut reads,
+            );
+
+            // **Named, not counted.** A file the library has never been told
+            // about is the one thing a scan can find that somebody has to act
+            // on, and `import` is the only act that takes it in (#160).
+            for path in report.unknown.iter().take(20) {
+                println!("unknown\t{}", path.display());
+            }
+            if report.unknown.len() > 20 {
+                println!("… and {} more", report.unknown.len() - 20);
+            }
+            // Two paths holding one set of bytes: the second buys no
+            // capability, and this is the only place it comes to light.
+            for (extra, kept) in &report.duplicates {
+                println!("duplicate\t{}\t{}", extra.display(), kept.display());
+            }
+            for (path, why) in report.unreadable.iter().take(10) {
+                eprintln!("unreadable: {} — {why}", path.display());
+            }
+
+            let (hit, read) = reads.tally();
+            eprintln!(
+                "{} file(s), {} unknown, {} duplicate, {} unreadable ({hit} unchanged, {read} read)",
+                report.files,
+                report.unknown.len(),
+                report.duplicates.len(),
+                report.unreadable.len(),
+            );
+
+            if *write {
+                let n = log.flush(&loaded.data_dir)?;
+                eprintln!(
+                    "{n} record(s) written ({} new)",
+                    log.records().len() - before
+                );
+                reads.prune_missing();
+                crate::cache::save_measurements(&crate::cache::measurements_path(), &reads);
+                // The locators moved, so anything holding old ones is stale.
+                drop_cache(cache_path.as_deref());
+            } else {
+                eprintln!("dry run — nothing written. Add --write.");
+            }
+        }
         cli::Shelf::Compact { write } => {
             let (mut log, _) = crate::model::instance::Instance::open(
                 &loaded.data_dir,
@@ -1075,8 +1131,7 @@ fn run_library(
                     .filter(|r| playable.contains_key(r))
                     .collect();
                 for row in query::rows(
-                    roots,
-                    log.records(),
+                    &crate::projection::Projected::rebuild(log.records()),
                     device,
                     crate::history::now_ms(),
                     query::Only::Everything,
@@ -1084,7 +1139,6 @@ fn run_library(
                     // which performance sits here — so one copy answers it.
                     query::Copies::Shown,
                     None,
-                    &mut crate::model::ingest::Reads::default(),
                 ) {
                     if row.recording.is_some_and(|r| contested.contains(&r)) {
                         println!("{}", serde_json::to_string(&row)?);
@@ -1742,29 +1796,31 @@ fn run_library(
                 .map(crate::query::filter::Expr::parse)
                 .transpose()
                 .map_err(|e| format!("--filter: {e}"))?;
-            // **Kept between runs** — #188. Both walks below ask the same
-            // question of the same files, and every run before this one asked
-            // it too. A `stat` says whether the answer still holds.
-            let seen_path = crate::cache::measurements_path();
-            let mut seen = crate::cache::load_measurements(&seen_path);
+            // **The snapshot, and the log only if it moved** — #194, #195.
+            //
+            // A print of the log files costs 17.5µs; loading the fold costs
+            // 9.5ms. Parsing and folding the log costs 216ms, and is now only
+            // paid when something has actually been appended.
+            let at = crate::cache::projection_path();
+            let print = crate::cache::LogPrint::of(&loaded.data_dir);
+            let projection = match crate::cache::current_projection(&at, &print) {
+                Some(ready) => ready,
+                None => {
+                    let folded = crate::projection::Projected::rebuild(log.records());
+                    crate::cache::save_projection(&at, &print, &folded);
+                    folded
+                }
+            };
             for row in query::rows(
-                roots,
-                log.records(),
+                &projection,
                 device,
                 crate::history::now_ms(),
                 only,
                 copies,
                 filter.as_ref(),
-                &mut seen,
             ) {
                 println!("{}", serde_json::to_string(&row)?);
             }
-            let (hit, read) = seen.tally();
-            if read > 0 || hit > 0 {
-                eprintln!("{hit} file(s) unchanged, {read} read");
-            }
-            seen.prune_missing();
-            crate::cache::save_measurements(&seen_path, &seen);
         }
         cli::Shelf::Apply { file, write } => {
             let outcome = apply::run(

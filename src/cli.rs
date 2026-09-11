@@ -416,6 +416,30 @@ pub enum Shelf {
         #[arg(long)]
         write: bool,
     },
+    /// **Reconcile what this device holds with what is on disk** — #196.
+    ///
+    /// `library-api.md`: _a scan reconciles holdings and reads no tags._ It
+    /// catalogues nothing and identifies nothing — it says where the bytes the
+    /// library already knows about currently sit, and names the files it found
+    /// that the library has never been told about.
+    ///
+    /// **This is the door the filesystem gets**, and reads stop walking
+    /// because it exists (#195). A file that moved is the same encoding at a
+    /// new locator — identity is the audio, so a move needs no operation and
+    /// cannot lose anything — and this is what carries that into the log.
+    ///
+    /// It cannot find new music. Every file under the root is there because
+    /// `import` put it there and `render` placed it, so a scan finds **drift**
+    /// rather than news: something moved, went missing, or was replaced from
+    /// outside. That is the 2026-09-10 Decision Log entry, and it is why this
+    /// is a repair rather than an ingestion.
+    ///
+    /// **A dry run unless given `--write`.**
+    Scan {
+        /// Append the holdings it found. Without this, nothing is written.
+        #[arg(long)]
+        write: bool,
+    },
     /// **Drop the holdings assertions nothing reads any more** — #201.
     ///
     /// A `HoldingsAsserted` carries the **whole map** of what a device holds,

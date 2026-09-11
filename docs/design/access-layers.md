@@ -660,6 +660,32 @@ Worth stating, so the plan is not read as bigger than it is.
 
 ---
 
+## 7a. What the cut-over found
+
+`shelf query`, warm: **1.05s → 0.45s**, and the log is not read at all unless something appended.
+
+Two things showed up the moment a read stopped walking, and both are the point rather than the cost.
+
+**36 rows were showing the file's tag over the library's own record.** Not one of them was visible before, because the
+answer came half from the log and half from the disk and nothing in a signature said so:
+
+| was (the tag)                                           | now (the library)                                       |
+| ------------------------------------------------------- | ------------------------------------------------------- |
+| `Ventolin (Carharrack mix)`                             | `Ventolin (Carharrack Mix)`                             |
+| `IZ‐US`                                                 | `IZ-US`                                                 |
+| `Don't Come Home a Drinkin' (with Lovin' on Your Mind)` | `Don’t Come Home a‐Drinkin’ (With Lovin’ on Your Mind)` |
+
+34 titles and 2 artists. The same class as #165's _"23 retitles… correct in the library; anything reading the files
+directly still sees the cross"_.
+
+**And one row disappeared, correctly.** A recording carrying `RecordingIdentified`, `TrackPlaced` and four encoding
+facts, and **no `RecordingCatalogued`** — so the library had never recorded its title, and drew it only because every
+read parsed the file. One row in 7,272 (#202).
+
+That is the argument for the whole change in one row: a read that walks will fill a gap in before anybody can see it.
+
+---
+
 ## 8. Sequencing
 
 Nine steps. Each leaves the tree working and each is independently reviewable. **(1) is worth doing whatever is decided

@@ -116,62 +116,45 @@ fn the_query_layer_does_not_know_the_player_exists() {
     );
 }
 
-/// **`std::fs` in the query layer, counted, so the number may only fall.**
+/// **The query layer opens no file. Asserted, not counted** — #195.
 ///
-/// A ratchet rather than an assertion, which is how `src/ui/`'s `Store` count
-/// already works and the only honest shape for it today: [`super::rows`] walks
-/// the library because nothing else notices a file that arrived — `:rescan` is
-/// a stub and a launch no longer scans (#64).
+/// This was a ratchet at five, because [`super::rows`] walked the library on
+/// every read: nothing else noticed a file that arrived, since `:rescan` was a
+/// stub and a launch no longer scans (#64). `shelf scan` is that door now
+/// (#196), so the walk is gone and the number is zero.
 ///
-/// **The number is written out loud** so a regression is a diff rather than a
-/// silent pass. #195 takes it to zero, and only together with #196, because
-/// cutting the walk without giving the filesystem a door of its own would swap
-/// a slow-but-current library for a fast-and-quietly-wrong one.
+/// **What it bought is not only speed.** A read assembled partly from the log
+/// and partly from the disk answers differently depending on what a tagger
+/// last wrote, and nothing in a signature said so — 36 rows of this library
+/// were showing a file's tag over the library's own record. A read is a
+/// function of the projection now: the same records give the same rows, on any
+/// machine, whatever is on disk that nobody has declared.
 ///
-/// The evaluator is already clean and this is worth saying: `filter`, `format`
-/// and `sort` reach for no file at all. What is left is the row assembly.
+/// Test fixtures are exempt and nothing else is. They write temp files to have
+/// something to fold; production code here opens nothing at all.
 #[test]
-fn the_walk_that_is_left_is_counted_and_may_only_shrink() {
-    /// Every `std::fs` mention under `src/query`, today.
-    const TODAY: usize = 5;
-    /// And every one of them is in this file.
-    const ONLY_IN: &str = "rows.rs";
-
-    let mut found = Vec::new();
+fn the_query_layer_opens_no_file_at_all() {
+    let mut leaks = Vec::new();
     for (file, text) in read("src/query") {
         if file.ends_with("boundary.rs") {
             continue;
         }
-        for line in text.lines() {
-            // **Code, not prose.** The module doc above explains this very
-            // ratchet and would otherwise trip it, which is the same trap
-            // `the_model_does_not_know_the_player_exists` avoids by reading
-            // only `use` lines.
-            let code = line.trim();
-            if code.starts_with("//") {
+        let production = match text.find("#[cfg(test)]") {
+            Some(at) => &text[..at],
+            None => &text[..],
+        };
+        for line in production.lines().map(str::trim) {
+            if line.starts_with("//") {
                 continue;
             }
-            if code.contains("std::fs") {
-                found.push((file.clone(), line.trim().to_string()));
+            if line.contains("std::fs") || line.contains("File::open") {
+                leaks.push(format!("{file}: {line}"));
             }
         }
     }
-
-    for (file, line) in &found {
-        assert!(
-            file.ends_with(ONLY_IN),
-            "the walk spread beyond {ONLY_IN}: {file}: {line}"
-        );
-    }
     assert!(
-        found.len() <= TODAY,
-        "the query layer reads more files than it did: {} against {TODAY}\n{found:#?}",
-        found.len(),
-    );
-    assert_eq!(
-        found.len(),
-        TODAY,
-        "the count fell to {} — good, and TODAY should now say so",
-        found.len(),
+        leaks.is_empty(),
+        "a read opened a file — which is how the answer starts depending on \
+         what a tagger last wrote: {leaks:#?}"
     );
 }

@@ -17,12 +17,15 @@
 //! files, and how the answer to a question came to depend on what a tagger last
 //! wrote rather than on what the library knows.
 //!
-//! ## `std::fs` is a ratchet here, not yet an assertion
+//! ## Nothing here opens a file
 //!
-//! [`rows`] still walks the library, because nothing else notices a file that
-//! arrived — `:rescan` is a stub and a launch no longer scans (#64). So the
-//! test asserts **no worse than today** and the count may only fall. #195 takes
-//! it to zero, together with #196 which gives the filesystem its own door.
+//! It was a ratchet while [`rows`] still walked the library, because nothing
+//! else noticed a file that arrived — `:rescan` was a stub and a launch no
+//! longer scans (#64). `shelf scan` is that door now (#196), so it is an
+//! assertion: no `std::fs` in production code under this directory.
+//!
+//! A read is a function of the projection. The same records give the same
+//! rows, on any machine, whatever sits on disk that nobody has declared.
 
 pub mod filter;
 pub mod format;
