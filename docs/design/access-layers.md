@@ -80,10 +80,21 @@ into every read**.
 **L0 — facts.** Append-only. The only write is appending a fact; there is no update and no delete. The only reader is
 the projector. Nothing else folds the log, and nothing else needs to.
 
-**L1 — the projection.** Everything a question could want, already assembled: rows, credits, concepts, encodings,
-holdings, measurements, plays and ratings. **Derived and disposable** — it holds nothing that cannot be rebuilt by
-replaying the log, which is the rule every event-sourced system converges on and the one this project already applies to
-`cache.rs`.
+**L1 — the projection.** The `Catalogue`: recordings, encodings, holdings, credits, concepts, aliases, measurements,
+plays and ratings — **keyed by id and assembled into nothing**. It already has this shape, because it mirrors a log
+whose facts name ids: `artist_names` holds a name once per artist, `credits` is keyed by
+`(subject, artist, role, source)`, `assertions` by ids.
+
+**Derived and disposable** — it holds nothing that cannot be rebuilt by replaying the log, which is the rule every
+event-sourced system converges on and the one this project already applies to `cache.rs`.
+
+**The drawn rows are not here.** `Librarian` holds `BTreeMap<CopyId, Drawn>` with credit lines assembled into strings,
+and that is **L2's materialisation**, not L1's storage: built per fold, never persisted, thrown away and rebuilt rather
+than patched. It cannot go stale for the same reason `Lookup::Built` cannot — it does not outlive the thing it was
+derived from. Rebuilding all 7,273 of them costs **42ms**.
+
+That distinction is the whole of §5a. Assembled strings are fine where they cannot outlive their source; what is not
+fine is _storing_ them somewhere a fact would have to reach in and correct.
 
 **L2 — the query.** `filter.rs`, `format.rs`, `sort.rs` and the levels. Pure: given a projection it is a function, with
 no I/O and no clock it was not handed.
@@ -299,32 +310,35 @@ per-fact application is a requirement and not an optimisation, and it has three 
 | **wide**    | `ArtistMerged`, `RecordingMerged`                     | touch every row crediting the loser — still incremental, just broader |
 | **rebuild** | a fact whose effect cannot be localised at all        | a full replay                                                         |
 
-**Provisional on §5a, and the third tier is empty.** Eight facts are wide _because a row stores something derived_; a
-normalised projection makes most of them narrow. The classification below describes the projection as it is built today,
-and #193 is where it is re-read against the shape it ends up with. That dependency is the useful finding: **a fact's
-blast radius is a property of the projection, not of the fact.**
+**Settled, and only three facts are wide.** All 53 variants are classified by `Fact::blast()`, an exhaustive `match` —
+so a new fact does not compile until it has a tier.
 
-**Settled, and the third tier is empty.** All 53 variants are classified by `Fact::blast()`, an exhaustive `match` — so
-a new fact does not compile until it has a tier, which is a stronger guarantee than a list somebody maintains.
+The first pass classified eight as wide and **seven of those were wrong**, for one reason: they were being read against
+the _drawn rows_ rather than against the projection. `ArtistNamed` looked wide because every row showing that artist
+carries the name; the fold writes `cat.artist_names.insert(who(artist), name)` — one entry. Rows are L2's
+materialisation, rebuilt per fold, and no fact has to reach into one.
 
-The wide ones, and why each is wider than it looks:
+| fact                                 | at the projection                                                   |
+| ------------------------------------ | ------------------------------------------------------------------- |
+| `ArtistNamed`, `LabelNamed`          | one map entry                                                       |
+| `CreditAsserted`, `CreditRetracted`  | one entry — `credits` is keyed by `(subject, artist, role, source)` |
+| `ReleaseGroupRetitled`               | one group                                                           |
+| `HierarchyNarrowed`, `ArtistRelated` | one edge                                                            |
+| `HoldingsAsserted`                   | every encoding it names — **big, not wide**                         |
+| **the three merges**                 | **wide**                                                            |
 
-| fact                                                    | why it is not narrow                                                                                        |
-| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `RecordingMerged`, `ReleaseGroupMerged`, `ArtistMerged` | every row of the loser                                                                                      |
-| `CreditAsserted`, `CreditRetracted`                     | a credit on a release group decides `file_under` for every track on it (#84)                                |
-| `ReleaseGroupRetitled`                                  | renames the album on every row of it                                                                        |
-| `HierarchyNarrowed`, `HierarchyNarrowRetracted`         | the hierarchy is what `genre@1` climbs (#79), so one edge moves every row beneath it                        |
-| `AliasAsserted`, `HeadingRetired`                       | every name an artist answers to is on its rows (#179)                                                       |
-| `ArtistRelated`                                         | a moniker edge is what a filing level climbs (#174)                                                         |
-| `ArtistNamed`, `LabelNamed`                             | a row stores the name, not the id — **so the answer follows the projection's shape rather than the fact's** |
-| ~~`HoldingsAsserted`~~                                  | **not wide** — it names every encoding it touches, so it is _big_ rather than wide                          |
+**The merges are wide and the fold shows why.** It applies them in a _first pass_ and then resolves every id it meets
+through the finished set, because a merge recorded on Tuesday has to move a rating given on Monday. Applying one to a
+projection that already exists means re-resolving what is already in it — a set the fact does not name, which is what
+wide means.
 
-**Wide means the affected set is not derivable from the fact**, and size is not the question. `ArtistMerged` hands over
-two ids and leaves _"every row crediting the loser"_ to be found; that search is the cost. `HoldingsAsserted` is the
-largest fact this log holds — 62 of them are 54 MB, 42% of it, because each is a full snapshot — and it is **narrow**,
-because the affected set is exactly the keys of the map it carries. N narrow updates arriving together is not a wide
-fact.
+**Wide means the affected set is not derivable from the fact**, and size is not the question: `HoldingsAsserted` is the
+largest fact this log holds — 62 of them were 54 MB before #201 compacted them — and it is narrow, because the affected
+set is exactly the keys of the map it carries.
+
+**The caveat that would reverse two of these.** `HierarchyNarrowed` and `ArtistRelated` are narrow only while nothing
+_stores_ a closure over them. Give either a closure table and they become wide, and the arm has to say so — which is
+§5a's rule arriving with teeth: never patch a derivation incrementally.
 
 **When it is not obvious, the answer is wide.** `Narrow` is the optimisation; a fact classified narrower than it is
 leaves the projection _wrong_, which is a different kind of bad from leaving it slow.

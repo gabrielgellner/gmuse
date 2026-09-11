@@ -1176,13 +1176,19 @@ impl Fact {
             | Fact::ReleaseCatalogued { .. }
             | Fact::MediumCatalogued { .. } => Blast::Narrow,
 
-            // Names. `ArtistNamed` and `LabelNamed` are last-writer-wins on a
-            // label, and a row shows the name of the artist it credits — so
-            // this is `Wide` in principle and `Narrow` only if the projection
-            // stores the id and resolves the name at draw time. It stores the
-            // name, so: wide. Listed here to say that the answer follows the
-            // projection's shape and not the fact's.
-            Fact::ArtistNamed { .. } | Fact::LabelNamed { .. } => Blast::Wide,
+            // **Narrow, and this pair is why the tiers had to be re-read.**
+            //
+            // The fold writes `cat.artist_names.insert(who(artist), name)` —
+            // one entry. It looked wide because the *drawn rows* carry the
+            // name, and drawn rows are not the projection: they are L2's
+            // materialisation, rebuilt per fold and never stored, so no fact
+            // has to reach in and correct one.
+            //
+            // Classified against `Drawn` these were wide. Classified against
+            // the `Catalogue`, which is what L1 actually is, they are a map
+            // insert. The tier follows the projection, and the projection had
+            // been mistaken for the view of it.
+            Fact::ArtistNamed { .. } | Fact::LabelNamed { .. } => Blast::Narrow,
 
             // Vocabulary. Defining a facet, a concept, a role or a hierarchy
             // adds a term; it does not assert anything about a row.
@@ -1205,28 +1211,37 @@ impl Fact {
 
             // ---- wide: bounded by what it hit, not by what it says --------
 
-            // **A merge rewrites every row of the loser.** The canonical
-            // example, and the reason `Wide` exists as a tier rather than being
-            // folded into `Rebuild`: it is a query over the projection for the
-            // loser's rows, which is incremental, just broader.
+            // **The merges, and now the only wide facts there are.**
+            //
+            // Every other tier fell to narrow once the projection was read as
+            // the `Catalogue` rather than as the rows drawn from it. These do
+            // not, and the fold shows why: it applies merges in a **first
+            // pass** and then resolves every id it meets through the finished
+            // set, because a merge recorded on Tuesday has to move a rating
+            // given on Monday. Applying one to a projection that already
+            // exists means re-resolving what is already in it — a set the fact
+            // does not name, which is exactly what wide means.
             Fact::RecordingMerged { .. }
             | Fact::ReleaseGroupMerged { .. }
             | Fact::ArtistMerged { .. } => Blast::Wide,
 
-            // A credit on a release group is the album-level credit, so it
-            // decides `file_under` for **every track on that record** (#84).
-            // Asserted on a recording it is narrow — but one arm cannot be two
-            // answers, and guessing downward is the mistake this tier exists to
-            // prevent.
-            Fact::CreditAsserted { .. } | Fact::CreditRetracted { .. } => Blast::Wide,
+            // **One entry.** `credits` is keyed by
+            // `(subject, artist, role, source)`, so asserting a credit inserts
+            // exactly what the fact names. That it decides `file_under` for
+            // every track on a record (#84) is true of the *rows*, and rows
+            // are rebuilt rather than patched.
+            Fact::CreditAsserted { .. } | Fact::CreditRetracted { .. } => Blast::Narrow,
 
-            // **A retitle of a group renames the album on every row of it.**
-            Fact::ReleaseGroupRetitled { .. } => Blast::Wide,
+            // One group's title: `cat.groups.get_mut(..)`. The rows that show
+            // it are rebuilt.
+            Fact::ReleaseGroupRetitled { .. } => Blast::Narrow,
 
-            // **The hierarchy is what `genre@1` climbs** (#79). Changing one
-            // narrower-of edge moves every row whose concept sits under it, and
-            // that is a set the fact does not name.
-            Fact::HierarchyNarrowed { .. } | Fact::HierarchyNarrowRetracted { .. } => Blast::Wide,
+            // One edge, asserted or retracted. What climbing it does to a
+            // `genre@1` heading (#79) is a question about a view, and a view
+            // is rebuilt — **unless a closure table is stored**, at which
+            // point these become wide and this arm has to say so. §5a: never
+            // patch a derivation incrementally.
+            Fact::HierarchyNarrowed { .. } | Fact::HierarchyNarrowRetracted { .. } => Blast::Narrow,
 
             // **Narrow since #193 normalised the row**, and the clearest case
             // of a tier following the projection rather than the fact.
@@ -1237,9 +1252,10 @@ impl Fact {
             // them, so an alias touches one artist record and no row at all.
             Fact::AliasAsserted { .. } | Fact::HeadingRetired { .. } => Blast::Narrow,
 
-            // A moniker edge is what a filing level climbs (#174), so adding
-            // one moves every row filed under either end.
-            Fact::ArtistRelated { .. } => Blast::Wide,
+            // One edge in the artist graph, for the same reason as the
+            // hierarchy above — and with the same caveat if it is ever given a
+            // closure table.
+            Fact::ArtistRelated { .. } => Blast::Narrow,
 
             // **Big, and not wide** — the distinction the tiers turn on.
             //
