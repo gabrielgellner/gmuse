@@ -287,7 +287,10 @@ fn cell(key: Key, id: CopyId, t: &crate::model::rows::Subject<'_>, env: &SortEnv
             // The **first** value where a field has several: sorting is a
             // total order over one key, and a genre tag naming three terms
             // sorts under the first, which is the broadest (#86).
-            Kind::Text => match crate::query::filter::texts_of(f, t).into_iter().next() {
+            Kind::Text => match crate::query::filter::texts_of(f, t, &env.env)
+                .into_iter()
+                .next()
+            {
                 Some(v) if !v.trim().is_empty() => {
                     let smart = env.smart_artist_sort && is_artist(f);
                     Cell::Text(sort_key(&v, smart).as_str().to_string())
@@ -424,6 +427,7 @@ mod tests {
         SortEnv {
             env: Env {
                 listened: Some(listened),
+                named: None,
                 now: 1_000_000,
             },
             smart_artist_sort: false,

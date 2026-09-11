@@ -12,6 +12,20 @@ use crate::model::id::Id;
 use crate::model::rows::Subject;
 use crate::query::format::{Field, Kind};
 
+/// **Every name an artist goes by** — #193.
+///
+/// A row holds artist *ids*, so the names are asked for at the moment a filter
+/// needs them. Passed in the way [`Listened`] is, because it is the same kind
+/// of thing: something the library knows that this layer must not go and fetch
+/// for itself.
+///
+/// **Hidden names are included.** A filter is exactly the caller
+/// `AliasKind::shown` does not apply to (#176) — search should reach
+/// `aphextwinsucks` and nothing should ever print it.
+pub trait Named {
+    fn names_of(&self, artist: crate::model::id::Id<crate::model::entity::Artist>) -> Vec<String>;
+}
+
 /// What a filter can see besides the track itself.
 ///
 /// History lives in its own store keyed by path (§13), not on `Track`, so a
@@ -29,6 +43,8 @@ pub struct Env<'a> {
     /// renumber moved a file and stranded a four-star rating because the key
     /// moved with it. A recording's id does not move.
     pub listened: Option<&'a dyn Listened>,
+    /// What each artist is called, asked for rather than stored on a row.
+    pub named: Option<&'a dyn Named>,
     /// Seconds since the epoch, for the `days_since_*` fields. Passed in so a
     /// test can fix the clock.
     pub now: i64,
@@ -619,7 +635,7 @@ impl Expr {
             Expr::And(a, b) => a.eval(t, env, memo) && b.eval(t, env, memo),
             Expr::Or(a, b) => a.eval(t, env, memo) || b.eval(t, env, memo),
             Expr::Not(e) => !e.eval(t, env, memo),
-            Expr::Present(Selector::Field(_, _, f)) => present(*f, t),
+            Expr::Present(Selector::Field(_, _, f)) => present(*f, t, env),
             Expr::Present(Selector::Any) => true,
             Expr::Present(Selector::History(h)) => history_number(*h, t, env).is_some(),
             Expr::Cmp {
@@ -882,13 +898,13 @@ fn compare(
         (Selector::Any, Value::Text(glob)) => {
             let hit = any_fields()
                 .iter()
-                .any(|f| texts_of(*f, t).iter().any(|v| glob.matches(v)));
+                .any(|f| texts_of(*f, t, env).iter().any(|v| glob.matches(v)));
             match op {
                 Op::Ne => !hit,
                 _ => hit,
             }
         }
-        (Selector::Field(q, reach, f), Value::Text(glob)) => match texts_of(f, t).as_slice() {
+        (Selector::Field(q, reach, f), Value::Text(glob)) => match texts_of(f, t, env).as_slice() {
             // A missing tag matches nothing, including `!=`. Three-valued
             // logic would be more correct and much harder to predict; `!` on
             // the whole comparison is how you ask for "or missing". `all` is
@@ -954,9 +970,9 @@ fn compare(
 /// An empty tag counts as missing: a `GENRE=""` frame is a tagging artefact,
 /// not an answer, and treating it as present would make `!genre?` miss exactly
 /// the files worth finding.
-fn present(f: Field, t: &Subject<'_>) -> bool {
+fn present(f: Field, t: &Subject<'_>, env: &Env<'_>) -> bool {
     match f.kind() {
-        Kind::Text => texts_of(f, t).iter().any(|v| !v.trim().is_empty()),
+        Kind::Text => texts_of(f, t, env).iter().any(|v| !v.trim().is_empty()),
         Kind::Number => number_of(f, t).is_some(),
     }
 }
@@ -968,7 +984,7 @@ fn present(f: Field, t: &Subject<'_>) -> bool {
 /// string meant `genre=Rock` could not match a file that was also tagged
 /// `Blues Rock`. Every other field returns nought or one, and the comparison
 /// is the same either way: does *any* value match.
-pub(crate) fn texts_of(f: Field, s: &Subject<'_>) -> Vec<String> {
+pub(crate) fn texts_of(f: Field, s: &Subject<'_>, env: &Env<'_>) -> Vec<String> {
     let one = |v: Option<&str>| v.map(|v| vec![v.to_string()]).unwrap_or_default();
     let r = &s.row;
     match f {
@@ -982,10 +998,26 @@ pub(crate) fn texts_of(f: Field, s: &Subject<'_>) -> Vec<String> {
         // the names the row does not print — hidden ones included, because a
         // filter is the caller `AliasKind::shown` does not apply to (#176).
         // Search should reach `aphextwinsucks`; nothing should ever print it.
-        Field::Artist => one(r.artist)
-            .into_iter()
-            .chain(r.also_known_as.iter().cloned())
-            .collect(),
+        // **Every name the credited identities answer to, not one string** —
+        // #179. `texts_of` returns a list precisely because one field can have
+        // several values, and artist was the second field for which that was
+        // false: `artist="*campfire*"` found nothing though the library knows
+        // Animal Collective is also Campfire Songs.
+        //
+        // **Resolved here rather than stored on the row** (#193). A name
+        // belongs to an artist, so a copy on every row that credits them is a
+        // second place it could be wrong. The row holds ids; this asks.
+        Field::Artist => {
+            let mut out = one(r.artist);
+            if let Some(named) = env.named {
+                for artist in r.credited {
+                    out.extend(named.names_of(*artist));
+                }
+            }
+            out.sort_unstable();
+            out.dedup();
+            out
+        }
         Field::AlbumArtist => one(r.album_artist),
         Field::FileUnder => vec![r.file_under.to_string()],
         // The album and title **as tagged**. `r.album` stands a placeholder in
@@ -1810,34 +1842,66 @@ mod tests {
     /// which that had stopped being true.
     #[test]
     fn an_artist_is_found_by_every_name_it_answers_to() {
+        use crate::model::entity::Artist;
+        use crate::model::id::Id;
+
+        /// The library's side of it: a row holds an id, and this says what the
+        /// id is called. Every name, hidden ones included.
+        struct Knows(Vec<String>);
+        impl Named for Knows {
+            fn names_of(&self, _artist: Id<Artist>) -> Vec<String> {
+                self.0.clone()
+            }
+        }
+
         let t = track();
         let (mut drawn, recording) = subject_of(&t);
-        let ask = |drawn: &crate::model::rows::Drawn, expr: &str| {
+        let ask = |drawn: &crate::model::rows::Drawn, names: &[&str], expr: &str| {
+            let knows = Knows(names.iter().map(|s| (*s).to_string()).collect());
             let subject = Subject {
                 row: drawn.listed(),
                 locator: t.path.to_str(),
                 recording,
             };
-            Expr::parse(expr)
-                .expect("should parse")
-                .compile(Env::default())(&subject)
+            let env = Env {
+                listened: None,
+                named: Some(&knows),
+                now: 0,
+            };
+            Expr::parse(expr).expect("should parse").compile(env)(&subject)
         };
 
         drawn.artist = Some("Animal Collective".into());
-        assert!(ask(&drawn, "artist=\"Animal Collective\""), "its own name");
+        let only = &["Animal Collective"];
         assert!(
-            !ask(&drawn, "artist=\"*campfire*\""),
+            ask(&drawn, only, "artist=\"Animal Collective\""),
+            "its own name"
+        );
+        assert!(
+            !ask(&drawn, only, "artist=\"*campfire*\""),
             "and nothing else, while it answers to nothing else"
         );
 
-        // The retired heading, and a hidden search hint beside it. Both are
-        // findable; only one of them is ever printed.
-        drawn.also_known_as = vec!["Campfire Songs".into(), "animalcollective".into()];
-        assert!(ask(&drawn, "artist=\"*campfire*\""), "the retired heading");
-        assert!(ask(&drawn, "artist=\"Campfire Songs\""), "exactly, too");
+        // **The row credits an id.** What that id is called is the library's
+        // business, and changing it does not touch this row (#193).
+        drawn.credited = vec![Id::<Artist>::derived(b"animal collective")];
+        let also = &["Animal Collective", "Campfire Songs", "animalcollective"];
+
         assert!(
-            ask(&drawn, "artist=\"animalcollective\""),
+            ask(&drawn, also, "artist=\"*campfire*\""),
+            "the retired heading"
+        );
+        assert!(
+            ask(&drawn, also, "artist=\"Campfire Songs\""),
+            "exactly, too"
+        );
+        assert!(
+            ask(&drawn, also, "artist=\"animalcollective\""),
             "and a hidden name a filter is exactly the caller for (#176)"
+        );
+        assert!(
+            ask(&drawn, also, "artist=\"Animal Collective\""),
+            "its own name still answers, so the extra names are additive"
         );
 
         // **The printed credit is untouched.** A name that finds is not a name
@@ -1849,9 +1913,20 @@ mod tests {
             "search reaches the hidden name; nothing prints it"
         );
 
-        // And the artist's own name still answers, so the extra names are
-        // additive rather than a replacement.
-        assert!(ask(&drawn, "artist=\"Animal Collective\""));
+        // **Without a library to ask, only the printed credit answers.** Which
+        // is the honest failure: a filter that cannot reach the names says so
+        // by finding less, not by inventing more.
+        let subject = Subject {
+            row: drawn.listed(),
+            locator: t.path.to_str(),
+            recording,
+        };
+        assert!(
+            !Expr::parse("artist=\"*campfire*\"")
+                .expect("parses")
+                .compile(Env::default())(&subject),
+            "no names supplied should mean no extra names matched"
+        );
     }
 
     /// **What a file claims against what it turned out to be** — the query
@@ -2375,6 +2450,7 @@ mod tests {
         let e = Expr::parse(expr).expect("should parse");
         let env = Env {
             listened: Some(h),
+            named: None,
             now,
         };
         let (drawn, recording) = subject_of(t);
@@ -2704,6 +2780,7 @@ mod perf {
         let cat = i.catalogue();
         let env = Env {
             listened: Some(&cat),
+            named: None,
             now: 0,
         };
 

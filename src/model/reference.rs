@@ -680,22 +680,6 @@ impl Reference {
         chain[climb.min(depth)]
     }
 
-    /// Every alias value, grouped by the artist it names — #179.
-    ///
-    /// **Built once for a pass over the library**, the way `by_subject` is.
-    /// `names_of` walks every alias in the library, and a row asking it per
-    /// credit is the four-passes-per-row shape #123 took out of `Lookup`
-    /// arriving through a different door.
-    pub fn aliases_by_artist(&self) -> BTreeMap<Id<Artist>, Vec<String>> {
-        let mut out: BTreeMap<Id<Artist>, Vec<String>> = BTreeMap::new();
-        for alias in &self.aliases {
-            if let Cataloguable::Artist(id) = alias.subject {
-                out.entry(id).or_default().push(alias.value.clone());
-            }
-        }
-        out
-    }
-
     /// **Every name this artist can be found by** — #179, and the inverse of
     /// [`Reference::artist_named`].
     ///

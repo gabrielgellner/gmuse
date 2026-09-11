@@ -506,6 +506,28 @@ Filtering a dimension and joining to the facts is strictly less work than materi
 it gets better as the library grows, because dimensions grow far more slowly than rows. The same holds for `genre=`,
 `label=` and anything else whose values are shared.
 
+### Measured, on the first field normalised
+
+`also_known_as` — the list of names a row could be found by — became `credited: Vec<Id<Artist>>`, with the names asked
+of the library through a `Named` capability at the moment a filter wants them.
+
+|                                                   |                                                          |
+| ------------------------------------------------- | -------------------------------------------------------- |
+| strings stored on rows                            | **0.82 MB**                                              |
+| the same held once each                           | **0.04 MB** — 2,603 distinct values, **21× duplication** |
+| assembling a credit line, through the built index | **0.78µs a row** — ~6ms for a whole-library draw         |
+| the same through the _unindexed_ path             | 8.3µs a row — 61ms, and the trap #123 named              |
+
+**The estimate this replaced was ~200ms, and it was mine.** Measuring the unindexed path first and nearly believing it
+is the same mistake in miniature: the cost of assembly is a question about the index, not about assembly.
+
+It also **deleted an index**. `Lookup::Built` carried an alias map so that building a row's names was a lookup rather
+than a walk, and `Reference::aliases_by_artist` existed to fill it. Normalised, neither has a caller — there is no
+per-row name to build. Derived state that no longer needs maintaining is the shape of the whole argument.
+
+And two facts changed tier: `AliasAsserted` and `HeadingRetired` were wide _because a row stored the names_, and are now
+narrow, touching one artist record and no row at all.
+
 **Where normalisation does cost** is rendering, and sorting by something derived: a tree sorted by `file_under` has to
 assemble every line. Two things bound it — the TUI draws a screenful rather than 7,272 rows, and a per-query memo (the
 descendant of `Lookup::Built`) **cannot go stale**, because it lives for one query rather than being maintained across

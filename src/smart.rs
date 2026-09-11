@@ -166,6 +166,7 @@ mod tests {
         SortEnv {
             env: Env {
                 listened: Some(h),
+                named: None,
                 now: 1_000_000,
             },
             smart_artist_sort: false,

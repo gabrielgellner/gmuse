@@ -1973,6 +1973,7 @@ fn run_tui(
             &listened,
             crate::query::filter::Env {
                 listened: Some(&listened),
+                named: None,
                 now,
             },
         )

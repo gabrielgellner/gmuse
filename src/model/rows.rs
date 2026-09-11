@@ -153,22 +153,25 @@ pub struct Listed<'a> {
     /// Keyed by facet rather than one field per axis, which is what lets a new
     /// axis reach the query language without a row shape to widen.
     pub concepts: &'a std::collections::BTreeMap<Id<Facet>, Vec<String>>,
-    /// **The other names this row's artists can be found by** — #179.
+    /// **Who this row credits, as ids** — #179, normalised by #193.
     ///
-    /// Not what it prints. `artist` and `file_under` are the credit as the
-    /// sleeve set it, and this is every *further* name the identities behind
-    /// them answer to — so `artist="*campfire*"` reaches the Animal Collective
-    /// files, and `artist="AFX"` reaches what Aphex Twin released as AFX.
+    /// Not names. A name is a property of the *artist*, so storing one here
+    /// would put it in two places — on every row that credits them, and in the
+    /// artist record — and nothing would forbid the two disagreeing. Held as
+    /// ids, the disagreeing state is not expressible, and `AliasAsserted`
+    /// stops being a fact that has to reach every row.
     ///
-    /// **Hidden names are in here**, which is the point of the display axis
-    /// being a sibling of the kind axis rather than a sort of one (#176):
-    /// search should reach `aphextwinsucks`, and nothing should ever print it.
-    /// A caller that draws must ask [`AliasKind::shown`]; this is the caller
-    /// that does not draw.
+    /// Measured before doing it: the strings a row stored weighed 0.82 MB
+    /// across the library and 0.04 MB held once each — **21× duplication** —
+    /// and assembling a credit line through the built index costs 0.78µs a
+    /// row, so a whole-library draw pays about 6ms for it.
     ///
-    /// **Empty for almost every row**, which is what keeps it cheap: it holds
-    /// only names the row does not already carry, and most artists have none.
-    pub also_known_as: &'a [String],
+    /// What a *view* does with these is ask [`crate::query::filter::Named`],
+    /// which answers with every name an artist goes by — **hidden ones
+    /// included**, because a filter is exactly the caller `AliasKind::shown`
+    /// does not apply to (#176). Search should reach `aphextwinsucks`; nothing
+    /// should print it.
+    pub credited: &'a [Id<crate::model::entity::Artist>],
     /// The imprint. Its own field because a label sampler's `album_artist` is
     /// "Various Artists" and the label has nowhere else to go.
     pub label: Option<&'a str>,
@@ -233,9 +236,8 @@ pub struct Drawn {
     pub title_if_named: Option<String>,
     pub album_if_named: Option<String>,
     pub concepts: std::collections::BTreeMap<Id<Facet>, Vec<String>>,
-    /// See [`Listed::also_known_as`] — the names this row is findable by and
-    /// does not print.
-    pub also_known_as: Vec<String>,
+    /// See [`Listed::credited`] — who the row credits, as ids.
+    pub credited: Vec<Id<crate::model::entity::Artist>>,
     pub label: Option<String>,
     pub release_type: crate::model::spine::ReleaseType,
     pub release_held: crate::model::seam::Held,
@@ -287,7 +289,7 @@ impl Listed<'_> {
             duration: self.duration,
             artist: self.artist.map(str::to_string),
             album_artist: self.album_artist.map(str::to_string),
-            also_known_as: self.also_known_as.to_vec(),
+            credited: self.credited.to_vec(),
             title_if_named: self.title_if_named.map(str::to_string),
             album_if_named: self.album_if_named.map(str::to_string),
             concepts: self.concepts.clone(),
@@ -338,7 +340,7 @@ impl Drawn {
             duration: self.duration,
             artist: self.artist.as_deref(),
             album_artist: self.album_artist.as_deref(),
-            also_known_as: &self.also_known_as,
+            credited: &self.credited,
             title_if_named: self.title_if_named.as_deref(),
             album_if_named: self.album_if_named.as_deref(),
             concepts: &self.concepts,
@@ -541,7 +543,7 @@ mod tests {
             duration: std::time::Duration::from_secs(151),
             artist: Some("Boards of Canada".into()),
             album_artist: Some("Boards of Canada".into()),
-            also_known_as: Vec::new(),
+            credited: Vec::new(),
             title_if_named: Some("Roygbiv".into()),
             album_if_named: Some("Music Has the Right to Children".into()),
             concepts: std::collections::BTreeMap::from([(

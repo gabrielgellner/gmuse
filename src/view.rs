@@ -986,6 +986,7 @@ mod tests {
     fn env() -> crate::query::filter::Env<'static> {
         crate::query::filter::Env {
             listened: None,
+            named: None,
             now: 1_000_000,
         }
     }

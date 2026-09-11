@@ -127,6 +127,10 @@ pub fn rows(
     // words, and this list runs over the whole library.
     let env = crate::query::filter::Env {
         listened: None,
+        // **The names come from the library, not from the rows** (#193).
+        // A row holds artist ids; this is what turns them into the strings a
+        // filter matches, including the hidden ones a view must never print.
+        named: Some(&library),
         now: now / 1000,
     };
     let keep = filter.map(|f| f.compile(env));

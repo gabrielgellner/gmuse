@@ -1228,10 +1228,14 @@ impl Fact {
             // that is a set the fact does not name.
             Fact::HierarchyNarrowed { .. } | Fact::HierarchyNarrowRetracted { .. } => Blast::Wide,
 
-            // **Every name an artist answers to is on its rows** (#179), so a
-            // new one reaches all of them. Same for a retired heading, which is
-            // an alias as well as a tombstone.
-            Fact::AliasAsserted { .. } | Fact::HeadingRetired { .. } => Blast::Wide,
+            // **Narrow since #193 normalised the row**, and the clearest case
+            // of a tier following the projection rather than the fact.
+            //
+            // These were wide while a row stored `also_known_as` — a new alias
+            // had to reach every row crediting the artist. A row now holds the
+            // artist's **id** and the names are asked for when a filter needs
+            // them, so an alias touches one artist record and no row at all.
+            Fact::AliasAsserted { .. } | Fact::HeadingRetired { .. } => Blast::Narrow,
 
             // A moniker edge is what a filing level climbs (#174), so adding
             // one moves every row filed under either end.

@@ -661,6 +661,7 @@ impl Ui {
         crate::query::sort::SortEnv {
             env: crate::query::filter::Env {
                 listened: Some(&self.listened),
+                named: None,
                 now: crate::history::now(),
             },
             smart_artist_sort: self.smart_artist_sort,
@@ -1888,6 +1889,7 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
                 .map(|f| {
                     let env = crate::query::filter::Env {
                         listened: Some(&ui.listened),
+                        named: None,
                         now: crate::history::now(),
                     };
                     let compiled = f.compile(env);
@@ -3646,6 +3648,7 @@ fn freeze(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     };
     let env = crate::query::filter::Env {
         listened: Some(&ui.listened),
+        named: None,
         now: crate::history::now(),
     };
     let resolved = stack.resolve(ctx.library, &ui.listened, env);
@@ -3805,6 +3808,7 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let resolved = {
         let env = crate::query::filter::Env {
             listened: Some(&ui.listened),
+            named: None,
             now: crate::history::now(),
         };
         ui.composed.resolve(ctx.library, &ui.listened, env)
@@ -3881,6 +3885,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         // library is replaced below.
         let env = crate::query::filter::Env {
             listened: Some(&ui.listened),
+            named: None,
             now: crate::history::now(),
         };
         // **One fold over one stack** (#94). This used to union the active

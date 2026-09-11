@@ -1161,6 +1161,7 @@ mod perf {
         let listened = crate::model::log::Catalogue::default();
         let env = crate::query::filter::Env {
             listened: Some(&listened),
+            named: None,
             now: 1_700_000_000,
         };
 
