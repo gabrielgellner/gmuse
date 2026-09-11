@@ -335,6 +335,9 @@ pub struct Credited {
 pub struct Released {
     pub group: Id<ReleaseGroup>,
     pub title: String,
+    /// Which MusicBrainz release this is, where one named it — #203. `None`
+    /// for a pressing minted from its group because nothing named it.
+    pub musicbrainz: Option<uuid::Uuid>,
     pub released: Option<PartialDate>,
     pub label: Option<Id<Label>>,
     #[serde(default)]
@@ -874,6 +877,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             }
             Fact::ReleaseCatalogued {
                 release,
+                musicbrainz,
                 group,
                 title,
                 released,
@@ -890,6 +894,7 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
                         // releases together would lose the difference.
                         group: group_of(group),
                         title: title.clone(),
+                        musicbrainz: *musicbrainz,
                         released: *released,
                         label: *label,
                         media: *media,
@@ -1769,6 +1774,7 @@ mod merge_tests {
         };
         let pressing = |release| Fact::ReleaseCatalogued {
             release,
+            musicbrainz: None,
             group,
             title: "Luna".into(),
             released: None,
@@ -1830,6 +1836,7 @@ mod merge_tests {
         let cat = fold(&log([
             Fact::ReleaseCatalogued {
                 release: named,
+                musicbrainz: None,
                 group,
                 title: "A Record".into(),
                 released: None,
@@ -2246,6 +2253,7 @@ mod merge_tests {
             },
             Fact::ReleaseCatalogued {
                 release: standard,
+                musicbrainz: None,
                 group: new,
                 title: "Barton Hollow".into(),
                 released: None,
@@ -2254,6 +2262,7 @@ mod merge_tests {
             },
             Fact::ReleaseCatalogued {
                 release: deluxe,
+                musicbrainz: None,
                 group: old,
                 title: "Barton Hollow".into(),
                 released: None,

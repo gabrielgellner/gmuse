@@ -857,6 +857,28 @@ pub enum Fact {
         release: Id<Release>,
         group: Id<ReleaseGroup>,
         title: String,
+        /// **Which MusicBrainz release this is, where one named it** — #203.
+        ///
+        /// The id above is `Id::derived(mbid.as_bytes())`, a UUIDv5: convergent,
+        /// so two machines that never spoke mint the same one — and **one-way**,
+        /// so the mbid is not recoverable from it. Without this the library can
+        /// say *which release a copy sits on* and cannot say *which MusicBrainz
+        /// release that is*, which is everything a pass needs to look one up
+        /// again.
+        ///
+        /// Identity and lookup are different needs, and the derivation only
+        /// ever served the first. A recording has recorded its `Basis` since
+        /// #89 for the same reason; this is that, for a pressing.
+        ///
+        /// **`None` is a real answer**: `Id::<Release>::of_release` mints from
+        /// the release group where no mbid exists, and a pressing nobody named
+        /// is an ordinary pressing.
+        ///
+        /// Not a `Basis`, because a release cannot rest on its bytes — a
+        /// pressing is not a thing you can hash — and a type admitting a state
+        /// that cannot happen is a type that invites handling it.
+        #[serde(default)]
+        musicbrainz: Option<uuid::Uuid>,
         /// When this pressing came out, which is **not** when the album did.
         /// #59's reissue trap is exactly this distinction: a 2015 pressing of
         /// a 1982 album sorts by 1982, and only the group knows that.

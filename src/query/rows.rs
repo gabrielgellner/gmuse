@@ -238,6 +238,13 @@ pub fn rows(
                 release: encoding
                     .and_then(|e| catalogue.placed.get(&e))
                     .and_then(|slot| library.release_of(Some(*slot))),
+                // **And which MusicBrainz release that is** — #203, so a pass
+                // can look the pressing up without asking a tag what it is.
+                release_musicbrainz: encoding
+                    .and_then(|e| catalogue.placed.get(&e))
+                    .and_then(|slot| library.release_of(Some(*slot)))
+                    .and_then(|release| catalogue.releases.get(&release))
+                    .and_then(|pressing| pressing.musicbrainz),
                 album_artist: encoding
                     .and_then(|e| catalogue.placed.get(&e))
                     .and_then(|slot| library.group_of(Some(*slot)))
@@ -287,6 +294,7 @@ pub fn rows(
             musicbrainz: None,
             album: None,
             release: None,
+            release_musicbrainz: None,
             album_artist: None,
         });
     }
@@ -748,8 +756,12 @@ mod tests {
         // And the field is omitted rather than emitted as null, so a tool can
         // test for its presence the way it tests for a locator.
         let bare_json = serde_json::to_string(&bare[0]).expect("serialises");
+        // **The field, not the substring.** `release_musicbrainz` contains
+        // this one, so a substring test started passing for the wrong reason
+        // the moment #203 added it — which is the kind of assertion that reads
+        // right and checks nothing.
         assert!(
-            !bare_json.contains("musicbrainz"),
+            !bare_json.contains("\"musicbrainz\""),
             "an absent rung should not appear at all: {bare_json}"
         );
         assert!(
@@ -829,6 +841,7 @@ mod tests {
                 },
                 Fact::ReleaseCatalogued {
                     release,
+                    musicbrainz: None,
                     group,
                     title: "An Album".into(),
                     released: None,

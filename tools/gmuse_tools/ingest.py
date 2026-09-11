@@ -1115,6 +1115,23 @@ def slots_of(disc: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def releases_named(lib: gmuse_core.Library) -> dict[str, str]:
+    """Which **MusicBrainz** release the library says each folder holds — #203.
+
+    The answer the tags were being asked for, from the library instead. Empty
+    for a pressing catalogued before the library recorded the id it was minted
+    from, which today is all of them: the field is new and nothing has
+    backfilled it. Those folders fall back to [`agrees`], where the tag is a
+    candidate the library confirms rather than an answer it takes.
+    """
+    named: dict[str, str] = {}
+    for row in lib.query(every_copy=True):
+        locator, mbid = row.get("locator"), row.get("release_musicbrainz")
+        if locator and mbid:
+            named[str(Path(locator).parent)] = mbid
+    return named
+
+
 def releases_held(lib: gmuse_core.Library) -> dict[str, str]:
     """Which release the library says each folder's copies sit on — #203.
 
@@ -1165,7 +1182,7 @@ def tracklist(root: Path, out: Path) -> None:
     establish.
     """
     lib = gmuse_core.Library.open()
-    held = releases_held(lib)
+    named, held = releases_named(lib), releases_held(lib)
     folders = sorted({f.parent for f in walk(root)})
     lines: list[str] = []
     tally: collections.Counter[str] = collections.Counter()
@@ -1177,12 +1194,16 @@ def tracklist(root: Path, out: Path) -> None:
     # for the part that already succeeded. Both halves should survive.
     handle = out.open("w")
     for folder in folders:
-        mbid, discs = held_discs(folder)
+        # **Ask the library first** — #203. Where it knows which MusicBrainz
+        # release these copies sit on, the tags are not consulted at all,
+        # which is what `library-api.md` said was already true.
+        tagged, discs = held_discs(folder)
+        mbid = named.get(str(folder)) or tagged
         if not mbid:
-            tally["no release id in the tags"] += 1
+            tally["no release id, in the library or the tags"] += 1
             continue
 
-        if not agrees(lib, held, folder, mbid):
+        if mbid == tagged and not agrees(lib, held, folder, mbid):
             tally["the tag names a different release than the library holds"] += 1
             continue
         release = asked(f"{MB}/release/{mbid}", {"inc": INC, "fmt": "json"})

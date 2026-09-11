@@ -801,7 +801,22 @@ pub struct Queried {
     /// Which is the shape #199 settled on: the outside world offers a
     /// candidate, the library confirms the identity, and a disagreement is a
     /// row to skip rather than a fact to write.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub release: Option<Id<crate::model::entity::Release>>,
+    /// **Which MusicBrainz release that is, where one named it** — #203.
+    ///
+    /// The pair above and this answer different questions and a pass needs
+    /// both: the id to propose against, and the mbid to look the pressing up
+    /// again. `Id::<Release>::of_musicbrainz` is one-way, so the second cannot
+    /// be derived from the first — the library records it, and this is where
+    /// it hands it over.
+    ///
+    /// **This is what takes a tag out of the loop.** `ingest tracklist` read
+    /// the release id out of the files because there was nowhere else to get
+    /// one; now there is, and the tags stop being consulted for identity, which
+    /// is what `library-api.md` said was already true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_musicbrainz: Option<uuid::Uuid>,
     /// Where this machine can open it, if it can. Absent for a recording
     /// nothing here holds, which is an ordinary row.
     pub locator: Option<String>,
@@ -1661,6 +1676,7 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             if let Some(twice) = tracks.iter().find(|t| !seen.insert(t.recording)) {
                 return Err(format!("{} is listed twice", twice.recording));
             }
+            let named = release;
             let release = Id::<Release>::of_musicbrainz(release);
             let medium = Id::<Medium>::of_medium(release, position);
             let role = Id::<Role>::of_name("performer");
@@ -1681,6 +1697,10 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     release,
                     group,
                     title: name.to_string(),
+                    // **The id this was derived from** — #203. A tracklist
+                    // always names a MusicBrainz release, so this is always
+                    // `Some` here; it is the one place that knew and dropped it.
+                    musicbrainz: Some(named),
                     released: None,
                     label: None,
                     // **Not stated.** How many discs the pressing has is a
@@ -3061,6 +3081,7 @@ pub(crate) mod tests {
             musicbrainz: Some("11f6d0f6-8e35-4d33-8b8b-a94a1a12a9f4".into()),
             album: Some(album()),
             release: None,
+            release_musicbrainz: None,
             album_artist: Some("Bodzin & Romboy".into()),
         };
         let wire = serde_json::to_string(&row).unwrap();
@@ -3154,6 +3175,7 @@ pub(crate) mod tests {
             musicbrainz: None,
             album: None,
             release: None,
+            release_musicbrainz: None,
             album_artist: None,
         };
         let wire = serde_json::to_string(&row).unwrap();

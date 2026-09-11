@@ -526,6 +526,10 @@ impl Instance {
                         release,
                         group,
                         title: album.clone(),
+                        // The id the tags carried, kept rather than derived
+                        // away — #203. `None` where they carried none, which
+                        // is the same case `of_release` mints from the group.
+                        musicbrainz: s.mb_release,
                         released: s.released,
                         label,
                         media: s.disc_total,
