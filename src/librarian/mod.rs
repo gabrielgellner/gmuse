@@ -10,7 +10,7 @@
 //!
 //! Nothing enforces that by construction: a fold is an ordinary function call
 //! and any thread can make one. What keeps it true is that [`Desk`] hands out
-//! `Arc<Held>` and no `&mut` to anything foldable, so the only code that *can*
+//! `Arc<Answer>` and no `&mut` to anything foldable, so the only code that *can*
 //! fold is on the far side of the channel.
 //!
 //! ## Writes are sent, not taken
@@ -36,12 +36,13 @@ use crate::model::seam::Librarian;
 use crate::operations::scan::Holdings;
 use crate::projection::catalogue::Catalogue;
 
-/// One published answer: everything derived from the log, folded together.
+/// What the desk hands back when you ask: everything derived from the log,
+/// folded together.
 ///
 /// The two travel as a pair because they are one fold. Refreshing them at
 /// separate moments would let them disagree about what the log says.
 #[derive(Default)]
-pub struct Held {
+pub struct Answer {
     /// What the player is allowed to ask (#77's seam).
     pub library: Librarian,
     /// Plays, ratings and views.
@@ -58,10 +59,10 @@ enum Job {
     /// crosses a thread.
     Say(Box<dyn FnOnce(&mut Instance) + Send>),
     /// A scan reconciled the disk; these are the holdings now.
-    Held(Holdings),
+    Holdings(Holdings),
     /// Nothing changed here — fold and publish anyway.
     Advance,
-    /// Answer when everything queued before this has been published.
+    /// Reply when everything queued before this has been published.
     Settled(Sender<()>),
 }
 
@@ -77,7 +78,7 @@ enum Job {
 /// bump, so a draw loop can take a fresh one every frame.
 pub struct Desk {
     device: Id<Device>,
-    current: Arc<ArcSwap<Held>>,
+    current: Arc<ArcSwap<Answer>>,
     jobs: Sender<Job>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -116,7 +117,7 @@ impl Desk {
                             }
                             None
                         }
-                        Job::Held(fresh) => {
+                        Job::Holdings(fresh) => {
                             held = fresh;
                             None
                         }
@@ -153,7 +154,7 @@ impl Desk {
     }
 
     /// The latest published answer. One atomic load.
-    pub fn current(&self) -> Arc<Held> {
+    pub fn current(&self) -> Arc<Answer> {
         self.current.load_full()
     }
 
@@ -168,7 +169,7 @@ impl Desk {
 
     /// A scan happened. These are the holdings now.
     pub fn holdings(&self, held: Holdings) {
-        let _ = self.jobs.send(Job::Held(held));
+        let _ = self.jobs.send(Job::Holdings(held));
     }
 
     /// Publish again without changing anything.
@@ -202,8 +203,8 @@ impl Drop for Desk {
 }
 
 /// The one fold, and the only place it happens.
-fn fold(log: &Instance, held: &Holdings, device: Id<Device>, now: i64) -> Held {
-    Held {
+fn fold(log: &Instance, held: &Holdings, device: Id<Device>, now: i64) -> Answer {
+    Answer {
         library: crate::bridge::librarian(held, log.records(), device, now),
         listened: Arc::new(log.catalogue()),
     }
