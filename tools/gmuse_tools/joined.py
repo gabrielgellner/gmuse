@@ -63,6 +63,7 @@ import unicodedata as u
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NamedTuple
 
+import gmuse_core
 import typer
 
 from gmuse_tools import bronze
@@ -513,21 +514,23 @@ def attribute(rows: list[dict[str, str]], ask: Callable[[str], tuple[str, ...] |
     return Attribution(splits, disputed, asked, unanswered)
 
 
-def attributed(work: Path, out: Path, review: Path) -> None:
-    """Read the work list, ask MusicBrainz, and write the split and the dispute.
+def attributed(out: Path, review: Path) -> None:
+    """Ask the library, then MusicBrainz, and write the split and the dispute.
 
     **Only rows the library rests on MusicBrainz for.** `musicbrainz` is absent
     for the 7.3% resting on bytes, and those stay with `survey`'s
     corroboration — this pass has nothing to ask about them.
     """
-    rows = [json.loads(line) for line in work.read_text().splitlines() if line.strip()]
+    lib = gmuse_core.Library.open()
+    rows = lib.query()
     con = bronze.open_cache()
     got = attribute(rows, lambda mbid: credited_on(con, mbid))
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w") as fh:
-        for line in got.splits:
-            fh.write(json.dumps(line) + "\n")
+    # **Checked on the way out** — #198. A malformed proposal fails here,
+    # naming the row, rather than in `apply` after a pass that spent a rate
+    # limit on every credit.
+    lib.propose([json.dumps(line) for line in got.splits], out)
     write_tsv(review, got.disputed, ["credit", "musicbrainz", "why", "recording"])
 
     print(f"{len(got.splits)} split(s) over {got.asked} credit(s) asked -> {out}", file=sys.stderr)
@@ -625,7 +628,6 @@ def remixed(rows: list[dict[str, str]], ask: Callable[[str], tuple[str, ...] | N
 
 LIB = typer.Argument(Path("~/MusicLibrary"), help="library root")
 OFFLINE = typer.Option(default=False, help="use only what the library itself can corroborate")
-WORK = typer.Argument(Path("work.jsonl"), help="the work list from `gmuse shelf query`")
 
 
 def register(app: typer.Typer) -> None:
@@ -638,26 +640,26 @@ def register(app: typer.Typer) -> None:
         survey(root.expanduser(), out_path("joined-review.tsv"), offline=offline)
 
     @sub.command("propose")
-    def propose_cmd(work: Path = WORK, root: Path = LIB, *, offline: bool = OFFLINE) -> None:
+    def propose_cmd(root: Path = LIB, *, offline: bool = OFFLINE) -> None:
         """Turn the settled verdicts into facts `gmuse shelf apply` can read."""
-        propose(work.expanduser(), root.expanduser(), out_path("joined-propose.jsonl"), offline=offline)
+        propose(root.expanduser(), out_path("joined-propose.jsonl"), offline=offline)
 
     @sub.command("attributed")
-    def attributed_cmd(work: Path = WORK) -> None:
+    def attributed_cmd() -> None:
         """Ask each identified recording who MusicBrainz credits on it, and split on that."""
-        attributed(work.expanduser(), out_path("joined-attributed.jsonl"), out_path("joined-disputed.tsv"))
+        attributed(out_path("joined-attributed.jsonl"), out_path("joined-disputed.tsv"))
 
     @sub.command("remixed")
-    def remixed_cmd(work: Path = WORK) -> None:
+    def remixed_cmd() -> None:
         """Split a performer-and-remixer credit, where MusicBrainz, the tag and the title agree."""
-        rows = [json.loads(line) for line in work.expanduser().read_text().splitlines() if line.strip()]
+        lib = gmuse_core.Library.open()
+        rows = lib.query()
         con = bronze.open_cache()
         got = remixed(rows, lambda mbid: credited_on(con, mbid))
         out, review = out_path("joined-remixed.jsonl"), out_path("joined-remix-unsettled.tsv")
         out.parent.mkdir(parents=True, exist_ok=True)
-        with out.open("w") as fh:
-            for line in got.lines:
-                fh.write(json.dumps(line) + "\n")
+        # Checked on the way out, so a malformed one fails here (#198).
+        lib.propose([json.dumps(line) for line in got.lines], out)
         write_tsv(review, got.left, ["credit", "musicbrainz", "why", "recording"])
         print(f"{len(got.lines)} fact(s) over {got.settled} recording(s) -> {out}", file=sys.stderr)
         print(f"{len(got.left)} left to a person -> {review}", file=sys.stderr)
@@ -695,10 +697,10 @@ def proposals(work: list[dict[str, str]], decided: dict[str, Verdict]) -> list[d
     return out
 
 
-def propose(work: Path, root: Path, out: Path, *, offline: bool = False) -> None:
-    """Read the work list, settle what can be settled, and write the proposals.
+def propose(root: Path, out: Path, *, offline: bool = False) -> None:
+    """Ask the library, settle what can be settled, and write the proposals.
 
-    **Two sources, and they answer different questions.** The work list says
+    **Two sources, and they answer different questions.** The library says
     which recording a credit belongs to, and it is the only thing that may:
     a proposal has to name an id the library knows. The *tags* are what the
     corroboration reads, because the library's answer is already canonical
@@ -707,15 +709,15 @@ def propose(work: Path, root: Path, out: Path, *, offline: bool = False) -> None
     `feat.` credits that corroborate each other. Settling on the narrow corpus
     decided 4 credits; on the wide one, 57.
     """
-    rows = [json.loads(line) for line in work.read_text().splitlines() if line.strip()]
+    lib = gmuse_core.Library.open()
+    rows = lib.query()
     corpus = sorted({r["artist"] for r in rows if r.get("artist")} | set(credits_under(root)))
     decided = settle(corpus, offline=offline)
     lines = proposals(rows, decided)
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w") as fh:
-        for line in lines:
-            fh.write(json.dumps(line) + "\n")
+    # Checked on the way out, so a malformed one fails here (#198).
+    lib.propose([json.dumps(line) for line in lines], out)
 
     settled = sum(1 for v in decided.values() if v.verdict == "list")
     unsure = sum(1 for v in decided.values() if v.verdict == "unsure")
