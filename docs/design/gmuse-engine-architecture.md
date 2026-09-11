@@ -89,9 +89,11 @@ These are normative. A change that violates one requires revising this document 
 client-side state. Per-client output is bounded and non-blocking (see §7.10).
 
 **I2. The RT callback is real-time safe.** It does not allocate or free memory, take locks, perform syscalls or file
-I/O, log through a blocking logger, or run unbounded loops. It communicates only through lock-free SPSC rings (rtrb) and
-atomics or lock-free snapshots. Heap objects that the RT side retires, such as old deck buffers or replaced lanes, are
-sent back over a ring and dropped on another thread.
+I/O, log through a blocking logger, run unbounded loops, or **panic** — a panic across the cpal FFI boundary is
+undefined behaviour, which is why the older statement of this rule listed it and why restating the rule may not quietly
+drop it. It communicates only through lock-free SPSC rings (rtrb) and atomics or lock-free snapshots. Heap objects that
+the RT side retires, such as old deck buffers or replaced lanes, are sent back over a ring and dropped on another
+thread.
 
 **I3. Each ring has one producer.** rtrb is single-producer, single-consumer. Each thread that sends to the RT callback
 has its own ring (§5.2). Never share a producer handle between threads.
