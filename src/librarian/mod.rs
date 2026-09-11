@@ -67,9 +67,14 @@ enum Job {
 
 /// Where the rest of the program asks.
 ///
-/// Cheap to clone: a reader wanting the current answer costs one atomic load
-/// and an `Arc` bump, which is what lets a draw loop take a fresh one every
-/// frame without thinking about it.
+/// The metaphor is the literal one: you ask at the desk rather than walking
+/// into the stacks yourself. Nothing here hands out the log — you send a
+/// request and read what was published — which is the shape I15 and I16
+/// describe. (`Librarian` was already the read surface in `model::seam`, so
+/// the thing holding the thread needed its own word.)
+///
+/// Cheap to clone: the current answer costs one atomic load and an `Arc`
+/// bump, so a draw loop can take a fresh one every frame.
 pub struct Desk {
     device: Id<Device>,
     current: Arc<ArcSwap<Held>>,
