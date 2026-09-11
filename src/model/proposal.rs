@@ -3060,6 +3060,7 @@ pub(crate) mod tests {
             artist: "Bodzin & Romboy".into(),
             musicbrainz: Some("11f6d0f6-8e35-4d33-8b8b-a94a1a12a9f4".into()),
             album: Some(album()),
+            release: None,
             album_artist: Some("Bodzin & Romboy".into()),
         };
         let wire = serde_json::to_string(&row).unwrap();
@@ -3152,6 +3153,7 @@ pub(crate) mod tests {
             artist: "Someone".into(),
             musicbrainz: None,
             album: None,
+            release: None,
             album_artist: None,
         };
         let wire = serde_json::to_string(&row).unwrap();
