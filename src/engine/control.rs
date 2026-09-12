@@ -254,7 +254,14 @@ fn run(
         // generation change are both discontinuities nobody sent it a command
         // about.
         let mut moved = match asks.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ask::Apply(command)) => apply(player, &command),
+            Ok(Ask::Apply(command)) => apply(
+                player,
+                &command,
+                &mut queue,
+                desk,
+                &mut pending,
+                &mut playing,
+            ),
             Ok(Ask::Load { recording }) => {
                 match source_for(desk, recording) {
                     Some(source) => {
@@ -433,7 +440,18 @@ fn source_for(desk: &Arc<Desk>, recording: Id<Recording>) -> Option<crate::audio
 }
 
 /// Apply one text-language command. Returns whether it was a discontinuity.
-fn apply(player: &PlayerHandle, command: &Command) -> bool {
+fn apply(
+    player: &PlayerHandle,
+    command: &Command,
+    queue: &mut super::queue::Playing,
+    desk: &Arc<Desk>,
+    pending: &mut Option<String>,
+    // **What the `playback` event names.** A load starts immediately, unlike a
+    // splice, so this is set here rather than promoted on `Finished` — and
+    // forgetting it is why the first version of `next` skipped the audio while
+    // telling every view the old track was still playing.
+    playing: &mut Option<String>,
+) -> bool {
     match command {
         Command::Play => {
             player.play();
@@ -454,11 +472,39 @@ fn apply(player: &PlayerHandle, command: &Command) -> bool {
             }
             false
         }
+        // **Skip to the next track, which the engine can now answer** — #232
+        // gave it the queue, so `next` no longer needs a view to resolve it.
+        //
+        // Unlike `NeedNext` this is a *load*, not a splice: the current track is
+        // being abandoned rather than played out, so there is nothing to join
+        // onto and `pending` is not the right slot.
+        Command::Next => match queue
+            .take_next()
+            .and_then(|(id, _)| recording_of(desk, id).map(|rec| (id, rec)))
+        {
+            Some((id, recording)) => match source_for(desk, recording) {
+                Some(source) => {
+                    queue.now_playing(Some(id));
+                    *pending = None;
+                    *playing = Some(recording.to_string());
+                    player.load(source);
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        },
         // **Not a transport discontinuity.** A volume change does not move the
         // playhead or the run state, so §7.8 has nothing to say about it — it
         // belongs to the `params` topic, which has no producer yet.
         Command::Vol(_) => false,
-        // Everything else needs a queue, which the engine does not have.
+        // **`prev` needs a history the engine does not keep.** Going back is not
+        // the inverse of `take_next`: the queue is consumed by being played
+        // from, so what played before is gone unless somebody remembered it.
+        // Refusing is honest; inventing a "previous" from the pool's order would
+        // be a different command wearing this one's name.
+        //
+        // Everything else needs a view — a cursor, a selection, a pane.
         _ => false,
     }
 }

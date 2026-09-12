@@ -938,3 +938,125 @@ fn a_second_engine_loses_cleanly_so_two_views_can_race_to_start_one() {
     let client = Client::connect(&engine.socket, "after", "0").expect("the first still listens");
     assert_eq!(client.hello().protocol, gmuse_proto::PROTOCOL);
 }
+
+/// **Playback continues across a detach and a re-attach** — #219's second
+/// Done-when line, and the property the whole milestone exists for.
+///
+/// Nothing about this needs a TUI: it is a claim about the engine, and it became
+/// true when #230 gave it a player and #232 gave it next-track selection. A view
+/// is now something that can go away.
+#[test]
+fn playback_survives_a_view_detaching_and_another_attaching() {
+    let (engine, recording) = start_with_a_track("detach");
+
+    // A view attaches and starts something.
+    let first = Client::connect(&engine.socket, "first-view", "0").expect("connect");
+    first
+        .subscribe(&[gmuse_proto::Topic::Playback])
+        .expect("subscribe");
+    first
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+
+    // Wait until it is actually playing, so the detach happens mid-track rather
+    // than before anything started.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut playing = false;
+    while std::time::Instant::now() < deadline {
+        let Ok(event) = first.next_event(Duration::from_secs(2)) else {
+            continue;
+        };
+        if event.body["state"] == "playing" {
+            playing = true;
+            break;
+        }
+    }
+    assert!(playing, "the first view got it playing");
+
+    // **The view goes away.** §7.10: a disconnect is a non-event for the engine —
+    // its subscriptions are dropped and nothing else changes.
+    drop(first);
+
+    // A second view attaches to the engine that is still running.
+    let second = Client::connect(&engine.socket, "second-view", "0").expect("re-attach");
+    assert!(
+        second.hello().stream_generation >= 1,
+        "the same stream is still open"
+    );
+    second
+        .subscribe(&[gmuse_proto::Topic::Playback])
+        .expect("subscribe");
+
+    // And it can still drive what the first one started.
+    second
+        .call(
+            "cmd.exec_line",
+            Some(serde_json::json!({ "line": "pause" })),
+        )
+        .expect("the second view can drive it");
+
+    let event = second
+        .next_event(Duration::from_secs(10))
+        .expect("a playback event for the second view");
+    assert_eq!(event.topic, gmuse_proto::Topic::Playback);
+    assert!(
+        event.body["recording"].as_str().is_some(),
+        "and it still knows what is loaded: {}",
+        event.body
+    );
+}
+
+/// **`next` over the wire skips to the next track** — #232 gave the engine the
+/// queue, so this no longer needs a view to resolve it.
+#[test]
+fn next_over_the_wire_skips_without_a_view_resolving_it() {
+    let (engine, recording) = start_with_a_track("next");
+    let client = Client::connect(&engine.socket, "view", "0").expect("connect");
+    client
+        .subscribe(&[gmuse_proto::Topic::Playback])
+        .expect("subscribe");
+    client
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+
+    // Let the first track be the one playing.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let Ok(e) = client.next_event(Duration::from_secs(2)) else {
+            continue;
+        };
+        if e.body["state"] == "playing" {
+            break;
+        }
+    }
+
+    // Skip. The engine picks from its own queue and pool.
+    client
+        .call("cmd.exec_line", Some(serde_json::json!({ "line": "next" })))
+        .expect("next is remotable");
+
+    // Something other than the first recording ends up loaded.
+    let mut names = vec![recording.clone()];
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        let Ok(e) = client.next_event(Duration::from_secs(3)) else {
+            continue;
+        };
+        if let Some(rec) = e.body["recording"].as_str()
+            && !names.contains(&rec.to_string())
+        {
+            names.push(rec.to_string());
+            break;
+        }
+    }
+    assert!(
+        names.len() >= 2,
+        "the engine skipped to something else on its own: {names:?}"
+    );
+}
