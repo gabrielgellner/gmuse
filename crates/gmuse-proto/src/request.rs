@@ -42,13 +42,39 @@ pub enum Request {
     /// against `--repl` — and that parser belongs to the engine, not to a wire
     /// crate that must not depend on it (§4.3). The boundary is real; it is one
     /// layer in.
-    ExecLine { line: String },
+    ExecLine {
+        line: String,
+    },
     /// What the engine is doing.
     EngineStatus,
     /// Ask it to stop.
     EngineShutdown,
     /// The engine's clock, for offset estimation (§7.9).
     TimeNow,
+    /// Read the queue — §7.4.
+    QueueGet,
+    /// Append recordings to the queue.
+    ///
+    /// **`base_version` is optional here and required on the mutating
+    /// siblings** (§7.7). Two appends to a list lose nothing; removing index 3
+    /// from a list that has changed removes the wrong track.
+    QueueEnqueue {
+        recordings: Vec<String>,
+        base_version: Option<u64>,
+    },
+    /// Remove one entry by position.
+    QueueRemove {
+        index: usize,
+        base_version: Option<u64>,
+    },
+    QueueClear {
+        base_version: Option<u64>,
+    },
+    /// What plays after this one runs out — §6 calls it control state because
+    /// it decides what plays next.
+    SetAaaMode {
+        mode: String,
+    },
     /// Play this recording on the main player — #230.
     ///
     /// **The one method here that §7.4's table does not list.** That table has
@@ -58,11 +84,17 @@ pub enum Request {
     /// `deck.load` because #224 settled that the player is a deck *plus a
     /// queue* rather than a deck, so claiming the deck spelling would claim a
     /// deck exists.
-    PlayerLoad { recording: String },
+    PlayerLoad {
+        recording: String,
+    },
     /// Start receiving events on these topics (§7.8).
-    Subscribe { topics: Vec<crate::Topic> },
+    Subscribe {
+        topics: Vec<crate::Topic>,
+    },
     /// Stop receiving them.
-    Unsubscribe { topics: Vec<crate::Topic> },
+    Unsubscribe {
+        topics: Vec<crate::Topic>,
+    },
     /// One of §8.4's named write operations.
     ///
     /// **A single variant carrying the operation**, rather than eight, because
@@ -190,6 +222,11 @@ pub mod method {
     pub const ENGINE_SHUTDOWN: &str = "engine.shutdown";
     pub const TIME_NOW: &str = "time.now";
     pub const PLAYER_LOAD: &str = "player.load";
+    pub const QUEUE_GET: &str = "queue.get";
+    pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
+    pub const QUEUE_REMOVE: &str = "queue.remove";
+    pub const QUEUE_CLEAR: &str = "queue.clear";
+    pub const SET_AAA_MODE: &str = "settings.set_aaa_mode";
     pub const SUBSCRIBE: &str = "sub.subscribe";
     pub const UNSUBSCRIBE: &str = "sub.unsubscribe";
 
@@ -216,6 +253,11 @@ pub mod method {
         ENGINE_SHUTDOWN,
         TIME_NOW,
         PLAYER_LOAD,
+        QUEUE_GET,
+        QUEUE_ENQUEUE,
+        QUEUE_REMOVE,
+        QUEUE_CLEAR,
+        SET_AAA_MODE,
         SUBSCRIBE,
         UNSUBSCRIBE,
         LIBRARY_APPLY,
@@ -287,6 +329,52 @@ impl Request {
                     recording: p.recording,
                 })
             }
+            method::QUEUE_GET => Ok(Self::QueueGet),
+            method::QUEUE_ENQUEUE => {
+                #[derive(Deserialize)]
+                struct P {
+                    recordings: Vec<String>,
+                    #[serde(default)]
+                    base_version: Option<u64>,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueueEnqueue {
+                    recordings: p.recordings,
+                    base_version: p.base_version,
+                })
+            }
+            method::QUEUE_REMOVE => {
+                #[derive(Deserialize)]
+                struct P {
+                    index: usize,
+                    #[serde(default)]
+                    base_version: Option<u64>,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueueRemove {
+                    index: p.index,
+                    base_version: p.base_version,
+                })
+            }
+            method::QUEUE_CLEAR => {
+                #[derive(Deserialize, Default)]
+                struct P {
+                    #[serde(default)]
+                    base_version: Option<u64>,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueueClear {
+                    base_version: p.base_version,
+                })
+            }
+            method::SET_AAA_MODE => {
+                #[derive(Deserialize)]
+                struct P {
+                    mode: String,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::SetAaaMode { mode: p.mode })
+            }
             method::SUBSCRIBE => {
                 let p: TopicsParams = typed(method, params)?;
                 Ok(Self::Subscribe {
@@ -312,6 +400,11 @@ impl Request {
             Self::EngineShutdown => method::ENGINE_SHUTDOWN,
             Self::TimeNow => method::TIME_NOW,
             Self::PlayerLoad { .. } => method::PLAYER_LOAD,
+            Self::QueueGet => method::QUEUE_GET,
+            Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
+            Self::QueueRemove { .. } => method::QUEUE_REMOVE,
+            Self::QueueClear { .. } => method::QUEUE_CLEAR,
+            Self::SetAaaMode { .. } => method::SET_AAA_MODE,
             Self::Subscribe { .. } => method::SUBSCRIBE,
             Self::Unsubscribe { .. } => method::UNSUBSCRIBE,
             Self::Library { operation, .. } => operation.method(),
@@ -357,7 +450,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 16, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 21, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

@@ -57,6 +57,41 @@ pub enum Ask {
     /// path means hashing the file's audio, which is a read this thread may not
     /// do. So a `playback` event names what was asked for, not what was found.
     Load { recording: Id<Recording> },
+    /// A queue operation, with somewhere to put the answer.
+    ///
+    /// **A reply channel, because the state lives on this thread.** `Playing` is
+    /// owned by the loop below and a connection worker cannot borrow it, so the
+    /// worker asks and waits. That is the engine blocking on *itself*, bounded
+    /// by one tick — not I1, which forbids blocking on a **view**.
+    Queue {
+        op: QueueOp,
+        reply: Sender<Result<Answered, super::queue::Stale>>,
+    },
+}
+
+/// What a client asked of the queue.
+pub enum QueueOp {
+    Get,
+    Enqueue {
+        ids: Vec<gmuse_library::model::rows::CopyId>,
+        base: Option<u64>,
+    },
+    Remove {
+        index: usize,
+        base: Option<u64>,
+    },
+    Clear {
+        base: Option<u64>,
+    },
+    SetAaaMode(gmuse_library::next::AaaMode),
+}
+
+/// The queue as it stands after an operation.
+pub struct Answered {
+    pub version: u64,
+    /// The entries, for a read. Absent for a mutation, which answers with the
+    /// version and lets the `queue` event carry the rest (§7.8).
+    pub entries: Option<Vec<gmuse_library::model::rows::CopyId>>,
 }
 
 /// What the handshake needs to report, published by this thread.
@@ -210,6 +245,7 @@ fn run(
     // gapless join — the engine had moved on and was telling every view it had
     // not.
     let mut pending: Option<String> = None;
+    let mut announced = queue.version();
     let mut folded = desk.current();
 
     while !stop.load(Ordering::Acquire) {
@@ -231,6 +267,41 @@ fn run(
                     // the honest report.
                     None => false,
                 }
+            }
+            Ok(Ask::Queue { op, reply }) => {
+                let answered = match op {
+                    QueueOp::Get => {
+                        let (version, entries) = queue.get();
+                        Ok(Answered {
+                            version,
+                            entries: Some(entries),
+                        })
+                    }
+                    QueueOp::Enqueue { ids, base } => {
+                        queue.enqueue(&ids, base).map(|version| Answered {
+                            version,
+                            entries: None,
+                        })
+                    }
+                    QueueOp::Remove { index, base } => {
+                        queue.remove(index, base).map(|version| Answered {
+                            version,
+                            entries: None,
+                        })
+                    }
+                    QueueOp::Clear { base } => queue.clear(base).map(|version| Answered {
+                        version,
+                        entries: None,
+                    }),
+                    QueueOp::SetAaaMode(mode) => Ok(Answered {
+                        version: queue.set_aaa_mode(mode),
+                        entries: None,
+                    }),
+                };
+                // A dropped receiver means the client gave up, which is not this
+                // thread's problem.
+                let _ = reply.send(answered);
+                false
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => false,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -301,6 +372,21 @@ fn run(
         // **Only on a discontinuity** — §7.8. A tick that published every 50 ms
         // would be a steady position stream, which the design forbids and which
         // §7.10's coalescing exists to avoid needing.
+        // **The queue says only its version** — §7.8. A view re-reads with
+        // `queue.get`; sending the entries would make every reorder carry the
+        // whole list, and §7.10's coalescing already means a view that fell
+        // behind sees one event rather than each.
+        let version = queue.version();
+        if version != announced {
+            if let Some(engine) = engine.get() {
+                engine.publish(&Event::new(
+                    Topic::Queue,
+                    serde_json::json!({ "version": version }),
+                ));
+            }
+            announced = version;
+        }
+
         if moved || told != Some(now) {
             if let Some(engine) = engine.get() {
                 engine.publish(&playback_event(player, &shared, now, playing.as_deref()));

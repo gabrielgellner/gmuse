@@ -2459,6 +2459,76 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
             }
         }
 
+        /// Ask the control thread, which owns the queue.
+        ///
+        /// **Bounded, and the bound is the point.** The worker waits on the
+        /// engine rather than the other way round, so I1 is untouched — but a
+        /// control thread that stopped ticking must not hold a client for ever,
+        /// so a timeout turns that into an error the client can see.
+        fn queue(
+            &self,
+            op: gmuse::engine::control::QueueOp,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse_proto::{RpcError, error::code};
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            if !self
+                .control
+                .ask(gmuse::engine::control::Ask::Queue { op, reply: tx })
+            {
+                return Err(RpcError::new(code::INTERNAL, "the player is not running"));
+            }
+            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(Ok(answered)) => {
+                    let mut body = serde_json::json!({ "version": answered.version });
+                    if let Some(entries) = answered.entries {
+                        // Back out to recordings, which is the grain a client
+                        // asked in (I17).
+                        let named: Vec<String> = entries
+                            .iter()
+                            .filter_map(|id| self.recording_of(*id))
+                            .map(|r| r.to_string())
+                            .collect();
+                        body["entries"] = serde_json::json!(named);
+                    }
+                    Ok(body)
+                }
+                Ok(Err(stale)) => Err(RpcError::stale_version(stale.current)),
+                Err(_) => Err(RpcError::new(
+                    code::INTERNAL,
+                    "the control thread did not answer",
+                )),
+            }
+        }
+
+        /// The row that draws a recording, for the device this engine is on.
+        fn row_of(
+            &self,
+            recording: gmuse::model::id::Id<gmuse::model::entity::Recording>,
+        ) -> Option<gmuse::model::rows::CopyId> {
+            // **A scan, and that is the right answer for one row.** #123's
+            // entry is the precedent: "building a map of 13,000 credits to ask
+            // about one album is worse than walking them". Enqueuing is a
+            // handful of ids at human speed, so walking the rows costs less
+            // than an index the librarian would have to maintain for it.
+            use gmuse::model::rows::Listing;
+            let answer = self.desk.current();
+            let rows: &dyn Listing = &answer.library;
+            rows.rows()
+                .into_iter()
+                .find(|id| rows.recording_of(*id) == Some(recording))
+        }
+
+        /// And back the other way, for reading the queue out.
+        fn recording_of(
+            &self,
+            id: gmuse::model::rows::CopyId,
+        ) -> Option<gmuse::model::id::Id<gmuse::model::entity::Recording>> {
+            use gmuse::model::rows::Listing;
+            let answer = self.desk.current();
+            let rows: &dyn Listing = &answer.library;
+            rows.recording_of(id)
+        }
+
         /// `library.edit` — the facts a view emits directly.
         fn edit(
             &self,
@@ -2571,6 +2641,59 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                 // point of §7.12: two textual command languages is the standing
                 // complaint against `--repl`, and routing here is what stops a
                 // second one being written.
+                Call::QueueGet => self.queue(gmuse::engine::control::QueueOp::Get),
+                Call::QueueEnqueue {
+                    recordings,
+                    base_version,
+                } => {
+                    // **Recordings on the wire, rows underneath** — I17: only
+                    // user-facing grains cross, and a recording is what a person
+                    // chooses. The librarian turns one into the row that draws
+                    // it, which is the same resolution `player.load` does.
+                    let mut ids = Vec::with_capacity(recordings.len());
+                    for raw in &recordings {
+                        let Ok(uuid) = raw.parse::<uuid::Uuid>() else {
+                            return Err(RpcError::invalid_params(
+                                "recordings",
+                                format!("{raw:?} is not a recording id"),
+                            ));
+                        };
+                        match self.row_of(gmuse::model::id::Id::from_uuid(uuid)) {
+                            Some(id) => ids.push(id),
+                            None => {
+                                return Err(RpcError::new(
+                                    code::NOT_FOUND,
+                                    format!("the library has no row for {raw}"),
+                                )
+                                .with_data(serde_json::json!({ "ref": raw })));
+                            }
+                        }
+                    }
+                    self.queue(gmuse::engine::control::QueueOp::Enqueue {
+                        ids,
+                        base: base_version,
+                    })
+                }
+                Call::QueueRemove {
+                    index,
+                    base_version,
+                } => self.queue(gmuse::engine::control::QueueOp::Remove {
+                    index,
+                    base: base_version,
+                }),
+                Call::QueueClear { base_version } => {
+                    self.queue(gmuse::engine::control::QueueOp::Clear { base: base_version })
+                }
+                Call::SetAaaMode { mode } => {
+                    let Some(mode) = gmuse::next::AaaMode::parse(&mode) else {
+                        return Err(RpcError::invalid_params(
+                            "mode",
+                            format!("{mode:?} is not an aaa mode"),
+                        ));
+                    };
+                    self.queue(gmuse::engine::control::QueueOp::SetAaaMode(mode))
+                }
+
                 Call::PlayerLoad { recording } => {
                     let Ok(uuid) = recording.parse::<uuid::Uuid>() else {
                         return Err(RpcError::invalid_params(

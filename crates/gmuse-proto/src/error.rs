@@ -84,6 +84,20 @@ impl RpcError {
         Self::new(code::METHOD_NOT_FOUND, format!("no such method: {method}"))
     }
 
+    /// **The queue moved under a caller** — §7.13's 1001, data `{current}`.
+    ///
+    /// The one place optimistic concurrency belongs (§8.8): a library write
+    /// unions and cannot conflict, and two views reordering a queue at once is
+    /// a lost update. The current version travels with the refusal so a client
+    /// can re-read and retry without a second round trip to find out where it is.
+    pub fn stale_version(current: u64) -> Self {
+        Self::new(
+            code::STALE_VERSION,
+            format!("the queue is at version {current}"),
+        )
+        .with_data(serde_json::json!({ "current": current }))
+    }
+
     /// Data is `{field, message}`, so a client can point at the argument.
     pub fn invalid_params(field: &str, message: impl Into<String>) -> Self {
         let message = message.into();

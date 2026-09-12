@@ -723,3 +723,98 @@ fn playback_continues_to_a_second_track_with_no_view_answering() {
         "and the first one was the one asked for"
     );
 }
+
+/// **Two clients, `StaleVersion` on the queue** — #217's last Done-when line,
+/// and #232 is what made it expressible.
+///
+/// §8.8 puts optimistic concurrency here and nowhere else: a library write
+/// unions and cannot conflict, and two views reordering a queue at once is a
+/// lost update. So this is the one refusal of its kind in the protocol.
+#[test]
+fn two_clients_editing_the_queue_produce_a_stale_version() {
+    let (engine, recording) = start_with_a_track("stale");
+
+    let first = Client::connect(&engine.socket, "first", "0").expect("connect");
+    let second = Client::connect(&engine.socket, "second", "0").expect("connect");
+
+    // Both put something in, so there is an entry to fight over.
+    first
+        .call(
+            "queue.enqueue",
+            Some(serde_json::json!({ "recordings": [recording] })),
+        )
+        .expect("append needs no version");
+
+    // The first client reads the queue and remembers where it was.
+    let seen = first.call("queue.get", None).expect("read")["version"]
+        .as_u64()
+        .expect("a version");
+
+    // The second client gets there first.
+    second
+        .call(
+            "queue.enqueue",
+            Some(serde_json::json!({ "recordings": [recording], "base_version": seen })),
+        )
+        .expect("in step");
+
+    // Now the first client's version is behind, and removing index 0 would take
+    // the wrong track.
+    let refused = first
+        .call(
+            "queue.remove",
+            Some(serde_json::json!({ "index": 0, "base_version": seen })),
+        )
+        .expect_err("the queue moved");
+    let rpc = refused.rpc().expect("an rpc error");
+    assert_eq!(rpc.code, 1001, "StaleVersion: {rpc}");
+    assert!(
+        rpc.data
+            .as_ref()
+            .and_then(|d| d["current"].as_u64())
+            .is_some_and(|c| c > seen),
+        "and it says where the queue actually is: {:?}",
+        rpc.data
+    );
+
+    // Nothing was removed.
+    let after = first.call("queue.get", None).expect("read");
+    assert_eq!(
+        after["entries"].as_array().map(Vec::len),
+        Some(2),
+        "the refusal changed nothing: {after}"
+    );
+}
+
+/// A `queue` event says only its version — §7.8. A view re-reads; sending the
+/// entries would make every reorder carry the whole list.
+#[test]
+fn a_queue_change_is_announced_by_version() {
+    let (engine, recording) = start_with_a_track("queue-event");
+    let client = Client::connect(&engine.socket, "watcher", "0").expect("connect");
+    client
+        .subscribe(&[gmuse_proto::Topic::Queue])
+        .expect("subscribe");
+
+    client
+        .call(
+            "queue.enqueue",
+            Some(serde_json::json!({ "recordings": [recording] })),
+        )
+        .expect("append");
+
+    let event = client
+        .next_event(Duration::from_secs(10))
+        .expect("a queue event");
+    assert_eq!(event.topic, gmuse_proto::Topic::Queue);
+    assert!(
+        event.body["version"].as_u64().is_some_and(|v| v > 1),
+        "it carries the version: {}",
+        event.body
+    );
+    assert!(
+        event.body.get("entries").is_none(),
+        "and not the entries: {}",
+        event.body
+    );
+}
