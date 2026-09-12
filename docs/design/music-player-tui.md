@@ -4784,6 +4784,37 @@ Append here as decisions are made. Format: date, decision, rationale.
   `Ref<T>` said this all along — _"a reference is valid when its target is absent; resolution is an optimisation, not a
   precondition"_ — and the first `RecordingDerived` arm refused on exactly that. The refusal is gone.
 
+- **2026-09-12** **A commit that does not parse is listed under `Other`, not dropped (!384).** `cliff.toml` set
+  `filter_unconventional = true`, so a badly typed subject did not fail loudly — it vanished from `CHANGELOG.md` without
+  a word. Measured: **44 of 383 commits** were invisible, dated 2026-09-03 to 09-07 and interleaved with well-formed
+  ones, so this was a live leak and not old pre-convention history. One of them is `8b84fd3`, which CLAUDE.md already
+  names as an accepted cost.
+
+  Every one of them is merged onto a protected `main`, where a subject cannot be corrected — rewriting one is a
+  force-push by definition. So the 44 could only be surfaced or left invisible. They are surfaced.
+
+  **This is not the preprocessor that was rejected, and that rejection still stands.** A preprocessor rewrites one
+  _named_ subject so it pretends to parse; the catch-all names nothing and claims nothing, it declines to throw away a
+  commit it cannot type. The 44 stay untyped in the changelog, which is accurate, because they _were_ untyped. What
+  changed is that the failure is visible instead of silent. The parser sits last in the list, so it can never shadow a
+  typed rule above it: `Other` holds exactly the 43 unconventional non-initial commits and no well-formed one was
+  misrouted into it. The forty-fourth is `10ef69d`, `feat/a row carries its genres`, which reaches `Features` because
+  `^feat` matches a slash as happily as a colon.
+
+  **The cause was a missing gate, and that is the part worth keeping.** `pre-commit` ran `just fmt-check` and `pre-push`
+  ran `just ci`; nothing had ever looked at a subject line, which is the whole reason 44 got through. A bucket without a
+  gate only licenses more of them. `.githooks/commit-msg` is that check, at the one moment a subject is still free to
+  fix — run over all 383 historical subjects it rejects exactly the 45 unconventional ones and accepts all 338
+  well-formed ones, with no disagreement in either direction.
+
+  **And the merge-skip rule never worked.** It matched `^\w+(\(.*\))?!?: merge `, hunting merge commits by typed
+  subject. This project is fast-forward only and has **no merge commits at all** — zero in 383 — so the rule could never
+  do its job, and its one hit in all of history was `feat(model): merge by redirect` (#68), a real feature it silently
+  dropped. It now matches what git actually writes for one.
+
+  Net: **every commit now appears except the initial one**, against 338 of 383 before. That one stays out by name rather
+  than as a side effect of a filter that was throwing away 44 others with it.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
