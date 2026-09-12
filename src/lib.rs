@@ -16,8 +16,8 @@
 #[cfg(test)]
 pub use gmuse_library::fixture;
 pub use gmuse_library::{
-    audio_id, bridge, cache, events, facts, history, librarian, model, operations, projection,
-    query, shelf, text,
+    audio_id, bridge, cache, events, facts, history, librarian, model, next, operations, playlist,
+    projection, query, shelf, text,
 };
 
 pub mod audio;
@@ -31,8 +31,6 @@ pub mod engine;
 pub mod guides;
 pub mod lock;
 pub mod m3u;
-pub mod next;
-pub mod playlist;
 /// The allocation guard, in the test binary only — #211.
 #[cfg(test)]
 pub mod rt_guard;

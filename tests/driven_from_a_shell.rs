@@ -486,6 +486,11 @@ fn start_with_a_track(name: &str) -> (Engine, String) {
     std::fs::create_dir_all(dir.join("xdg")).expect("scratch");
     let track = dir.join("lib").join("tone.wav");
     write_wav(&track, 44_100);
+    // **Two tracks, because one cannot show a join.** The second is a different
+    // length so its bytes hash differently and the import mints a second
+    // recording rather than joining the first.
+    let second = dir.join("lib").join("tone2.wav");
+    write_wav(&second, 22_050);
 
     let imported = Command::new(binary())
         .args([
@@ -496,6 +501,7 @@ fn start_with_a_track(name: &str) -> (Engine, String) {
             "--write",
         ])
         .arg(&track)
+        .arg(&second)
         .env("XDG_DATA_HOME", dir.join("xdg"))
         // **Run it from the scratch directory, not from the repository.**
         //
@@ -659,5 +665,61 @@ fn playback_events_do_not_arrive_between_discontinuities() {
     assert!(
         client.next_event(Duration::from_secs(2)).is_err(),
         "the engine published a playback event with nothing happening"
+    );
+}
+
+/// **The engine picks the next track, with no view attached** — #232, and the
+/// property the whole milestone exists for.
+///
+/// The decoder's `NeedNext` arrives while the current track is still playing and
+/// needs an answer before it ends. Nothing is asked of a client here: this test
+/// connects only to *watch*, and could disconnect without changing the outcome.
+#[test]
+fn playback_continues_to_a_second_track_with_no_view_answering() {
+    let (engine, recording) = start_with_a_track("gapless");
+    let client = Client::connect(&engine.socket, "watcher", "0").expect("connect");
+    client
+        .subscribe(&[gmuse_proto::Topic::Playback])
+        .expect("subscribe");
+
+    client
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+    // **No play command, because `load` starts it.** The UI's resume path is the
+    // evidence: it loads, seeks, and then explicitly pauses, because "resuming
+    // playback unbidden on launch would be obnoxious". A first version of this
+    // test sent `pause` here and spent a while watching a paused player refuse
+    // to reach the end of a track.
+
+    // **Wait for a second recording to be named.** The first track is a second
+    // long under the null renderer at wall speed, so the join happens on its
+    // own — and the only way a second recording can appear is if the engine
+    // chose it, because nobody told it one.
+    let mut names = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    while std::time::Instant::now() < deadline {
+        let Ok(event) = client.next_event(Duration::from_secs(3)) else {
+            continue;
+        };
+        if let Some(rec) = event.body["recording"].as_str()
+            && !names.contains(&rec.to_string())
+        {
+            names.push(rec.to_string());
+        }
+        if names.len() >= 2 {
+            break;
+        }
+    }
+
+    assert!(
+        names.len() >= 2,
+        "the engine never moved to a second track on its own; it named {names:?}"
+    );
+    assert!(
+        names.contains(&recording),
+        "and the first one was the one asked for"
     );
 }

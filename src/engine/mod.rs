@@ -35,6 +35,7 @@ pub mod control;
 pub mod librarian;
 pub mod library;
 pub mod outbox;
+pub mod queue;
 pub mod socket;
 
 use std::io::{BufRead, BufReader, Read, Write};

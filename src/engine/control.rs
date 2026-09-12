@@ -37,6 +37,7 @@ use crate::cmd::Command;
 use crate::librarian::Desk;
 use crate::model::entity::Recording;
 use crate::model::id::Id;
+use gmuse_library::model::rows::Listing;
 
 /// What the connection workers can ask the player for.
 pub enum Ask {
@@ -195,6 +196,22 @@ fn run(
     let mut told: Option<Told> = None;
     let mut playing: Option<String> = None;
 
+    // **The pool, materialised** — #232. §4.4 forbids this thread from running
+    // a query, so it holds one instead and rebuilds it when the librarian
+    // publishes a change. Answering `NeedNext` is then a lookup.
+    let mut queue = super::queue::Playing::new(pool_of(desk));
+    // **What was spliced on but has not started yet.**
+    //
+    // `set_next` hands the decoder a track to join onto the end of the current
+    // one; nothing has played it yet, so `playing` must not name it. Promoted
+    // when the current track finishes, which is the moment the join happens.
+    //
+    // Without this the `playback` event kept naming the first recording after a
+    // gapless join — the engine had moved on and was telling every view it had
+    // not.
+    let mut pending: Option<String> = None;
+    let mut folded = desk.current();
+
     while !stop.load(Ordering::Acquire) {
         // **A timeout, not a blocking receive.** §5.1: this thread must wake on
         // its own, because a `Finished` from the decoder and a stream
@@ -219,17 +236,57 @@ fn run(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
+        // **A new fold means a new pool.** A track imported while something is
+        // playing should be playable next, and the cheapest way to know is the
+        // pointer the librarian swapped.
+        let now = desk.current();
+        if !Arc::ptr_eq(&folded, &now) {
+            queue.refresh(pool_of(desk));
+            folded = now;
+        }
+
         // What the player has to say for itself. Draining rather than taking
         // one: a track change can arrive as `Finished` then `Loaded` in the
         // same tick, and only the last state matters.
         while let Ok(event) = player.events().try_recv() {
             match event {
-                PlayerEvent::Finished | PlayerEvent::Loaded { .. } | PlayerEvent::DeviceLost(_) => {
+                // **The engine answers this, and that is the whole of #232.**
+                // The decoder asks while the current track is still playing and
+                // needs a reply before it ends; a detached view cannot serve a
+                // deadline, so nothing is asked of one.
+                PlayerEvent::NeedNext => {
+                    match queue
+                        .take_next()
+                        .and_then(|(id, _source)| recording_of(desk, id).map(|rec| (id, rec)))
+                    {
+                        Some((id, recording)) => match source_for(desk, recording) {
+                            Some(source) => {
+                                pending = Some(recording.to_string());
+                                queue.now_playing(Some(id));
+                                player.set_next(Some(source));
+                            }
+                            // Named and not held: a row the library has and this
+                            // device does not is an ordinary thing to reach.
+                            None => player.set_next(None),
+                        },
+                        // End of pool. Letting playback stop is the answer, and
+                        // it has to be *an* answer or the decoder waits.
+                        None => player.set_next(None),
+                    }
+                }
+                PlayerEvent::Finished => {
+                    // The join happened: what was spliced on is what is playing.
+                    if let Some(next) = pending.take() {
+                        playing = Some(next);
+                    }
+                    moved = true;
+                }
+                PlayerEvent::Loaded { .. } | PlayerEvent::DeviceLost(_) => {
                     moved = true;
                 }
                 // Informational: the OS rerouted us and playback continues, so
                 // it is not a transport discontinuity.
-                PlayerEvent::DeviceChanged | PlayerEvent::NeedNext | PlayerEvent::Error(_) => {}
+                PlayerEvent::DeviceChanged | PlayerEvent::Error(_) => {}
             }
         }
 
@@ -251,6 +308,26 @@ fn run(
             told = Some(now);
         }
     }
+}
+
+/// Every row the library holds, as the pool to pick from.
+///
+/// **A projection read, not a query** (§4.4). `Listing::rows` walks what the
+/// librarian already folded, and `Shelf::from_members` groups it — the same call
+/// the TUI makes for its own list, which is what keeps the two from disagreeing
+/// about what "the library" contains.
+fn pool_of(desk: &Arc<Desk>) -> gmuse_library::shelf::Shelf {
+    let answer = desk.current();
+    let rows: std::collections::HashSet<gmuse_library::model::rows::CopyId> =
+        Listing::rows(&answer.library).into_iter().collect();
+    gmuse_library::shelf::Shelf::from_members(&answer.library, rows, true)
+}
+
+/// The recording a row draws, so a pick can be resolved to a locator.
+fn recording_of(desk: &Arc<Desk>, id: gmuse_library::model::rows::CopyId) -> Option<Id<Recording>> {
+    let answer = desk.current();
+    let rows: &dyn Listing = &answer.library;
+    rows.recording_of(id)
 }
 
 /// Build a playable source from a recording, through the projection.
