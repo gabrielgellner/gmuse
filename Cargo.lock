@@ -802,6 +802,7 @@ dependencies = [
  "crossterm",
  "gmuse-ids",
  "gmuse-library",
+ "gmuse-proto",
  "lofty",
  "nucleo-matcher",
  "postcard",
@@ -849,6 +850,15 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "gmuse-proto"
+version = "0.1.0"
+dependencies = [
+ "gmuse-ids",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

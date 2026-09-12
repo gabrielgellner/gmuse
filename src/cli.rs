@@ -133,6 +133,25 @@ pub enum Command {
     /// Operations on the library itself.
     #[command(subcommand)]
     Shelf(Shelf),
+    /// Run the engine daemon — #214, §4.2.
+    ///
+    /// One instance per user, holding an exclusive lock beside its socket.
+    Engine {
+        /// Stay in the foreground rather than detaching.
+        ///
+        /// **The default today, and the flag exists so the invocation does not
+        /// change when detaching lands.** A view auto-starting the engine
+        /// (§4.2) wants it detached; a person debugging one wants the log on
+        /// their terminal.
+        #[arg(long)]
+        foreground: bool,
+        /// Render through the virtual clock instead of a device (§14, #210).
+        ///
+        /// What makes the engine startable in a test, in CI, and on a machine
+        /// with no sound card.
+        #[arg(long)]
+        null_audio: bool,
+    },
 }
 
 #[derive(Debug, clap::Subcommand)]

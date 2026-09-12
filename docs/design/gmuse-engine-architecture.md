@@ -222,6 +222,11 @@ There is a single `gmuse` binary, following the tmux model:
 This supersedes today's `--remote <CMD>`, which is a second, ad-hoc IPC mechanism over the same socket-shaped problem.
 It should be removed rather than kept alongside: `gmuse ctl` is the same thing with a protocol behind it.
 
+**It is removed when `gmuse ctl` exists, not before** (#214, #217). `--remote` is the only way to drive a running player
+from a key binding that is not focused on it, which is the reason §1 asked for a socket at all. Retiring it in the same
+change that stands the engine up would leave a release where that is simply not possible — so the two doors are open at
+once for exactly as long as it takes #217 to land the new one, and no longer.
+
 ### 4.3 Crate layout
 
 | Crate                      | Contents                                                                                                                                                                                                                                                                                                                                                                                                        | Depends on                                                   |

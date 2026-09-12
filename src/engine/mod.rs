@@ -1,0 +1,665 @@
+//! **The engine's front door** — #214, §4.2, §7.1, §7.3.
+//!
+//! A unix socket, an NDJSON envelope, and a handshake that refuses a client
+//! speaking a different major version.
+//!
+//! ## This generalises `remote.rs` rather than replacing it
+//!
+//! `remote.rs` is not a sketch: it has a listener thread off the audio path, a
+//! stale-socket story that is correct by construction, and status answered from
+//! a published snapshot so a status bar can never wedge a render. Those are the
+//! two structural ideas the engine needs, and they are kept. What changes is the
+//! framing — a line of the `:` language becomes a JSON-RPC object — and that
+//! this is on its way to being the *only* way in.
+//!
+//! `--remote` is still here. §4.2 retires it in favour of `gmuse ctl`, and
+//! `gmuse ctl` is #217: removing the old door before the new one opens would
+//! leave a release with no way to drive a running player from a key binding.
+//!
+//! ## The stale socket needs no liveness check
+//!
+//! `UnixListener::bind` fails if the path exists, which normally means guessing
+//! whether a leftover socket belongs to a live process. It does not here, for
+//! the reason `remote.rs` already records: **the lock is taken before the bind**,
+//! so holding it proves no other engine is running and any socket present is
+//! stale by construction. The kernel made the liveness check, once.
+//!
+//! It is worth being precise about why the alternative is worse. Connecting to
+//! the socket to see whether anything answers is a race — nothing answers
+//! between a crash and a restart either — and it is also a lie about what was
+//! learned: a refused connection means nothing is *listening*, not that nothing
+//! is *running*. The lock answers the question that was actually being asked.
+
+pub mod socket;
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use gmuse_proto::envelope::{self, MAX_LINE};
+use gmuse_proto::hello::{HelloParams, HelloResult};
+use gmuse_proto::{Request, Response, RpcError, error::code, version};
+use thiserror::Error;
+
+/// What the engine could not do.
+#[derive(Debug, Error)]
+pub enum EngineError {
+    #[error("another gmuse engine is running{}", match .pid { Some(p) => format!(" (pid {p})"), None => String::new() })]
+    Running { pid: Option<u32> },
+    #[error("could not listen on {path}: {source}")]
+    Bind {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not prepare {path}: {source}")]
+    Prepare {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// What the engine tells a client about itself at `hello`.
+///
+/// Held rather than recomputed per connection so that `engine_generation` is
+/// stable for the engine's life, which is the whole point of it (§7.6).
+#[derive(Debug, Clone)]
+pub struct Identity {
+    pub engine_generation: String,
+    pub sample_rate: u32,
+    pub capabilities: Vec<String>,
+}
+
+impl Identity {
+    /// **A fresh generation per engine, from the clock and the pid.**
+    ///
+    /// It only has to differ between runs on one machine, which those two do:
+    /// the same pid cannot recur within the same nanosecond. Deliberately not a
+    /// random number — that would mean a dependency for no gain — and
+    /// deliberately not the pid alone, which a system recycles.
+    pub fn new(sample_rate: u32, capabilities: Vec<String>) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        Self {
+            engine_generation: format!("{:x}-{:x}", now, std::process::id()),
+            sample_rate,
+            capabilities,
+        }
+    }
+}
+
+/// What a connection can ask the running engine.
+///
+/// **A trait with one implementor is a struct** (§12), and this is the
+/// exception the rule allows for: the daemon must be startable in a test
+/// without an audio device, a library or a decoder. It is the seam that lets
+/// `hello` be tested against a stub and served by the real engine.
+pub trait Answers: Send + Sync + 'static {
+    /// Which audio stream the frame clock is counting in (§10.1, #212). Zero
+    /// before any stream has opened.
+    fn stream_generation(&self) -> u32;
+    /// The engine's clock, in nanoseconds, for offset estimation (§7.9).
+    fn now_ns(&self) -> i64;
+    /// Answer anything that is not `hello`.
+    fn call(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, RpcError>;
+}
+
+/// A running engine. Dropping it stops listening and removes the socket.
+pub struct Engine {
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    _lock: crate::lock::Lock,
+}
+
+impl Engine {
+    /// Where it is listening.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        // **Wake the accept loop by connecting to it.** `UnixListener::accept`
+        // blocks, and nothing else will return it: without this the thread sits
+        // in the kernel until a client happens to arrive, and the join below
+        // waits with it.
+        let _ = UnixStream::connect(&self.path);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Take the lock, bind the socket, and start answering.
+pub fn serve(
+    path: &Path,
+    identity: Identity,
+    answers: Arc<dyn Answers>,
+) -> Result<Engine, EngineError> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    socket::prepare_dir(dir).map_err(|source| EngineError::Prepare {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+
+    // **Before the bind, and that ordering is the whole stale-socket story.**
+    let lock = crate::lock::acquire(&dir.join(socket::LOCK)).map_err(|e| match e {
+        crate::lock::LockError::Held { pid, .. } => EngineError::Running { pid },
+        crate::lock::LockError::Io { path, source } => EngineError::Prepare { path, source },
+    })?;
+
+    // Holding the lock proves nothing else is listening, so whatever is here is
+    // a leftover. No liveness check, because it has already been made.
+    let _ = std::fs::remove_file(path);
+
+    let listener = UnixListener::bind(path).map_err(|source| EngineError::Bind {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    socket::restrict(path).map_err(|source| EngineError::Prepare {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
+    let thread = std::thread::Builder::new()
+        .name("gmuse-engine-listener".into())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                if stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                let Ok(stream) = stream else { continue };
+                let answers = Arc::clone(&answers);
+                let identity = identity.clone();
+                // A thread per connection. There are a handful of views, not a
+                // thousand, and a blocking read per client is the simplest
+                // thing that cannot make one client's slowness another's.
+                let _ = std::thread::Builder::new()
+                    .name("gmuse-engine-conn".into())
+                    .spawn(move || converse(stream, &identity, answers.as_ref()));
+            }
+        })
+        .map_err(|source| EngineError::Bind {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(Engine {
+        path: path.to_path_buf(),
+        stop,
+        thread: Some(thread),
+        _lock: lock,
+    })
+}
+
+/// One connection, from `hello` to close.
+fn converse(stream: UnixStream, identity: &Identity, answers: &dyn Answers) {
+    let Ok(write_half) = stream.try_clone() else {
+        return;
+    };
+    let mut out = std::io::BufWriter::new(write_half);
+    let mut reader = BufReader::new(stream);
+
+    let mut greeted = false;
+    loop {
+        // **Read at most one line's worth, then decide.** `lines()` and
+        // `read_line` both grow their buffer until a newline arrives, so a
+        // client that never sends one grows the engine's memory instead — which
+        // is the thing §7.1's cap exists to prevent, and a cap checked after
+        // the read would be a cap on nothing.
+        let mut raw = Vec::new();
+        let read = (&mut reader)
+            .take(MAX_LINE as u64 + 1)
+            .read_until(b'\n', &mut raw);
+        let Ok(read) = read else { return };
+        if read == 0 {
+            return; // the client hung up
+        }
+        if raw.len() > MAX_LINE {
+            // §7.1: rejected *and discarded* — the tail is not a request, so
+            // skipping to the next newline is what keeps the stream usable
+            // rather than reading the remainder as a stream of parse errors.
+            let over =
+                RpcError::invalid_request(format!("line exceeds the {MAX_LINE}-byte maximum"));
+            let body = serde_json::to_string(&Response::err(None, over)).unwrap_or_default();
+            if writeln!(out, "{body}").is_err() || out.flush().is_err() {
+                return;
+            }
+            if discard_line(&mut reader).is_err() {
+                return;
+            }
+            continue;
+        }
+        let Ok(line) = String::from_utf8(raw) else {
+            let e = RpcError::parse("a line must be UTF-8");
+            let body = serde_json::to_string(&Response::err(None, e)).unwrap_or_default();
+            let _ = writeln!(out, "{body}");
+            let _ = out.flush();
+            continue;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (reply, fatal) = serve_line(&line, identity, answers, &mut greeted);
+        if let Some(reply) = reply {
+            let Ok(body) = serde_json::to_string(&reply) else {
+                return;
+            };
+            if writeln!(out, "{body}").is_err() || out.flush().is_err() {
+                return;
+            }
+        }
+        if fatal {
+            return;
+        }
+    }
+}
+
+/// Throw away everything up to and including the next newline.
+fn discard_line(reader: &mut impl BufRead) -> std::io::Result<()> {
+    let mut sink = Vec::new();
+    loop {
+        sink.clear();
+        let n = (&mut *reader)
+            .take(MAX_LINE as u64)
+            .read_until(b'\n', &mut sink)?;
+        if n == 0 || sink.last() == Some(&b'\n') {
+            return Ok(());
+        }
+    }
+}
+
+/// Answer one line. Returns the reply to send, and whether to close after it.
+///
+/// Split out from the socket so it can be tested without one: everything about
+/// the protocol is decided here, and nothing here knows what a file descriptor
+/// is.
+fn serve_line(
+    line: &str,
+    identity: &Identity,
+    answers: &dyn Answers,
+    greeted: &mut bool,
+) -> (Option<Response>, bool) {
+    let request = match envelope::parse_line(line) {
+        Ok(r) => r,
+        Err(e) => return (Some(Response::err(None, e)), false),
+    };
+    let id = request.id.clone();
+    let notification = request.is_notification();
+
+    // **`hello` must come first** (§7.3). A client that skips it has not agreed
+    // a version, so anything the engine returned would be in a shape neither
+    // side has promised.
+    if !*greeted && request.method != "hello" {
+        let e = RpcError::invalid_request(format!(
+            "the first message must be hello, got {:?}",
+            request.method
+        ));
+        return (Some(Response::err(id, e)), true);
+    }
+
+    let outcome = if request.method == "hello" {
+        match hello(&request, identity, answers) {
+            Ok(result) => {
+                *greeted = true;
+                Ok(result)
+            }
+            Err(e) => {
+                // A version mismatch closes the connection (§7.3).
+                let close = e.code == code::INVALID_PARAMS;
+                let reply = (!notification).then(|| Response::err(id, e));
+                return (reply, close);
+            }
+        }
+    } else {
+        answers.call(&request.method, request.params)
+    };
+
+    if notification {
+        // Fire-and-forget: §7.2 allows it, so an error here has nowhere to go.
+        return (None, false);
+    }
+    match outcome {
+        Ok(result) => (Some(Response::ok(id, result)), false),
+        Err(e) => (Some(Response::err(id, e)), false),
+    }
+}
+
+/// The handshake.
+fn hello(
+    request: &Request,
+    identity: &Identity,
+    answers: &dyn Answers,
+) -> Result<serde_json::Value, RpcError> {
+    let params: HelloParams = match &request.params {
+        Some(v) => serde_json::from_value(v.clone())
+            .map_err(|e| RpcError::invalid_params("params", format!("not a hello: {e}")))?,
+        None => return Err(RpcError::invalid_params("params", "hello needs a protocol")),
+    };
+    version::accept(&params.protocol)
+        .map_err(|e| RpcError::invalid_params("protocol", e.to_string()))?;
+
+    let result = HelloResult {
+        protocol: version::PROTOCOL.into(),
+        engine_generation: identity.engine_generation.clone(),
+        stream_generation: answers.stream_generation(),
+        engine_now_ns: answers.now_ns(),
+        sample_rate: identity.sample_rate,
+        capabilities: identity.capabilities.clone(),
+    };
+    serde_json::to_value(result).map_err(|e| RpcError::new(code::INTERNAL, e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An engine with nothing behind the door, which is what #214 ships.
+    struct Stub {
+        generation: u32,
+    }
+    impl Answers for Stub {
+        fn stream_generation(&self) -> u32 {
+            self.generation
+        }
+        fn now_ns(&self) -> i64 {
+            1_234
+        }
+        fn call(
+            &self,
+            method: &str,
+            _: Option<serde_json::Value>,
+        ) -> Result<serde_json::Value, RpcError> {
+            if method == "echo" {
+                Ok(serde_json::json!("echo"))
+            } else {
+                Err(RpcError::method_not_found(method))
+            }
+        }
+    }
+
+    fn identity() -> Identity {
+        Identity::new(48_000, vec!["dj".into()])
+    }
+
+    /// Drive `serve_line` without a socket.
+    fn exchange(lines: &[&str]) -> Vec<Option<Response>> {
+        let id = identity();
+        let answers = Stub { generation: 3 };
+        let mut greeted = false;
+        let mut out = Vec::new();
+        for line in lines {
+            let (reply, fatal) = serve_line(line, &id, &answers, &mut greeted);
+            out.push(reply);
+            if fatal {
+                break;
+            }
+        }
+        out
+    }
+
+    const HELLO: &str =
+        r#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":"gmuse/0"}}"#;
+
+    #[test]
+    fn the_handshake_answers_with_what_the_client_needs_to_extrapolate() {
+        let replies = exchange(&[HELLO]);
+        let result = replies[0].as_ref().unwrap().result.as_ref().unwrap();
+        assert_eq!(result["protocol"], "gmuse/0");
+        assert_eq!(result["stream_generation"], 3);
+        assert_eq!(result["sample_rate"], 48_000);
+        assert_eq!(result["capabilities"][0], "dj");
+        assert!(
+            result["engine_generation"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "a generation that scopes references cannot be empty"
+        );
+    }
+
+    /// §7.3: a differing major is an error **and the connection closes**.
+    /// Answering anything else would be answering in a shape neither side has
+    /// agreed on.
+    #[test]
+    fn a_client_speaking_another_major_is_refused_and_cut_off() {
+        let id = identity();
+        let answers = Stub { generation: 0 };
+        let mut greeted = false;
+        let (reply, fatal) = serve_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":"gmuse/9"}}"#,
+            &id,
+            &answers,
+            &mut greeted,
+        );
+        assert!(fatal, "a version mismatch closes the connection");
+        assert!(!greeted);
+        let error = reply.unwrap().error.unwrap();
+        assert_eq!(error.code, code::INVALID_PARAMS);
+        assert!(error.message.contains("gmuse/9"), "{}", error.message);
+    }
+
+    #[test]
+    fn nothing_is_served_before_hello() {
+        let replies = exchange(&[r#"{"jsonrpc":"2.0","id":1,"method":"echo"}"#]);
+        let error = replies[0].as_ref().unwrap().error.as_ref().unwrap();
+        assert_eq!(error.code, code::INVALID_REQUEST);
+        assert!(error.message.contains("hello"), "{}", error.message);
+    }
+
+    #[test]
+    fn after_hello_an_unknown_method_is_an_error_and_not_a_disconnection() {
+        let replies = exchange(&[HELLO, r#"{"jsonrpc":"2.0","id":2,"method":"nope"}"#]);
+        assert_eq!(replies.len(), 2, "the connection stayed open");
+        assert_eq!(
+            replies[1].as_ref().unwrap().error.as_ref().unwrap().code,
+            code::METHOD_NOT_FOUND
+        );
+    }
+
+    /// §7.2: a notification gets no reply, even when it fails.
+    #[test]
+    fn a_notification_is_answered_with_silence() {
+        let replies = exchange(&[HELLO, r#"{"jsonrpc":"2.0","method":"nope"}"#]);
+        assert!(replies[1].is_none());
+    }
+
+    #[test]
+    fn a_batch_is_refused_before_the_handshake_and_does_not_close_the_connection() {
+        let replies = exchange(&[r#"[{"jsonrpc":"2.0","id":1,"method":"hello"}]"#, HELLO]);
+        assert_eq!(
+            replies[0].as_ref().unwrap().error.as_ref().unwrap().code,
+            code::INVALID_REQUEST
+        );
+        assert!(
+            replies[1].as_ref().unwrap().result.is_some(),
+            "hello still worked"
+        );
+    }
+
+    /// The whole point of `engine_generation`: two engines must not claim the
+    /// same one, or a client cannot tell that its references expired.
+    #[test]
+    fn two_engines_do_not_share_a_generation() {
+        assert_ne!(
+            Identity::new(48_000, vec![]).engine_generation,
+            Identity::new(48_000, vec![]).engine_generation
+        );
+    }
+}
+
+#[cfg(test)]
+mod over_a_real_socket {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    struct Bare;
+    impl Answers for Bare {
+        fn stream_generation(&self) -> u32 {
+            7
+        }
+        fn now_ns(&self) -> i64 {
+            0
+        }
+        fn call(
+            &self,
+            m: &str,
+            _: Option<serde_json::Value>,
+        ) -> Result<serde_json::Value, RpcError> {
+            Err(RpcError::method_not_found(m))
+        }
+    }
+
+    /// A directory of this test's own, so two tests never share a socket.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gmuse-engine-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn ask(path: &Path, line: &str) -> String {
+        let mut stream = UnixStream::connect(path).expect("connect");
+        writeln!(stream, "{line}").unwrap();
+        stream.flush().unwrap();
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).unwrap();
+        reply
+    }
+
+    const HELLO: &str =
+        r#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":"gmuse/0"}}"#;
+
+    #[test]
+    fn the_daemon_binds_and_handshakes() {
+        let dir = scratch("handshake");
+        let path = dir.join(socket::SOCKET);
+        let engine = serve(&path, Identity::new(44_100, vec![]), Arc::new(Bare)).unwrap();
+
+        let reply: serde_json::Value = serde_json::from_str(&ask(&path, HELLO)).unwrap();
+        assert_eq!(reply["result"]["protocol"], "gmuse/0");
+        assert_eq!(reply["result"]["stream_generation"], 7);
+        assert_eq!(reply["result"]["sample_rate"], 44_100);
+
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The socket and its directory are this user's** — §7.1.
+    #[test]
+    fn the_directory_is_0700_and_the_socket_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("modes");
+        let path = dir.join(socket::SOCKET);
+        let engine = serve(&path, Identity::new(48_000, vec![]), Arc::new(Bare)).unwrap();
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700, "directory");
+        assert_eq!(mode(&path), 0o600, "socket");
+
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Single instance, by the lock and not by the socket** — §7.1.
+    #[test]
+    fn a_second_engine_is_refused_while_the_first_holds_the_lock() {
+        let dir = scratch("single");
+        let path = dir.join(socket::SOCKET);
+        let first = serve(&path, Identity::new(48_000, vec![]), Arc::new(Bare)).unwrap();
+
+        let second = serve(&path, Identity::new(48_000, vec![]), Arc::new(Bare));
+        assert!(
+            matches!(second, Err(EngineError::Running { .. })),
+            "a second engine must not bind over the first"
+        );
+        // And the first is still answering, rather than having had its socket
+        // removed by the attempt.
+        assert!(ask(&path, HELLO).contains("result"));
+
+        drop(first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A leftover socket is reclaimed without a liveness check** — the
+    /// Done-when line, and the reason is the ordering: the lock is taken first,
+    /// so holding it *is* the proof that the file is stale. A crashed engine
+    /// leaves exactly this — a socket nothing is listening on — and asking it
+    /// whether it is alive would be a race with its own restart.
+    #[test]
+    fn a_stale_socket_is_reclaimed_because_the_lock_already_answered() {
+        let dir = scratch("stale");
+        let path = dir.join(socket::SOCKET);
+
+        // What a killed engine leaves behind: a socket file, no listener, no
+        // lock held.
+        std::fs::write(&path, b"").unwrap();
+        assert!(path.exists());
+        assert!(
+            UnixStream::connect(&path).is_err(),
+            "nothing is listening on the leftover"
+        );
+
+        let engine = serve(&path, Identity::new(48_000, vec![]), Arc::new(Bare))
+            .expect("the stale socket is reclaimed, not fatal");
+        assert!(ask(&path, HELLO).contains("result"));
+
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Dropping the engine takes the socket with it, so the next start is a
+    /// clean bind rather than a reclaim.
+    #[test]
+    fn stopping_removes_the_socket() {
+        let dir = scratch("cleanup");
+        let path = dir.join(socket::SOCKET);
+        let engine = serve(&path, Identity::new(48_000, vec![]), Arc::new(Bare)).unwrap();
+        assert!(path.exists());
+        drop(engine);
+        assert!(!path.exists(), "a stopped engine leaves no socket");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §7.1's cap, over a real stream: the oversized line is refused and
+    /// *discarded*, so the request after it is still answered.
+    #[test]
+    fn an_oversized_line_is_refused_and_the_connection_survives_it() {
+        let dir = scratch("toolong");
+        let path = dir.join(socket::SOCKET);
+        let engine = serve(&path, Identity::new(48_000, vec![]), Arc::new(Bare)).unwrap();
+
+        let mut stream = UnixStream::connect(&path).unwrap();
+        writeln!(stream, "{}", "x".repeat(MAX_LINE + 10)).unwrap();
+        writeln!(stream, "{HELLO}").unwrap();
+        stream.flush().unwrap();
+
+        let mut lines = BufReader::new(stream).lines();
+        let first: serde_json::Value =
+            serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        assert_eq!(first["error"]["code"], code::INVALID_REQUEST);
+        let second: serde_json::Value =
+            serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        assert_eq!(
+            second["result"]["protocol"], "gmuse/0",
+            "the hello after the discarded line was still served"
+        );
+
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

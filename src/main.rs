@@ -65,6 +65,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // it opens no device and writes only the log, so refusing it because a
     // player is running would make `import` and `apply` unusable exactly when
     // somebody is listening to the library they are editing.
+    // **The engine, before the lock and before any device is opened.**
+    //
+    // It takes its own lock — `engine.lock`, beside its socket — which is a
+    // different question from the player's: that one asks "is a *player*
+    // holding this device", this one asks "is an *engine* already listening".
+    // Conflating them would make the engine refuse to start while a TUI was
+    // open, which is precisely the arrangement §4.2 is heading for.
+    if let Some(gmuse::cli::Command::Engine {
+        foreground,
+        null_audio,
+    }) = &args.command
+    {
+        return run_engine(*foreground, *null_audio);
+    }
+
     if let Some(gmuse::cli::Command::Shelf(op)) = &args.command {
         let loaded = if args.no_config {
             // **`--no-config` still keeps the log where the log lives.**
@@ -2335,6 +2350,61 @@ fn surviving_holders<'a>(
         }
     }
     out
+}
+
+/// Run the engine until interrupted — #214.
+///
+/// **What this is not, yet.** It binds, handshakes and answers `hello`, and
+/// every other method is a `-32601`. The methods arrive with #215–#218, and
+/// standing a door up before there is anything behind it is deliberate: §15
+/// wants the protocol operable from a shell before the TUI depends on it, and
+/// the handshake is what a client has to get right first.
+fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    // **Detaching is not built.** Said out loud rather than accepting the flag
+    // and ignoring it, which would leave a view's auto-start (§4.2) silently
+    // holding a foreground process.
+    if !foreground {
+        eprintln!("gmuse engine: only --foreground is implemented; running in the foreground");
+    }
+
+    let path = gmuse::engine::socket::default_path();
+    // **48 kHz until a device is opened, and that is a placeholder.** The
+    // handshake promises the rate everything scheduled in frames is counted in
+    // (§7.3), so it has to come from the stream once there is one — which is
+    // #215's work, when the engine grows something behind the door. Under
+    // `--null-audio` it is genuinely a choice rather than a report.
+    let _ = null_audio;
+    let identity = gmuse::engine::Identity::new(48_000, Vec::new());
+
+    struct Bare;
+    impl gmuse::engine::Answers for Bare {
+        fn stream_generation(&self) -> u32 {
+            0
+        }
+        fn now_ns(&self) -> i64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+                .unwrap_or(0)
+        }
+        fn call(
+            &self,
+            method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            Err(gmuse_proto::RpcError::method_not_found(method))
+        }
+    }
+
+    let engine = gmuse::engine::serve(&path, identity, Arc::new(Bare))?;
+    eprintln!("gmuse engine: listening on {}", engine.path().display());
+
+    // Nothing to do on this thread but stay alive; the listener owns the work.
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }
 
 #[cfg(test)]

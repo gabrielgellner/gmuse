@@ -27,6 +27,7 @@ pub mod cmd;
 pub mod config;
 pub mod datadir;
 pub mod edit;
+pub mod engine;
 pub mod guides;
 pub mod lock;
 pub mod m3u;
