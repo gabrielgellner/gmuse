@@ -49,6 +49,16 @@ pub enum Request {
     EngineShutdown,
     /// The engine's clock, for offset estimation (§7.9).
     TimeNow,
+    /// Play this recording on the main player — #230.
+    ///
+    /// **The one method here that §7.4's table does not list.** That table has
+    /// `queue.enqueue` and `deck.load`, and the engine has neither a queue nor a
+    /// deck: this is the single player stream it already has code for, reached
+    /// over the socket. It is named `player.load` rather than folded into
+    /// `deck.load` because #224 settled that the player is a deck *plus a
+    /// queue* rather than a deck, so claiming the deck spelling would claim a
+    /// deck exists.
+    PlayerLoad { recording: String },
     /// Start receiving events on these topics (§7.8).
     Subscribe { topics: Vec<crate::Topic> },
     /// Stop receiving them.
@@ -179,6 +189,7 @@ pub mod method {
     pub const ENGINE_STATUS: &str = "engine.status";
     pub const ENGINE_SHUTDOWN: &str = "engine.shutdown";
     pub const TIME_NOW: &str = "time.now";
+    pub const PLAYER_LOAD: &str = "player.load";
     pub const SUBSCRIBE: &str = "sub.subscribe";
     pub const UNSUBSCRIBE: &str = "sub.unsubscribe";
 
@@ -204,6 +215,7 @@ pub mod method {
         ENGINE_STATUS,
         ENGINE_SHUTDOWN,
         TIME_NOW,
+        PLAYER_LOAD,
         SUBSCRIBE,
         UNSUBSCRIBE,
         LIBRARY_APPLY,
@@ -265,6 +277,16 @@ impl Request {
                 operation: LibraryOp::of_method(other).expect("just matched"),
                 params: params.unwrap_or(serde_json::Value::Null),
             }),
+            method::PLAYER_LOAD => {
+                #[derive(Deserialize)]
+                struct Load {
+                    recording: String,
+                }
+                let p: Load = typed(method, params)?;
+                Ok(Self::PlayerLoad {
+                    recording: p.recording,
+                })
+            }
             method::SUBSCRIBE => {
                 let p: TopicsParams = typed(method, params)?;
                 Ok(Self::Subscribe {
@@ -289,6 +311,7 @@ impl Request {
             Self::EngineStatus => method::ENGINE_STATUS,
             Self::EngineShutdown => method::ENGINE_SHUTDOWN,
             Self::TimeNow => method::TIME_NOW,
+            Self::PlayerLoad { .. } => method::PLAYER_LOAD,
             Self::Subscribe { .. } => method::SUBSCRIBE,
             Self::Unsubscribe { .. } => method::UNSUBSCRIBE,
             Self::Library { operation, .. } => operation.method(),
@@ -334,7 +357,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 15, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 16, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

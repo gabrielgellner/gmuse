@@ -2381,13 +2381,6 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
     }
 
     let path = gmuse::engine::socket::default_path();
-    // **48 kHz until a device is opened, and that is a placeholder.** The
-    // handshake promises the rate everything scheduled in frames is counted in
-    // (§7.3), so it has to come from the stream once there is one — which is
-    // #215's work, when the engine grows something behind the door. Under
-    // `--null-audio` it is genuinely a choice rather than a report.
-    let _ = null_audio;
-    let identity = gmuse::engine::Identity::new(48_000, Vec::new());
 
     // **What is behind the door today.** `hello` is served by the engine
     // itself; these are the three methods whose answers exist without a player
@@ -2403,6 +2396,10 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
         desk: Arc<gmuse::librarian::Desk>,
         /// What to reconcile on a scan.
         roots: Vec<std::path::PathBuf>,
+        /// **The player, behind a channel** — #230. `PlayerHandle` is `!Send`
+        /// and `Answers` is `Send + Sync`, so the player cannot live here; what
+        /// lives here is the way to ask it for something.
+        control: Arc<gmuse::engine::control::Control>,
         /// **Set after `serve` returns**, because the engine owns the answerer
         /// and the answerer needs the engine to publish through. A `OnceLock`
         /// rather than a channel back: written once at startup, read from
@@ -2505,7 +2502,13 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
 
     impl gmuse::engine::Answers for Bare {
         fn stream_generation(&self) -> u32 {
-            0
+            // **A report now, not a placeholder** (#212, #230). The control
+            // thread stores what the render step is counting in; before #230
+            // this was hardcoded zero because there was no stream.
+            self.control
+                .facts()
+                .stream_generation
+                .load(std::sync::atomic::Ordering::Acquire)
         }
         fn now_ns(&self) -> i64 {
             std::time::SystemTime::now()
@@ -2564,19 +2567,43 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                 // point of §7.12: two textual command languages is the standing
                 // complaint against `--repl`, and routing here is what stops a
                 // second one being written.
+                Call::PlayerLoad { recording } => {
+                    let Ok(uuid) = recording.parse::<uuid::Uuid>() else {
+                        return Err(RpcError::invalid_params(
+                            "recording",
+                            format!("{recording:?} is not a recording id"),
+                        ));
+                    };
+                    let recording = gmuse::model::id::Id::from_uuid(uuid);
+                    self.control
+                        .ask(gmuse::engine::control::Ask::Load { recording });
+                    // **Accepted, not played** — §7.4's acknowledgement
+                    // semantics. Whether it sounded arrives as a `playback`
+                    // event, and a load of something this device does not hold
+                    // produces no event, which is the honest report.
+                    Ok(serde_json::json!({ "accepted": true }))
+                }
+
                 Call::ExecLine { line } => match gmuse::cmd::parse::command(&line) {
                     Ok(cmd) => {
-                        // Parsed, and with nowhere to go: there is no player
-                        // attached yet. `NotReady` says exactly that rather
-                        // than an `ok` that would read as "it happened".
-                        Err(RpcError::new(
-                            code::NOT_READY,
-                            "the engine parses commands but has no player attached yet",
-                        )
-                        .with_data(serde_json::json!({
-                            "reason": "no player attached",
-                            "parsed": gmuse::cmd::parse::format(&cmd),
-                        })))
+                        // **Only what makes sense without a view.**
+                        // `is_remotable` already answers that question for the
+                        // socket — it was written for `--remote` and the set has
+                        // not changed just because the transport has.
+                        if gmuse::remote::is_remotable(&cmd) {
+                            let parsed = gmuse::cmd::parse::format(&cmd);
+                            self.control.ask(gmuse::engine::control::Ask::Apply(cmd));
+                            Ok(serde_json::json!({ "accepted": true, "parsed": parsed }))
+                        } else {
+                            Err(RpcError::new(
+                                code::NOT_READY,
+                                "that command needs a view: it moves a cursor or a selection",
+                            )
+                            .with_data(serde_json::json!({
+                                "reason": "not remotable",
+                                "parsed": gmuse::cmd::parse::format(&cmd),
+                            })))
+                        }
                     }
                     // **`span` is null and that is honest.** §7.13 shapes this
                     // as `{message, span}`; today's parser reports what was
@@ -2636,6 +2663,39 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
 
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let engine_slot: Arc<std::sync::OnceLock<Arc<gmuse::engine::Engine>>> = Arc::default();
+
+    // **The player, on its own thread, before the socket** — #230. It blocks
+    // until the device is open so that `hello` never reports a placeholder
+    // rate: a client connecting during startup would otherwise be told 0 Hz
+    // and have no way to learn better.
+    let control = Arc::new(gmuse::engine::control::Control::start(
+        null_audio,
+        Arc::clone(&desk),
+        Arc::clone(&engine_slot),
+    )?);
+    eprintln!(
+        "gmuse engine: {} at {} Hz",
+        if null_audio {
+            "null renderer"
+        } else {
+            "audio device"
+        },
+        control
+            .facts()
+            .sample_rate
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    // **The rate is a report now**, from the stream the control thread opened
+    // (#230). It was hardcoded 48 kHz with a comment admitting it, because the
+    // handshake promises the rate frames are counted in and there was no stream
+    // to ask.
+    let identity = gmuse::engine::Identity::new(
+        control
+            .facts()
+            .sample_rate
+            .load(std::sync::atomic::Ordering::Acquire),
+        Vec::new(),
+    );
     let engine = gmuse::engine::serve(
         &path,
         identity,
@@ -2643,6 +2703,7 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
             stopping: Arc::clone(&stopping),
             engine: Arc::clone(&engine_slot),
             desk: Arc::clone(&desk),
+            control: Arc::clone(&control),
             roots: roots.clone(),
         }),
     )?;

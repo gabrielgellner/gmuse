@@ -627,6 +627,18 @@ impl PlayerHandle {
     }
 
     /// Which stream is running. Bumped once per stream; zero before the first.
+    /// The atomics the render step publishes into.
+    ///
+    /// **Handed out so another thread can read them** — §1's feedback path
+    /// needs the control thread to see state, position and the frame-to-instant
+    /// mapping without asking the decoder anything. Every field is an atomic
+    /// and `Shared` is already `pub`; what this adds is reaching them from a
+    /// thread that does not own the handle, which is what makes a `playback`
+    /// event possible at all.
+    pub fn shared(&self) -> Arc<Shared> {
+        Arc::clone(&self.shared)
+    }
+
     pub fn stream_generation(&self) -> u32 {
         self.shared.generation()
     }

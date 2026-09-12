@@ -109,12 +109,19 @@ fn ctl_reports_the_engines_own_refusal() {
         "the engine's own words and code, got: {err}"
     );
 
-    // A command that parses gets as far as the engine can take it today.
-    let (_out, err, ok) = ctl(&engine.socket, &["seek", "+10"]);
+    // **A parsing, remotable command is now accepted** — #230 attached a player,
+    // so this stopped being a `NotReady` and became an acknowledgement.
+    let (out, _err, ok) = ctl(&engine.socket, &["--json", "seek", "+10"]);
+    assert!(ok, "a remotable command reaches the player: {out}");
+    assert!(out.contains("accepted"), "{out}");
+
+    // A command that needs a view still is not remotable: `play` means "play
+    // what is under the cursor", which a socket has no notion of.
+    let (out, err, ok) = ctl(&engine.socket, &["--json", "play"]);
     assert!(!ok);
     assert!(
-        err.contains("1007"),
-        "parsed, and nothing to apply it to: {err}"
+        format!("{out}{err}").contains("1007"),
+        "not remotable: {out}{err}"
     );
 }
 
@@ -127,8 +134,8 @@ fn ctl_json_is_machine_readable_on_stdout() {
     let (out, _err, _ok) = ctl(&engine.socket, &["--json", "seek", "+10"]);
     let value: serde_json::Value = serde_json::from_str(out.trim())
         .unwrap_or_else(|e| panic!("stdout was not NDJSON: {e}\n{out}"));
-    assert_eq!(value["code"], 1007);
-    assert_eq!(value["data"]["parsed"], "seek +10");
+    assert_eq!(value["accepted"], true);
+    assert_eq!(value["parsed"], "seek +10");
 }
 
 /// **A leading-dash argument reaches the parser intact.** `vol -10` and
@@ -436,4 +443,207 @@ fn the_append_reached_the_engines_own_log_and_nothing_elses() {
     assert_eq!(logs.len(), 1, "one appender, one log: {logs:?}");
 
     drop(engine);
+}
+
+/// Write a WAV a decoder will accept: two seconds of a cheap ramp.
+fn write_wav(path: &Path, frames: usize) {
+    use std::io::Write;
+    let bytes = 4 * frames;
+    let mut f = std::fs::File::create(path).expect("create wav");
+    f.write_all(b"RIFF").unwrap();
+    f.write_all(&((36 + bytes) as u32).to_le_bytes()).unwrap();
+    f.write_all(b"WAVEfmt ").unwrap();
+    // **Each field at its own width.** A first version packed the format tag
+    // and the channel count into one `u32`, which little-endian reverses into
+    // "ADPCM, mono" — the decoder refused it and the import found no audio,
+    // which surfaced three tests later as "the import minted a recording".
+    f.write_all(&16u32.to_le_bytes()).unwrap(); // fmt chunk size
+    f.write_all(&1u16.to_le_bytes()).unwrap(); // PCM
+    f.write_all(&2u16.to_le_bytes()).unwrap(); // stereo
+    f.write_all(&44_100u32.to_le_bytes()).unwrap();
+    f.write_all(&176_400u32.to_le_bytes()).unwrap(); // byte rate
+    f.write_all(&4u16.to_le_bytes()).unwrap(); // block align
+    f.write_all(&16u16.to_le_bytes()).unwrap(); // bits
+    f.write_all(b"data").unwrap();
+    f.write_all(&(bytes as u32).to_le_bytes()).unwrap();
+    for i in 0..frames {
+        let s = ((i % 100) as i16).wrapping_mul(300);
+        f.write_all(&s.to_le_bytes()).unwrap();
+        f.write_all(&s.to_le_bytes()).unwrap();
+    }
+}
+
+/// An engine over a library containing exactly one playable track.
+///
+/// **Imported through the CLI, not over the wire**, because `library.import` has
+/// no arguments plumbed yet (#218). `XDG_DATA_HOME` redirects
+/// `config::default_data_dir`, so the import and the engine agree on where the
+/// log is without either of them touching the real library.
+fn start_with_a_track(name: &str) -> (Engine, String) {
+    let dir = std::env::temp_dir().join(format!("gmuse-230-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("lib")).expect("scratch");
+    std::fs::create_dir_all(dir.join("xdg")).expect("scratch");
+    let track = dir.join("lib").join("tone.wav");
+    write_wav(&track, 44_100);
+
+    let imported = Command::new(binary())
+        .args([
+            "--no-config",
+            "shelf",
+            "import",
+            "--unidentified",
+            "--write",
+        ])
+        .arg(&track)
+        .env("XDG_DATA_HOME", dir.join("xdg"))
+        .output()
+        .expect("run shelf import");
+    assert!(
+        imported.status.success(),
+        "import failed: {}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+
+    // The recording the import minted, read back from the log it wrote.
+    let data = dir.join("xdg").join("gmuse");
+    let log: String = std::fs::read_dir(&data)
+        .expect("data dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    let recording = log
+        .split("\"RecordingIdentified\":{\"recording\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| {
+            panic!(
+                "the import minted no recording.\nstdout: {}\nlog was {} bytes",
+                String::from_utf8_lossy(&imported.stdout),
+                log.len()
+            )
+        })
+        .to_string();
+
+    let socket = dir.join("engine.sock");
+    let child = Command::new(binary())
+        .args(["engine", "--foreground", "--null-audio"])
+        .env("GMUSE_SOCKET", &socket)
+        .env("GMUSE_DATA_DIR", &data)
+        // **Roots matter here, unlike every other test.** The librarian's
+        // locators come from the scan, so an engine with no roots can resolve a
+        // recording to nothing and `player.load` finds nothing to play.
+        .env("GMUSE_ROOTS", dir.join("lib"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn gmuse engine");
+
+    for _ in 0..400 {
+        if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    (Engine { child, dir, socket }, recording)
+}
+
+/// **The engine plays, with no TUI attached** — #230.
+///
+/// `gmuse-client` correlates by `id`, which is what this needs: a first attempt
+/// in a shell read a `playback` event as the reply to its own command, because
+/// §7.2 gives responses no ordering guarantee and means it.
+#[test]
+fn the_engine_plays_a_track_and_says_so() {
+    let (engine, recording) = start_with_a_track("plays");
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+
+    // The handshake reports the stream, not a placeholder.
+    assert_eq!(client.hello().sample_rate, 48_000, "a real device rate");
+    assert!(
+        client.hello().stream_generation >= 1,
+        "a stream is open, so the generation is not zero: {}",
+        client.hello().stream_generation
+    );
+
+    client
+        .subscribe(&[gmuse_proto::Topic::Playback])
+        .expect("subscribe");
+    client
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("the load is accepted");
+
+    // **The load names what plays.** Resolving a path back to a recording would
+    // mean hashing the file, which §4.4 forbids on this thread — so the event
+    // can only name it because the request did.
+    let loaded = client
+        .next_event(Duration::from_secs(10))
+        .expect("a playback event for the load");
+    assert_eq!(loaded.topic, gmuse_proto::Topic::Playback);
+    assert_eq!(loaded.body["recording"], recording);
+    assert_eq!(loaded.body["sample_rate"], 48_000);
+    assert!(
+        loaded.body["stream_generation"]
+            .as_u64()
+            .is_some_and(|g| g >= 1)
+    );
+
+    // `pause` is cmus's toggle, and `play` is deliberately not remotable — in a
+    // view it means "play what is under the cursor". #225 gives the protocol its
+    // own Play/Pause/Toggle.
+    client
+        .call(
+            "cmd.exec_line",
+            Some(serde_json::json!({ "line": "pause" })),
+        )
+        .expect("pause is accepted");
+
+    // **Wait for the change, do not assume it is the next event.** A load
+    // publishes once for the request and again when the decoder reports
+    // `Loaded`, so the transition can be third. Asserting on "the next one"
+    // made this flake on its own setup rather than on the behaviour.
+    let was = loaded.body["state"].clone();
+    let mut moved = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let Ok(event) = client.next_event(Duration::from_secs(2)) else {
+            break;
+        };
+        if event.body["state"] != was {
+            moved = Some(event);
+            break;
+        }
+    }
+    let moved = moved.unwrap_or_else(|| panic!("the state never left {was}"));
+    assert!(
+        moved.body["stream_generation"]
+            .as_u64()
+            .is_some_and(|g| g >= 1),
+        "and it is still the same stream"
+    );
+}
+
+/// **No steady position stream** — §7.8. Events come on discontinuity only; a
+/// client extrapolates between them from `pos_frames` and `at_ns`.
+#[test]
+fn playback_events_do_not_arrive_between_discontinuities() {
+    let (engine, _recording) = start_with_a_track("quiet");
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+    client
+        .subscribe(&[gmuse_proto::Topic::Playback])
+        .expect("subscribe");
+
+    // Drain whatever the startup published.
+    while client.next_event(Duration::from_millis(300)).is_ok() {}
+
+    // Then ask for nothing for a while.
+    assert!(
+        client.next_event(Duration::from_secs(2)).is_err(),
+        "the engine published a playback event with nothing happening"
+    );
 }
