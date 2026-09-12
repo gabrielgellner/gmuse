@@ -2,26 +2,36 @@
 
 ***G***abriel's ***MUS***ical ***E***xperience.
 
-A [cmus](https://cmus.github.io/)-shaped terminal music player for a local music library, written in Rust with a
-pure-Rust audio path.
+A terminal music player and library manager for a local music library, written in Rust with a pure-Rust audio path.
 
-This is a reimplementation of cmus's _interaction model_ — its views, its next-track semantics, its command and
-keybinding layer — not a port of its C. See [`docs/design/music-player-tui.md`](docs/design/music-player-tui.md) for the
-full brief, the invariants, and the decision log.
+The interaction model started from [cmus](https://cmus.github.io/) — its views, its next-track semantics, its command
+and keybinding layer — and cmus remains the reference for what a terminal player should feel like. It is no longer the
+shape the design is fitted to: the library is an append-only fact log rather than a tag reader, the player is one view
+onto an engine other clients can drive, and the transport vocabulary is being derived from DJ software rather than from
+cmus's bottom row. Where the two disagree now, cmus loses.
+
+See [`docs/design/music-player-tui.md`](docs/design/music-player-tui.md) for the full brief, the invariants, and the
+decision log.
 
 ## Status
 
-Early. The audio path works; there is no UI yet.
+Usable, and being pulled apart into an engine and its views.
 
-| Milestone                                 | State                                    |
-| ----------------------------------------- | ---------------------------------------- |
-| M1 — sound out of the speakers            | ✅ done                                  |
-| Resampler                                 | ✅ done (pulled forward — Opus needs it) |
-| M2 — the audio API (`PlayerHandle`)       | next                                     |
-| M3–M9 — library, views, commands, gapless | not started                              |
+| Part                                           | State                                                          |
+| ---------------------------------------------- | -------------------------------------------------------------- |
+| Audio path — decode, resample, gapless, Opus   | ✅ works                                                       |
+| The TUI — browse, search, queue, rate, play    | ✅ works                                                       |
+| The library — an append-only fact log          | ✅ works; import, scan, relink and forget are named operations |
+| `gmuse-tools` — the Python passes over the log | ✅ works, through a PyO3 binding that needs no engine          |
+| The engine — one process, many views           | 🚧 the socket, the protocol and the librarian are in           |
+| Decks, mixing, MIDI                            | designed, not built                                            |
 
-Today the TUI browses a scanned library across five views, and `--repl` gives a line prompt that can actually play files
-— load, play, pause, stop, seek, volume, status. The two meet in M5.
+`gmuse` runs the TUI. `gmuse engine` runs the daemon, and `gmuse ctl` and `gmuse events` drive it from a shell over a
+JSON-RPC socket — that much works today with no TUI attached. What the engine cannot do yet is play: attaching the audio
+path to it is the next piece, after which the TUI becomes a client like any other.
+
+`--repl` is gone (it was a second player wearing a CLI); `--remote` still works and retires when `gmuse ctl` replaces it
+fully.
 
 ## Building
 

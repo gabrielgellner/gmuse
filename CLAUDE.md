@@ -4,8 +4,14 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-`gmuse` (Gabriel's MUSical Experience) is a cmus-shaped terminal music player in Rust with a pure-Rust audio path —
-except for a bundled, statically linked libopus.
+`gmuse` (Gabriel's MUSical Experience) is a terminal music player and library manager in Rust with a pure-Rust audio
+path — except for a bundled, statically linked libopus.
+
+**cmus is the origin and no longer the authority.** The interaction model started there and the reference is still
+useful, but the design has outgrown it in three directions that matter when deciding something: the library is an
+append-only fact log rather than a tag reader, the player is one view onto an engine that other clients drive, and the
+transport vocabulary is derived from DJ software (`docs/design/transport-keymap-spec.md`). "cmus does it this way" is
+evidence, not a decision.
 
 **Read [`docs/design/music-player-tui.md`](docs/design/music-player-tui.md) before making design decisions.** It is the
 project brief and it is authoritative. Sections marked **INVARIANT** are not to be revised without recording an explicit

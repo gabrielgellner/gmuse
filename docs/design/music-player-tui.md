@@ -1,4 +1,4 @@
-# DESIGN.md — a cmus-shaped music player in Rust
+# DESIGN.md — a terminal music player and library manager in Rust
 
 Working title: `gmuse`.
 
@@ -4814,6 +4814,25 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   Net: **every commit now appears except the initial one**, against 338 of 383 before. That one stays out by name rather
   than as a side effect of a filter that was throwing away 44 others with it.
+
+- **2026-09-12** **cmus is the origin and no longer the authority, and the transport spec is what made that explicit.**
+  This brief was titled "a cmus-shaped music player" and the README called itself a reimplementation of cmus's
+  interaction model. That was true when the question was what a terminal player should feel like, and it has quietly
+  stopped being true in three directions: the library is an append-only fact log rather than a tag reader (#81, #140),
+  the player is one view onto an engine other clients drive (`gmuse-engine-architecture.md`), and the transport
+  vocabulary is now derived from DJ software rather than from cmus's bottom row.
+
+  `transport-keymap-spec.md` is where that last one becomes undeniable. It rebinds `v` — cmus's stop — to next-track, on
+  the grounds that stop is not a verb at all once cue exists (D-10, D-14), and it says in as many words that the known
+  cost is a cmus user pressing `v` and getting something else. A document that is willing to break cmus muscle memory on
+  derived grounds is not fitting a shape; it is using a reference.
+
+  So the framing changes and the reference does not. "cmus does it this way" remains evidence — it is in the prior-art
+  table beside Mixxx and Serato — and it stops being a reason on its own. Nothing about the existing bindings changes as
+  a consequence of this entry; what changes is that changing one no longer needs to argue with the title.
+
+  Recorded here because §1 is the list of decisions and this revises how the whole of it is read, which is exactly the
+  kind of change CLAUDE.md says must not happen on a whim.
 
 ## 14. Prior art worth reading
 
