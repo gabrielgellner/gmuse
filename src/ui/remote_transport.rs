@@ -34,8 +34,10 @@ use std::time::{Duration, Instant};
 use gmuse_client::Client;
 use gmuse_proto::Topic;
 
-use crate::audio::{SeekTo, State, TrackSource};
-use crate::ui::transport::Transport;
+use crate::audio::{SeekTo, State};
+use crate::model::id::Id;
+use crate::model::spine::Recording;
+use crate::ui::transport::{Accepted, Loading, Transport};
 
 /// The last thing the engine said about playback, and when it said it.
 #[derive(Debug, Clone)]
@@ -44,6 +46,10 @@ struct Heard {
     /// Frames at the moment the event was published.
     pos_frames: u64,
     sample_rate: u32,
+    /// **Who chose it does not matter, only that the engine says so.** This is
+    /// how an attached view learns about a gapless join it did not ask for, and
+    /// about another view's keypress.
+    recording: Option<Id<Recording>>,
     /// When this arrived here, for extrapolating forward.
     at: Instant,
 }
@@ -54,6 +60,7 @@ impl Default for Heard {
             state: State::Stopped,
             pos_frames: 0,
             sample_rate: 48_000,
+            recording: None,
             at: Instant::now(),
         }
     }
@@ -118,6 +125,15 @@ impl Remote {
                         if let Some(rate) = event.body["sample_rate"].as_u64() {
                             held.sample_rate = (rate as u32).max(1);
                         }
+                        // **Set on every event, `null` included.** Absent is
+                        // not "unchanged" here the way `pos_frames` is: a stop
+                        // publishes no recording, and keeping the last one
+                        // would leave a view drawing a track as current after
+                        // playback had ended.
+                        held.recording = event.body["recording"]
+                            .as_str()
+                            .and_then(|s| s.parse::<uuid::Uuid>().ok())
+                            .map(Id::from_uuid);
                         held.at = Instant::now();
                     }
                 })
@@ -129,6 +145,23 @@ impl Remote {
             heard,
             _reader: Arc::new(ReaderStop(stop)),
         })
+    }
+
+    /// The connection, for the calls that are not transport.
+    ///
+    /// `library.scan` is the one that needs it today: a rescan is a write, so
+    /// I15 sends it over the socket rather than letting an attached view fold
+    /// and append beside the engine.
+    pub fn client(&self) -> &Arc<Client> {
+        &self.client
+    }
+
+    /// What the engine's device is running at, for the audit line.
+    ///
+    /// From the handshake until the first `playback` event says otherwise — a
+    /// rate change is a discontinuity §7.8 publishes, so this follows it.
+    pub fn device_rate(&self) -> u32 {
+        self.heard.lock().expect("heard").sample_rate
     }
 
     /// Send a command through the one textual command language (§7.12).
@@ -177,18 +210,33 @@ impl Transport for Remote {
         self.line("stop");
     }
 
-    /// **A path cannot cross** — I17: only user-facing grains go on the wire, and
-    /// a locator is a property of one device's copy.
+    /// **The recording crosses and the path does not** — I17.
     ///
-    /// Nothing calls this on a remote transport: a view loads by asking the
-    /// engine for a recording, which is `player.load`. It is unreachable rather
-    /// than unimplemented, and saying so is better than sending a path the
-    /// engine would have to refuse.
-    fn load(&self, _source: TrackSource) {
-        debug_assert!(
-            false,
-            "a remote transport loads by recording, not by path — use player.load"
+    /// `what.source` is ignored on purpose: a locator is a property of one
+    /// device's copy, and the engine resolves the recording through its own
+    /// projection, which is the copy *it* can open. On the same machine that is
+    /// the same file; the point is that nothing here assumes it.
+    ///
+    /// A store file the library has no row for cannot be named, so it cannot be
+    /// played by an attached view. That is reported rather than swallowed.
+    fn load(&self, what: Loading) -> Accepted {
+        let Some(recording) = what.recording else {
+            return Accepted::NotNamed;
+        };
+        let _ = self.client.notify(
+            gmuse_proto::request::method::PLAYER_LOAD,
+            Some(serde_json::json!({ "recording": recording.to_string() })),
         );
+        Accepted::Yes
+    }
+
+    fn playing(&self) -> Option<Id<Recording>> {
+        self.heard.lock().expect("heard").recording
+    }
+
+    /// The engine was here first and stays after. That is what attaching means.
+    fn outlives_this_view(&self) -> bool {
+        true
     }
 
     fn seek(&self, to: SeekTo) {

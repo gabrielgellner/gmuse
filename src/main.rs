@@ -16,9 +16,56 @@ use gmuse::cli::Cli;
 use gmuse::operations::scan::Holdings;
 use gmuse::shelf::Shelf;
 
+/// **Where playback is** — #219, I11.
+///
+/// Two arms rather than a `Box<dyn Transport>` because the local one is not only
+/// a transport: `PlayerHandle` also answers the decoder's `NeedNext`, and that
+/// path is named separately on `Context` precisely so what is temporary looks
+/// temporary. An enum keeps both facts in one place instead of a handle and a
+/// flag that could disagree.
+enum Playback {
+    /// This process owns the device, which is every launch that is not attached.
+    Local(PlayerHandle),
+    /// The engine owns it and this is a view. No device, no lock, and nothing
+    /// it does on the way in or out disturbs what is playing.
+    Attached(gmuse::ui::remote_transport::Remote),
+}
+
+impl Playback {
+    fn transport(&self) -> &dyn gmuse::ui::transport::Transport {
+        match self {
+            Self::Local(player) => player,
+            Self::Attached(remote) => remote,
+        }
+    }
+
+    /// **The handle itself, and only when playback is here.**
+    ///
+    /// `None` when attached is not a gap: the engine answers `NeedNext` from the
+    /// queue it owns (#232), which is where that responsibility went.
+    fn gapless(&self) -> Option<&PlayerHandle> {
+        match self {
+            Self::Local(player) => Some(player),
+            Self::Attached(_) => None,
+        }
+    }
+
+    fn attached(&self) -> bool {
+        matches!(self, Self::Attached(_))
+    }
+
+    /// What the output is running at, for the audit line.
+    fn device_rate(&self) -> u32 {
+        match self {
+            Self::Local(player) => player.device_rate(),
+            Self::Attached(remote) => remote.device_rate(),
+        }
+    }
+}
+
 /// Everything the prompt operates on.
 struct App {
-    player: PlayerHandle,
+    player: Playback,
     store: Holdings,
     roots: Vec<PathBuf>,
     cache_path: Option<PathBuf>,
@@ -122,7 +169,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Before the device is opened, so a refused second instance never makes a
     // sound and never touches state. Held for the whole of `main`: the binding
     // must outlive the player, and the kernel drops it whichever way we exit.
-    let _lock = if args.no_lock {
+    //
+    // **An attached view does not take it** — #219. The lock exists because two
+    // *players* share one audio device; a view opens no device, and refusing a
+    // second one would refuse the thing attaching is for. The engine's own
+    // `engine.lock` is what keeps there being one player, and #214 made losing
+    // that race a clean refusal rather than a crash.
+    let _lock = if args.no_lock || args.attach {
         None
     } else {
         match gmuse::lock::acquire(&gmuse::lock::default_path()) {
@@ -149,8 +202,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let player = PlayerHandle::new(args.player_config())?;
-    println!("gmuse — device at {} Hz", player.device_rate());
+    // **Attached or local, decided once and here** — #219, §4.2.
+    //
+    // The order matters: `attach` starts an engine if none answers, and the
+    // engine opens the device. Opening one here first and then attaching would
+    // mean two processes holding it, and on CoreAudio the second one simply gets
+    // silence rather than an error.
+    let player = if args.attach {
+        let client = std::sync::Arc::new(gmuse::engine::attach::attach(
+            "gmuse-tui",
+            env!("CARGO_PKG_VERSION"),
+        )?);
+        let hz = client.hello().sample_rate;
+        let remote = gmuse::ui::remote_transport::Remote::attach(client)?;
+        println!("gmuse — attached to the engine, device at {hz} Hz");
+        Playback::Attached(remote)
+    } else {
+        let player = PlayerHandle::new(args.player_config())?;
+        println!("gmuse — device at {} Hz", player.device_rate());
+        Playback::Local(player)
+    };
 
     // Read the config first: it defines the catalogs, which decide what to
     // scan.
@@ -237,7 +308,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gmuse::config::default_path().display()
         );
     } else {
-        println!("library: {} tracks, reconciling on start", app.store.len());
+        println!(
+            "library: {} tracks, {}",
+            app.store.len(),
+            // **Said, because it stopped being true when attached** — #219. The
+            // engine reconciles its own roots; this view would be a second
+            // appender on one log (§4.4), so it does not. Printing the old line
+            // anyway would have been the message describing work nobody did.
+            if app.player.attached() {
+                "the engine reconciles, not this view"
+            } else {
+                "reconciling on start"
+            }
+        );
     }
 
     if args.migrate_log {
@@ -1970,7 +2053,11 @@ fn run_tui(
     //
     // Warm it is ~0.3s, because the read cache settles 7,266 of 7,267 files
     // with a `stat`. Cold it re-reads everything, which is why it is a job.
-    if !app.roots.is_empty() {
+    //
+    // **Not when attached** — #219, §4.4. A scan appends, and the engine
+    // reconciled the same roots when it started; doing it again here would be a
+    // second appender on one log. `:rescan` still works and goes over the wire.
+    if !app.roots.is_empty() && !app.player.attached() {
         desk.scan(app.roots.clone(), app.cache_path.clone());
     }
     let library_view = desk.current();
@@ -2038,18 +2125,33 @@ fn run_tui(
     let mut library_view = library_view;
     let ctx = gmuse::ui::Context {
         library: &library_view.library,
-        player: Some(&app.player),
-        gapless: Some(&app.player),
+        player: Some(app.player.transport()),
+        gapless: app.player.gapless(),
         remote: server.as_ref(),
     };
     let mut state = gmuse::ui::Ui::new(library);
+    state.attached = app.player.attached();
     state.playlists = loaded.playlists.clone();
 
     // Opened before the terminal is taken over, so a failure is visible.
     if let Some(path) = log_path {
         match gmuse::audit::Audit::open(&path) {
             Ok(mut audit) => {
-                audit.line("device", &format!("{} Hz output", app.player.device_rate()));
+                audit.line(
+                    "device",
+                    &format!(
+                        "{} Hz output{}",
+                        app.player.device_rate(),
+                        // Said, because the two lines mean different things: one
+                        // is this process's device and the other is a report of
+                        // somebody else's.
+                        if app.player.attached() {
+                            " — the engine's, attached"
+                        } else {
+                            ""
+                        }
+                    ),
+                );
                 audit.line(
                     "library",
                     &format!(
@@ -2193,8 +2295,8 @@ fn run_tui(
         let stop = {
             let ctx = gmuse::ui::Context {
                 library: &library_view.library,
-                player: Some(&app.player),
-                gapless: Some(&app.player),
+                player: Some(app.player.transport()),
+                gapless: app.player.gapless(),
                 remote: server.as_ref(),
             };
             match gmuse::ui::run(&mut terminal, &mut state, &ctx) {
@@ -2210,8 +2312,27 @@ fn run_tui(
                 // **Asked for, not waited on.** A cold pass re-reads every
                 // file, and this thread is the one drawing. What it found
                 // arrives on `desk.scans`, which the draw loop drains.
-                state.desk.scan(app.roots.clone(), app.cache_path.clone());
-                state.notify("rescan: started".to_string());
+                // **Asked of whoever owns the log** — I15. Attached, that is
+                // the engine: it reconciles its own roots and publishes what it
+                // found, and this view learns through `library` like any other
+                // client. Scanning here as well would be the second appender
+                // §4.4 forbids.
+                match &app.player {
+                    Playback::Attached(remote) => {
+                        let sent = remote.client().notify(
+                            gmuse_proto::request::LibraryOp::Scan.method(),
+                            Some(serde_json::json!({})),
+                        );
+                        state.notify(match sent {
+                            Ok(()) => "rescan: asked the engine".to_string(),
+                            Err(e) => format!("rescan: the engine did not take it — {e}"),
+                        });
+                    }
+                    Playback::Local(_) => {
+                        state.desk.scan(app.roots.clone(), app.cache_path.clone());
+                        state.notify("rescan: started".to_string());
+                    }
+                }
                 library_view = state.desk.current();
             }
             gmuse::ui::Stop::Refold => {
@@ -2249,8 +2370,8 @@ fn run_tui(
         // things a second way (#84).
         let ctx = gmuse::ui::Context {
             library: &library_view.library,
-            player: Some(&app.player),
-            gapless: Some(&app.player),
+            player: Some(app.player.transport()),
+            gapless: app.player.gapless(),
             remote: server.as_ref(),
         };
         gmuse::ui::refresh_library(&mut state, &ctx);
@@ -2261,14 +2382,17 @@ fn run_tui(
     // setup above took: that one is long gone, and it named an older fold.
     let ctx = gmuse::ui::Context {
         library: &library_view.library,
-        player: Some(&app.player),
-        gapless: Some(&app.player),
+        player: Some(app.player.transport()),
+        gapless: app.player.gapless(),
         remote: server.as_ref(),
     };
     gmuse::ui::save_session(&mut state, &ctx);
     // Written after the terminal is restored, so the summary is visible.
     if state.audit.is_enabled() {
-        let underruns = app.player.underruns();
+        // **Through the seam, which reports 0 when attached.** An attached view
+        // has no ring to starve; the engine's underruns are the engine's to
+        // report, and §7.8 puts them on `meters` rather than `playback`.
+        let underruns = app.player.transport().underruns();
         state
             .audit
             .line("session", &format!("ended, {underruns} underruns in total"));

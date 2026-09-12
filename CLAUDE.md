@@ -254,6 +254,7 @@ Options are parsed with clap (derive), and each also reads an env var as a fallb
 | `-r, --rate`     | `GMUSE_RATE`     | Force the device sample rate (to measure SRC cost)            |
 | `-q, --resample` | `GMUSE_RESAMPLE` | `fast`, `balanced`, or `high`                                 |
 | `-v, --volume`   | —                | Initial fader position, 1.0 is unity (see §13)                |
+| `--attach`       | `GMUSE_ATTACH`   | Drive the engine over the socket: no device, no lock (#219)   |
 | `--remote <CMD>` | —                | Send one command to the running player, print the reply, exit |
 | `--no-lock`      | —                | Start even if another gmuse holds the lock                    |
 

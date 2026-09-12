@@ -4867,6 +4867,28 @@ Append here as decisions are made. Format: date, decision, rationale.
   D-14's unification survives intact: cue is one verb across both because the default cue point is the track start,
   which is a statement about the _verb_, not about the run-state enum.
 
+- **2026-09-12** **A view attaches and playback stops being its own** (#219, I11, I15). `gmuse --attach` takes no audio
+  device and no player lock: it loads by recording, learns what is playing from the `playback` topic, and its going away
+  is not a stop. Two things had to move for that, and both were guards rather than features.
+
+  **A session restore had to learn not to run.** Restoring loads, seeks and pauses — three commands that, aimed at an
+  engine mid-track, destroy exactly what attaching preserves. The guard is `Transport::outlives_this_view`, on the seam
+  rather than a flag in `main`, so the next restore path inherits it instead of having to remember. The view's own half
+  — the view number, the open playlist, the settings — still comes back, because that is not playback.
+
+  **And `current` had to be followed rather than owned.** An attached view does not choose every track: the engine
+  splices the next one (#232) and another view's keypress is just as real. `Transport::playing` answers over a socket
+  and is `None` in process, which is not "nothing playing" but "you chose it, you know". The local default being `None`
+  is why `outlives_this_view` guards the follow as well — without it, every ordinary launch would have `current` cleared
+  on the first tick: audio still playing, status line saying nothing was on, and no test failing.
+
+  **What is not built is the write half, and it is named out loud rather than shipped quietly.** An attached view's
+  `Desk` points at the same log the engine's does, so a rating appended here would be two appenders on one file — which
+  §4.4 gives to the engine alone. So `record` refuses and says so, with the issue number in the message; the launch scan
+  does not run; `:rescan` goes over the wire. Its library is the fold it did at launch and does not follow the engine's
+  appends, because nothing subscribes it to `library` yet. #236 is both halves, and it is why `--attach` is opt-in:
+  making it the default would trade a working library manager for a working detach.
+
 - **2026-09-12** **`aaa_mode` becomes `Scope`, because the three values are tree depths and not music** (#234).
 
   `AaaMode` was `All | Artist | Album`, and `next::pool` narrowed the candidate pool with it — through `Shelf::locate`,

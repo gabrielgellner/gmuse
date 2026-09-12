@@ -30,6 +30,46 @@
 use std::time::Duration;
 
 use crate::audio::{SeekTo, State, TrackSource};
+use crate::model::id::Id;
+use crate::model::spine::Recording;
+
+/// **What a view asks to be played, named both ways.**
+///
+/// The two transports can each use exactly one half, and neither can derive the
+/// other: a local decoder needs a path and cannot mint one from a recording
+/// without the projection, while a socket may only carry the recording, because
+/// a locator is a property of one device's copy and I17 keeps it off the wire.
+///
+/// The caller has both already — `source_for` resolves the source *from* the
+/// recording — so handing over both is free, and it is the alternative to a
+/// transport-shaped `if` at every call site.
+pub struct Loading {
+    /// The user-facing grain, and the only half that crosses a socket.
+    ///
+    /// `None` for a file the store holds and the library has no row for: it
+    /// plays locally through the `playable` fallback and cannot be named to the
+    /// engine at all, which is what [`Accepted::NotNamed`] reports.
+    pub recording: Option<Id<Recording>>,
+    /// This device's copy, with its gain already resolved.
+    pub source: TrackSource,
+}
+
+/// Whether a transport could act on a [`Loading`].
+///
+/// **One arm is unreachable per implementor, and that is the point.** A local
+/// player can always play what it was handed; a remote one cannot play what the
+/// library has no recording for. A view that ignored this would draw a row as
+/// playing while nothing played, which is the failure the return value exists
+/// to prevent.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Accepted {
+    /// Handed over. Whether it *sounds* arrives separately — over a socket that
+    /// is §7.4's rule and in process it is the decoder's `Loaded`.
+    Yes,
+    /// The library has no recording for this file, so there is nothing to send.
+    NotNamed,
+}
 
 /// The playback a view can see and ask for.
 ///
@@ -69,14 +109,42 @@ pub trait Transport {
     /// its own thing.
     fn stop(&self);
 
-    /// Play this file.
+    /// Play this.
     ///
-    /// **Takes a source rather than a recording, for now.** I17 says only
-    /// user-facing grains cross a wire, and a path is not one — the wire form is
-    /// `player.load { recording }`, and the engine resolves it through the
-    /// projection. Keeping the in-process signature means this commit changes
-    /// no behaviour; #219 changes the argument when the caller becomes a client.
-    fn load(&self, source: TrackSource);
+    /// Takes [`Loading`] rather than a path because the wire form is
+    /// `player.load { recording }` and the local form is a locator, and the
+    /// caller is the only place that holds both. The answer says whether this
+    /// transport could act on it at all.
+    fn load(&self, what: Loading) -> Accepted;
+
+    /// **What the transport says is playing, when it is the authority.**
+    ///
+    /// `None` from a local player, and that is not "nothing is playing": in
+    /// process the view chose the track and already knows which one. Over a
+    /// socket somebody else chose — a gapless join the engine made, another
+    /// view's keypress — and this is how a view finds out.
+    ///
+    /// Which is why the default is `None` rather than a required method: the
+    /// question only has an answer where playback is somewhere else.
+    fn playing(&self) -> Option<Id<Recording>> {
+        None
+    }
+
+    /// **Whether playback was here before this view was, and will be after.**
+    ///
+    /// `false` in process: the player *is* this program, so when it starts
+    /// nothing is playing and the session file is the only thing that knows
+    /// where it left off. `true` over a socket, where the engine may well be
+    /// mid-track and its position is on the `playback` topic rather than in a
+    /// file.
+    ///
+    /// It decides exactly one thing, and it is the property the whole milestone
+    /// is for: a session restore must not `load`, `seek` and `pause` an engine
+    /// that is playing. So the guard sits on the seam rather than as a flag in
+    /// `main`, where the next restore path would have to remember it.
+    fn outlives_this_view(&self) -> bool {
+        false
+    }
 
     fn seek(&self, to: SeekTo);
 
@@ -116,8 +184,13 @@ impl Transport for crate::audio::PlayerHandle {
     fn stop(&self) {
         crate::audio::PlayerHandle::stop(self);
     }
-    fn load(&self, source: TrackSource) {
-        crate::audio::PlayerHandle::load(self, source);
+    /// **The recording is unused here, and deliberately not asserted on.** A
+    /// local decoder opens the file; whether the library also has a row for it
+    /// is a question this side does not need to ask, which is exactly why the
+    /// `playable` fallback still plays a store file the library has never seen.
+    fn load(&self, what: Loading) -> Accepted {
+        crate::audio::PlayerHandle::load(self, what.source);
+        Accepted::Yes
     }
     fn seek(&self, to: SeekTo) {
         crate::audio::PlayerHandle::seek(self, to);
@@ -196,8 +269,9 @@ mod tests {
         fn stop(&self) {
             self.note("stop");
         }
-        fn load(&self, source: TrackSource) {
-            self.note(format!("load {}", source.path.display()));
+        fn load(&self, what: Loading) -> Accepted {
+            self.note(format!("load {}", what.source.path.display()));
+            Accepted::Yes
         }
         fn seek(&self, to: SeekTo) {
             self.note(match to {

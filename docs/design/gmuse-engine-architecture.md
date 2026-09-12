@@ -209,23 +209,34 @@ flowchart LR
 
 There is a single `gmuse` binary, following the tmux model:
 
-| Invocation                                   | Behaviour                                                                                                            |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `gmuse engine [--foreground] [--null-audio]` | Runs the engine daemon. `--null-audio` uses a virtual output clock (§14).                                            |
-| `gmuse`                                      | Starts the TUI. Connects to the socket, spawns `gmuse engine` in the background if no engine answers, then attaches. |
-| `gmuse ctl <command…>`                       | Sends one command, either typed arguments or passed through as `cmd.exec_line`, prints the result, and exits.        |
-| `gmuse query <expr> [--json]`                | Runs a query and prints the results (NDJSON with `--json`).                                                          |
-| `gmuse events [--topics …]`                  | Subscribes and prints events as NDJSON. Useful for debugging and for the agent.                                      |
-| `gmuse mcp` (later)                          | Runs an MCP stdio server that maps tools onto protocol methods.                                                      |
-| `gmuse shelf <op>`                           | The library operations. Read-only ones work with no engine (I15); writing ones go to the engine, auto-starting it.   |
+| Invocation                                   | Behaviour                                                                                                          |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `gmuse engine [--foreground] [--null-audio]` | Runs the engine daemon. `--null-audio` uses a virtual output clock (§14).                                          |
+| `gmuse`                                      | Starts the TUI with playback in this process. Still the default; see the note below.                               |
+| `gmuse --attach`                             | Starts the TUI as a view: no device, no player lock. Spawns `gmuse engine` if none answers, then attaches (#219).  |
+| `gmuse ctl <command…>`                       | Sends one command, either typed arguments or passed through as `cmd.exec_line`, prints the result, and exits.      |
+| `gmuse query <expr> [--json]`                | Runs a query and prints the results (NDJSON with `--json`).                                                        |
+| `gmuse events [--topics …]`                  | Subscribes and prints events as NDJSON. Useful for debugging and for the agent.                                    |
+| `gmuse mcp` (later)                          | Runs an MCP stdio server that maps tools onto protocol methods.                                                    |
+| `gmuse shelf <op>`                           | The library operations. Read-only ones work with no engine (I15); writing ones go to the engine, auto-starting it. |
 
 This supersedes today's `--remote <CMD>`, which is a second, ad-hoc IPC mechanism over the same socket-shaped problem.
 It should be removed rather than kept alongside: `gmuse ctl` is the same thing with a protocol behind it.
 
-**It is removed when `gmuse ctl` exists, not before** (#214, #217). `--remote` is the only way to drive a running player
-from a key binding that is not focused on it, which is the reason §1 asked for a socket at all. Retiring it in the same
-change that stands the engine up would leave a release where that is simply not possible — so the two doors are open at
-once for exactly as long as it takes #217 to land the new one, and no longer.
+**`--attach` is opt-in, and the reason is the library rather than the audio** (#219). Attached, playback is entirely the
+engine's: a view loads by recording, learns what is playing from the `playback` topic, and going away does not stop it.
+What an attached view cannot do yet is _write_. Its own `Desk` points at the same log the engine's does, so appending
+here would be two appenders on one file — which §4.4 makes the engine's job alone. So a rating from an attached view is
+refused out loud rather than silently dropped, and its library is the fold it did at launch: it does not follow the
+engine's appends, because nothing subscribes it to `library` yet. #236 is both halves.
+
+That is also why the bare `gmuse` still owns its device. Making `--attach` the default would trade a working library
+manager for a working detach, and the two want to be true at once.
+
+**`--remote` is removed when `gmuse ctl` exists, not before** (#214, #217). `--remote` is the only way to drive a
+running player from a key binding that is not focused on it, which is the reason §1 asked for a socket at all. Retiring
+it in the same change that stands the engine up would leave a release where that is simply not possible — so the two
+doors are open at once for exactly as long as it takes #217 to land the new one, and no longer.
 
 ### 4.3 Crate layout
 

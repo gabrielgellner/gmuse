@@ -117,6 +117,33 @@ pub struct Cli {
     #[arg(long, value_name = "COMMAND")]
     pub remote: Option<String>,
 
+    /// Drive the engine over the socket instead of opening a device — #219.
+    ///
+    /// **A view, not a player.** The TUI takes no audio device and no player
+    /// lock; it asks the engine, renders what the `playback` topic says, and
+    /// leaves what is playing alone when it starts and when it exits. Starts an
+    /// engine if none answers, which is §4.2's tmux model.
+    ///
+    /// Not yet the default, and the reason is #233: an attached view still
+    /// draws its *own* queue while the engine plays from the one it owns. So
+    /// enqueueing in an attached TUI does not change what plays next. Pressing
+    /// enter does, because that is a `player.load`.
+    ///
+    /// **`GMUSE_ATTACH=1` works**, which needed saying in code. clap's `bool`
+    /// parser accepts `true` and `false` and nothing else, so the first thing
+    /// anyone writes in a shell profile is an error message — and it is an
+    /// error message about the *flag*, which reads as the flag being broken
+    /// rather than the value. `truthy` is the boundary doing its job (§12).
+    #[arg(
+        long,
+        env = "GMUSE_ATTACH",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = truthy,
+    )]
+    pub attach: bool,
+
     /// Start even if another gmuse is already running.
     ///
     /// The lock exists because two instances both open the audio device and
@@ -125,6 +152,20 @@ pub struct Cli {
     /// default, not a rule.
     #[arg(long)]
     pub no_lock: bool,
+}
+
+/// The spellings a person actually writes for "yes" in an environment variable.
+///
+/// Deliberately not a general-purpose parser: it is one flag's value, it lists
+/// what it accepts, and it names what it was given when it refuses.
+fn truthy(text: &str) -> Result<bool, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "no" | "n" | "off" | "" => Ok(false),
+        other => Err(format!(
+            "{other:?} is not a yes or a no — try 1, true, yes, on, or their opposites"
+        )),
+    }
 }
 
 /// What gmuse can be asked to do instead of playing music.
@@ -592,6 +633,30 @@ mod tests {
         let mut full = vec!["gmuse"];
         full.extend_from_slice(args);
         Cli::try_parse_from(full).unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// **`GMUSE_ATTACH=1` is what a person writes, so it has to work** — #219.
+    ///
+    /// clap's `bool` value parser takes `true`/`false` only, and the failure it
+    /// produces names the flag rather than the value: "invalid value '1' for
+    /// '--attach'" reads as the flag being broken. Found by running it.
+    #[test]
+    fn attach_takes_the_spellings_of_yes_that_people_write() {
+        assert!(!parse(&[]).attach, "off unless asked");
+        assert!(parse(&["--attach"]).attach, "the bare flag");
+        for yes in ["1", "true", "yes", "on", "TRUE"] {
+            assert!(
+                parse(&["--attach", yes]).attach,
+                "{yes:?} should mean attached"
+            );
+        }
+        for no in ["0", "false", "no", "off"] {
+            assert!(!parse(&["--attach", no]).attach, "{no:?} should mean local");
+        }
+        assert!(
+            Cli::try_parse_from(["gmuse", "--attach", "maybe"]).is_err(),
+            "and it refuses what it cannot read rather than guessing"
+        );
     }
 
     /// `--log` shipped broken because nothing here was tested: clap rejected

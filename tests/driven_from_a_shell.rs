@@ -480,7 +480,16 @@ fn write_wav(path: &Path, frames: usize) {
 /// `config::default_data_dir`, so the import and the engine agree on where the
 /// log is without either of them touching the real library.
 fn start_with_a_track(name: &str) -> (Engine, String) {
-    let dir = std::env::temp_dir().join(format!("gmuse-230-{}-{name}", std::process::id()));
+    // **A counter, because two tests picking the same name wiped each other.**
+    //
+    // `remove_dir_all` below is what makes a rerun clean, and with the name as
+    // the only distinguishing part it also made a *parallel* test's engine socket
+    // disappear underneath it — which shows up as `connect: NotFound` in whichever
+    // test lost, nowhere near the test that caused it. The name still leads the
+    // path so a failure says which test left the directory.
+    static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("gmuse-230-{}-{name}-{nth}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("lib")).expect("scratch");
     std::fs::create_dir_all(dir.join("xdg")).expect("scratch");
@@ -905,6 +914,125 @@ fn a_remote_transport_tracks_the_engines_playback() {
         later > first,
         "a playing position advances between discontinuities: {first:?} -> {later:?}"
     );
+}
+
+/// **An attached view learns mid-track what is playing, without asking** — #219.
+///
+/// `playback_survives_a_view_detaching_and_another_attaching` above proves the
+/// engine keeps playing; this proves the *seam* reports it. The distinction
+/// matters because the TUI draws `ui.playback.current` from
+/// `Transport::playing`, and the only thing that can set it on a view that
+/// attached late is an event it did not ask for.
+///
+/// It is also why `outlives_this_view` exists: a session restore on this view
+/// would load over what is playing, seek it and pause it. That failure is
+/// invisible from the protocol level, because at that level nothing restores.
+#[test]
+fn an_attached_view_learns_what_is_playing_from_the_event_stream() {
+    use gmuse::ui::transport::Transport;
+
+    let (engine, recording) = start_with_a_track("late-attach");
+
+    // The first view: attach, load, see it play.
+    {
+        let client =
+            std::sync::Arc::new(Client::connect(&engine.socket, "first", "0").expect("connect"));
+        let view = gmuse::ui::remote_transport::Remote::attach(client).expect("attach");
+        assert_eq!(
+            view.load(gmuse::ui::transport::Loading {
+                recording: Some(recording.parse().expect("a recording id")),
+                // **Ignored, and deliberately a path that does not exist.** A
+                // locator does not cross (I17); the engine opens the copy its own
+                // projection names. If this were the half being used, nothing would
+                // play and the wait below would time out.
+                source: gmuse::audio::TrackSource {
+                    path: std::path::PathBuf::from("/nonexistent/not-the-copy-that-plays.wav"),
+                    gain: 1.0,
+                },
+            }),
+            gmuse::ui::transport::Accepted::Yes,
+            "a named recording is something a socket can carry"
+        );
+        assert!(
+            wait_until(|| view.state() == gmuse::audio::State::Playing),
+            "the first view got it playing"
+        );
+        assert_eq!(
+            view.playing().map(|r| r.to_string()),
+            Some(recording.clone()),
+            "and knows which recording, from the event rather than from having asked"
+        );
+    }
+    // Dropped: the connection is closed and the reader thread told to stop.
+    // Exactly what closing a terminal does.
+
+    // The second view, which has no idea any of that happened.
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "second", "0").expect("connect"));
+    let fresh = gmuse::ui::remote_transport::Remote::attach(client).expect("attach");
+
+    // **Learned from an event, not asked for.** §7.8 has no synchronous read of
+    // position, and the engine republishes state to a new subscriber — which is
+    // what makes attaching mid-track show the right thing.
+    assert!(
+        wait_until(|| fresh.playing().map(|r| r.to_string()) == Some(recording.clone())),
+        "a fresh view found the same recording still playing: it said {:?}",
+        fresh.playing().map(|r| r.to_string())
+    );
+    assert_eq!(
+        fresh.state(),
+        gmuse::audio::State::Playing,
+        "and still playing, because a view detaching is not a stop"
+    );
+    assert!(
+        fresh.outlives_this_view(),
+        "which is the whole claim this transport makes about itself"
+    );
+}
+
+/// **A file the library has no row for cannot be asked for over a socket** —
+/// I17, #219.
+///
+/// A path is a property of one device's copy, so there is nothing to send. The
+/// refusal is a return value rather than a silent drop because the view marks a
+/// row as playing on the strength of it.
+#[test]
+fn an_attached_view_refuses_to_load_what_the_library_cannot_name() {
+    use gmuse::ui::transport::{Accepted, Loading, Transport};
+
+    let (engine, _recording) = start_with_a_track("unnamed");
+    let client = std::sync::Arc::new(Client::connect(&engine.socket, "tui", "0").expect("connect"));
+    let view = gmuse::ui::remote_transport::Remote::attach(client).expect("attach");
+
+    let answer = view.load(Loading {
+        recording: None,
+        source: gmuse::audio::TrackSource {
+            path: std::path::PathBuf::from("/tmp/a-file-nobody-imported.wav"),
+            gain: 1.0,
+        },
+    });
+    assert_eq!(
+        answer,
+        Accepted::NotNamed,
+        "it says so rather than sending a path the engine would refuse"
+    );
+    assert_eq!(
+        view.state(),
+        gmuse::audio::State::Stopped,
+        "and nothing started"
+    );
+}
+
+/// Wait for something the event stream will eventually say, or give up.
+fn wait_until(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    done()
 }
 
 /// **Two engines cannot both bind, so the auto-start race is benign** — #219.

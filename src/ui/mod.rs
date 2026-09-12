@@ -380,6 +380,22 @@ pub struct Ui {
     /// The current track has already been counted, so a long listen does not
     /// count twice. Cleared whenever a different track becomes audible.
     counted_current: bool,
+    /// **What the engine last said it was playing** — #219.
+    ///
+    /// Remembered rather than recomputed so that following it costs one
+    /// comparison a tick. Resolving a recording to the row that draws it is a
+    /// walk of the library, and the engine naming something this device has no
+    /// row for would otherwise repeat that walk five times a second for as long
+    /// as it played.
+    ///
+    /// Meaningless when playback is in this process, where nothing says it.
+    followed: Option<Id<Recording>>,
+    /// **Playback is somewhere else, so this view may not append** — #219, I15.
+    ///
+    /// Reads bypass the socket by design; writes may not, because §4.4 makes the
+    /// librarian the single appender and an attached view's `Desk` would be a
+    /// second one on the same log. Set from `main`, where the choice is made.
+    pub attached: bool,
     /// A restored track has been loaded but its seek has not landed yet.
     ///
     /// Loading emits `Loaded`, which is a save point — and at that instant the
@@ -619,6 +635,8 @@ impl Ui {
             listened: std::sync::Arc::default(),
             data_dir: None,
             counted_current: false,
+            followed: None,
+            attached: false,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
@@ -909,6 +927,7 @@ where
             handle_key(key, ui, ctx);
         }
         drain_player_events(ui, ctx);
+        follow_the_engine(ui, ctx);
         serve_remote(ui, ctx);
         note_play_progress(ui, ctx);
         audit_underruns(ui, ctx);
@@ -966,6 +985,52 @@ fn serve_remote(ui: &mut Ui, ctx: &Context<'_>) {
         let track = next.track.or_else(|| slot.track.take());
         *slot = crate::remote::Status { track, ..next };
         ui.remote_track = ui.playback.current;
+    }
+}
+
+/// **Adopt what the engine says is playing** — #219, §7.8.
+///
+/// An attached view does not choose every track. The engine splices the next one
+/// on a gapless join (#232) and another view's keypress is just as real, so
+/// `current` is *followed* here rather than owned.
+///
+/// Nothing happens in process: `Transport::playing` is `None` there, because in
+/// process this view did the choosing and already knows the answer.
+fn follow_the_engine(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(player) = ctx.player else { return };
+    if !player.outlives_this_view() {
+        return;
+    }
+    let said = player.playing();
+    if said == ui.followed {
+        return;
+    }
+    ui.followed = said;
+
+    let rows: &dyn Listing = ctx.library;
+    // A walk, and it runs once per track change rather than once per tick,
+    // which is what `followed` is for. The cheap direction — a row to its
+    // recording — is the one the comparison above would need, and it is not the
+    // one being asked here.
+    let adopted = said.and_then(|r| {
+        rows.rows()
+            .into_iter()
+            .find(|&id| rows.recording_of(id) == Some(r))
+    });
+    // **`None` is adopted too.** The engine having stopped is news, and keeping
+    // the last track drawn as current is exactly how a view comes to show
+    // something playing that is not.
+    ui.playback.current = adopted;
+    // Which copy sounded is the engine's answer and it does not publish one, so
+    // this view does not claim to know. A play naming an encoding is what that
+    // field is for, and an attached view does not record plays yet.
+    ui.playback.playing = None;
+    ui.counted_current = false;
+    if let Some(id) = adopted
+        && let Some(listed) = rows.listed(id)
+    {
+        ui.audit
+            .line("engine", &format!("now playing {}", listed.title));
     }
 }
 
@@ -1097,6 +1162,26 @@ pub fn record(
     say: impl FnOnce(&mut crate::model::instance::Instance) + Send + 'static,
 ) {
     if ui.data_dir.is_none() {
+        return;
+    }
+    // **An attached view does not append, and says so rather than dropping it**
+    // — #219, I15, §4.4.
+    //
+    // The librarian is one process's single appender; this view's `Desk` points
+    // at the same log the engine's does, so writing here would be two appenders
+    // on one file. Routing these over `library.edit` is what makes an attached
+    // view able to rate again, and that is #236 — `library.edit` carries a
+    // rating today and not a play, and there are eleven call sites, which is
+    // more than a rename.
+    //
+    // Said out loud every time on purpose: a rating that silently vanished is
+    // the failure worth being noisy about.
+    if ui.attached {
+        ui.notify("attached: the engine owns the log, so this was not recorded (#236)");
+        ui.audit.line(
+            "record",
+            "refused: attached, writes are not on the wire yet",
+        );
         return;
     }
     ui.desk.say(say);
@@ -1480,6 +1565,23 @@ pub fn restore_session(
         ui.previous_view = view;
     }
 
+    // **A view attached to a running engine restores nothing about playback** —
+    // #219. The saved position is where *some earlier launch* left off, and
+    // acting on it means loading over whatever is playing now and pausing it.
+    // That is precisely the property the milestone is for, so the check is the
+    // transport's own (`outlives_this_view`) rather than a flag passed down.
+    //
+    // What is playing arrives on the `playback` topic instead, and
+    // `follow_the_engine` adopts it. Everything above this line — the view, the
+    // open playlist, the settings — is this view's own state and still restores.
+    if ctx.player.is_some_and(|p| p.outlives_this_view()) {
+        follow_the_engine(ui, ctx);
+        if missing > 0 {
+            ui.notify(format!("{missing} remembered track(s) are gone"));
+        }
+        return;
+    }
+
     if let Some(playing) = saved.current.as_ref()
         && let Some(&id) = here.get(&playing.recording)
     {
@@ -1493,7 +1595,10 @@ pub fn restore_session(
             // opens the file, moves to where you were, and stops there.
             if let Some((source, encoding)) = source_for(ui, ctx, id) {
                 ui.playback.playing = encoding;
-                player.load(source);
+                let _ = player.load(crate::ui::transport::Loading {
+                    recording: recording_of(ctx, id),
+                    source,
+                });
             }
             if saved.position_secs > 0.0 {
                 player.seek(crate::audio::SeekTo::Absolute(
@@ -1670,15 +1775,28 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: CopyId) {
         };
         return;
     };
+    // **Asked before anything is marked as playing** — #219. An attached view
+    // can only name a recording, so a store file the library has no row for is
+    // refused there; setting `current` first would draw it as playing while
+    // nothing played.
+    if let Some(player) = ctx.player {
+        let accepted = player.load(crate::ui::transport::Loading {
+            recording: recording_of(ctx, id),
+            source,
+        });
+        if accepted == crate::ui::transport::Accepted::NotNamed {
+            ui.status = "that file is not in the library yet, so an attached \
+                         view cannot ask for it — `:import`"
+                .to_string();
+            return;
+        }
+    }
     ui.playback.current = Some(id);
     ui.playback.playing = encoding;
     ui.status.clear();
     // An explicit play discards whatever was queued up to be spliced on; the
     // player drops it too, on `Load`.
     ui.pending_next = None;
-    if let Some(player) = ctx.player {
-        player.load(source);
-    }
 }
 
 /// Whether a popup is up **and has something hidden to scroll to**.
@@ -6772,6 +6890,154 @@ mod tests {
         Ui::new(Shelf::rebuild(lib_of(store), smart))
     }
 
+    /// **A transport that is somewhere else**, like the engine over a socket.
+    ///
+    /// The two methods that matter are `playing` and `outlives_this_view`; the
+    /// rest are inert because nothing below asks them. A `Remote` against a real
+    /// engine is covered in `tests/driven_from_a_shell.rs` — what is cheap to
+    /// test here and expensive there is what the *view* does with the answer.
+    struct Elsewhere(std::sync::Mutex<Option<Id<Recording>>>);
+
+    impl transport::Transport for Elsewhere {
+        fn state(&self) -> crate::audio::State {
+            crate::audio::State::Playing
+        }
+        fn position(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn play(&self) {}
+        fn pause(&self) {}
+        fn toggle(&self) {}
+        fn stop(&self) {}
+        fn load(&self, _what: transport::Loading) -> transport::Accepted {
+            transport::Accepted::Yes
+        }
+        fn seek(&self, _to: crate::audio::SeekTo) {}
+        fn volume(&self) -> f32 {
+            1.0
+        }
+        fn set_volume(&self, _position: f32) {}
+        fn underruns(&self) -> u32 {
+            0
+        }
+        fn last_short_frames(&self) -> u32 {
+            0
+        }
+        fn playing(&self) -> Option<Id<Recording>> {
+            *self.0.lock().expect("playing")
+        }
+        fn outlives_this_view(&self) -> bool {
+            true
+        }
+    }
+
+    /// **An attached view follows rather than chooses** — #219.
+    ///
+    /// The engine splices the next track on a gapless join and another view's
+    /// keypress is just as real, so what is current comes off the `playback`
+    /// topic. Adopting `None` matters as much as adopting a track: keeping the
+    /// last one drawn is how a view shows something playing that has stopped.
+    #[test]
+    fn an_attached_view_adopts_what_the_engine_says_is_playing() {
+        let store = fixture();
+        let library = lib_of(&store);
+        let rows: &dyn Listing = library;
+        let row = rows.rows()[0];
+        let recording = rows
+            .recording_of(row)
+            .expect("the fixture's rows are identified");
+
+        let engine = Elsewhere(std::sync::Mutex::new(Some(recording)));
+        let ctx = Context {
+            library,
+            player: Some(&engine),
+            gapless: None,
+            remote: None,
+        };
+        let mut ui = ui_of(&store, true);
+        assert_eq!(ui.playback.current, None, "nothing chosen here");
+
+        follow_the_engine(&mut ui, &ctx);
+        assert_eq!(
+            ui.playback.current,
+            Some(row),
+            "the recording the engine named resolved to the row that draws it"
+        );
+
+        // Idempotent, and cheaply so: the second call compares one `Option` and
+        // does not walk the library again.
+        follow_the_engine(&mut ui, &ctx);
+        assert_eq!(ui.playback.current, Some(row));
+
+        *engine.0.lock().expect("playing") = None;
+        follow_the_engine(&mut ui, &ctx);
+        assert_eq!(
+            ui.playback.current, None,
+            "the engine stopping is news, not something to keep drawing"
+        );
+    }
+
+    /// **A local player is never followed, and this is the guard that says so.**
+    ///
+    /// `Transport::playing` defaults to `None`, so without the
+    /// `outlives_this_view` check every launch would have `current` cleared on
+    /// the first tick of the draw loop — playback continuing while the status
+    /// line claimed nothing was on. Exactly the kind of fault that looks green:
+    /// no test fails, the audio keeps playing, and the display is a lie.
+    #[test]
+    fn a_local_player_is_not_followed_so_nothing_clears_what_it_chose() {
+        let store = fixture();
+        let library = lib_of(&store);
+        let rows: &dyn Listing = library;
+        let row = rows.rows()[0];
+
+        // `Recorded`-shaped: the defaults, which is what `PlayerHandle` uses.
+        struct Here;
+        impl transport::Transport for Here {
+            fn state(&self) -> crate::audio::State {
+                crate::audio::State::Playing
+            }
+            fn position(&self) -> Duration {
+                Duration::ZERO
+            }
+            fn play(&self) {}
+            fn pause(&self) {}
+            fn toggle(&self) {}
+            fn stop(&self) {}
+            fn load(&self, _what: transport::Loading) -> transport::Accepted {
+                transport::Accepted::Yes
+            }
+            fn seek(&self, _to: crate::audio::SeekTo) {}
+            fn volume(&self) -> f32 {
+                1.0
+            }
+            fn set_volume(&self, _position: f32) {}
+            fn underruns(&self) -> u32 {
+                0
+            }
+            fn last_short_frames(&self) -> u32 {
+                0
+            }
+        }
+
+        let here = Here;
+        let ctx = Context {
+            library,
+            player: Some(&here),
+            gapless: None,
+            remote: None,
+        };
+        let mut ui = ui_of(&store, true);
+        ui.playback.current = Some(row);
+
+        follow_the_engine(&mut ui, &ctx);
+        assert_eq!(
+            ui.playback.current,
+            Some(row),
+            "what this process chose is not up for adoption"
+        );
+    }
+
     #[test]
     fn x_plays_the_track_row_under_the_cursor() {
         let store = fixture();
@@ -10039,6 +10305,93 @@ mod tests {
         assert_eq!(first.queue, second.queue);
         assert_eq!(first.current, second.current);
         assert_eq!(first.modes, second.modes);
+    }
+
+    /// **Attaching to a running engine restores nothing about playback** — #219,
+    /// and this is the property the milestone is for.
+    ///
+    /// A session file says where *some earlier launch* left off. Acting on it
+    /// against an engine that is mid-track means loading over what is playing,
+    /// seeking it, and pausing it — three commands that between them destroy
+    /// exactly what attaching was supposed to preserve.
+    ///
+    /// The queue and the settings still come back: those are this view's own.
+    #[test]
+    fn an_attached_view_restores_its_own_state_and_leaves_playback_alone() {
+        let store = fixture();
+        let library = lib_of(&store);
+        let row = Listing::rows(library)[0];
+        let engine_is_playing = Listing::recording_of(library, row).expect("identified");
+
+        // The engine is playing the first row. The session remembers the second.
+        let other = Listing::rows(library)[1];
+        let engine = Elsewhere(std::sync::Mutex::new(Some(engine_is_playing)));
+        let ctx = Context {
+            library,
+            player: Some(&engine),
+            gapless: None,
+            remote: None,
+        };
+        let mut ui = ui_of(&store, true);
+
+        let mut saved = saved_with(true, "inner", 2);
+        saved.current = Some(crate::session::Playing {
+            recording: Listing::recording_of(library, other).expect("identified"),
+            copy: None,
+        });
+        saved.position_secs = 42.5;
+        saved.queue = vec![Listing::recording_of(library, other).expect("identified")];
+
+        restore_session(&mut ui, &ctx, &saved, &Default::default());
+
+        assert_eq!(
+            ui.playback.current,
+            Some(row),
+            "what the engine is playing, not what the file remembered"
+        );
+        assert!(
+            !ui.resuming,
+            "nothing was loaded, so there is no seek to wait for"
+        );
+        assert_eq!(ui.queue.len(), 1, "the view's own queue still came back");
+        assert!(ui.playback.shuffle, "and its own settings");
+        assert_eq!(ui.playback.scope, crate::next::Scope::Inner);
+    }
+
+    /// **An attached view does not append to the log, and says so** — I15, §4.4.
+    ///
+    /// Its `Desk` points at the same log the engine's does, so writing here
+    /// would make two appenders on one file. Routing these over `library.edit`
+    /// is #236; until then a refusal that is *visible* is the honest shape,
+    /// because a rating that silently vanished is the worse failure.
+    #[test]
+    fn an_attached_view_refuses_to_append_rather_than_dropping_the_fact() {
+        let store = fixture();
+        let mut ui = ui_of(&store, true);
+        ui.data_dir = Some(std::env::temp_dir().join("gmuse-attached-no-append"));
+        ui.attached = true;
+
+        record(&mut ui, 100, move |log| {
+            log.rate(100, Id::derived(b"x"), Some(5));
+        });
+        assert!(
+            ui.status.contains("#236"),
+            "it said so, pointing at where it is fixed: {:?}",
+            ui.status
+        );
+
+        // **And the other side of the branch**, or the assertion above would
+        // pass on a `record` that refused unconditionally.
+        let mut local = ui_of(&store, true);
+        local.data_dir = ui.data_dir.clone();
+        record(&mut local, 100, move |log| {
+            log.rate(100, Id::derived(b"x"), Some(5));
+        });
+        assert!(
+            local.status.is_empty(),
+            "a local view records without saying anything: {:?}",
+            local.status
+        );
     }
 
     /// Restoring loads the track, which emits `Loaded` — a save point — while
