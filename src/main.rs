@@ -2039,6 +2039,7 @@ fn run_tui(
     let ctx = gmuse::ui::Context {
         library: &library_view.library,
         player: Some(&app.player),
+        gapless: Some(&app.player),
         remote: server.as_ref(),
     };
     let mut state = gmuse::ui::Ui::new(library);
@@ -2193,6 +2194,7 @@ fn run_tui(
             let ctx = gmuse::ui::Context {
                 library: &library_view.library,
                 player: Some(&app.player),
+                gapless: Some(&app.player),
                 remote: server.as_ref(),
             };
             match gmuse::ui::run(&mut terminal, &mut state, &ctx) {
@@ -2248,6 +2250,7 @@ fn run_tui(
         let ctx = gmuse::ui::Context {
             library: &library_view.library,
             player: Some(&app.player),
+            gapless: Some(&app.player),
             remote: server.as_ref(),
         };
         gmuse::ui::refresh_library(&mut state, &ctx);
@@ -2259,6 +2262,7 @@ fn run_tui(
     let ctx = gmuse::ui::Context {
         library: &library_view.library,
         player: Some(&app.player),
+        gapless: Some(&app.player),
         remote: server.as_ref(),
     };
     gmuse::ui::save_session(&mut state, &ctx);

@@ -8,6 +8,7 @@ pub mod list;
 pub mod picker;
 pub mod statusline;
 pub mod theme;
+pub mod transport;
 pub mod tree;
 
 use std::io;
@@ -807,7 +808,25 @@ pub struct Context<'a> {
     /// built from one scan so they cannot disagree.
     pub library: &'a crate::model::seam::Librarian,
     /// `None` in tests, which have no audio device.
-    pub player: Option<&'a PlayerHandle>,
+    ///
+    /// **A seam, not the handle** — #219. The TUI is becoming a client and the
+    /// call sites should not know whether playback is in this process; `dyn
+    /// Transport` is what makes the eventual swap a rename rather than a hunt
+    /// through fourteen thousand lines. `PlayerHandle` implements it today.
+    ///
+    /// One path still reaches past this: the decoder's `NeedNext` is answered
+    /// from `ui.queue`, and that responsibility moves to the engine in #232
+    /// rather than through here.
+    pub player: Option<&'a dyn crate::ui::transport::Transport>,
+    /// **The one path that still needs the handle itself** — and it is leaving.
+    ///
+    /// The decoder's `NeedNext` arrives with a deadline and is answered from
+    /// `ui.queue` and `ui.playback.aaa_mode` — state §6 assigns to the control
+    /// thread. A detached view cannot answer a deadline, so #232 moves the
+    /// selection into the engine and this field goes with it. It is named
+    /// separately rather than widening `Transport`, so that what is temporary
+    /// looks temporary.
+    pub gapless: Option<&'a PlayerHandle>,
     /// `None` in tests, and when the socket could not be bound.
     pub remote: Option<&'a crate::remote::Server>,
 }
@@ -1144,7 +1163,7 @@ fn audit_underruns(ui: &mut Ui, ctx: &Context<'_>) {
 
 /// Turn player events into UI state, and advance when a track ends.
 fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
-    let Some(player) = ctx.player else { return };
+    let Some(player) = ctx.gapless else { return };
     let mut finished = false;
     while let Ok(event) = player.events().try_recv() {
         match event {
@@ -6511,6 +6530,7 @@ mod tests {
         let ctx = Context {
             library: lib_of(&store),
             player: None,
+            gapless: None,
             remote: None,
         };
         let ui = ui_of(&store, true);
@@ -6535,6 +6555,7 @@ mod tests {
         let ctx = Context {
             library: lib_of(&store),
             player: None,
+            gapless: None,
             remote: None,
         };
         let mut ui = ui_of(&store, true);
@@ -6569,6 +6590,7 @@ mod tests {
         let ctx = Context {
             library: lib_of(&store),
             player: None,
+            gapless: None,
             remote: None,
         };
         let mut ui = ui_of(&store, true);
@@ -6624,6 +6646,7 @@ mod tests {
         let ctx = Context {
             library: lib_of(&store),
             player: None,
+            gapless: None,
             remote: None,
         };
         let mut ui = ui_of(&store, true);
@@ -6645,6 +6668,7 @@ mod tests {
         let ctx = Context {
             library: lib_of(&store),
             player: None,
+            gapless: None,
             remote: None,
         };
         let mut ui = ui_of(&store, true);
@@ -6662,6 +6686,7 @@ mod tests {
         let ctx = Context {
             library: lib_of(&store),
             player: None,
+            gapless: None,
             remote: None,
         };
         let mut ui = ui_of(&store, true);
@@ -6711,6 +6736,7 @@ mod tests {
                 0,
             ))),
             player: None,
+            gapless: None,
             remote: None,
         }
     }
@@ -6725,6 +6751,7 @@ mod tests {
         Context {
             library: lib_of(store),
             player: None,
+            gapless: None,
             remote: None,
         }
     }
@@ -6939,6 +6966,7 @@ mod tests {
         let ctx = Context {
             library,
             player: None,
+            gapless: None,
             remote: None,
         };
         let mut ui = Ui::new(Shelf::rebuild(library, true));
@@ -11971,6 +11999,7 @@ mod tests {
         let ctx = Context {
             library,
             player: None,
+            gapless: None,
             remote: None,
         };
         let mut ui = ui_with_history(&store, "rate-relinked");
