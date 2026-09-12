@@ -2378,7 +2378,14 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
     let _ = null_audio;
     let identity = gmuse::engine::Identity::new(48_000, Vec::new());
 
-    struct Bare;
+    // **What is behind the door today.** `hello` is served by the engine
+    // itself; these are the three methods whose answers exist without a player
+    // attached, and `cmd.exec_line` is the interesting one — it is the second
+    // half of I4's rule, routing to the *same* parser the `:` line uses so
+    // there is exactly one textual command language (§7.12).
+    struct Bare {
+        stopping: Arc<std::sync::atomic::AtomicBool>,
+    }
     impl gmuse::engine::Answers for Bare {
         fn stream_generation(&self) -> u32 {
             0
@@ -2391,20 +2398,79 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
         }
         fn call(
             &self,
-            method: &str,
-            _params: Option<serde_json::Value>,
+            request: gmuse_proto::Call,
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
-            Err(gmuse_proto::RpcError::method_not_found(method))
+            use gmuse_proto::{Call, RpcError, error::code};
+            match request {
+                // Served by the engine before this is reached.
+                Call::Hello(_) => Err(RpcError::new(
+                    code::INTERNAL,
+                    "hello is not dispatched here",
+                )),
+
+                Call::TimeNow => Ok(serde_json::json!({ "engine_now_ns": self.now_ns() })),
+
+                Call::EngineStatus => Ok(serde_json::json!({
+                    "protocol": gmuse_proto::PROTOCOL,
+                    "methods": gmuse_proto::method::ALL,
+                    "pid": std::process::id(),
+                })),
+
+                Call::EngineShutdown => {
+                    self.stopping
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    Ok(serde_json::json!({ "stopping": true }))
+                }
+
+                // **The same parser the `:` line uses**, which is the whole
+                // point of §7.12: two textual command languages is the standing
+                // complaint against `--repl`, and routing here is what stops a
+                // second one being written.
+                Call::ExecLine { line } => match gmuse::cmd::parse::command(&line) {
+                    Ok(cmd) => {
+                        // Parsed, and with nowhere to go: there is no player
+                        // attached yet. `NotReady` says exactly that rather
+                        // than an `ok` that would read as "it happened".
+                        Err(RpcError::new(
+                            code::NOT_READY,
+                            "the engine parses commands but has no player attached yet",
+                        )
+                        .with_data(serde_json::json!({
+                            "reason": "no player attached",
+                            "parsed": gmuse::cmd::parse::format(&cmd),
+                        })))
+                    }
+                    // **`span` is null and that is honest.** §7.13 shapes this
+                    // as `{message, span}`; today's parser reports what was
+                    // wrong and not where, so inventing an offset would be
+                    // worse than admitting there is none.
+                    Err(e) => Err(RpcError::new(code::COMMAND_PARSE, e.to_string())
+                        .with_data(serde_json::json!({ "message": e.to_string(), "span": null }))),
+                },
+            }
         }
     }
 
-    let engine = gmuse::engine::serve(&path, identity, Arc::new(Bare))?;
+    let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let engine = gmuse::engine::serve(
+        &path,
+        identity,
+        Arc::new(Bare {
+            stopping: Arc::clone(&stopping),
+        }),
+    )?;
     eprintln!("gmuse engine: listening on {}", engine.path().display());
 
-    // Nothing to do on this thread but stay alive; the listener owns the work.
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
+    // Nothing to do on this thread but wait to be told to stop; the listener
+    // owns the work. Polling rather than a condvar because the only waker is a
+    // flag set from a connection thread and a second of latency on shutdown
+    // costs nothing.
+    while !stopping.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
+    eprintln!("gmuse engine: stopping");
+    drop(engine);
+    Ok(())
 }
 
 #[cfg(test)]

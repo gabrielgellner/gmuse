@@ -1,0 +1,12 @@
+> {"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":"gmuse/0"}}
+< {"jsonrpc":"2.0","id":1,"result":{"capabilities":["golden"],"engine_generation":"<generation>","engine_now_ns":0,"protocol":"gmuse/0","sample_rate":48000,"stream_generation":0}}
+> not json at all
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"not a request: expected ident at line 1 column 2"}}
+> [{"jsonrpc":"2.0","id":2,"method":"time.now"}]
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"batches are not supported: send one object per line"}}
+> {"jsonrpc":"1.0","id":3,"method":"time.now"}
+< {"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"jsonrpc must be \"2.0\", got \"1.0\""}}
+> {"jsonrpc":"2.0","id":4,"method":"deck.load","params":{}}
+< {"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"no such method: deck.load"}}
+> {"jsonrpc":"2.0","id":5,"method":"cmd.exec_line","params":{"lien":"pause"}}
+< {"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"cmd.exec_line: missing field `line`","data":{"field":"params","message":"cmd.exec_line: missing field `line`"}}}

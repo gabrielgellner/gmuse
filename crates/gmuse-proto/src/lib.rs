@@ -21,8 +21,10 @@
 pub mod envelope;
 pub mod error;
 pub mod hello;
+pub mod request;
 pub mod version;
 
 pub use envelope::{Id, Request, Response};
 pub use error::RpcError;
+pub use request::{Request as Call, method};
 pub use version::{MAJOR, PROTOCOL};

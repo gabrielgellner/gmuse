@@ -1,0 +1,2 @@
+> {"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":"gmuse/0","client":"golden","client_version":"0.1.0"}}
+< {"jsonrpc":"2.0","id":1,"result":{"capabilities":["golden"],"engine_generation":"<generation>","engine_now_ns":0,"protocol":"gmuse/0","sample_rate":48000,"stream_generation":0}}

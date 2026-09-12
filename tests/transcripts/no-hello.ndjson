@@ -1,0 +1,2 @@
+> {"jsonrpc":"2.0","id":1,"method":"time.now"}
+< {"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"the first message must be hello, got \"time.now\""}}

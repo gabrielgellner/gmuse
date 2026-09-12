@@ -1,0 +1,2 @@
+> {"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":"gmuse/9"}}
+< {"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"client speaks gmuse/9, this engine speaks gmuse/0","data":{"field":"protocol","message":"client speaks gmuse/9, this engine speaks gmuse/0"}}}

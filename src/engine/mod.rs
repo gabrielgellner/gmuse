@@ -40,7 +40,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gmuse_proto::envelope::{self, MAX_LINE};
 use gmuse_proto::hello::{HelloParams, HelloResult};
-use gmuse_proto::{Request, Response, RpcError, error::code, version};
+use gmuse_proto::request::method;
+use gmuse_proto::{Call, Response, RpcError, error::code, version};
 use thiserror::Error;
 
 /// What the engine could not do.
@@ -74,19 +75,29 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// **A fresh generation per engine, from the clock and the pid.**
+    /// **A fresh generation per engine, from the clock, the pid and a counter.**
     ///
-    /// It only has to differ between runs on one machine, which those two do:
-    /// the same pid cannot recur within the same nanosecond. Deliberately not a
-    /// random number — that would mean a dependency for no gain — and
-    /// deliberately not the pid alone, which a system recycles.
+    /// Deliberately not a random number — that would mean a dependency for no
+    /// gain — and deliberately not the pid alone, which a system recycles.
+    ///
+    /// **The counter is not belt-and-braces.** The first version was clock and
+    /// pid, on the reasoning that "the same pid cannot recur within the same
+    /// nanosecond". That is true across processes and false within one: two
+    /// identities built back to back share a pid by definition, and on a fast
+    /// machine they share the nanosecond too. A test asking for two and getting
+    /// one is what found it. Two engines cannot both hold the lock, so this
+    /// could not have collided in production today — but `engine_generation`
+    /// exists so a client can tell that its references expired, and a value
+    /// that is only usually unique is not one you can build that on.
     pub fn new(sample_rate: u32, capabilities: Vec<String>) -> Self {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         Self {
-            engine_generation: format!("{:x}-{:x}", now, std::process::id()),
+            engine_generation: format!("{:x}-{:x}-{:x}", now, std::process::id(), seq),
             sample_rate,
             capabilities,
         }
@@ -106,11 +117,11 @@ pub trait Answers: Send + Sync + 'static {
     /// The engine's clock, in nanoseconds, for offset estimation (§7.9).
     fn now_ns(&self) -> i64;
     /// Answer anything that is not `hello`.
-    fn call(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, RpcError>;
+    ///
+    /// **Typed** — I4. The string and the `Value` were consumed at the
+    /// boundary; what arrives here is a [`Call`], and an implementor that
+    /// wanted to match on a method name again would find there is none left.
+    fn call(&self, request: Call) -> Result<serde_json::Value, RpcError>;
 }
 
 /// A running engine. Dropping it stops listening and removes the socket.
@@ -284,6 +295,20 @@ fn discard_line(reader: &mut impl BufRead) -> std::io::Result<()> {
     }
 }
 
+/// The line server, for the golden transcripts — #215.
+///
+/// **Exposed rather than duplicated.** A transcript suite that replayed against
+/// its own copy of the dispatch would pin that copy, which is the one thing it
+/// must not do.
+pub fn serve_line_for_test(
+    line: &str,
+    identity: &Identity,
+    answers: &dyn Answers,
+    greeted: &mut bool,
+) -> (Option<Response>, bool) {
+    serve_line(line, identity, answers, greeted)
+}
+
 /// Answer one line. Returns the reply to send, and whether to close after it.
 ///
 /// Split out from the socket so it can be tested without one: everything about
@@ -305,7 +330,7 @@ fn serve_line(
     // **`hello` must come first** (§7.3). A client that skips it has not agreed
     // a version, so anything the engine returned would be in a shape neither
     // side has promised.
-    if !*greeted && request.method != "hello" {
+    if !*greeted && request.method != method::HELLO {
         let e = RpcError::invalid_request(format!(
             "the first message must be hello, got {:?}",
             request.method
@@ -313,8 +338,19 @@ fn serve_line(
         return (Some(Response::err(id, e)), true);
     }
 
-    let outcome = if request.method == "hello" {
-        match hello(&request, identity, answers) {
+    // **The one parse boundary** (I4, §7.5). After this line the method is a
+    // type: nothing below matches on a string or reaches into a `Value`.
+    let call = match Call::of(&request.method, request.params) {
+        Ok(call) => call,
+        // **A notification gets silence even when it is wrong** (§7.2). The
+        // boundary refusing an unknown method is still a refusal of something
+        // that asked for no answer, and replying anyway would send a response
+        // carrying `"id": null` that no client has anywhere to put.
+        Err(e) => return ((!notification).then(|| Response::err(id, e)), false),
+    };
+
+    let outcome = if let Call::Hello(params) = &call {
+        match hello(params, identity, answers) {
             Ok(result) => {
                 *greeted = true;
                 Ok(result)
@@ -327,7 +363,7 @@ fn serve_line(
             }
         }
     } else {
-        answers.call(&request.method, request.params)
+        answers.call(call)
     };
 
     if notification {
@@ -342,15 +378,10 @@ fn serve_line(
 
 /// The handshake.
 fn hello(
-    request: &Request,
+    params: &HelloParams,
     identity: &Identity,
     answers: &dyn Answers,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: HelloParams = match &request.params {
-        Some(v) => serde_json::from_value(v.clone())
-            .map_err(|e| RpcError::invalid_params("params", format!("not a hello: {e}")))?,
-        None => return Err(RpcError::invalid_params("params", "hello needs a protocol")),
-    };
     version::accept(&params.protocol)
         .map_err(|e| RpcError::invalid_params("protocol", e.to_string()))?;
 
@@ -380,16 +411,8 @@ mod tests {
         fn now_ns(&self) -> i64 {
             1_234
         }
-        fn call(
-            &self,
-            method: &str,
-            _: Option<serde_json::Value>,
-        ) -> Result<serde_json::Value, RpcError> {
-            if method == "echo" {
-                Ok(serde_json::json!("echo"))
-            } else {
-                Err(RpcError::method_not_found(method))
-            }
+        fn call(&self, request: Call) -> Result<serde_json::Value, RpcError> {
+            Ok(serde_json::json!(request.method()))
         }
     }
 
@@ -515,12 +538,8 @@ mod over_a_real_socket {
         fn now_ns(&self) -> i64 {
             0
         }
-        fn call(
-            &self,
-            m: &str,
-            _: Option<serde_json::Value>,
-        ) -> Result<serde_json::Value, RpcError> {
-            Err(RpcError::method_not_found(m))
+        fn call(&self, request: Call) -> Result<serde_json::Value, RpcError> {
+            Err(RpcError::method_not_found(request.method()))
         }
     }
 
