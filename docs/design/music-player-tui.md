@@ -4834,6 +4834,39 @@ Append here as decisions are made. Format: date, decision, rationale.
   Recorded here because §1 is the list of decisions and this revises how the whole of it is read, which is exactly the
   kind of change CLAUDE.md says must not happen on a whim.
 
+- **2026-09-12** **A deck is selected on the wire and resolved at the boundary; the player is a deck plus a queue**
+  (#224, `transport-keymap-spec.md` O-4, O-7, O-8).
+
+  **`DeckSel` goes in and `DeckId` comes out.** The wire and the keymap accept `Focused | Other | Id | All`; the engine
+  resolves it against control-state focus at the parse boundary, and nothing downstream — control state, the RT
+  schedule, the performance log — ever sees anything but a concrete `DeckId`. That is §12's "parse at the boundary"
+  applied to a selector rather than to a string.
+
+  It reconciles two things that looked opposed. D-5 is right that focus must be engine state: two views each tracking
+  their own make "the focused deck" resolve differently per sender, with no good failure mode. §7.5's sketch is right
+  that everything downstream carries `DeckId`. They are the same design seen from either side of one resolution point.
+
+  **Two arguments settled it, and neither was in the original spec.** §15 phase 8 exits on "record a mix, then replay
+  its performance log to identical audio", and §12.3 logs every _applied_ `PerfEvent` — so a recorded `Focused` replayed
+  under different focus produces different audio, and replay determinism forbids an unresolved selector in anything
+  persisted. And §5.1 forbids the MIDI input thread from going through the control thread or the socket, so a focus
+  living in a view is unreachable from a controller at all: D-5's concern is not only about two TUIs disagreeing.
+
+  Consequences: focus is control state (§6) and needs a `decks` event so views can render it, and `All` resolves to a
+  set applied as **one** act rather than a loop — D-7's idempotence requirement is about exactly that.
+
+  **The player is a deck plus a queue, and `audio::State` is not touched yet.** D-9 argues for two running states plus
+  `Armed`, and the argument is about a deck. The shipped `audio::State` is about the single player stream, is read by
+  the render step every buffer under I2, and carries a meaning a deck has no concept of: "stopped" is the queue not
+  advancing. §7.8 already models the two separately — "transport state for the main player _and each deck_".
+
+  So `RunState { Paused, Armed { at }, Running }` is a new deck-side type arriving with quantize in phase 6, and
+  `audio::State` changes when something can actually produce an `Armed` — not before. Changing an RT-adjacent enum for a
+  state nothing can reach is the opposite of how this project has earned its other changes.
+
+  D-14's unification survives intact: cue is one verb across both because the default cue point is the track start,
+  which is a statement about the _verb_, not about the run-state enum.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

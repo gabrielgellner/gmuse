@@ -334,42 +334,46 @@ Splitting the number row in half for cue points is the one near-universal conven
 - **O-3.** Is `SnapBack` a property of the jump, or a separate slip-mode flag on the deck that modifies all jumps?
   Serato and Traktor model it as deck state; the axis decomposition models it per command. Per-command is more
   composable but may surprise.
-- **O-4.** Does player mode need its own deck concept at all, or is it deck mode with one deck and a different unit
-  table?
+- **O-4. Decided (#224, Decision Log 2026-09-12): the player is a deck plus a queue.** The deck-level transport is
+  shared; the queue sits above it. "Stopped" is a queue-level condition — the queue not advancing — which a deck has no
+  concept of, and §7.8 already models the two separately as "the main player _and each deck_".
 
 ### Integration with what already ships
 
 Four names in this document are already taken. None of these is an argument against the reasoning above; each is a
 decision about which declaration wins.
 
-- **O-5. `When` is already defined, and more richly** (§10.1). The shipped design has six variants — `Now`,
-  `Frame(FrameTime)`, `TrackFrame`, `NextBeat { deck }`, `NextBar { deck }`, `Beat { deck, index }` — resolved by the RT
-  callback against a beat grid delivered with the deck buffer, and scoped to a `stream_generation` so a stale schedule
-  is refused rather than reinterpreted (#212). This document's `When { Now, NextBoundary(Quantize) }` is the same idea
-  one level coarser. **Recommendation: §10.1's declaration stands**, and D-13's mode-level quantize default becomes the
-  thing that _chooses_ which §10.1 variant a binding sends, rather than a second enum. D-12 is unaffected and is in fact
-  §10.1's stated reason for RT-side resolution.
+All four are now decided. They are kept here with their reasoning rather than deleted, because the reasoning is what
+makes them re-checkable.
 
-- **O-6. `Command` is already taken twice.** `gmuse::cmd::Command` is the `:` line's language — 63 variants, shipping,
-  and already carrying `Play`, `Pause`, `Stop`, `Next`, `Prev`, `Seek`, `Vol`. §7.5 separately sketches a wire `Command`
-  for the protocol. This document proposes a third. **Recommendation: there are two, not three** — the text language
-  (`cmd::Command`, parsed by `cmd::parse`, which I4 requires be the only textual parser) and the wire (§7.5's), with
-  this document's `Transport(DeckSel, Transport)` becoming a family inside the latter. The keymap binds to the wire
-  form; `cmd.exec_line` parses text into it.
+- **O-5. Decided: §10.1's declaration stands.** `When` is already defined, and more richly (§10.1). The shipped design
+  has six variants — `Now`, `Frame(FrameTime)`, `TrackFrame`, `NextBeat { deck }`, `NextBar { deck }`,
+  `Beat { deck, index }` — resolved by the RT callback against a beat grid delivered with the deck buffer, and scoped to
+  a `stream_generation` so a stale schedule is refused rather than reinterpreted (#212). This document's
+  `When { Now, NextBoundary(Quantize) }` is the same idea one level coarser. **Recommendation: §10.1's declaration
+  stands**, and D-13's mode-level quantize default becomes the thing that _chooses_ which §10.1 variant a binding sends,
+  rather than a second enum. D-12 is unaffected and is in fact §10.1's stated reason for RT-side resolution.
 
-- **O-7. Dropping `Stopped` touches the RT callback.** D-9 and D-10 collapse to two running states and derive stop from
-  cue. `audio::State` ships as `Stopped | Playing | Paused`, is read by the render step every buffer, and appears in
-  §7.8's `playback` event payload. The argument for two states is about a _deck_; the shipped enum is about the single
-  player stream, and O-4 is the question of whether those are the same thing. **Decide O-4 first** — if player mode is
-  deck mode with one deck, `audio::State` is revised and §7.8's payload with it; if not, `RunState` is a new deck type
-  and `audio::State` is untouched.
+- **O-6. Decided: two enums, not three.** `Command` is already taken twice. `gmuse::cmd::Command` is the `:` line's
+  language — 63 variants, shipping, and already carrying `Play`, `Pause`, `Stop`, `Next`, `Prev`, `Seek`, `Vol`. §7.5
+  separately sketches a wire `Command` for the protocol. This document proposes a third. **Recommendation: there are
+  two, not three** — the text language (`cmd::Command`, parsed by `cmd::parse`, which I4 requires be the only textual
+  parser) and the wire (§7.5's), with this document's `Transport(DeckSel, Transport)` becoming a family inside the
+  latter. The keymap binds to the wire form; `cmd.exec_line` parses text into it.
 
-- **O-8. `DeckSel` on the wire contradicts §7.5.** D-5 argues focus is engine state because two views with their own
-  focus make `Focused` resolve differently per sender — which is right, and is the same reasoning §6 uses to put control
-  state on the control thread. But §7.5's sketch passes an explicit `deck: DeckId` in every deck method, which puts the
-  resolution in the view. **The two cannot both stand.** D-5's argument is the stronger one and the protocol sketch is
-  explicitly illustrative, but this is a wire-visible choice and method names are public API (§7.4), so it wants
-  deciding before `deck.*` is implemented rather than after.
+- **O-7. Decided: `audio::State` is not touched yet.** Dropping `Stopped` touches the RT callback. D-9 and D-10 collapse
+  to two running states and derive stop from cue. `audio::State` ships as `Stopped | Playing | Paused`, is read by the
+  render step every buffer, and appears in §7.8's `playback` event payload. The argument for two states is about a
+  _deck_; the shipped enum is about the single player stream, and O-4 is the question of whether those are the same
+  thing. **Decide O-4 first** — if player mode is deck mode with one deck, `audio::State` is revised and §7.8's payload
+  with it; if not, `RunState` is a new deck type and `audio::State` is untouched.
+
+- **O-8. Decided: `DeckSel` goes in, `DeckId` comes out.** D-5 argues focus is engine state because two views with their
+  own focus make `Focused` resolve differently per sender — which is right, and is the same reasoning §6 uses to put
+  control state on the control thread. But §7.5's sketch passes an explicit `deck: DeckId` in every deck method, which
+  puts the resolution in the view. **The two cannot both stand.** D-5's argument is the stronger one and the protocol
+  sketch is explicitly illustrative, but this is a wire-visible choice and method names are public API (§7.4), so it
+  wants deciding before `deck.*` is implemented rather than after.
 
 ---
 

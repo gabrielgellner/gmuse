@@ -356,12 +356,12 @@ The RT callback drains `ctl_ring` and `perf_ring` once per callback, in a fixed 
 
 ## 6. State ownership
 
-| Kind                  | Owner          | Changed by                                                         | Examples                                                                                                                                                                                        |
-| --------------------- | -------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Control state**     | Control thread | Protocol commands                                                  | Library snapshot pointer, the queue, playlists, `aaa_mode`, which recording is loaded on each deck, cue points, loops (as data), automation lanes, MIDI mapping table, settings, output routing |
-| **Performance state** | RT callback    | Performance plane, automation lanes, and control-plane `param.set` | Fader and crossfader positions, EQ bands, deck rate, pitch bend and jog, gain, cue-bus selection                                                                                                |
-| **Library state**     | Librarian      | Named operations (§8.4), and facts the player emits                | The fact log, the projection folded from it, holdings, the read cache. The control thread holds an `Arc` to the projection and nothing more.                                                    |
-| **View state**        | Each view      | That view's own input                                              | Cursor, selection, scroll, which cmus-style view is shown, fuzzy-filter text and nucleo matcher state, keymap, pending modal state                                                              |
+| Kind                  | Owner          | Changed by                                                         | Examples                                                                                                                                                                                                                          |
+| --------------------- | -------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Control state**     | Control thread | Protocol commands                                                  | Library snapshot pointer, the queue, playlists, `aaa_mode`, which recording is loaded on each deck, **which deck is focused** (#224), cue points, loops (as data), automation lanes, MIDI mapping table, settings, output routing |
+| **Performance state** | RT callback    | Performance plane, automation lanes, and control-plane `param.set` | Fader and crossfader positions, EQ bands, deck rate, pitch bend and jog, gain, cue-bus selection                                                                                                                                  |
+| **Library state**     | Librarian      | Named operations (§8.4), and facts the player emits                | The fact log, the projection folded from it, holdings, the read cache. The control thread holds an `Arc` to the projection and nothing more.                                                                                      |
+| **View state**        | Each view      | That view's own input                                              | Cursor, selection, scroll, which cmus-style view is shown, fuzzy-filter text and nucleo matcher state, keymap, pending modal state                                                                                                |
 
 Consequences:
 
@@ -508,6 +508,19 @@ pub enum Command {
 
 The exact serde attributes (for example adjacent tagging on `method`/`params`) are left to the implementer. The
 constraints are that method names are stable strings and parsing happens in exactly one place.
+
+**A deck is named by a `DeckSel` on the wire and by a `DeckId` below it** — #224, and `transport-keymap-spec.md` D-3 to
+D-5. The sketch above writes `deck: DeckId` in every deck method, which is right about everything downstream and wrong
+about the wire: a view cannot resolve "the focused deck" without holding focus itself, and two attached views holding
+their own make the same command mean different things depending on which one sent it.
+
+So the wire accepts `Focused | Other | Id(DeckId) | All`, and the engine resolves it against control-state focus at the
+parse boundary (I4). Everything after that point — control state, the RT schedule, the performance log — carries a
+concrete `DeckId`, which is what keeps §15 phase 8's "replay to identical audio" true: a persisted `Focused` would
+replay against whatever focus happened to be current. `All` resolves to a set and is applied as one act, not a loop,
+because `All` + `Pause` must be idempotent.
+
+Focus is therefore control state (§6), and a `decks` event carries it so views can render what they no longer own.
 
 ### 7.6 Identity on the wire
 
