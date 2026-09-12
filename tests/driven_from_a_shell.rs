@@ -497,6 +497,15 @@ fn start_with_a_track(name: &str) -> (Engine, String) {
         ])
         .arg(&track)
         .env("XDG_DATA_HOME", dir.join("xdg"))
+        // **Run it from the scratch directory, not from the repository.**
+        //
+        // `import --write` *places* a file — moves it into
+        // `{file_under}/{album}/{track} {title}` — and with `--no-config` there
+        // is no configured storage root, so the tree is rooted at the working
+        // directory (#231). Without this the suite left `Unknown Artist/tone.wav`
+        // in the repo on every `just ci`, and the first time it did I committed
+        // it.
+        .current_dir(&dir)
         .output()
         .expect("run shelf import");
     assert!(
@@ -533,9 +542,14 @@ fn start_with_a_track(name: &str) -> (Engine, String) {
         .env("GMUSE_SOCKET", &socket)
         .env("GMUSE_DATA_DIR", &data)
         // **Roots matter here, unlike every other test.** The librarian's
-        // locators come from the scan, so an engine with no roots can resolve a
+        // locators come from the scan, so an engine with no roots resolves every
         // recording to nothing and `player.load` finds nothing to play.
-        .env("GMUSE_ROOTS", dir.join("lib"))
+        //
+        // The whole scratch directory rather than `lib/`, because the import
+        // *placed* the file: it now lives under `Unknown Artist/` beside `lib/`,
+        // and a root pointing at where the file used to be finds an empty
+        // library and a test that fails for the wrong reason.
+        .env("GMUSE_ROOTS", &dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
