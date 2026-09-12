@@ -390,6 +390,17 @@ pub struct Ui {
     ///
     /// Meaningless when playback is in this process, where nothing says it.
     followed: Option<Id<Recording>>,
+    /// **Where a fact goes when this view cannot append it** — #236, I15.
+    ///
+    /// The second of two doors, tried in order by [`record`]: the desk's appender
+    /// first, this next. `None` in the ordinary case, where the desk *is* the
+    /// appender and there is no engine to ask.
+    ///
+    /// A *separate* connection from the one `Remote` holds, and not an oversight:
+    /// a `Client` has one `Receiver<Event>`, so two readers of one client would
+    /// steal each other's events. Transport and library are two subscriptions, so
+    /// they get two sockets, which the engine is built to serve.
+    pub engine: Option<std::sync::Arc<gmuse_client::Client>>,
     /// A restored track has been loaded but its seek has not landed yet.
     ///
     /// Loading emits `Loaded`, which is a save point — and at that instant the
@@ -630,6 +641,7 @@ impl Ui {
             data_dir: None,
             counted_current: false,
             followed: None,
+            engine: None,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
@@ -921,6 +933,7 @@ where
         }
         drain_player_events(ui, ctx);
         follow_the_engine(ui, ctx);
+        follow_the_library(ui);
         serve_remote(ui, ctx);
         note_play_progress(ui, ctx);
         audit_underruns(ui, ctx);
@@ -979,6 +992,58 @@ fn serve_remote(ui: &mut Ui, ctx: &Context<'_>) {
         *slot = crate::remote::Status { track, ..next };
         ui.remote_track = ui.playback.current;
     }
+}
+
+/// **Read the log again when the engine says there is more of it** — #236, §8.7.
+///
+/// An attached view holds a reading desk (#219): the engine appends and this view
+/// folds. Which means its fold goes stale the moment anybody writes — including
+/// this view itself, whose ratings now travel through [`propose`] and come back
+/// the same way as another client's.
+///
+/// **Coalesced, because a change can arrive several times.** A scan publishes on
+/// start and again with its result, and `Event::coalesce` already joins what the
+/// engine queued; draining the rest here means one re-read per batch rather than
+/// one per event. On the live library a re-read is ~0.17s to parse and ~0.15s to
+/// fold, so the difference between one and five is the difference between a beat
+/// and a pause.
+///
+/// **`Stop::Refold` is the door**, not a refresh in place. The shelf is a
+/// projection of the librarian and `main` owns the borrow, which is the whole
+/// reason the loop hands back a reason rather than acting (#120).
+fn follow_the_library(ui: &mut Ui) {
+    let Some(client) = ui.engine.clone() else {
+        return;
+    };
+    let mut heard = 0;
+    let mut scope = None;
+    // `try_iter`, not `for`: the channel stays open for the program's life, so
+    // iterating it would block the draw loop here.
+    for event in client.events().try_iter() {
+        if event.topic != gmuse_proto::Topic::Library {
+            continue;
+        }
+        heard += 1;
+        scope = event.body["scope"].as_str().map(str::to_string).or(scope);
+    }
+    if heard == 0 {
+        return;
+    }
+    ui.audit.line(
+        "library",
+        &format!(
+            "{heard} change(s) from the engine, scope {}",
+            scope.as_deref().unwrap_or("unsaid")
+        ),
+    );
+    ui.desk.reread();
+    // Waited on, for the same reason the local path waits: a rating that has been
+    // taken must be on screen, and a rating that has not been recorded must not
+    // be. The cost is the re-read, on the librarian thread, and this is the only
+    // place a view pays it.
+    ui.desk.settled();
+    ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
+    ui.stop = Some(Stop::Refold);
 }
 
 /// **Adopt what the engine says is playing** — #219, §7.8.
@@ -1157,27 +1222,17 @@ pub fn record(
     if ui.data_dir.is_none() {
         return;
     }
-    // **Asked of the desk, not of a flag** — #219, I15, §4.4.
+    // **Two doors, asked in order** — #219, #236, I15, §4.4.
     //
-    // A view attached to an engine holds a reading desk, and a reading desk has
-    // no appender. Before this the guard here was `if ui.attached`, which is a
-    // bool standing in for a type: it happened to cover the only `say` in the UI
-    // and would not have covered the next one. `Desk::appender` makes the
-    // question unavoidable, because there is nothing to call.
+    // The desk's appender first. A view attached to an engine has none: §4.4 makes
+    // the librarian the process's single appender, and `Desk::appender` returning
+    // an `Option` is what makes that unavoidable rather than remembered.
     //
-    // Routing these over `library.edit` is what lets an attached view rate
-    // again, and that is #236: the method carries a rating today and not a play,
-    // and `say` takes a *closure*, which cannot cross a socket, so each of the
-    // eleven call sites has to name its operation instead.
-    //
-    // Said out loud every time on purpose: a rating that silently vanished is
-    // the failure worth being noisy about.
+    // Then the socket, where the engine appends on this view's behalf. What
+    // crosses is the *facts* — see [`propose`], which is where the closure stops
+    // being a closure.
     let Some(appender) = ui.desk.appender() else {
-        ui.notify("attached: the engine owns the log, so this was not recorded (#236)");
-        ui.audit.line(
-            "record",
-            "refused: a reading desk has nothing to append with",
-        );
+        propose(ui, say);
         return;
     };
     appender.say(say);
@@ -1191,6 +1246,71 @@ pub fn record(
     // the fold's semantics rather than a slice of it.
     ui.desk.settled();
     ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
+}
+
+/// **Ask the engine to append what this view would have** — #236, I15.
+///
+/// ## How a closure becomes a message
+///
+/// `record` takes `impl FnOnce(&mut Instance)`, which cannot cross a socket. But
+/// every one of those closures is a *pure producer*: each calls `Instance`
+/// methods that are one `append` each and read nothing back. So running it
+/// against a throwaway `Instance` and taking what it appended yields exactly the
+/// facts it would have written — which is why none of the ten call sites had to
+/// change, and why this is one function rather than ten wire methods.
+///
+/// That property is load-bearing rather than lucky, and
+/// `the_closures_record_takes_only_ever_append` is what keeps it true: a closure
+/// that started *reading* the log would silently propose the wrong thing here.
+///
+/// ## No stamp crosses
+///
+/// The scratch instance stamps what it mints and those stamps are dropped. A
+/// stamp says which device said something and in what order, and one machine's
+/// log has one device id — a client minting its own would be the contradiction
+/// #219 took the appender away from a view to avoid. The engine stamps with its
+/// own clock when it appends.
+///
+/// ## It waits, briefly
+///
+/// §7.4 says a result means *accepted*, not executed, so the wait is for the
+/// engine to take the facts and not for them to land. It is bounded because this
+/// is the draw thread: a wedged engine must not freeze the screen.
+fn propose(ui: &mut Ui, say: impl FnOnce(&mut crate::model::instance::Instance)) {
+    let Some(client) = ui.engine.clone() else {
+        // Neither door. Reachable only from a test that built a reading desk
+        // without an engine, and said rather than silently dropped.
+        ui.notify("nowhere to record this: no appender and no engine");
+        return;
+    };
+
+    let mut scratch = crate::model::instance::Instance::new(ui.desk.device());
+    say(&mut scratch);
+    let facts: Vec<&crate::facts::Fact> = scratch.records().iter().map(|r| &r.fact).collect();
+    if facts.is_empty() {
+        return;
+    }
+    let counted = facts.len();
+    let params = serde_json::json!({ "facts": facts });
+
+    match client.call_within(
+        gmuse_proto::request::LibraryOp::Edit.method(),
+        Some(params),
+        std::time::Duration::from_secs(2),
+    ) {
+        Ok(_) => {
+            ui.audit
+                .line("record", &format!("{counted} fact(s) sent to the engine"));
+            // **Nothing is refreshed here.** The engine publishes a `library`
+            // event when the facts land, and `follow_the_library` is what acts on
+            // it — so what the screen shows comes from the log rather than from
+            // this view assuming its own write succeeded.
+        }
+        Err(e) => {
+            ui.notify(format!("the engine did not take it: {e}"));
+            ui.audit.line("record", &format!("refused: {e}"));
+        }
+    }
 }
 
 /// Say what a background scan found, once it has finished.
@@ -10366,20 +10486,99 @@ mod tests {
         assert_eq!(ui.playback.scope, crate::next::Scope::Inner);
     }
 
-    /// **A reading desk has nothing to append with, and the refusal says so** —
-    /// I15, §4.4.
+    /// **Every closure `record` takes only appends** — #236, and this is the
+    /// property [`propose`] stands on.
     ///
-    /// Its log file is the engine's: `durable::log_path` is one file per device
-    /// and the device comes from `machine_id`, so two processes on one machine
-    /// are one file with two watermarks and two stamp counters. Routing these
-    /// over `library.edit` is #236; until then a refusal that is *visible* is the
-    /// honest shape, because a rating that silently vanished is the worse
-    /// failure.
+    /// `propose` runs the closure against a throwaway `Instance` and sends what it
+    /// appended. That is exact only while the closures are pure producers: one
+    /// that *read* the log before deciding — "rate this unless it is already
+    /// rated" — would read an empty scratch instance and propose the wrong thing,
+    /// silently, on the attached path only.
     ///
-    /// What this pins is that the refusal is structural rather than a flag: the
-    /// desk below is a real `read_only` one, not a `Ui` field set to `true`.
+    /// So the vocabulary is fixed here rather than trusted. A closure calling
+    /// something new fails this, and the question it asks is whether the new
+    /// method reads. The companion is
+    /// `gmuse_library`'s `an_append_says_the_same_thing_whatever_the_log_holds`,
+    /// which is what establishes that these particular methods do not.
     #[test]
-    fn a_reading_desk_refuses_to_append_rather_than_dropping_the_fact() {
+    fn the_closures_record_takes_only_ever_append() {
+        /// What an `Instance` method on this list is: one or more `append`s and no
+        /// read of what is already there.
+        const PURE: &[&str] = &[
+            "rate",
+            "play_maybe",
+            "name_collection",
+            "add_to_collection",
+            "remove_from_collection",
+            "save_view",
+            "froze",
+            "assert_concept",
+            // Only reached from tests, which build their own facts directly.
+            "append_fact",
+            "merge",
+        ];
+
+        let text = std::fs::read_to_string("src/ui/mod.rs").expect("src/ui/mod.rs");
+        let mut found = 0;
+        let mut strangers = Vec::new();
+        for (at, _) in text.match_indices("record(") {
+            // Skip the definitions and the unrelated `undo.record`.
+            let before = &text[at.saturating_sub(20)..at];
+            if before.ends_with("fn ") || before.ends_with("undo.") || before.ends_with('_') {
+                continue;
+            }
+            // The closure body runs to the matching paren of this call.
+            let rest = &text[at + "record(".len()..];
+            let mut depth = 1usize;
+            let mut end = 0;
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let body = &rest[..end];
+            if !body.contains("log.") {
+                continue;
+            }
+            found += 1;
+            for (m, _) in body.match_indices("log.") {
+                let name: String = body[m + 4..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !PURE.contains(&name.as_str()) {
+                    strangers.push(name);
+                }
+            }
+        }
+        assert!(found >= 10, "the call sites were not found: {found}");
+        assert!(
+            strangers.is_empty(),
+            "these are called inside a `record` closure and are not known to be \
+             pure appends, so `propose` may be harvesting the wrong facts: {strangers:?}"
+        );
+    }
+
+    /// **Neither door, and it says so rather than dropping the fact** — #236.
+    ///
+    /// `record` tries the desk's appender, then the engine. A reading desk with no
+    /// engine is the one shape that can do neither — reachable from a test, and
+    /// from a launch where `attach` connected for playback and the second
+    /// connection failed, which `main` warns about and does not treat as fatal.
+    ///
+    /// It must be loud. A rating that silently vanished is the failure worth
+    /// making noise about, and the round trip that replaces this refusal in the
+    /// ordinary case is `a_view_that_cannot_append_proposes_a_rating_and_reads_it_back`.
+    #[test]
+    fn with_no_appender_and_no_engine_a_fact_is_refused_out_loud() {
         let store = fixture();
         let mut ui = ui_of(&store, true);
         ui.data_dir = Some(std::env::temp_dir().join("gmuse-attached-no-append"));
@@ -10389,23 +10588,25 @@ mod tests {
             Default::default(),
             device,
             0,
+            std::env::temp_dir().join("gmuse-attached-no-append"),
         );
         assert!(
             ui.desk.appender().is_none(),
             "a reading desk is the thing being tested"
         );
+        assert!(ui.engine.is_none(), "and there is nowhere else to send it");
 
         record(&mut ui, 100, move |log| {
             log.rate(100, Id::derived(b"x"), Some(5));
         });
         assert!(
-            ui.status.contains("#236"),
-            "it said so, pointing at where it is fixed: {:?}",
+            ui.status.contains("nowhere to record"),
+            "it said so: {:?}",
             ui.status
         );
 
-        // **And the other side of the branch**, or the assertion above would
-        // pass on a `record` that refused unconditionally.
+        // **And the other side of the branch**, or the assertion above would pass
+        // on a `record` that refused unconditionally.
         let mut local = ui_of(&store, true);
         local.data_dir = ui.data_dir.clone();
         record(&mut local, 100, move |log| {

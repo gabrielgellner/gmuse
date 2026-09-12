@@ -2051,7 +2051,13 @@ fn run_tui(
     // no `Appender`, and the three places that used to ask `if attached` — the
     // scan below, `:rescan`, and `ui::record` — now ask for one and get `None`.
     let desk = if app.player.attached() {
-        gmuse::librarian::Desk::read_only(log, app.store.clone(), device, now_ms)
+        gmuse::librarian::Desk::read_only(
+            log,
+            app.store.clone(),
+            device,
+            now_ms,
+            loaded.data_dir.clone(),
+        )
     } else {
         gmuse::librarian::Desk::open(
             log,
@@ -2147,6 +2153,32 @@ fn run_tui(
         remote: server.as_ref(),
     };
     let mut state = gmuse::ui::Ui::new(library);
+    // **The library connection, separate from the transport's** — #236.
+    //
+    // A `Client` has one `Receiver<Event>`, so two readers of one connection
+    // would steal each other's events — `Remote` already has a thread on
+    // `playback`. Two subscriptions get two sockets, which is what the engine is
+    // built to serve and what §7.10 makes cheap (a disconnect is a non-event).
+    //
+    // The engine is certainly up by now: `Playback::Attached` only exists because
+    // `attach` connected to one.
+    if app.player.attached() {
+        match gmuse::engine::attach::attach("gmuse-tui-library", env!("CARGO_PKG_VERSION")) {
+            Ok(client) => {
+                let client = std::sync::Arc::new(client);
+                if let Err(e) = client.subscribe(&[gmuse_proto::Topic::Library]) {
+                    eprintln!("library: cannot follow the engine's changes: {e}");
+                } else {
+                    state.engine = Some(client);
+                }
+            }
+            // **Not fatal, and said.** Without it the view still reads and still
+            // plays; what it loses is writing and noticing. Refusing to start
+            // would be worse than starting degraded, and silence would be worse
+            // than both.
+            Err(e) => eprintln!("library: cannot reach the engine to write: {e}"),
+        }
+    }
     state.playlists = loaded.playlists.clone();
 
     // Opened before the terminal is taken over, so a failure is visible.
@@ -2693,49 +2725,93 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
             rows.recording_of(id)
         }
 
-        /// `library.edit` — the facts a view emits directly.
+        /// **Proposed facts, each checked before any is appended** — #236, §8.4.
+        ///
+        /// The method's own summary is "the facts a view emits directly", and this
+        /// is that literally: a view sends the facts, the engine decides. It
+        /// replaces a `{recording, stars?}` shape whose error message already said
+        /// "in this build" — one rating-shaped call could not carry the ten
+        /// gestures the TUI has, and a method per gesture would be ten methods to
+        /// keep in step with `Fact`.
+        ///
+        /// **The wire form is the log form**, `{"RecordingRated": {…}}`, and that
+        /// coupling is worth naming: renaming a fact is a protocol change. In
+        /// exchange, a fact read out of `gmuse events` and a fact written here are
+        /// the same text, which is what makes the pair debuggable by eye.
+        ///
+        /// **`Fact::is_an_edit` is the gate.** A client may not propose what it did
+        /// not observe — a measurement, an import's reading of a file, one
+        /// machine's holdings — and that function explains each refusal group.
         fn edit(
             &self,
             params: serde_json::Value,
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
             use gmuse_proto::RpcError;
 
+            /// A batch has to be bounded, and this is generous: `:collect` over a
+            /// large selection is the biggest real one, and it writes two facts per
+            /// recording.
+            const MOST: usize = 20_000;
+
             #[derive(serde::Deserialize)]
-            struct Rate {
-                recording: String,
-                /// `None` clears the rating, which is a different act from
-                /// rating it zero and the model already distinguishes them.
-                #[serde(default)]
-                stars: Option<u8>,
+            struct Edit {
+                facts: Vec<gmuse::facts::Fact>,
             }
 
-            let Ok(rate) = serde_json::from_value::<Rate>(params) else {
+            let Ok(edit) = serde_json::from_value::<Edit>(params) else {
                 return Err(RpcError::invalid_params(
-                    "params",
-                    "library.edit takes {recording, stars?} in this build",
+                    "facts",
+                    "library.edit takes {facts: [...]}, in the log's own encoding",
                 ));
             };
-            let Ok(recording) = rate.recording.parse::<uuid::Uuid>() else {
+            if edit.facts.is_empty() {
+                return Err(RpcError::invalid_params("facts", "nothing to append"));
+            }
+            if edit.facts.len() > MOST {
                 return Err(RpcError::invalid_params(
-                    "recording",
-                    format!("{:?} is not a recording id", rate.recording),
+                    "facts",
+                    format!("{} facts is more than {MOST} in one call", edit.facts.len()),
                 ));
-            };
-            if rate.stars.is_some_and(|n| n > 5) {
-                return Err(RpcError::invalid_params("stars", "a rating is 0 to 5"));
             }
 
-            let recording = gmuse::model::id::Id::from_uuid(recording);
-            let stars = rate.stars;
+            // **Every one, before any of them.** A half-applied batch would leave
+            // a collection somebody named with none of its members — the same
+            // failure `edit.rs` refuses for a mistyped view document, where
+            // nothing is applied rather than half of it.
+            for (nth, fact) in edit.facts.iter().enumerate() {
+                if !fact.is_an_edit() {
+                    return Err(RpcError::invalid_params(
+                        "facts",
+                        format!("fact {nth} is not one a view may propose"),
+                    )
+                    .with_data(serde_json::json!({
+                        "at": nth,
+                        "reason": "a view proposes what it observed; this one comes from an \
+                                   import, a scan, a measurement or a curated vocabulary",
+                    })));
+                }
+            }
+
+            let counted = edit.facts.len();
+            let facts = edit.facts;
             let now = gmuse::history::now_ms();
 
-            // **Through the desk, which is the only door.** Nothing here
-            // touches the log: the closure runs on the librarian thread (I16),
-            // and the event a view sees comes from what that thread publishes.
-            self.appender()
-                .say(move |log| log.rate(now, recording, stars));
+            // **Through the desk, which is the only door.** Nothing here touches
+            // the log: the closure runs on the librarian thread (I16), and the
+            // event a view sees comes from what that thread publishes.
+            //
+            // Stamped *here*, by the appender's clock, and a proposal carries no
+            // stamp at all. A stamp says which device said something and in what
+            // order; a client minting its own would put a second device id in one
+            // machine's log, which is the contradiction #219 avoided by taking the
+            // appender away from a view.
+            self.appender().say(move |log| {
+                for fact in facts {
+                    log.append_fact(now, fact);
+                }
+            });
 
-            Ok(serde_json::json!({ "accepted": true, "recording": recording.to_string() }))
+            Ok(serde_json::json!({ "accepted": true, "facts": counted }))
         }
     }
 

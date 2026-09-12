@@ -4867,6 +4867,47 @@ Append here as decisions are made. Format: date, decision, rationale.
   D-14's unification survives intact: cue is one verb across both because the default cue point is the track start,
   which is a statement about the _verb_, not about the run-state enum.
 
+- **2026-09-12** **An attached view writes by proposing facts, and reads by re-reading** (#236, I15, §8.4).
+
+  The two halves of what `--attach` could not do. Both turned on finding the right thing to put on the wire.
+
+  **A closure cannot cross a socket, and it did not have to.** `ui::record` takes `impl FnOnce(&mut Instance)` and ten
+  gestures call it. Every one of those closures turned out to be a _pure producer_ — each `Instance` method it reaches
+  is one or more `append`s that read nothing back — so running the closure against a throwaway `Instance` and sending
+  what it appended is exactly what a local write would have produced. Ten call sites changed by zero lines, and the
+  alternative was ten wire methods to keep in step with `Fact`.
+
+  That property is load-bearing rather than lucky, so two tests hold it.
+  `an_append_says_the_same_thing_whatever_the_log_holds` runs the whole vocabulary against a log that already
+  contradicts every one of its answers, and `the_closures_record_takes_only_ever_append` fixes the vocabulary so a
+  closure that started _reading_ fails here rather than silently proposing the wrong thing on the attached path only.
+
+  **`library.edit` carries facts, in the log's own encoding.** Its summary always said "the facts a view emits
+  directly"; the `{recording, stars?}` shape was the stopgap and said so in its own error message. `Fact::is_an_edit` is
+  the gate, with a ratchet test so a new variant must decide rather than inherit a default, and a batch containing one
+  refused fact appends none of it. No stamp crosses — a stamp says which device said something, and #219 is the entry
+  about what happens when two processes claim one device id.
+
+  Writing that gate found a bug before it shipped. `Instance::assert_concept` emits **two** facts, the term and the
+  assertion, and the first cut refused `ConceptCatalogued` on the reasoning that the vocabulary is curated. An attached
+  `:assert` would then have failed as a whole batch on any term nobody had used before. What
+  `genre-hierarchy-is-curated` is about is the _shape_ — where a term sits — and `node_label: false` says this claims no
+  position. Caught by counting the facts rather than assuming one per call.
+
+  **Reading back is a re-read, and it is affordable.** Measured on the live log: 280,000 records parse in ~0.17s and
+  fold in ~0.15s, on the librarian thread. So a `library` event just means there is more log to read, and `Desk::reread`
+  merges the file and publishes the _difference_ — one `Touched` for a rating rather than a rebuild. Carrying the facts
+  on the event instead would avoid the parse and need a size guard and a second path; 0.32s in the background justified
+  neither.
+
+  **Two sockets, because a `Client` has one `Receiver<Event>`.** Transport and library are two subscriptions, and one
+  connection with two readers would have them stealing each other's events.
+
+  What is still not done is `Holdings`, and measuring it corrects something the entry below says. The librarian's rows
+  come from the log; which of them this device can _open_ comes from the store, and an attached view never scans. So it
+  depends on a cache a local launch wrote, and a machine that has only ever run attached can list a record and not reach
+  it. That is why `--attach` stays opt-in.
+
 - **2026-09-12** **A view attaches and playback stops being its own** (#219, I11, I15). `gmuse --attach` takes no audio
   device and no player lock: it loads by recording, learns what is playing from the `playback` topic, and its going away
   is not a stop. Two things had to move for that, and both were guards rather than features.
@@ -4882,12 +4923,19 @@ Append here as decisions are made. Format: date, decision, rationale.
   is why `outlives_this_view` guards the follow as well — without it, every ordinary launch would have `current` cleared
   on the first tick: audio still playing, status line saying nothing was on, and no test failing.
 
-  **What is not built is the write half, and it is named out loud rather than shipped quietly.** An attached view's
-  `Desk` points at the same log the engine's does, so a rating appended here would be two appenders on one file — which
-  §4.4 gives to the engine alone. So `record` refuses and says so, with the issue number in the message; the launch scan
-  does not run; `:rescan` goes over the wire. Its library is the fold it did at launch and does not follow the engine's
-  appends, because nothing subscribes it to `library` yet. #236 is both halves, and it is why `--attach` is opt-in:
-  making it the default would trade a working library manager for a working detach.
+  **And an attached view holds a reading desk, which is a capability rather than a flag.** I15 lets a view fold the log
+  directly — that is what keeps browsing off the socket — and does not let it add to the log. The reason is sharper than
+  a race: `durable::log_path` is one file per **device**, the device comes from `machine_id`, and `Stamp.device` is
+  documented as "the final tiebreak, so two devices cannot produce an equal stamp". Two processes on one machine would
+  be two appenders claiming to be one device, each with its own `flushed` watermark and its own counter inside the same
+  millisecond.
+
+  The first cut of this was `if ui.attached` inside `ui::record`, which happened to cover the only `say` in the UI and
+  would not have covered the next one. `Desk::read_only` has no `Appender`, and `Desk::appender` answers an `Option` —
+  the same shape `Context::gapless` uses, so a caller that wants to append has to say what it does when it cannot. Three
+  places that asked `if attached` now ask for an appender and get `None`: the launch scan, `:rescan`, and `record`.
+
+  What an attached view then does with a fact it cannot append is the entry above (#236).
 
 - **2026-09-12** **`aaa_mode` becomes `Scope`, because the three values are tree depths and not music** (#234).
 

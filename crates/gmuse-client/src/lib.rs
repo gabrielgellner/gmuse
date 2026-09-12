@@ -129,6 +129,31 @@ impl Client {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ClientError> {
+        self.ask(method, params, None)
+    }
+
+    /// The same, giving up after `within`.
+    ///
+    /// **For a caller that must not be held.** `call` waits as long as it takes,
+    /// which is right for `gmuse ctl` — a person can interrupt it — and wrong on
+    /// a draw thread, where a wedged engine would freeze the screen. The engine
+    /// makes the same argument to itself in `Bare::queue`, which bounds its wait
+    /// on the control thread for the same reason one layer in.
+    pub fn call_within(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        within: Duration,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.ask(method, params, Some(within))
+    }
+
+    fn ask(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        within: Option<Duration>,
+    ) -> Result<serde_json::Value, ClientError> {
         let id = Id::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = bounded(1);
         self.pending.lock().expect("pending").insert(id.clone(), tx);
@@ -150,12 +175,26 @@ impl Client {
             }
         }
 
-        match rx.recv() {
+        let heard = match within {
+            Some(limit) => rx.recv_timeout(limit).map_err(|e| {
+                // **Forget the correlation on the way out.** A timed-out call
+                // that left its sender in `pending` would leak an entry per
+                // give-up, and the reply — if it ever came — would be delivered
+                // to nobody while still looking outstanding.
+                self.pending.lock().expect("pending").remove(&id);
+                match e {
+                    crossbeam_channel::RecvTimeoutError::Timeout => ClientError::TimedOut(limit),
+                    crossbeam_channel::RecvTimeoutError::Disconnected => ClientError::Closed,
+                }
+            }),
+            None => rx.recv().map_err(|_| ClientError::Closed),
+        };
+        match heard {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(e)) => Err(ClientError::Refused(e)),
             // The reader thread dropped the sender, which it does when the
             // socket closes.
-            Err(_) => Err(ClientError::Closed),
+            Err(e) => Err(e),
         }
     }
 

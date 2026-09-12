@@ -304,7 +304,12 @@ fn a_read_only_operation_is_not_reachable_over_the_wire() {
 /// user's actual data directory, and a first attempt at this test appended a
 /// fabricated rating towards it.
 fn start_with_library(name: &str) -> (Engine, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("gmuse-222-{}-{name}", std::process::id()));
+    // A counter for the same reason `start_with_a_track` has one: the name was the
+    // only distinguishing part, and `remove_dir_all` below would take a parallel
+    // test's socket with it.
+    static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("gmuse-222-{}-{name}-{nth}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("data")).expect("scratch");
     let socket = dir.join("engine.sock");
@@ -356,7 +361,11 @@ fn a_fact_from_one_client_reaches_another_naming_what_changed() {
     editor
         .call(
             "library.edit",
-            Some(serde_json::json!({ "recording": recording, "stars": 4 })),
+            // **The log's own encoding on the wire** — #236. A fact read out of
+            // `gmuse events` and a fact written here are the same text.
+            Some(serde_json::json!({
+                "facts": [{ "RecordingRated": { "recording": recording, "stars": 4 } }]
+            })),
         )
         .expect("the edit is accepted");
 
@@ -382,6 +391,221 @@ fn a_fact_from_one_client_reaches_another_naming_what_changed() {
     );
 }
 
+/// **The round trip an attached view lives on** — #236, and both halves at once.
+///
+/// A reading desk (#219) cannot append, so a rating leaves as a proposal and comes
+/// back as a fold. This drives exactly the machinery `ui::propose` and
+/// `ui::follow_the_library` use, without a terminal:
+///
+/// 1. the view holds a `Desk::read_only` over the engine's data directory, and has
+///    never seen the rating;
+/// 2. the facts a `record` closure would have appended go out as `library.edit`;
+/// 3. the engine appends and publishes on `library`;
+/// 4. the view re-reads and the rating is *in its own projection*.
+///
+/// Step 4 is the one worth having a test for. Before it, an attached view's write
+/// was accepted by the engine and invisible on screen — which reads as the rating
+/// not having worked.
+#[test]
+fn a_view_that_cannot_append_proposes_a_rating_and_reads_it_back() {
+    let (engine, data) = start_with_library("roundtrip");
+
+    let client = Client::connect(&engine.socket, "view", "0").expect("connect");
+    client
+        .subscribe(&[gmuse_proto::Topic::Library])
+        .expect("subscribe");
+
+    let device = gmuse::model::id::Id::derived(b"the-view");
+    let song = gmuse::model::id::Id::<gmuse::model::entity::Recording>::derived(b"a song");
+    let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
+    let desk = gmuse::librarian::Desk::read_only(log, Default::default(), device, 0, data.clone());
+
+    assert!(desk.appender().is_none(), "this is the attached shape");
+    assert_eq!(
+        desk.current().listened.ratings.get(&song).copied(),
+        None,
+        "nothing has rated it yet"
+    );
+
+    // **What `ui::propose` does**: run the closure against a throwaway instance
+    // and send what it appended. No stamp crosses — the engine's clock stamps.
+    let mut scratch = gmuse::model::instance::Instance::new(device);
+    scratch.rate(1_000, song, Some(5));
+    let facts: Vec<_> = scratch.records().iter().map(|r| &r.fact).collect();
+    assert_eq!(facts.len(), 1, "one call, one fact");
+    client
+        .call("library.edit", Some(serde_json::json!({ "facts": facts })))
+        .expect("the engine takes it");
+
+    // **The engine says there is more to read.** §7.4: the result above meant
+    // accepted, not appended, so this is the part that means it landed.
+    let event = client
+        .next_event(Duration::from_secs(10))
+        .expect("a library event");
+    assert_eq!(event.topic, gmuse_proto::Topic::Library);
+    assert_eq!(
+        event.body["scope"], "ids",
+        "narrow, because a rating names its subject"
+    );
+
+    // **What `ui::follow_the_library` does.**
+    desk.reread();
+    desk.settled();
+    assert_eq!(
+        desk.current().listened.ratings.get(&song).copied(),
+        Some(5),
+        "the view's own projection never caught up with its own write"
+    );
+
+    // And the change it publishes is narrow, so a rating does not cost a rebuild.
+    assert!(
+        matches!(desk.current().changed, gmuse::librarian::Changed::These(_)),
+        "a re-read after one rating published {:?}",
+        desk.current().changed
+    );
+}
+
+/// **`ui::record` itself takes the second door** — #236, the seam the round trip
+/// above does not cover.
+///
+/// The test above does what `propose` does; this one calls the function the ten
+/// gestures actually call, with the `Ui` shaped the way an attached launch shapes
+/// it: a reading desk, and an engine to ask. If `record` ever stopped reaching for
+/// the second door, that test would still pass and this one would not.
+///
+/// Driving the real TUI would be better still and is not available: `script` on
+/// macOS refuses a pty whose stdin is a pipe, so there is no way to send a
+/// keystroke to a running gmuse from here. What is left untested is the keypress,
+/// not the write.
+#[test]
+fn record_sends_a_fact_to_the_engine_when_this_view_cannot_append() {
+    let (engine, data) = start_with_library("record-door");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let device = gmuse::model::id::Id::derived(b"the-view");
+    let song = gmuse::model::id::Id::<gmuse::model::entity::Recording>::derived(b"through record");
+    let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
+
+    let mut ui = gmuse::ui::Ui::new(Default::default());
+    ui.data_dir = Some(data.clone());
+    ui.desk = gmuse::librarian::Desk::read_only(log, Default::default(), device, 0, data.clone());
+    ui.engine = Some(client);
+    assert!(
+        ui.desk.appender().is_none(),
+        "the first door has to be shut for this to mean anything"
+    );
+
+    gmuse::ui::record(&mut ui, 0, move |log| log.rate(1_000, song, Some(3)));
+
+    let mut found = false;
+    for _ in 0..400 {
+        let log: String = std::fs::read_dir(&data)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+                    .filter_map(|p| std::fs::read_to_string(p).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if log.contains(&song.to_string()) {
+            found = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        found,
+        "the rating never reached the engine's log, so `record` did not take the \
+         second door"
+    );
+    assert!(
+        !ui.status.contains("nowhere"),
+        "and it did not report having nowhere to put it: {:?}",
+        ui.status
+    );
+}
+
+/// **A fact a view has no business observing is refused, and nothing is appended**
+/// — #236, §8.4.
+///
+/// `Fact::is_an_edit` is the gate. A measurement the client never took, an
+/// import's reading of a file, one machine's holdings: all of those come from
+/// somewhere a view is not, and a socket that took them would let any client
+/// write anything into the log.
+///
+/// **All-or-nothing matters as much as the refusal.** A batch with one bad fact
+/// appends none of it, or a `:collect` could leave a collection named with none of
+/// its members.
+#[test]
+fn a_fact_a_view_cannot_observe_is_refused_and_takes_the_batch_with_it() {
+    let (engine, data) = start_with_library("refuse");
+    let editor = Client::connect(&engine.socket, "editor", "0").expect("connect");
+    let rated = "8f3a1b2c-0000-4000-8000-000000000003";
+
+    let refused = editor.call(
+        "library.edit",
+        Some(serde_json::json!({
+            "facts": [
+                // Perfectly good, and it must not land.
+                { "RecordingRated": { "recording": rated, "stars": 3 } },
+                // A measurement this client never took.
+                { "EncodingMeasured": {
+                    "encoding": "8f3a1b2c-0000-4000-8000-0000000000ff",
+                    "cutoff_hz": 15700,
+                    "analyser": 1
+                }},
+            ]
+        })),
+    );
+    let err = refused.expect_err("a measurement is not a view's to propose");
+    let rpc = err
+        .rpc()
+        .expect("an RPC refusal rather than a transport failure");
+    assert_eq!(
+        rpc.data.as_ref().and_then(|d| d["at"].as_u64()),
+        Some(1),
+        "it says which one: {rpc:?}"
+    );
+
+    // And a good one afterwards, so the wait below is for something that *did*
+    // happen rather than for a fixed interval.
+    let good = "8f3a1b2c-0000-4000-8000-000000000004";
+    editor
+        .call(
+            "library.edit",
+            Some(serde_json::json!({
+                "facts": [{ "RecordingRated": { "recording": good, "stars": 2 } }]
+            })),
+        )
+        .expect("a rating on its own is accepted");
+
+    let mut log = String::new();
+    for _ in 0..400 {
+        log = std::fs::read_dir(&data)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+                    .filter_map(|p| std::fs::read_to_string(p).ok())
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        if log.contains(good) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(log.contains(good), "the accepted rating never landed");
+    assert!(
+        !log.contains(rated),
+        "the refused batch's *first* fact landed anyway, so it was applied in part"
+    );
+}
+
 /// **No process but the engine appends** — I15, and a test that would fail if
 /// the write had gone anywhere else.
 #[test]
@@ -393,8 +617,12 @@ fn the_append_reached_the_engines_own_log_and_nothing_elses() {
         .call(
             "library.edit",
             Some(serde_json::json!({
-                "recording": "8f3a1b2c-0000-4000-8000-000000000002",
-                "stars": 5
+                "facts": [{
+                    "RecordingRated": {
+                        "recording": "8f3a1b2c-0000-4000-8000-000000000002",
+                        "stars": 5
+                    }
+                }]
             })),
         )
         .expect("accepted");

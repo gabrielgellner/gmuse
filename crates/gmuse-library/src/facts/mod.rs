@@ -1376,6 +1376,130 @@ impl Fact {
 }
 
 impl Fact {
+    /// **Whether a view may propose this over the socket** — #236, §8.4, I15.
+    ///
+    /// `LibraryOp::Edit` is "the facts a view emits directly", and this is that
+    /// sentence made checkable. An attached view holds a reading desk and cannot
+    /// append (#219), so its writes travel as proposed facts and the engine — the
+    /// process's single appender, per §4.4 — decides whether to take them.
+    ///
+    /// **The list is what the UI can actually produce, and nothing more.** Every
+    /// other fact comes from somewhere a view is not: an import reads a file, a
+    /// scan walks a disk, an identification pass asks MusicBrainz, the analyser
+    /// measures bytes. A view proposing `EncodingMeasured` would be claiming a
+    /// measurement it never took, and `HoldingsAsserted` would be one machine
+    /// telling the log what another machine holds.
+    ///
+    /// Widening it is a deliberate act, which is what
+    /// `every_fact_says_whether_a_view_may_propose_it` is for: adding a variant
+    /// to the enum forces a decision here rather than inheriting a default.
+    pub fn is_an_edit(&self) -> bool {
+        match self {
+            // A person rating a song, and the play that a listen earned. The
+            // two things the UI writes constantly.
+            Fact::RecordingRated { .. } | Fact::RecordingPlayed { .. } => true,
+
+            // Crates: naming one, its membership, and freezing a question into
+            // an answer somebody kept.
+            Fact::CollectionNamed { .. }
+            | Fact::CollectionEntryAdded { .. }
+            | Fact::CollectionEntryRemoved { .. }
+            | Fact::CollectionFrozen { .. } => true,
+
+            // Saved views, and dropping one. `ViewDropped` is not emitted by
+            // the TUI today and is here because it is the exact inverse of one
+            // that is — refusing it would make a view removable only by the
+            // process that could save it.
+            Fact::ViewSaved { .. } | Fact::ViewDropped { .. } => true,
+
+            // `:assert` writes these — a genre, a mood, an era said by a
+            // person, which is the `Source::Manual` that outranks an import.
+            // The retraction for the same reason `ViewDropped` is here.
+            //
+            // **`ConceptCatalogued` comes with them and is not curation.**
+            // `Instance::assert_concept` emits *two* facts: the term, minted
+            // deterministically from `(facet, label)`, and the assertion about the
+            // subject. Refusing the first — which an earlier cut of this did, on
+            // the reasoning that the vocabulary is curated — made an attached
+            // `:assert` fail as a whole batch, because a term nobody had used
+            // before does not exist yet. What `genre-hierarchy-is-curated` is about
+            // is the *shape*: where a term sits, which is `HierarchyDefined` and
+            // `HierarchyNarrowed` below, and `node_label: false` here says this
+            // claims no position.
+            Fact::ConceptAsserted { .. }
+            | Fact::ConceptRetracted { .. }
+            | Fact::ConceptCatalogued { .. } => true,
+
+            // **Everything below is somebody else's to say**, and the grouping
+            // is deliberate rather than a catch-all: each line names where the
+            // fact actually comes from, so a new variant landing in the wrong
+            // group is visible.
+
+            // An import: what a file claims about itself, read once, when
+            // somebody declares it belongs here.
+            Fact::ArtistNamed { .. }
+            | Fact::RecordingIdentified { .. }
+            | Fact::RecordingCatalogued { .. }
+            | Fact::EncodingClaimed { .. }
+            | Fact::EncodingDescribed { .. }
+            | Fact::EncodingBound { .. }
+            | Fact::ReleaseGroupCatalogued { .. }
+            | Fact::WorkCatalogued { .. }
+            | Fact::WorkPerformed { .. }
+            | Fact::RoleDefined { .. }
+            | Fact::CreditAsserted { .. }
+            | Fact::CreditRetracted { .. }
+            | Fact::LabelNamed { .. }
+            | Fact::ReleaseIdentified { .. }
+            | Fact::ReleaseCatalogued { .. }
+            | Fact::MediumCatalogued { .. }
+            | Fact::TrackPlaced { .. }
+            | Fact::AliasAsserted { .. }
+            | Fact::ArtistRelated { .. } => false,
+
+            // A scan, a placement, or the analyser: what this machine found on
+            // its own disk, and what the bytes measure.
+            Fact::HoldingsAsserted { .. }
+            | Fact::EncodingPlaced { .. }
+            | Fact::EncodingLevelled { .. }
+            | Fact::EncodingMeasured { .. }
+            | Fact::EncodingProcessed { .. }
+            | Fact::EncodingRetired { .. }
+            | Fact::EncodingRestored { .. }
+            | Fact::RecordingAcquired { .. } => false,
+
+            // The *shape* of the vocabulary, which `tools/` curates as a whole
+            // rather than a row at a time (`genre-hierarchy-is-curated`) — and the
+            // facets, which are the axes themselves and not terms on one.
+            Fact::FacetDefined { .. }
+            | Fact::HierarchyDefined { .. }
+            | Fact::HierarchyNarrowed { .. }
+            | Fact::HierarchyNarrowRetracted { .. } => false,
+
+            // Derivations: a relation one pass computed from another.
+            Fact::EncodingDerived { .. }
+            | Fact::EncodingDerivationRetracted { .. }
+            | Fact::RecordingDerived { .. }
+            | Fact::RecordingDerivationRetracted { .. }
+            | Fact::WorkDerived { .. }
+            | Fact::WorkDerivationRetracted { .. } => false,
+
+            // **Merges and retitles, and this is the one that is arguable.**
+            // §8.4's own summary of `edit` says "collections, ratings, merges",
+            // and the UI has no gesture that emits one — `shelf` does, having
+            // looked at `shelf duplicates`, which the project is explicit is a
+            // brief and not a work list. A wrong merge is not one merge from
+            // repaired, so it stays off the wire until a view has a gesture
+            // that earns it.
+            Fact::RecordingMerged { .. }
+            | Fact::ReleaseGroupMerged { .. }
+            | Fact::ArtistMerged { .. }
+            | Fact::RecordingRetitled { .. }
+            | Fact::ReleaseGroupRetitled { .. }
+            | Fact::HeadingRetired { .. } => false,
+        }
+    }
+
     /// What folding this fact can reach.
     #[allow(
         dead_code,
@@ -1650,6 +1774,91 @@ mod reachability {
             "these facts are matched by a grouping rather than by name, so nobody \
              decided their blast radius: {missing:?}"
         );
+    }
+
+    /// **Every variant says whether a view may propose it** — #236.
+    ///
+    /// The same ratchet as `every_fact_names_its_blast_radius` and for the same
+    /// reason, with one extra stake: this list decides what a socket will accept
+    /// into the log. A new variant swept up by a catch-all would be either
+    /// silently writable by any client or silently unwritable by the UI, and
+    /// neither failure announces itself.
+    #[test]
+    fn every_fact_says_whether_a_view_may_propose_it() {
+        let variants = fact_variants();
+        let body = body_of("    pub fn is_an_edit(&self) -> bool {");
+        let missing: Vec<_> = variants
+            .iter()
+            .filter(|v| !body.contains(&format!("Fact::{v} ")))
+            .cloned()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these facts are not named in `is_an_edit`, so nobody decided whether a \
+             view may write them: {missing:?}"
+        );
+    }
+
+    /// **The set is small, and a change to it should be noticed.**
+    ///
+    /// Not a restatement of the function: a count is what catches a `false` arm
+    /// quietly becoming `true`, which is the direction that matters — it widens
+    /// what a socket will take into the log.
+    #[test]
+    fn only_what_a_view_can_produce_is_an_edit() {
+        let body = body_of("    pub fn is_an_edit(&self) -> bool {");
+        // **The patterns of the arms that answer `true`.** Split on the arrow and
+        // keep each left-hand side whose verdict is `true`: a chunk contains the
+        // previous arm's verdict and this arm's patterns, which is exactly what is
+        // wanted — a refused group's names sit in a chunk followed by `false`.
+        let arms: Vec<&str> = body.split("=>").collect();
+        let allowed: String = arms
+            .windows(2)
+            .filter(|w| w[1].trim_start().starts_with("true"))
+            .map(|w| w[0])
+            .collect();
+        let named: Vec<String> = fact_variants()
+            .into_iter()
+            .filter(|v| allowed.contains(&format!("Fact::{v} ")))
+            .collect();
+        assert_eq!(
+            named.len(),
+            11,
+            "the set a view may propose changed: {named:?}"
+        );
+    }
+
+    /// The variant names of `Fact`, read from source.
+    fn fact_variants() -> Vec<String> {
+        let text = std::fs::read_to_string("src/facts/mod.rs").expect("facts/mod.rs");
+        let start = text.find("pub enum Fact {").expect("the Fact enum");
+        let body = &text[start..text[start..].find("\n}\n").unwrap() + start];
+        let mut variants = Vec::new();
+        for line in body.lines() {
+            let Some(rest) = line.strip_prefix("    ") else {
+                continue;
+            };
+            let name: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+            if name.is_empty() || !name.starts_with(char::is_uppercase) {
+                continue;
+            }
+            if rest.starts_with(&format!("{name} {{")) || rest == format!("{name},") {
+                variants.push(name);
+            }
+        }
+        assert!(variants.len() > 50, "the enum was not parsed: {variants:?}");
+        variants
+    }
+
+    /// The body of a function, read from source by its signature line.
+    fn body_of(signature: &str) -> String {
+        let text = std::fs::read_to_string("src/facts/mod.rs").expect("facts/mod.rs");
+        let start = text
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature}"));
+        let rest = &text[start..];
+        let end = rest.find("\n    }\n").expect("the end of the function");
+        rest[..end].to_string()
     }
 
     /// The body of `Fact::blast`, read from source.

@@ -1543,6 +1543,121 @@ mod tests {
         );
     }
 
+    /// **An append says the same thing whatever the log already holds** — #236.
+    ///
+    /// The property an attached view's writes stand on. `ui::propose` runs a
+    /// `record` closure against a *throwaway* `Instance` and sends what it
+    /// appended, because the closure cannot cross a socket. That is exact only
+    /// while these methods are pure producers: one that consulted what was already
+    /// there would see an empty scratch log and propose something different from
+    /// what it would have written locally — silently, and on the attached path
+    /// only.
+    ///
+    /// So: the same calls against an empty instance, and against one already
+    /// holding a *contradicting* answer for every one of them. The facts must match.
+    ///
+    /// Compared as JSON, which is not incidental — it is the form that actually
+    /// crosses the socket.
+    #[test]
+    fn an_append_says_the_same_thing_whatever_the_log_holds() {
+        use crate::model::facet::Described;
+        use crate::model::ingest::Confidence;
+        use crate::model::ord::OrdKey;
+        use crate::model::reference::Source;
+
+        let song = recording(7);
+        let crate_id = Id::<crate::model::entity::Collection>::of_name("late night");
+        let view = Id::<crate::model::entity::View>::of_name("loud");
+
+        /// Every `Instance` method a `record` closure reaches, in one place.
+        fn everything(log: &mut Instance) {
+            let song = recording(7);
+            let crate_id = Id::<crate::model::entity::Collection>::of_name("late night");
+            let view = Id::<crate::model::entity::View>::of_name("loud");
+            log.rate(1_000, song, Some(4));
+            log.play_maybe(1_000, song, None);
+            log.name_collection(1_000, crate_id, "late night", true);
+            log.add_to_collection(1_000, crate_id, song, OrdKey::first());
+            log.remove_from_collection(1_000, crate_id, song, OrdKey::first());
+            log.save_view(1_000, view, "loud", "rating>=4");
+            log.froze(1_000, crate_id, "rating>=4");
+            log.assert_concept(
+                1_000,
+                Described::Recording(song),
+                "genre",
+                "techno",
+                Source::Manual,
+                Confidence::Confirmed,
+            );
+        }
+
+        /// Every fact in a log, as it would go on the wire.
+        ///
+        /// **Not filtered by stamp.** The clock repairs one that goes backwards, so
+        /// appending "at 1,000" to an instance that has already seen 3,000 lands
+        /// later than asked — which is right, and which made the first version of
+        /// this test find nothing and call the property broken.
+        fn facts(log: &Instance) -> Vec<String> {
+            let mut out: Vec<String> = log
+                .records()
+                .iter()
+                .map(|r| serde_json::to_string(&r.fact).expect("a fact encodes"))
+                .collect();
+            out.sort();
+            out
+        }
+
+        let mut empty = Instance::new(device(1));
+        everything(&mut empty);
+        let from_nothing = facts(&empty);
+        // **Nine from eight calls**, because `assert_concept` emits the term and
+        // the assertion. Counted rather than assumed: it is how `ConceptCatalogued`
+        // turned out to be a fact a view emits, which the first cut of
+        // `Fact::is_an_edit` refused.
+        assert_eq!(
+            from_nothing.len(),
+            9,
+            "nothing was conditional even on an empty log"
+        );
+
+        // **A log that already answers every one of them, differently.** This is
+        // where a method that looked before deciding would diverge.
+        // Each one contradicts what `everything` is about to say, and the two that
+        // would otherwise be byte-identical are about a different recording — the
+        // question is whether a method *looks*, not whether a set deduplicates.
+        let other = recording(8);
+        let mut history = Instance::new(device(1));
+        history.rate(2_000, song, Some(1));
+        history.play_maybe(2_000, other, None);
+        history.name_collection(2_000, crate_id, "renamed", false);
+        history.add_to_collection(2_000, crate_id, other, OrdKey::first());
+        history.save_view(2_000, view, "loud", "rating>=1");
+        history.froze(2_000, crate_id, "rating>=1");
+        history.assert_concept(
+            2_000,
+            Described::Recording(song),
+            "genre",
+            "house",
+            Source::Manual,
+            Confidence::Confirmed,
+        );
+        let before = facts(&history);
+
+        let mut onto = Instance::new(device(1));
+        onto.merge(3_000, history.records());
+        everything(&mut onto);
+
+        let added: Vec<String> = facts(&onto)
+            .into_iter()
+            .filter(|f| !before.contains(f))
+            .collect();
+        assert_eq!(
+            added, from_nothing,
+            "these appends changed with what the log held, so a proposal harvested \
+             from a throwaway instance would not be what a local write produced"
+        );
+    }
+
     /// A flush with nothing new must write nothing. Otherwise every launch
     /// appends the whole library again and the log grows by its own size.
     #[test]

@@ -223,21 +223,33 @@ There is a single `gmuse` binary, following the tmux model:
 This supersedes today's `--remote <CMD>`, which is a second, ad-hoc IPC mechanism over the same socket-shaped problem.
 It should be removed rather than kept alongside: `gmuse ctl` is the same thing with a protocol behind it.
 
-**`--attach` is opt-in, and the reason is the library rather than the audio** (#219). Attached, playback is entirely the
-engine's: a view loads by recording, learns what is playing from the `playback` topic, and going away does not stop it.
-What an attached view cannot do is _write_, and that is a capability rather than a check. It holds a `Desk::read_only`,
-which folds the log — I15 permits that, and it is what keeps browsing off the socket — and has no `Appender`. The reason
-is sharper than two writers racing: `durable::log_path` is one file per **device**, the device comes from `machine_id`,
-and `Stamp.device` exists so that "two devices cannot produce an equal stamp". Two processes on one machine would be two
+**`--attach` is opt-in** (#219). Attached, playback is entirely the engine's: a view loads by recording, learns what is
+playing from the `playback` topic, and going away does not stop it.
+
+An attached view cannot _append_, and that is a capability rather than a check. It holds a `Desk::read_only`, which
+folds the log — I15 permits that, and it is what keeps browsing off the socket — and has no `Appender`. The reason is
+sharper than two writers racing: `durable::log_path` is one file per **device**, the device comes from `machine_id`, and
+`Stamp.device` exists so that "two devices cannot produce an equal stamp". Two processes on one machine would be two
 appenders claiming to be one device.
 
-So the launch scan, `:rescan` and `ui::record` all ask `Desk::appender()` and get `None`, and `record`'s refusal is
-visible rather than silent. The read side is only half connected too: the fold it did at launch, not following the
-engine's appends, with `Holdings` from the cache a _local_ launch wrote — an attached view never scans, so it never
-warms one. #236 is all of that.
+**It still writes, through the engine** (#236). `ui::record` asks `Desk::appender()` first and the socket second: the
+facts a `record` closure would have appended are harvested by running the closure against a throwaway `Instance`, and
+sent as `library.edit { facts: [...] }` in the log's own encoding. `Fact::is_an_edit` is the gate — a client may propose
+what a view observes, and not a measurement, an import's reading of a file, or one machine's holdings — and a batch
+containing one refused fact appends none of it. No stamp crosses; the engine stamps with its own clock, because a stamp
+says which device said something.
 
-That is also why the bare `gmuse` still owns its device. Making `--attach` the default would trade a working library
-manager for a working detach, and the two want to be true at once.
+**And it follows what the engine wrote.** A `library` event means there is more log to read, so the view calls
+`Desk::reread`, which merges the file's records and publishes the difference — a rating stays one `Touched` rather than
+a rebuild. On the live library that is ~0.17s to parse 280,000 records and ~0.15s to fold them, on the librarian thread.
+The launch scan and `:rescan` still have nothing to scan with and go to the engine.
+
+Two connections and not one: a `Client` has a single `Receiver<Event>`, so the transport's subscription and the
+library's get a socket each.
+
+What remains before `--attach` could be the default is `Holdings`. The librarian's rows come from the log, but which of
+them this device can _open_ comes from the store — and an attached view never scans, so it depends on a cache some local
+launch wrote. A machine that has only ever run attached can list a record and not reach it.
 
 **`--remote` is removed when `gmuse ctl` exists, not before** (#214, #217). `--remote` is the only way to drive a
 running player from a key binding that is not focused on it, which is the reason §1 asked for a socket at all. Retiring

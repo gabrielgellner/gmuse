@@ -76,6 +76,13 @@ enum Job {
     Say(Box<dyn FnOnce(&mut Instance) + Send>),
     /// A scan reconciled the disk; these are the holdings now.
     Holdings(Holdings),
+    /// **Read the log again, because somebody else appended to it** — #236.
+    ///
+    /// For a reading desk following an engine (#219): the engine is the appender
+    /// and this view learns from the `library` topic that there is more to read.
+    /// Merged rather than replaced, so the change it publishes is the difference
+    /// and not a rebuild — a rating from another client stays one `Touched`.
+    Reread,
     /// Reconcile the disk under these roots, here rather than on the caller's
     /// thread.
     Scan {
@@ -260,6 +267,22 @@ impl Desk {
                             held = Arc::new(fresh);
                             None
                         }
+                        // **A re-read is not an append**, which is why it is
+                        // here rather than behind `Appender`: parsing the file
+                        // again is a fold's work, and `access-layers.md` §3a puts
+                        // a derivation inside a read's reach.
+                        Job::Reread => {
+                            if let Some(dir) = &data_dir {
+                                let (fresh, _damage) = Instance::open(dir, device, now);
+                                // The difference, so `Changed` stays narrow: a
+                                // rating another client wrote is one `Touched`,
+                                // not a `Rebuild`, and #223's lattice is the
+                                // whole point of measuring it.
+                                moved = Changed::of(fresh.records().difference(&before));
+                                log.merge(now, fresh.records());
+                            }
+                            None
+                        }
                         Job::Advance => None,
                         Job::Settled(reply) => Some(reply),
                     };
@@ -300,15 +323,38 @@ impl Desk {
     /// has no [`Appender`], which is the whole difference: `say` and `scan` are
     /// not merely refused at one call site, they are unreachable.
     ///
-    /// `data_dir` is dropped rather than passed, so even the fold's own thread
-    /// holds no path to write to. That is belt and braces and not the mechanism
-    /// — the mechanism is that nothing can queue a `Say`.
-    pub fn read_only(log: Instance, held: Holdings, device: Id<Device>, now: i64) -> Desk {
+    /// **It keeps `data_dir`, and that is not a leak.** The path is what
+    /// [`Desk::reread`] needs to read the log again when the engine appends to it
+    /// (#236). `commit` is reachable only from `Job::Say`, which a reading desk
+    /// cannot queue — so the absent `Appender` is the whole mechanism, and an
+    /// earlier version of this passed `None` as belt and braces before there was
+    /// anything to read back.
+    pub fn read_only(
+        log: Instance,
+        held: Holdings,
+        device: Id<Device>,
+        now: i64,
+        data_dir: PathBuf,
+    ) -> Desk {
         // Not `..Desk::open(…)`: `Desk` has a `Drop`, so functional update would
         // move out of a value that has to be dropped as a whole.
-        let mut desk = Desk::open(log, held, device, now, None);
+        let mut desk = Desk::open(log, held, device, now, Some(data_dir));
         desk.appends = false;
         desk
+    }
+
+    /// **Read the log again** — for a view following an engine (#236, #219).
+    ///
+    /// Returns immediately; the parse and the fold happen on the librarian
+    /// thread, and what it found arrives through the next [`Desk::current`]. On
+    /// the live library that is ~0.17s to parse 280,000 records and ~0.15s to
+    /// fold them, which is why it is a job and not a read.
+    ///
+    /// **Not behind [`Appender`]**, because reading a file is not appending to
+    /// it. An appending desk may call it too and nothing is lost: the fresh
+    /// records are *merged*, so anything said here and not yet flushed survives.
+    pub fn reread(&self) {
+        let _ = self.jobs.send(Job::Reread);
     }
 
     /// The half that may add to the log, or `None` on a reading desk.
@@ -536,7 +582,14 @@ mod tests {
             },
         );
 
-        let reading = Desk::read_only(log, Holdings::default(), device(), 0);
+        let reading = Desk::read_only(
+            log,
+            Holdings::default(),
+            device(),
+            0,
+            // Nothing is read back here; `reread` has its own test.
+            std::env::temp_dir().join("gmuse-reading-desk"),
+        );
         assert!(
             reading.appender().is_none(),
             "there is nothing to append with, which is the whole difference"
