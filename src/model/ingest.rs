@@ -680,17 +680,14 @@ fn peak_e4(raw: &str) -> Option<u32> {
 /// stage name contains an ampersand — must not become two. No two artists are
 /// distinguished by whether a space follows a comma; plenty are distinguished
 /// by everything else.
-pub fn normalise(name: &str) -> String {
-    let tidy = |part: &str| part.split_whitespace().collect::<Vec<_>>().join(" ");
-    // Empty parts dropped, so a trailing comma does not leave a dangling
-    // separator that is itself a distinction.
-    name.split(',')
-        .map(tidy)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(", ")
-        .to_lowercase()
-}
+// **The body is in `gmuse-ids`, and the name stays here** — #213.
+//
+// A derived id's *value* depends on this function: two devices agree on an
+// imprint only because they fold its name the same way. That makes it part of
+// the identity contract rather than a tidying helper, and the contract lives
+// with `Id::derived` which reads it. Changing it renames every concept ever
+// minted, which is the same insidiousness `Entity::KIND` documents.
+pub use gmuse_ids::normalise;
 
 #[cfg(test)]
 mod tests {

@@ -12,7 +12,7 @@ default:
 # Build in release mode (debug builds are too slow for glitch-free audio)
 [group('dev')]
 build:
-    cargo build --release
+    cargo build --release --workspace
 
 # Launch the TUI: just ui [library-root]   (the root is remembered in the cache)
 [group('dev')]
@@ -81,7 +81,7 @@ fmt-check:
 # Clippy across all targets and features, warnings are errors
 [group('dev')]
 lint:
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Build the Python extension module — #197.
 #
@@ -109,7 +109,7 @@ wheel-dev:
 # Run the test suite
 [group('test')]
 test:
-    cargo test --release
+    cargo test --release --workspace
 
 # Show what it costs to draw a view (#121). Runs in `ci` too — it is fast.
 bench-shelf:

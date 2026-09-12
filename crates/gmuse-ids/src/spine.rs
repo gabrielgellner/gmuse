@@ -36,9 +36,9 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::model::entity::Encoding;
-use crate::model::entity::Label;
-use crate::model::id::{Id, Ref};
+use crate::entity::Encoding;
+use crate::entity::Label;
+use crate::id::{Id, Ref};
 
 /// A date known to whatever precision the source knew it.
 ///

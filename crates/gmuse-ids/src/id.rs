@@ -349,7 +349,7 @@ impl<'de, T> serde::Deserialize<'de> for Ref<T> {
 mod tests {
     use super::*;
 
-    use crate::model::entity::{Encoding, Recording, Release};
+    use crate::entity::{Encoding, Recording, Release};
 
     /// A tag implementing nothing at all, to prove the impls demand nothing.
     struct Untagged;
@@ -392,7 +392,7 @@ mod tests {
     fn a_kind_name_cannot_run_into_its_seed() {
         assert_ne!(
             Id::<Release>::derived(b"-group-x").as_uuid(),
-            Id::<crate::model::entity::ReleaseGroup>::derived(b"x").as_uuid()
+            Id::<crate::entity::ReleaseGroup>::derived(b"x").as_uuid()
         );
     }
 

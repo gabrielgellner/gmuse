@@ -1,3 +1,11 @@
+# **A workspace, with the root still a package** — #213.
+#
+# `src/` does not move. The split is meant to be a rename, and relocating
+# 84,000 lines into `crates/gmuse/` would bury that rename in a diff nobody can
+# read. Members arrive one at a time as the boundaries are drawn.
+[workspace]
+members = ["crates/gmuse-ids"]
+
 [package]
 name = "gmuse"
 version = "0.1.0"
@@ -15,6 +23,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 arc-swap = "1.7.1"
+gmuse-ids = { path = "crates/gmuse-ids" }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 cpal = "0.18.2"
 crossbeam-channel = "0.5.16"

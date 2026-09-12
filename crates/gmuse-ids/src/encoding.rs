@@ -28,8 +28,8 @@
 use std::collections::BTreeMap;
 
 use crate::audio_id::AudioId;
-use crate::model::entity::{Device, Recording};
-use crate::model::id::{Id, Ref};
+use crate::entity::{Device, Recording};
+use crate::id::{Id, Ref};
 
 #[allow(
     dead_code,

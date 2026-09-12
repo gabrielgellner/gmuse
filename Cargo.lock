@@ -800,6 +800,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "crossterm",
+ "gmuse-ids",
  "lofty",
  "nucleo-matcher",
  "postcard",
@@ -817,6 +818,16 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "gmuse-ids"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]

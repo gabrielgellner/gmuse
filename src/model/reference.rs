@@ -42,18 +42,6 @@ pub struct ArtistRecord {
     pub sort_name: String,
 }
 
-impl Id<Label> {
-    /// The id an imprint's name always mints.
-    ///
-    /// Through [`crate::model::ingest::normalise`], like every other concept:
-    /// two devices reading the same sleeve land on the same imprint without
-    /// meeting. 218 distinct labels here, and `Columbia` on one file must be
-    /// `Columbia` on the next.
-    pub fn of_name(name: &str) -> Self {
-        Id::derived(crate::model::ingest::normalise(name).as_bytes())
-    }
-}
-
 /// An imprint.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelRecord {
@@ -91,18 +79,6 @@ pub const ROLES: &[(&str, RoleClass)] = &[
     ("producer", RoleClass::Production),
     ("composer", RoleClass::Composer),
 ];
-
-impl Id<Role> {
-    /// The id a role name always mints.
-    ///
-    /// Through [`crate::model::ingest::normalise`], for the reason concept ids
-    /// are: the codelist has to be definable on two machines that never meet.
-    /// It replaces `Id::derived(b"performer")` written inline in the
-    /// projection, which was one role, minted once, handed to everybody.
-    pub fn of_name(name: &str) -> Self {
-        Id::derived(crate::model::ingest::normalise(name).as_bytes())
-    }
-}
 
 /// What an artist did, as a codelist entry.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -143,8 +143,8 @@ kinds! {
     Assertion => "assertion",
 }
 
-pub use crate::model::encoding::Encoding;
-pub use crate::model::spine::{Medium, MixEntry, Recording, Release, ReleaseGroup, Track, Work};
+pub use crate::encoding::Encoding;
+pub use crate::spine::{Medium, MixEntry, Recording, Release, ReleaseGroup, Track, Work};
 
 #[cfg(test)]
 mod tests {

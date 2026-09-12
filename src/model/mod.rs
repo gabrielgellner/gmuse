@@ -37,20 +37,25 @@
 
 pub mod about;
 pub mod arena;
-pub mod basis;
 pub mod clock;
 pub mod durable;
-pub mod encoding;
-pub mod entity;
+// **These four live in `gmuse-ids` and are named here as they always were** —
+// #213. `Id<T>` and the kinds it tags must be reachable from `gmuse-proto`,
+// which may not depend on the library; re-exporting at the old paths is what
+// makes that a crate boundary rather than 84,000 lines of churn. Every
+// `crate::model::id::Id` in the tree still resolves, and still to the one
+// declaration.
+pub use gmuse_ids::{basis, encoding, entity, id, mint, spine};
+
 pub mod facet;
 pub mod focus;
-pub mod id;
 pub mod ingest;
 pub mod instance;
 pub mod key;
 pub mod merge;
 pub mod migrate;
-pub mod mint;
+#[cfg(test)]
+pub mod minting;
 pub mod ord;
 pub mod proposal;
 pub mod provenance;
@@ -60,7 +65,6 @@ pub mod round_trip;
 pub mod rows;
 pub mod seam;
 pub mod sortkey;
-pub mod spine;
 pub mod tree;
 pub mod view;
 pub mod vocabulary;

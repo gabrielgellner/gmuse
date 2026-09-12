@@ -45,7 +45,6 @@
 //! literal. If Symphonia reframes anything, that test fails loudly rather than
 //! the library going quietly wrong.
 
-use std::fmt;
 use std::path::Path;
 
 use symphonia::core::formats::probe::Hint;
@@ -53,6 +52,12 @@ use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use twox_hash::xxhash3_128::Hasher as XxHash3_128;
+
+// **The type lives in `gmuse-ids`, and is named here as it always was.**
+// Every caller says `audio_id::AudioId`; moving the declaration must not move
+// the name, or the split stops being a rename and becomes 84,000 lines of
+// churn for nothing.
+pub use gmuse_ids::audio_id::AudioId;
 
 /// Which scheme produced an id.
 ///
@@ -65,44 +70,6 @@ pub const SCHEME: u8 = 1;
 /// `Default` is scheme 0 and hash 0 — a value no real file produces, since
 /// [`SCHEME`] starts at 1. It exists so partial test fixtures can be built with
 /// `..Default::default()`, and it is deliberately not a *valid* id.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct AudioId {
-    pub scheme: u8,
-    pub hash: u128,
-}
-
-impl fmt::Display for AudioId {
-    /// `v1:` then 32 hex digits — greppable, and it says what made it.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "v{}:{:032x}", self.scheme, self.hash)
-    }
-}
-
-impl std::str::FromStr for AudioId {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let rest = s.strip_prefix('v').ok_or(())?;
-        let (scheme, hash) = rest.split_once(':').ok_or(())?;
-        Ok(AudioId {
-            scheme: scheme.parse().map_err(|_| ())?,
-            hash: u128::from_str_radix(hash, 16).map_err(|_| ())?,
-        })
-    }
-}
-
 /// Why a file's audio could not be identified.
 #[derive(Debug, thiserror::Error)]
 pub enum AudioIdError {

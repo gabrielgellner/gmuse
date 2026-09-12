@@ -38,8 +38,8 @@
 use uuid::Uuid;
 
 use crate::audio_id::AudioId;
-use crate::model::entity::Recording;
-use crate::model::id::Id;
+use crate::entity::Recording;
+use crate::id::Id;
 
 /// What a recording's id was derived from.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -127,7 +127,7 @@ impl Id<Recording> {
     }
 }
 
-impl Id<crate::model::entity::Artist> {
+impl Id<crate::entity::Artist> {
     /// An artist's identity: the MusicBrainz id where the tags carry one, and
     /// the name otherwise.
     ///
@@ -183,7 +183,7 @@ impl Id<crate::model::entity::Artist> {
                 // this library, normalising merges **one** pair, and it is
                 // `ANTIGONE`/`Antigone` — one producer, filed twice.
                 let mut seed = b"name\x1f".to_vec();
-                seed.extend_from_slice(crate::model::ingest::normalise(name).as_bytes());
+                seed.extend_from_slice(crate::normalise(name).as_bytes());
                 Id::derived(&seed)
             }
         }
@@ -203,7 +203,7 @@ mod tests {
     /// touches nothing else.
     #[test]
     fn case_and_spacing_are_not_two_artists() {
-        let one = Id::<crate::model::entity::Artist>::of_artist(None, "ANTIGONE");
+        let one = Id::<crate::entity::Artist>::of_artist(None, "ANTIGONE");
         assert_eq!(one, Id::of_artist(None, "Antigone"));
         assert_eq!(one, Id::of_artist(None, "  antigone  "));
     }
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn a_folded_name_is_still_a_different_artist() {
         assert_ne!(
-            Id::<crate::model::entity::Artist>::of_artist(None, "Christian Löffler"),
+            Id::<crate::entity::Artist>::of_artist(None, "Christian Löffler"),
             Id::of_artist(None, "Christian Loffler"),
         );
     }
@@ -304,7 +304,7 @@ mod tests {
     /// different artist — fourteen of them for 2Pac in this library alone.
     #[test]
     fn a_guest_credit_does_not_make_a_second_artist() {
-        use crate::model::entity::Artist;
+        use crate::entity::Artist;
         let tupac = Uuid::from_u128(0x2_9ac);
         assert_eq!(
             Id::<Artist>::of_artist(Some(tupac), "2Pac"),
@@ -318,7 +318,7 @@ mod tests {
     /// and merging them is not repairable.
     #[test]
     fn two_artists_sharing_a_name_stay_apart() {
-        use crate::model::entity::Artist;
+        use crate::entity::Artist;
         assert_ne!(
             Id::<Artist>::of_artist(Some(Uuid::from_u128(1)), "John Williams"),
             Id::<Artist>::of_artist(Some(Uuid::from_u128(2)), "John Williams")
@@ -329,7 +329,7 @@ mod tests {
     /// convergent: two devices reading one tag agree.
     #[test]
     fn without_an_id_the_name_is_the_identity() {
-        use crate::model::entity::Artist;
+        use crate::entity::Artist;
         assert_eq!(
             Id::<Artist>::of_artist(None, "Burial"),
             Id::<Artist>::of_artist(None, "Burial")
