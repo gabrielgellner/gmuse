@@ -4867,6 +4867,34 @@ Append here as decisions are made. Format: date, decision, rationale.
   D-14's unification survives intact: cue is one verb across both because the default cue point is the track start,
   which is a statement about the _verb_, not about the run-state enum.
 
+- **2026-09-12** **`aaa_mode` becomes `Scope`, because the three values are tree depths and not music** (#234).
+
+  `AaaMode` was `All | Artist | Album`, and `next::pool` narrowed the candidate pool with it — through `Shelf::locate`,
+  which returns the **outer and inner keys of the grouping tree**, and `artist_tracks(&SortKey)` /
+  `album_tracks(&SortKey, &SortKey)`, which take generic sort keys. The tree is grouped by
+  `Levels::By { outer: Level, inner: Level }` where `Level { field, at }` is any query field with an optional hierarchy
+  depth, and `levels` is user-settable.
+
+  So the name was already wrong, demonstrably: group by `genre,year`, set `aaa_mode=album`, and the player keeps playing
+  **within the current year**. That is the mechanism working correctly, and nothing about the setting's name would let
+  anybody predict it. The three values are the three depths of a two-level tree — the whole pool, the outer key, the
+  inner key — which is what `Scope { All | Outer | Inner }` says.
+
+  **The rename now, the query-defined pool later.** Level-narrowing cannot reach a dimension that is not currently
+  grouped — "shuffle within this genre" while grouped by artist and album is inexpressible as a tree lookup — and a pool
+  defined by a query can. But the two are not interchangeable: `Scope` is _relative to what is playing_ and a query is
+  absolute, so the query form is `album = album_of(current)` re-resolved on every track change. That is strictly more
+  machinery than a map lookup into a tree that is already built, so the cheap form stays and the general one arrives
+  beside it (#235).
+
+  `:set aaa_mode=…` survives as an alias, because a config file on disk should not stop working over a rename. The wire
+  spelling does not: `settings.set_aaa_mode` shipped hours earlier in #232 and nothing depends on it yet, which is the
+  one moment renaming a protocol method is free. §7.4's method names are public API precisely so that this is not true
+  later.
+
+  This is the second thing the 2026-09-12 cmus entry was written for, arriving the same day: an inherited name on a
+  mechanism that outgrew it. The reference stays useful; the vocabulary stops being binding.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

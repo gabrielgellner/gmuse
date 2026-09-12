@@ -16,7 +16,7 @@ pub mod parse;
 use std::path::PathBuf;
 
 use crate::audio::resample::Quality;
-use crate::next::AaaMode;
+use crate::next::Scope;
 
 /// Which view a binding applies to. `Common` is the fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -195,7 +195,7 @@ pub enum SearchDir {
 /// Settings reachable from `:set` and `:toggle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SettingKey {
-    AaaMode,
+    Scope,
     Shuffle,
     Repeat,
     RepeatCurrent,
@@ -256,7 +256,7 @@ impl ReplayGainMode {
 impl SettingKey {
     pub fn name(self) -> &'static str {
         match self {
-            SettingKey::AaaMode => "aaa_mode",
+            SettingKey::Scope => "scope",
             SettingKey::Shuffle => "shuffle",
             SettingKey::Repeat => "repeat",
             SettingKey::RepeatCurrent => "repeat_current",
@@ -272,7 +272,7 @@ impl SettingKey {
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "aaa_mode" => SettingKey::AaaMode,
+            "scope" => SettingKey::Scope,
             "shuffle" => SettingKey::Shuffle,
             "repeat" => SettingKey::Repeat,
             "repeat_current" => SettingKey::RepeatCurrent,
@@ -288,7 +288,7 @@ impl SettingKey {
     }
 
     pub const ALL: &'static [SettingKey] = &[
-        SettingKey::AaaMode,
+        SettingKey::Scope,
         SettingKey::Shuffle,
         SettingKey::Repeat,
         SettingKey::RepeatCurrent,
@@ -323,7 +323,7 @@ pub enum RateSpec {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SettingValue {
     Bool(bool),
-    Aaa(AaaMode),
+    Scope(Scope),
     Quality(Quality),
     ReplayGain(ReplayGainMode),
     /// A duration in milliseconds. The first setting that is a *number* rather
@@ -338,7 +338,7 @@ impl std::fmt::Display for SettingValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SettingValue::Bool(b) => write!(f, "{b}"),
-            SettingValue::Aaa(a) => write!(f, "{}", a.label()),
+            SettingValue::Scope(a) => write!(f, "{}", a.label()),
             SettingValue::Quality(q) => write!(f, "{}", quality_name(*q)),
             SettingValue::ReplayGain(m) => write!(f, "{}", m.label()),
             SettingValue::Millis(ms) => write!(f, "{ms}"),

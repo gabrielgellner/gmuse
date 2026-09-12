@@ -822,7 +822,7 @@ pub struct Context<'a> {
     /// **The one path that still needs the handle itself** — and it is leaving.
     ///
     /// The decoder's `NeedNext` arrives with a deadline and is answered from
-    /// `ui.queue` and `ui.playback.aaa_mode` — state §6 assigns to the control
+    /// `ui.queue` and `ui.playback.scope` — state §6 assigns to the control
     /// thread. A detached view cannot answer a deadline, so #232 moves the
     /// selection into the engine and this field goes with it. It is named
     /// separately rather than widening `Transport`, so that what is temporary
@@ -1387,7 +1387,7 @@ pub fn capture_session(ui: &Ui, ctx: &Context<'_>) -> crate::session::Session {
             repeat: ui.playback.repeat,
             repeat_current: ui.playback.repeat_current,
             continue_playing: ui.continue_playing,
-            aaa_mode: ui.playback.aaa_mode.label().into(),
+            scope: ui.playback.scope.label().into(),
             replaygain: ui.replaygain.label().into(),
             active: match ui.playback.active {
                 next::ActiveSource::Playlist => "playlist".into(),
@@ -1414,7 +1414,7 @@ pub fn restore_session(
     fixed: &std::collections::HashSet<SettingKey>,
 ) {
     use crate::cmd::ReplayGainMode;
-    use next::{AaaMode, ActiveSource};
+    use next::{ActiveSource, Scope};
 
     let m = &saved.modes;
     if !fixed.contains(&SettingKey::Shuffle) {
@@ -1429,10 +1429,10 @@ pub fn restore_session(
     if !fixed.contains(&SettingKey::Continue) {
         ui.continue_playing = m.continue_playing;
     }
-    if !fixed.contains(&SettingKey::AaaMode)
-        && let Some(mode) = AaaMode::parse(&m.aaa_mode)
+    if !fixed.contains(&SettingKey::Scope)
+        && let Some(mode) = Scope::parse(&m.scope)
     {
-        ui.playback.aaa_mode = mode;
+        ui.playback.scope = mode;
     }
     if !fixed.contains(&SettingKey::ReplayGain)
         && let Some(mode) = ReplayGainMode::parse(&m.replaygain)
@@ -1647,7 +1647,7 @@ fn next_input(ui: &Ui) -> next::NextInput<'_> {
         library: &ui.library,
         playlist: &ui.playlist,
         current: ui.playback.current,
-        aaa_mode: ui.playback.aaa_mode,
+        scope: ui.playback.scope,
         shuffle: ui.playback.shuffle,
         repeat: ui.playback.repeat,
         repeat_current: ui.playback.repeat_current,
@@ -2572,7 +2572,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Set { key, value } => apply_setting(ui, ctx, key, value),
         Command::Toggle(key) => {
             let value = match key {
-                SettingKey::AaaMode => SettingValue::Aaa(ui.playback.aaa_mode.cycle()),
+                SettingKey::Scope => SettingValue::Scope(ui.playback.scope.cycle()),
                 SettingKey::ReplayGain => SettingValue::ReplayGain(ui.replaygain.cycle()),
                 SettingKey::Shuffle => SettingValue::Bool(!ui.playback.shuffle),
                 SettingKey::Repeat => SettingValue::Bool(!ui.playback.repeat),
@@ -4004,7 +4004,7 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
         .line("setting", &format!("{}={}", key.name(), value));
 
     match (key, value) {
-        (SettingKey::AaaMode, SettingValue::Aaa(mode)) => ui.playback.aaa_mode = mode,
+        (SettingKey::Scope, SettingValue::Scope(mode)) => ui.playback.scope = mode,
         (SettingKey::ReplayGain, SettingValue::ReplayGain(m)) => ui.replaygain = m,
         (SettingKey::Shuffle, SettingValue::Bool(v)) => {
             ui.playback.shuffle = v;
@@ -6850,10 +6850,17 @@ mod tests {
         handle_key(KeyEvent::from(KeyCode::Char('r')), &mut ui, &ctx);
         assert!(ui.playback.repeat);
         handle_key(KeyEvent::from(KeyCode::Char('m')), &mut ui, &ctx);
-        assert_eq!(ui.playback.aaa_mode, crate::next::AaaMode::Artist);
+        assert_eq!(ui.playback.scope, crate::next::Scope::Outer);
 
         let out = render(&ui, &ctx, 90, 8);
-        assert!(out.contains("[artist]"), "{out}");
+        // **`file_under`, not `artist`** — #234. The status line shows the field
+        // the tree is grouped by, and the default outer level is
+        // `Field::FileUnder`, which is a different field from `Field::Artist`:
+        // they part company on a compilation, where a row files under Various
+        // Artists and its artist is somebody else. The old label said "artist"
+        // while narrowing by `file_under`, which was a small lie the rename
+        // surfaced rather than introduced.
+        assert!(out.contains("[file_under]"), "{out}");
         assert!(out.contains("[shuffle]"), "{out}");
         assert!(out.contains("[repeat]"), "{out}");
     }
@@ -8995,7 +9002,7 @@ mod tests {
         press(&mut ui, &ctx, "r");
         assert!(ui.playback.repeat);
         press(&mut ui, &ctx, "m");
-        assert_eq!(ui.playback.aaa_mode, crate::next::AaaMode::Artist);
+        assert_eq!(ui.playback.scope, crate::next::Scope::Outer);
 
         // And `:set` reaches the same state.
         press(&mut ui, &ctx, ":");
@@ -9951,7 +9958,7 @@ mod tests {
                 repeat: true,
                 repeat_current: false,
                 continue_playing: true,
-                aaa_mode: aaa.into(),
+                scope: aaa.into(),
                 replaygain: "album".into(),
                 active: "library".into(),
                 rng_state: rng,
@@ -9974,14 +9981,14 @@ mod tests {
         ui.playback.shuffle = true;
         let fixed = std::collections::HashSet::from([SettingKey::Shuffle]);
 
-        // The session remembers shuffle off and aaa_mode album.
+        // The session remembers shuffle off and scope album.
         restore_session(&mut ui, &ctx, &saved_with(false, "album", 7), &fixed);
 
         assert!(ui.playback.shuffle, "the config named shuffle and lost");
         assert_eq!(
-            ui.playback.aaa_mode,
-            crate::next::AaaMode::Album,
-            "the config was silent on aaa_mode, so the session should win"
+            ui.playback.scope,
+            crate::next::Scope::Inner,
+            "the config was silent on scope, so the session should win"
         );
         assert!(ui.playback.repeat, "likewise repeat");
     }
@@ -12209,7 +12216,7 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        for c in "set aaa_mode=".chars() {
+        for c in "set scope=".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
@@ -12218,7 +12225,7 @@ mod tests {
         press(&mut ui, &ctx, "^y");
         assert_eq!(
             ui.prompt.as_ref().unwrap().buffer,
-            format!("set aaa_mode={first} ")
+            format!("set scope={first} ")
         );
     }
 
@@ -12472,13 +12479,13 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        for c in "set aaa_mode=".chars() {
+        for c in "set scope=".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
         let all: Vec<String> = ui.prompt.as_ref().unwrap().candidates().to_vec();
         // Tab extended to the common prefix of all/artist/album first.
-        assert_eq!(ui.prompt.as_ref().unwrap().buffer, "set aaa_mode=a");
+        assert_eq!(ui.prompt.as_ref().unwrap().buffer, "set scope=a");
         assert_eq!(all, vec!["all", "artist", "album"]);
 
         handle_key(KeyEvent::from(KeyCode::Char('l')), &mut ui, &ctx);
@@ -12494,7 +12501,7 @@ mod tests {
             ui.prompt.as_ref().unwrap().candidates(),
             ["album".to_string()]
         );
-        assert_eq!(ui.prompt.as_ref().unwrap().buffer, "set aaa_mode=alb");
+        assert_eq!(ui.prompt.as_ref().unwrap().buffer, "set scope=alb");
     }
 
     /// Backspace widens the list again. This is the payoff of deriving the
@@ -12575,15 +12582,15 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         press(&mut ui, &ctx, ":");
-        for c in "set aaa_mode=ar".chars() {
+        for c in "set scope=ar".chars() {
             handle_key(KeyEvent::from(KeyCode::Char(c)), &mut ui, &ctx);
         }
         tab(&mut ui, &ctx);
-        assert_eq!(typed(&ui), "set aaa_mode=artist");
+        assert_eq!(typed(&ui), "set scope=artist");
 
         // And the completed line still parses and runs.
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
-        assert_eq!(ui.playback.aaa_mode, crate::next::AaaMode::Artist);
+        assert_eq!(ui.playback.scope, crate::next::Scope::Outer);
     }
 
     #[test]

@@ -9,8 +9,8 @@
 //! playback continuing across a detach being the property the whole milestone
 //! exists for.
 //!
-//! §6 already assigned the state: the queue and `aaa_mode` are control state,
-//! and says why for the second — "`aaa_mode` is control state because it
+//! §6 already assigned the state: the queue and `scope` are control state,
+//! and says why for the second — "`scope` is control state because it
 //! determines what plays next".
 //!
 //! ## The pool is materialised, not a query
@@ -29,7 +29,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gmuse_library::model::rows::CopyId;
-use gmuse_library::next::{AaaMode, ActiveSource, NextInput, Playback, Source};
+use gmuse_library::next::{ActiveSource, NextInput, Playback, Scope, Source};
 use gmuse_library::playlist::{Playlist, Queue};
 use gmuse_library::shelf::Shelf;
 
@@ -118,13 +118,13 @@ impl Playing {
         Ok(self.moved())
     }
 
-    pub fn set_aaa_mode(&mut self, mode: AaaMode) -> u64 {
-        self.playback.aaa_mode = mode;
+    pub fn set_scope(&mut self, mode: Scope) -> u64 {
+        self.playback.scope = mode;
         self.moved()
     }
 
-    pub fn aaa_mode(&self) -> AaaMode {
-        self.playback.aaa_mode
+    pub fn scope(&self) -> Scope {
+        self.playback.scope
     }
 
     /// **The pool, rebuilt.** Called when the librarian publishes a change, so
@@ -144,7 +144,7 @@ impl Playing {
     /// popped by being played from, so calling it twice gives two different
     /// answers. `next` would also read as `Iterator::next`, which this is not.
     ///
-    /// Takes from the queue first and falls back to the pool under `aaa_mode`,
+    /// Takes from the queue first and falls back to the pool under `scope`,
     /// which is `next::next_with_source`'s existing logic unchanged: this moved
     /// the *caller*, not the rule.
     pub fn take_next(&mut self) -> Option<(CopyId, Source)> {
@@ -154,7 +154,7 @@ impl Playing {
             library: &self.pool,
             playlist: &self.playlist,
             current: self.playback.current,
-            aaa_mode: self.playback.aaa_mode,
+            scope: self.playback.scope,
             shuffle: self.playback.shuffle,
             repeat: self.playback.repeat,
             repeat_current: self.playback.repeat_current,
@@ -269,11 +269,11 @@ mod tests {
     }
 
     #[test]
-    fn the_aaa_mode_is_control_state_and_bumps_the_version() {
+    fn the_scope_is_control_state_and_bumps_the_version() {
         let mut playing = empty();
         let before = playing.version();
-        let after = playing.set_aaa_mode(AaaMode::Album);
+        let after = playing.set_scope(Scope::Inner);
         assert!(after > before);
-        assert_eq!(playing.aaa_mode(), AaaMode::Album);
+        assert_eq!(playing.scope(), Scope::Inner);
     }
 }

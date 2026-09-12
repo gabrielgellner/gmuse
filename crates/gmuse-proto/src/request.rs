@@ -72,7 +72,7 @@ pub enum Request {
     },
     /// What plays after this one runs out — §6 calls it control state because
     /// it decides what plays next.
-    SetAaaMode {
+    SetScope {
         mode: String,
     },
     /// Play this recording on the main player — #230.
@@ -226,7 +226,7 @@ pub mod method {
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
     pub const QUEUE_REMOVE: &str = "queue.remove";
     pub const QUEUE_CLEAR: &str = "queue.clear";
-    pub const SET_AAA_MODE: &str = "settings.set_aaa_mode";
+    pub const SET_SCOPE: &str = "settings.set_scope";
     pub const SUBSCRIBE: &str = "sub.subscribe";
     pub const UNSUBSCRIBE: &str = "sub.unsubscribe";
 
@@ -257,7 +257,7 @@ pub mod method {
         QUEUE_ENQUEUE,
         QUEUE_REMOVE,
         QUEUE_CLEAR,
-        SET_AAA_MODE,
+        SET_SCOPE,
         SUBSCRIBE,
         UNSUBSCRIBE,
         LIBRARY_APPLY,
@@ -367,13 +367,13 @@ impl Request {
                     base_version: p.base_version,
                 })
             }
-            method::SET_AAA_MODE => {
+            method::SET_SCOPE => {
                 #[derive(Deserialize)]
                 struct P {
                     mode: String,
                 }
                 let p: P = typed(method, params)?;
-                Ok(Self::SetAaaMode { mode: p.mode })
+                Ok(Self::SetScope { mode: p.mode })
             }
             method::SUBSCRIBE => {
                 let p: TopicsParams = typed(method, params)?;
@@ -404,7 +404,7 @@ impl Request {
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
             Self::QueueRemove { .. } => method::QUEUE_REMOVE,
             Self::QueueClear { .. } => method::QUEUE_CLEAR,
-            Self::SetAaaMode { .. } => method::SET_AAA_MODE,
+            Self::SetScope { .. } => method::SET_SCOPE,
             Self::Subscribe { .. } => method::SUBSCRIBE,
             Self::Unsubscribe { .. } => method::UNSUBSCRIBE,
             Self::Library { operation, .. } => operation.method(),

@@ -356,19 +356,21 @@ The RT callback drains `ctl_ring` and `perf_ring` once per callback, in a fixed 
 
 ## 6. State ownership
 
-| Kind                  | Owner          | Changed by                                                         | Examples                                                                                                                                                                                                                          |
-| --------------------- | -------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Control state**     | Control thread | Protocol commands                                                  | Library snapshot pointer, the queue, playlists, `aaa_mode`, which recording is loaded on each deck, **which deck is focused** (#224), cue points, loops (as data), automation lanes, MIDI mapping table, settings, output routing |
-| **Performance state** | RT callback    | Performance plane, automation lanes, and control-plane `param.set` | Fader and crossfader positions, EQ bands, deck rate, pitch bend and jog, gain, cue-bus selection                                                                                                                                  |
-| **Library state**     | Librarian      | Named operations (§8.4), and facts the player emits                | The fact log, the projection folded from it, holdings, the read cache. The control thread holds an `Arc` to the projection and nothing more.                                                                                      |
-| **View state**        | Each view      | That view's own input                                              | Cursor, selection, scroll, which cmus-style view is shown, fuzzy-filter text and nucleo matcher state, keymap, pending modal state                                                                                                |
+| Kind                  | Owner          | Changed by                                                         | Examples                                                                                                                                                                                                                                                                |
+| --------------------- | -------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Control state**     | Control thread | Protocol commands                                                  | Library snapshot pointer, the queue, playlists, the playback `Scope` (#234, formerly `aaa_mode`), which recording is loaded on each deck, **which deck is focused** (#224), cue points, loops (as data), automation lanes, MIDI mapping table, settings, output routing |
+| **Performance state** | RT callback    | Performance plane, automation lanes, and control-plane `param.set` | Fader and crossfader positions, EQ bands, deck rate, pitch bend and jog, gain, cue-bus selection                                                                                                                                                                        |
+| **Library state**     | Librarian      | Named operations (§8.4), and facts the player emits                | The fact log, the projection folded from it, holdings, the read cache. The control thread holds an `Arc` to the projection and nothing more.                                                                                                                            |
+| **View state**        | Each view      | That view's own input                                              | Cursor, selection, scroll, which cmus-style view is shown, fuzzy-filter text and nucleo matcher state, keymap, pending modal state                                                                                                                                      |
 
 Consequences:
 
 - Library state is listed separately from control state because it has a second access path (§8.1) and a different
   concurrency model (§8.8) — it is not merely a large field on the control thread.
-- `aaa_mode` is control state because it determines what plays next. The cmus "views" (library tree, sorted list,
-  playlist, queue, browser, filters, settings) are client-side layouts over queries.
+- The playback **`Scope`** is control state because it determines what plays next. It was `aaa_mode`, whose three values
+  turned out to be the three depths of the grouping tree rather than music concepts — #234, and the Decision Log entry
+  of 2026-09-12. The cmus "views" (library tree, sorted list, playlist, queue, browser, filters, settings) are
+  client-side layouts over queries.
 - Fuzzy filtering with nucleo is per-keystroke interaction, so it runs in the TUI over a result set fetched from the
   engine. The nvim plugin uses its own picker.
 - A view may _request_ a performance-state change through `param.set`, for example a volume change from a menu. The RT
@@ -446,14 +448,14 @@ The first message on a connection MUST be `hello`:
 
 ### 7.4 Method families
 
-| Family        | Methods (illustrative)                                                                                                                                                                                                                                                                                        | Semantics                                                                                   |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Session       | `hello`, `engine.status`, `engine.shutdown`, `time.now`                                                                                                                                                                                                                                                       | Lifecycle and clock                                                                         |
-| Commands      | `player.play`, `player.pause`, `player.seek`, `queue.enqueue`, `queue.move`, `queue.remove`, `queue.clear`, `settings.set_aaa_mode`, `deck.load`, `deck.play`, `deck.cue`, `deck.loop`, `deck.sync`, `param.set`, `lane.put`, `lane.delete`, `mapping.learn`, `mapping.put`, `record.start`, `record.stop`, … | Mutations. Each is one variant of the typed `Command` enum.                                 |
-| Text commands | `cmd.exec_line`                                                                                                                                                                                                                                                                                               | A cmus-style command line, parsed by the engine into `Command` (§7.12)                      |
-| Library       | `library.apply`, `library.import`, `library.scan`, `library.restore`, `library.remove`, `library.compact`, `library.unfiled`, `library.edit`                                                                                                                                                                  | The named write operations (§8.4). Long-running ones acknowledge and report through events. |
-| Queries       | `query.parse`, `query.run`, `queue.get`, `deck.get`, `lane.get`, `mapping.get`, `analysis.get`                                                                                                                                                                                                                | Reads                                                                                       |
-| Subscriptions | `sub.subscribe`, `sub.unsubscribe`                                                                                                                                                                                                                                                                            | Topic-based event delivery (§7.8)                                                           |
+| Family        | Methods (illustrative)                                                                                                                                                                                                                                                                                     | Semantics                                                                                   |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Session       | `hello`, `engine.status`, `engine.shutdown`, `time.now`                                                                                                                                                                                                                                                    | Lifecycle and clock                                                                         |
+| Commands      | `player.play`, `player.pause`, `player.seek`, `queue.enqueue`, `queue.move`, `queue.remove`, `queue.clear`, `settings.set_scope`, `deck.load`, `deck.play`, `deck.cue`, `deck.loop`, `deck.sync`, `param.set`, `lane.put`, `lane.delete`, `mapping.learn`, `mapping.put`, `record.start`, `record.stop`, … | Mutations. Each is one variant of the typed `Command` enum.                                 |
+| Text commands | `cmd.exec_line`                                                                                                                                                                                                                                                                                            | A cmus-style command line, parsed by the engine into `Command` (§7.12)                      |
+| Library       | `library.apply`, `library.import`, `library.scan`, `library.restore`, `library.remove`, `library.compact`, `library.unfiled`, `library.edit`                                                                                                                                                               | The named write operations (§8.4). Long-running ones acknowledge and report through events. |
+| Queries       | `query.parse`, `query.run`, `queue.get`, `deck.get`, `lane.get`, `mapping.get`, `analysis.get`                                                                                                                                                                                                             | Reads                                                                                       |
+| Subscriptions | `sub.subscribe`, `sub.unsubscribe`                                                                                                                                                                                                                                                                         | Topic-based event delivery (§7.8)                                                           |
 
 Method names are part of the public API. Rename them only with a protocol version bump.
 
@@ -618,7 +620,7 @@ stream.
 
 ### 7.12 Text commands
 
-- `cmd.exec_line { line }` accepts the cmus-style command language (for example `seek +10`, `set aaa_mode=album`) and
+- `cmd.exec_line { line }` accepts the cmus-style command language (for example `seek +10`, `set scope=album`) and
   parses it engine-side into `Command`.
 - The TUI's `:` line, nvim's `:Gmuse …`, and `gmuse ctl` pass-through all use it, so there is exactly one textual
   command parser.
@@ -663,7 +665,7 @@ stream.
 The librarian owns the fact log and the projection folded from it. It runs **inside the engine process**, on its own
 thread, and it is not the control thread.
 
-In-process because the player needs the library continuously — what plays next, how the queue resolves, what `aaa_mode`
+In-process because the player needs the library continuously — what plays next, how the queue resolves, what the `Scope`
 means for an album. A process boundary in that path would buy nothing. The RT callback is insulated regardless: I2 means
 it never allocates and never locks, so a scan or a fold on a librarian thread cannot reach it.
 
@@ -1102,8 +1104,8 @@ A control-plane `param.set` counts as a touch for precedence purposes.
 
 - Built on ratatui and crossterm, and connects through `gmuse-client` like every other view (I11).
 - Auto-starts the engine if it isn't running.
-- Its keymap maps crossterm key events to `Command` locally. The cmus interaction model (views, keybindings, `aaa_mode`
-  semantics) is the UX target.
+- Its keymap maps crossterm key events to `Command` locally. The cmus interaction model (views, keybindings, playback
+  scope semantics) is the UX target.
 - The vim-style modal input layer (modes, counts, operator-pending state, a configurable keymap) SHOULD be a small
   reusable module so other Rust TUIs can share it.
 - The cmus views are client-side layouts over queries; the `:` line uses `cmd.exec_line`; fuzzy filtering uses nucleo

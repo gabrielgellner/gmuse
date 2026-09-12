@@ -27,42 +27,66 @@ pub enum ActiveSource {
 
 /// cmus's "all / artist / album" narrowing. Applies to the library only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AaaMode {
+pub enum Scope {
     #[default]
     All,
-    Artist,
-    Album,
+    /// Stay within the current **outer** key of the grouping tree.
+    Outer,
+    /// Stay within the current **inner** key.
+    Inner,
 }
 
-impl AaaMode {
+impl Scope {
     pub fn cycle(self) -> Self {
         match self {
-            AaaMode::All => AaaMode::Artist,
-            AaaMode::Artist => AaaMode::Album,
-            AaaMode::Album => AaaMode::All,
+            Scope::All => Scope::Outer,
+            Scope::Outer => Scope::Inner,
+            Scope::Inner => Scope::All,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            AaaMode::All => "all",
-            AaaMode::Artist => "artist",
-            AaaMode::Album => "album",
+            Scope::All => "all",
+            Scope::Outer => "outer",
+            Scope::Inner => "inner",
         }
     }
 
-    /// The inverse of [`AaaMode::label`], for reading a saved session.
+    /// **What to call this scope, given what the view is grouped by** — #234.
+    ///
+    /// `label` says the depth and this says the dimension, which is what a
+    /// person reading a status line wants: grouped by artist and album, `Inner`
+    /// is "album"; grouped by genre and year it is "year". The depth is the
+    /// mechanism and the field is the meaning.
+    ///
+    /// Falls back to the depth when the grouping is flat, because there is then
+    /// no field to name and "all" is already the honest answer.
+    pub fn named(self, levels: crate::shelf::Levels) -> String {
+        match (self, levels) {
+            (Scope::All, _) | (_, crate::shelf::Levels::Flat) => self.label().to_string(),
+            (Scope::Outer, crate::shelf::Levels::By { outer, .. }) => outer.field.name(),
+            (Scope::Inner, crate::shelf::Levels::By { inner, .. }) => inner.field.name(),
+        }
+    }
+
+    /// The inverse of [`Scope::label`], and the home of the cmus spellings.
+    ///
+    /// **`artist` and `album` are accepted for ever** — they are what a saved
+    /// session and a `config.toml` on disk say, and a rename must not stop a
+    /// config file working (#234). They are aliases rather than synonyms: they
+    /// meant "the outer key" and "the inner key" all along, which is only
+    /// obvious once the grouping is something other than artist and album.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "all" => AaaMode::All,
-            "artist" => AaaMode::Artist,
-            "album" => AaaMode::Album,
+            "all" => Scope::All,
+            "outer" | "artist" => Scope::Outer,
+            "inner" | "album" => Scope::Inner,
             _ => return None,
         })
     }
 }
 
-/// Where the chosen track came from, so the caller knows what to do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     /// `repeat_current` held the track in place. Nothing to consume.
@@ -83,7 +107,7 @@ pub struct NextInput<'a> {
     pub library: &'a Shelf,
     pub playlist: &'a Playlist,
     pub current: Option<CopyId>,
-    pub aaa_mode: AaaMode,
+    pub scope: Scope,
     pub shuffle: bool,
     pub repeat: bool,
     pub repeat_current: bool,
@@ -104,7 +128,7 @@ pub fn next(input: NextInput<'_>) -> Option<CopyId> {
 /// Resolution order is §5's, exactly:
 ///
 /// 1. `repeat_current` holds the current track.
-/// 2. **The queue wins unconditionally** — regardless of `aaa_mode`, shuffle,
+/// 2. **The queue wins unconditionally** — regardless of `scope`, shuffle,
 ///    or which source is active. Playing a queued track does not move the
 ///    library cursor, which is why `current` is left alone here.
 /// 3. Otherwise, the successor within the pool.
@@ -179,7 +203,7 @@ pub fn upcoming(input: &NextInput<'_>, limit: usize) -> Vec<(CopyId, Upcoming)> 
     };
     // Where the pool's own successor would start, by exactly the rule `step`
     // uses — including its fallback when the current track is not in the pool
-    // at all, which happens after a queued track or an `aaa_mode` change.
+    // at all, which happens after a queued track or an `scope` change.
     let start = input
         .current
         .and_then(|c| order.iter().position(|id| *id == c))
@@ -241,7 +265,7 @@ fn step(input: &NextInput<'_>, dir: Direction) -> Option<(CopyId, Source)> {
     };
 
     // The current track may not be in the pool at all — it was queued, or
-    // `aaa_mode` changed under it. Starting from the top is the least
+    // `scope` changed under it. Starting from the top is the least
     // surprising thing to do.
     let Some(position) = order.iter().position(|id| *id == current) else {
         return Some(match dir {
@@ -272,14 +296,14 @@ fn step(input: &NextInput<'_>, dir: Direction) -> Option<(CopyId, Source)> {
     }
 }
 
-/// The candidate pool: the active source, narrowed by `aaa_mode` when that
+/// The candidate pool: the active source, narrowed by `scope` when that
 /// source is the library.
 fn pool(input: &NextInput<'_>) -> Vec<CopyId> {
     match input.active {
         ActiveSource::Playlist => input.playlist.entries().to_vec(),
-        ActiveSource::Library => match input.aaa_mode {
-            AaaMode::All => input.library.sorted().to_vec(),
-            AaaMode::Artist | AaaMode::Album => {
+        ActiveSource::Library => match input.scope {
+            Scope::All => input.library.sorted().to_vec(),
+            Scope::Outer | Scope::Inner => {
                 // Narrowing is relative to what is playing. With nothing
                 // playing there is no artist to narrow to, so fall back to the
                 // whole library rather than returning nothing at all.
@@ -289,8 +313,8 @@ fn pool(input: &NextInput<'_>) -> Vec<CopyId> {
                 let Some((artist, album)) = input.library.locate(current) else {
                     return input.library.sorted().to_vec();
                 };
-                match input.aaa_mode {
-                    AaaMode::Artist => input.library.artist_tracks(artist),
+                match input.scope {
+                    Scope::Outer => input.library.artist_tracks(artist),
                     _ => input.library.album_tracks(artist, album).to_vec(),
                 }
             }
@@ -346,7 +370,7 @@ pub struct Playback {
     /// `None` for a file the library cannot place — it still plays.
     pub playing: Option<Id<Encoding>>,
     pub active: ActiveSource,
-    pub aaa_mode: AaaMode,
+    pub scope: Scope,
     pub shuffle: bool,
     pub repeat: bool,
     pub repeat_current: bool,
@@ -432,7 +456,7 @@ mod tests {
                 library: &self.library,
                 playlist: &self.playlist,
                 current: p.current,
-                aaa_mode: p.aaa_mode,
+                scope: p.scope,
                 shuffle: p.shuffle,
                 repeat: p.repeat,
                 repeat_current: p.repeat_current,
@@ -603,7 +627,7 @@ mod tests {
             library: &library,
             playlist: &playlist,
             current: None,
-            aaa_mode: p.aaa_mode,
+            scope: p.scope,
             shuffle: false,
             repeat: true,
             repeat_current: false,
@@ -631,7 +655,7 @@ mod tests {
             library: &library,
             playlist: &playlist,
             current: Some(only),
-            aaa_mode: AaaMode::All,
+            scope: Scope::All,
             shuffle: false,
             repeat,
             repeat_current: false,
@@ -656,18 +680,18 @@ mod tests {
         let queued = id_of(&ctx.store, "c-solo-1");
         ctx.queue.push_back(queued);
 
-        // Queued track is returned regardless of shuffle, aaa_mode, or which
+        // Queued track is returned regardless of shuffle, scope, or which
         // source is active — §5's "unconditionally".
         for (shuffle, aaa, active) in [
-            (false, AaaMode::All, ActiveSource::Library),
-            (true, AaaMode::All, ActiveSource::Library),
-            (false, AaaMode::Album, ActiveSource::Library),
-            (true, AaaMode::Artist, ActiveSource::Playlist),
+            (false, Scope::All, ActiveSource::Library),
+            (true, Scope::All, ActiveSource::Library),
+            (false, Scope::Inner, ActiveSource::Library),
+            (true, Scope::Outer, ActiveSource::Playlist),
         ] {
             let p = Playback {
                 current: Some(id_of(&ctx.store, "a-first-1")),
                 shuffle,
-                aaa_mode: aaa,
+                scope: aaa,
                 active,
                 rng_state: 7,
                 ..Default::default()
@@ -713,7 +737,7 @@ mod tests {
         );
     }
 
-    // ---- aaa_mode --------------------------------------------------------
+    // ---- scope --------------------------------------------------------
 
     #[test]
     fn aaa_all_walks_the_whole_library() {
@@ -741,14 +765,14 @@ mod tests {
     fn aaa_album_stops_at_the_album_boundary() {
         let ctx = Ctx::new();
         let p = Playback {
-            aaa_mode: AaaMode::Album,
+            scope: Scope::Inner,
             ..ctx.at("a-first-2")
         };
         // "First" has two tracks; we are on the last of them.
         assert_eq!(next(ctx.input(p)), None);
 
         let p = Playback {
-            aaa_mode: AaaMode::Album,
+            scope: Scope::Inner,
             ..ctx.at("a-first-1")
         };
         assert_eq!(
@@ -762,7 +786,7 @@ mod tests {
         let ctx = Ctx::new();
         // Last track of "First", same artist has "Second" after it.
         let p = Playback {
-            aaa_mode: AaaMode::Artist,
+            scope: Scope::Outer,
             ..ctx.at("a-first-2")
         };
         assert_eq!(
@@ -772,20 +796,20 @@ mod tests {
 
         // Last track of that artist: stop rather than crossing to B.
         let p = Playback {
-            aaa_mode: AaaMode::Artist,
+            scope: Scope::Outer,
             ..ctx.at("a-second-1")
         };
         assert_eq!(next(ctx.input(p)), None);
     }
 
-    /// §5 asks specifically about `aaa_mode` transitions when the current
+    /// §5 asks specifically about `scope` transitions when the current
     /// track changes artist — the pool must be recomputed from whatever is
     /// playing *now*, not from where playback started.
     #[test]
     fn aaa_pool_follows_the_current_track_across_artists() {
         let ctx = Ctx::new();
         let p = Playback {
-            aaa_mode: AaaMode::Artist,
+            scope: Scope::Outer,
             ..ctx.at("b-only-1")
         };
         assert_eq!(
@@ -795,7 +819,7 @@ mod tests {
 
         // Same mode, different current track: a different pool entirely.
         let p = Playback {
-            aaa_mode: AaaMode::Artist,
+            scope: Scope::Outer,
             ..ctx.at("c-solo-1")
         };
         assert_eq!(
@@ -809,7 +833,7 @@ mod tests {
     fn aaa_narrowing_with_nothing_playing_falls_back_to_the_whole_library() {
         let ctx = Ctx::new();
         let p = Playback {
-            aaa_mode: AaaMode::Album,
+            scope: Scope::Inner,
             current: None,
             ..Default::default()
         };
@@ -1005,13 +1029,13 @@ mod tests {
     }
 
     #[test]
-    fn playlist_ignores_aaa_mode() {
+    fn playlist_ignores_scope() {
         let mut ctx = Ctx::new();
         ctx.playlist.push(id_of(&ctx.store, "a-first-1"));
         ctx.playlist.push(id_of(&ctx.store, "c-solo-1"));
         let p = Playback {
             active: ActiveSource::Playlist,
-            aaa_mode: AaaMode::Album,
+            scope: Scope::Inner,
             current: Some(id_of(&ctx.store, "a-first-1")),
             ..Default::default()
         };
@@ -1054,10 +1078,10 @@ mod tests {
     }
 
     #[test]
-    fn aaa_mode_cycles_through_all_three() {
-        assert_eq!(AaaMode::All.cycle(), AaaMode::Artist);
-        assert_eq!(AaaMode::Artist.cycle(), AaaMode::Album);
-        assert_eq!(AaaMode::Album.cycle(), AaaMode::All);
+    fn scope_cycles_through_all_three() {
+        assert_eq!(Scope::All.cycle(), Scope::Outer);
+        assert_eq!(Scope::Outer.cycle(), Scope::Inner);
+        assert_eq!(Scope::Inner.cycle(), Scope::All);
     }
 
     #[test]

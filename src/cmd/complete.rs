@@ -198,7 +198,7 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
 /// being perfectly valid.
 fn setting_values(key: SettingKey, world: &World) -> Vec<String> {
     match key {
-        SettingKey::AaaMode => vec!["all".into(), "artist".into(), "album".into()],
+        SettingKey::Scope => vec!["all".into(), "artist".into(), "album".into()],
         SettingKey::ResampleQuality => vec!["fast".into(), "balanced".into(), "high".into()],
         SettingKey::ReplayGain => vec!["off".into(), "track".into(), "album".into(), "auto".into()],
         SettingKey::WhichKeyDelay => world
@@ -363,7 +363,7 @@ mod tests {
     /// The interesting one: which values are valid depends on the key.
     #[test]
     fn set_values_depend_on_the_key() {
-        let c = complete_setting_value("aaa_mode=a", &world()).unwrap();
+        let c = complete_setting_value("scope=a", &world()).unwrap();
         assert_eq!(c.options, ["all", "artist", "album"]);
 
         let c = complete_setting_value("resample_quality=", &world()).unwrap();

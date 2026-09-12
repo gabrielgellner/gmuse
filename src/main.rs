@@ -2174,10 +2174,10 @@ fn run_tui(
     state.audit.line(
         "settings",
         &format!(
-            "replaygain={} shuffle={} aaa_mode={}",
+            "replaygain={} shuffle={} scope={}",
             state.replaygain.label(),
             state.playback.shuffle,
-            state.playback.aaa_mode.label(),
+            state.playback.scope.label(),
         ),
     );
 
@@ -2684,14 +2684,14 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                 Call::QueueClear { base_version } => {
                     self.queue(gmuse::engine::control::QueueOp::Clear { base: base_version })
                 }
-                Call::SetAaaMode { mode } => {
-                    let Some(mode) = gmuse::next::AaaMode::parse(&mode) else {
+                Call::SetScope { mode } => {
+                    let Some(mode) = gmuse::next::Scope::parse(&mode) else {
                         return Err(RpcError::invalid_params(
                             "mode",
                             format!("{mode:?} is not an aaa mode"),
                         ));
                     };
-                    self.queue(gmuse::engine::control::QueueOp::SetAaaMode(mode))
+                    self.queue(gmuse::engine::control::QueueOp::SetScope(mode))
                 }
 
                 Call::PlayerLoad { recording } => {

@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use super::keys;
 use super::{
-    AaaMode, AddTarget, Command, Context, Fold, Motion, PaneTarget, Place, PlaylistSpec, Quality,
-    RateSpec, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
+    AddTarget, Command, Context, Fold, Motion, PaneTarget, Place, PlaylistSpec, Quality, RateSpec,
+    Scope, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -780,12 +780,13 @@ fn vol_spec(rest: &str) -> Result<VolSpec, ParseError> {
 
 fn setting_value(key: SettingKey, text: &str) -> Result<SettingValue, ParseError> {
     Ok(match key {
-        SettingKey::AaaMode => SettingValue::Aaa(match text {
-            "all" => AaaMode::All,
-            "artist" => AaaMode::Artist,
-            "album" => AaaMode::Album,
-            _ => return Err(ParseError::Bad(text.into(), "aaa mode")),
-        }),
+        // **Through `Scope::parse`, not a second copy of it.** This was its own
+        // three-arm match, which knew `all`, `artist` and `album` — and stopped
+        // knowing the whole set the moment #234 added `outer` and `inner`. One
+        // declaration is the fix; the round-trip test is what caught it.
+        SettingKey::Scope => SettingValue::Scope(
+            Scope::parse(text).ok_or_else(|| ParseError::Bad(text.into(), "scope"))?,
+        ),
         SettingKey::ReplayGain => SettingValue::ReplayGain(
             crate::cmd::ReplayGainMode::parse(text)
                 .ok_or_else(|| ParseError::Bad(text.into(), "replaygain mode"))?,
@@ -1168,10 +1169,10 @@ mod tests {
             }
         );
         assert_eq!(
-            command("set aaa_mode=album").unwrap(),
+            command("set scope=album").unwrap(),
             Command::Set {
-                key: SettingKey::AaaMode,
-                value: SettingValue::Aaa(AaaMode::Album)
+                key: SettingKey::Scope,
+                value: SettingValue::Scope(Scope::Inner)
             }
         );
         assert_eq!(
@@ -1182,7 +1183,7 @@ mod tests {
             }
         );
         // A boolean value for an enum key is an error, not a silent default.
-        assert!(command("set aaa_mode=true").is_err());
+        assert!(command("set scope=true").is_err());
         assert!(command("set shuffle=maybe").is_err());
         assert!(command("set nosuchthing=1").is_err());
         assert!(command("set shuffle").is_err());
@@ -1276,8 +1277,8 @@ mod tests {
                 value: SettingValue::Bool(true),
             },
             Command::Set {
-                key: SettingKey::AaaMode,
-                value: SettingValue::Aaa(AaaMode::Artist),
+                key: SettingKey::Scope,
+                value: SettingValue::Scope(Scope::Outer),
             },
             Command::Set {
                 key: SettingKey::ResampleQuality,

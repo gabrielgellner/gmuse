@@ -198,7 +198,7 @@ pub const DEFAULTS: &[&str] = &[
     "bind transport r toggle repeat",
     "bind transport R toggle repeat_current",
     "bind transport C toggle continue",
-    "bind transport m toggle aaa_mode",
+    "bind transport m toggle scope",
     // A closed keymap has to carry its own way out and its own way to ask.
     // Out of the *mode* is `escape`; out of the *player* is `:q`, and it is
     // deliberately not a keystroke — see the note beside the search bindings.
@@ -208,7 +208,7 @@ pub const DEFAULTS: &[&str] = &[
     "bind common r toggle repeat",
     "bind common R toggle repeat_current",
     "bind common C toggle continue",
-    "bind common m toggle aaa_mode",
+    "bind common m toggle scope",
     // library
     // `a` is the common one, so it gets the obvious key. `y` went to yank,
     // which is what it means in vim, and adding to the *library* is rare —

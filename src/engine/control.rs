@@ -83,7 +83,7 @@ pub enum QueueOp {
     Clear {
         base: Option<u64>,
     },
-    SetAaaMode(gmuse_library::next::AaaMode),
+    SetScope(gmuse_library::next::Scope),
 }
 
 /// The queue as it stands after an operation.
@@ -300,8 +300,8 @@ fn run(
                         version,
                         entries: None,
                     }),
-                    QueueOp::SetAaaMode(mode) => Ok(Answered {
-                        version: queue.set_aaa_mode(mode),
+                    QueueOp::SetScope(mode) => Ok(Answered {
+                        version: queue.set_scope(mode),
                         entries: None,
                     }),
                 };

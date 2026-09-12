@@ -194,7 +194,7 @@ impl Shelf {
     ///
     /// This is how catalogs work: §4 makes the library a projection over a
     /// *subset* of the rows, so confining the subset confines browsing,
-    /// shuffle and `aaa_mode` without `next()` knowing catalogs exist.
+    /// shuffle and `scope` without `next()` knowing catalogs exist.
     ///
     /// **There was a second one of these** (#116). `project` grouped by what
     /// the model says and this grouped by what the tags carried, and #84 chose
@@ -438,7 +438,7 @@ impl Shelf {
 
     /// Which artist and album a track sits under.
     ///
-    /// `aaa_mode` needs this to narrow the candidate pool, and getting it from
+    /// `scope` needs this to narrow the candidate pool, and getting it from
     /// the tree rather than the `Scan` keeps `next()`'s inputs to exactly what
     /// DESIGN §5 lists.
     pub fn locate(&self, id: CopyId) -> Option<(&SortKey, &SortKey)> {

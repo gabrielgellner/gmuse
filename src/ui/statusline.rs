@@ -135,7 +135,10 @@ fn modes(ui: &Ui) -> String {
     if !ui.composed.is_empty() {
         out.push(format!("[{}]", ui.composed.label()));
     }
-    out.push(format!("[{}]", ui.playback.aaa_mode.label()));
+    // **The dimension, not the depth** — #234. `Inner` is "album" when grouped
+    // by artist and album, and "year" when grouped by genre and year; a status
+    // line saying `[inner]` would be honest and useless.
+    out.push(format!("[{}]", ui.playback.scope.named(ui.levels)));
     if ui.playback.shuffle {
         out.push("[shuffle]".into());
     }

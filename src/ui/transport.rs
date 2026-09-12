@@ -22,7 +22,7 @@
 //! ## What is deliberately not here
 //!
 //! **Gapless next-track selection.** The decoder's `NeedNext` has a deadline and
-//! the TUI answers it today from `ui.queue` and `ui.playback.aaa_mode` — state
+//! the TUI answers it today from `ui.queue` and `ui.playback.scope` — state
 //! §6 assigns to the control thread. A detached view cannot answer a deadline,
 //! so that responsibility *moves* rather than being wrapped, and #232 is where.
 //! Wrapping it here would encode a responsibility that is leaving.

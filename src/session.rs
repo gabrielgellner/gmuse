@@ -57,7 +57,7 @@ pub struct Modes {
     pub repeat: bool,
     pub repeat_current: bool,
     pub continue_playing: bool,
-    pub aaa_mode: String,
+    pub scope: String,
     pub replaygain: String,
     pub active: String,
     /// The shuffle seed.
@@ -202,7 +202,7 @@ mod tests {
                 repeat: false,
                 repeat_current: false,
                 continue_playing: true,
-                aaa_mode: "album".into(),
+                scope: "album".into(),
                 replaygain: "auto".into(),
                 active: "library".into(),
                 rng_state: 0x1234_5678_9abc_def0,

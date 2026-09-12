@@ -495,7 +495,7 @@ mod tests {
             r#"
             [settings]
             shuffle = true
-            aaa_mode = "album"
+            scope = "album"
             "#,
         );
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
@@ -504,8 +504,8 @@ mod tests {
             value: SettingValue::Bool(true)
         }));
         assert!(loaded.commands.contains(&Command::Set {
-            key: SettingKey::AaaMode,
-            value: SettingValue::Aaa(crate::next::AaaMode::Album)
+            key: SettingKey::Scope,
+            value: SettingValue::Scope(crate::next::Scope::Inner)
         }));
     }
 
