@@ -14,7 +14,7 @@ body = """
     ### {{ group | striptags | trim | upper_first }}
     {% for commit in commits %}
         - {% if commit.breaking %}[**breaking**] {% endif %}\
-          {{ commit.message | upper_first }} ([`{{ commit.id | truncate(length=7, end="") }}`]({{ repo }}/-/commit/{{ commit.id }}))\
+          {{ commit.message | split(pat="\n") | first | trim | upper_first }} ([`{{ commit.id | truncate(length=7, end="") }}`]({{ repo }}/-/commit/{{ commit.id }}))\
     {% endfor %}
 {% endfor %}\n
 """
@@ -38,11 +38,28 @@ trim = true
 
 [git]
 conventional_commits = true
-filter_unconventional = true
+# **A commit that does not parse is listed under "Other", not dropped.**
+#
+# This was `true`, which meant a badly typed subject did not fail loudly — it
+# vanished from CHANGELOG.md without a word. Measured on this history: 44 of
+# 383 commits, dated 2026-09-03 to 09-07 and interleaved with well-formed ones,
+# were invisible. They are merged onto a protected `main`, so rewriting them is
+# a force-push by definition and is not available.
+#
+# The catch-all below is a *general* rule and not the per-subject preprocessor
+# CLAUDE.md rejects: nothing here names a commit. `.githooks/commit-msg` is
+# what stops new ones arriving, so this bucket describes history rather than
+# licensing more of it.
+filter_unconventional = false
 split_commits = false
 commit_parsers = [
-    # Merge commits repeat the branch's own commits, which are listed already.
-    { message = "^\\w+(\\(.*\\))?!?: merge ", skip = true },
+    # A real merge commit repeats the branch's own commits, which are listed
+    # already — and git writes those as "Merge branch ...", never as a typed
+    # subject. This was `^\\w+(\\(.*\\))?!?: merge `, which matched no merge
+    # commit in 383 (this project is fast-forward only, so there are none) and
+    # silently dropped exactly one real feature: `feat(model): merge by
+    # redirect` (#68). Match what git actually writes.
+    { message = "^Merge (branch|remote-tracking|pull request)", skip = true },
     { message = "^feat", group = "Features" },
     { message = "^fix", group = "Bug Fixes" },
     { message = "^perf", group = "Performance" },
@@ -55,6 +72,11 @@ commit_parsers = [
     { message = "^chore\\(release\\)", skip = true },
     { message = "^chore", group = "Miscellaneous" },
     { body = ".*security", group = "Security" },
+    # The initial commit predates the convention and stays out, as it always has.
+    { message = "^Initial commit", skip = true },
+    # Anything left is pre-hook history. Listed, so it is visible, and last so
+    # it can never shadow a typed rule above it.
+    { message = ".*", group = "Other" },
 ]
 protect_breaking_commits = false
 filter_commits = true

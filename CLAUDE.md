@@ -113,6 +113,7 @@ avoid spending shared-runner minutes re-running checks the hooks already made.
 
 `just hooks-install` points `core.hooksPath` at `.githooks/`:
 
+- **commit-msg** — the subject must be a Conventional Commit, because the changelog is built from it
 - **pre-commit** — `just fmt-check` only, so committing stays fast
 - **pre-push** — the full `just ci`
 
@@ -122,14 +123,26 @@ Bypass with `--no-verify` sparingly, and say why in the message.
 
 ### Commits
 
-**Conventional Commits, enforced by the changelog.** `cliff.toml` sets `filter_unconventional = true`, so a commit that
-does not parse is silently dropped from `CHANGELOG.md` — a badly typed commit does not fail loudly, it just vanishes.
+**Conventional Commits, enforced at commit time.** `.githooks/commit-msg` rejects a subject that does not parse, which
+is the only moment it is still free to fix — see below for what it cost to learn that.
 
 Types in use: `feat`, `fix`, `perf`, `refactor`, `style`, `test`, `docs`, `build`, `ci`, `chore`. Use `!` or a
-`BREAKING CHANGE:` footer for breaking changes.
+`BREAKING CHANGE:` footer for breaking changes. Adding a type means adding it to the hook **and** to `cliff.toml`, or
+the commit passes the gate and then lands in `Other`.
 
-The initial commit predates this convention and is filtered out of the changelog. History is conventional from
-`chore/dev-workflow` onward.
+The initial commit predates this convention and is skipped by name. History is conventional from `chore/dev-workflow`
+onward.
+
+**A commit that does not parse is listed under `Other`, not dropped.** `filter_unconventional` was `true`, so a badly
+typed subject did not fail loudly — it vanished from `CHANGELOG.md` without a word. Measured: **44 of 383 commits**,
+dated 2026-09-03 to 09-07 and interleaved with well-formed ones, were invisible; all of them already merged onto a
+protected `main`, where a subject cannot be corrected. The catch-all that surfaces them is a _general_ rule and names no
+commit, which is what separates it from the per-subject preprocessor rejected below.
+
+The same pass found `cliff.toml`'s merge-skip rule matching `^\w+(\(.*\))?!?: merge `. This project is fast-forward
+only, so it has **no merge commits at all** and that rule could never do its job — its one hit in 383 commits was
+`feat(model): merge by redirect` (#68), a real feature it dropped. It now matches what git actually writes,
+`^Merge (branch|remote-tracking|pull request)`.
 
 ### Merge requests
 
@@ -156,6 +169,11 @@ title about blast radii — which was unfixable, for the reason below.
 so that cannot happen. It has bitten twice: `8b84fd3` (the #151 fix, an untyped title) and `ddd51bb` (a squash that
 swallowed a whole branch). That is a cost worth accepting rather than working around — a `cliff.toml` preprocessor
 special-casing a subject line would be a permanent wart describing a historical accident.
+
+**That still holds, and it is not what the `Other` group is.** A preprocessor rewrites one named subject so it pretends
+to parse; the catch-all names nothing and claims nothing, it just declines to throw away a commit it cannot type. The 44
+stay untyped in the changelog, which is accurate — they _were_ untyped. What changed is that the failure is now visible
+instead of silent, and `.githooks/commit-msg` means the bucket describes history rather than licensing more of it.
 
 ### Configuration and theming
 

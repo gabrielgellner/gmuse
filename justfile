@@ -143,6 +143,7 @@ hooks-install:
     set -euo pipefail
     git config core.hooksPath .githooks
     echo "core.hooksPath -> .githooks"
+    echo "  commit-msg: Conventional Commit subject  (bypass: git commit --no-verify)"
     echo "  pre-commit: 'just fmt-check'  (bypass: git commit --no-verify)"
     echo "  pre-push:   'just ci'         (bypass: git push --no-verify)"
 

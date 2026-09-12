@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Subject-line gate: the changelog is built from commit history, so a badly
+# typed subject is not a cosmetic problem — git-cliff used to drop it from
+# CHANGELOG.md without a word. Measured before this hook existed: 44 of 383
+# commits were invisible, and every one of them was already merged onto a
+# protected `main`, where a subject cannot be corrected.
+#
+# So the check belongs here, at the one moment it is still free to fix.
+#
+# Install: just hooks-install
+# Bypass:  git commit --no-verify   (use sparingly, and say why)
+set -euo pipefail
+
+msg_file="$1"
+
+# The comment block git appends is not part of the message, and a merge or a
+# fixup is not ours to type.
+subject=$(grep -v '^#' "$msg_file" | sed '/^[[:space:]]*$/d' | head -n 1)
+
+case "$subject" in
+    "Merge branch"*|"Merge remote"*|"Revert "*|"fixup!"*|"squash!"*|"amend!"*)
+        exit 0
+        ;;
+esac
+
+# The types cliff.toml groups on. Adding one here means adding it there too,
+# or the commit parses and then vanishes anyway.
+types='feat|fix|perf|refactor|style|test|docs|build|ci|chore|revert'
+
+if printf '%s\n' "$subject" | grep -qE "^($types)(\([^)]+\))?!?: .+"; then
+    exit 0
+fi
+
+cat >&2 <<MSG
+
+commit-msg: the subject is not a Conventional Commit, so it would be dropped
+            from CHANGELOG.md silently rather than failing loudly.
+
+  subject:  $subject
+
+  expected: type(optional-scope)!: description
+  types:    ${types//|/, }
+
+  examples: feat(librarian): a scan reconciles holdings and reads no tags
+            fix(audio)!: the callback no longer allocates on underrun
+            docs: say where a name comes from
+
+Amend the subject and commit again, or bypass with --no-verify and say why.
+MSG
+exit 1
