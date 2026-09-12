@@ -2402,11 +2402,12 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
             use gmuse_proto::{Call, RpcError, error::code};
             match request {
-                // Served by the engine before this is reached.
-                Call::Hello(_) => Err(RpcError::new(
-                    code::INTERNAL,
-                    "hello is not dispatched here",
-                )),
+                // Served by the connection before this is reached: the
+                // handshake and the subscription calls are its own state, not
+                // something the engine answers about itself.
+                Call::Hello(_) | Call::Subscribe { .. } | Call::Unsubscribe { .. } => Err(
+                    RpcError::new(code::INTERNAL, "handled by the connection, not here"),
+                ),
 
                 Call::TimeNow => Ok(serde_json::json!({ "engine_now_ns": self.now_ns() })),
 

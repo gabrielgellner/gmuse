@@ -20,11 +20,13 @@
 
 pub mod envelope;
 pub mod error;
+pub mod event;
 pub mod hello;
 pub mod request;
 pub mod version;
 
 pub use envelope::{Id, Request, Response};
 pub use error::RpcError;
+pub use event::{Event, Topic};
 pub use request::{Request as Call, method};
 pub use version::{MAJOR, PROTOCOL};

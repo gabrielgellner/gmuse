@@ -1,0 +1,10 @@
+> {"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":"gmuse/0"}}
+< {"jsonrpc":"2.0","id":1,"result":{"capabilities":["golden"],"engine_generation":"<generation>","engine_now_ns":0,"protocol":"gmuse/0","sample_rate":48000,"stream_generation":0}}
+> {"jsonrpc":"2.0","id":2,"method":"sub.subscribe","params":{"topics":["queue","library"]}}
+< {"jsonrpc":"2.0","id":2,"result":{"topics":["queue","library"]}}
+> {"jsonrpc":"2.0","id":3,"method":"sub.subscribe"}
+< {"jsonrpc":"2.0","id":3,"result":{"topics":["playback","queue","library","decks","params","meters","engine"]}}
+> {"jsonrpc":"2.0","id":4,"method":"sub.unsubscribe","params":{"topics":["meters","queue"]}}
+< {"jsonrpc":"2.0","id":4,"result":{"topics":["playback","library","decks","params","engine"]}}
+> {"jsonrpc":"2.0","id":5,"method":"sub.subscribe","params":{"topics":["weather"]}}
+< {"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"sub.subscribe: unknown variant `weather`, expected one of `playback`, `queue`, `library`, `decks`, `params`, `meters`, `engine`","data":{"field":"params","message":"sub.subscribe: unknown variant `weather`, expected one of `playback`, `queue`, `library`, `decks`, `params`, `meters`, `engine`"}}}

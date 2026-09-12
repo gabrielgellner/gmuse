@@ -20,6 +20,7 @@
 
 use std::path::Path;
 
+use gmuse::engine::client::Client;
 use gmuse::engine::{Answers, Identity, serve_line_for_test};
 use gmuse_proto::{Call, RpcError};
 
@@ -63,12 +64,19 @@ fn replay(path: &Path) -> (Vec<String>, Vec<String>) {
     let id = identity();
     let generation = id.engine_generation.clone();
     let answers = Golden;
+    // **A real connection, so `sub.*` answers what it actually would.**
+    //
+    // The first version passed no client and the blessed transcript recorded
+    // `{"topics":[]}` for a subscribe that named two — pinning a lie, which is
+    // worse than having no transcript at all. A golden file is only worth
+    // keeping if the thing it replays is the thing that ships.
+    let client = Client::new(gmuse::engine::client::DEFAULT_CAPACITY);
     let mut greeted = false;
 
     let (mut expected, mut actual) = (Vec::new(), Vec::new());
     for line in text.lines() {
         if let Some(sent) = line.strip_prefix("> ") {
-            let (reply, _fatal) = serve_line_for_test(sent, &id, &answers, &mut greeted);
+            let (reply, _fatal) = serve_line_for_test(sent, &id, &answers, &mut greeted, &client);
             let body = reply
                 .map(|r| serde_json::to_string(&r).expect("serialise"))
                 .unwrap_or_default();

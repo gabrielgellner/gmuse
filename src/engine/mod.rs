@@ -30,6 +30,8 @@
 //! learned: a refused connection means nothing is *listening*, not that nothing
 //! is *running*. The lock answers the question that was actually being asked.
 
+pub mod client;
+pub mod outbox;
 pub mod socket;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -41,7 +43,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gmuse_proto::envelope::{self, MAX_LINE};
 use gmuse_proto::hello::{HelloParams, HelloResult};
 use gmuse_proto::request::method;
-use gmuse_proto::{Call, Response, RpcError, error::code, version};
+use gmuse_proto::{Call, Event, Response, RpcError, Topic, error::code, version};
 use thiserror::Error;
 
 /// What the engine could not do.
@@ -129,6 +131,7 @@ pub struct Engine {
     path: PathBuf,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    subscribers: Arc<client::Subscribers>,
     _lock: crate::lock::Lock,
 }
 
@@ -136,6 +139,20 @@ impl Engine {
     /// Where it is listening.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Say something to every view subscribed to the topic.
+    ///
+    /// **Returns rather than waits** — I1. The count is how many clients the
+    /// event was queued for, not how many have received it; a client is sent to
+    /// by its own writer thread, on its own time.
+    pub fn publish(&self, event: &Event) -> usize {
+        self.subscribers.publish(event)
+    }
+
+    /// How many views are connected.
+    pub fn clients(&self) -> usize {
+        self.subscribers.len()
     }
 }
 
@@ -187,6 +204,9 @@ pub fn serve(
 
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = Arc::clone(&stop);
+    // Everyone connected, so an event reaches every view that asked for it.
+    let subscribers = Arc::new(client::Subscribers::default());
+    let published = Arc::clone(&subscribers);
     let thread = std::thread::Builder::new()
         .name("gmuse-engine-listener".into())
         .spawn(move || {
@@ -196,13 +216,14 @@ pub fn serve(
                 }
                 let Ok(stream) = stream else { continue };
                 let answers = Arc::clone(&answers);
+                let subscribers = Arc::clone(&subscribers);
                 let identity = identity.clone();
                 // A thread per connection. There are a handful of views, not a
                 // thousand, and a blocking read per client is the simplest
                 // thing that cannot make one client's slowness another's.
                 let _ = std::thread::Builder::new()
                     .name("gmuse-engine-conn".into())
-                    .spawn(move || converse(stream, &identity, answers.as_ref()));
+                    .spawn(move || converse(stream, &identity, answers, &subscribers));
             }
         })
         .map_err(|source| EngineError::Bind {
@@ -214,19 +235,61 @@ pub fn serve(
         path: path.to_path_buf(),
         stop,
         thread: Some(thread),
+        subscribers: published,
         _lock: lock,
     })
 }
 
 /// One connection, from `hello` to close.
-fn converse(stream: UnixStream, identity: &Identity, answers: &dyn Answers) {
+///
+/// **Three parts, and the split is I1.** The reader parses; a worker answers;
+/// the writer is the only thing that touches the socket. No path from the
+/// engine to a client write exists that does not go through the bounded
+/// [`client::Outbox`], which is what makes "the engine never blocks on a view"
+/// structural rather than a rule to remember.
+fn converse(
+    stream: UnixStream,
+    identity: &Identity,
+    answers: Arc<dyn Answers>,
+    subscribers: &Arc<client::Subscribers>,
+) {
     let Ok(write_half) = stream.try_clone() else {
         return;
     };
-    let mut out = std::io::BufWriter::new(write_half);
-    let mut reader = BufReader::new(stream);
 
+    let conn = Arc::new(client::Client::new(client::DEFAULT_CAPACITY));
+    subscribers.add(Arc::clone(&conn));
+
+    // The writer. It outlives the reader by design: a client that stops sending
+    // is still owed the answers it already asked for.
+    let writer = {
+        let conn = Arc::clone(&conn);
+        std::thread::Builder::new()
+            .name("gmuse-engine-writer".into())
+            .spawn(move || {
+                let mut out = std::io::BufWriter::new(write_half);
+                while let Some(item) = conn.next() {
+                    let body = match &item {
+                        client::Outgoing::Response(r) => serde_json::to_string(r),
+                        client::Outgoing::Event(e) => {
+                            serde_json::to_string(&gmuse_proto::event::notification(e))
+                        }
+                    };
+                    let Ok(body) = body else { continue };
+                    if writeln!(out, "{body}").is_err() || out.flush().is_err() {
+                        // The client has gone. Not an error: §7.10 calls a
+                        // disconnect a non-event for the engine.
+                        conn.close();
+                        return;
+                    }
+                }
+            })
+    };
+
+    let mut reader = BufReader::new(stream);
     let mut greeted = false;
+    let mut workers = Vec::new();
+
     loop {
         // **Read at most one line's worth, then decide.** `lines()` and
         // `read_line` both grow their buffer until a newline arrives, so a
@@ -237,48 +300,101 @@ fn converse(stream: UnixStream, identity: &Identity, answers: &dyn Answers) {
         let read = (&mut reader)
             .take(MAX_LINE as u64 + 1)
             .read_until(b'\n', &mut raw);
-        let Ok(read) = read else { return };
+        let Ok(read) = read else { break };
         if read == 0 {
-            return; // the client hung up
+            break; // the client hung up
         }
         if raw.len() > MAX_LINE {
             // §7.1: rejected *and discarded* — the tail is not a request, so
             // skipping to the next newline is what keeps the stream usable
             // rather than reading the remainder as a stream of parse errors.
-            let over =
-                RpcError::invalid_request(format!("line exceeds the {MAX_LINE}-byte maximum"));
-            let body = serde_json::to_string(&Response::err(None, over)).unwrap_or_default();
-            if writeln!(out, "{body}").is_err() || out.flush().is_err() {
-                return;
-            }
+            conn.respond(Response::err(
+                None,
+                RpcError::invalid_request(format!("line exceeds the {MAX_LINE}-byte maximum")),
+            ));
             if discard_line(&mut reader).is_err() {
-                return;
+                break;
             }
             continue;
         }
         let Ok(line) = String::from_utf8(raw) else {
-            let e = RpcError::parse("a line must be UTF-8");
-            let body = serde_json::to_string(&Response::err(None, e)).unwrap_or_default();
-            let _ = writeln!(out, "{body}");
-            let _ = out.flush();
+            conn.respond(Response::err(None, RpcError::parse("a line must be UTF-8")));
             continue;
         };
         if line.trim().is_empty() {
             continue;
         }
-        let (reply, fatal) = serve_line(&line, identity, answers, &mut greeted);
-        if let Some(reply) = reply {
-            let Ok(body) = serde_json::to_string(&reply) else {
-                return;
-            };
-            if writeln!(out, "{body}").is_err() || out.flush().is_err() {
-                return;
+
+        // **Session work is answered here; everything else is dispatched.**
+        //
+        // §7.2 requires that responses have no ordering guarantee, and calls it
+        // a requirement rather than a permission: a reader that answered each
+        // line before reading the next would make a cue press wait behind a
+        // scan, which is the head-of-line blocking I6 forbids. The handshake
+        // and the subscription calls are the exception because they *are* the
+        // connection's own state — running them off-thread would let a client
+        // race its own `hello`.
+        if is_session_work(&line) || !greeted {
+            let (reply, fatal) =
+                serve_line(&line, identity, answers.as_ref(), &mut greeted, Some(&conn));
+            if let Some(reply) = reply {
+                conn.respond(reply);
             }
+            if fatal {
+                break;
+            }
+            continue;
         }
-        if fatal {
-            return;
+
+        let conn_for_worker = Arc::clone(&conn);
+        let answers = Arc::clone(&answers);
+        let identity = identity.clone();
+        let worker = std::thread::Builder::new()
+            .name("gmuse-engine-worker".into())
+            .spawn(move || {
+                let mut already = true;
+                let (reply, _) = serve_line(
+                    &line,
+                    &identity,
+                    answers.as_ref(),
+                    &mut already,
+                    Some(&conn_for_worker),
+                );
+                if let Some(reply) = reply {
+                    conn_for_worker.respond(reply);
+                }
+            });
+        if let Ok(worker) = worker {
+            workers.push(worker);
         }
     }
+
+    // The reader is done. Let the outstanding answers finish and be written
+    // before the socket goes, or a client that asked and then stopped sending
+    // would never hear back.
+    for worker in workers {
+        let _ = worker.join();
+    }
+    conn.close();
+    if let Ok(writer) = writer {
+        let _ = writer.join();
+    }
+}
+
+/// Whether a line is the connection's own business rather than the engine's.
+///
+/// A cheap prefix test on the raw line, deliberately: it decides *where* to
+/// parse, so it cannot be the thing that parses. Anything it misjudges is still
+/// parsed correctly one layer down — the cost of a wrong guess is a thread, not
+/// a wrong answer.
+fn is_session_work(line: &str) -> bool {
+    [
+        gmuse_proto::request::method::HELLO,
+        gmuse_proto::request::method::SUBSCRIBE,
+        gmuse_proto::request::method::UNSUBSCRIBE,
+    ]
+    .iter()
+    .any(|m| line.contains(&format!("\"{m}\"")))
 }
 
 /// Throw away everything up to and including the next newline.
@@ -305,8 +421,9 @@ pub fn serve_line_for_test(
     identity: &Identity,
     answers: &dyn Answers,
     greeted: &mut bool,
+    client: &client::Client,
 ) -> (Option<Response>, bool) {
-    serve_line(line, identity, answers, greeted)
+    serve_line(line, identity, answers, greeted, Some(client))
 }
 
 /// Answer one line. Returns the reply to send, and whether to close after it.
@@ -319,6 +436,7 @@ fn serve_line(
     identity: &Identity,
     answers: &dyn Answers,
     greeted: &mut bool,
+    client: Option<&client::Client>,
 ) -> (Option<Response>, bool) {
     let request = match envelope::parse_line(line) {
         Ok(r) => r,
@@ -362,6 +480,14 @@ fn serve_line(
                 return (reply, close);
             }
         }
+    } else if let Call::Subscribe { topics } = &call {
+        // **Handled here, not by `Answers`.** A subscription is per-connection
+        // bookkeeping, and `Answers` is what the *engine* can answer — giving
+        // it a client to mutate would put connection state behind a seam whose
+        // whole purpose is not to have any.
+        Ok(subscription_result(client, |c| c.subscribe(topics)))
+    } else if let Call::Unsubscribe { topics } = &call {
+        Ok(subscription_result(client, |c| c.unsubscribe(topics)))
     } else {
         answers.call(call)
     };
@@ -374,6 +500,19 @@ fn serve_line(
         Ok(result) => (Some(Response::ok(id, result)), false),
         Err(e) => (Some(Response::err(id, e)), false),
     }
+}
+
+/// What a `sub.*` call answers: the topics now in force.
+///
+/// **The full set, not the delta.** A client that asked for two topics and got
+/// back "ok" would have to model the engine's view of its own subscription;
+/// answering with the whole list means it never has to.
+fn subscription_result(
+    client: Option<&client::Client>,
+    change: impl FnOnce(&client::Client) -> Vec<Topic>,
+) -> serde_json::Value {
+    let topics = client.map(change).unwrap_or_default();
+    serde_json::json!({ "topics": topics })
 }
 
 /// The handshake.
@@ -427,7 +566,7 @@ mod tests {
         let mut greeted = false;
         let mut out = Vec::new();
         for line in lines {
-            let (reply, fatal) = serve_line(line, &id, &answers, &mut greeted);
+            let (reply, fatal) = serve_line(line, &id, &answers, &mut greeted, None);
             out.push(reply);
             if fatal {
                 break;
@@ -468,6 +607,7 @@ mod tests {
             &id,
             &answers,
             &mut greeted,
+            None,
         );
         assert!(fatal, "a version mismatch closes the connection");
         assert!(!greeted);
@@ -677,6 +817,213 @@ mod over_a_real_socket {
             second["result"]["protocol"], "gmuse/0",
             "the hello after the discarded line was still served"
         );
+
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The two properties #216 exists to establish, over real sockets.
+#[cfg(test)]
+mod under_pressure {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    /// An engine where one method is slow and another is not.
+    struct Uneven;
+    impl Answers for Uneven {
+        fn stream_generation(&self) -> u32 {
+            0
+        }
+        fn now_ns(&self) -> i64 {
+            0
+        }
+        fn call(&self, request: Call) -> Result<serde_json::Value, RpcError> {
+            match request {
+                // Stands in for a scan or a query on the librarian.
+                Call::EngineStatus => {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    Ok(serde_json::json!("slow"))
+                }
+                // Stands in for a cue press.
+                Call::TimeNow => Ok(serde_json::json!("fast")),
+                other => Err(RpcError::method_not_found(other.method())),
+            }
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gmuse-216-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const HELLO: &str =
+        r#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":"gmuse/0"}}"#;
+
+    /// **§7.2, as a requirement rather than a permission.** A reader that
+    /// answered each line before reading the next would make a cue press wait
+    /// behind a scan — the head-of-line blocking I6 forbids. The slow request
+    /// goes first and must come back second.
+    #[test]
+    fn a_fast_response_overtakes_a_slow_one() {
+        let dir = scratch("overtake");
+        let path = dir.join(socket::SOCKET);
+        let engine = serve(&path, Identity::new(48_000, vec![]), Arc::new(Uneven)).unwrap();
+
+        let mut stream = UnixStream::connect(&path).unwrap();
+        writeln!(stream, "{HELLO}").unwrap();
+        writeln!(
+            stream,
+            r#"{{"jsonrpc":"2.0","id":2,"method":"engine.status"}}"#
+        )
+        .unwrap();
+        writeln!(stream, r#"{{"jsonrpc":"2.0","id":3,"method":"time.now"}}"#).unwrap();
+        stream.flush().unwrap();
+
+        let mut ids = Vec::new();
+        for line in BufReader::new(stream).lines().take(3) {
+            let v: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+            ids.push(v["id"].as_i64().unwrap());
+        }
+
+        assert_eq!(
+            ids,
+            vec![1, 3, 2],
+            "the fast answer came back before the slow one it was sent after"
+        );
+
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The slow client** — §7.10. It subscribes, never reads, and is driven
+    /// past its bound; what it eventually finds waiting is a resync notice
+    /// rather than a backlog.
+    #[test]
+    fn a_client_that_stops_reading_is_coalesced_then_told_to_resync() {
+        let dir = scratch("slow");
+        let path = dir.join(socket::SOCKET);
+        let engine = serve(&path, Identity::new(48_000, vec![]), Arc::new(Uneven)).unwrap();
+
+        let mut stream = UnixStream::connect(&path).unwrap();
+        writeln!(stream, "{HELLO}").unwrap();
+        writeln!(
+            stream,
+            r#"{{"jsonrpc":"2.0","id":2,"method":"sub.subscribe","params":{{"topics":["params"]}}}}"#
+        )
+        .unwrap();
+        stream.flush().unwrap();
+
+        // Read only the two answers, then stop reading entirely.
+        let mut reading = BufReader::new(stream.try_clone().unwrap());
+        for _ in 0..2 {
+            let mut line = String::new();
+            reading.read_line(&mut line).unwrap();
+        }
+
+        // Wait for the subscription to be in force before publishing, or the
+        // test would be racing its own setup rather than the backpressure.
+        for _ in 0..200 {
+            if engine.clients() > 0
+                && engine.publish(&Event::new(Topic::Params, serde_json::json!({"warm":true}))) > 0
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // **Distinct keys**, so nothing coalesces and the bound is genuinely
+        // reached. Coalescing is covered by the outbox's own tests; what this
+        // asserts is that the engine did not wait for a client that stopped.
+        let started = std::time::Instant::now();
+        for n in 0..10_000 {
+            engine.publish(&Event::keyed(
+                Topic::Params,
+                n.to_string(),
+                serde_json::json!({ "n": n }),
+            ));
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "publishing to a client that stopped reading blocked the engine (I1)"
+        );
+
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A subscription answers with the topics now in force, so a client never
+    /// has to model the engine's view of its own state.
+    #[test]
+    fn subscribing_answers_with_the_whole_set() {
+        let dir = scratch("subs");
+        let path = dir.join(socket::SOCKET);
+        let engine = serve(&path, Identity::new(48_000, vec![]), Arc::new(Uneven)).unwrap();
+
+        let mut stream = UnixStream::connect(&path).unwrap();
+        writeln!(stream, "{HELLO}").unwrap();
+        writeln!(
+            stream,
+            r#"{{"jsonrpc":"2.0","id":2,"method":"sub.subscribe","params":{{"topics":["queue","library"]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stream,
+            r#"{{"jsonrpc":"2.0","id":3,"method":"sub.unsubscribe","params":{{"topics":["queue"]}}}}"#
+        )
+        .unwrap();
+        stream.flush().unwrap();
+
+        let mut lines = BufReader::new(stream).lines();
+        let _hello = lines.next().unwrap().unwrap();
+        let sub: serde_json::Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        assert_eq!(
+            sub["result"]["topics"],
+            serde_json::json!(["queue", "library"])
+        );
+        let unsub: serde_json::Value =
+            serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        assert_eq!(unsub["result"]["topics"], serde_json::json!(["library"]));
+
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An event reaches a subscribed client as a notification with no id.
+    #[test]
+    fn a_subscribed_client_receives_events() {
+        let dir = scratch("delivery");
+        let path = dir.join(socket::SOCKET);
+        let engine = serve(&path, Identity::new(48_000, vec![]), Arc::new(Uneven)).unwrap();
+
+        let mut stream = UnixStream::connect(&path).unwrap();
+        writeln!(stream, "{HELLO}").unwrap();
+        writeln!(
+            stream,
+            r#"{{"jsonrpc":"2.0","id":2,"method":"sub.subscribe","params":{{"topics":["queue"]}}}}"#
+        )
+        .unwrap();
+        stream.flush().unwrap();
+
+        let mut lines = BufReader::new(stream).lines();
+        let _hello = lines.next().unwrap().unwrap();
+        let _sub = lines.next().unwrap().unwrap();
+
+        for _ in 0..200 {
+            if engine.publish(&Event::new(Topic::Queue, serde_json::json!({"version":4}))) > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let event: serde_json::Value =
+            serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        assert_eq!(event["method"], "event");
+        assert!(event.get("id").is_none(), "an event is never correlated");
+        assert_eq!(event["params"]["topic"], "queue");
+        assert_eq!(event["params"]["version"], 4);
 
         drop(engine);
         let _ = std::fs::remove_dir_all(&dir);
