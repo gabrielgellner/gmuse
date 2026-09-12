@@ -31,6 +31,7 @@
 //! is *running*. The lock answers the question that was actually being asked.
 
 pub mod client;
+pub mod librarian;
 pub mod library;
 pub mod outbox;
 pub mod socket;

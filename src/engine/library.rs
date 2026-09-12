@@ -1,67 +1,51 @@
-//! **What an append tells the views** — #218, §8.7.
+//! **What an append tells the views** — #218, #222, §8.7.
 //!
-//! The log already classifies how far a fact reaches: `Fact::blast()` is
-//! Narrow, Wide or Rebuild. This turns a batch of appended facts into the one
-//! `library` event a view needs, which is the same classification plus the ids
-//! where they are derivable.
+//! The librarian already classifies how far a change reaches: `Changed` is
+//! `Nothing`, `These`, `Wide` or `Rebuild`, folded by `Changed::of` from each
+//! fact's own `blast()`. This renders that onto the wire, and does not work it
+//! out a second time.
 
-use gmuse_library::facts::{Blast, Fact, Record, Touched};
+use gmuse_library::facts::Touched;
+use gmuse_library::librarian::Changed;
 use gmuse_proto::{Change, Event, Topic};
 
-/// The event a batch of appended records should produce.
+/// The event a published answer should produce.
 ///
-/// **One event for the batch, not one per fact.** An apply lands thousands of
-/// facts; a view told about each would spend the whole operation re-querying,
-/// and §8.7's lattice says what the answer is instead — the join of all of
-/// them. Folding here rather than letting the outbox do it also means a client
-/// that is keeping up gets the same answer as one that is behind.
-pub fn change_for(records: &[Record], version: u64) -> Option<Event> {
-    let mut folded: Option<Change> = None;
-    for record in records {
-        let one = match record.fact.blast() {
-            Blast::Narrow => {
-                let ids = subjects(&record.fact);
-                // **An empty narrow is a wide**, not an empty refresh. A view
-                // told `scope: "ids"` with no ids would conclude that nothing
-                // it displays changed, which is the one thing that is certainly
-                // false about a fact that was just appended.
-                if ids.is_empty() {
-                    Change::wide(version)
-                } else {
-                    Change::ids(version, ids)
-                }
+/// **A rendering of `librarian::Changed`, not a second derivation of it.**
+///
+/// The first version walked the records and mapped `Fact::blast()` itself,
+/// which is exactly what `Changed::of` does forty lines away in the library —
+/// and `Changed::and` is the same lattice join as `Change::join`. Two
+/// implementations of one coalescing rule is the drift
+/// `every_fact_names_its_subject` exists to prevent, arriving one layer up:
+/// both compile, both look right, and the day a fact's blast radius changes
+/// only one of them is told.
+///
+/// So the library owns the lattice and this owns the wire. #218 said as much —
+/// "a serialisation of something already proven rather than a new invention" —
+/// and it was written as a new invention anyway.
+pub fn change_for(changed: &Changed, version: u64) -> Option<Event> {
+    let change = match changed {
+        Changed::Nothing => return None,
+        Changed::Rebuild => Change::rebuild(version),
+        Changed::Wide => Change::wide(version),
+        Changed::These(touched) => {
+            let ids: Vec<String> = touched.iter().map(name_of).collect();
+            // **An empty set is a wide, not an empty refresh.** A view told
+            // `scope: "ids"` with no ids would conclude nothing it displays
+            // changed, which is the one thing certainly false about a change
+            // that was just published.
+            if ids.is_empty() {
+                Change::wide(version)
+            } else {
+                Change::ids(version, ids)
             }
-            Blast::Wide => Change::wide(version),
-            Blast::Rebuild => Change::rebuild(version),
-        };
-        folded = Some(match folded {
-            Some(so_far) => so_far.join(&one),
-            None => one,
-        });
-    }
-    let change = folded?;
+        }
+    };
     Some(Event::new(
         Topic::Library,
         serde_json::to_value(change).ok()?,
     ))
-}
-
-/// The ids a narrow fact names, as the fact itself reports them.
-///
-/// **`Fact::touches()`, not a second table and not a heuristic.** It is
-/// exhaustive on purpose — "a new fact does not compile until somebody says
-/// what it reaches, which is the only thing that stops this drifting quietly
-/// out of step with the fold" — and that is exactly the property a blast-radius
-/// event needs.
-///
-/// The first version of this walked the fact's serialisation collecting
-/// UUID-shaped strings, on the reasoning that a narrow fact's ids *are* its
-/// blast radius. That is true and it was still the wrong way to get them:
-/// `touches()` already exists two hundred lines from `blast()`, the two are
-/// kept in step by the same rule, and a heuristic beside them would have been a
-/// third opinion that compiles when a variant is added and is silently wrong.
-fn subjects(fact: &Fact) -> Vec<String> {
-    fact.touches().iter().map(name_of).collect()
 }
 
 /// **`kind:uuid`**, which is §8.7's `"rec:8f3a…"` shape generalised.
@@ -94,96 +78,84 @@ fn name_of(touched: &Touched) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gmuse_library::model::clock::Stamp;
     use gmuse_library::model::id::Id;
     use gmuse_proto::Scope;
 
-    fn record(fact: Fact) -> Record {
-        Record {
-            // Any stamp: this maps facts to a blast radius and never reads one.
-            stamp: Stamp {
-                wall: 0,
-                counter: 0,
-                device: Id::derived(b"test-device"),
-            },
-            fact,
-        }
-    }
-
-    fn change(records: &[Record], version: u64) -> gmuse_proto::Change {
-        let event = change_for(records, version).expect("an event");
+    fn change(changed: &Changed, version: u64) -> gmuse_proto::Change {
+        let event = change_for(changed, version).expect("an event");
         serde_json::from_value(event.body).expect("a change")
     }
 
     #[test]
-    fn an_empty_batch_says_nothing() {
-        assert!(change_for(&[], 1).is_none());
+    fn nothing_arrived_so_nothing_is_said() {
+        assert!(change_for(&Changed::Nothing, 1).is_none());
     }
 
-    /// §8.7's Done-when shape: a narrow fact names exactly what changed.
+    /// §8.7's Done-when shape: a narrow change names exactly what moved.
     #[test]
-    fn a_narrow_fact_names_the_row_it_touched() {
+    fn a_narrow_change_names_the_rows_it_touched() {
         let recording = Id::derived(b"one");
-        let batch = [record(Fact::RecordingRated {
-            recording,
-            stars: Some(4),
-        })];
-        let change = change(&batch, 42);
+        let changed = Changed::These([Touched::Recording(recording)].into_iter().collect());
+        let change = change(&changed, 42);
         assert_eq!(change.scope, Scope::Ids);
         assert_eq!(change.version, 42);
         assert_eq!(change.ids, vec![format!("recording:{recording}")]);
-    }
-
-    /// **One event for the batch, not one per fact.** An apply lands thousands;
-    /// a view told about each would spend the whole operation re-querying.
-    #[test]
-    fn a_batch_of_narrow_facts_is_one_event_listing_all_of_them() {
-        let (a, b) = (Id::derived(b"a"), Id::derived(b"b"));
-        let batch = [
-            record(Fact::RecordingRated {
-                recording: a,
-                stars: Some(4),
-            }),
-            record(Fact::RecordingRated {
-                recording: b,
-                stars: Some(5),
-            }),
-        ];
-        let change = change(&batch, 7);
-        assert_eq!(change.scope, Scope::Ids);
-        assert_eq!(change.ids.len(), 2, "both, not the last: {:?}", change.ids);
-    }
-
-    /// The same row twice is one entry — a view refreshing it twice is waste,
-    /// and the lattice already says so.
-    #[test]
-    fn the_same_row_touched_twice_is_listed_once() {
-        let a = Id::derived(b"a");
-        let batch = [
-            record(Fact::RecordingRated {
-                recording: a,
-                stars: Some(4),
-            }),
-            record(Fact::RecordingRated {
-                recording: a,
-                stars: Some(5),
-            }),
-        ];
-        assert_eq!(change(&batch, 1).ids.len(), 1);
     }
 
     /// **The id carries its kind.** A view holding a heterogeneous list has to
     /// know which collection to look in.
     #[test]
     fn an_id_says_what_kind_of_thing_it_names() {
-        let batch = [record(Fact::RecordingRated {
-            recording: Id::derived(b"one"),
-            stars: Some(4),
-        })];
-        assert!(
-            change(&batch, 1).ids[0].starts_with("recording:"),
-            "got {:?}",
-            change(&batch, 1).ids
+        let changed = Changed::These(
+            [
+                Touched::Recording(Id::derived(b"r")),
+                Touched::Artist(Id::derived(b"a")),
+            ]
+            .into_iter()
+            .collect(),
         );
+        let ids = change(&changed, 1).ids;
+        assert!(ids.iter().any(|i| i.starts_with("recording:")), "{ids:?}");
+        assert!(ids.iter().any(|i| i.starts_with("artist:")), "{ids:?}");
+    }
+
+    #[test]
+    fn a_wide_change_asks_for_a_re_query() {
+        assert_eq!(change(&Changed::Wide, 3).scope, Scope::Wide);
+        assert_eq!(change(&Changed::Rebuild, 3).scope, Scope::Rebuild);
+    }
+
+    /// An empty `These` is a wide, not an empty refresh: a view told nothing
+    /// changed would be told the one thing that is certainly false.
+    #[test]
+    fn an_empty_set_of_touches_is_a_wide() {
+        assert_eq!(
+            change(&Changed::These(Default::default()), 1).scope,
+            Scope::Wide
+        );
+    }
+
+    /// **The two lattices agree, which is the property the refactor buys.**
+    /// `Changed::and` and `Change::join` are the same join; if they ever
+    /// disagree, one of them has been changed without the other.
+    #[test]
+    fn the_librarys_lattice_and_the_wires_lattice_are_the_same_join() {
+        let a = Changed::These(
+            [Touched::Recording(Id::derived(b"a"))]
+                .into_iter()
+                .collect(),
+        );
+        let b = Changed::These(
+            [Touched::Recording(Id::derived(b"b"))]
+                .into_iter()
+                .collect(),
+        );
+
+        let folded_in_library = change(&a.clone().and(b.clone()), 2);
+        let folded_on_wire = change(&a, 1).join(&change(&b, 2));
+
+        assert_eq!(folded_in_library.scope, folded_on_wire.scope);
+        assert_eq!(folded_in_library.ids, folded_on_wire.ids);
+        assert_eq!(folded_in_library.version, folded_on_wire.version);
     }
 }

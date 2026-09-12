@@ -2396,12 +2396,113 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
     // there is exactly one textual command language (§7.12).
     struct Bare {
         stopping: Arc<std::sync::atomic::AtomicBool>,
+        /// **The process's single appender** (I15). Every write goes through
+        /// here and there is no other door: `Instance::flush` is crate-private
+        /// to `gmuse-library`, so the binary cannot reach the log except by
+        /// asking the desk.
+        desk: Arc<gmuse::librarian::Desk>,
+        /// What to reconcile on a scan.
+        roots: Vec<std::path::PathBuf>,
         /// **Set after `serve` returns**, because the engine owns the answerer
         /// and the answerer needs the engine to publish through. A `OnceLock`
         /// rather than a channel back: written once at startup, read from
         /// connection threads.
         engine: Arc<std::sync::OnceLock<Arc<gmuse::engine::Engine>>>,
     }
+    impl Bare {
+        /// §8.4's named write operations, routed to the one appender.
+        fn library(
+            &self,
+            operation: gmuse_proto::request::LibraryOp,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse_proto::request::LibraryOp;
+            use gmuse_proto::{RpcError, error::code};
+
+            match operation {
+                // **Acknowledges and reports through events** — §8.4's
+                // long-running case. Waiting for a scan here would hold a
+                // connection open for thirty to seventy seconds and tell the
+                // client nothing while it did; the `library` event that follows
+                // says what it found, which is strictly better than today's
+                // blocking scan with nowhere to show progress.
+                LibraryOp::Scan => {
+                    if self.roots.is_empty() {
+                        return Err(RpcError::new(
+                            code::NOT_READY,
+                            "no roots are configured, so there is nothing to reconcile",
+                        ));
+                    }
+                    self.desk.scan(self.roots.clone(), None);
+                    Ok(serde_json::json!({
+                        "accepted": true,
+                        "roots": self.roots.len(),
+                    }))
+                }
+
+                // **The facts a view emits directly** (§8.4). A rating is the
+                // one this build can express end to end, which is what makes
+                // "a fact appended by one client reaches another" testable at
+                // all — the rest need their arguments plumbed and are refused
+                // by name rather than pretended at.
+                LibraryOp::Edit => self.edit(params),
+
+                other => Err(RpcError::new(
+                    code::NOT_READY,
+                    format!("library.{} has no arguments plumbed yet", other.as_str()),
+                )
+                .with_data(serde_json::json!({
+                    "reason": "arguments not plumbed",
+                    "operation": other.as_str(),
+                }))),
+            }
+        }
+
+        /// `library.edit` — the facts a view emits directly.
+        fn edit(
+            &self,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse_proto::RpcError;
+
+            #[derive(serde::Deserialize)]
+            struct Rate {
+                recording: String,
+                /// `None` clears the rating, which is a different act from
+                /// rating it zero and the model already distinguishes them.
+                #[serde(default)]
+                stars: Option<u8>,
+            }
+
+            let Ok(rate) = serde_json::from_value::<Rate>(params) else {
+                return Err(RpcError::invalid_params(
+                    "params",
+                    "library.edit takes {recording, stars?} in this build",
+                ));
+            };
+            let Ok(recording) = rate.recording.parse::<uuid::Uuid>() else {
+                return Err(RpcError::invalid_params(
+                    "recording",
+                    format!("{:?} is not a recording id", rate.recording),
+                ));
+            };
+            if rate.stars.is_some_and(|n| n > 5) {
+                return Err(RpcError::invalid_params("stars", "a rating is 0 to 5"));
+            }
+
+            let recording = gmuse::model::id::Id::from_uuid(recording);
+            let stars = rate.stars;
+            let now = gmuse::history::now_ms();
+
+            // **Through the desk, which is the only door.** Nothing here
+            // touches the log: the closure runs on the librarian thread (I16),
+            // and the event a view sees comes from what that thread publishes.
+            self.desk.say(move |log| log.rate(now, recording, stars));
+
+            Ok(serde_json::json!({ "accepted": true, "recording": recording.to_string() }))
+        }
+    }
+
     impl gmuse::engine::Answers for Bare {
         fn stream_generation(&self) -> u32 {
             0
@@ -2434,18 +2535,7 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                 // protocol does not have that" and "this build cannot do it
                 // yet" — a client can tell them apart, and `-32601` would have
                 // said the first when the second is true.
-                Call::Library { operation, .. } => Err(RpcError::new(
-                    code::NOT_READY,
-                    format!(
-                        "library.{} is not served yet: the engine has no librarian attached",
-                        operation.as_str()
-                    ),
-                )
-                .with_data(serde_json::json!({
-                    "reason": "no librarian attached",
-                    "operation": operation.as_str(),
-                    "long_running": operation.is_long_running(),
-                }))),
+                Call::Library { operation, params } => self.library(operation, params),
 
                 Call::EngineStatus => Ok(serde_json::json!({
                     "protocol": gmuse_proto::PROTOCOL,
@@ -2499,6 +2589,51 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
         }
     }
 
+    // **The librarian, before the socket.** §4.4 and I15: it owns the log and
+    // the projection and is the process's single appender. `Desk::open` folds
+    // once synchronously, so no client that connects can ever see an empty
+    // library — which is why it happens here rather than on the first request.
+    let mut loaded = gmuse::config::load(&gmuse::config::default_path());
+    // **`GMUSE_DATA_DIR` points the engine at another library.**
+    //
+    // Without it the engine can only ever be run against the real one, which
+    // makes it untestable and makes a first attempt at an integration test a
+    // write into somebody's actual log. An env var rather than a flag because
+    // the thing that needs it is a test harness spawning the binary, and it
+    // matches how `GMUSE_SOCKET` already moves the socket for the same reason.
+    if let Some(dir) = std::env::var_os("GMUSE_DATA_DIR") {
+        loaded.data_dir = std::path::PathBuf::from(dir);
+    }
+    // **And `GMUSE_ROOTS` decides what it reconciles**, empty meaning nothing.
+    //
+    // Needed for the same reason and separately: the desk processes jobs in
+    // order, so the scan queued at startup delays every write behind it. On
+    // this library that is thirty to seventy seconds during which a rating
+    // sent over the socket is accepted and does not land — which is what a
+    // test pointed at a fresh data directory but the real roots looks like,
+    // and it took a while to see because the acknowledgement is honest: the
+    // operation *was* accepted, it is simply queued.
+    if let Some(roots) = std::env::var_os("GMUSE_ROOTS") {
+        let roots = roots.to_string_lossy().to_string();
+        loaded.library = if roots.trim().is_empty() {
+            Vec::new()
+        } else {
+            roots.split(':').map(std::path::PathBuf::from).collect()
+        };
+    }
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+    let now_ms = gmuse::history::now_ms();
+    let (log, _damage) = gmuse::model::instance::Instance::open(&loaded.data_dir, device, now_ms);
+    let roots = loaded.library.clone();
+    let desk = Arc::new(gmuse::librarian::Desk::open(
+        log,
+        Default::default(),
+        device,
+        now_ms,
+        Some(loaded.data_dir.clone()),
+    ));
+
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let engine_slot: Arc<std::sync::OnceLock<Arc<gmuse::engine::Engine>>> = Arc::default();
     let engine = gmuse::engine::serve(
@@ -2507,10 +2642,27 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
         Arc::new(Bare {
             stopping: Arc::clone(&stopping),
             engine: Arc::clone(&engine_slot),
+            desk: Arc::clone(&desk),
+            roots: roots.clone(),
         }),
     )?;
     let engine = Arc::new(engine);
     let _ = engine_slot.set(Arc::clone(&engine));
+
+    // **What the librarian publishes becomes what the views are told.** The
+    // announcer starts from the answer standing now, not from the first fold:
+    // the startup fold is not news, and announcing it would tell every view to
+    // re-query the moment it connected.
+    let _announcer =
+        gmuse::engine::librarian::Announcer::start(Arc::clone(&desk), Arc::clone(&engine));
+
+    // **The scan at engine start** — §8.9, and the 2026-09-10 decision that a
+    // stale cache is the worse failure. Not waited on: the library is already
+    // usable from the log, and this closes drift rather than supplying rows.
+    // Its completion arrives as a `library` event like any other change.
+    if !roots.is_empty() {
+        desk.scan(roots.clone(), None);
+    }
     eprintln!("gmuse engine: listening on {}", engine.path().display());
 
     // Nothing to do on this thread but wait to be told to stop; the listener

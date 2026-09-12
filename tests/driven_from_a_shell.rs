@@ -51,6 +51,9 @@ fn start(name: &str) -> Engine {
     let child = Command::new(binary())
         .args(["engine", "--foreground", "--null-audio"])
         .env("GMUSE_SOCKET", &socket)
+        // The other tests do not append, and a startup scan of the real library
+        // would make every one of them wait on it.
+        .env("GMUSE_ROOTS", "")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -258,15 +261,14 @@ fn a_library_change_reaches_a_second_client_naming_what_changed() {
     // A second connection, the way another view would be.
     let _other = Client::connect(&engine.socket, "editor", "0").expect("connect");
 
-    // `gmuse ctl` reaching a library method gets a typed refusal today, and it
-    // is the *right* refusal: the method exists and the engine cannot serve it,
-    // which a client can tell apart from "no such method".
-    let (out, _err, ok) = ctl(&engine.socket, &["--json", "library.scan", "{}"]);
+    // **An operation with no arguments plumbed refuses by name**, and the
+    // refusal is `NotReady` rather than `MethodNotFound`: the protocol has the
+    // method and this build cannot serve it, which a client can tell apart.
+    let (out, _err, ok) = ctl(&engine.socket, &["--json", "library.import", "{}"]);
     assert!(!ok);
     let refusal: serde_json::Value = serde_json::from_str(out.trim()).expect("NDJSON");
     assert_eq!(refusal["code"], 1007, "NotReady, not MethodNotFound");
-    assert_eq!(refusal["data"]["operation"], "scan");
-    assert_eq!(refusal["data"]["long_running"], true);
+    assert_eq!(refusal["data"]["operation"], "import");
 }
 
 /// **The read-only subcommands have no method** — #218's "what must NOT land".
@@ -287,4 +289,151 @@ fn a_read_only_operation_is_not_reachable_over_the_wire() {
             "{name}: {said}"
         );
     }
+}
+
+/// A child engine pointed at a library of its own.
+///
+/// **Not the real one.** Without `GMUSE_DATA_DIR` the engine resolves the
+/// user's actual data directory, and a first attempt at this test appended a
+/// fabricated rating towards it.
+fn start_with_library(name: &str) -> (Engine, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("gmuse-222-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("data")).expect("scratch");
+    let socket = dir.join("engine.sock");
+    let data = dir.join("data");
+
+    let child = Command::new(binary())
+        .args(["engine", "--foreground", "--null-audio"])
+        .env("GMUSE_SOCKET", &socket)
+        .env("GMUSE_DATA_DIR", &data)
+        // **No roots, so no startup scan.** The desk runs jobs in order, and a
+        // scan of a real library would delay this test's write behind thirty to
+        // seventy seconds of disk.
+        .env("GMUSE_ROOTS", "")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn gmuse engine");
+
+    for _ in 0..400 {
+        if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    (
+        Engine {
+            child,
+            dir,
+            socket: socket.clone(),
+        },
+        data,
+    )
+}
+
+/// **A fact appended by one client reaches another as a `scope: "ids"` event
+/// naming exactly what changed** — #222's first Done-when line, and #218's.
+#[test]
+fn a_fact_from_one_client_reaches_another_naming_what_changed() {
+    let (engine, _data) = start_with_library("append");
+
+    let watcher = Client::connect(&engine.socket, "watcher", "0").expect("connect");
+    watcher
+        .subscribe(&[gmuse_proto::Topic::Library])
+        .expect("subscribe");
+
+    // A second client appends, the way another view would.
+    let editor = Client::connect(&engine.socket, "editor", "0").expect("connect");
+    let recording = "8f3a1b2c-0000-4000-8000-000000000001";
+    editor
+        .call(
+            "library.edit",
+            Some(serde_json::json!({ "recording": recording, "stars": 4 })),
+        )
+        .expect("the edit is accepted");
+
+    let event = watcher
+        .next_event(Duration::from_secs(10))
+        .expect("a library event within ten seconds");
+
+    assert_eq!(event.topic, gmuse_proto::Topic::Library);
+    assert_eq!(
+        event.body["scope"], "ids",
+        "narrow: the fact names its subject"
+    );
+    let ids = event.body["ids"].as_array().expect("an id list");
+    assert!(
+        ids.iter()
+            .any(|i| i.as_str() == Some(&format!("recording:{recording}"))),
+        "it names exactly what changed, got {ids:?}"
+    );
+    assert!(
+        event.body["version"].as_u64().is_some_and(|v| v >= 1),
+        "the engine's own log position, got {}",
+        event.body["version"]
+    );
+}
+
+/// **No process but the engine appends** — I15, and a test that would fail if
+/// the write had gone anywhere else.
+#[test]
+fn the_append_reached_the_engines_own_log_and_nothing_elses() {
+    let (engine, data) = start_with_library("appender");
+
+    let editor = Client::connect(&engine.socket, "editor", "0").expect("connect");
+    editor
+        .call(
+            "library.edit",
+            Some(serde_json::json!({
+                "recording": "8f3a1b2c-0000-4000-8000-000000000002",
+                "stars": 5
+            })),
+        )
+        .expect("accepted");
+
+    // **Wait for the content, not for the file.** `durable::append` creates
+    // the log before it writes to it, so polling for the filename finds an
+    // empty file about one run in ten — which is a flaky test asserting the
+    // right thing for the wrong reason.
+    let mut found = String::new();
+    for _ in 0..400 {
+        found = std::fs::read_dir(&data)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with("log-") && n.ends_with(".jsonl"))
+                    })
+                    .filter_map(|p| std::fs::read_to_string(p).ok())
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        if found.contains("8f3a1b2c-0000-4000-8000-000000000002") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    assert!(
+        found.contains("8f3a1b2c-0000-4000-8000-000000000002"),
+        "the fact is in the engine's own log under {}: {found}",
+        data.display()
+    );
+
+    // **And nowhere else.** The only log in that directory is the engine's
+    // own, which is what "no process but the engine appends" looks like from
+    // outside: one appender, one device file.
+    let logs: Vec<_> = std::fs::read_dir(&data)
+        .expect("the data directory")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("log-"))
+        .collect();
+    assert_eq!(logs.len(), 1, "one appender, one log: {logs:?}");
+
+    drop(engine);
 }
