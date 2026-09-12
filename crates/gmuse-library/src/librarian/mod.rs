@@ -262,6 +262,51 @@ impl Desk {
                             {
                                 eprintln!("cache: {e}");
                             }
+                            // **And written down** — #237. Before this, a
+                            // launch's scan produced holdings for the *fold* and
+                            // nothing else, so the only thing that ever put them
+                            // in the log was `gmuse shelf scan`. Which meant a
+                            // process that does not scan — an attached view
+                            // (#219) — could list a record and not reach it.
+                            //
+                            // Only when the set changed, which is #148's rule for
+                            // the same fact in `populate::reconcile`: holdings
+                            // supersede, so re-asserting an identical set folds to
+                            // what is already there and a warm launch would grow
+                            // the log by a record that says nothing.
+                            // **Only what the library knows**, which is
+                            // `populate::reconcile`'s rule and has to be this
+                            // one's too: two writers of one superseding fact that
+                            // disagree about its contents take turns adding and
+                            // removing the difference, and the log grows by the
+                            // disagreement on every pass. A file on disk that
+                            // nobody imported is a *stranger* — `shelf import`
+                            // finds it through the store, and holdings are about
+                            // copies of records the library has.
+                            //
+                            // The catalogue costs a fold (~0.15s on the live log)
+                            // and this is the most expensive job there is, so it
+                            // is paid here rather than avoided by guessing.
+                            let known = log.catalogue();
+                            let asserting: std::collections::BTreeMap<_, _> = fresh
+                                .iter()
+                                .map(|h| {
+                                    (
+                                        Id::<crate::model::entity::Encoding>::of_audio(&h.audio),
+                                        h.at.to_string_lossy().into_owned(),
+                                    )
+                                })
+                                .filter(|(encoding, _)| known.encodings.contains_key(encoding))
+                                .collect();
+                            if log.holdings_asserted(device) != Some(&asserting) {
+                                log.assert_holdings(now, asserting);
+                                if let Some(dir) = &data_dir {
+                                    // Same reasoning as `Job::Say`: a refused
+                                    // disk is not a reason to lose the answer
+                                    // in memory.
+                                    let _ = commit(&mut log, dir);
+                                }
+                            }
                             scanned = Some(report);
                             moved = Changed::Wide;
                             held = Arc::new(fresh);

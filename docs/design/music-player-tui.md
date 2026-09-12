@@ -4867,6 +4867,39 @@ Append here as decisions are made. Format: date, decision, rationale.
   D-14's unification survives intact: cue is one verb across both because the default cue point is the track start,
   which is a statement about the _verb_, not about the run-state enum.
 
+- **2026-09-12** **Holdings are in the log, because a process that cannot scan still has to reach a copy** (#237, #85,
+  #148).
+
+  The librarian's rows always came from the log — `HoldingsAsserted` is a fact and any fold reads it. Which of those
+  rows this device can `open` came from the **store**, and `bridge::librarian` asserted the scan's answer _over_
+  whatever the log said. Holdings supersede whole, so a fold with an empty store erased the log's assertion.
+
+  That is exactly an attached view (#219): it never scans, so it arrived with nothing and refused every row it could
+  see. A view _with_ a cache was no better, because the cache is from the last local launch while the log is whatever
+  the engine reconciled a moment ago — asserting the cache with `now` puts the stale answer on top. Measured before the
+  fix: a reading desk over an import's log listed the row and answered `open=None`.
+
+  **Two changes.** A launch's scan writes what it found into the log, which only `gmuse shelf scan` did before; and the
+  fold treats the log as the answer, keeping the scan's map as a bootstrap for a log that has no assertion yet. One
+  source of truth, which is what `library-is-the-truth` already says about every other field.
+
+  **Both writers have to mean the same thing by "holds".** `populate::reconcile` asserts only encodings the library
+  knows, so this does too — two writers of one superseding fact that disagreed would take turns adding and removing the
+  difference on every pass. It is also right on its own terms: a file in a watched root is not a declaration that it
+  belongs here, which is one of the five inferences `library-api.md` §2 lists as wrong.
+
+  **The cost, measured.** One assertion on the live library is **957 KB** for 7,267 entries — so "only when it changed"
+  (#148's rule for the same fact) is load-bearing rather than tidy, and `shelf compact` exists to drop the superseded
+  ones. The extra `catalogue()` the filter needs is ~0.15s against a scan that takes 8.8s. And on the live library the
+  next launch appends **nothing**: the map this code would assert is identical to what the log already holds, all 7,267
+  locators still exist, and nothing moved.
+
+  **The first version of the test for this passed with the append removed**, because the import had already written
+  holdings and "the count did not grow" was true for the wrong reason. It now deletes a file and asserts the count
+  _does_ grow, then scans again and asserts it does not — which fails in both directions when the guard is wrong.
+
+  What is left before `--attach` could be the default is the queue (#233), not the library.
+
 - **2026-09-12** **An attached view writes by proposing facts, and reads by re-reading** (#236, I15, §8.4).
 
   The two halves of what `--attach` could not do. Both turned on finding the right thing to put on the wire.

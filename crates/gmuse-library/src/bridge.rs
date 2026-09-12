@@ -84,23 +84,37 @@ pub fn librarian(
     let mut scratch = Instance::new(device);
     scratch.merge(now, records);
 
-    // **What this device can actually open** — issue #85.
+    // **What this device can actually open** — #85, and #237 for who gets to say.
     //
-    // Without it the librarian knows every recording and can reach none of
-    // them: `open` looks for a holding on this device and finds no rows, so it
-    // refuses everything. A scan is exactly the moment that answer is known,
-    // and it is the only moment — by the time the player asks, all it has is
-    // an id.
-    let holdings: BTreeMap<Id<Encoding>, String> = held
-        .iter()
-        .map(|h| {
-            (
-                Id::<Encoding>::of_audio(&h.audio),
-                h.at.to_string_lossy().into_owned(),
-            )
-        })
-        .collect();
-    scratch.assert_holdings(now, holdings);
+    // Without it the librarian knows every recording and can reach none of them:
+    // `open` looks for a holding on this device and finds no rows, so it refuses
+    // everything.
+    //
+    // **The log wins where it has spoken.** This used to assert the scan's answer
+    // unconditionally, and holdings supersede whole — so a fold with an empty
+    // `held` erased what the log said. That is what an attached view is (#219): it
+    // never scans, so it arrived here with nothing and left unable to open a
+    // single row it could see. And a view *with* a cache was no better, because
+    // the cache is from the last local launch while the log is whatever the engine
+    // reconciled a moment ago; asserting the cache with `now` would put the stale
+    // answer on top.
+    //
+    // So the scan's map is a **bootstrap**, for a library whose log has no
+    // assertion yet. Once `Job::Scan` has written one — which it now does — the
+    // log is the single answer, which is what `library-is-the-truth` says about
+    // every other field.
+    if scratch.holdings_asserted(device).is_none() {
+        let holdings: BTreeMap<Id<Encoding>, String> = held
+            .iter()
+            .map(|h| {
+                (
+                    Id::<Encoding>::of_audio(&h.audio),
+                    h.at.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        scratch.assert_holdings(now, holdings);
+    }
 
     let mut l = Librarian::from_catalogue(&scratch.catalogue());
     // **What was recorded, not what the scan re-derived** (#128). `scratch`

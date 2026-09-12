@@ -642,6 +642,32 @@ impl Instance {
         self.append(now, Fact::HoldingsAsserted { device, held });
     }
 
+    /// **What the log says this device holds** — #237.
+    ///
+    /// The latest assertion for `device`, or `None` if nobody has said. Holdings
+    /// supersede whole, so the last one simply wins, which is what the fold does
+    /// too.
+    ///
+    /// **Not a fold.** A caller that wants one number out of the log should not
+    /// pay for the catalogue: records are ordered by stamp, so walking from the
+    /// newest finds the answer immediately once anything has asserted, and only
+    /// walks the whole log in the case where the answer is that nobody has. The
+    /// alternative — `self.catalogue().holdings` — is ~0.15s on the live library,
+    /// and `populate::reconcile` pays it because it wanted the whole catalogue
+    /// anyway.
+    pub fn holdings_asserted(&self, device: Id<Device>) -> Option<&BTreeMap<Id<Encoding>, String>> {
+        self.records
+            .iter()
+            .rev()
+            .find_map(|record| match &record.fact {
+                Fact::HoldingsAsserted {
+                    device: whose,
+                    held,
+                } if *whose == device => Some(held),
+                _ => None,
+            })
+    }
+
     #[allow(
         dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — a relation is written by `Proposal::Related`, which goes through `facts_of` rather than through here"

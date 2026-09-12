@@ -247,9 +247,20 @@ The launch scan and `:rescan` still have nothing to scan with and go to the engi
 Two connections and not one: a `Client` has a single `Receiver<Event>`, so the transport's subscription and the
 library's get a socket each.
 
-What remains before `--attach` could be the default is `Holdings`. The librarian's rows come from the log, but which of
-them this device can _open_ comes from the store — and an attached view never scans, so it depends on a cache some local
-launch wrote. A machine that has only ever run attached can list a record and not reach it.
+**And it can reach a copy** (#237). The librarian's rows always came from the log; which of them this device can _open_
+came from the **store**, asserted over whatever the log said — so an attached view, which never scans, erased the answer
+by asserting an empty one. Two changes meet: a launch's scan now writes what it found into the log, the way `shelf scan`
+already did, and the fold treats the log's assertion as the answer rather than a starting point. The scan's map is a
+bootstrap for a log that has none.
+
+Both writers assert the same thing by "holds" — only encodings the library knows — because holdings supersede whole, and
+two writers that disagreed would take turns adding and removing the difference on every pass. Only when it changed, for
+the same reason: one assertion on the live library is **957 KB** for 7,267 entries, and `shelf compact` exists to drop
+the superseded ones.
+
+What remains before `--attach` could be the default is the **queue** (#233). An attached view draws its own while the
+engine plays from the one it owns, so enqueueing there does not change what plays next. Pressing enter does, because
+that is a `player.load`.
 
 **`--remote` is removed when `gmuse ctl` exists, not before** (#214, #217). `--remote` is the only way to drive a
 running player from a key binding that is not focused on it, which is the reason §1 asked for a socket at all. Retiring

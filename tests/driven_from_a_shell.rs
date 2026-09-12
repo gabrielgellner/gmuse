@@ -807,6 +807,219 @@ fn start_with_a_track(name: &str) -> (Engine, String) {
     (Engine { child, dir, socket }, recording)
 }
 
+/// **A view that never scans can still reach a copy** — #237.
+///
+/// The librarian's rows come from the log, so an attached view could always *list*
+/// a record. Which of those rows this device can `open` came from the **store** —
+/// the scan's answer, handed to `bridge::librarian` and asserted over whatever the
+/// log said. An attached view never scans, so it arrived with nothing, erased the
+/// log's assertion by asserting an empty one, and refused every row it could see.
+///
+/// Two changes meet here: a scan now writes what it found into the log, and the
+/// fold treats the log as the answer rather than as a starting point. So this
+/// builds the attached shape exactly — a reading desk with **empty** `Holdings` —
+/// and asks for a locator.
+#[test]
+fn a_reading_desk_with_no_store_can_still_open_what_the_engine_scanned() {
+    let (engine, recording) = start_with_a_track("holdings");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let recording: gmuse::model::id::Id<gmuse::model::entity::Recording> =
+        recording.parse().expect("a recording id");
+
+    // The same device all three processes use: the import, the engine, and a view.
+    // `machine_id` is what makes them one appender and one holder.
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+
+    // **Wait for the engine's scan to write it down.** The engine reconciles at
+    // start and does not wait on it, so the assertion arrives a moment after the
+    // socket does.
+    let mut opened = None;
+    for _ in 0..400 {
+        let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
+        let desk = gmuse::librarian::Desk::read_only(
+            log,
+            // **Empty on purpose.** This is the whole point: no cache, no scan,
+            // nothing but the log.
+            Default::default(),
+            device,
+            0,
+            data.clone(),
+        );
+        opened = desk
+            .current()
+            .library
+            .open(recording, &[device], &[])
+            .map(|(_encoding, locator)| locator.to_string());
+        if opened.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let locator = opened.expect(
+        "a view with no store could not reach the copy, so the log is not carrying \
+         the holdings",
+    );
+    assert!(
+        locator.ends_with(".wav"),
+        "and it is a real locator: {locator}"
+    );
+    assert!(
+        std::path::Path::new(&locator).exists(),
+        "one that points at a file that is there: {locator}"
+    );
+}
+
+/// **A scan writes what changed and nothing when nothing did** — #237, #148's rule.
+///
+/// Both directions, in one test, because the first version of this only had the
+/// second and **passed with the append removed entirely**: the import had already
+/// written holdings, so "the count did not grow" was true for the wrong reason.
+///
+/// Holdings supersede whole, so re-asserting an identical set folds to exactly what
+/// is already there. Without the guard every launch would grow the log by a record
+/// that says nothing — and on the live library one assertion is 7,267
+/// encoding-to-locator pairs, so "nothing" is about half a megabyte of it.
+#[test]
+fn a_scan_writes_holdings_when_the_disk_changed_and_not_when_it_did_not() {
+    let (engine, _recording) = start_with_a_track("holdings-twice");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+
+    let count = || {
+        let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
+        log.records()
+            .iter()
+            .filter(|r| matches!(r.fact, gmuse::facts::Fact::HoldingsAsserted { .. }))
+            .count()
+    };
+    let client = Client::connect(&engine.socket, "rescanner", "0").expect("connect");
+    let rescan = || {
+        client
+            .call("library.scan", Some(serde_json::json!({})))
+            .expect("the engine takes a scan");
+        // Long enough for a scan of two files to finish several times over.
+        std::thread::sleep(Duration::from_millis(1_500));
+    };
+
+    // Settle: the engine reconciles at start and does not wait on it.
+    let mut settled = 0;
+    for _ in 0..400 {
+        settled = count();
+        if settled > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(settled > 0, "the import wrote no holdings at all");
+    rescan();
+    let unchanged = count();
+    assert_eq!(
+        unchanged, settled,
+        "a scan over the same files wrote another holdings record"
+    );
+
+    // **Now change the disk.** Removing a copy is the clean way to do it: it
+    // changes the set without involving a second appender, which importing a file
+    // would.
+    let placed: Vec<std::path::PathBuf> = walk(&engine.dir)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "wav"))
+        .collect();
+    assert!(
+        placed.len() >= 2,
+        "the fixture holds two copies: {placed:?}"
+    );
+    std::fs::remove_file(&placed[0]).expect("remove one copy");
+
+    rescan();
+    assert_eq!(
+        count(),
+        unchanged + 1,
+        "a scan that found one fewer file wrote nothing down, so the log is not \
+         following the disk"
+    );
+
+    rescan();
+    assert_eq!(
+        count(),
+        unchanged + 1,
+        "and then said it again over an unchanged disk"
+    );
+}
+
+/// **A file nobody imported is not a holding** — #237, and the rule
+/// `populate::reconcile` already followed.
+///
+/// Two writers of one *superseding* fact that disagree about its contents take turns
+/// adding and removing the difference, so the log grows by the disagreement on every
+/// pass. `shelf scan` asserts only encodings the library knows; a launch's scan has
+/// to mean the same thing by "holds".
+///
+/// It is also the right answer on its own terms: a file in a watched root is not a
+/// declaration that it belongs here — that inference is one of the five
+/// `library-api.md` §2 lists as wrong. `shelf import` is how a stranger is found,
+/// through the store.
+#[test]
+fn a_file_nobody_imported_is_not_a_holding() {
+    let (engine, _recording) = start_with_a_track("strangers");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+
+    let held = || {
+        let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
+        log.holdings_asserted(device).map(|h| h.len())
+    };
+
+    let mut before = None;
+    for _ in 0..400 {
+        before = held();
+        if before.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let before = before.expect("nothing has asserted holdings");
+
+    // A stranger in the root the engine reconciles. Different length, so it hashes
+    // differently and is nobody's copy.
+    write_wav(&engine.dir.join("stranger.wav"), 11_025);
+
+    let client = Client::connect(&engine.socket, "rescanner", "0").expect("connect");
+    client
+        .call("library.scan", Some(serde_json::json!({})))
+        .expect("the engine takes a scan");
+    std::thread::sleep(Duration::from_millis(1_500));
+
+    assert_eq!(
+        held(),
+        Some(before),
+        "a file nobody imported entered the holdings, so a launch's scan and \
+         `shelf scan` now disagree about what this device holds"
+    );
+}
+
+/// Every file under a directory, recursively.
+fn walk(at: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(at) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
 /// **The engine plays, with no TUI attached** — #230.
 ///
 /// `gmuse-client` correlates by `id`, which is what this needs: a first attempt
