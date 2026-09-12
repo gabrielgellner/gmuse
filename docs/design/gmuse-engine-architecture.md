@@ -225,10 +225,16 @@ It should be removed rather than kept alongside: `gmuse ctl` is the same thing w
 
 **`--attach` is opt-in, and the reason is the library rather than the audio** (#219). Attached, playback is entirely the
 engine's: a view loads by recording, learns what is playing from the `playback` topic, and going away does not stop it.
-What an attached view cannot do yet is _write_. Its own `Desk` points at the same log the engine's does, so appending
-here would be two appenders on one file — which §4.4 makes the engine's job alone. So a rating from an attached view is
-refused out loud rather than silently dropped, and its library is the fold it did at launch: it does not follow the
-engine's appends, because nothing subscribes it to `library` yet. #236 is both halves.
+What an attached view cannot do is _write_, and that is a capability rather than a check. It holds a `Desk::read_only`,
+which folds the log — I15 permits that, and it is what keeps browsing off the socket — and has no `Appender`. The reason
+is sharper than two writers racing: `durable::log_path` is one file per **device**, the device comes from `machine_id`,
+and `Stamp.device` exists so that "two devices cannot produce an equal stamp". Two processes on one machine would be two
+appenders claiming to be one device.
+
+So the launch scan, `:rescan` and `ui::record` all ask `Desk::appender()` and get `None`, and `record`'s refusal is
+visible rather than silent. The read side is only half connected too: the fold it did at launch, not following the
+engine's appends, with `Holdings` from the cache a _local_ launch wrote — an attached view never scans, so it never
+warms one. #236 is all of that.
 
 That is also why the bare `gmuse` still owns its device. Making `--attach` the default would trade a working library
 manager for a working detach, and the two want to be true at once.

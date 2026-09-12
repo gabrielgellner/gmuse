@@ -107,7 +107,60 @@ pub struct Desk {
     /// nothing here waits on a reader.
     pub scans: crossbeam_channel::Receiver<crate::operations::scan::ScanReport>,
     jobs: Sender<Job>,
+    /// **Whether this desk may add to the log** — the one bool, turned into a
+    /// type by [`Desk::appender`] and never read anywhere else.
+    ///
+    /// §4.4 makes the librarian *the process's single appender*, and
+    /// `durable::log_path` is one file per **device** — which comes from
+    /// `machine_id`, so two processes on one machine mean the same file. That is
+    /// not merely a race: `Stamp.device` is documented as "the final tiebreak,
+    /// so two devices cannot produce an equal stamp", and two appenders sharing
+    /// one device id break the thing the field exists to guarantee.
+    ///
+    /// A view that only reads is entitled to fold the log (I15) and is not
+    /// entitled to add to it. Before this, the only door was `say` and the guard
+    /// was a bool at the one call site that remembered to check.
+    appends: bool,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// **The half of a desk that adds to the log.**
+///
+/// Reached only through [`Desk::appender`], which answers `None` on a reading
+/// desk. A borrow rather than a clone so it cannot be stored somewhere the
+/// desk's lifetime does not cover — the point is that obtaining one is the
+/// moment the question gets asked.
+pub struct Appender<'a> {
+    jobs: &'a Sender<Job>,
+}
+
+impl Appender<'_> {
+    /// Append to the log, off this thread.
+    ///
+    /// Returns immediately. The caller learns the result through the next
+    /// [`Desk::current`], like every other reader: a writer is not privileged
+    /// just because it was the one who wrote.
+    pub fn say(&self, say: impl FnOnce(&mut Instance) + Send + 'static) {
+        let _ = self.jobs.send(Job::Say(Box::new(say)));
+    }
+
+    /// A scan happened elsewhere. These are the holdings now.
+    pub fn holdings(&self, held: Holdings) {
+        let _ = self.jobs.send(Job::Holdings(held));
+    }
+
+    /// Reconcile the disk, off this thread.
+    ///
+    /// Returns immediately, which is the point: a cold pass re-reads every
+    /// file. The caller learns it started from [`Answer::scanning`] and learns
+    /// what it found from [`Desk::scans`].
+    ///
+    /// **Here rather than on `Desk` because a scan appends.** It is also a
+    /// discovery rather than a derivation, which `access-layers.md` §3a puts out
+    /// of a read's reach for a second, independent reason.
+    pub fn scan(&self, roots: Vec<PathBuf>, cache: Option<PathBuf>) {
+        let _ = self.jobs.send(Job::Scan { roots, cache });
+    }
 }
 
 impl Desk {
@@ -236,11 +289,43 @@ impl Desk {
             current,
             scans,
             jobs: tx,
+            appends: true,
             thread: Some(thread),
         }
     }
 
-    /// A desk over an empty log that writes nothing, for tests.
+    /// **The same desk, with nothing to add to the log** — #219, I15, §4.4.
+    ///
+    /// For a view attached to an engine. It folds, which a read may do, and it
+    /// has no [`Appender`], which is the whole difference: `say` and `scan` are
+    /// not merely refused at one call site, they are unreachable.
+    ///
+    /// `data_dir` is dropped rather than passed, so even the fold's own thread
+    /// holds no path to write to. That is belt and braces and not the mechanism
+    /// — the mechanism is that nothing can queue a `Say`.
+    pub fn read_only(log: Instance, held: Holdings, device: Id<Device>, now: i64) -> Desk {
+        // Not `..Desk::open(…)`: `Desk` has a `Drop`, so functional update would
+        // move out of a value that has to be dropped as a whole.
+        let mut desk = Desk::open(log, held, device, now, None);
+        desk.appends = false;
+        desk
+    }
+
+    /// The half that may add to the log, or `None` on a reading desk.
+    ///
+    /// **An `Option` rather than a bool**, so a caller that wants to append has
+    /// to say what it does when it cannot. The same shape `Context::gapless`
+    /// uses, and for the same reason: a capability that is absent should be
+    /// absent in the type.
+    pub fn appender(&self) -> Option<Appender<'_>> {
+        self.appends.then_some(Appender { jobs: &self.jobs })
+    }
+
+    /// A desk over an empty log that writes nothing to disk, for tests.
+    ///
+    /// It still appends — to its own in-memory log — because that is what the
+    /// tests asserting on what a write did are for. `read_only` is the one that
+    /// cannot.
     pub fn detached(device: Id<Device>) -> Desk {
         Desk::open(Instance::new(device), Holdings::default(), device, 0, None)
     }
@@ -254,29 +339,6 @@ impl Desk {
     /// The latest published answer. One atomic load.
     pub fn current(&self) -> Arc<Answer> {
         self.current.load_full()
-    }
-
-    /// Append to the log, off this thread.
-    ///
-    /// Returns immediately. The caller learns the result through the next
-    /// [`Desk::current`], like every other reader: a writer is not privileged
-    /// just because it was the one who wrote.
-    pub fn say(&self, say: impl FnOnce(&mut Instance) + Send + 'static) {
-        let _ = self.jobs.send(Job::Say(Box::new(say)));
-    }
-
-    /// A scan happened elsewhere. These are the holdings now.
-    pub fn holdings(&self, held: Holdings) {
-        let _ = self.jobs.send(Job::Holdings(held));
-    }
-
-    /// Reconcile the disk, off this thread.
-    ///
-    /// Returns immediately, which is the point: a cold pass re-reads every
-    /// file. The caller learns it started from [`Answer::scanning`] and learns
-    /// what it found from [`Desk::scans`].
-    pub fn scan(&self, roots: Vec<PathBuf>, cache: Option<PathBuf>) {
-        let _ = self.jobs.send(Job::Scan { roots, cache });
     }
 
     /// Publish again without changing anything.
@@ -449,6 +511,50 @@ mod tests {
         Desk::detached(device())
     }
 
+    /// **A reading desk folds and cannot add** — #219, I15, §4.4.
+    ///
+    /// Both halves matter. I15 lets a view fold the log directly, which is what
+    /// keeps browsing off the socket, so a reading desk that could not read would
+    /// be useless. What it must not do is append, because
+    /// `durable::log_path(data_dir, device)` is one file per device and the device
+    /// comes from `machine_id` — two processes on one machine are one file with
+    /// two `flushed` watermarks and two stamp counters, which breaks what
+    /// `Stamp.device` is documented to guarantee.
+    ///
+    /// The absent `Appender` is the mechanism. A bool consulted at each call site
+    /// is what this replaced, and it only ever covered the call sites that
+    /// remembered to ask.
+    #[test]
+    fn a_reading_desk_folds_the_log_and_has_nothing_to_append_with() {
+        let song = Id::<Recording>::from_uuid(uuid::Uuid::from_u128(21));
+        let mut log = Instance::new(device());
+        log.append_fact(
+            1_000,
+            Fact::RecordingRated {
+                recording: song,
+                stars: Some(4),
+            },
+        );
+
+        let reading = Desk::read_only(log, Holdings::default(), device(), 0);
+        assert!(
+            reading.appender().is_none(),
+            "there is nothing to append with, which is the whole difference"
+        );
+        assert_eq!(
+            reading.current().listened.ratings.get(&song).copied(),
+            Some(4),
+            "and it folded the log it was given, because a read may"
+        );
+
+        // The other side, or the assertion above would pass on a `Desk` that
+        // never appends at all.
+        assert!(
+            Desk::detached(device()).appender().is_some(),
+            "an ordinary desk is the appender"
+        );
+    }
+
     /// **A job that changed nothing does not erase what the last one said.**
     ///
     /// `changed` rides on the publication it describes, so a settle or a
@@ -460,15 +566,17 @@ mod tests {
     fn a_no_op_job_does_not_overwrite_what_moved() {
         let desk = desk();
         let song = Id::<Recording>::from_uuid(uuid::Uuid::from_u128(11));
-        desk.say(move |log| {
-            log.append_fact(
-                1_000,
-                Fact::RecordingRated {
-                    recording: song,
-                    stars: Some(5),
-                },
-            );
-        });
+        desk.appender()
+            .expect("a test desk appends")
+            .say(move |log| {
+                log.append_fact(
+                    1_000,
+                    Fact::RecordingRated {
+                        recording: song,
+                        stars: Some(5),
+                    },
+                );
+            });
         desk.settled();
 
         // Several no-ops, any one of which used to wipe it.
@@ -501,7 +609,9 @@ mod tests {
         let desk = desk();
         assert!(desk.scans.try_recv().is_err(), "nothing has scanned yet");
 
-        desk.scan(vec![dir.clone()], None);
+        desk.appender()
+            .expect("a test desk appends")
+            .scan(vec![dir.clone()], None);
         desk.settled();
 
         assert!(
@@ -527,7 +637,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let desk = desk();
-        desk.scan(vec![dir.clone()], None);
+        desk.appender()
+            .expect("a test desk appends")
+            .scan(vec![dir.clone()], None);
         desk.settled();
 
         let wrote: Vec<_> = std::fs::read_dir(&dir)
@@ -599,7 +711,7 @@ mod tests {
         let desk = desk();
         let before = desk.current();
 
-        desk.say(|log| {
+        desk.appender().expect("a test desk appends").say(|log| {
             log.append_fact(
                 1_000,
                 Fact::RecordingCatalogued {
@@ -631,16 +743,18 @@ mod tests {
         let desk = desk();
         let rec = Id::<Recording>::from_uuid(uuid::Uuid::from_u128(2));
         for title in ["first", "second", "third"] {
-            desk.say(move |log| {
-                log.append_fact(
-                    1_000,
-                    Fact::RecordingCatalogued {
-                        recording: rec,
-                        title: title.into(),
-                        artist: Id::<Artist>::derived(b"someone"),
-                    },
-                );
-            });
+            desk.appender()
+                .expect("a test desk appends")
+                .say(move |log| {
+                    log.append_fact(
+                        1_000,
+                        Fact::RecordingCatalogued {
+                            recording: rec,
+                            title: title.into(),
+                            artist: Id::<Artist>::derived(b"someone"),
+                        },
+                    );
+                });
         }
         desk.settled();
 
@@ -673,16 +787,18 @@ mod tests {
                 1_000,
                 Some(dir.clone()),
             );
-            desk.say(move |log| {
-                log.append_fact(
-                    1_000,
-                    Fact::RecordingCatalogued {
-                        recording: rec,
-                        title: "Aisatsana".into(),
-                        artist: Id::<Artist>::derived(b"aphex twin"),
-                    },
-                );
-            });
+            desk.appender()
+                .expect("a test desk appends")
+                .say(move |log| {
+                    log.append_fact(
+                        1_000,
+                        Fact::RecordingCatalogued {
+                            recording: rec,
+                            title: "Aisatsana".into(),
+                            artist: Id::<Artist>::derived(b"aphex twin"),
+                        },
+                    );
+                });
             // Deliberately no `settled()`. Drop is the thing under test.
         }
 

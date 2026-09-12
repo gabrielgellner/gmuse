@@ -2039,13 +2039,28 @@ fn run_tui(
     // thing that folds is the librarian thread (I16), and this side holds
     // whatever it last published. `Desk::open` folds once synchronously, so
     // nothing below sees an empty library.
-    let desk = gmuse::librarian::Desk::open(
-        log,
-        app.store.clone(),
-        device,
-        now_ms,
-        Some(loaded.data_dir.clone()),
-    );
+    //
+    // **Attached, it is a reading desk** — #219, I15, §4.4. I15 lets a view fold
+    // the log directly and that is what keeps browsing off the socket; what it
+    // does not let a view do is *add* to it, because `durable::log_path` is one
+    // file per device and the device comes from `machine_id`. Two processes on
+    // one machine would be two appenders claiming to be one device, which breaks
+    // what `Stamp.device` is for.
+    //
+    // So the difference is a capability rather than a flag: a reading desk has
+    // no `Appender`, and the three places that used to ask `if attached` — the
+    // scan below, `:rescan`, and `ui::record` — now ask for one and get `None`.
+    let desk = if app.player.attached() {
+        gmuse::librarian::Desk::read_only(log, app.store.clone(), device, now_ms)
+    } else {
+        gmuse::librarian::Desk::open(
+            log,
+            app.store.clone(),
+            device,
+            now_ms,
+            Some(loaded.data_dir.clone()),
+        )
+    };
     // **Reconciled at start, and not waited on** — the 2026-09-10 decision
     // that a stale cache is the worse failure, now that it costs nothing to
     // act on. The library is already usable: holdings come from the cached
@@ -2054,11 +2069,13 @@ fn run_tui(
     // Warm it is ~0.3s, because the read cache settles 7,266 of 7,267 files
     // with a `stat`. Cold it re-reads everything, which is why it is a job.
     //
-    // **Not when attached** — #219, §4.4. A scan appends, and the engine
-    // reconciled the same roots when it started; doing it again here would be a
-    // second appender on one log. `:rescan` still works and goes over the wire.
-    if !app.roots.is_empty() && !app.player.attached() {
-        desk.scan(app.roots.clone(), app.cache_path.clone());
+    // **And only with something to append with.** A scan appends, so a reading
+    // desk has no way to start one — the engine reconciled the same roots when it
+    // started, and `:rescan` goes over the wire.
+    if !app.roots.is_empty()
+        && let Some(appender) = desk.appender()
+    {
+        appender.scan(app.roots.clone(), app.cache_path.clone());
     }
     let library_view = desk.current();
     let known = library_view.library.recordings().count();
@@ -2130,7 +2147,6 @@ fn run_tui(
         remote: server.as_ref(),
     };
     let mut state = gmuse::ui::Ui::new(library);
-    state.attached = app.player.attached();
     state.playlists = loaded.playlists.clone();
 
     // Opened before the terminal is taken over, so a failure is visible.
@@ -2309,30 +2325,38 @@ fn run_tui(
         match stop {
             gmuse::ui::Stop::Quit => break Ok(()),
             gmuse::ui::Stop::Rescan => {
-                // **Asked for, not waited on.** A cold pass re-reads every
-                // file, and this thread is the one drawing. What it found
-                // arrives on `desk.scans`, which the draw loop drains.
-                // **Asked of whoever owns the log** — I15. Attached, that is
-                // the engine: it reconciles its own roots and publishes what it
-                // found, and this view learns through `library` like any other
-                // client. Scanning here as well would be the second appender
-                // §4.4 forbids.
-                match &app.player {
-                    Playback::Attached(remote) => {
-                        let sent = remote.client().notify(
-                            gmuse_proto::request::LibraryOp::Scan.method(),
-                            Some(serde_json::json!({})),
-                        );
-                        state.notify(match sent {
-                            Ok(()) => "rescan: asked the engine".to_string(),
-                            Err(e) => format!("rescan: the engine did not take it — {e}"),
-                        });
+                // **Asked of whoever can append** — I15, §4.4. A scan appends,
+                // so a reading desk has no way to start one and the engine that
+                // owns the log owns the reconcile too. This view then learns what
+                // it found through `library`, like any other client.
+                //
+                // Neither branch waits: a cold pass re-reads every file and this
+                // thread is the one drawing. A local scan reports on `desk.scans`,
+                // which the draw loop drains.
+                let said = if let Some(appender) = state.desk.appender() {
+                    appender.scan(app.roots.clone(), app.cache_path.clone());
+                    "rescan: started".to_string()
+                } else {
+                    match &app.player {
+                        Playback::Attached(remote) => {
+                            match remote.client().notify(
+                                gmuse_proto::request::LibraryOp::Scan.method(),
+                                Some(serde_json::json!({})),
+                            ) {
+                                Ok(()) => "rescan: asked the engine".to_string(),
+                                Err(e) => format!("rescan: the engine did not take it — {e}"),
+                            }
+                        }
+                        // Unreachable, and said rather than assumed: the two
+                        // facts are set in different places, so "a local player
+                        // has an appending desk" is worth stating where it would
+                        // be noticed if it stopped being true.
+                        Playback::Local(_) => {
+                            "rescan: nothing to scan with and no engine to ask".to_string()
+                        }
                     }
-                    Playback::Local(_) => {
-                        state.desk.scan(app.roots.clone(), app.cache_path.clone());
-                        state.notify("rescan: started".to_string());
-                    }
-                }
+                };
+                state.notify(said);
                 library_view = state.desk.current();
             }
             gmuse::ui::Stop::Refold => {
@@ -2558,7 +2582,11 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                             "no roots are configured, so there is nothing to reconcile",
                         ));
                     }
-                    self.desk.scan(self.roots.clone(), None);
+                    // **The engine's desk is the appending one**, opened that
+                    // way ~300 lines below: §4.4 makes it the process's single
+                    // appender, which is the same sentence that makes a view's
+                    // desk a reading one.
+                    self.appender().scan(self.roots.clone(), None);
                     Ok(serde_json::json!({
                         "accepted": true,
                         "roots": self.roots.len(),
@@ -2622,6 +2650,18 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                     "the control thread did not answer",
                 )),
             }
+        }
+
+        /// **The half of the desk that appends**, which this one always has.
+        ///
+        /// `Desk::appender` is an `Option` because a *view* holds a reading desk
+        /// (#219, I15); the engine's is opened appending, so the absent case is a
+        /// construction error rather than a state to handle. Named once here so
+        /// the reason lives in one place instead of at each call site.
+        fn appender(&self) -> gmuse::librarian::Appender<'_> {
+            self.desk
+                .appender()
+                .expect("§4.4: the engine's desk is the process's appender")
         }
 
         /// The row that draws a recording, for the device this engine is on.
@@ -2692,7 +2732,8 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
             // **Through the desk, which is the only door.** Nothing here
             // touches the log: the closure runs on the librarian thread (I16),
             // and the event a view sees comes from what that thread publishes.
-            self.desk.say(move |log| log.rate(now, recording, stars));
+            self.appender()
+                .say(move |log| log.rate(now, recording, stars));
 
             Ok(serde_json::json!({ "accepted": true, "recording": recording.to_string() }))
         }
@@ -2985,7 +3026,9 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
     // usable from the log, and this closes drift rather than supplying rows.
     // Its completion arrives as a `library` event like any other change.
     if !roots.is_empty() {
-        desk.scan(roots.clone(), None);
+        desk.appender()
+            .expect("the engine's desk appends")
+            .scan(roots.clone(), None);
     }
     eprintln!("gmuse engine: listening on {}", engine.path().display());
 

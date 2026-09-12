@@ -390,12 +390,6 @@ pub struct Ui {
     ///
     /// Meaningless when playback is in this process, where nothing says it.
     followed: Option<Id<Recording>>,
-    /// **Playback is somewhere else, so this view may not append** — #219, I15.
-    ///
-    /// Reads bypass the socket by design; writes may not, because §4.4 makes the
-    /// librarian the single appender and an attached view's `Desk` would be a
-    /// second one on the same log. Set from `main`, where the choice is made.
-    pub attached: bool,
     /// A restored track has been loaded but its seek has not landed yet.
     ///
     /// Loading emits `Loaded`, which is a save point — and at that instant the
@@ -636,7 +630,6 @@ impl Ui {
             data_dir: None,
             counted_current: false,
             followed: None,
-            attached: false,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
@@ -1164,27 +1157,30 @@ pub fn record(
     if ui.data_dir.is_none() {
         return;
     }
-    // **An attached view does not append, and says so rather than dropping it**
-    // — #219, I15, §4.4.
+    // **Asked of the desk, not of a flag** — #219, I15, §4.4.
     //
-    // The librarian is one process's single appender; this view's `Desk` points
-    // at the same log the engine's does, so writing here would be two appenders
-    // on one file. Routing these over `library.edit` is what makes an attached
-    // view able to rate again, and that is #236 — `library.edit` carries a
-    // rating today and not a play, and there are eleven call sites, which is
-    // more than a rename.
+    // A view attached to an engine holds a reading desk, and a reading desk has
+    // no appender. Before this the guard here was `if ui.attached`, which is a
+    // bool standing in for a type: it happened to cover the only `say` in the UI
+    // and would not have covered the next one. `Desk::appender` makes the
+    // question unavoidable, because there is nothing to call.
+    //
+    // Routing these over `library.edit` is what lets an attached view rate
+    // again, and that is #236: the method carries a rating today and not a play,
+    // and `say` takes a *closure*, which cannot cross a socket, so each of the
+    // eleven call sites has to name its operation instead.
     //
     // Said out loud every time on purpose: a rating that silently vanished is
     // the failure worth being noisy about.
-    if ui.attached {
+    let Some(appender) = ui.desk.appender() else {
         ui.notify("attached: the engine owns the log, so this was not recorded (#236)");
         ui.audit.line(
             "record",
-            "refused: attached, writes are not on the wire yet",
+            "refused: a reading desk has nothing to append with",
         );
         return;
-    }
-    ui.desk.say(say);
+    };
+    appender.say(say);
     // Waits, because the screen must show the rating it just took and a
     // rating that has not been recorded yet must not appear.
     //
@@ -7681,7 +7677,11 @@ mod tests {
         // (#118) — so the fixture merges the records rather than sharing state.
         fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
         let carried = ui.desk.current().library.records.clone();
-        fresh.desk.say(move |log| log.merge(200, &carried));
+        fresh
+            .desk
+            .appender()
+            .expect("a test desk appends")
+            .say(move |log| log.merge(200, &carried));
         fresh.desk.settled();
         fresh.listened = std::sync::Arc::clone(&fresh.desk.current().listened);
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
@@ -7716,7 +7716,11 @@ mod tests {
         // (#118) — so the fixture merges the records rather than sharing state.
         fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
         let carried = ui.desk.current().library.records.clone();
-        fresh.desk.say(move |log| log.merge(200, &carried));
+        fresh
+            .desk
+            .appender()
+            .expect("a test desk appends")
+            .say(move |log| log.merge(200, &carried));
         fresh.desk.settled();
         fresh.listened = std::sync::Arc::clone(&fresh.desk.current().listened);
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
@@ -7761,7 +7765,11 @@ mod tests {
         // (#118) — so the fixture merges the records rather than sharing state.
         fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
         let carried = ui.desk.current().library.records.clone();
-        fresh.desk.say(move |log| log.merge(200, &carried));
+        fresh
+            .desk
+            .appender()
+            .expect("a test desk appends")
+            .say(move |log| log.merge(200, &carried));
         fresh.desk.settled();
         fresh.listened = std::sync::Arc::clone(&fresh.desk.current().listened);
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
@@ -10358,18 +10366,34 @@ mod tests {
         assert_eq!(ui.playback.scope, crate::next::Scope::Inner);
     }
 
-    /// **An attached view does not append to the log, and says so** — I15, §4.4.
+    /// **A reading desk has nothing to append with, and the refusal says so** —
+    /// I15, §4.4.
     ///
-    /// Its `Desk` points at the same log the engine's does, so writing here
-    /// would make two appenders on one file. Routing these over `library.edit`
-    /// is #236; until then a refusal that is *visible* is the honest shape,
-    /// because a rating that silently vanished is the worse failure.
+    /// Its log file is the engine's: `durable::log_path` is one file per device
+    /// and the device comes from `machine_id`, so two processes on one machine
+    /// are one file with two watermarks and two stamp counters. Routing these
+    /// over `library.edit` is #236; until then a refusal that is *visible* is the
+    /// honest shape, because a rating that silently vanished is the worse
+    /// failure.
+    ///
+    /// What this pins is that the refusal is structural rather than a flag: the
+    /// desk below is a real `read_only` one, not a `Ui` field set to `true`.
     #[test]
-    fn an_attached_view_refuses_to_append_rather_than_dropping_the_fact() {
+    fn a_reading_desk_refuses_to_append_rather_than_dropping_the_fact() {
         let store = fixture();
         let mut ui = ui_of(&store, true);
         ui.data_dir = Some(std::env::temp_dir().join("gmuse-attached-no-append"));
-        ui.attached = true;
+        let device = crate::model::id::Id::derived(b"attached");
+        ui.desk = crate::librarian::Desk::read_only(
+            crate::model::instance::Instance::new(device),
+            Default::default(),
+            device,
+            0,
+        );
+        assert!(
+            ui.desk.appender().is_none(),
+            "a reading desk is the thing being tested"
+        );
 
         record(&mut ui, 100, move |log| {
             log.rate(100, Id::derived(b"x"), Some(5));
@@ -10903,16 +10927,19 @@ mod tests {
             )
             .expect("a fixture row is a recording")
         };
-        ui.desk.say(move |log| {
-            log.assert_concept(
-                1,
-                Described::Recording(seeded),
-                "genre",
-                "techno",
-                crate::model::reference::Source::TagVariant,
-                crate::model::ingest::Confidence::Matched,
-            );
-        });
+        ui.desk
+            .appender()
+            .expect("a test desk appends")
+            .say(move |log| {
+                log.assert_concept(
+                    1,
+                    Described::Recording(seeded),
+                    "genre",
+                    "techno",
+                    crate::model::reference::Source::TagVariant,
+                    crate::model::ingest::Confidence::Matched,
+                );
+            });
         ui.desk.settled();
         ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
         // The librarian is what a facet comparison reads, so the seed has to
