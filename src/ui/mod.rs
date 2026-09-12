@@ -6,6 +6,7 @@
 pub mod fold;
 pub mod list;
 pub mod picker;
+pub mod remote_transport;
 pub mod statusline;
 pub mod theme;
 pub mod transport;

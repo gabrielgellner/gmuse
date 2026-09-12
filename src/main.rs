@@ -2791,15 +2791,25 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let engine_slot: Arc<std::sync::OnceLock<Arc<gmuse::engine::Engine>>> = Arc::default();
 
+    // **Claim the engine before opening a device** — #219. The lock is what
+    // decides whether this process is *the* engine, and it used to be taken
+    // inside `serve`, after the player was already open: a second engine
+    // claimed the sound card, printed the rate it had opened it at, and only
+    // then found out it was not allowed to be an engine.
+    let lock = gmuse::engine::claim(&path).unwrap_or_else(|e| die(e));
+
     // **The player, on its own thread, before the socket** — #230. It blocks
     // until the device is open so that `hello` never reports a placeholder
     // rate: a client connecting during startup would otherwise be told 0 Hz
     // and have no way to learn better.
-    let control = Arc::new(gmuse::engine::control::Control::start(
-        null_audio,
-        Arc::clone(&desk),
-        Arc::clone(&engine_slot),
-    )?);
+    let control = Arc::new(
+        gmuse::engine::control::Control::start(
+            null_audio,
+            Arc::clone(&desk),
+            Arc::clone(&engine_slot),
+        )
+        .unwrap_or_else(|e| die(e)),
+    );
     eprintln!(
         "gmuse engine: {} at {} Hz",
         if null_audio {
@@ -2823,7 +2833,7 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
             .load(std::sync::atomic::Ordering::Acquire),
         Vec::new(),
     );
-    let engine = gmuse::engine::serve(
+    let engine = gmuse::engine::serve_with(
         &path,
         identity,
         Arc::new(Bare {
@@ -2833,7 +2843,9 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
             control: Arc::clone(&control),
             roots: roots.clone(),
         }),
-    )?;
+        lock,
+    )
+    .unwrap_or_else(|e| die(e));
     let engine = Arc::new(engine);
     let _ = engine_slot.set(Arc::clone(&engine));
 

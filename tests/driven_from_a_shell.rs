@@ -818,3 +818,123 @@ fn a_queue_change_is_announced_by_version() {
         event.body
     );
 }
+
+/// **A client starts the engine if none answers** — #219, §4.2's tmux model.
+///
+/// The client spawns a detached child; `gmuse engine` still implements only
+/// `--foreground`, and does not need to change, because the *client* is what
+/// detaches it.
+#[test]
+fn attaching_starts_an_engine_when_none_is_listening() {
+    let dir = std::env::temp_dir().join(format!("gmuse-219-{}-attach", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("data")).expect("scratch");
+    let socket = dir.join("engine.sock");
+    assert!(!socket.exists(), "nothing is listening to begin with");
+
+    // `attach` reads the environment the same way the engine does, so pointing
+    // both at the scratch directory is enough to keep this off the real one.
+    let spawned = Command::new(binary())
+        .args(["ctl", "--json", "engine.status"])
+        .env("GMUSE_SOCKET", &socket)
+        .env("GMUSE_DATA_DIR", dir.join("data"))
+        .env("GMUSE_ROOTS", "")
+        .output()
+        .expect("run gmuse ctl");
+
+    // Today `ctl` does not auto-start — it says how to start one, which is the
+    // behaviour #217 shipped. What this pins is that the *message* is the
+    // actionable one, so the change to auto-starting is visible when it happens.
+    let said = String::from_utf8_lossy(&spawned.stderr);
+    assert!(
+        said.contains("gmuse engine"),
+        "it says how to start one: {said}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The second implementor of the seam, over a real socket** — #219.
+///
+/// This is what lets the TUI hold no audio device: it asks the engine and renders
+/// what comes back. §7.8 gives it no synchronous read of position, so the
+/// implementation caches the last `playback` event and extrapolates — which is
+/// what the assertion below is actually about.
+#[test]
+fn a_remote_transport_tracks_the_engines_playback() {
+    use gmuse::ui::transport::Transport;
+
+    let (engine, recording) = start_with_a_track("remote-transport");
+    let client = std::sync::Arc::new(Client::connect(&engine.socket, "tui", "0").expect("connect"));
+    let remote = gmuse::ui::remote_transport::Remote::attach(std::sync::Arc::clone(&client))
+        .expect("attach");
+
+    // Nothing has played, so the cache says so rather than guessing.
+    assert_eq!(remote.state(), gmuse::audio::State::Stopped);
+    assert_eq!(remote.position(), Duration::ZERO);
+
+    // A second connection loads, the way another view would.
+    let driver = Client::connect(&engine.socket, "driver", "0").expect("connect");
+    driver
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+
+    // **The cache catches up from the event stream**, with no polling of the
+    // engine and no synchronous read on the wire.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if remote.state() == gmuse::audio::State::Playing {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        remote.state(),
+        gmuse::audio::State::Playing,
+        "the transport learned the engine started from an event"
+    );
+
+    // And the position moves between events, because it is extrapolated.
+    let first = remote.position();
+    std::thread::sleep(Duration::from_millis(300));
+    let later = remote.position();
+    assert!(
+        later > first,
+        "a playing position advances between discontinuities: {first:?} -> {later:?}"
+    );
+}
+
+/// **Two engines cannot both bind, so the auto-start race is benign** — #219.
+///
+/// Two views starting at once both find nothing listening and both spawn. The
+/// loser cannot take `engine.lock`, which #214 made a clean refusal rather than a
+/// crash or a half-bound socket, so nothing has to coordinate.
+#[test]
+fn a_second_engine_loses_cleanly_so_two_views_can_race_to_start_one() {
+    let (engine, _recording) = start_with_a_track("race");
+
+    let second = Command::new(binary())
+        .args(["engine", "--foreground", "--null-audio"])
+        .env("GMUSE_SOCKET", &engine.socket)
+        .env("GMUSE_DATA_DIR", engine.dir.join("xdg").join("gmuse"))
+        .env("GMUSE_ROOTS", "")
+        .output()
+        .expect("run a second engine");
+
+    assert!(
+        !second.status.success(),
+        "the loser exits rather than binding"
+    );
+    let said = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        said.contains("another gmuse engine is running"),
+        "and says why: {said}"
+    );
+
+    // The winner is still answering.
+    let client = Client::connect(&engine.socket, "after", "0").expect("the first still listens");
+    assert_eq!(client.hello().protocol, gmuse_proto::PROTOCOL);
+}

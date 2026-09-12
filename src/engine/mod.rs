@@ -30,6 +30,7 @@
 //! learned: a refused connection means nothing is *listening*, not that nothing
 //! is *running*. The lock answers the question that was actually being asked.
 
+pub mod attach;
 pub mod client;
 pub mod control;
 pub mod librarian;
@@ -197,23 +198,48 @@ impl Drop for Engine {
     }
 }
 
+/// Take the single-instance lock, before anything expensive happens.
+///
+/// **Separate from [`serve`] so a caller can claim the engine first.** The lock
+/// is what decides whether this process is *the* engine, and until #219 the
+/// answer arrived after the audio device had already been opened — so a second
+/// engine claimed the hardware, printed the rate it had opened it at, and only
+/// then discovered it was not allowed to be an engine. On a real device that is
+/// a claim on somebody's sound card for the length of a failed startup.
+///
+/// The ordering it establishes is also the stale-socket story: holding this
+/// proves no other engine is listening, so any socket file present is a
+/// leftover (see [`serve`]).
+pub fn claim(path: &Path) -> Result<crate::lock::Lock, EngineError> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    socket::prepare_dir(dir).map_err(|source| EngineError::Prepare {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    crate::lock::acquire(&dir.join(socket::LOCK)).map_err(|e| match e {
+        crate::lock::LockError::Held { pid, .. } => EngineError::Running { pid },
+        crate::lock::LockError::Io { path, source } => EngineError::Prepare { path, source },
+    })
+}
+
 /// Take the lock, bind the socket, and start answering.
 pub fn serve(
     path: &Path,
     identity: Identity,
     answers: Arc<dyn Answers>,
 ) -> Result<Engine, EngineError> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    socket::prepare_dir(dir).map_err(|source| EngineError::Prepare {
-        path: dir.to_path_buf(),
-        source,
-    })?;
+    let lock = claim(path)?;
+    serve_with(path, identity, answers, lock)
+}
 
-    // **Before the bind, and that ordering is the whole stale-socket story.**
-    let lock = crate::lock::acquire(&dir.join(socket::LOCK)).map_err(|e| match e {
-        crate::lock::LockError::Held { pid, .. } => EngineError::Running { pid },
-        crate::lock::LockError::Io { path, source } => EngineError::Prepare { path, source },
-    })?;
+/// As [`serve`], with the lock already held — see [`claim`].
+pub fn serve_with(
+    path: &Path,
+    identity: Identity,
+    answers: Arc<dyn Answers>,
+    lock: crate::lock::Lock,
+) -> Result<Engine, EngineError> {
+    let _ = path.parent();
 
     // Holding the lock proves nothing else is listening, so whatever is here is
     // a leftover. No liveness check, because it has already been made.
