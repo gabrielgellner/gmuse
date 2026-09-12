@@ -167,6 +167,16 @@ impl Subscribers {
         self.clients.lock().expect("clients").len()
     }
 
+    /// How much is still waiting to be written, across every client.
+    pub fn pending(&self) -> usize {
+        self.clients
+            .lock()
+            .expect("clients")
+            .iter()
+            .map(|c| c.queued())
+            .sum()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

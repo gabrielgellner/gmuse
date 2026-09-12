@@ -4,7 +4,7 @@
 # 84,000 lines into `crates/gmuse/` would bury that rename in a diff nobody can
 # read. Members arrive one at a time as the boundaries are drawn.
 [workspace]
-members = ["crates/gmuse-ids", "crates/gmuse-library", "crates/gmuse-proto"]
+members = ["crates/gmuse-ids", "crates/gmuse-library", "crates/gmuse-proto", "crates/gmuse-client"]
 
 [package]
 name = "gmuse"
@@ -26,6 +26,7 @@ arc-swap = "1.7.1"
 gmuse-ids = { path = "crates/gmuse-ids" }
 gmuse-library = { path = "crates/gmuse-library" }
 gmuse-proto = { path = "crates/gmuse-proto" }
+gmuse-client = { path = "crates/gmuse-client" }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 cpal = "0.18.2"
 crossbeam-channel = "0.5.16"

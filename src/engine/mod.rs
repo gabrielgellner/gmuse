@@ -154,6 +154,28 @@ impl Engine {
     pub fn clients(&self) -> usize {
         self.subscribers.len()
     }
+
+    /// Wait, briefly, for what is queued to reach the sockets.
+    ///
+    /// **For shutdown, and only for shutdown.** [`Engine::publish`] returns
+    /// without waiting because I1 forbids blocking on a view — that holds while
+    /// the engine is running. Stopping is the one moment where the alternative
+    /// is worse: a `stopping` notice queued and then dropped on the floor as
+    /// the process exits tells a view nothing, and it cannot distinguish that
+    /// from a crash.
+    ///
+    /// Bounded, so a client that has stopped reading delays the exit by the
+    /// deadline and not for ever. Returns whether everything drained.
+    pub fn drain(&self, within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if self.subscribers.pending() == 0 {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
 }
 
 impl Drop for Engine {

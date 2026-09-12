@@ -800,6 +800,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "crossterm",
+ "gmuse-client",
  "gmuse-ids",
  "gmuse-library",
  "gmuse-proto",
@@ -820,6 +821,17 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "gmuse-client"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "gmuse-proto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

@@ -72,6 +72,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // holding this device", this one asks "is an *engine* already listening".
     // Conflating them would make the engine refuse to start while a TUI was
     // open, which is precisely the arrangement §4.2 is heading for.
+    // **`ctl` and `events` before everything**, for the reason the remote
+    // client already goes first: they open no device, take no lock and write
+    // nothing. They are clients, and a client that had to wait for a player to
+    // start would not be one.
+    if let Some(gmuse::cli::Command::Ctl { words, json }) = &args.command {
+        return run_ctl(words, *json);
+    }
+    if let Some(gmuse::cli::Command::Events { topics, count }) = &args.command {
+        return run_events(topics, *count);
+    }
+
     if let Some(gmuse::cli::Command::Engine {
         foreground,
         null_audio,
@@ -2385,6 +2396,11 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
     // there is exactly one textual command language (§7.12).
     struct Bare {
         stopping: Arc<std::sync::atomic::AtomicBool>,
+        /// **Set after `serve` returns**, because the engine owns the answerer
+        /// and the answerer needs the engine to publish through. A `OnceLock`
+        /// rather than a channel back: written once at startup, read from
+        /// connection threads.
+        engine: Arc<std::sync::OnceLock<Arc<gmuse::engine::Engine>>>,
     }
     impl gmuse::engine::Answers for Bare {
         fn stream_generation(&self) -> u32 {
@@ -2418,6 +2434,17 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                 })),
 
                 Call::EngineShutdown => {
+                    // **Say so before going.** §7.8 puts status on the `engine`
+                    // topic, and a view that learns the engine stopped by its
+                    // socket closing cannot tell that from a crash. The notice
+                    // is queued before the flag is set, so the writers have it
+                    // in hand before the shutdown drains them.
+                    if let Some(engine) = self.engine.get() {
+                        engine.publish(&gmuse_proto::Event::new(
+                            gmuse_proto::Topic::Engine,
+                            serde_json::json!({ "stopping": true, "reason": "engine.shutdown" }),
+                        ));
+                    }
                     self.stopping
                         .store(true, std::sync::atomic::Ordering::Release);
                     Ok(serde_json::json!({ "stopping": true }))
@@ -2453,13 +2480,17 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
     }
 
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let engine_slot: Arc<std::sync::OnceLock<Arc<gmuse::engine::Engine>>> = Arc::default();
     let engine = gmuse::engine::serve(
         &path,
         identity,
         Arc::new(Bare {
             stopping: Arc::clone(&stopping),
+            engine: Arc::clone(&engine_slot),
         }),
     )?;
+    let engine = Arc::new(engine);
+    let _ = engine_slot.set(Arc::clone(&engine));
     eprintln!("gmuse engine: listening on {}", engine.path().display());
 
     // Nothing to do on this thread but wait to be told to stop; the listener
@@ -2470,7 +2501,156 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     eprintln!("gmuse engine: stopping");
+    // Let the `stopping` notice reach the views that asked for it before the
+    // process goes. Bounded: a view that stopped reading does not get to hold
+    // the shutdown open.
+    engine.drain(std::time::Duration::from_secs(2));
     drop(engine);
+    Ok(())
+}
+
+/// Connect to a running engine, or say plainly that there is none.
+fn connect() -> Result<gmuse_client::Client, String> {
+    let path = gmuse::engine::socket::default_path();
+    gmuse_client::Client::connect(&path, "gmuse-cli", env!("CARGO_PKG_VERSION")).map_err(|e| {
+        // **Not a stack trace and not a bare io error.** The overwhelmingly
+        // likely cause is that no engine is running, and saying so with the
+        // command that starts one is the whole difference between a usable CLI
+        // and one you have to already understand.
+        format!("{e}\n\nStart one with: gmuse engine --foreground")
+    })
+}
+
+/// Print a message and stop, the way a command-line tool does.
+///
+/// **Not `Err` back to `main`.** `main` returns `Box<dyn Error>`, which Rust
+/// prints with `Debug` — so a refusal reached a terminal as
+/// `Refused(RpcError { code: 1005, message: "unknown command \"nonsuch\"", … })`
+/// when what the person needed was `unknown command "nonsuch" (1005)`. Found by
+/// running it, which is the point of this phase.
+fn die(message: impl std::fmt::Display) -> ! {
+    eprintln!("gmuse: {message}");
+    std::process::exit(1)
+}
+
+/// `gmuse ctl <command…>` — one command, printed, exit — §4.2.
+fn run_ctl(words: &[String], json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if words.is_empty() {
+        die("gmuse ctl needs a command, for example: gmuse ctl pause");
+    }
+    let client = connect().unwrap_or_else(|e| die(e));
+
+    // **Either typed arguments or passed through** — §4.2, and the first
+    // version only did the second half. `gmuse ctl engine.shutdown` went to the
+    // `:` line's parser, which has never heard of it, and came back
+    // `unknown command "engine.shutdown"` — so the protocol's own methods were
+    // the one thing the CLI could not reach. Found by driving it from a shell,
+    // which is what §15 says this phase is for.
+    //
+    // A method name is distinguishable from a command word by being one: the
+    // `:` language has no dots in its verbs and every method does. No guessing
+    // and no new syntax — the params are JSON, because inventing a shell-ish
+    // key=value dialect here would be a second parameter language to keep in
+    // step with the first.
+    let outcome = if gmuse_proto::request::method::ALL.contains(&words[0].as_str()) {
+        let params = words.get(1).map(|raw| {
+            serde_json::from_str(raw).unwrap_or_else(|e| {
+                die(format!(
+                    "{raw:?} is not JSON: {e}\n\nUsage: gmuse ctl {} '{{…}}'",
+                    words[0]
+                ))
+            })
+        });
+        client.call(&words[0], params)
+    } else {
+        // The `:` line's language, parsed engine-side by the same parser the
+        // TUI uses (§7.12) — so the CLI has no command vocabulary of its own.
+        client.call(
+            gmuse_proto::request::method::EXEC_LINE,
+            Some(serde_json::json!({ "line": words.join(" ") })),
+        )
+    };
+
+    match outcome {
+        Ok(result) => {
+            if json {
+                println!("{}", serde_json::to_string(&result)?);
+            } else if !result.is_null() {
+                println!("{}", render(&result));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            // **A refusal is still an exit status.** A pipeline that only read
+            // stdout would otherwise treat "the engine said no" as success.
+            if json && let Some(rpc) = e.rpc() {
+                println!("{}", serde_json::to_string(rpc)?);
+                std::process::exit(1);
+            }
+            die(e)
+        }
+    }
+}
+
+/// Render a result for a person rather than for jq.
+fn render(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| format!("{k}: {}", render(v)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Array(items) => items.iter().map(render).collect::<Vec<_>>().join("\n"),
+        other => other.to_string(),
+    }
+}
+
+/// `gmuse events [--topics …]` — subscribe and print NDJSON — §13.3.
+fn run_events(topics: &[String], count: Option<usize>) -> Result<(), Box<dyn std::error::Error>> {
+    let wanted: Vec<gmuse_proto::Topic> = if topics.is_empty() {
+        gmuse_proto::Topic::ALL.to_vec()
+    } else {
+        topics
+            .iter()
+            .map(|name| {
+                serde_json::from_value(serde_json::Value::String(name.clone())).map_err(|_| {
+                    format!(
+                        "{name:?} is not a topic — try one of: {}",
+                        gmuse_proto::Topic::ALL
+                            .iter()
+                            .map(|t| t.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+            })
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e: String| die(e))
+    };
+
+    let client = connect().unwrap_or_else(|e| die(e));
+    let in_force = client.subscribe(&wanted).unwrap_or_else(|e| die(e));
+    eprintln!(
+        "subscribed: {}",
+        in_force
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // **NDJSON on stdout, the subscription note on stderr** (§13.3). A jq or
+    // fzf pipeline reads stdout, and a line of prose in it would be a parse
+    // error in somebody's script.
+    for (seen, event) in client.events().iter().enumerate() {
+        println!("{}", serde_json::to_string(&event)?);
+        use std::io::Write as _;
+        std::io::stdout().flush()?;
+        if count.is_some_and(|n| seen + 1 >= n) {
+            break;
+        }
+    }
     Ok(())
 }
 

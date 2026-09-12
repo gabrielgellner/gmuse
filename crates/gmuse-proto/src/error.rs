@@ -11,6 +11,16 @@ pub struct RpcError {
     pub data: Option<serde_json::Value>,
 }
 
+impl std::fmt::Display for RpcError {
+    /// The code as well as the message, because §7.13's codes are what a caller
+    /// branches on and a log that omitted them would be unactionable.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.message, self.code)
+    }
+}
+
+impl std::error::Error for RpcError {}
+
 /// The codes of §7.13.
 ///
 /// **The negative ones are JSON-RPC 2.0's and mean what it says they mean**;
@@ -90,6 +100,15 @@ mod tests {
     fn an_error_without_data_omits_the_field_rather_than_sending_null() {
         let line = serde_json::to_string(&RpcError::new(code::INTERNAL, "boom")).unwrap();
         assert_eq!(line, r#"{"code":-32603,"message":"boom"}"#);
+    }
+
+    /// A code without its number is unactionable in a log: §7.13's table is
+    /// keyed by the number, not by the prose.
+    #[test]
+    fn displaying_an_error_keeps_its_code() {
+        let shown = RpcError::method_not_found("deck.load").to_string();
+        assert!(shown.contains("deck.load"), "{shown}");
+        assert!(shown.contains("-32601"), "{shown}");
     }
 
     #[test]

@@ -152,6 +152,38 @@ pub enum Command {
         #[arg(long)]
         null_audio: bool,
     },
+    /// Send one command to the running engine and print the reply — §4.2.
+    ///
+    /// **This is what `--remote` becomes.** The same job with a protocol behind
+    /// it, rather than a second ad-hoc IPC over the same socket-shaped problem.
+    Ctl {
+        /// The command, in the `:` line's language: `gmuse ctl seek +10`.
+        ///
+        /// Taken as words and joined, so a shell does not have to be fought
+        /// over quoting for the common case.
+        ///
+        /// **Flags go before it**: `gmuse ctl --json seek +10`. Everything
+        /// after the command is part of the command, because `seek -5` and
+        /// `vol -10` have to reach the parser intact — and a rule that let
+        /// `--json` through would have to guess which leading-dash words are
+        /// arguments, which is exactly the guess that makes a CLI surprising.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+        /// Print the engine's reply as NDJSON rather than for a person.
+        ///
+        /// Must come **before** the command: `gmuse ctl --json pause`.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Subscribe and print events as NDJSON — §4.2, §13.3.
+    Events {
+        /// Which topics. Every topic when not given.
+        #[arg(long, value_delimiter = ',')]
+        topics: Vec<String>,
+        /// Stop after this many events. Runs until interrupted when not given.
+        #[arg(long)]
+        count: Option<usize>,
+    },
 }
 
 #[derive(Debug, clap::Subcommand)]
