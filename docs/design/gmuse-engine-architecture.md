@@ -974,7 +974,11 @@ which a forward-streaming decoder doesn't provide. **So there are two audio path
 ### 11.5 Sounding position
 
 - cpal's output callback info provides both a callback instant and a playback instant
-  (`OutputCallbackInfo::timestamp()`). **[verify]** Confirm the exact API in the pinned cpal version.
+  (`OutputCallbackInfo::timestamp()`). **Verified** against the pinned cpal 0.18.2: `OutputStreamTimestamp` carries
+  `callback` and `playback` as public `StreamInstant` fields, `playback` documented as "the predicted instant that data
+  written will be delivered to the device for playback", and `StreamInstant::as_nanos()` is public so the mapping can be
+  published as an absolute number in the stream's timebase. `OutputCallbackInfo::new` is public too, which is what lets
+  the null backend supply the same pair from a virtual clock instead of a second code path.
 - The RT side publishes the frame-to-host-time mapping using the _playback_ instant, so `at_ns` in `playback` events and
   the MIDI timestamp mapping both refer to when audio reaches the output, not when it was computed.
 - Without this, waveform playheads sit visibly ahead of the audio.

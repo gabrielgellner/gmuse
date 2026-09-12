@@ -200,6 +200,35 @@ pub(super) fn fill_output(
 /// Callback-local state, held here rather than captured in a closure so the
 /// step can be driven by something other than cpal — a virtual clock, in a
 /// test with no audio device.
+/// When this buffer was computed, and when it will be heard — #212.
+///
+/// **Two instants, and the second is the one that matters.** A device supplies
+/// both; the gap between them is the output latency, which is what separates
+/// the frames handed over from the frames coming out of the speaker.
+///
+/// Plain integers rather than `cpal::OutputCallbackInfo`, for the same reason
+/// [`process`] takes two numbers rather than a `StreamConfig`: naming cpal here
+/// would put it back on the headless path, and the null renderer has a virtual
+/// clock that is every bit as real to the code under test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderClock {
+    /// When the render step was invoked, in the stream's timebase.
+    pub callback_nanos: u64,
+    /// When the audio written here reaches the output.
+    pub playback_nanos: u64,
+}
+
+impl RenderClock {
+    /// How far ahead of the sound this buffer is being computed.
+    ///
+    /// Saturating: a backend whose playback instant precedes its callback
+    /// instant is reporting nonsense, and a wrapped subtraction would turn
+    /// that into an enormous latency rather than none.
+    pub fn latency_nanos(&self) -> u64 {
+        self.playback_nanos.saturating_sub(self.callback_nanos)
+    }
+}
+
 pub struct Rt {
     consumer: rtrb::Consumer<f32>,
     shared: Arc<Shared>,
@@ -208,6 +237,12 @@ pub struct Rt {
     /// step reads or writes it.
     serviced: u64,
     fade: Fade,
+    /// The stream this renderer belongs to, captured when it was built.
+    ///
+    /// Held rather than read from `shared` each buffer so that a renderer
+    /// outliving its stream publishes its *own* generation and is therefore
+    /// detectable, instead of silently adopting the new one.
+    generation: u32,
 }
 
 impl Rt {
@@ -220,13 +255,55 @@ impl Rt {
         channels: usize,
         rate: u32,
     ) -> Rt {
+        // **The stream begins here, not at the first buffer.** Bumping on
+        // construction means a consumer that reads the generation before any
+        // audio has been rendered still sees the stream it is about to hear,
+        // and the mapping this renderer publishes can never carry a generation
+        // nobody has been told about.
+        let generation = shared
+            .stream_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .wrapping_add(1);
         Rt {
             consumer,
             channels,
             fade: Fade::new(rate),
             shared,
             serviced: 0,
+            generation,
         }
+    }
+
+    /// Which stream this renderer is rendering.
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Publish *this frame sounds at this instant*, as one fact.
+    ///
+    /// **Seqlock, written from the render step.** The sequence goes odd, the
+    /// four values are stored, the sequence goes even; a reader that sees an
+    /// odd sequence or a changed one retries. No allocation, no lock, no
+    /// syscall, and no loop — which is what the callback's rules require.
+    fn publish(&self, frame: u64, clock: RenderClock) {
+        use std::sync::atomic::{Ordering, fence};
+        let odd = self.shared.map_seq.load(Ordering::Relaxed).wrapping_add(1);
+        self.shared.map_seq.store(odd, Ordering::Relaxed);
+        // The odd sequence must be visible before the values it guards.
+        fence(Ordering::Release);
+        self.shared.map_frame.store(frame, Ordering::Relaxed);
+        self.shared
+            .map_at_nanos
+            .store(clock.playback_nanos, Ordering::Relaxed);
+        self.shared
+            .map_latency_nanos
+            .store(clock.latency_nanos(), Ordering::Relaxed);
+        self.shared
+            .map_generation
+            .store(self.generation, Ordering::Relaxed);
+        self.shared
+            .map_seq
+            .store(odd.wrapping_add(1), Ordering::Release);
     }
 }
 
@@ -240,7 +317,7 @@ impl Rt {
 /// runs under cpal and under a virtual clock. Nothing in the signature names
 /// cpal, which is what makes the headless path the *same* renderer rather
 /// than a second one that drifts.
-pub fn process(rt: &mut Rt, out: &mut [f32]) {
+pub fn process(rt: &mut Rt, out: &mut [f32], clock: RenderClock) {
     // Seek/stop handshake: discard buffered audio and adopt the new
     // position. `read_chunk(..).commit_all()` moves an index; it does
     // not copy or free, so this is safe in the RT context.
@@ -262,6 +339,11 @@ pub fn process(rt: &mut Rt, out: &mut [f32]) {
         // than splice, or the seek itself clicks.
         rt.fade.cut();
         out.fill(0.0);
+        // **Published on every path, including the silent ones.** A paused or
+        // seeking stream still calls back, and a mapping that only moved while
+        // audio flowed would leave a consumer extrapolating from an instant
+        // that is seconds old the moment anything stops.
+        rt.publish(rt.shared.position_frames.load(Ordering::Relaxed), clock);
         return;
     }
 
@@ -278,8 +360,15 @@ pub fn process(rt: &mut Rt, out: &mut [f32]) {
     // pause holds its place rather than draining.
     if rt.fade.is_silent(target) {
         out.fill(0.0);
+        rt.publish(rt.shared.position_frames.load(Ordering::Relaxed), clock);
         return;
     }
+
+    // **The mapping is about the first frame of this buffer**, which is the
+    // one that sounds at the playback instant. Taken before the counter moves;
+    // taking it after would name a frame that has not been handed over yet.
+    let at_frame = rt.shared.position_frames.load(Ordering::Relaxed);
+    rt.publish(at_frame, clock);
 
     let want = out.len();
     let got = match rt.consumer.read_chunk(want.min(rt.consumer.slots())) {
@@ -330,7 +419,23 @@ pub(super) fn build_stream(
 
     let stream = device.build_output_stream(
         config,
-        move |out: &mut [f32], _: &cpal::OutputCallbackInfo| process(&mut rt, out),
+        move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+            // **The playback instant, not the callback instant** (I13, §11.5).
+            // Verified against the pinned cpal 0.18.2: `OutputStreamTimestamp`
+            // carries both, `playback` being "the predicted instant that data
+            // written will be delivered to the device for playback".
+            //
+            // `as_nanos` is a `u128` in a timebase that starts at the stream,
+            // so it cannot overflow a `u64` in any run this will see; the
+            // saturating cast is there so that a backend reporting nonsense
+            // yields a clamped instant rather than a wrapped one.
+            let stamp = info.timestamp();
+            let clock = RenderClock {
+                callback_nanos: u64::try_from(stamp.callback.as_nanos()).unwrap_or(u64::MAX),
+                playback_nanos: u64::try_from(stamp.playback.as_nanos()).unwrap_or(u64::MAX),
+            };
+            process(&mut rt, out, clock);
+        },
         move |err| {
             // **Never print from here.** The TUI owns the alternate screen, so
             // anything written to stdout or stderr lands on top of the drawn
@@ -364,6 +469,251 @@ mod tests {
     /// 8ms at 48k.
     const RAMP_FRAMES: usize = 384;
 
+    /// A clock for the tests that are not about timing.
+    ///
+    /// Ten milliseconds of latency, which is the order a device reports, and a
+    /// callback instant that does not advance — these tests assert on the ring,
+    /// the fade and the allocator, none of which read it. The tests that *are*
+    /// about the clock build their own.
+    /// **A mapping names the first frame of the buffer, not the last** — #212.
+    ///
+    /// The instant a device reports is when *this* buffer reaches the output,
+    /// so the frame it is paired with has to be the one at the buffer's head.
+    /// Pairing it with the counter after rendering would name a frame that has
+    /// not been handed over yet, and every position derived from it would be
+    /// one buffer late — which is precisely the error I13 exists to remove,
+    /// reintroduced from the other direction.
+    #[test]
+    fn a_mapping_names_the_first_frame_of_the_buffer() {
+        use crate::audio::State;
+        use std::sync::atomic::Ordering;
+
+        const CHANNELS: usize = 2;
+        const PERIOD: usize = 256;
+
+        let (mut producer, consumer) = crate::audio::ring::new(RATE, CHANNELS);
+        let shared = Arc::new(crate::audio::Shared::new());
+        let mut rt = Rt::new(consumer, Arc::clone(&shared), CHANNELS, RATE);
+        let mut out = vec![0.0f32; PERIOD * CHANNELS];
+
+        let audio = vec![0.25f32; PERIOD * CHANNELS * 4];
+        if let Ok(chunk) = producer.write_chunk_uninit(audio.len()) {
+            chunk.fill_from_iter(audio.iter().copied());
+        }
+        shared.state.store(State::Playing as u8, Ordering::Relaxed);
+
+        process(&mut rt, &mut out, TEST_CLOCK);
+        let first = shared.sounding().expect("a mapping after the first buffer");
+        assert_eq!(first.frame, 0, "the first buffer starts at frame zero");
+
+        process(&mut rt, &mut out, TEST_CLOCK);
+        let second = shared.sounding().expect("a mapping after the second");
+        assert_eq!(
+            second.frame, PERIOD as u64,
+            "the second buffer starts where the first ended"
+        );
+    }
+
+    /// **A renderer publishes the stream it belongs to, not the one that is
+    /// running** — #212.
+    ///
+    /// This is what makes a stale mapping detectable. A renderer that outlived
+    /// its stream still writes to the same `Shared`; if it read the generation
+    /// fresh each buffer it would adopt the new one and its stale frame count
+    /// would be indistinguishable from the live stream's. Holding the
+    /// generation it was built under is what lets a reader refuse it.
+    #[test]
+    fn a_renderer_publishes_its_own_generation_not_the_running_one() {
+        use crate::audio::State;
+        use std::sync::atomic::Ordering;
+
+        const CHANNELS: usize = 2;
+        const PERIOD: usize = 64;
+
+        let shared = Arc::new(crate::audio::Shared::new());
+        let (mut producer, consumer) = crate::audio::ring::new(RATE, CHANNELS);
+        let mut stale = Rt::new(consumer, Arc::clone(&shared), CHANNELS, RATE);
+        assert_eq!(stale.generation(), 1, "the first stream is generation one");
+
+        // A second stream opens — the device came back, say — and the first
+        // renderer has not stopped yet.
+        let (_p2, consumer2) = crate::audio::ring::new(RATE, CHANNELS);
+        let live = Rt::new(consumer2, Arc::clone(&shared), CHANNELS, RATE);
+        assert_eq!(live.generation(), 2);
+        assert_eq!(shared.generation(), 2, "the running stream is the second");
+
+        let audio = vec![0.25f32; PERIOD * CHANNELS * 4];
+        if let Ok(chunk) = producer.write_chunk_uninit(audio.len()) {
+            chunk.fill_from_iter(audio.iter().copied());
+        }
+        shared.state.store(State::Playing as u8, Ordering::Relaxed);
+
+        let mut out = vec![0.0f32; PERIOD * CHANNELS];
+        process(&mut stale, &mut out, TEST_CLOCK);
+
+        let map = shared.sounding().expect("the stale renderer published");
+        assert_eq!(
+            map.generation, 1,
+            "it published its own generation, so it can be told apart"
+        );
+        assert_ne!(
+            map.generation,
+            shared.generation(),
+            "and a reader comparing against the running stream refuses it"
+        );
+    }
+
+    /// **The published latency is the gap between the two instants** — I13.
+    ///
+    /// Not the callback instant, and not zero. This is the number a position
+    /// is corrected by, so getting it from the wrong pair of instants puts the
+    /// playhead exactly as wrong as having no correction at all.
+    #[test]
+    fn the_published_latency_is_the_gap_to_the_playback_instant() {
+        use crate::audio::State;
+        use std::sync::atomic::Ordering;
+
+        const CHANNELS: usize = 2;
+        const PERIOD: usize = 128;
+
+        let (mut producer, consumer) = crate::audio::ring::new(RATE, CHANNELS);
+        let shared = Arc::new(crate::audio::Shared::new());
+        let mut rt = Rt::new(consumer, Arc::clone(&shared), CHANNELS, RATE);
+        let mut out = vec![0.0f32; PERIOD * CHANNELS];
+
+        let audio = vec![0.25f32; PERIOD * CHANNELS * 4];
+        if let Ok(chunk) = producer.write_chunk_uninit(audio.len()) {
+            chunk.fill_from_iter(audio.iter().copied());
+        }
+        shared.state.store(State::Playing as u8, Ordering::Relaxed);
+
+        let clock = RenderClock {
+            callback_nanos: 5_000_000,
+            playback_nanos: 12_000_000,
+        };
+        process(&mut rt, &mut out, clock);
+
+        let map = shared.sounding().expect("a mapping");
+        assert_eq!(map.at_nanos, 12_000_000, "the instant is the playback one");
+        assert_eq!(map.latency_nanos, 7_000_000, "and the latency is the gap");
+    }
+
+    /// A backend reporting a playback instant *before* its callback instant is
+    /// talking nonsense. Saturating means that reads as no latency rather than
+    /// as the near-six-hundred years a wrapped subtraction would produce — and
+    /// a position corrected by that would be pinned at zero forever.
+    #[test]
+    fn a_playback_instant_before_the_callback_is_no_latency_not_an_enormous_one() {
+        let backwards = RenderClock {
+            callback_nanos: 9_000_000,
+            playback_nanos: 1_000_000,
+        };
+        assert_eq!(backwards.latency_nanos(), 0);
+    }
+
+    /// **A half-written mapping is never handed out** — #212.
+    ///
+    /// The four values are one fact, and the seqlock is what makes reading
+    /// them atomic. An odd sequence means the render step is mid-write, and
+    /// the reader gives up rather than returning a frame paired with the
+    /// previous buffer's instant.
+    #[test]
+    fn a_mapping_caught_mid_write_is_refused() {
+        use std::sync::atomic::Ordering;
+
+        let shared = crate::audio::Shared::new();
+        shared.map_frame.store(1024, Ordering::Relaxed);
+        shared.map_at_nanos.store(7, Ordering::Relaxed);
+        // Odd: the writer is inside the pair of stores.
+        shared.map_seq.store(3, Ordering::Relaxed);
+
+        assert_eq!(
+            shared.sounding(),
+            None,
+            "a torn read is refused rather than guessed at"
+        );
+    }
+
+    /// Nothing has played yet, so there is nothing to report. Distinguished
+    /// from a mapping that happens to be all zeroes, which is a real answer.
+    #[test]
+    fn no_stream_has_published_anything_yet() {
+        let shared = crate::audio::Shared::new();
+        assert_eq!(shared.sounding(), None);
+        assert_eq!(shared.generation(), 0, "and no stream has opened");
+    }
+
+    /// **While audio flows, the instant and the frame advance together** —
+    /// #212. That is what makes the pair a clock rather than two numbers.
+    ///
+    /// Driven directly rather than through a thread, because the relation only
+    /// holds while the ring has audio: a renderer that runs past the end keeps
+    /// publishing a running clock against a stalled frame count, which is
+    /// correct and would make this assertion flaky if it were raced.
+    #[test]
+    fn a_published_instant_tracks_the_frames_while_audio_flows() {
+        use crate::audio::State;
+        use std::sync::atomic::Ordering;
+
+        const CHANNELS: usize = 2;
+        const PERIOD: usize = 256;
+        const BUFFERS: usize = 8;
+
+        let (mut producer, consumer) = crate::audio::ring::new(RATE, CHANNELS);
+        let shared = Arc::new(crate::audio::Shared::new());
+        let mut rt = Rt::new(consumer, Arc::clone(&shared), CHANNELS, RATE);
+        let mut out = vec![0.0f32; PERIOD * CHANNELS];
+
+        let audio = vec![0.25f32; PERIOD * CHANNELS * (BUFFERS + 2)];
+        if let Ok(chunk) = producer.write_chunk_uninit(audio.len()) {
+            chunk.fill_from_iter(audio.iter().copied());
+        }
+        shared.state.store(State::Playing as u8, Ordering::Relaxed);
+
+        let per_buffer_nanos = (PERIOD as u64 * 1_000_000_000) / u64::from(RATE);
+        let mut previous: Option<crate::audio::Sounding> = None;
+        for buffer in 0..BUFFERS {
+            let callback_nanos = buffer as u64 * per_buffer_nanos;
+            process(
+                &mut rt,
+                &mut out,
+                RenderClock {
+                    callback_nanos,
+                    playback_nanos: callback_nanos + per_buffer_nanos,
+                },
+            );
+            let map = shared.sounding().expect("a mapping per buffer");
+            assert_eq!(
+                map.frame,
+                buffer as u64 * PERIOD as u64,
+                "buffer {buffer} starts where the previous one ended"
+            );
+            // **Asserted as a step, not as a formula.** `per_buffer_nanos` is
+            // truncated, so `n` steps of it is not the same number as the time
+            // at frame `n * PERIOD` computed in one division — off by a
+            // nanosecond by the fourth buffer. The claim worth making is that
+            // the frame and the instant move together, and that is exact.
+            if let Some(last) = previous {
+                assert_eq!(
+                    map.frame - last.frame,
+                    PERIOD as u64,
+                    "one buffer of frames"
+                );
+                assert_eq!(
+                    map.at_nanos - last.at_nanos,
+                    per_buffer_nanos,
+                    "and one buffer of time, in step with it"
+                );
+            }
+            previous = Some(map);
+        }
+    }
+
+    const TEST_CLOCK: RenderClock = RenderClock {
+        callback_nanos: 0,
+        playback_nanos: 10_000_000,
+    };
+
     /// **The render step allocates nothing, on any path it can take** — I2.
     ///
     /// Not a review and not a comment: a global allocator counts, and this
@@ -395,18 +745,18 @@ mod tests {
 
         let (_, violations) = crate::rt_guard::forbidden(|| {
             // A fed ring.
-            process(&mut rt, &mut out);
+            process(&mut rt, &mut out, TEST_CLOCK);
             // A seek: the flush handshake discards and repositions.
             shared.flush_seq.fetch_add(1, Ordering::Release);
-            process(&mut rt, &mut out);
+            process(&mut rt, &mut out, TEST_CLOCK);
             // Starved: the ring is empty now, so this takes the fade-to-silence
             // path and bumps the underrun counter.
-            process(&mut rt, &mut out);
-            process(&mut rt, &mut out);
+            process(&mut rt, &mut out, TEST_CLOCK);
+            process(&mut rt, &mut out, TEST_CLOCK);
             // Paused, then fully silent: the early return.
             shared.state.store(State::Paused as u8, Ordering::Relaxed);
             for _ in 0..64 {
-                process(&mut rt, &mut out);
+                process(&mut rt, &mut out, TEST_CLOCK);
             }
         });
 
@@ -434,11 +784,11 @@ mod tests {
         for period in [1usize, 64, 256, 1024] {
             let mut out = vec![0.0f32; period * CHANNELS];
             shared.state.store(State::Playing as u8, Ordering::Relaxed);
-            process(&mut rt, &mut out);
+            process(&mut rt, &mut out, TEST_CLOCK);
             shared.flush_seq.fetch_add(1, Ordering::Release);
-            process(&mut rt, &mut out);
+            process(&mut rt, &mut out, TEST_CLOCK);
             shared.state.store(State::Stopped as u8, Ordering::Relaxed);
-            process(&mut rt, &mut out);
+            process(&mut rt, &mut out, TEST_CLOCK);
         }
 
         assert!(

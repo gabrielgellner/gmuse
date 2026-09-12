@@ -249,9 +249,110 @@ pub struct Shared {
     /// plugged in, default device switched). Informational: playback carries
     /// on, so this must not be reported as an error.
     pub device_rerouted: AtomicBool,
+
+    /// **Which stream the frame counter is counting in** — #212.
+    ///
+    /// `position_frames` counts from the start of a stream, so it restarts at
+    /// zero when a stream does, and a device disappearing is the likeliest
+    /// hardware event in this design. Without a generation, a consumer
+    /// extrapolating a position cannot tell a restart from a seek to the
+    /// beginning: both look like the clock going backwards. `engine_generation`
+    /// covers an engine restart and does not cover this one.
+    ///
+    /// Zero means no stream has run yet. Bumped once per stream, before the
+    /// first render.
+    pub stream_generation: AtomicU32,
+
+    /// Seqlock sequence for the mapping below. Odd while it is being written.
+    ///
+    /// The four values are one fact — *this frame sounds at this instant* — and
+    /// a reader that caught half of one and half of the next would compute a
+    /// position that was never true. A seqlock rather than a mutex because the
+    /// writer is the render step, which may not lock; the writer never waits
+    /// and the reader retries.
+    pub map_seq: AtomicU64,
+    /// The frame index the mapping is about: the first frame of the buffer.
+    pub map_frame: AtomicU64,
+    /// When that frame reaches the output, in the stream's timebase.
+    pub map_at_nanos: AtomicU64,
+    /// The stream generation the two values above belong to. A mapping from a
+    /// previous generation is refused, never reinterpreted.
+    pub map_generation: AtomicU32,
+    /// How far ahead of the sound the render step runs — the callback instant
+    /// subtracted from the playback instant.
+    ///
+    /// **This is what makes a reported position the sounding one (I13).**
+    /// `position_frames` counts frames *handed to the device*, which are not
+    /// yet audible; without subtracting this, a playhead sits visibly ahead of
+    /// what you can hear, and every beat-relative decision inherits the error.
+    pub map_latency_nanos: AtomicU64,
+}
+
+/// Where the stream had got to, and when that will be audible — #212.
+///
+/// Read as one value or not at all, which is the whole point of publishing it
+/// under a sequence: the frame and the instant are only meaningful together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sounding {
+    /// The stream this belongs to. A consumer that sees this change discards
+    /// whatever it had extrapolated and asks again.
+    pub generation: u32,
+    /// The first frame of the buffer the mapping describes.
+    pub frame: u64,
+    /// When that frame reaches the output, in the stream's timebase.
+    pub at_nanos: u64,
+    /// How far ahead of the sound the render step is running.
+    pub latency_nanos: u64,
 }
 
 impl Shared {
+    /// The most recent frame-to-instant mapping, or `None` if no stream has
+    /// published one yet.
+    ///
+    /// Retries a bounded number of times rather than spinning: the writer is
+    /// the render step and never waits, so a torn read means it published
+    /// again while we were looking, and the next attempt gets the newer value.
+    /// An unbounded loop here would be the same mistake the callback is
+    /// forbidden from making.
+    ///
+    /// **The bound is a backstop, not a tuning knob.** A device publishes once
+    /// per buffer — a few milliseconds apart — so a reader wins on the first
+    /// attempt essentially always. It was 8, which was enough for that and not
+    /// enough for [`null::Pace::Fast`], where the renderer publishes in a tight
+    /// loop and a reader could lose eight times in a row and report *no
+    /// mapping* while one plainly existed. Losing 128 in a row means something
+    /// far stranger than contention.
+    pub fn sounding(&self) -> Option<Sounding> {
+        for _ in 0..128 {
+            let before = self.map_seq.load(Ordering::Acquire);
+            if before == 0 || before & 1 == 1 {
+                if before == 0 {
+                    return None;
+                }
+                continue;
+            }
+            let frame = self.map_frame.load(Ordering::Relaxed);
+            let at_nanos = self.map_at_nanos.load(Ordering::Relaxed);
+            let latency_nanos = self.map_latency_nanos.load(Ordering::Relaxed);
+            let generation = self.map_generation.load(Ordering::Relaxed);
+            std::sync::atomic::fence(Ordering::Acquire);
+            if self.map_seq.load(Ordering::Relaxed) == before {
+                return Some(Sounding {
+                    generation,
+                    frame,
+                    at_nanos,
+                    latency_nanos,
+                });
+            }
+        }
+        None
+    }
+
+    /// Which stream is running. Zero before the first one starts.
+    pub fn generation(&self) -> u32 {
+        self.stream_generation.load(Ordering::Acquire)
+    }
+
     fn new() -> Self {
         Self {
             position_frames: AtomicU64::new(0),
@@ -267,6 +368,12 @@ impl Shared {
             device_lost: AtomicBool::new(false),
             device_rerouted: AtomicBool::new(false),
             draining: AtomicBool::new(false),
+            stream_generation: AtomicU32::new(0),
+            map_seq: AtomicU64::new(0),
+            map_frame: AtomicU64::new(0),
+            map_at_nanos: AtomicU64::new(0),
+            map_generation: AtomicU32::new(0),
+            map_latency_nanos: AtomicU64::new(0),
         }
     }
 }
@@ -473,13 +580,55 @@ impl PlayerHandle {
     /// so it cannot drift from what is actually coming out of the speakers.
     /// A seek repositions the counter as part of the flush handshake, so this
     /// never reports a stale position afterwards.
+    /// How far into the current track the sound has got — **what you can
+    /// hear, not what has been handed over** (#212, I13).
+    ///
+    /// `position_frames` counts frames written to the device, and those are
+    /// not audible yet: they sit in the device's buffer for the output
+    /// latency, which the render step publishes from the gap between its
+    /// callback and playback instants. Subtracting it is the difference
+    /// between a playhead that tracks the music and one that runs visibly
+    /// ahead of it.
+    ///
+    /// Saturating at zero, which is what the first buffer of a track wants:
+    /// the sound has not started, so the position is the start rather than a
+    /// negative time wrapped into an enormous one.
     pub fn position(&self) -> Duration {
         let frames = self
             .shared
             .position_frames
             .load(Ordering::Relaxed)
             .saturating_sub(self.shared.track_base.load(Ordering::Relaxed));
-        Duration::from_secs_f64(frames as f64 / self.device_rate as f64)
+        let handed = Duration::from_secs_f64(frames as f64 / self.device_rate as f64);
+        handed.saturating_sub(self.output_latency())
+    }
+
+    /// How far ahead of the sound the render step is running. Zero until a
+    /// stream has published a mapping.
+    pub fn output_latency(&self) -> Duration {
+        match self.shared.sounding() {
+            Some(map) if map.generation == self.shared.generation() => {
+                Duration::from_nanos(map.latency_nanos)
+            }
+            // **A mapping from a previous stream is refused, not reinterpreted**
+            // (#212). Its latency belonged to a device that is no longer the
+            // one playing, and guessing that it still applies is exactly the
+            // silent wrongness the generation exists to prevent.
+            _ => Duration::ZERO,
+        }
+    }
+
+    /// The frame-to-instant mapping the running stream last published, or
+    /// `None` if none has or it belongs to a stream that has been replaced.
+    pub fn sounding(&self) -> Option<Sounding> {
+        self.shared
+            .sounding()
+            .filter(|map| map.generation == self.shared.generation())
+    }
+
+    /// Which stream is running. Bumped once per stream; zero before the first.
+    pub fn stream_generation(&self) -> u32 {
+        self.shared.generation()
     }
 
     pub fn underruns(&self) -> u32 {
