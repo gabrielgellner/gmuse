@@ -111,13 +111,37 @@ wheel-dev:
 test:
     cargo test --release --workspace
 
+# Run one bench test and insist that it ran.
+#
+# **`--workspace`, and a check that something matched.** These were
+# `cargo test --release <filter>`, which searches the root package only — so
+# when #213 moved `seam.rs` into `gmuse-library`, `bench-fold` started printing
+# nothing and exiting 0. The bench still ran under `just ci`, which is
+# workspace-wide; what was lost was the recipe whose entire purpose is to show
+# the table. A bench that reports nothing and succeeds is the same failure as a
+# boundary test that reads no files.
+_bench filter:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=$(cargo test --release --workspace {{filter}} -- --nocapture 2>&1)
+    echo "$out"
+    if ! grep -qE "^test .*{{filter}}.* \.\.\. ok" <<<"$out"; then
+        echo "" >&2
+        echo "bench: no test matched {{filter}} — it has moved or been renamed." >&2
+        exit 1
+    fi
+
 # Show what it costs to draw a view (#121). Runs in `ci` too — it is fast.
 bench-shelf:
-    cargo test --release drawing_a_view -- --nocapture
+    @just _bench drawing_a_view
 
 # Show what it costs to rebuild the librarian (#123). Runs in `ci` too.
 bench-fold:
-    cargo test --release rebuilding_the_librarian -- --nocapture
+    @just _bench rebuilding_the_librarian
+
+# Show what one appended fact costs the librarian (#223). Runs in `ci` too.
+bench-write:
+    @just _bench one_rating_is_not_a_whole_rebuild
 
 # Show the resampler benchmark table (not part of `ci` — it takes ~30s)
 [group('test')]

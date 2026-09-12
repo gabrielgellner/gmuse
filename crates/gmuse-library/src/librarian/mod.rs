@@ -798,3 +798,164 @@ mod change_tests {
         assert!(touched.contains(&Touched::Encoding(two)));
     }
 }
+
+#[cfg(test)]
+mod what_a_write_costs {
+    //! **What one appended fact costs the librarian** — #223.
+    //!
+    //! `just bench-write`. The figure that mattered before the engine existed
+    //! was a full rebuild (#123, `just bench-fold`), because a refold happened
+    //! when somebody asked for one. Over the socket any client may write at any
+    //! time and every connected view's `library` event waits on the publish, so
+    //! the cost of *one write* is now its own number.
+    //!
+    //! Reported rather than asserted, except for the one bound that would catch
+    //! a regression worth catching.
+    //!
+    //! ## What it found, and what it ruled out
+    //!
+    //! On 110,500 records one rating costs **~70 ms**, of which the append is
+    //! 375 ns. Everything else is the publish:
+    //!
+    //! | step                | cost   | share |
+    //! | ------------------- | ------ | ----- |
+    //! | `bridge::librarian` | 53 ms  | 76%   |
+    //! | `log.catalogue()`   | 12 ms  | 17%   |
+    //! | `records().clone()` | 3.7 ms | 5%    |
+    //! | `Changed::of(diff)` | 1.2 ms | 2%    |
+    //! | `rate()`            | 375 ns | ~0    |
+    //!
+    //! **It ruled out the cheap fix.** §8.5's position-driven `advance()` short
+    //! circuits a *caught-up* log to a `Position` comparison, and I expected
+    //! wiring the write path through it to be an easy win. It cannot be: after
+    //! a write the log is behind by exactly the fact just written, so the
+    //! comparison always fails and the fold always runs. `Position::of` is
+    //! reported here to make that concrete — it is ~560 µs, so even the check
+    //! is not free, and it buys nothing on this path.
+    //!
+    //! **And it ruled out the clone.** Removing the whole-log clone and its
+    //! diff is 7% for a change to how `Changed` is computed, which is the one
+    //! thing on this path that decides what every view refreshes. Poor trade.
+    //!
+    //! What is left is the thing the doc on `Projected::advance` already warns
+    //! about: not re-drawing 6,500 rows to change one. That is incremental
+    //! narrow application, it is a second implementation of a multi-pass fold,
+    //! and the equivalence test is what makes paying for it safe.
+
+    use std::time::Instant;
+
+    use super::*;
+    use crate::model::instance::Scanned;
+
+    /// A library of `albums` albums, ten tracks each, over `artists` artists.
+    ///
+    /// The same shape `seam`'s bench uses, because the two numbers are only
+    /// comparable if the library is.
+    fn scan_of(artists: usize, albums: usize) -> Vec<Scanned> {
+        const GENRES: [&str; 6] = ["Techno", "House", "Folk", "Rock", "Jazz", "Ambient"];
+        let mut scan = Vec::new();
+        for a in 0..albums {
+            for track in 1..=10u16 {
+                let artist = format!("Artist {:04}", a % artists);
+                scan.push(Scanned {
+                    audio: crate::audio_id::AudioId {
+                        scheme: 1,
+                        hash: (a as u128) * 1000 + u128::from(track),
+                    },
+                    title: format!("Track {track:02} of {a:04}"),
+                    artist: artist.clone(),
+                    album: Some(format!("Album {a:04}")),
+                    album_artist: Some(artist),
+                    genres: vec![GENRES[a % GENRES.len()].to_string()],
+                    disc: Some(1),
+                    track: Some(track),
+                    track_total: Some(10),
+                    disc_total: Some(1),
+                    length_ms: 200_000,
+                    ..Default::default()
+                });
+            }
+        }
+        scan
+    }
+
+    #[test]
+    fn one_rating_is_not_a_whole_rebuild() {
+        let device = crate::fixture::device();
+        let mut log = Instance::new(device);
+        log.ingest(100, &scan_of(200, 650));
+        let records = log.records().len();
+        let held = Arc::new(Holdings::default());
+
+        // The recording to rate: any one the ingest minted.
+        let recording = log
+            .catalogue()
+            .ratings
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or_else(|| Id::derived(b"absent"));
+
+        // 1. What the job loop does before running the job at all.
+        let t = Instant::now();
+        let before = log.records().clone();
+        let snapshot = t.elapsed();
+
+        // 2. The append itself.
+        let t = Instant::now();
+        log.rate(200, recording, Some(4));
+        let append = t.elapsed();
+
+        // 3. Working out what moved.
+        let t = Instant::now();
+        let moved = Changed::of(log.records().difference(&before));
+        let diff = t.elapsed();
+
+        // 4. The publish, which is a full fold of everything — broken into the
+        //    two halves it is made of, because they are different work and only
+        //    one of them turned out to be the cost.
+        let t = Instant::now();
+        let library = crate::bridge::librarian(&held, log.records(), device, 200);
+        let drawn = t.elapsed();
+        let t = Instant::now();
+        let catalogue = log.catalogue();
+        let catalogued = t.elapsed();
+        let publish = drawn + catalogued;
+        let _ = (library, catalogue);
+
+        // And what the position comparison costs, for the same log — the thing
+        // §8.5 says a caught-up advance should cost instead of a fold.
+        let t = Instant::now();
+        let head = crate::projection::Position::of(log.records());
+        let positioned = t.elapsed();
+        let _ = head;
+
+        let total = snapshot + append + diff + publish;
+        eprintln!(
+            "\n{records} records, one rating appended\n  \
+             records().clone()   {snapshot:>9.1?}\n  \
+             rate()              {append:>9.1?}\n  \
+             Changed::of(diff)   {diff:>9.1?}\n  \
+             fold(), of which:   {publish:>9.1?}\n    \
+               bridge::librarian {drawn:>9.1?}\n    \
+               log.catalogue()   {catalogued:>9.1?}\n  \
+             ---\n  \
+             one write           {total:>9.1?}\n\n  \
+             Position::of        {positioned:>9.1?}   (what §8.5 wants a caught-up advance to cost)\n"
+        );
+
+        assert!(
+            matches!(moved, Changed::These(_)),
+            "a rating is narrow, so the publish could have named exactly what moved: {moved:?}"
+        );
+
+        // **The one bound worth asserting.** What must not come back is the
+        // whole-log clone growing into something superlinear, or the fold
+        // regaining a per-row scan — both of which show up here as a write
+        // costing a second rather than a fraction of one.
+        assert!(
+            total < std::time::Duration::from_secs(2),
+            "one write took {total:?}; something has become quadratic"
+        );
+    }
+}
