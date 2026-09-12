@@ -801,6 +801,7 @@ dependencies = [
  "crossbeam-channel",
  "crossterm",
  "gmuse-ids",
+ "gmuse-library",
  "lofty",
  "nucleo-matcher",
  "postcard",
@@ -828,6 +829,26 @@ dependencies = [
  "serde",
  "thiserror 2.0.20",
  "uuid",
+]
+
+[[package]]
+name = "gmuse-library"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "crossbeam-channel",
+ "gmuse-ids",
+ "lofty",
+ "postcard",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "thiserror 2.0.20",
+ "toml",
+ "twox-hash",
+ "unicode-normalization",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

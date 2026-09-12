@@ -9,31 +9,29 @@
 //! Nothing else changes. `access-layers.md`'s layers are the same modules in
 //! the same order, and the boundary tests still walk the same directories.
 
+// **These live in `gmuse-library` and are named here as they always were** —
+// #213. The binary, the UI and the Python door all say `crate::model::…` and
+// `crate::query::…` in forty thousand places; re-exporting at the old paths is
+// what makes the move a crate boundary instead of a rewrite of every caller.
+#[cfg(test)]
+pub use gmuse_library::fixture;
+pub use gmuse_library::{
+    audio_id, bridge, cache, events, facts, history, librarian, model, operations, projection,
+    query, shelf, text,
+};
+
 pub mod audio;
-pub mod audio_id;
 pub mod audit;
-pub mod bridge;
-pub mod cache;
 pub mod cli;
 pub mod cmd;
 pub mod config;
 pub mod datadir;
 pub mod edit;
-pub mod events;
-pub mod facts;
-#[cfg(test)]
-pub mod fixture;
 pub mod guides;
-pub mod history;
-pub mod librarian;
 pub mod lock;
 pub mod m3u;
-pub mod model;
 pub mod next;
-pub mod operations;
 pub mod playlist;
-pub mod projection;
-pub mod query;
 /// The allocation guard, in the test binary only — #211.
 #[cfg(test)]
 pub mod rt_guard;
@@ -42,9 +40,10 @@ pub mod rt_guard;
 static RT_GUARD: rt_guard::Guarded = rt_guard::Guarded;
 pub mod remote;
 pub mod session;
-pub mod shelf;
+/// The view bench, rehoused by #213 — see the module header.
+#[cfg(test)]
+pub mod shelf_perf;
 pub mod smart;
-pub mod text;
 pub mod ui;
 pub mod undo;
 pub mod view;

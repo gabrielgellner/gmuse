@@ -1,0 +1,41 @@
+[package]
+name = "gmuse-library"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "The librarian: the log, the projection, the query, the named operations"
+repository = "https://gitlab.com/gabrielgellner/gmuse"
+
+# **Nothing here knows how the library is shown or played.** That used to be a
+# test scanning `use` lines; it is now the dependency list. cpal, ratatui and
+# crossterm are absent, so reaching for one does not fail an assertion — it
+# fails to build, and adding it here is the visible act.
+[dependencies]
+gmuse-ids = { path = "../gmuse-ids" }
+
+arc-swap = "1.7.1"
+crossbeam-channel = "0.5.16"
+lofty = "0.25.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+symphonia = { version = "0.6.1", features = ["aac", "alac", "mp3", "isomp4"] }
+thiserror = "2.0.20"
+toml = "1.1.4"
+twox-hash = { version = "2.1.4", default-features = false, features = [
+  "xxhash3_128",
+  "std",
+] }
+unicode-normalization = "0.1.25"
+uuid = { version = "1.26.0", features = ["v4", "v5", "serde"] }
+postcard = { version = "1.1.3", features = ["use-std"] }
+walkdir = "2.5.0"
+
+# **Test scaffolding the binary's tests also need.**
+#
+# `fixture` and a handful of `*_test` constructors were `#[cfg(test)]`, which
+# does not cross a crate boundary: the binary's tests used them through
+# `crate::fixture`, and after the split they were simply gone. A feature is the
+# ordinary way to lend test-only code to a dependent, and it stays off for an
+# ordinary build.
+[features]
+testing = []

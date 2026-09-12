@@ -227,7 +227,7 @@ It should be removed rather than kept alongside: `gmuse ctl` is the same thing w
 | Crate                      | Contents                                                                                                                                                                                                                                                                                                                                                                                                        | Depends on                                                   |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | `gmuse-ids`                | `Id<T>`, the UUIDv5 derivation, and the entity kinds — plus the spine and encoding types, because eight kinds are structs rather than tags and `Id<Recording>` names one of them. Dependency-free in the sense that matters: nothing here reads a file or opens a socket, so wire IDs can be real domain IDs without `gmuse-proto` depending on the librarian. **Not tiny** — ~2,900 lines; see the note below. | uuid, serde, thiserror                                       |
-| `gmuse-library`            | The librarian: facts, projection, query, and the named operations. Today's `src/facts`, `src/projection`, `src/query`, `src/operations`, `src/model`.                                                                                                                                                                                                                                                           | gmuse-ids                                                    |
+| `gmuse-library`            | The librarian: facts, projection, query, and the named operations — and the nine more modules their closure required: `audio_id`, `bridge`, `cache`, `events`, `fixture`, `history`, `librarian`, `shelf`, `text`. ~44,000 lines.                                                                                                                                                                               | gmuse-ids, serde, lofty, symphonia, walkdir, arc-swap, …     |
 | `gmuse-proto`              | Wire types (requests, responses, events, errors, IDs, `When`, query AST), serde derives, protocol version constants, and optionally a JSON Schema export. It MUST NOT depend on engine internals.                                                                                                                                                                                                               | gmuse-ids, serde, serde_json                                 |
 | `gmuse-engine`             | Library crate: control thread, librarian thread, IPC server, RT processing, mixer, scheduler, input thread, and audio backend trait with cpal and null implementations.                                                                                                                                                                                                                                         | gmuse-proto, gmuse-library, cpal, symphonia, rubato, rtrb, … |
 | `gmuse-core` (PyO3)        | The Python extension the `tools/` passes read through. Depends on `gmuse-library` **directly**, not on the protocol — this is I15's read path, and it must keep working with no engine running.                                                                                                                                                                                                                 | gmuse-library, pyo3                                          |
@@ -253,6 +253,33 @@ Two things fell out of the move rather than being designed:
 
 The boundary is now enforced by the build rather than by a test that scans for `use` lines: this crate cannot reach the
 player because cpal and ratatui are not among its dependencies, and adding them would be the visible act.
+
+**On what `gmuse-library` turned out to contain** (#213). The table named five modules; the closure of those five is
+fourteen. Computed from real code references rather than `use` lines, because `crate::text::needle(…)` written inline is
+as much a dependency as an import — and the first graph, which counted every `crate::x` occurrence including those
+inside the boundary tests' own forbidden-lists, was wrong in the other direction.
+
+Two members read oddly and are right:
+
+- **`bridge`**, which sounds like the seam to the player and is the reverse: `bridge::librarian` takes holdings and
+  records and returns a `Librarian`. Library types in, a library type out. The player calls it; that does not make it
+  the player's.
+- **`shelf`**, which is a subcommand's name. `gmuse shelf copies` is dispatch and stays with the binary; this module is
+  the arrangement those subcommands report on, and contains no clap and nothing that knows a terminal exists.
+
+Only two things had to move to make the set closed, and both were a type in the wrong module — which is what a split is
+for finding. The view bench went the other way, to `gmuse::shelf_perf`: it measures `view::Stack`, so following `shelf`
+into the library would have dragged the whole command language across the boundary to run one test.
+
+**`#[cfg(test)]` does not cross a crate boundary**, which the split turned into a `testing` feature on `gmuse-library`.
+`fixture`, `bridge::imported`, `rows::row_of_test` and three `Holdings` helpers were test-only and used by the binary's
+tests; they are now gated on `any(test, feature = "testing")`, and the root crate asks for the feature in its
+dev-dependencies.
+
+**One boundary test had stopped checking anything.** `read()` skipped an unreadable directory and carried on, so
+`read("src/ui")` — a path that left this crate — turned a ratchet asserting `reaches == 0` into `assert!(0 <= 0)`, and
+it passed. It now asserts the directory exists before walking it, and prints the working directory when it does not. The
+same lesson as §13's degenerate fixture, arriving through a different door.
 
 ### 4.4 Responsibilities
 

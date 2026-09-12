@@ -75,7 +75,7 @@ pub struct Holdings {
     ///
     /// Not on `Held`, which production constructs and could then be asked to
     /// fill with something it does not have.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     #[serde(skip)]
     tagged: std::collections::BTreeMap<PathBuf, crate::model::instance::Scanned>,
 }
@@ -89,7 +89,7 @@ impl Holdings {
     ///
     /// The holding gets the hash off the tags rather than being handed one
     /// separately, so a fixture cannot say one thing and hold another.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn take(
         &mut self,
         at: PathBuf,
@@ -107,13 +107,13 @@ impl Holdings {
     }
 
     /// What the fixture said the tags were — **tests only**.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn tags(&self) -> Vec<crate::model::instance::Scanned> {
         self.tagged.values().cloned().collect()
     }
 
     /// The tags a fixture gave one file — **tests only**.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn tag_at(&self, at: &Path) -> Option<&crate::model::instance::Scanned> {
         self.tagged.get(at)
     }

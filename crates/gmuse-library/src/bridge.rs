@@ -122,7 +122,7 @@ pub fn librarian(
 /// A launch no longer catalogues what a scan walks past, so a test that wants
 /// rows has to declare them the way a person does. This is `import` followed
 /// by the fold, in one call.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn imported(
     held: &crate::operations::scan::Holdings,
     records: &BTreeSet<Record>,

@@ -2039,6 +2039,26 @@ mod tests {
     use std::path::Path;
 
     fn read(dir: &str) -> Vec<(String, String)> {
+        // **A missing directory is a failure, not an empty answer** — #213.
+        //
+        // The walk below skips an unreadable directory and carries on, which
+        // is right for a subdirectory that vanished mid-walk and was very
+        // wrong for the argument: every boundary ratchet built on this counts
+        // occurrences and asserts the count has not risen, so a path that no
+        // longer exists turns the whole test into `assert!(0 <= 0)`.
+        //
+        // The crate split moved `src/model` under `crates/gmuse-library/` and
+        // took `src/ui` out of this crate entirely. The model tests kept
+        // working — cargo runs them with the package root as the working
+        // directory — and the one pointed at `src/ui` silently stopped
+        // checking anything. It passed. That is the same lesson as the
+        // degenerate fixture in §13, arriving through a different door.
+        assert!(
+            Path::new(dir).is_dir(),
+            "{dir} is not a directory from {:?} — a boundary test that reads \
+             nothing passes for the wrong reason",
+            std::env::current_dir().unwrap_or_default()
+        );
         let mut out = Vec::new();
         let mut stack = vec![Path::new(dir).to_path_buf()];
         while let Some(p) = stack.pop() {
@@ -2846,7 +2866,11 @@ mod tests {
 
         let (mut store, mut reaches) = (0, 0);
         let mut stray_paths: Vec<String> = Vec::new();
-        for (name, text) in read("src/ui") {
+        // **The UI is in the binary crate**, one level up from this one. Named
+        // relatively because that is the truth and because `read` now fails
+        // loudly if it stops being true, which is what this whole comment is
+        // about.
+        for (name, text) in read("../../src/ui") {
             let live = code_only(production(&text));
             store += identifiers(&live, "Scan");
             reaches += live.matches("ctx.store.").count();

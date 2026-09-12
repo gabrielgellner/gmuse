@@ -94,7 +94,7 @@ impl CopyId {
 /// what a row id stopped being (#86). Derived from the number so the same
 /// fixture gets the same id every run, and so a test that asserts an ordering
 /// asserts a real one.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn row_of_test(n: u32) -> CopyId {
     CopyId::On(Id::derived(&n.to_le_bytes()))
 }
