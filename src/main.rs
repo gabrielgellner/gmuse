@@ -2427,6 +2427,26 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
 
                 Call::TimeNow => Ok(serde_json::json!({ "engine_now_ns": self.now_ns() })),
 
+                // **Reachable, and refusing honestly.** §8.4's write surface is
+                // named and typed; what is not built is the engine's librarian
+                // to route it to, so every operation answers `NotReady` with
+                // which one it was. That is the difference between "this
+                // protocol does not have that" and "this build cannot do it
+                // yet" — a client can tell them apart, and `-32601` would have
+                // said the first when the second is true.
+                Call::Library { operation, .. } => Err(RpcError::new(
+                    code::NOT_READY,
+                    format!(
+                        "library.{} is not served yet: the engine has no librarian attached",
+                        operation.as_str()
+                    ),
+                )
+                .with_data(serde_json::json!({
+                    "reason": "no librarian attached",
+                    "operation": operation.as_str(),
+                    "long_running": operation.is_long_running(),
+                }))),
+
                 Call::EngineStatus => Ok(serde_json::json!({
                     "protocol": gmuse_proto::PROTOCOL,
                     "methods": gmuse_proto::method::ALL,

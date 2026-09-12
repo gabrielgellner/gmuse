@@ -108,7 +108,15 @@ impl Outbox {
             Outgoing::Event(pending) => pending.coalescing_key() == key,
             Outgoing::Response(_) => false,
         }) {
-            *slot = Outgoing::Event(event);
+            // **Not simply "the newer one wins"** — §8.7. `Event::coalesce`
+            // decides, because what two pending events mean together is a fact
+            // about the topic's payload rather than about this queue: a
+            // `playback` event is a complete statement and supersedes, a
+            // `library` event is a list of what changed and must be unioned or
+            // the rows in the older list stay stale on screen for ever.
+            if let Outgoing::Event(pending) = slot {
+                *slot = Outgoing::Event(pending.coalesce(&event));
+            }
             return true;
         }
 
@@ -228,6 +236,25 @@ mod tests {
         assert_eq!(sent[0].topic, Topic::Library, "it kept its place");
         assert_eq!(sent[0].body["v"], 2, "with the newer value");
         assert_eq!(sent[1].topic, Topic::Queue);
+    }
+
+    /// The reason `push_event` asks the event rather than assuming: a library
+    /// change is a list, and replacing one loses rows nothing will mention
+    /// again.
+    #[test]
+    fn pending_library_changes_are_unioned_not_replaced() {
+        let mut outbox = Outbox::new(8);
+        outbox.push_event(Event::new(
+            Topic::Library,
+            serde_json::json!({"version":1,"scope":"ids","ids":["rec:a"]}),
+        ));
+        outbox.push_event(Event::new(
+            Topic::Library,
+            serde_json::json!({"version":2,"scope":"ids","ids":["rec:b"]}),
+        ));
+        assert_eq!(outbox.len(), 1);
+        let sent = events(&mut outbox);
+        assert_eq!(sent[0].body["ids"], serde_json::json!(["rec:a", "rec:b"]));
     }
 
     #[test]

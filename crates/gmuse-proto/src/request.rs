@@ -53,6 +53,92 @@ pub enum Request {
     Subscribe { topics: Vec<crate::Topic> },
     /// Stop receiving them.
     Unsubscribe { topics: Vec<crate::Topic> },
+    /// One of §8.4's named write operations.
+    ///
+    /// **A single variant carrying the operation**, rather than eight, because
+    /// what the engine does with them is the same in every case: route to the
+    /// librarian, which is the only appender. The operations differ in their
+    /// arguments, not in how they reach the log.
+    Library {
+        operation: LibraryOp,
+        params: serde_json::Value,
+    },
+}
+
+/// §8.4's write surface, and there is no other one.
+///
+/// **No read-only operation is here and that is deliberate.** `query`,
+/// `render`, `duplicates`, `copies`, `slots`, `verify`, `artists`, `names` and
+/// `tree` read directly with no engine (I15) — and several are explicitly
+/// *reported, never decided*: their output is a decision brief for a person,
+/// which is not a thing to put behind an RPC that returns a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LibraryOp {
+    /// A file of proposed facts, each checked before it is appended.
+    Apply,
+    /// Catalogue this audio.
+    Import,
+    /// Reconcile holdings with what is on disk. Long-running.
+    Scan,
+    /// Retire or bring back copies.
+    Restore,
+    Remove,
+    /// Drop holdings assertions nothing reads. Long-running.
+    Compact,
+    /// File whatever is in no collection.
+    Unfiled,
+    /// The facts a view emits directly: collections, ratings, merges.
+    Edit,
+}
+
+impl LibraryOp {
+    pub const ALL: &'static [LibraryOp] = &[
+        LibraryOp::Apply,
+        LibraryOp::Import,
+        LibraryOp::Scan,
+        LibraryOp::Restore,
+        LibraryOp::Remove,
+        LibraryOp::Compact,
+        LibraryOp::Unfiled,
+        LibraryOp::Edit,
+    ];
+
+    /// The method name, which is `library.` and this.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LibraryOp::Apply => "apply",
+            LibraryOp::Import => "import",
+            LibraryOp::Scan => "scan",
+            LibraryOp::Restore => "restore",
+            LibraryOp::Remove => "remove",
+            LibraryOp::Compact => "compact",
+            LibraryOp::Unfiled => "unfiled",
+            LibraryOp::Edit => "edit",
+        }
+    }
+
+    pub fn method(self) -> &'static str {
+        match self {
+            LibraryOp::Apply => "library.apply",
+            LibraryOp::Import => "library.import",
+            LibraryOp::Scan => "library.scan",
+            LibraryOp::Restore => "library.restore",
+            LibraryOp::Remove => "library.remove",
+            LibraryOp::Compact => "library.compact",
+            LibraryOp::Unfiled => "library.unfiled",
+            LibraryOp::Edit => "library.edit",
+        }
+    }
+
+    /// **Long-running ones acknowledge and report through events** (§8.4).
+    pub fn is_long_running(self) -> bool {
+        matches!(self, LibraryOp::Scan | LibraryOp::Compact)
+    }
+
+    fn of_method(method: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|op| op.method() == method)
+    }
 }
 
 /// Which topics a subscription is about.
@@ -96,6 +182,20 @@ pub mod method {
     pub const SUBSCRIBE: &str = "sub.subscribe";
     pub const UNSUBSCRIBE: &str = "sub.unsubscribe";
 
+    /// §8.4's write surface. Listed here as well as on [`super::LibraryOp`]
+    /// because `ALL` is what `engine.status` advertises and what the CLI matches
+    /// a first word against — a method missing from it is a method no caller can
+    /// discover or reach, which is how `library.scan` spent its first afternoon
+    /// being parsed as a `:` line.
+    pub const LIBRARY_APPLY: &str = "library.apply";
+    pub const LIBRARY_IMPORT: &str = "library.import";
+    pub const LIBRARY_SCAN: &str = "library.scan";
+    pub const LIBRARY_RESTORE: &str = "library.restore";
+    pub const LIBRARY_REMOVE: &str = "library.remove";
+    pub const LIBRARY_COMPACT: &str = "library.compact";
+    pub const LIBRARY_UNFILED: &str = "library.unfiled";
+    pub const LIBRARY_EDIT: &str = "library.edit";
+
     /// Every method this engine answers. Used by `engine.status` and by the
     /// test that keeps the golden transcripts honest.
     pub const ALL: &[&str] = &[
@@ -106,6 +206,14 @@ pub mod method {
         TIME_NOW,
         SUBSCRIBE,
         UNSUBSCRIBE,
+        LIBRARY_APPLY,
+        LIBRARY_IMPORT,
+        LIBRARY_SCAN,
+        LIBRARY_RESTORE,
+        LIBRARY_REMOVE,
+        LIBRARY_COMPACT,
+        LIBRARY_UNFILED,
+        LIBRARY_EDIT,
     ];
 }
 
@@ -153,6 +261,10 @@ impl Request {
             method::ENGINE_STATUS => Ok(Self::EngineStatus),
             method::ENGINE_SHUTDOWN => Ok(Self::EngineShutdown),
             method::TIME_NOW => Ok(Self::TimeNow),
+            other if LibraryOp::of_method(other).is_some() => Ok(Self::Library {
+                operation: LibraryOp::of_method(other).expect("just matched"),
+                params: params.unwrap_or(serde_json::Value::Null),
+            }),
             method::SUBSCRIBE => {
                 let p: TopicsParams = typed(method, params)?;
                 Ok(Self::Subscribe {
@@ -179,6 +291,7 @@ impl Request {
             Self::TimeNow => method::TIME_NOW,
             Self::Subscribe { .. } => method::SUBSCRIBE,
             Self::Unsubscribe { .. } => method::UNSUBSCRIBE,
+            Self::Library { operation, .. } => operation.method(),
         }
     }
 }
@@ -221,7 +334,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 7, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 15, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to
@@ -264,6 +377,67 @@ mod tests {
     fn an_unknown_topic_is_invalid_params_rather_than_being_ignored() {
         let e = of(method::SUBSCRIBE, serde_json::json!({"topics":["weather"]})).unwrap_err();
         assert_eq!(e.code, code::INVALID_PARAMS);
+    }
+
+    /// **Every library operation is in `ALL`.** It is what `engine.status`
+    /// advertises and what the CLI matches a first word against, so one missing
+    /// from it is one no caller can discover or reach — which is exactly what
+    /// happened: `library.scan` typed at a terminal went to the `:` line's
+    /// parser and came back `unknown command "library.scan"`.
+    #[test]
+    fn every_library_method_is_advertised() {
+        for op in LibraryOp::ALL {
+            assert!(
+                method::ALL.contains(&op.method()),
+                "{} is handled but not advertised",
+                op.method()
+            );
+        }
+    }
+
+    /// §8.4's eight, each reachable and each reporting its own name.
+    #[test]
+    fn every_library_operation_is_a_method() {
+        for op in LibraryOp::ALL {
+            let request = Request::of(op.method(), Some(serde_json::json!({}))).unwrap();
+            assert_eq!(request.method(), op.method());
+            assert!(matches!(request, Request::Library { operation, .. } if operation == *op));
+        }
+    }
+
+    /// **The read-only subcommands must not be reachable** — they read directly
+    /// with no engine (I15), and several are reported-never-decided, which is
+    /// not a thing to put behind an RPC that returns a result.
+    #[test]
+    fn no_read_only_subcommand_has_a_method() {
+        for name in [
+            "library.query",
+            "library.render",
+            "library.duplicates",
+            "library.copies",
+            "library.slots",
+            "library.verify",
+            "library.artists",
+            "library.names",
+            "library.tree",
+        ] {
+            let e = Request::of(name, None).unwrap_err();
+            assert_eq!(
+                e.code,
+                code::METHOD_NOT_FOUND,
+                "{name} must not be a write method"
+            );
+        }
+    }
+
+    #[test]
+    fn the_long_running_ones_are_scan_and_compact() {
+        let long: Vec<_> = LibraryOp::ALL
+            .iter()
+            .filter(|op| op.is_long_running())
+            .map(|op| op.as_str())
+            .collect();
+        assert_eq!(long, vec!["scan", "compact"]);
     }
 
     #[test]

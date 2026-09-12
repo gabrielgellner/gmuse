@@ -111,6 +111,38 @@ impl Event {
         )
     }
 
+    /// Fold a newer event about the same subject into this one.
+    ///
+    /// **Usually the newer one wins, and for `library` it does not** (§8.7).
+    /// A `playback` event is a complete statement about the transport, so
+    /// replacing a pending one loses nothing. A `library` event is a list of
+    /// what changed, and replacing one drops rows that are still stale in the
+    /// view — with nothing to tell the view otherwise. Those lists join as a
+    /// lattice instead.
+    ///
+    /// This lives here rather than in the outbox because it is a fact about
+    /// what a topic's payload *means*, not about how one client's queue is
+    /// managed.
+    pub fn coalesce(&self, newer: &Event) -> Event {
+        debug_assert_eq!(self.coalescing_key(), newer.coalescing_key());
+        if self.topic != Topic::Library {
+            return newer.clone();
+        }
+        let (Ok(old), Ok(new)) = (
+            serde_json::from_value::<crate::library::Change>(self.body.clone()),
+            serde_json::from_value::<crate::library::Change>(newer.body.clone()),
+        ) else {
+            // Not a change payload after all. Newer wins, which is the general
+            // rule and cannot be worse than dropping both.
+            return newer.clone();
+        };
+        Event {
+            topic: Topic::Library,
+            key: newer.key.clone(),
+            body: serde_json::to_value(old.join(&new)).unwrap_or_else(|_| newer.body.clone()),
+        }
+    }
+
     /// What this event coalesces against. Two events with equal keys are two
     /// versions of one fact; the newer wins.
     pub fn coalescing_key(&self) -> (Topic, Option<&str>) {
@@ -175,6 +207,31 @@ mod tests {
         let first = Event::new(Topic::Queue, serde_json::json!({"version":1}));
         let later = Event::new(Topic::Queue, serde_json::json!({"version":2}));
         assert_eq!(first.coalescing_key(), later.coalescing_key());
+    }
+
+    /// §8.7's lattice, reached through the type the outbox actually holds.
+    #[test]
+    fn two_library_events_join_rather_than_replace() {
+        let first = Event::new(
+            Topic::Library,
+            serde_json::json!({"version":1,"scope":"ids","ids":["rec:a"]}),
+        );
+        let later = Event::new(
+            Topic::Library,
+            serde_json::json!({"version":2,"scope":"ids","ids":["rec:b"]}),
+        );
+        let merged = first.coalesce(&later);
+        assert_eq!(merged.body["ids"], serde_json::json!(["rec:a", "rec:b"]));
+        assert_eq!(merged.body["version"], 2);
+    }
+
+    /// Every other topic keeps the simple rule, because every other payload is
+    /// a complete statement about its subject.
+    #[test]
+    fn a_newer_playback_event_simply_wins() {
+        let first = Event::new(Topic::Playback, serde_json::json!({"pos_frames":1}));
+        let later = Event::new(Topic::Playback, serde_json::json!({"pos_frames":2}));
+        assert_eq!(first.coalesce(&later).body["pos_frames"], 2);
     }
 
     #[test]

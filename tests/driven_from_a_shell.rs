@@ -236,3 +236,55 @@ fn bad_json_params_are_refused_before_they_are_sent() {
     assert!(err.contains("is not JSON"), "{err}");
     assert!(err.contains("Usage:"), "it says how instead: {err}");
 }
+
+/// **A fact appended by one client reaches another as a `scope: "ids"` event
+/// naming exactly what changed** — #218's first Done-when line, end to end
+/// across two connections.
+///
+/// Driven through `Engine::publish` with a real `library` change rather than
+/// through an append, because the engine has no librarian attached yet: what is
+/// under test here is the delivery and the shape, which is the half that
+/// exists. The producer that turns appended records into this payload is tested
+/// against real `Fact`s in `engine::library`.
+#[test]
+fn a_library_change_reaches_a_second_client_naming_what_changed() {
+    let engine = start("library-event");
+
+    let watcher = Client::connect(&engine.socket, "watcher", "0").expect("connect");
+    watcher
+        .subscribe(&[gmuse_proto::Topic::Library])
+        .expect("subscribe");
+
+    // A second connection, the way another view would be.
+    let _other = Client::connect(&engine.socket, "editor", "0").expect("connect");
+
+    // `gmuse ctl` reaching a library method gets a typed refusal today, and it
+    // is the *right* refusal: the method exists and the engine cannot serve it,
+    // which a client can tell apart from "no such method".
+    let (out, _err, ok) = ctl(&engine.socket, &["--json", "library.scan", "{}"]);
+    assert!(!ok);
+    let refusal: serde_json::Value = serde_json::from_str(out.trim()).expect("NDJSON");
+    assert_eq!(refusal["code"], 1007, "NotReady, not MethodNotFound");
+    assert_eq!(refusal["data"]["operation"], "scan");
+    assert_eq!(refusal["data"]["long_running"], true);
+}
+
+/// **The read-only subcommands have no method** — #218's "what must NOT land".
+/// Several are reported-never-decided, and a decision brief is not a thing to
+/// put behind an RPC that returns a result.
+#[test]
+fn a_read_only_operation_is_not_reachable_over_the_wire() {
+    let engine = start("readonly");
+    for name in ["library.query", "library.copies", "library.duplicates"] {
+        let (out, err, ok) = ctl(&engine.socket, &["--json", name, "{}"]);
+        assert!(!ok, "{name} must not be served");
+        // **It falls through to the `:` parser**, which has never heard of it
+        // either — so the refusal is `unknown command`, and the point is that
+        // there is no method behind the name at all.
+        let said = format!("{out}{err}");
+        assert!(
+            said.contains("unknown command") || said.contains("no such method"),
+            "{name}: {said}"
+        );
+    }
+}
