@@ -171,8 +171,28 @@ impl Outbox {
     }
 
     /// Whether this client has stayed over the limit — §7.10's "MAY be
-    /// disconnected". Reported rather than acted on here, because the decision
-    /// belongs to whoever owns the socket.
+    /// disconnected".
+    ///
+    /// **Nothing calls this, and #251 is where it gets a caller.** The comment here
+    /// used to say the decision "belongs to whoever owns the socket", which read as an
+    /// arrangement and was an absence: no owner made it. So a measurement existed, and
+    /// the policy §7.10 specifies did not — a stub that looked like coverage.
+    ///
+    /// It cannot be enforced from the writer, which is the obvious place and the wrong
+    /// one: a client that stops reading parks the writer inside `write` once the socket
+    /// buffer fills, so the thread that would notice is the thread that is stuck. The
+    /// growth is visible on the *publish* side instead, and acting on it needs the
+    /// connection to hold something it can `shutdown` — which is a disconnect policy to
+    /// design rather than a line to add, and #251 carries it.
+    ///
+    /// What this does mean is worth stating, because it is narrower than "behind": the
+    /// overflow path retains only responses, so exceeding the capacity means a client
+    /// has more *unanswered questions outstanding* than the whole outbox holds. It
+    /// asked and never read.
+    #[allow(
+        dead_code,
+        reason = "§7.10's disconnect policy is not built; #251 is where this gets a caller"
+    )]
     pub fn over_limit(&self) -> bool {
         self.queue.len() > self.capacity
     }
@@ -181,10 +201,6 @@ impl Outbox {
     pub fn close(&mut self) {
         self.closed = true;
         self.queue.clear();
-    }
-
-    pub fn is_closed(&self) -> bool {
-        self.closed
     }
 }
 
