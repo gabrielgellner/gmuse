@@ -26,6 +26,7 @@
 
 pub mod audio_id;
 pub mod basis;
+pub mod copy;
 pub mod encoding;
 pub mod entity;
 pub mod id;

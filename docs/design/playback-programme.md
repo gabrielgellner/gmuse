@@ -58,6 +58,22 @@ The split is what makes the interesting cases cheap:
   three rather than one.
 - **"Up next" is read from the librarian**, because it is the only actor that knows more than two items ahead.
 
+### A token names an entry, not a recording
+
+**A programme can hold the same recording twice** — a disc that plays one recording in two places, a compilation
+carrying two versions. `shelf slots` exists because that shape is real and is not a defect. So `follows(id)` would be
+ambiguous: given `[A, B, A, C]`, which `A`?
+
+**A token names an entry in the programme, and the librarian mints it.** It is opaque to the audio engine, which stores
+it and hands it back. Two things follow, and the design needs both:
+
+- **`follows(token)` is unambiguous**, which is what the cursor argument in §7 rests on. An id could not carry it.
+- **The engine names no library type.** A token is a number to it — which is what lets `gmuse-engine` stop depending on
+  `gmuse-library` (§9) while still reporting which entry finished.
+
+The distinction is the one the domain model already draws between a library entry and a file: **a programme entry has
+identity distinct from the recording it names.**
+
 ## 3. An order is a library computation
 
 Every input to an interesting order is library data: a rating, a genre, a musical key, a play count, when the track was

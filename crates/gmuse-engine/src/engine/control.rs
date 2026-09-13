@@ -34,9 +34,9 @@ use gmuse_proto::{Event, Topic};
 
 use crate::audio::{PlayerConfig, PlayerEvent, PlayerHandle, Shared, State, null};
 use crate::instruction::{Fader, Instruction, ScopeTo};
+use gmuse_ids::entity::Recording;
+use gmuse_ids::id::Id;
 use gmuse_library::librarian::Desk;
-use gmuse_library::model::entity::Recording;
-use gmuse_library::model::id::Id;
 use gmuse_library::model::rows::Listing;
 
 /// What the connection workers can ask the player for.
@@ -81,12 +81,12 @@ pub enum Ask {
 pub enum QueueOp {
     /// Replace it whole, for a view that holds a mirror (#233).
     Set {
-        ids: Vec<gmuse_library::model::rows::CopyId>,
+        ids: Vec<gmuse_ids::copy::CopyId>,
         base: u64,
     },
     Get,
     Enqueue {
-        ids: Vec<gmuse_library::model::rows::CopyId>,
+        ids: Vec<gmuse_ids::copy::CopyId>,
         base: Option<u64>,
     },
     Remove {
@@ -121,7 +121,7 @@ pub struct Answered {
     pub version: u64,
     /// The entries, for a read. Absent for a mutation, which answers with the
     /// version and lets the `queue` event carry the rest (§7.8).
-    pub entries: Option<Vec<gmuse_library::model::rows::CopyId>>,
+    pub entries: Option<Vec<gmuse_ids::copy::CopyId>>,
     /// **What plays next, for a read** — #233: scope, shuffle, repeat,
     /// repeat_current.
     ///
@@ -288,7 +288,7 @@ impl Control {
                         if let Some(recording) = resuming
                             .as_deref()
                             .and_then(|r| r.parse::<uuid::Uuid>().ok())
-                            .map(gmuse_library::model::id::Id::from_uuid)
+                            .map(gmuse_ids::id::Id::from_uuid)
                             && let Some(source) = source_for(&desk, recording)
                         {
                             player.load(source);
@@ -697,13 +697,13 @@ fn wait_for_a_device(
 /// about what "the library" contains.
 fn pool_of(desk: &Arc<Desk>) -> gmuse_library::shelf::Shelf {
     let answer = desk.current();
-    let rows: std::collections::HashSet<gmuse_library::model::rows::CopyId> =
+    let rows: std::collections::HashSet<gmuse_ids::copy::CopyId> =
         Listing::rows(&answer.library).into_iter().collect();
     gmuse_library::shelf::Shelf::from_members(&answer.library, rows, true)
 }
 
 /// The recording a row draws, so a pick can be resolved to a locator.
-fn recording_of(desk: &Arc<Desk>, id: gmuse_library::model::rows::CopyId) -> Option<Id<Recording>> {
+fn recording_of(desk: &Arc<Desk>, id: gmuse_ids::copy::CopyId) -> Option<Id<Recording>> {
     let answer = desk.current();
     let rows: &dyn Listing = &answer.library;
     rows.recording_of(id)
@@ -800,7 +800,7 @@ fn apply(
             let Some(recording) = playing
                 .as_deref()
                 .and_then(|r| r.parse::<uuid::Uuid>().ok())
-                .map(gmuse_library::model::id::Id::from_uuid)
+                .map(gmuse_ids::id::Id::from_uuid)
             else {
                 return false;
             };
@@ -848,7 +848,7 @@ fn load_picked(
     desk: &Arc<Desk>,
     pending: &mut Option<String>,
     playing: &mut Option<String>,
-    picked: Option<gmuse_library::model::rows::CopyId>,
+    picked: Option<gmuse_ids::copy::CopyId>,
 ) -> bool {
     let Some((id, recording)) = picked.and_then(|id| recording_of(desk, id).map(|r| (id, r)))
     else {

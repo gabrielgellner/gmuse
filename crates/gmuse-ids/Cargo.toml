@@ -15,6 +15,15 @@ repository = "https://gitlab.com/gabrielgellner/gmuse"
 # that decodes, walks a disk or opens a socket here puts that thing on the
 # wire crate's dependency graph, which is the failure this crate is shaped to
 # prevent.
+# **`testing` exposes the fixture helpers, and nothing else.**
+#
+# `copy::row_of_test` mints a deterministic row id so a test asserting an
+# ordering asserts a real one (#86). It is behind a feature rather than
+# `#[cfg(test)]` because the crates downstream need it in *their* tests, which
+# is a different compilation.
+[features]
+testing = []
+
 [dependencies]
 # Already the project's convention for error enums (§12) and a proc macro, so
 # it adds nothing to what a dependent links.

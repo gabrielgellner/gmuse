@@ -360,6 +360,64 @@ fn has_issue_reference(text: &str) -> bool {
 )]
 fn unused_example() {}
 
+/// **The audio engine's reaches into the library may only go down** — #257.
+///
+/// The decision is that `gmuse-engine` does not depend on `gmuse-library` at all, and the
+/// finished check is a one-liner: `crates/gmuse-engine/Cargo.toml` has no `gmuse-library`
+/// line. That cannot be written yet because the line is still there — so this holds the
+/// ground in between.
+///
+/// **A ratchet and not a target**, deliberately. It says nothing about how far the work
+/// has got; it says a reach cannot be *added* while the work is in progress. Lower the
+/// number as each stage lands, and delete the test when the Cargo line goes — a cargo
+/// dependency check replaces it and is strictly better, because it cannot be satisfied by
+/// spelling an import differently.
+///
+/// The 14 that already left were never library concepts: `model::id` and `model::entity`
+/// are `pub use gmuse_ids::{…}` in `model/mod.rs`, so those call sites named gmuse-ids
+/// types through a library path. What remains is real — `next::`, `Shelf`, `playlist`,
+/// `Desk`, `Answer`, `Changed`, `Touched`, `Listing`, and the `lock` module, which wants a
+/// crate of its own because the engine, the librarian and `main` all need it.
+#[test]
+fn the_engine_does_not_reach_further_into_the_library() {
+    const CEILING: usize = 18;
+
+    let engine = Path::new("crates").join("gmuse-engine").join("src");
+    let mut found: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    for (path, text) in sources() {
+        if !path.starts_with(&engine) {
+            continue;
+        }
+        let hits = text.matches("gmuse_library").count();
+        if hits > 0 {
+            found.insert(path, hits);
+        }
+    }
+
+    // **The instrument is attached.** If `sources()` stopped matching the engine's files
+    // — a moved crate, a renamed directory — every count would be zero and the ceiling
+    // below would pass for exactly the wrong reason. That is four of the five vacuous
+    // tests in §13's entry of 2026-09-12, and one line rules it out.
+    assert!(
+        !found.is_empty(),
+        "no file under {} mentions gmuse_library — either #257 is finished, in which case \
+         delete this test and assert on Cargo.toml, or the walk found nothing",
+        engine.display()
+    );
+
+    let total: usize = found.values().sum();
+    assert!(
+        total <= CEILING,
+        "the engine reaches into gmuse-library {total} times, up from {CEILING}. #257 is \
+         moving these out, so a new one is a step backwards:\n{}",
+        found
+            .iter()
+            .map(|(f, n)| format!("  {n:2}  {}", f.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 #[cfg(test)]
 mod proving_the_scanner {
     use super::*;

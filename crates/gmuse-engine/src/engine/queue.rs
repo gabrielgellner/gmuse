@@ -28,7 +28,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use gmuse_library::model::rows::CopyId;
+use gmuse_ids::copy::CopyId;
 use gmuse_library::next::{ActiveSource, NextInput, Playback, Scope, Source};
 use gmuse_library::playlist::{Playlist, Queue};
 use gmuse_library::shelf::Shelf;
@@ -287,9 +287,7 @@ mod tests {
     }
 
     fn copy(n: u128) -> CopyId {
-        gmuse_library::model::rows::CopyId::Loose(gmuse_library::model::id::Id::from_uuid(
-            uuid::Uuid::from_u128(n),
-        ))
+        gmuse_ids::copy::CopyId::Loose(gmuse_ids::id::Id::from_uuid(uuid::Uuid::from_u128(n)))
     }
 
     #[test]

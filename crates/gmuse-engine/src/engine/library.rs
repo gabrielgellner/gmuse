@@ -78,7 +78,7 @@ fn name_of(touched: &Touched) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gmuse_library::model::id::Id;
+    use gmuse_ids::id::Id;
     use gmuse_proto::Scope;
 
     fn change(changed: &Changed, version: u64) -> gmuse_proto::Change {
