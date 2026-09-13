@@ -5813,6 +5813,36 @@ Append here as decisions are made. Format: date, decision, rationale.
   and the position reset inside it. Sampling in 150 ms windows inside one track gave the real number. **A measurement
   across a boundary measures the boundary** — and the boundary was one I had introduced hours earlier.
 
+- **2026-09-13** **The snapshot is keyed by its log, so a write can leave a current one** (#258, #194, §5 of
+  `access-layers.md`). `commit` refused to refresh the projection snapshot and said exactly why: _"the snapshot lives at
+  one fixed path under the cache directory while the log is named by a parameter, so a write against any other data
+  directory — every test that applies a proposal — would overwrite the snapshot of the real library with its own."_ So
+  it went stale on the first rating of a session, and every reader fell back to parsing 87 MB of log to rebuild what a
+  5.7 MB file already said.
+
+  Keyed by a UUIDv5 of the data directory — the derivation this project already trusts to be stable across machines and
+  versions, where `DefaultHasher` promises neither and a key that moves under you is a silent miss. Then `commit`
+  refreshes it, and so does `rewrite_all`, because compaction changes the log as much as an append does and `LogPrint`
+  cannot see _same records, different bytes_.
+
+  **Why the writer and not the reader.** A reader that finds a stale snapshot has already paid the fold, and has nowhere
+  safe to write the result: it may not hold the appender, and two readers racing would each save a different moment. The
+  writer knows a write happened, holds the `Appending` that proves nobody else is writing, and has the folded state in
+  hand.
+
+  **The fix created a smaller problem, which is the part worth recording.** One fixed path meant one file; keying means
+  one per data directory, and a single run of this suite left **92** of them behind — one per scratch directory, for
+  ever. A snapshot records the log files it was folded from, so _"is this abandoned"_ is answerable rather than
+  guessable: not one of those paths exists. The sweep runs on save, only once a directory holds more than 32, and reads
+  a bounded prefix because the header is a few paths and the projection behind it is megabytes.
+
+  The sweep's test asserts both halves, and the second is the one that matters: a sweep that deleted everything would
+  pass the first and cost a real library its fold every time anything else wrote.
+
+  **Not done, and it is the half that saves the memory.** An attached TUI still calls `Instance::open`. Reading the
+  snapshot instead needs `fold` to build an `Answer` from a projection rather than from `log.records()`, which is #256's
+  refactor — so the two issues meet there rather than being independent.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

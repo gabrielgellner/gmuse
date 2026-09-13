@@ -125,25 +125,39 @@ pub fn save_measurements(path: &Path, seen: &crate::model::ingest::Reads) {
     let _ = std::fs::write(path, bytes);
 }
 
-#[allow(
-    dead_code,
-    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
-)]
-/// Where the folded projection lives — #194.
+/// Where the folded projection of **this log** lives — #194, #258.
 ///
 /// Its own file beside the others, for the reason the measurement cache has
 /// one: they are dropped for different reasons. The scan cache goes whenever
 /// gmuse moves music; the measurements go when a file changes; this goes when
 /// the fold's shape changes. Sharing a file would throw all three away
 /// whenever any one of them needed to go.
-pub fn projection_path() -> PathBuf {
-    default_path().with_file_name("projection.postcard")
+///
+/// **Keyed by the data directory, which is what #258 needed.** It was one fixed
+/// path, and `commit` recorded exactly why that stopped it refreshing the
+/// snapshot after a write: *"the snapshot lives at one fixed path under the
+/// cache directory while the log is named by a parameter, so a write against
+/// any other data directory — every test that applies a proposal — would
+/// overwrite the snapshot of the real library with its own."*
+///
+/// A UUIDv5 of the path rather than a hash of it, because this project already
+/// trusts that derivation to be the same on two machines and across versions —
+/// `DefaultHasher` promises neither, and a key that changes under you is a
+/// silent cache miss rather than a loud one.
+pub fn projection_path(data_dir: &Path) -> PathBuf {
+    // Canonical where it can be: two spellings of one directory are one log, and
+    // `~/MusicLibrary/.gmuse` reached through a symlink must not get a second
+    // snapshot. A directory that does not exist yet cannot be canonicalised, and
+    // for that case the literal path is the best key there is.
+    let key = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    let id = crate::model::id::Id::<crate::model::entity::Device>::derived(
+        key.as_os_str().as_encoded_bytes(),
+    );
+    default_path().with_file_name(format!("projection-{}.postcard", id.as_uuid().simple()))
 }
 
-#[allow(
-    dead_code,
-    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
-)]
 /// Bump on any change to `Catalogue`, `Position` or anything they hold.
 ///
 /// **Which is often**, and deliberately cheap: the snapshot is derived, so a
@@ -151,10 +165,6 @@ pub fn projection_path() -> PathBuf {
 /// makes changing the projection's shape ordinary rather than dangerous.
 const PROJECTION_VERSION: u32 = 1;
 
-#[allow(
-    dead_code,
-    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
-)]
 /// **What the logs looked like when a snapshot was taken** — #194.
 ///
 /// The snapshot is only worth having if a caller can tell it is current
@@ -171,6 +181,21 @@ const PROJECTION_VERSION: u32 = 1;
 /// `Reads` does.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LogPrint(Vec<(PathBuf, u64, i64)>);
+
+impl LogPrint {
+    /// Whether the log this describes is gone — #258.
+    ///
+    /// **Not one file of it left.** A log that lost a device's file has changed rather
+    /// than vanished, and `current_projection` already refuses a snapshot whose print
+    /// does not match. Requiring *all* of them to be missing is what keeps a sweep from
+    /// deleting a snapshot of a library that is merely one file lighter.
+    ///
+    /// An empty print means a directory with no logs in it, which is abandoned by any
+    /// reading — and is also what a scratch directory leaves behind.
+    fn abandoned(&self) -> bool {
+        self.0.iter().all(|(path, _, _)| !path.exists())
+    }
+}
 
 impl LogPrint {
     /// Take a print of every log in a data directory. Cheap: one `stat` each,
@@ -195,10 +220,6 @@ impl LogPrint {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
-)]
 /// Load a folded projection **only if the logs have not changed since**.
 ///
 /// `None` means fold: missing, corrupt, from another version, or taken before
@@ -227,10 +248,6 @@ fn load_projection(path: &Path) -> Option<(LogPrint, crate::projection::Projecte
     postcard::from_bytes(rest).ok()
 }
 
-#[allow(
-    dead_code,
-    reason = "#195 is the first read that can use a snapshot — until reads stop populating, opening the log is unavoidable and maintaining one would be pure cost"
-)]
 /// Keep a folded projection, with the print of the logs it was folded from.
 /// Never fatal — it is a cache.
 pub fn save_projection(path: &Path, print: &LogPrint, projected: &crate::projection::Projected) {
@@ -252,7 +269,92 @@ pub fn save_projection(path: &Path, print: &LogPrint, projected: &crate::project
     let beside = path.with_extension("postcard.writing");
     if std::fs::write(&beside, bytes).is_ok() {
         let _ = std::fs::rename(&beside, path);
+        sweep_abandoned(path);
     }
+}
+
+/// How many snapshots may sit beside each other before a sweep is worth its cost.
+///
+/// **A threshold rather than a sweep per save**, because a save happens on every commit
+/// and a sweep reads a header from every sibling. A working machine has one or two
+/// libraries; thirty-two means something has been leaving them behind.
+const CROWDED: usize = 32;
+
+/// Delete snapshots whose log no longer exists — #258.
+///
+/// **The cost of keying the snapshot by its log**, and it is worth paying once rather
+/// than living with: keying fixed the bug where two data directories overwrote each
+/// other's snapshot, and created a smaller one where every scratch directory leaves a
+/// file behind for ever. One run of this project's own suite left **92**.
+///
+/// A snapshot records the log files it was folded from, so "is this abandoned" is
+/// answerable without guessing: if not one of those paths exists, the library it
+/// describes is gone.
+fn sweep_abandoned(just_wrote: &Path) {
+    let Some(dir) = just_wrote.parent() else {
+        return;
+    };
+    // **The one before keying, retired by name** — #258. `projection.postcard` was the
+    // single fixed path, and no production code reads it any more; on an existing
+    // install it is 5.7 MB describing a library that is now snapshotted under its own
+    // key.
+    //
+    // **Unless it is the file just written.** A caller may still name that path — a test
+    // in `projection/mod.rs` does — and the first version of this deleted the snapshot
+    // it had that moment saved. The suite caught it, which is the argument for the test
+    // that names its own path.
+    let legacy = dir.join("projection.postcard");
+    if legacy != just_wrote {
+        let _ = std::fs::remove_file(&legacy);
+    }
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let ours: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("projection-") && n.ends_with(".postcard"))
+        })
+        .collect();
+    if ours.len() <= CROWDED {
+        return;
+    }
+    for path in ours {
+        // Never the one just written, whatever its header says.
+        if path == just_wrote {
+            continue;
+        }
+        if print_of(&path).is_some_and(|p| p.abandoned()) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// The `LogPrint` from a snapshot's header, without decoding the projection behind it.
+///
+/// **A bounded read**, because the projection is 5.7 MB for a real library and the
+/// header is a few paths. `(print, projected)` is a tuple, so postcard lays the print
+/// down first and `take_from_bytes` stops there.
+fn print_of(path: &Path) -> Option<LogPrint> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = vec![0u8; 64 * 1024];
+    let read = file.read(&mut head).ok()?;
+    head.truncate(read);
+    if head.len() < MAGIC.len() || &head[..MAGIC.len()] != MAGIC {
+        return None;
+    }
+    let (version, rest) = postcard::take_from_bytes::<u32>(&head[MAGIC.len()..]).ok()?;
+    if version != PROJECTION_VERSION {
+        return None;
+    }
+    postcard::take_from_bytes::<LogPrint>(rest)
+        .ok()
+        .map(|(print, _)| print)
 }
 
 /// What came back from a cache read.
@@ -361,6 +463,60 @@ pub fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An abandoned snapshot is swept, and a live one is not** — #258.
+    ///
+    /// Keying the snapshot by its log fixed two data directories overwriting each
+    /// other's and created a smaller problem: one run of this project's suite left
+    /// **92** files behind, one per scratch directory. This is the sweep, and the half
+    /// that matters is the second assertion — a sweep that deleted everything would pass
+    /// the first.
+    #[test]
+    fn a_snapshot_whose_log_is_gone_is_swept_and_one_in_use_is_not() {
+        let dir = std::env::temp_dir().join(format!("gmuse-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+
+        // A log that exists, and one that does not.
+        let live_log = dir.join("log-live.jsonl");
+        std::fs::write(&live_log, "{}\n").expect("write");
+        let gone_log = dir.join("log-gone.jsonl");
+
+        let projected = crate::projection::Projected::default();
+        let live = dir.join("projection-live.postcard");
+        let gone = dir.join("projection-gone.postcard");
+        save_projection(&live, &LogPrint(vec![(live_log.clone(), 3, 0)]), &projected);
+        save_projection(&gone, &LogPrint(vec![(gone_log, 3, 0)]), &projected);
+
+        // **The instrument is attached**: both were written, so the sweep below has
+        // something to be right and wrong about.
+        assert!(live.exists() && gone.exists(), "the fixture wrote nothing");
+        assert!(
+            print_of(&live).is_some(),
+            "the header cannot be read back, so the sweep can only guess"
+        );
+
+        // Crowd the directory past the threshold, then sweep by writing one more.
+        for n in 0..=CROWDED {
+            save_projection(
+                &dir.join(format!("projection-filler{n}.postcard")),
+                &LogPrint(vec![(dir.join(format!("log-absent{n}.jsonl")), 1, 0)]),
+                &projected,
+            );
+        }
+
+        assert!(
+            !gone.exists(),
+            "a snapshot of a library that no longer exists was kept"
+        );
+        assert!(
+            live.exists(),
+            "a snapshot whose log is still there was swept — which would cost a real \
+             library its fold every time anything else wrote"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::operations::scan::Held;
 
     /// **A cache the writer knows is wrong is thrown away, not corrected.**

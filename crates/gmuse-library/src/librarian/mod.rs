@@ -677,6 +677,9 @@ pub fn rewrite_all(
             &mine,
         )?;
     }
+    // **Compaction changes the log as much as an append does** — #258. Same records,
+    // different bytes, so `LogPrint` would not notice on its own.
+    refresh_snapshot(log, data_dir);
     Ok(total)
 }
 
@@ -690,18 +693,47 @@ pub fn rewrite_all(
 /// **And now of the operating system too** (#218): it takes an [`Appending`], which
 /// only one process can hold for a given log.
 ///
-/// It deliberately does **not** refresh the projection snapshot, though that
-/// is where such a thing would belong. The snapshot lives at one fixed path
-/// under the cache directory while the log is named by a parameter, so a
-/// write against any other data directory — every test that applies a
-/// proposal — would overwrite the snapshot of the real library with its own.
-/// Refreshing here needs the snapshot keyed by the log it describes first.
+/// **And it refreshes the projection snapshot** — #258.
+///
+/// It did not, and said why: *"the snapshot lives at one fixed path under the cache
+/// directory while the log is named by a parameter, so a write against any other data
+/// directory — every test that applies a proposal — would overwrite the snapshot of the
+/// real library with its own. Refreshing here needs the snapshot keyed by the log it
+/// describes first."* It is keyed now, so this is safe to do and worth doing.
+///
+/// **Why here and not in the reader.** A reader that finds a stale snapshot folds the
+/// log — 190 ms and 83.5 MB of records for the real library — and then has nowhere
+/// sensible to write the result back to, because it may not hold the appender and two
+/// readers racing to save would each write a different moment. The writer knows a write
+/// happened, holds the `Appending` that proves nobody else is writing, and has the
+/// folded state in hand. It is the only place that can leave a current snapshot behind.
+///
+/// **Best effort, after the flush.** A snapshot is derived: failing to write one costs
+/// the next reader a fold and nothing else, so it must not turn a successful append into
+/// an error. The flush's count is what the caller asked for and is returned unchanged.
 pub fn commit(
     log: &mut Instance,
     data_dir: &std::path::Path,
     _appending: &Appending,
 ) -> Result<usize, LogError> {
-    log.flush(data_dir)
+    let wrote = log.flush(data_dir)?;
+    refresh_snapshot(log, data_dir);
+    Ok(wrote)
+}
+
+/// Leave a snapshot that matches the log as it now stands — #258.
+///
+/// Separate so [`rewrite_all`] can call it too: compacting changes the log as much as
+/// appending does, and a snapshot describing the pre-compaction file would be stale in
+/// the one way `LogPrint` cannot see — same records, different bytes on disk.
+fn refresh_snapshot(log: &Instance, data_dir: &std::path::Path) {
+    let mut folded = crate::projection::Projected::default();
+    folded.advance(log.records());
+    crate::cache::save_projection(
+        &crate::cache::projection_path(data_dir),
+        &crate::cache::LogPrint::of(data_dir),
+        &folded,
+    );
 }
 
 /// The projection as it stands, for a read.
@@ -716,7 +748,7 @@ pub fn commit(
 /// the disk answers with what the tags say rather than what the library
 /// recorded, which is the one thing the library is for.
 pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Projected {
-    let at = crate::cache::projection_path();
+    let at = crate::cache::projection_path(data_dir);
     let print = crate::cache::LogPrint::of(data_dir);
     match crate::cache::current_projection(&at, &print) {
         Some(ready) => ready,
@@ -922,6 +954,64 @@ mod tests {
     ///
     /// Against the source, because no type can carry it: `flush` is an
     /// ordinary method and any module could call one.
+    /// **A write leaves a snapshot the next reader can use** — #258.
+    ///
+    /// `commit` used to leave the snapshot stale, so the first rating of a session sent
+    /// every reader back to parsing the log — 190 ms and 83.5 MB of records for the real
+    /// library, to rebuild what a 5.7 MB file already said.
+    ///
+    /// **Asserted by the snapshot being *current*, not by it existing.** A file left
+    /// over from before the write is the exact failure this fixes, and it is on disk
+    /// either way — so the test reads it back and checks `LogPrint` accepts it against
+    /// the log as it now stands, which is the question a reader asks.
+    #[test]
+    fn a_commit_leaves_a_snapshot_a_reader_can_use() {
+        let dir = std::env::temp_dir().join(format!("gmuse-258-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let device = crate::fixture::device();
+
+        let appending = Appending::claim(&dir).expect("nothing else holds this");
+        let mut log = Instance::new(device);
+        log.rate(100, crate::model::id::Id::derived(b"a-recording"), Some(5));
+        let wrote = commit(&mut log, &dir, &appending).expect("commit");
+
+        // **The instrument is attached.** If nothing was appended there is nothing for a
+        // snapshot to be current *about*, and every assertion below would hold trivially.
+        assert!(wrote > 0, "commit wrote no records, so this proves nothing");
+
+        let at = crate::cache::projection_path(&dir);
+        let print = crate::cache::LogPrint::of(&dir);
+        let loaded = crate::cache::current_projection(&at, &print);
+        assert!(
+            loaded.is_some(),
+            "a reader would have folded the log instead of loading {at:?}"
+        );
+
+        // And it describes the write, rather than the empty log before it.
+        let projected = loaded.expect("just checked");
+        assert!(
+            !projected.catalogue().ratings.is_empty(),
+            "the snapshot is current by `LogPrint` and does not contain the rating that \
+             was just committed — which would make it worse than a stale one"
+        );
+
+        // **Two data directories do not share a snapshot** (#258's blocker). The whole
+        // reason `commit` refused to do this was one fixed path; keying by the log is
+        // what made it safe, so that is asserted rather than assumed.
+        let other = dir.join("elsewhere");
+        std::fs::create_dir_all(&other).expect("scratch");
+        assert_ne!(
+            crate::cache::projection_path(&dir),
+            crate::cache::projection_path(&other),
+            "two logs would overwrite each other's snapshot, which is what stopped \
+             `commit` refreshing one in the first place"
+        );
+
+        drop(appending);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn nothing_but_commit_puts_facts_on_disk() {
         let mut offenders = Vec::new();
