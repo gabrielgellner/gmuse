@@ -4,6 +4,21 @@
 # macOS
 .DS_Store
 
+# **Nothing that a run produces** — closing the gap that let three scan logs and a
+# zip of `src/` into the tree (3.6 MB between them, each committed as a side effect
+# of a change about something else).
+#
+# `events-*.log` is the old path-keyed event log. The three that were committed held
+# 23,654 `seen` lines and not one `played`, which is why removing them cost nothing:
+# `seen` means "the scanner walked past this", and a scan re-derives it. The decoder
+# in `events.rs` stays — `--migrate-log` needs it for the logs on a real disk.
+*.log
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+__MACOSX/
+
 # Credentials for the out-of-tree tag tools (Discogs, AcoustID). Prefer the
 # macOS Keychain; this is the backstop for when a token lands here anyway.
 .env
