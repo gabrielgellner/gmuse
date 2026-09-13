@@ -43,6 +43,7 @@ pub mod model;
 pub mod next;
 pub mod operations;
 pub mod playlist;
+pub mod programme;
 pub mod projection;
 pub mod query;
 pub mod shelf;
