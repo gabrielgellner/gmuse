@@ -50,6 +50,17 @@ struct Heard {
     /// how an attached view learns about a gapless join it did not ask for, and
     /// about another view's keypress.
     recording: Option<Id<Recording>>,
+    /// **How fast the position is moving, as a multiple of real time** — #212, I13.
+    ///
+    /// One while a stream is running and **zero when the device has gone**: the render
+    /// step has stopped, so the engine's position is frozen. Without this a remote view
+    /// took that frozen position, reset its own clock and advanced forever while nothing
+    /// played — which is the failure I13 is about, on the one hardware event #212 calls
+    /// the likeliest in this design.
+    ///
+    /// It is also where varispeed arrives when there is any, which is why the field was
+    /// already on the payload as a constant.
+    rate: f64,
     /// When this arrived here, for extrapolating forward.
     at: Instant,
 }
@@ -61,6 +72,7 @@ impl Default for Heard {
             pos_frames: 0,
             sample_rate: 48_000,
             recording: None,
+            rate: 1.0,
             at: Instant::now(),
         }
     }
@@ -130,6 +142,10 @@ impl Remote {
                         // publishes no recording, and keeping the last one
                         // would leave a view drawing a track as current after
                         // playback had ended.
+                        // **Absent means one, not zero.** An engine that predates
+                        // the field is running a stream; defaulting to zero would
+                        // freeze a playhead that is moving.
+                        held.rate = event.body["rate"].as_f64().unwrap_or(1.0);
                         held.recording = event.body["recording"]
                             .as_str()
                             .and_then(|s| s.parse::<uuid::Uuid>().ok())
@@ -178,20 +194,29 @@ impl Remote {
     }
 }
 
+impl Remote {
+    /// **Where the sound is now, from what the engine last said** — #212, §7.8.
+    ///
+    /// Its own function so the arithmetic can be tested without a socket: it is the
+    /// part that was wrong, and a connection adds nothing to the question.
+    fn extrapolated(held: &Heard) -> Duration {
+        let played = Duration::from_secs_f64(held.pos_frames as f64 / f64::from(held.sample_rate));
+        match held.state {
+            // The engine said where it was and when; between events the clock is what
+            // moves — **times the rate**, which is zero when the device has gone.
+            State::Playing => played + held.at.elapsed().mul_f64(held.rate),
+            State::Paused | State::Stopped => played,
+        }
+    }
+}
+
 impl Transport for Remote {
     fn state(&self) -> State {
         self.heard.lock().expect("heard").state
     }
 
     fn position(&self) -> Duration {
-        let held = self.heard.lock().expect("heard");
-        let played = Duration::from_secs_f64(held.pos_frames as f64 / f64::from(held.sample_rate));
-        match held.state {
-            // Extrapolated, per §7.8. The engine said where it was and when;
-            // between events the clock is what moves.
-            State::Playing => played + held.at.elapsed(),
-            State::Paused | State::Stopped => played,
-        }
+        Self::extrapolated(&self.heard.lock().expect("heard"))
     }
 
     /// **Resume, which is `pause` when paused** — #225.
@@ -286,5 +311,55 @@ impl Transport for Remote {
 
     fn last_short_frames(&self) -> u32 {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A playhead does not advance while nothing is sounding** — #212, I13.
+    ///
+    /// §7.8 gives a client no synchronous read of position, so it extrapolates between
+    /// discontinuities. When the device goes the render step stops and the engine's
+    /// position freezes — and a view that kept extrapolating showed a playhead moving
+    /// through audio nobody could hear, for ever. #212 calls a device disappearing the
+    /// likeliest hardware event in this design.
+    ///
+    /// `rate` is what carries it. Tested on the cache directly, because the arithmetic
+    /// is the thing that was wrong and a socket adds nothing to the question.
+    #[test]
+    fn a_rate_of_zero_stops_the_position_advancing() {
+        let held = |rate: f64| Heard {
+            state: State::Playing,
+            pos_frames: 48_000,
+            sample_rate: 48_000,
+            recording: None,
+            rate,
+            // A second ago, so any extrapolation is visible.
+            at: Instant::now() - Duration::from_secs(1),
+        };
+
+        let running = Remote::extrapolated(&held(1.0));
+        assert!(
+            running >= Duration::from_millis(1_900),
+            "a running stream advances: {running:?}"
+        );
+
+        let stalled = Remote::extrapolated(&held(0.0));
+        assert_eq!(
+            stalled,
+            Duration::from_secs(1),
+            "a lost device leaves the playhead where the sound stopped"
+        );
+    }
+
+    /// **An engine that predates the field is running a stream, not a stalled one.**
+    ///
+    /// Defaulting an absent `rate` to zero would freeze a playhead that is moving,
+    /// which is a worse failure than the one this fixes.
+    #[test]
+    fn an_absent_rate_reads_as_one() {
+        assert_eq!(Heard::default().rate, 1.0);
     }
 }

@@ -661,6 +661,18 @@ The engine emits a new `playback` event only when the state, rate, or position c
 seek, rate change (varispeed is just a rate change), track change, or loop wrap. It never emits a steady position
 stream.
 
+**`rate` is 0 when nothing is sounding** (#212). A lost device stops the render step, so the engine's position freezes —
+`PlayerHandle::position` reads the frames the render step handed over and is honest by construction. A remote view has
+no synchronous read and extrapolates, so without being told it took that frozen position, reset its own clock, and
+advanced for ever while nothing played. The formula above already multiplies by `rate`; what was missing was an engine
+that ever published anything but `1.0`, and a client that read the field. **An absent `rate` reads as 1**, because an
+engine that predates it is running a stream and freezing a moving playhead is the worse error.
+
+**Measured, because I13 is a claim about milliseconds.** Playing to the end on a real device, against `ffprobe`: mp3
+−2.9 ms, flac −2.9 ms, ogg −22.9 ms, underruns zero throughout. Every one _under_-reports, which is the point — the
+sounding position lags what has been handed to the device by a buffer (10.7 ms at 512 frames), or two for ogg's coarser
+packets. A position that matched the handed-over count exactly would be the bug I13 exists to prevent.
+
 ### 7.9 Clock
 
 - `at_ns` and `engine_now_ns` are nanoseconds on the engine's monotonic clock.

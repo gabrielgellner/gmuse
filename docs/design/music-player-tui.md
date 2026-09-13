@@ -5354,6 +5354,47 @@ Append here as decisions are made. Format: date, decision, rationale.
   Measured on the live library: **279,941 records, 279,941 distinct stamps, 0 shared.** So this was reachable and had
   not yet bitten, which is the best moment to fix it and the reason it was worth looking.
 
+- **2026-09-12** **A position stops moving when the sound does, and `rate` is how a client is told** (#212, I13, §7.8).
+
+  The clock half of #212 landed in !386 — a seqlock mapping, the sounding position, a generation per stream that
+  `output_latency` and `sounding` already refuse to read across. What was left was the consumer half, and it was broken
+  in the one case #212 calls the likeliest hardware event in this design.
+
+  **A lost device freezes the local position and not a remote one.** `PlayerHandle::position` reads `position_frames`,
+  which the render step advances — so when the device goes and the callback stops, it is honest by construction. A
+  remote view extrapolates locally between discontinuities, because §7.8 gives it no synchronous read: it took the
+  frozen position, reset its own clock, and **advanced for ever while nothing played**.
+
+  **`rate` is the field that already meant this.** It was published as the constant `1.0` with a note that varispeed
+  does not exist yet; a stalled stream is rate 0. So the engine reports it, the client multiplies its extrapolation by
+  it, and a playhead stops where the sound stopped — with no fourth run state invented for the case, and with the field
+  doing the job it was named for. An absent `rate` reads as 1, because an engine that predates it is running a stream
+  and freezing a moving playhead is the worse error.
+
+  **The position claim is now measured rather than asserted.** Against `ffprobe`, on a real device, playing to the end:
+
+  | file       | ffprobe    | highest position | difference | underruns |
+  | ---------- | ---------- | ---------------- | ---------- | --------- |
+  | mp3, 411s  | 411.683991 | 411.681062       | −2.9 ms    | 0         |
+  | flac, 199s | 199.346667 | 199.343750       | −2.9 ms    | 0         |
+  | ogg, 230s  | 230.440000 | 230.417083       | −22.9 ms   | 0         |
+
+  Every one **under**-reports, which is the point: the sounding position lags what has been handed to the device, and
+  the gap is one buffer — 10.7 ms at 512 frames — or two for ogg's coarser packets. A position that matched the
+  handed-over count exactly would be the bug I13 exists to prevent.
+
+  **Two things this turned up, both filed.** #241: a lost device is never retried, so the daemon that outlives the
+  terminal does not outlive the headphones — split out because #212's own comments called it a recovery policy rather
+  than a clock concern, and it needs decisions (when to retry, which device, what the playhead does) rather than code.
+  And #242: `null::Pace::RealTime` runs about 17% slow, which its own comment claims is undetectable downstream and is
+  detectable with a stopwatch — found only because the first measurement used it and disagreed with the device by that
+  much.
+
+  **What #212 could not finish is one line, and it belongs elsewhere.** A `When::Frame` from a dead generation must be
+  refused with `ScheduleMissed` rather than reinterpreted; §10.1's `When` does not exist, so there are no schedules to
+  drop. The mechanism is entirely in place — the generation is in the handshake and every event, and the audio path
+  already refuses a mapping across one — so whoever builds scheduling inherits a solved clock and a written-down rule.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

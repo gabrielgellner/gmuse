@@ -247,6 +247,8 @@ fn run(
     let shared = player.shared();
     let mut told: Option<Told> = None;
     let mut playing: Option<String> = None;
+    // Whether the device has gone; see the `DeviceLost` arm below.
+    let mut lost = false;
 
     // **The pool, materialised** — #232. §4.4 forbids this thread from running
     // a query, so it holds one instead and rebuilds it when the librarian
@@ -387,7 +389,15 @@ fn run(
                     }
                     moved = true;
                 }
-                PlayerEvent::Loaded { .. } | PlayerEvent::DeviceLost(_) => {
+                PlayerEvent::Loaded { .. } => {
+                    moved = true;
+                }
+                // **Remembered, not just announced** — #212. The render step has
+                // stopped, so the position is frozen and every client needs to be
+                // told to stop extrapolating it. There is no restart path yet
+                // (#241), so this stays set: the stream really is gone.
+                PlayerEvent::DeviceLost(_) => {
+                    lost = true;
                     moved = true;
                 }
                 // Informational: the OS rerouted us and playback continues, so
@@ -437,7 +447,13 @@ fn run(
 
         if moved || told != Some(now) {
             if let Some(engine) = engine.get() {
-                engine.publish(&playback_event(player, &shared, now, playing.as_deref()));
+                engine.publish(&playback_event(
+                    player,
+                    &shared,
+                    now,
+                    playing.as_deref(),
+                    lost,
+                ));
             }
             told = Some(now);
         }
@@ -631,6 +647,8 @@ fn playback_event(
     shared: &Arc<Shared>,
     told: Told,
     recording: Option<&str>,
+    // Whether the device has gone, so the position is not advancing (#212).
+    lost: bool,
 ) -> Event {
     let sounding = shared.sounding();
     Event::new(
@@ -646,10 +664,20 @@ fn playback_event(
             "stream_generation": told.generation,
             "sample_rate": player.device_rate(),
             "at_ns": sounding.map(|s| s.at_nanos),
-            // Varispeed is a rate change and there is no varispeed yet, so this
-            // is the honest constant rather than an absent field a client would
-            // have to default.
-            "rate": 1.0,
+            // **Zero when nothing is sounding** — #212, I13.
+            //
+            // A client extrapolates position locally between discontinuities
+            // (§7.8), so it needs to know when *not* to. A lost device stops the
+            // render step, which freezes `position_frames` — so the local
+            // `PlayerHandle::position` is honest by construction and a remote one
+            // was not: it took the frozen position, reset its own clock, and
+            // advanced forever while nothing played.
+            //
+            // `rate` is the field that already means this. It was the constant 1.0
+            // with a note that varispeed does not exist yet; a stalled stream is
+            // rate 0, which is the same quantity honestly measured rather than a
+            // fourth run state invented for the case.
+            "rate": if lost { 0.0 } else { 1.0 },
         }),
     )
 }
