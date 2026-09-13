@@ -26,7 +26,7 @@ pub enum ActiveSource {
 }
 
 /// cmus's "all / artist / album" narrowing. Applies to the library only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Scope {
     #[default]
     All,

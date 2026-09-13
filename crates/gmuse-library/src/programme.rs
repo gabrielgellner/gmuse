@@ -136,6 +136,17 @@ impl Version {
 pub struct Programme {
     entries: Vec<Entry>,
     mode: Mode,
+    /// **How the order was made, so a view can draw the toggles.**
+    ///
+    /// Descriptive rather than operative: nothing consults these to decide what follows —
+    /// `follows` reads the list. They are here because a view drawing a shuffle button has
+    /// to know whether it is on, and the librarian is the actor that knows.
+    ///
+    /// §6 calls `scope` control state "because it determines what plays next". Under this
+    /// design it determines what the *programme* is, once, when one is built — so the
+    /// reason it lived in the engine no longer holds.
+    scope: crate::next::Scope,
+    shuffled: bool,
     version: Version,
     /// The next token to hand out. **Never reset**, including by [`Programme::replace`],
     /// which is what makes a token from an older version fail to match rather than
@@ -170,6 +181,21 @@ impl Programme {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    pub fn scope(&self) -> crate::next::Scope {
+        self.scope
+    }
+
+    pub fn shuffled(&self) -> bool {
+        self.shuffled
+    }
+
+    /// Record how an order was made. **Called by whoever made it**, not by a person
+    /// toggling a switch — the toggle is a reorder, and this says what the reorder was.
+    pub fn made_by(&mut self, scope: crate::next::Scope, shuffled: bool) {
+        self.scope = scope;
+        self.shuffled = shuffled;
     }
 
     pub fn version(&self) -> Version {
@@ -245,6 +271,63 @@ impl Programme {
         let mut out = vec![first];
         self.extend_from(&mut out, first.token, n);
         out
+    }
+
+    /// **What precedes this entry, under the mode in force** — the mirror of [`follows`].
+    ///
+    /// `RepeatCurrent` answers itself, as forwards does. `RepeatAll` wraps to the last
+    /// entry, which is what makes `prev` from the first track land on the last.
+    ///
+    /// [`follows`]: Programme::follows
+    pub fn precedes(&self, token: EntryToken) -> Option<Entry> {
+        let at = self.position(token)?;
+        match self.mode {
+            Mode::RepeatCurrent => Some(self.entries[at]),
+            Mode::RepeatAll => {
+                let last = self.entries.len() - 1;
+                Some(self.entries[if at == 0 { last } else { at - 1 }])
+            }
+            Mode::OnceThrough => match at {
+                0 => None,
+                _ => self.entries.get(at - 1).copied(),
+            },
+        }
+    }
+
+    /// The `n` entries before this one, nearest first.
+    pub fn before(&self, token: EntryToken, n: usize) -> Vec<Entry> {
+        if self.position(token).is_none() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut at = token;
+        while out.len() < n {
+            match self.precedes(at) {
+                Some(prev) => {
+                    at = prev.token;
+                    out.push(prev);
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// **Reorder to put these rows in this order, keeping every token.**
+    ///
+    /// For a shuffle toggle: the caller computes an order of *rows* — shuffled, or the
+    /// shelf's — and the entries follow it. Rows the order does not mention keep their
+    /// relative position at the end, so an entry put in by hand is never dropped.
+    pub fn reorder_by_row(&mut self, rows: &[CopyId]) {
+        let mut rank: std::collections::HashMap<CopyId, usize> = std::collections::HashMap::new();
+        for (at, row) in rows.iter().enumerate() {
+            rank.entry(*row).or_insert(at);
+        }
+        let unknown = rows.len();
+        // Stable, so two entries holding one row keep their order relative to each other.
+        self.entries
+            .sort_by_key(|e| *rank.get(&e.row).unwrap_or(&unknown));
+        self.bump();
     }
 
     /// The `n` entries after this one — **the refill answer**.
@@ -554,6 +637,31 @@ mod tests {
             assert!(
                 p.after(EntryToken(*token), 2).is_empty(),
                 "an old token still refills"
+            );
+        }
+    }
+
+    /// **A partial order keeps what it does not mention, at the end.**
+    ///
+    /// `reorder_by_row`'s fallback, tested directly because no `Ask` exercises it: a
+    /// shuffle derives its order from the entries, so every one is always mentioned. The
+    /// fallback is what makes that safe to get wrong — and a guard nothing tests is a guard
+    /// that is not there.
+    #[test]
+    fn reordering_by_a_partial_row_order_keeps_the_rest() {
+        let mut p = Programme::of([row(1), row(2), row(3)]);
+        let held: Vec<u64> = p.entries().iter().map(|e| e.token.as_u64()).collect();
+
+        // Only two of the three named, reversed.
+        p.reorder_by_row(&[row(3), row(1)]);
+
+        let after: Vec<CopyId> = p.entries().iter().map(|e| e.row).collect();
+        assert_eq!(p.len(), 3, "an unmentioned entry was dropped");
+        assert_eq!(after, vec![row(3), row(1), row(2)], "the order is wrong");
+        for token in held {
+            assert!(
+                p.entry(EntryToken::from_u64(token)).is_some(),
+                "a token was lost to a partial reorder"
             );
         }
     }

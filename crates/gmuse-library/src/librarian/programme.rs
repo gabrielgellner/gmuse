@@ -71,6 +71,35 @@ pub enum Ask {
         token: u64,
         n: usize,
     },
+    /// **The `n` cues before this token** — what `prev` asks.
+    ///
+    /// The programme walked backwards. `next::prev` walked the *pool* backwards and never
+    /// read the queue, which under one list is the same thing said more simply.
+    Before {
+        token: u64,
+        n: usize,
+    },
+    /// **Shuffle on or off, keeping every token** — so the track playing keeps playing.
+    ///
+    /// Off restores the shelf's order: who made it, then the release, then the track.
+    /// Entries put in by hand sort into place rather than being dropped, which is the only
+    /// answer that does not lose an edit.
+    Shuffle {
+        on: bool,
+        seed: u64,
+    },
+    /// **Narrow or widen the pool, anchored at an entry the caller holds.**
+    ///
+    /// A scope is relative to what is playing, and only the caller knows which entry that
+    /// is — so it passes the token rather than the librarian guessing. Every old token
+    /// stops matching, because this is a different set of rows.
+    Rescope {
+        at: Option<u64>,
+        scope: crate::next::Scope,
+        shuffle: bool,
+        seed: u64,
+        window: usize,
+    },
     /// The same rows in a new order, keeping every token. A reshuffle.
     Reorder {
         order: Vec<u64>,
@@ -134,6 +163,9 @@ pub enum Reply {
     Look {
         version: u64,
         mode: Mode,
+        /// How the order was made — what a view draws its toggles from.
+        scope: crate::next::Scope,
+        shuffled: bool,
         entries: Vec<Shown>,
         /// How many the programme holds, which `entries` may be a `limit`ed prefix of.
         total: usize,
@@ -173,6 +205,7 @@ pub(crate) fn answer(
         } => {
             let ordered = pool(library, at, scope, shuffle, seed);
             plan.replace(ordered);
+            plan.made_by(scope, shuffle);
             let version = plan.version().as_u64();
 
             // **Cue from the row the person picked, not from the head.** `at` may be
@@ -201,6 +234,64 @@ pub(crate) fn answer(
                 version: plan.version().as_u64(),
                 cues: cues_for(plan.after(token, n), library, device),
             }
+        }
+
+        Ask::Before { token, n } => {
+            let token = EntryToken::from_u64(token);
+            if plan.entry(token).is_none() {
+                return Reply::Stale {
+                    version: plan.version().as_u64(),
+                };
+            }
+            Reply::Window {
+                version: plan.version().as_u64(),
+                cues: cues_for(plan.before(token, n), library, device),
+            }
+        }
+
+        Ask::Shuffle { on, seed } => {
+            // **The rows already in the programme, ordered** — not the pool. Shuffling
+            // re-derived from the library would silently drop whatever was put in by hand,
+            // and re-including what was taken out.
+            let rows: Vec<CopyId> = plan.entries().iter().map(|e| e.row).collect();
+            let members: std::collections::HashSet<CopyId> = rows.iter().copied().collect();
+            let shelf = crate::shelf::Shelf::from_members(library, members, true);
+            let ordered = if on {
+                crate::next::shuffled(shelf.sorted(), seed)
+            } else {
+                shelf.sorted().to_vec()
+            };
+            plan.reorder_by_row(&ordered);
+            plan.made_by(plan.scope(), on);
+            Reply::Settled {
+                version: plan.version().as_u64(),
+            }
+        }
+
+        Ask::Rescope {
+            at,
+            scope,
+            shuffle,
+            seed,
+            window,
+        } => {
+            // The caller holds a token, not a row: only it knows which entry is sounding.
+            let anchor = at
+                .map(EntryToken::from_u64)
+                .and_then(|t| plan.entry(t))
+                .map(|e| e.row);
+            answer(
+                plan,
+                library,
+                device,
+                Ask::Open {
+                    at: anchor,
+                    scope,
+                    shuffle,
+                    seed,
+                    window,
+                },
+            )
         }
 
         Ask::Reorder { order } => {
@@ -247,6 +338,8 @@ pub(crate) fn answer(
         Ask::Look { limit } => Reply::Look {
             version: plan.version().as_u64(),
             mode: plan.mode(),
+            scope: plan.scope(),
+            shuffled: plan.shuffled(),
             entries: plan
                 .entries()
                 .iter()
@@ -802,5 +895,225 @@ mod tests {
             5,
             "an unanchored narrowing emptied the programme"
         );
+    }
+
+    /// **`prev` walks the programme backwards, and wraps when repeating.**
+    #[test]
+    fn before_walks_back_and_repeat_all_wraps_to_the_end() {
+        let (l, rows) = library(3);
+        let mut plan = Programme::new();
+        ask(&mut plan, &l, Ask::Play { rows, window: 1 });
+        let held: Vec<u64> = plan.entries().iter().map(|e| e.token.as_u64()).collect();
+
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Before {
+                token: held[1],
+                n: 1,
+            },
+        ) else {
+            panic!("before did not answer with a window");
+        };
+        assert_eq!(cues[0].token, held[0], "it did not step back one");
+
+        // The first entry has nothing before it, until the programme repeats.
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Before {
+                token: held[0],
+                n: 1,
+            },
+        ) else {
+            panic!("no window");
+        };
+        assert!(cues.is_empty(), "once-through walked back off the front");
+
+        ask(&mut plan, &l, Ask::SetMode(Mode::RepeatAll));
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Before {
+                token: held[0],
+                n: 1,
+            },
+        ) else {
+            panic!("no window");
+        };
+        assert_eq!(cues[0].token, held[2], "repeat-all did not wrap backwards");
+    }
+
+    /// **A shuffle toggle keeps every token, so the track playing keeps playing.**
+    #[test]
+    fn shuffling_reorders_without_invalidating_the_position() {
+        let (l, rows) = library(8);
+        let mut plan = Programme::new();
+        ask(
+            &mut plan,
+            &l,
+            Ask::Open {
+                at: Some(rows[0]),
+                scope: crate::next::Scope::All,
+                shuffle: false,
+                seed: 0,
+                window: 1,
+            },
+        );
+        let playing = plan.entries()[0].token;
+        let sorted: Vec<CopyId> = plan.entries().iter().map(|e| e.row).collect();
+
+        ask(&mut plan, &l, Ask::Shuffle { on: true, seed: 99 });
+        let after: Vec<CopyId> = plan.entries().iter().map(|e| e.row).collect();
+
+        assert_ne!(after, sorted, "a shuffle of eight rows changed nothing");
+        assert_eq!(
+            plan.entry(playing).map(|e| e.row),
+            Some(sorted[0]),
+            "the playing entry's token went stale across a shuffle"
+        );
+        assert!(plan.shuffled(), "the toggle was not recorded");
+
+        ask(&mut plan, &l, Ask::Shuffle { on: false, seed: 0 });
+        let back: Vec<CopyId> = plan.entries().iter().map(|e| e.row).collect();
+        assert_eq!(
+            back, sorted,
+            "turning shuffle off did not restore the order"
+        );
+        assert!(!plan.shuffled(), "the toggle was not recorded going back");
+    }
+
+    /// **The permutation is over the programme, not over the library.**
+    ///
+    /// This test first claimed a pool-derived order would *drop* a hand-placed entry, and
+    /// two mutations killed nothing — because `reorder_by_row` sorts unmentioned entries to
+    /// the end rather than discarding them, so membership is safe either way. The real
+    /// difference is the order: a Fisher-Yates over 4 library rows is not the same
+    /// permutation as one over the 3 a person is actually playing, and only the second is
+    /// what "shuffle my queue" means.
+    ///
+    /// So it is asserted against `next::shuffled` over the held rows, which is the only
+    /// form of the claim that can fail.
+    #[test]
+    fn a_shuffle_permutes_the_programme_and_not_the_library() {
+        let (l, rows) = library(8);
+        let mut plan = Programme::new();
+        ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows: rows[..5].to_vec(),
+                window: 1,
+            },
+        );
+        assert_eq!(
+            plan.len(),
+            5,
+            "the programme is not a subset of the library"
+        );
+
+        ask(&mut plan, &l, Ask::Shuffle { on: true, seed: 31 });
+        let got: Vec<CopyId> = plan.entries().iter().map(|e| e.row).collect();
+
+        let members: std::collections::HashSet<CopyId> = rows[..5].iter().copied().collect();
+        let shelf = crate::shelf::Shelf::from_members(&l, members, true);
+        let expected = crate::next::shuffled(shelf.sorted(), 31);
+
+        assert_eq!(
+            got.len(),
+            5,
+            "the shuffle changed the programme's membership"
+        );
+        assert_eq!(
+            got, expected,
+            "the permutation was not over the five rows held"
+        );
+    }
+
+    /// **A rescope anchors at the entry the caller names**, because only the caller knows
+    /// which one is sounding.
+    #[test]
+    fn a_rescope_narrows_around_the_callers_token() {
+        let (l, rows) = library(4);
+        let mut plan = Programme::new();
+        ask(
+            &mut plan,
+            &l,
+            Ask::Open {
+                at: Some(rows[2]),
+                scope: crate::next::Scope::All,
+                shuffle: false,
+                seed: 0,
+                window: 1,
+            },
+        );
+        let playing = plan
+            .entries()
+            .iter()
+            .find(|e| e.row == rows[2])
+            .unwrap()
+            .token;
+
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Rescope {
+                at: Some(playing.as_u64()),
+                scope: crate::next::Scope::Inner,
+                shuffle: false,
+                seed: 0,
+                window: 1,
+            },
+        ) else {
+            panic!("a rescope did not answer with a window");
+        };
+
+        // One album in the fixture, so `Inner` keeps all four — what is asserted is that
+        // the anchor was resolved and the cue is the row that was playing, not the head.
+        assert_eq!(plan.len(), 4);
+        assert_eq!(
+            cues.len(),
+            1,
+            "the rescope cued nothing, so the anchor did not resolve"
+        );
+        let cued = plan.entry(crate::programme::EntryToken::from_u64(cues[0].token));
+        assert_eq!(
+            cued.map(|e| e.row),
+            Some(rows[2]),
+            "the rescope cued from the head rather than the anchor"
+        );
+    }
+
+    /// **A `Look` reports the toggles**, which is where a view draws them from now.
+    ///
+    /// §6 put `scope` in the engine "because it determines what plays next". It determines
+    /// what the *programme* is, once — so the reason no longer holds and the state moved.
+    #[test]
+    fn a_look_reports_the_scope_and_the_shuffle() {
+        let (l, rows) = library(3);
+        let mut plan = Programme::new();
+        ask(
+            &mut plan,
+            &l,
+            Ask::Open {
+                at: Some(rows[0]),
+                scope: crate::next::Scope::Outer,
+                shuffle: true,
+                seed: 5,
+                window: 1,
+            },
+        );
+        let Reply::Look {
+            scope, shuffled, ..
+        } = ask(&mut plan, &l, Ask::Look { limit: 0 })
+        else {
+            panic!("no look");
+        };
+        assert_eq!(
+            scope,
+            crate::next::Scope::Outer,
+            "the scope was not recorded"
+        );
+        assert!(shuffled, "the shuffle was not recorded");
     }
 }
