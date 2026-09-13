@@ -63,6 +63,7 @@ impl Sink {
         let thread = std::thread::Builder::new()
             .name("gmuse-null-audio".into())
             .spawn(move || {
+                let mut clock = Metronome::new(per_buffer, std::time::Instant::now());
                 while !stopping.load(Ordering::Relaxed) {
                     device::process(
                         &mut rt,
@@ -73,8 +74,10 @@ impl Sink {
                         },
                     );
                     callback_nanos = callback_nanos.saturating_add(per_buffer_nanos);
-                    if pace == Pace::RealTime {
-                        std::thread::sleep(per_buffer);
+                    if pace == Pace::RealTime
+                        && let Some(wait) = clock.wait(std::time::Instant::now())
+                    {
+                        std::thread::sleep(wait);
                     }
                 }
             })
@@ -83,6 +86,53 @@ impl Sink {
         Sink {
             stop,
             thread: Some(thread),
+        }
+    }
+}
+
+/// **A deadline, not a delay** — #242.
+///
+/// The loop used to render a buffer and then `sleep(per_buffer)`, so a cycle cost a
+/// period *plus* the work of filling it and the renderer ran at `period / (period +
+/// work)`. Measured at **83% of real time** — a three-minute track took three and a
+/// half — which broke the one claim `Pace::RealTime` makes for itself: *"a headless
+/// engine is still playing for somebody, and nothing downstream should be able to tell
+/// which backend it is."* It was tellable, with a stopwatch.
+///
+/// A device does not have this problem because its clock runs whether or not the
+/// callback is quick. This is that: the deadline advances by exactly one period per
+/// buffer, so the work is absorbed rather than added.
+struct Metronome {
+    period: std::time::Duration,
+    /// When the buffer just rendered was due to finish.
+    next: std::time::Instant,
+}
+
+impl Metronome {
+    fn new(period: std::time::Duration, now: std::time::Instant) -> Self {
+        Self { period, next: now }
+    }
+
+    /// How long to sleep after rendering a buffer, or `None` when already late.
+    ///
+    /// **Falling far behind gives up the backlog rather than bursting through it**,
+    /// which is also what a device does: an underrun is silence and a counter, not a
+    /// promise to play the missing audio faster later. Without the reset, a laptop
+    /// resuming from sleep would render at full speed until it had caught up on every
+    /// buffer it missed — minutes of audio at once, out of a renderer whose entire
+    /// purpose is to behave like a device.
+    fn wait(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.next += self.period;
+        match self.next.checked_duration_since(now) {
+            Some(wait) => Some(wait),
+            None => {
+                // More than eight periods late — about 85 ms at 512 frames and
+                // 48 kHz — is a stall rather than a slow buffer.
+                if now.duration_since(self.next) > self.period * 8 {
+                    self.next = now;
+                }
+                None
+            }
         }
     }
 }
@@ -99,6 +149,107 @@ impl Drop for Sink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    const ONE_BUFFER: Duration = Duration::from_nanos(10_666_666);
+
+    /// **The schedule does not drift with the work** — #242.
+    ///
+    /// The bug was `sleep(per_buffer)` *after* rendering, so a cycle cost a period plus
+    /// the work and the renderer ran at 83% of real time. This asserts the property that
+    /// fixes it: however long a buffer takes to fill, the next deadline is one period
+    /// after the last one, not one period after now.
+    ///
+    /// **No stopwatch.** Every instant here is derived by adding a `Duration` to one
+    /// `Instant::now()`, so the test measures arithmetic rather than the machine — the
+    /// load-sensitive shape thrown away on 2026-09-13 for passing alone and failing
+    /// inside `just ci`.
+    #[test]
+    fn the_deadline_absorbs_the_work_rather_than_adding_it() {
+        let t0 = Instant::now();
+        let mut clock = Metronome::new(ONE_BUFFER, t0);
+
+        // A buffer that took 4 ms to fill: sleep the remainder, not a whole period.
+        let work = Duration::from_millis(4);
+        let first = clock.wait(t0 + work).expect("not late");
+        assert_eq!(
+            first,
+            ONE_BUFFER - work,
+            "it slept a period on top of the work"
+        );
+
+        // The next buffer starts where the last was *due*, so a slow one does not push
+        // the schedule out. Woke on time, then spent 4 ms again.
+        let second = clock.wait(t0 + ONE_BUFFER + work).expect("not late");
+        assert_eq!(
+            second,
+            ONE_BUFFER - work,
+            "the schedule drifted by the work"
+        );
+
+        // **The instrument is attached.** Both assertions above hold trivially if
+        // `wait` simply returned `ONE_BUFFER - work` while ignoring its argument, so this
+        // varies the work and requires the answer to change with it.
+        let slower = Duration::from_millis(9);
+        let third = clock.wait(t0 + ONE_BUFFER * 2 + slower).expect("not late");
+        assert_eq!(third, ONE_BUFFER - slower);
+        assert_ne!(
+            third, second,
+            "the sleep does not depend on how long the work took"
+        );
+    }
+
+    /// **A buffer that overran is late, not owed** — #242.
+    ///
+    /// Work longer than a period means there is nothing left to sleep. The renderer
+    /// carries on immediately, which is the honest answer and what lets it catch up a
+    /// buffer or two.
+    #[test]
+    fn a_buffer_that_overran_does_not_sleep() {
+        let t0 = Instant::now();
+        let mut clock = Metronome::new(ONE_BUFFER, t0);
+        assert_eq!(
+            clock.wait(t0 + ONE_BUFFER * 2),
+            None,
+            "it slept while already late"
+        );
+        // **And the time is made back, rather than lost.** The deadline is still on the
+        // original schedule, so the next buffer — rendered instantly, as it would be
+        // after an overrun — is exactly on time and sleeps zero rather than a period.
+        // A schedule rebased to `now` would hand back a full period here and the
+        // renderer would be permanently one buffer behind.
+        assert_eq!(clock.wait(t0 + ONE_BUFFER * 2), Some(Duration::ZERO));
+    }
+
+    /// **A long stall gives up the backlog** — #242.
+    ///
+    /// A device that missed a second of audio does not then play a second of audio at
+    /// double speed; it underruns, counts it, and carries on from now. Without this a
+    /// laptop resuming from sleep would render every missed buffer at full tilt.
+    #[test]
+    fn a_stall_resets_the_schedule_rather_than_bursting() {
+        let t0 = Instant::now();
+        let mut clock = Metronome::new(ONE_BUFFER, t0);
+
+        // Gone for a hundred periods.
+        let woke = t0 + ONE_BUFFER * 100;
+        assert_eq!(
+            clock.wait(woke),
+            None,
+            "nothing to sleep while a hundred behind"
+        );
+
+        // **The next buffer is paced again**, rather than ninety-nine more racing to
+        // catch up. That is the whole difference, and it is what this asserts: a
+        // schedule that had not reset would return `None` here too.
+        let after = clock
+            .wait(woke)
+            .expect("the schedule reset, so this one paces");
+        assert!(
+            after > Duration::ZERO && after <= ONE_BUFFER,
+            "expected one period of pacing, got {after:?}"
+        );
+    }
     use crate::audio::{Shared, State};
     use std::sync::atomic::Ordering;
 

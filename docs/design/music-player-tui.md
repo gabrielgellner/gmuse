@@ -5786,6 +5786,33 @@ Append here as decisions are made. Format: date, decision, rationale.
 
   The library now answers what the FFT pass was for: **879 suspect, 71 unmeasured, 6,073 good.**
 
+- **2026-09-13** **A deadline, not a delay** (#242). The null renderer filled a buffer and then slept a buffer's worth
+  of wall time, so a cycle cost a period _plus_ the work and it ran at `period / (period + work)`. Measured against a
+  real track, four samples: **82.4%, 83.8%, 84.6%, 82.4%** — a three-minute track taking three and a half. After:
+  **96.2%, 97.6%, 105.6%, 96.2%**.
+
+  That broke the one claim `Pace::RealTime` makes for itself — _"a headless engine is still playing for somebody, and
+  nothing downstream should be able to tell which backend it is"_ — and it was tellable with a stopwatch. A device does
+  not have the problem because its clock runs whether or not the callback is quick; the fix is to be a clock rather than
+  a delay.
+
+  **Two behaviours the deadline has to get right, and both are what a device does.** A buffer that overran sleeps
+  nothing and stays on the original schedule, so the next one is exactly on time and the lost time is made back. But a
+  _long_ stall gives the backlog up: a device that missed a second of audio underruns and carries on from now, it does
+  not then play a second of audio at double speed. Without that reset a laptop resuming from sleep would render every
+  missed buffer at full tilt.
+
+  **The test measures arithmetic, not the machine.** `Metronome::wait` is a pure function of two instants, both derived
+  by adding `Duration`s to one `Instant::now()` — so there is no wall-clock tolerance to tune and nothing for load to
+  perturb. That is the direct lesson of the socket test thrown away earlier the same day for passing alone and failing
+  inside `just ci`.
+
+  **And a measurement that was 17% wrong before it was right.** The first probe timed over 1.2 seconds and reported
+  _17%_ of real time, which would have meant the renderer was five times worse than #242 said. The fixture's first track
+  is one second long and `pos_frames` became track-relative that morning (#246), so the window spanned a gapless join
+  and the position reset inside it. Sampling in 150 ms windows inside one track gave the real number. **A measurement
+  across a boundary measures the boundary** — and the boundary was one I had introduced hours earlier.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
