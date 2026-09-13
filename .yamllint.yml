@@ -1,0 +1,32 @@
+# yamllint — `just lint-yaml`, and part of `just ci`.
+#
+# **120 columns, because that is this project's width.** `.prettierrc` sets
+# `printWidth: 120` for markdown and the design documents are wrapped there, so a YAML
+# file breaking at 80 would be the one file in the repository with a different measure.
+# yamllint's default is 80, which reported twenty findings on `.gitlab-ci.yml` — all of
+# them the comments that explain why each rule in it exists.
+
+extends: default
+
+rules:
+  line-length:
+    max: 120
+    # A long URL cannot be wrapped, and breaking a `curl` line to satisfy a linter
+    # would make the file worse to read for no gain.
+    allow-non-breakable-words: true
+
+  # **No `---` required.** GitLab's own documentation writes `.gitlab-ci.yml` without
+  # one, every example in the wild omits it, and a single-document file gains nothing
+  # from the marker.
+  document-start: disable
+
+  # Comments explaining a decision often run to a paragraph directly above the key they
+  # are about; requiring a blank line before each would space this file out without
+  # making it clearer.
+  empty-lines:
+    max: 2
+
+ignore: |
+  tools/.venv/
+  docs/books/*/book/
+  target/

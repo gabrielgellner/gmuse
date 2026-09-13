@@ -22,20 +22,18 @@ workflow:
     - if: $CI_PIPELINE_SOURCE == "web"
     # Started via an API trigger token.
     - if: $CI_PIPELINE_SOURCE == "trigger"
-    # **A push to `main` creates a pipeline, for the docs job only** (#247).
+    # Started from the CLI: `glab ci run`.
+    - if: $CI_PIPELINE_SOURCE == "api"
+    # **A push creates nothing**, including a push to `main`.
     #
-    # This is the one exception to the rule above, and it does not contradict the
-    # reasoning: what that reasoning objects to is paying for apt-get, a rustup
-    # toolchain and a cold cargo registry to repeat checks the pre-push hook already
-    # ran. The `pages` job is not that job. It downloads one ~10 MB binary, runs a
-    # python script and a markdown build, and finishes in seconds — and unlike `verify`
-    # it does something the hook cannot do at all, which is publish.
+    # It did, briefly, so the docs could publish themselves. Measured over two runs:
+    # **27 seconds each, billed as a minute**, against a free tier of 400 a month — and
+    # this repository saw 41 commits land on `main` in a single day. Publishing on every
+    # push would spend the budget rebuilding a book whose sources usually had not
+    # changed.
     #
-    # `verify` stays off this path by its own `rules` below, so a push to `main` runs
-    # the docs and nothing else.
-    - if: $CI_COMMIT_BRANCH == "main"
-    # Everything else — a push to another branch, a merge request, a tag — creates
-    # nothing.
+    # So the docs publish by hand, like everything else here. `just docs` builds them
+    # locally in a second and needs no runner at all, which is where the loop belongs.
     - when: never
 
 stages:
@@ -51,8 +49,10 @@ stages:
 verify:
   stage: verify
   rules:
+    # Automatic inside a pipeline you started — starting one is the decision.
     - if: $CI_PIPELINE_SOURCE == "web"
     - if: $CI_PIPELINE_SOURCE == "trigger"
+    - if: $CI_PIPELINE_SOURCE == "api"
   image: rust:1-slim
   before_script:
     - apt-get update -qq && apt-get install -y -qq cmake curl >/dev/null
@@ -83,11 +83,15 @@ pages:
   stage: deploy
   image: rust:1-slim
   rules:
-    # On a push to `main`, and by hand. Never on a branch or an MR: Pages has one
-    # published copy, so building it from anything but `main` would publish a draft.
+    # **By hand, on `main` only.** Pages has one published copy, so building it from a
+    # branch would publish a draft over the real thing.
+    #
+    # `when: manual` even inside a pipeline somebody started deliberately: starting one
+    # to run `verify` is not the same as asking to publish, and the button is the
+    # difference between the two.
     - if: $CI_COMMIT_BRANCH == "main"
-    - if: $CI_PIPELINE_SOURCE == "web"
       when: manual
+    - when: never
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl python3 >/dev/null
     - |

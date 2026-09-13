@@ -78,6 +78,16 @@ fmt-check:
 
 # ── Lint & test ───────────────────────────────────────────────────────────────
 
+# Lint the YAML — 120 columns, per .yamllint.yml
+lint-yaml:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v yamllint >/dev/null 2>&1; then
+        echo "lint-yaml needs yamllint: pipx install yamllint" >&2
+        exit 1
+    fi
+    yamllint .
+
 # Clippy across all targets and features, warnings are errors
 [group('dev')]
 lint:
@@ -241,7 +251,7 @@ bench:
 
 # Formatting + lint + a type check, no tests
 [group('test')]
-check: fmt-check lint
+check: fmt-check lint lint-yaml
     cargo check --all-targets --all-features
 
 # Full local gate: format, lint, typecheck, tests, release build.

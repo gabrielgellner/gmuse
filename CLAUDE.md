@@ -220,6 +220,7 @@ adopted for storage, streaming or audio backends.
 
 - **Rust** — `cargo fmt`, edition 2024 (`rustfmt.toml`)
 - **Markdown** — `prettier`, `proseWrap: always`, `printWidth: 120` (`.prettierrc`)
+- **YAML** — `yamllint`, 120 columns (`.yamllint.yml`), run by `just lint-yaml` and part of `just check`
 
 `CHANGELOG.md` is in `.prettierignore`: git-cliff owns that file.
 
