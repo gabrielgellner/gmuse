@@ -381,16 +381,28 @@ fn every_crate_depends_only_on_what_it_is_meant_to() {
         // **`std::fs` and an error enum.** Three callers, none of which may depend on the
         // others — see §13's entry of 2026-09-13.
         ("gmuse-lock", &[]),
+        // **The contract between the two resident actors** — #257. The ordering and the
+        // words for it; nothing that can open a file or learn what a library holds.
+        ("gmuse-programme", &["gmuse-ids"]),
         // §4.3: it must not depend on engine internals, which is why the ids are separate.
         ("gmuse-proto", &["gmuse-ids"]),
         ("gmuse-client", &["gmuse-proto", "gmuse-ids"]),
         // The librarian. Notably **not** `gmuse-proto`: the wire describes the library, and
         // an edge the other way would let a fact be shaped by a message.
-        ("gmuse-library", &["gmuse-ids", "gmuse-lock"]),
+        (
+            "gmuse-library",
+            &["gmuse-ids", "gmuse-lock", "gmuse-programme"],
+        ),
         // **`gmuse-library` is the line #257 removes.** Everything else here is settled.
         (
             "gmuse-engine",
-            &["gmuse-ids", "gmuse-lock", "gmuse-proto", "gmuse-library"],
+            &[
+                "gmuse-ids",
+                "gmuse-lock",
+                "gmuse-programme",
+                "gmuse-proto",
+                "gmuse-library",
+            ],
         ),
     ];
 
@@ -447,6 +459,68 @@ fn section<'a>(text: &'a str, header: &str) -> &'a str {
     }
 }
 
+/// **The crates that claim they cannot touch a disk, checked** — #257.
+///
+/// `gmuse-ids` says "everything that can name an entity, and **nothing that can read a
+/// file**", and that claim is load-bearing: it is the whole reason the ids live apart from the
+/// library, and the reason `gmuse-lock` had to be its own crate rather than going in there.
+/// `gmuse-programme` makes the same claim for the same kind of reason.
+///
+/// Both were comments with no instrument, which is §13's fourth way to be green and wrong.
+/// The dependency check above stops either *acquiring* something that walks a disk; this stops
+/// either doing it with `std` directly.
+#[test]
+fn the_crates_that_cannot_touch_a_disk_do_not() {
+    // Named because they cannot be inferred: `Path` and `PathBuf` are fine — a path is a
+    // name, and `Cued` carries one. Opening one is not.
+    const FORBIDDEN: &[&str] = &[
+        "std::fs",
+        "File::open",
+        "File::create",
+        "OpenOptions",
+        "read_to_string",
+        "read_dir",
+        "std::net",
+        "std::process",
+    ];
+
+    let mut found: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    for crate_name in ["gmuse-ids", "gmuse-programme"] {
+        let root = Path::new("crates").join(crate_name).join("src");
+        for (path, text) in sources() {
+            if !path.starts_with(&root) {
+                continue;
+            }
+            scanned += 1;
+            // Tests may do as they like; the claim is about the shipped surface.
+            for line in production(&text).lines() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                for bad in FORBIDDEN {
+                    if code.contains(bad) {
+                        found.push(format!("{}: {}", path.display(), code.trim()));
+                    }
+                }
+            }
+        }
+    }
+
+    // **The instrument is attached**, and this one needs it badly: the assertion below is an
+    // absence, and an absence over a set that matched no files passes for nothing.
+    assert!(
+        scanned >= 8,
+        "only {scanned} files were scanned across the two crates, so this proved nothing"
+    );
+    assert!(
+        found.is_empty(),
+        "a crate that claims it cannot touch a disk does:\n  {}",
+        found.join("\n  ")
+    );
+}
+
 /// **The audio engine's reaches into the library may only go down** — #257.
 ///
 /// The decision is that `gmuse-engine` does not depend on `gmuse-library` at all, and the
@@ -469,11 +543,11 @@ fn section<'a>(text: &'a str, header: &str) -> &'a str {
 /// What is left is almost entirely `use` lines and the `Desk`: the librarian's identity, the
 /// `Ask`/`Reply` vocabulary that becomes a channel, `Scope`, `Touched`/`Changed`, and two
 /// straggler with a reason of its own: `history::now_ms`, which stamps a rate fact the engine
-/// should not be appending at all. `lock` is gone — it is `gmuse-lock` now, for the reason
-/// that made it a crate rather than a shared module.
+/// should not be appending at all. `lock` and the programme vocabulary are gone — `gmuse-lock`
+/// and `gmuse-programme`, for the reason that made each a crate rather than a shared module.
 #[test]
 fn the_engine_does_not_reach_further_into_the_library() {
-    const CEILING: usize = 11;
+    const CEILING: usize = 7;
 
     let engine = Path::new("crates").join("gmuse-engine").join("src");
     let mut found: BTreeMap<PathBuf, usize> = BTreeMap::new();

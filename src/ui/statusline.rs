@@ -138,7 +138,10 @@ fn modes(ui: &Ui) -> String {
     // **The dimension, not the depth** — #234. `Inner` is "album" when grouped
     // by artist and album, and "year" when grouped by genre and year; a status
     // line saying `[inner]` would be honest and useless.
-    out.push(format!("[{}]", ui.playback.scope.named(ui.levels)));
+    out.push(format!(
+        "[{}]",
+        gmuse_library::next::scope_named(ui.playback.scope, ui.levels)
+    ));
     if ui.playback.shuffle {
         out.push("[shuffle]".into());
     }

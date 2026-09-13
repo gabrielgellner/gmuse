@@ -25,65 +25,22 @@ pub enum ActiveSource {
     Playlist,
 }
 
-/// cmus's "all / artist / album" narrowing. Applies to the library only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum Scope {
-    #[default]
-    All,
-    /// Stay within the current **outer** key of the grouping tree.
-    Outer,
-    /// Stay within the current **inner** key.
-    Inner,
-}
+/// **cmus's "all / artist / album" narrowing** — `gmuse-programme` owns it now (#257).
+///
+/// Re-exported because `next::Scope` is what 74 call sites say, and because it is still a
+/// narrowing over *this* crate's catalogue. What moved is only where the type is defined: the
+/// engine has to name a scope to forward one, and may not reach the log to do it.
+pub use gmuse_programme::Scope;
 
-impl Scope {
-    pub fn cycle(self) -> Self {
-        match self {
-            Scope::All => Scope::Outer,
-            Scope::Outer => Scope::Inner,
-            Scope::Inner => Scope::All,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Scope::All => "all",
-            Scope::Outer => "outer",
-            Scope::Inner => "inner",
-        }
-    }
-
-    /// **What to call this scope, given what the view is grouped by** — #234.
-    ///
-    /// `label` says the depth and this says the dimension, which is what a
-    /// person reading a status line wants: grouped by artist and album, `Inner`
-    /// is "album"; grouped by genre and year it is "year". The depth is the
-    /// mechanism and the field is the meaning.
-    ///
-    /// Falls back to the depth when the grouping is flat, because there is then
-    /// no field to name and "all" is already the honest answer.
-    pub fn named(self, levels: crate::shelf::Levels) -> String {
-        match (self, levels) {
-            (Scope::All, _) | (_, crate::shelf::Levels::Flat) => self.label().to_string(),
-            (Scope::Outer, crate::shelf::Levels::By { outer, .. }) => outer.field.name(),
-            (Scope::Inner, crate::shelf::Levels::By { inner, .. }) => inner.field.name(),
-        }
-    }
-
-    /// The inverse of [`Scope::label`], and the home of the cmus spellings.
-    ///
-    /// **`artist` and `album` are accepted for ever** — they are what a saved
-    /// session and a `config.toml` on disk say, and a rename must not stop a
-    /// config file working (#234). They are aliases rather than synonyms: they
-    /// meant "the outer key" and "the inner key" all along, which is only
-    /// obvious once the grouping is something other than artist and album.
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "all" => Scope::All,
-            "outer" | "artist" => Scope::Outer,
-            "inner" | "album" => Scope::Inner,
-            _ => return None,
-        })
+/// What a scope is called, given how the browser is grouped.
+///
+/// **Left behind deliberately**, because it needs `shelf::Levels` and `gmuse-programme`
+/// cannot see a shelf. One caller, in the status line.
+pub fn scope_named(scope: Scope, levels: crate::shelf::Levels) -> String {
+    match (scope, levels) {
+        (Scope::All, _) | (_, crate::shelf::Levels::Flat) => scope.label().to_string(),
+        (Scope::Outer, crate::shelf::Levels::By { outer, .. }) => outer.field.name(),
+        (Scope::Inner, crate::shelf::Levels::By { inner, .. }) => inner.field.name(),
     }
 }
 

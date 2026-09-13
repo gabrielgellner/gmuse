@@ -38,7 +38,54 @@
 //! stop. [`Programme::replace`] is the other case, a genuinely different set of rows, and
 //! that one does invalidate every token the engine holds.
 
+use std::path::PathBuf;
+
 use gmuse_ids::copy::CopyId;
+
+/// cmus's "all / artist / album" narrowing. Applies to the library only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Scope {
+    #[default]
+    All,
+    /// Stay within the current **outer** key of the grouping tree.
+    Outer,
+    /// Stay within the current **inner** key.
+    Inner,
+}
+
+impl Scope {
+    pub fn cycle(self) -> Self {
+        match self {
+            Scope::All => Scope::Outer,
+            Scope::Outer => Scope::Inner,
+            Scope::Inner => Scope::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Scope::All => "all",
+            Scope::Outer => "outer",
+            Scope::Inner => "inner",
+        }
+    }
+
+    /// The inverse of [`Scope::label`], and the home of the cmus spellings.
+    ///
+    /// **`artist` and `album` are accepted for ever** — they are what a saved
+    /// session and a `config.toml` on disk say, and a rename must not stop a
+    /// config file working (#234). They are aliases rather than synonyms: they
+    /// meant "the outer key" and "the inner key" all along, which is only
+    /// obvious once the grouping is something other than artist and album.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "all" => Scope::All,
+            "outer" | "artist" => Scope::Outer,
+            "inner" | "album" => Scope::Inner,
+            _ => return None,
+        })
+    }
+}
 
 /// Which entry, as against which recording.
 ///
@@ -145,7 +192,7 @@ pub struct Programme {
     /// §6 calls `scope` control state "because it determines what plays next". Under this
     /// design it determines what the *programme* is, once, when one is built — so the
     /// reason it lived in the engine no longer holds.
-    scope: crate::next::Scope,
+    scope: Scope,
     shuffled: bool,
     version: Version,
     /// The next token to hand out. **Never reset**, including by [`Programme::replace`],
@@ -164,7 +211,7 @@ impl Default for Programme {
         Self {
             entries: Vec::new(),
             mode: Mode::default(),
-            scope: crate::next::Scope::default(),
+            scope: Scope::default(),
             shuffled: false,
             version: Version(1),
             minting: 0,
@@ -201,7 +248,7 @@ impl Programme {
         self.mode
     }
 
-    pub fn scope(&self) -> crate::next::Scope {
+    pub fn scope(&self) -> Scope {
         self.scope
     }
 
@@ -211,7 +258,7 @@ impl Programme {
 
     /// Record how an order was made. **Called by whoever made it**, not by a person
     /// toggling a switch — the toggle is a reorder, and this says what the reorder was.
-    pub fn made_by(&mut self, scope: crate::next::Scope, shuffled: bool) {
+    pub fn made_by(&mut self, scope: Scope, shuffled: bool) {
         self.scope = scope;
         self.shuffled = shuffled;
     }
@@ -732,4 +779,274 @@ mod tests {
             "after() repeated an entry it was given"
         );
     }
+}
+
+// ── What the librarian and the engine say to each other ─────────────────────
+
+/// What to do to the programme, or ask of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ask {
+    /// **Start over on these rows**, and cue the first `window` of them.
+    ///
+    /// Every token the caller held stops matching, which is the honest answer for a
+    /// genuinely different list.
+    Play {
+        rows: Vec<CopyId>,
+        window: usize,
+        base: Option<u64>,
+    },
+    /// **Build a programme from the library and cue from one row** — a play gesture.
+    ///
+    /// The caller names a row, a narrowing, and whether to shuffle; the librarian
+    /// materialises the pool, orders it, and cues from `at`. **The pool never crosses**,
+    /// which is the point of the ask existing: scope `All` is 7,271 rows and a caller has
+    /// no business holding them.
+    ///
+    /// `at` absent cues from the head — "play this album" rather than "play this track".
+    Open {
+        at: Option<CopyId>,
+        scope: Scope,
+        shuffle: bool,
+        /// Seeds the permutation. **The same seed shuffles the same pool the same way**, so
+        /// a reshuffle is a new seed rather than a hidden `rand` call, and a test can assert
+        /// an order.
+        seed: u64,
+        window: usize,
+    },
+    /// **Put these rows at the end** — what `queue.enqueue` is now.
+    ///
+    /// A programme is one list, so "play next" and "add to the queue" are both an insert at
+    /// a position. `base` is #233's optimistic concurrency: two views reordering at once
+    /// *is* a lost update, so a mutation carries the version it was computed against.
+    Push {
+        rows: Vec<CopyId>,
+        base: Option<u64>,
+    },
+    /// **Take out the entry at this index** — what `queue.remove` is.
+    ///
+    /// By index because that is what the wire says (§7.4) and a view counts rows. **A token
+    /// would be better** and `Ask::Remove` is it: an index races, which is exactly why
+    /// `base` has to be checked. Changing the wire is a protocol decision, not a refactor.
+    RemoveAt {
+        index: usize,
+        base: Option<u64>,
+    },
+    /// **Play this recording, and open a programme around it.**
+    ///
+    /// For the callers that name a recording rather than a programme position: a view saying
+    /// "play this", and a session resume.
+    ///
+    /// **It opens a programme, and that is load-bearing rather than tidy.** `Ask::Load` used
+    /// to load and touch nothing, which worked only because the old design had an *implicit*
+    /// programme — the whole library, always, walked from a cursor. With an explicit one,
+    /// loading without opening leaves the window empty and playback stops after one track.
+    /// Two integration tests said so, which is what they are for.
+    ///
+    /// The narrowing and shuffle are whatever the programme already had, so pressing play on
+    /// a track does not silently reset them.
+    Start {
+        recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
+        window: usize,
+    },
+    /// **A window from the *end* of the programme, changing nothing.**
+    ///
+    /// What `prev` asks with nothing playing. `next::step` walked the pool backwards from
+    /// "whichever end we are walking from" when there was no current track, and this is that
+    /// rule said about a list.
+    Tail {
+        n: usize,
+    },
+    /// **A window from the top of the programme, changing nothing** — a resync.
+    ///
+    /// Distinct from `Open`, which rebuilds the pool. A resync means *the programme is
+    /// right and my copy of it is not*, so nothing may move.
+    Head {
+        n: usize,
+    },
+    /// **The `n` cues after this token** — the refill.
+    ///
+    /// `version` is what the caller last saw. A mismatch is not by itself an error: the
+    /// token is looked up regardless, because a reorder keeps tokens and the caller's
+    /// position is still good. The version is reported back so a caller can tell a
+    /// reorder from a replace.
+    After {
+        token: u64,
+        n: usize,
+    },
+    /// **The `n` cues before this token** — what `prev` asks.
+    ///
+    /// The programme walked backwards. `next::prev` walked the *pool* backwards and never
+    /// read the queue, which under one list is the same thing said more simply.
+    Before {
+        token: u64,
+        n: usize,
+    },
+    /// **Shuffle on or off, keeping every token** — so the track playing keeps playing.
+    ///
+    /// Off restores the shelf's order: who made it, then the release, then the track.
+    /// Entries put in by hand sort into place rather than being dropped, which is the only
+    /// answer that does not lose an edit.
+    Shuffle {
+        on: bool,
+        seed: u64,
+    },
+    /// **Narrow or widen the pool, anchored at an entry the caller holds.**
+    ///
+    /// A scope is relative to what is playing, and only the caller knows which entry that
+    /// is — so it passes the token rather than the librarian guessing. Every old token
+    /// stops matching, because this is a different set of rows.
+    Rescope {
+        at: Option<u64>,
+        scope: Scope,
+        shuffle: bool,
+        seed: u64,
+        window: usize,
+    },
+    /// The same rows in a new order, keeping every token. A reshuffle.
+    Reorder {
+        order: Vec<u64>,
+    },
+    /// What happens at the end of an entry.
+    SetMode(Mode),
+    Insert {
+        at: usize,
+        rows: Vec<CopyId>,
+    },
+    Remove {
+        tokens: Vec<u64>,
+    },
+    Clear {
+        base: Option<u64>,
+    },
+    /// **The programme as it stands, for drawing it.** Up to `limit` entries.
+    Look {
+        limit: usize,
+    },
+}
+
+impl Ask {
+    /// The version this mutation was computed against, if it names one.
+    ///
+    /// **Exhaustive with no catch-all**, so a new mutating variant does not compile until
+    /// somebody has decided whether it needs a guard. A `_ => None` would make "no guard"
+    /// the silent default, which is the failure this whole file keeps naming.
+    /// Whether applying this changes the programme, so a caller knows to resync.
+    pub fn mutating(&self) -> bool {
+        match self {
+            Ask::Play { .. }
+            | Ask::Open { .. }
+            | Ask::Push { .. }
+            | Ask::RemoveAt { .. }
+            | Ask::Clear { .. }
+            | Ask::Reorder { .. }
+            | Ask::Shuffle { .. }
+            | Ask::Rescope { .. }
+            | Ask::SetMode(_)
+            | Ask::Insert { .. }
+            | Ask::Remove { .. } => true,
+            Ask::Start { .. }
+            | Ask::Tail { .. }
+            | Ask::Head { .. }
+            | Ask::After { .. }
+            | Ask::Before { .. }
+            | Ask::Look { .. } => false,
+        }
+    }
+
+    /// **`pub` because the guard that reads it lives with the fold**, not here — the
+    /// librarian checks it before applying anything, and this crate has nothing to apply to.
+    pub fn base(&self) -> Option<u64> {
+        match self {
+            Ask::Play { base, .. }
+            | Ask::Push { base, .. }
+            | Ask::RemoveAt { base, .. }
+            | Ask::Clear { base } => *base,
+            // Reads, and the asks whose whole job is to replace what a caller holds.
+            Ask::Open { .. }
+            | Ask::Start { .. }
+            | Ask::Tail { .. }
+            | Ask::Head { .. }
+            | Ask::After { .. }
+            | Ask::Before { .. }
+            | Ask::Reorder { .. }
+            | Ask::Shuffle { .. }
+            | Ask::Rescope { .. }
+            | Ask::SetMode(_)
+            | Ask::Insert { .. }
+            | Ask::Remove { .. }
+            | Ask::Look { .. } => None,
+        }
+    }
+}
+
+/// Where to find one entry's audio, and what the tags say about its loudness.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cued {
+    /// The programme entry. **Opaque**: hand it back, do not read it.
+    pub token: u64,
+    pub path: PathBuf,
+    /// **Which recording is sounding**, for the `playback` event to name.
+    ///
+    /// The one library identity a cue carries, and it is unavoidable: a view identifies the
+    /// playing track by recording — `gp` jumps to it, the info panel follows it — and the
+    /// engine is the only actor that knows what is sounding. Not the row: two rows can hold
+    /// one recording, and what a listener is hearing is the recording.
+    pub recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
+    /// The ReplayGain tags, in dB, and nothing done with them.
+    ///
+    /// **How loud to play is the engine's question**, because it is the half that holds
+    /// the person's gain preference; what the tags say is the library's. `Playable`'s own
+    /// comment has drawn that line since #78, and `source_for` plays at unity today
+    /// precisely because the cue carried no way to say this.
+    pub track_db: Option<f32>,
+    pub track_peak: Option<f32>,
+    pub album_db: Option<f32>,
+    pub album_peak: Option<f32>,
+}
+
+/// One entry, for a surface that draws the programme rather than plays it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shown {
+    pub token: u64,
+    pub row: CopyId,
+}
+
+/// **What is true of the programme, carried by every reply** — #259.
+///
+/// So a caller never has to *ask* for the version or the toggles: every answer refreshes
+/// them. That is what lets the engine hold them as cached state instead of sending a `Look`
+/// before each mode change and once per publish — and an ask the engine does not send is an
+/// ask that cannot block it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Standing {
+    pub version: u64,
+    pub mode: Mode,
+    /// How the order was made — what a view draws its toggles from.
+    pub scope: Scope,
+    pub shuffled: bool,
+    /// How many entries the programme holds.
+    pub total: usize,
+}
+
+/// What came back.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reply {
+    /// Cues to play, in order, and the version they were taken from.
+    ///
+    /// **Shorter than asked for is not an error.** A `OnceThrough` programme runs out, and
+    /// a row whose audio this device does not hold is skipped rather than cueing a path
+    /// that cannot be opened.
+    Window { standing: Standing, cues: Vec<Cued> },
+    /// **The token is not in this programme.** Ask for a window from the top.
+    ///
+    /// The rarer case than the design document assumed, because a reshuffle is a
+    /// [`Ask::Reorder`] and keeps every token — so this means a genuine replacement.
+    Stale { standing: Standing },
+    /// The programme, for drawing. `entries` may be a `limit`ed prefix of `standing.total`.
+    Look {
+        standing: Standing,
+        entries: Vec<Shown>,
+    },
+    /// A mutation landed.
+    Settled { standing: Standing },
 }

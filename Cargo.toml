@@ -7,6 +7,7 @@
 members = [
   "crates/gmuse-ids",
   "crates/gmuse-lock",
+  "crates/gmuse-programme",
   "crates/gmuse-library",
   "crates/gmuse-proto",
   "crates/gmuse-client",

@@ -5912,6 +5912,25 @@ Append here as decisions are made. Format: date, decision, rationale.
   So: the smallest crate in the workspace, `std::fs` and one error enum. `gmuse-library` re-exports it as `lock`,
   because `gmuse::lock::acquire` is what `main` says and the librarian's `Appending::claim` is one of the three callers.
 
+- **2026-09-13** **`gmuse-programme` is the contract between the two resident actors** (#257). The ordering and the
+  words for it: `Programme`, `Scope`, `Mode`, `EntryToken`, and the `Ask`/`Reply`/`Cued`/`Standing` vocabulary. The
+  librarian owns an ordered programme and the engine holds a window of it, both have to name what passes between them,
+  and neither may depend on the other — the engine must not reach the log, and **the library must not be shaped by a
+  message**, which is why `gmuse-proto` was rejected as the home despite being the obvious one.
+
+  The third option was for the engine to mirror the types and `main` to translate. Rejected on the same grounds as the
+  lock: two parallel definitions of one vocabulary is a drift risk, and this session paid for that twice —
+  `next::shuffled` ported wrong, and `Window::from` used for two different things.
+
+  **What did not move is the useful half of the decision.** `answer` and `cues_for` resolve a row to a path and project
+  a shelf, so they need the fold and stay with the librarian. `Scope::named` needs `shelf::Levels` and stayed as
+  `next::scope_named`. `Changed` and `Touched` stayed too, and their translation onto the wire belongs in the **root
+  crate** rather than either — it is the one place that legitimately sees both a library type and a protocol type, which
+  is what a wiring layer is for.
+
+  Both new crates claim in a comment that they cannot touch a disk, and `the_crates_that_cannot_touch_a_disk_do_not` is
+  now the instrument. `gmuse-ids` had made that claim since it was created with nothing checking it.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

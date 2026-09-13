@@ -41,9 +41,7 @@
 use std::sync::Arc;
 
 use gmuse_library::librarian::Desk;
-use gmuse_library::librarian::programme::{Ask, Cued, Reply, Standing};
-use gmuse_library::next::Scope;
-use gmuse_library::programme::Mode as Rule;
+use gmuse_programme::{Ask, Cued, Mode as Rule, Reply, Scope, Standing};
 
 use crate::instruction::{Mode, Switch};
 

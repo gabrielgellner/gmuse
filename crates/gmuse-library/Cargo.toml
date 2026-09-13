@@ -13,6 +13,7 @@ repository = "https://gitlab.com/gabrielgellner/gmuse"
 [dependencies]
 gmuse-ids = { path = "../gmuse-ids" }
 gmuse-lock = { path = "../gmuse-lock" }
+gmuse-programme = { path = "../gmuse-programme" }
 
 arc-swap = "1.7.1"
 crossbeam-channel = "0.5.16"
@@ -51,4 +52,4 @@ gmuse-ids = { path = "../gmuse-ids", features = ["testing"] }
 # ordinary way to lend test-only code to a dependent, and it stays off for an
 # ordinary build.
 [features]
-testing = ["gmuse-ids/testing"]
+testing = ["gmuse-ids/testing", "gmuse-programme/testing"]

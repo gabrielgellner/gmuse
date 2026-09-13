@@ -47,7 +47,12 @@ pub mod model;
 pub mod next;
 pub mod operations;
 pub mod playlist;
-pub mod programme;
+/// **What plays next** — `gmuse-programme` owns it now (#257).
+///
+/// Re-exported because the librarian is still where a programme is *answered from*: the
+/// ordering lives in the crate both actors can name, and resolving a row to a path needs the
+/// fold, which only this side has.
+pub use gmuse_programme as programme;
 pub mod projection;
 pub mod query;
 pub mod shelf;

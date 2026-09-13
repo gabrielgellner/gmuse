@@ -843,6 +843,7 @@ dependencies = [
  "gmuse-ids",
  "gmuse-library",
  "gmuse-lock",
+ "gmuse-programme",
  "gmuse-proto",
  "rtrb",
  "rubato",
@@ -873,6 +874,7 @@ dependencies = [
  "crossbeam-channel",
  "gmuse-ids",
  "gmuse-lock",
+ "gmuse-programme",
  "lofty",
  "postcard",
  "serde",
@@ -891,6 +893,14 @@ name = "gmuse-lock"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "gmuse-programme"
+version = "0.1.0"
+dependencies = [
+ "gmuse-ids",
+ "serde",
 ]
 
 [[package]]

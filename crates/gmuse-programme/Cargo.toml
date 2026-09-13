@@ -1,0 +1,31 @@
+[package]
+name = "gmuse-programme"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "What plays next, and what the librarian and the engine say about it"
+repository = "https://gitlab.com/gabrielgellner/gmuse"
+
+# **The contract between the two resident actors** — #257.
+#
+# `docs/design/playback-programme.md` is the decision: the librarian owns an
+# ordered programme and the audio engine holds a window of it. Both have to name
+# the vocabulary in between, and neither may depend on the other — the engine
+# must not reach the log, and the library must not be shaped by a message.
+#
+# The same reasoning that made `gmuse-lock` a crate, one layer up: not a shared
+# module, because there is nowhere shared to put it that does not invert an edge.
+#
+# **What is here is the ordering and the words for it.** What is *not* here is
+# anything that resolves a row to a path — that needs the fold, so `answer` and
+# `cues_for` stay with the librarian. This crate cannot open a file and has no
+# way to learn what a library holds.
+[dependencies]
+gmuse-ids = { path = "../gmuse-ids" }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[features]
+testing = ["gmuse-ids/testing"]
+
+[dev-dependencies]
+gmuse-ids = { path = "../gmuse-ids", features = ["testing"] }

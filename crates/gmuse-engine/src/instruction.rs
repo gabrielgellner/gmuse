@@ -94,6 +94,6 @@ pub enum Switch {
 /// Where to point the scope, or one step round the cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeTo {
-    Set(gmuse_library::next::Scope),
+    Set(gmuse_programme::Scope),
     Cycle,
 }
