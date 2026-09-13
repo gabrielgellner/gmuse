@@ -933,6 +933,91 @@ fn a_writing_subcommand_hands_its_facts_to_the_engine_that_holds_the_log() {
     );
 }
 
+/// **Compacting claims the appender, or hands the job to whoever holds it** — #249,
+/// §4.4, I15.
+///
+/// `shelf compact --write` held its own copy of the per-device rewrite loop and called
+/// `durable::rewrite` directly, claiming nothing. So the one operation that *removes*
+/// could rewrite a log from outside the lock while an engine held it — deleting
+/// whatever the engine appended after this process folded.
+///
+/// **The `dropped > 0` guard is why this test needs a real superseded assertion.** An
+/// empty log short-circuits with "nothing to drop" before reaching the rewrite at all,
+/// so a test that skipped the setup below would pass against the bug without ever
+/// executing the line under test. That is measured, not hypothetical: it is exactly how
+/// the first attempt at reproducing this came back clean.
+#[test]
+fn compacting_defers_to_the_engine_that_holds_the_log() {
+    let (engine, _recording) = start_with_a_track("compact-held");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let config = engine.dir.join("as-the-engine.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "data_dir = {:?}\nlibrary = [{:?}]\n",
+            data.display().to_string(),
+            engine.dir.display().to_string()
+        ),
+    )
+    .expect("write a config");
+
+    // **Give the log a second holdings assertion, so one supersedes the other.**
+    // Removing a placed copy changes the set, so the scan has something to say; it
+    // hands the facts to the engine, which appends them with its own clock.
+    let placed: Vec<std::path::PathBuf> = walk(&engine.dir)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "wav"))
+        .collect();
+    assert!(!placed.is_empty(), "the fixture placed nothing: {placed:?}");
+    std::fs::remove_file(&placed[0]).expect("remove one copy");
+    let scanned = Command::new(binary())
+        .args(["shelf", "scan", "--write"])
+        .env("GMUSE_CONFIG", &config)
+        .env("GMUSE_SOCKET", &engine.socket)
+        .output()
+        .expect("run shelf scan --write");
+    assert!(
+        scanned.status.success(),
+        "the scan could not happen: {}",
+        String::from_utf8_lossy(&scanned.stderr)
+    );
+
+    // **The instrument is attached**, and this is the assertion the whole test rests
+    // on: there is something to compact, so the write path below is actually reached.
+    let dry = Command::new(binary())
+        .args(["shelf", "compact"])
+        .env("GMUSE_CONFIG", &config)
+        .env("GMUSE_SOCKET", &engine.socket)
+        .output()
+        .expect("run shelf compact");
+    let seen = String::from_utf8_lossy(&dry.stderr);
+    assert!(
+        !seen.contains("0 superseded"),
+        "nothing to drop, so the rewrite would be skipped and this test would prove \
+         nothing: {seen}"
+    );
+
+    // Now the real thing, against an engine that holds the log.
+    let held = Command::new(binary())
+        .args(["shelf", "compact", "--write"])
+        .env("GMUSE_CONFIG", &config)
+        .env("GMUSE_SOCKET", &engine.socket)
+        .output()
+        .expect("run shelf compact --write");
+    let said = String::from_utf8_lossy(&held.stderr);
+    assert!(held.status.success(), "it could not compact at all: {said}");
+    // **Deferred, not done here.** The distinction is the issue: this process may not
+    // rewrite a log it does not hold.
+    assert!(
+        said.contains("the engine holds the log"),
+        "it rewrote the log from outside the lock: {said}"
+    );
+    assert!(
+        !said.contains("logs rewritten"),
+        "it rewrote the log from outside the lock: {said}"
+    );
+}
+
 /// **`shelf tidy` names what it would remove, and removes nothing without `--write`**
 /// — #239.
 ///

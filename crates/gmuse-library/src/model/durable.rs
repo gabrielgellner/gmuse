@@ -197,7 +197,17 @@ pub fn append(path: &Path, records: &BTreeSet<Record>) -> Result<usize, LogError
 /// Compaction is the only caller and the only thing that should ever be one.
 /// `compact` drops superseded holdings assertions and nothing else — a
 /// superseded play still carries a listen.
-pub fn rewrite(path: &Path, records: &BTreeSet<Record>) -> Result<usize, LogError> {
+/// **`pub(crate)`, so one appender is a property of the build** — #249.
+///
+/// It was `pub`, and that was the hole `commit`'s doc claimed did not exist:
+/// `Instance::flush` was locked down so facts could only reach disk through an
+/// `Appending`, and this sat beside it wide open — so `shelf compact --write` rewrote
+/// every device's log with no lock at all. Compacting is the one operation that
+/// *removes*, which makes it the worst possible thing to leave outside the gate.
+///
+/// [`crate::librarian::rewrite_all`] is the way in, and it takes an `Appending` for the
+/// reason it says: a process that may not add to a log certainly may not rewrite it.
+pub(crate) fn rewrite(path: &Path, records: &BTreeSet<Record>) -> Result<usize, LogError> {
     let beside = path.with_extension("jsonl.compacting");
     let _ = std::fs::remove_file(&beside);
 

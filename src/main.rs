@@ -735,30 +735,50 @@ fn run_library(
             } else if dropped == 0 {
                 eprintln!("nothing to drop.");
             } else {
-                // **Each device's log holds that device's records**, so each is
-                // rewritten with its own share. Compacting one and not another
-                // is safe — the fold is the same either way — which is what
-                // makes this per-file rather than an all-or-nothing rewrite.
-                let mut devices: std::collections::BTreeSet<
-                    gmuse::model::id::Id<gmuse::model::entity::Device>,
-                > = std::collections::BTreeSet::new();
-                for record in &after {
-                    devices.insert(record.stamp.device);
+                // **Claimed, or handed over** — #249, §4.4, I15.
+                //
+                // This arm used to hold its own copy of the per-device loop and call
+                // `durable::rewrite` directly, which claimed nothing. So compacting —
+                // the one operation that *removes* — could rewrite a log from outside
+                // the lock while an engine held it, deleting whatever the engine had
+                // appended since this process folded. `durable::rewrite` is
+                // `pub(crate)` now, so the shape is unavailable rather than merely
+                // discouraged.
+                //
+                // The shape is `land`'s, because the question is the same one every
+                // writer in this program has to ask: hold the log, or ask whoever
+                // does. `library.compact` is the engine's answer and it already
+                // existed — it was simply unreachable from here.
+                match gmuse::librarian::Appending::claim(&loaded.data_dir) {
+                    Ok(appending) => {
+                        let total =
+                            gmuse::librarian::rewrite_all(&log, &loaded.data_dir, &appending)?;
+                        eprintln!("{total} record(s) kept, logs rewritten");
+                        // The player's cache names paths and nothing here moved a
+                        // file, so it stays valid. Said out loud because every other
+                        // command in this block drops it.
+                    }
+                    Err(held) => {
+                        let socket = gmuse::engine::socket::default_path();
+                        if !gmuse::engine::attach::is_live(&socket) {
+                            eprintln!("{held}");
+                            return Err("the log is held by something that is not \
+                                        answering on the socket; stop it and run this \
+                                        again"
+                                .into());
+                        }
+                        let client = gmuse_client::Client::connect(
+                            &socket,
+                            "gmuse-shelf",
+                            env!("CARGO_PKG_VERSION"),
+                        )?;
+                        client.call(gmuse_proto::method::LIBRARY_COMPACT, None)?;
+                        eprintln!(
+                            "the engine holds the log; it will compact its own copy — \
+                             {dropped} assertion(s) to drop"
+                        );
+                    }
                 }
-                let mut total = 0usize;
-                for each in devices {
-                    let mine: std::collections::BTreeSet<_> = after
-                        .iter()
-                        .filter(|r| r.stamp.device == each)
-                        .cloned()
-                        .collect();
-                    let path = gmuse::model::durable::log_path(&loaded.data_dir, each);
-                    total += gmuse::model::durable::rewrite(&path, &mine)?;
-                }
-                eprintln!("{total} record(s) kept, logs rewritten");
-                // The player's cache names paths and nothing here moved a
-                // file, so it stays valid. Said out loud because every other
-                // command in this block drops it.
             }
         }
         gmuse::cli::Shelf::Tidy { write } => {

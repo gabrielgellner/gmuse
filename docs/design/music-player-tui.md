@@ -5566,6 +5566,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   it was cleaned up or never created. It also checks the acknowledgement came back before the process went, because a
   shutdown that dropped the reply would pass the file check too.
 
+- **2026-09-13** **A gate is only as narrow as its widest door** (#249, §4.4, I15). Found by auditing the crate refactor
+  rather than by anything failing. `Instance::flush` is `pub(crate)` so facts can only reach disk through
+  `commit(log, dir, &Appending)`, and `commit`'s doc drew the conclusion out loud: _"the binary crate cannot write at
+  all except by calling this, which makes 'one appender' a property of the build rather than of everyone's good
+  intentions."_
+
+  `durable::rewrite` was `pub`. `shelf compact --write` held its own copy of the per-device loop and called it directly,
+  claiming nothing — so **the one operation that removes records could rewrite a log the engine held**, deleting
+  whatever the engine had appended since this process folded. Reverting the fix and running the test prints it:
+  `15 record(s) kept, logs rewritten`, from a second process, against a live engine's log.
+
+  What generalises is not "lock the other function too". It is that **a property of the build has to be checked at every
+  boundary it claims to hold at, and `pub` versus `pub(crate)` is where that claim actually lives.** One function was
+  narrowed, the sentence about it was written, and the sibling that did the more destructive thing kept its visibility
+  because nothing pointed at it. `rewrite` is `pub(crate)` now and `rewrite_all` — which has required an `Appending`
+  since it was written, for the reason it gives: _"a process that may not add to a log certainly may not rewrite it"_ —
+  is the only way in.
+
+  **The test needed a real superseded assertion, and that is the finding inside the finding.** The rewrite is guarded by
+  `dropped > 0`, so an empty log short-circuits with "nothing to drop" before reaching the line under test. Two attempts
+  to reproduce this by hand came back clean for exactly that reason — one of them also pointed the two processes at
+  different data directories, because `GMUSE_DATA_DIR` is read only by `run_engine`. Both would have passed against the
+  bug. The test now removes a placed copy, hands the scan to the engine so a second holdings assertion supersedes the
+  first, and **asserts there is something to drop before asserting what happens** — the second-assertion discipline from
+  the 2026-09-12 entry, applied to a setup step rather than to a predicate.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
