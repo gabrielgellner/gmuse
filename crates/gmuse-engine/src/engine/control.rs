@@ -37,7 +37,6 @@ use crate::instruction::{Fader, Instruction, ScopeTo};
 use gmuse_ids::entity::Recording;
 use gmuse_ids::id::Id;
 use gmuse_library::librarian::Desk;
-use gmuse_library::model::rows::Listing;
 
 /// What the connection workers can ask the player for.
 pub enum Ask {
@@ -65,38 +64,13 @@ pub enum Ask {
     /// reason: `Held.playing` is owned by the loop below, so a connection worker
     /// asks and waits one tick.
     Playing { reply: Sender<Sounded> },
-    /// A queue operation, with somewhere to put the answer.
+    /// **The programme changed under us; take a fresh window** — #257.
     ///
-    /// **A reply channel, because the state lives on this thread.** `Playing` is
-    /// owned by the loop below and a connection worker cannot borrow it, so the
-    /// worker asks and waits. That is the engine blocking on *itself*, bounded
-    /// by one tick — not I1, which forbids blocking on a **view**.
-    Queue {
-        op: QueueOp,
-        reply: Sender<Result<Answered, super::queue::Stale>>,
-    },
-}
-
-/// What a client asked of the queue.
-pub enum QueueOp {
-    /// Replace it whole, for a view that holds a mirror (#233).
-    Set {
-        ids: Vec<gmuse_ids::copy::CopyId>,
-        base: u64,
-    },
-    Get,
-    Enqueue {
-        ids: Vec<gmuse_ids::copy::CopyId>,
-        base: Option<u64>,
-    },
-    Remove {
-        index: usize,
-        base: Option<u64>,
-    },
-    Clear {
-        base: Option<u64>,
-    },
-    SetScope(gmuse_library::next::Scope),
+    /// The queue itself is no longer asked of this thread: a view's `queue.*` goes to the
+    /// librarian, which owns the programme. But the window here was filled from the old
+    /// one, so the mutation has to say so or the change would not take effect until the
+    /// window ran dry two tracks later.
+    Resync,
 }
 
 /// What is sounding, for a client that asked instead of waiting.
@@ -114,21 +88,6 @@ pub struct Sounded {
     pub sample_rate: u32,
     /// Zero when the device has gone, so a client knows not to extrapolate (#212).
     pub rate: f64,
-}
-
-/// The queue as it stands after an operation.
-pub struct Answered {
-    pub version: u64,
-    /// The entries, for a read. Absent for a mutation, which answers with the
-    /// version and lets the `queue` event carry the rest (§7.8).
-    pub entries: Option<Vec<gmuse_ids::copy::CopyId>>,
-    /// **What plays next, for a read** — #233: scope, shuffle, repeat,
-    /// repeat_current.
-    ///
-    /// On the read as well as the event, so a view that attaches mid-stream knows
-    /// them without waiting for one to change. Absent for a mutation, for the same
-    /// reason `entries` is.
-    pub modes: Option<(gmuse_library::next::Scope, bool, bool, bool)>,
 }
 
 /// What the handshake needs to report, published by this thread.
@@ -227,7 +186,7 @@ impl Control {
                     // **Everything that outlives a stream** (#241), so a cable coming
                     // out does not empty the queue.
                     let mut held = Held {
-                        queue: super::queue::Playing::new(pool_of(&desk)),
+                        queue: super::queue::Playing::new(),
                         playing: None,
                         pending: None,
                         announced: 0,
@@ -289,9 +248,9 @@ impl Control {
                             .as_deref()
                             .and_then(|r| r.parse::<uuid::Uuid>().ok())
                             .map(gmuse_ids::id::Id::from_uuid)
-                            && let Some(source) = source_for(&desk, recording)
+                            && let Some(cue) = super::queue::Playing::resume(&desk, recording)
                         {
-                            player.load(source);
+                            player.load(source_of(&cue, 1.0));
                             if was > Duration::ZERO {
                                 player.seek(crate::audio::SeekTo::Absolute(was));
                             }
@@ -350,7 +309,7 @@ struct Told {
 /// remembers between ticks lives here, owned by the thread body rather than by `run`,
 /// and a rebuilt player is handed the same `Held` back.
 struct Held {
-    /// The queue, the modes and the materialised pool (#232).
+    /// The window, and the door to the programme behind it (#257).
     queue: super::queue::Playing,
     /// What the `playback` event names.
     playing: Option<String>,
@@ -429,10 +388,10 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 &mut held.playing,
             ),
             Ok(Ask::Load { recording }) => {
-                match source_for(desk, recording) {
-                    Some(source) => {
+                match held.queue.start(desk, recording) {
+                    Some(cue) => {
                         held.playing = Some(recording.to_string());
-                        player.load(source);
+                        player.load(source_of(&cue, player.volume()));
                         true
                     }
                     // Nothing this device holds. Not an error the player can
@@ -449,65 +408,34 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 let _ = reply.send(sounded(player, &shared, held.playing.as_deref(), lost));
                 false
             }
-            Ok(Ask::Queue { op, reply }) => {
-                let answered = match op {
-                    QueueOp::Get => {
-                        let (version, entries) = held.queue.get();
-                        Ok(Answered {
-                            version,
-                            entries: Some(entries),
-                            modes: Some(held.queue.modes()),
-                        })
-                    }
-                    QueueOp::Enqueue { ids, base } => {
-                        held.queue.enqueue(&ids, base).map(|version| Answered {
-                            version,
-                            entries: None,
-                            modes: None,
-                        })
-                    }
-                    QueueOp::Set { ids, base } => {
-                        held.queue.set(&ids, base).map(|version| Answered {
-                            version,
-                            entries: None,
-                            modes: None,
-                        })
-                    }
-                    QueueOp::Remove { index, base } => {
-                        held.queue.remove(index, base).map(|version| Answered {
-                            version,
-                            entries: None,
-                            modes: None,
-                        })
-                    }
-                    QueueOp::Clear { base } => held.queue.clear(base).map(|version| Answered {
-                        version,
-                        entries: None,
-                        modes: None,
-                    }),
-                    QueueOp::SetScope(mode) => Ok(Answered {
-                        version: held.queue.set_scope(mode),
-                        entries: None,
-                        modes: None,
-                    }),
-                };
-                // A dropped receiver means the client gave up, which is not this
-                // thread's problem.
-                let _ = reply.send(answered);
+            // **The programme moved, so the window did too** — #257.
+            //
+            // Whoever mutated it did so through the librarian, which is the owner; this
+            // side only has to notice. A resync takes a window from the top of the
+            // programme as it now stands, which is what makes a `queue.set` audible at the
+            // next track rather than two tracks later.
+            Ok(Ask::Resync) => {
+                held.queue.reopen(desk);
                 false
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => false,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
-        // **A new fold means a new pool.** A track imported while something is
-        // playing should be playable next, and the cheapest way to know is the
-        // pointer the librarian swapped.
+        // **A new fold may have moved a file, so re-cue what is waiting** — #257.
+        //
+        // There is no pool to refresh any more; the programme is the librarian's and it
+        // rebuilt itself when the fold did. What can go stale here is a *locator*: a relink
+        // or a rescan changes where a row's audio is, and the window holds paths. Taking a
+        // fresh window is cheap and is the only thing that could be wrong.
         let now = desk.current();
         if !Arc::ptr_eq(&held.folded, &now) {
-            held.queue.refresh(pool_of(desk));
+            held.queue.reopen(desk);
             held.folded = now;
         }
+
+        // **Top the window up, without waiting** — the refill is off every deadline.
+        held.queue.keep_topped_up(desk);
 
         // What the player has to say for itself. Draining rather than taking
         // one: a track change can arrive as `Finished` then `Loaded` in the
@@ -519,22 +447,17 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 // needs a reply before it ends; a detached view cannot serve a
                 // deadline, so nothing is asked of one.
                 PlayerEvent::NeedNext => {
-                    match held
-                        .queue
-                        .take_next()
-                        .and_then(|(id, _source)| recording_of(desk, id).map(|rec| (id, rec)))
-                    {
-                        Some((id, recording)) => match source_for(desk, recording) {
-                            Some(source) => {
-                                held.pending = Some(recording.to_string());
-                                held.queue.now_playing(Some(id));
-                                player.set_next(Some(source));
-                            }
-                            // Named and not held: a row the library has and this
-                            // device does not is an ordinary thing to reach.
-                            None => player.set_next(None),
-                        },
-                        // End of pool. Letting playback stop is the answer, and
+                    // **A `pop_front`, and no ask at all** — #257. The librarian resolved
+                    // the path when it filled the window, so nothing here queries anything
+                    // on the deadline. A cue that reached the window is one this device can
+                    // open: an unopenable row was dropped librarian-side, which shortens the
+                    // window rather than handing the decoder a path that would underrun.
+                    match held.queue.take_next() {
+                        Some(cue) => {
+                            held.pending = Some(cue.recording.to_string());
+                            player.set_next(Some(source_of(&cue, player.volume())));
+                        }
+                        // The programme ran out. Letting playback stop is the answer, and
                         // it has to be *an* answer or the decoder waits.
                         None => player.set_next(None),
                     }
@@ -601,7 +524,7 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 // describe what will happen. They are small, they change on the
                 // same events, and `set_scope`/`set_mode` already move the version
                 // — so there is nothing to add but the fields.
-                let (scope, shuffle, repeat, repeat_current) = held.queue.modes();
+                let (scope, shuffle, repeat, repeat_current) = held.queue.modes(desk);
                 engine.publish(&Event::new(
                     Topic::Queue,
                     serde_json::json!({
@@ -689,40 +612,36 @@ fn wait_for_a_device(
     None
 }
 
-/// Every row the library holds, as the pool to pick from.
+/// **A cue, as a thing to decode — and the gain applied here** (#257).
 ///
-/// **A projection read, not a query** (§4.4). `Listing::rows` walks what the
-/// librarian already folded, and `Shelf::from_members` groups it — the same call
-/// the TUI makes for its own list, which is what keeps the two from disagreeing
-/// about what "the library" contains.
-fn pool_of(desk: &Arc<Desk>) -> gmuse_library::shelf::Shelf {
-    let answer = desk.current();
-    let rows: std::collections::HashSet<gmuse_ids::copy::CopyId> =
-        Listing::rows(&answer.library).into_iter().collect();
-    gmuse_library::shelf::Shelf::from_members(&answer.library, rows, true)
-}
-
-/// The recording a row draws, so a pick can be resolved to a locator.
-fn recording_of(desk: &Arc<Desk>, id: gmuse_ids::copy::CopyId) -> Option<Id<Recording>> {
-    let answer = desk.current();
-    let rows: &dyn Listing = &answer.library;
-    rows.recording_of(id)
-}
-
-/// Build a playable source from a recording, through the projection.
+/// `source_for` played everything at unity and said why: the ReplayGain tags are the
+/// library's and the person's gain preference is this side's, and a cue had no way to carry
+/// the first. It does now, so the arithmetic happens where both halves are.
 ///
-/// **Unity gain for now.** `source_for` in the UI applies replay gain from the
-/// encoding's levels and the user's gain preference — and that preference is
-/// control state the engine does not carry yet. Playing at unity is wrong by a
-/// few dB and is not wrong about *what* plays; a silent guess at the preference
-/// would be the worse error.
-fn source_for(desk: &Arc<Desk>, recording: Id<Recording>) -> Option<crate::audio::TrackSource> {
-    let answer = desk.current();
-    let (_encoding, locator) = answer.library.open(recording, &[desk.device()], &[])?;
-    Some(crate::audio::TrackSource {
-        path: std::path::PathBuf::from(locator.to_string()),
-        gain: 1.0,
-    })
+/// Track gain before album gain, because a queue is not an album: playing one track of a
+/// record next to one of another is exactly when per-track normalisation is what a listener
+/// wants. Falls back to unity when neither tag is there, which is the honest answer for a
+/// file nothing measured.
+fn source_of(cue: &super::window::Cue, _fader: f32) -> crate::audio::TrackSource {
+    let db = cue.track_db.or(cue.album_db);
+    crate::audio::TrackSource {
+        path: cue.path.clone(),
+        // **Clamped, and the peak is why.** A +6 dB correction on a track that already peaks
+        // at 0.99 clips, and clipping is audible where being 6 dB quiet is merely wrong.
+        gain: match db {
+            Some(db) => {
+                let linear = 10f32.powf(db / 20.0);
+                let ceiling = cue
+                    .track_peak
+                    .or(cue.album_peak)
+                    .filter(|p| *p > 0.0)
+                    .map(|p| 1.0 / p)
+                    .unwrap_or(1.0);
+                linear.min(ceiling).clamp(0.05, 4.0)
+            }
+            None => 1.0,
+        },
+    }
 }
 
 /// Apply one text-language command. Returns whether it was a discontinuity.
@@ -765,8 +684,8 @@ fn apply(
         // being abandoned rather than played out, so there is nothing to join onto
         // and `pending` is not the right slot.
         Instruction::Next => {
-            let picked = queue.take_next().map(|(id, _)| id);
-            load_picked(player, queue, desk, pending, playing, picked)
+            let picked = queue.skip_next(desk);
+            load_picked(player, pending, playing, picked)
         }
         // **`prev` is the pool's previous, and always was.** An earlier note here
         // refused it, on the grounds that going back is not the inverse of
@@ -777,8 +696,8 @@ fn apply(
         //
         // A play *history* is still a design question, and a different feature.
         Instruction::Prev => {
-            let picked = queue.take_prev();
-            load_picked(player, queue, desk, pending, playing, picked)
+            let picked = queue.take_prev(desk);
+            load_picked(player, pending, playing, picked)
         }
 
         // **A volume change is not a transport discontinuity**, so §7.8 has nothing
@@ -813,15 +732,15 @@ fn apply(
 
         // **What plays next** — §6 assigns these to the control thread.
         Instruction::Mode(which, to) => {
-            queue.set_mode(which, to);
+            queue.set_mode(desk, which, to);
             false
         }
         Instruction::Scope(to) => {
             let mode = match to {
                 ScopeTo::Set(mode) => mode,
-                ScopeTo::Cycle => queue.scope().cycle(),
+                ScopeTo::Cycle => queue.scope(desk).cycle(),
             };
-            queue.set_scope(mode);
+            queue.set_scope(desk, mode);
             false
         }
 
@@ -844,24 +763,20 @@ fn apply(
 /// tell every view the old track was still playing.
 fn load_picked(
     player: &PlayerHandle,
-    queue: &mut super::queue::Playing,
-    desk: &Arc<Desk>,
     pending: &mut Option<String>,
     playing: &mut Option<String>,
-    picked: Option<gmuse_ids::copy::CopyId>,
+    picked: Option<super::window::Cue>,
 ) -> bool {
-    let Some((id, recording)) = picked.and_then(|id| recording_of(desk, id).map(|r| (id, r)))
-    else {
-        // End of pool, or a row the library has and this device does not.
+    // **Resolves nothing** — #257. The cue arrived with a path the librarian chose and a
+    // recording to name, so there is no library question left to ask here. That this
+    // function used to take a `Desk` is the whole of what moved.
+    let Some(cue) = picked else {
+        // The programme ran out, or its next row is not held on this device.
         return false;
     };
-    let Some(source) = source_for(desk, recording) else {
-        return false;
-    };
-    queue.now_playing(Some(id));
     *pending = None;
-    *playing = Some(recording.to_string());
-    player.load(source);
+    *playing = Some(cue.recording.to_string());
+    player.load(source_of(&cue, player.volume()));
     true
 }
 

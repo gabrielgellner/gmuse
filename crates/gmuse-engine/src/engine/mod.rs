@@ -50,6 +50,7 @@ pub mod library;
 pub mod outbox;
 pub mod queue;
 pub mod socket;
+pub mod window;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};

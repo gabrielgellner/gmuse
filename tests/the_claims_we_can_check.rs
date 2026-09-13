@@ -373,14 +373,20 @@ fn unused_example() {}
 /// dependency check replaces it and is strictly better, because it cannot be satisfied by
 /// spelling an import differently.
 ///
-/// The 14 that already left were never library concepts: `model::id` and `model::entity`
-/// are `pub use gmuse_ids::{…}` in `model/mod.rs`, so those call sites named gmuse-ids
-/// types through a library path. What remains is real — `next::`, `Shelf`, `playlist`,
-/// `Desk`, `Answer`, `Changed`, `Touched`, `Listing`, and the `lock` module, which wants a
-/// crate of its own because the engine, the librarian and `main` all need it.
+/// **31 → 18 → 12**, and the character changed more than the count. The first 14 were never
+/// library concepts: `model::id` and `model::entity` are `pub use gmuse_ids::{…}` in
+/// `model/mod.rs`, so those call sites named gmuse-ids types through a library path. The next
+/// six were the *resolution* — `Shelf`, `playlist`, `next::prev`, `next::next_with_source`
+/// and the materialised pool — which is what #257 is actually about.
+///
+/// What is left is almost entirely `use` lines and the `Desk`: the librarian's identity, the
+/// `Ask`/`Reply` vocabulary that becomes a channel, `Scope`, `Touched`/`Changed`, and two
+/// stragglers with reasons of their own — `history::now_ms`, which stamps a rate fact the
+/// engine should not be appending, and `lock`, whose 193 lines of `std::fs` want a crate of
+/// their own because the engine, the librarian and `main` all need them.
 #[test]
 fn the_engine_does_not_reach_further_into_the_library() {
-    const CEILING: usize = 18;
+    const CEILING: usize = 12;
 
     let engine = Path::new("crates").join("gmuse-engine").join("src");
     let mut found: BTreeMap<PathBuf, usize> = BTreeMap::new();

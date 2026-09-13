@@ -132,7 +132,7 @@ impl Version {
 }
 
 /// The ordered list of what will play.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Programme {
     entries: Vec<Entry>,
     mode: Mode,
@@ -152,6 +152,24 @@ pub struct Programme {
     /// which is what makes a token from an older version fail to match rather than
     /// matching the wrong entry.
     minting: u64,
+}
+
+/// **Version 1, because 0 means "no version".**
+///
+/// A view asserts `version > 0` to mean "a version was read rather than defaulted", which is
+/// the only way to tell an answer from an absent one over a wire that fills in zeros. An empty
+/// programme is still a programme and has a version; nothing has one before it exists.
+impl Default for Programme {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            mode: Mode::default(),
+            scope: crate::next::Scope::default(),
+            shuffled: false,
+            version: Version(1),
+            minting: 0,
+        }
+    }
 }
 
 impl Programme {

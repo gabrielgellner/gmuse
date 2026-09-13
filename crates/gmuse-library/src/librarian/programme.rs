@@ -42,6 +42,7 @@ pub enum Ask {
     Play {
         rows: Vec<CopyId>,
         window: usize,
+        base: Option<u64>,
     },
     /// **Build a programme from the library and cue from one row** — a play gesture.
     ///
@@ -60,6 +61,56 @@ pub enum Ask {
         /// an order.
         seed: u64,
         window: usize,
+    },
+    /// **Put these rows at the end** — what `queue.enqueue` is now.
+    ///
+    /// A programme is one list, so "play next" and "add to the queue" are both an insert at
+    /// a position. `base` is #233's optimistic concurrency: two views reordering at once
+    /// *is* a lost update, so a mutation carries the version it was computed against.
+    Push {
+        rows: Vec<CopyId>,
+        base: Option<u64>,
+    },
+    /// **Take out the entry at this index** — what `queue.remove` is.
+    ///
+    /// By index because that is what the wire says (§7.4) and a view counts rows. **A token
+    /// would be better** and `Ask::Remove` is it: an index races, which is exactly why
+    /// `base` has to be checked. Changing the wire is a protocol decision, not a refactor.
+    RemoveAt {
+        index: usize,
+        base: Option<u64>,
+    },
+    /// **Play this recording, and open a programme around it.**
+    ///
+    /// For the callers that name a recording rather than a programme position: a view saying
+    /// "play this", and a session resume.
+    ///
+    /// **It opens a programme, and that is load-bearing rather than tidy.** `Ask::Load` used
+    /// to load and touch nothing, which worked only because the old design had an *implicit*
+    /// programme — the whole library, always, walked from a cursor. With an explicit one,
+    /// loading without opening leaves the window empty and playback stops after one track.
+    /// Two integration tests said so, which is what they are for.
+    ///
+    /// The narrowing and shuffle are whatever the programme already had, so pressing play on
+    /// a track does not silently reset them.
+    Start {
+        recording: crate::model::id::Id<crate::model::entity::Recording>,
+        window: usize,
+    },
+    /// **A window from the *end* of the programme, changing nothing.**
+    ///
+    /// What `prev` asks with nothing playing. `next::step` walked the pool backwards from
+    /// "whichever end we are walking from" when there was no current track, and this is that
+    /// rule said about a list.
+    Tail {
+        n: usize,
+    },
+    /// **A window from the top of the programme, changing nothing** — a resync.
+    ///
+    /// Distinct from `Open`, which rebuilds the pool. A resync means *the programme is
+    /// right and my copy of it is not*, so nothing may move.
+    Head {
+        n: usize,
     },
     /// **The `n` cues after this token** — the refill.
     ///
@@ -113,11 +164,66 @@ pub enum Ask {
     Remove {
         tokens: Vec<u64>,
     },
-    Clear,
+    Clear {
+        base: Option<u64>,
+    },
     /// **The programme as it stands, for drawing it.** Up to `limit` entries.
     Look {
         limit: usize,
     },
+}
+
+impl Ask {
+    /// The version this mutation was computed against, if it names one.
+    ///
+    /// **Exhaustive with no catch-all**, so a new mutating variant does not compile until
+    /// somebody has decided whether it needs a guard. A `_ => None` would make "no guard"
+    /// the silent default, which is the failure this whole file keeps naming.
+    /// Whether applying this changes the programme, so a caller knows to resync.
+    pub fn mutating(&self) -> bool {
+        match self {
+            Ask::Play { .. }
+            | Ask::Open { .. }
+            | Ask::Push { .. }
+            | Ask::RemoveAt { .. }
+            | Ask::Clear { .. }
+            | Ask::Reorder { .. }
+            | Ask::Shuffle { .. }
+            | Ask::Rescope { .. }
+            | Ask::SetMode(_)
+            | Ask::Insert { .. }
+            | Ask::Remove { .. } => true,
+            Ask::Start { .. }
+            | Ask::Tail { .. }
+            | Ask::Head { .. }
+            | Ask::After { .. }
+            | Ask::Before { .. }
+            | Ask::Look { .. } => false,
+        }
+    }
+
+    fn base(&self) -> Option<u64> {
+        match self {
+            Ask::Play { base, .. }
+            | Ask::Push { base, .. }
+            | Ask::RemoveAt { base, .. }
+            | Ask::Clear { base } => *base,
+            // Reads, and the asks whose whole job is to replace what a caller holds.
+            Ask::Open { .. }
+            | Ask::Start { .. }
+            | Ask::Tail { .. }
+            | Ask::Head { .. }
+            | Ask::After { .. }
+            | Ask::Before { .. }
+            | Ask::Reorder { .. }
+            | Ask::Shuffle { .. }
+            | Ask::Rescope { .. }
+            | Ask::SetMode(_)
+            | Ask::Insert { .. }
+            | Ask::Remove { .. }
+            | Ask::Look { .. } => None,
+        }
+    }
 }
 
 /// Where to find one entry's audio, and what the tags say about its loudness.
@@ -126,6 +232,13 @@ pub struct Cued {
     /// The programme entry. **Opaque**: hand it back, do not read it.
     pub token: u64,
     pub path: PathBuf,
+    /// **Which recording is sounding**, for the `playback` event to name.
+    ///
+    /// The one library identity a cue carries, and it is unavoidable: a view identifies the
+    /// playing track by recording — `gp` jumps to it, the info panel follows it — and the
+    /// engine is the only actor that knows what is sounding. Not the row: two rows can hold
+    /// one recording, and what a listener is hearing is the recording.
+    pub recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
     /// The ReplayGain tags, in dB, and nothing done with them.
     ///
     /// **How loud to play is the engine's question**, because it is the half that holds
@@ -187,8 +300,21 @@ pub(crate) fn answer(
 ) -> Reply {
     use crate::programme::EntryToken;
 
+    // **#233's optimistic concurrency, in one place.** A mutation computed against a
+    // version the programme has moved past is refused rather than applied to something
+    // else — two views reordering at once is a lost update, and §8.8 says in as many words
+    // that this is the state where that matters. A `None` base is a caller that did not
+    // care, which the wire allows.
+    if let Some(base) = ask.base()
+        && base != plan.version().as_u64()
+    {
+        return Reply::Stale {
+            version: plan.version().as_u64(),
+        };
+    }
+
     match ask {
-        Ask::Play { rows, window } => {
+        Ask::Play { rows, window, .. } => {
             plan.replace(rows);
             Reply::Window {
                 version: plan.version().as_u64(),
@@ -222,6 +348,47 @@ pub(crate) fn answer(
                 cues: cues_for(entries, library, device),
             }
         }
+
+        Ask::Start { recording, window } => {
+            // **A scan of the rows, and that is the right answer for one.** #123's entry is
+            // the precedent: building an index of every recording to ask about one track is
+            // worse than walking them, and pressing play happens at human speed.
+            let at = Listing::rows(library)
+                .into_iter()
+                .find(|row| library.recording_of(*row) == Some(recording));
+            answer(
+                plan,
+                library,
+                device,
+                Ask::Open {
+                    at,
+                    scope: plan.scope(),
+                    shuffle: plan.shuffled(),
+                    seed: 0,
+                    window,
+                },
+            )
+        }
+
+        Ask::Tail { n } => {
+            let entries = match plan.entries().last().copied() {
+                Some(last) => {
+                    let mut out = vec![last];
+                    out.extend(plan.before(last.token, n.saturating_sub(1)));
+                    out
+                }
+                None => Vec::new(),
+            };
+            Reply::Window {
+                version: plan.version().as_u64(),
+                cues: cues_for(entries, library, device),
+            }
+        }
+
+        Ask::Head { n } => Reply::Window {
+            version: plan.version().as_u64(),
+            cues: cues_for(plan.head(n), library, device),
+        },
 
         Ask::After { token, n } => {
             let token = EntryToken::from_u64(token);
@@ -328,7 +495,24 @@ pub(crate) fn answer(
             }
         }
 
-        Ask::Clear => {
+        Ask::Push { rows, .. } => {
+            plan.push(rows);
+            Reply::Settled {
+                version: plan.version().as_u64(),
+            }
+        }
+
+        Ask::RemoveAt { index, .. } => {
+            let token = plan.entries().get(index).map(|e| e.token);
+            if let Some(token) = token {
+                plan.remove(&[token]);
+            }
+            Reply::Settled {
+                version: plan.version().as_u64(),
+            }
+        }
+
+        Ask::Clear { .. } => {
             plan.clear();
             Reply::Settled {
                 version: plan.version().as_u64(),
@@ -403,6 +587,7 @@ fn cues_for(
             let loudness = library.playable(entry.row).and_then(|p| p.gain);
             Some(Cued {
                 token: entry.token.as_u64(),
+                recording,
                 path: PathBuf::from(locator),
                 track_db: loudness.and_then(|l| l.track_db),
                 track_peak: loudness.and_then(|l| l.track_peak),
@@ -479,6 +664,7 @@ mod tests {
             Ask::Play {
                 rows: rows.clone(),
                 window: 2,
+                base: None,
             },
         ) else {
             panic!("a play did not answer with a window");
@@ -506,7 +692,15 @@ mod tests {
         let (l, rows) = library(1);
         let mut plan = Programme::new();
 
-        let Reply::Window { cues, .. } = ask(&mut plan, &l, Ask::Play { rows, window: 1 }) else {
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows,
+                window: 1,
+                base: None,
+            },
+        ) else {
             panic!("no window");
         };
         let cue = &cues[0];
@@ -527,7 +721,15 @@ mod tests {
     fn a_stale_token_is_reported() {
         let (l, rows) = library(2);
         let mut plan = Programme::new();
-        ask(&mut plan, &l, Ask::Play { rows, window: 1 });
+        ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows,
+                window: 1,
+                base: None,
+            },
+        );
 
         match ask(&mut plan, &l, Ask::After { token: 9_999, n: 2 }) {
             Reply::Stale { version } => assert!(version > 0),
@@ -554,6 +756,7 @@ mod tests {
             Ask::Play {
                 rows: with_a_ghost,
                 window: 3,
+                base: None,
             },
         ) else {
             panic!("no window");
@@ -577,7 +780,15 @@ mod tests {
     fn a_look_reports_the_mode_and_the_whole_length() {
         let (l, rows) = library(3);
         let mut plan = Programme::new();
-        ask(&mut plan, &l, Ask::Play { rows, window: 1 });
+        ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows,
+                window: 1,
+                base: None,
+            },
+        );
         ask(&mut plan, &l, Ask::SetMode(Mode::RepeatAll));
 
         let Reply::Look {
@@ -603,7 +814,15 @@ mod tests {
         let (l, rows) = library(1);
         let mut plan = Programme::new();
         ask(&mut plan, &l, Ask::SetMode(Mode::RepeatCurrent));
-        let Reply::Window { cues, .. } = ask(&mut plan, &l, Ask::Play { rows, window: 2 }) else {
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows,
+                window: 2,
+                base: None,
+            },
+        ) else {
             panic!("no window");
         };
 
@@ -675,6 +894,7 @@ mod tests {
         let Some(Reply::Window { cues, .. }) = desk.programme(Ask::Play {
             rows: rows.clone(),
             window: 2,
+            base: None,
         }) else {
             panic!("the desk did not answer a Play");
         };
@@ -736,7 +956,15 @@ mod tests {
     fn a_reorder_to_the_end_leaves_nothing_after_it() {
         let (l, rows) = library(3);
         let mut plan = Programme::new();
-        let Reply::Window { cues, .. } = ask(&mut plan, &l, Ask::Play { rows, window: 1 }) else {
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows,
+                window: 1,
+                base: None,
+            },
+        ) else {
             panic!("no window");
         };
         let playing = cues[0].token;
@@ -902,7 +1130,15 @@ mod tests {
     fn before_walks_back_and_repeat_all_wraps_to_the_end() {
         let (l, rows) = library(3);
         let mut plan = Programme::new();
-        ask(&mut plan, &l, Ask::Play { rows, window: 1 });
+        ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows,
+                window: 1,
+                base: None,
+            },
+        );
         let held: Vec<u64> = plan.entries().iter().map(|e| e.token.as_u64()).collect();
 
         let Reply::Window { cues, .. } = ask(
@@ -1004,6 +1240,7 @@ mod tests {
             Ask::Play {
                 rows: rows[..5].to_vec(),
                 window: 1,
+                base: None,
             },
         );
         assert_eq!(

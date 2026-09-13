@@ -2832,53 +2832,77 @@ fn run_engine(
             }
         }
 
-        /// Ask the control thread, which owns the queue.
+        /// **Ask the librarian, which owns the programme** — #257.
         ///
-        /// **Bounded, and the bound is the point.** The worker waits on the
-        /// engine rather than the other way round, so I1 is untouched — but a
-        /// control thread that stopped ticking must not hold a client for ever,
-        /// so a timeout turns that into an error the client can see.
-        fn queue(
+        /// It used to ask the control thread, because the queue lived there with a
+        /// materialised pool behind it. Under the triangle the queue is a *librarian*
+        /// question: a UI asks the actor that is the authority on the answer, and what plays
+        /// next is not something the audio engine decides.
+        ///
+        /// **Which also takes the control thread off this path entirely.** A socket worker
+        /// blocking on the librarian blocks itself; blocking on the control thread put a
+        /// client's round trip in front of transport.
+        ///
+        /// A mutation is followed by `Ask::Resync`, because the engine's window was filled
+        /// from the programme as it was — without it a `queue.set` would not be audible until
+        /// the window ran dry two tracks later.
+        fn programme(
             &self,
-            op: gmuse::engine::control::QueueOp,
+            ask: gmuse::librarian::programme::Ask,
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse::librarian::programme::Reply;
             use gmuse_proto::{RpcError, error::code};
-            let (tx, rx) = crossbeam_channel::bounded(1);
-            if !self
-                .control
-                .ask(gmuse::engine::control::Ask::Queue { op, reply: tx })
-            {
-                return Err(RpcError::new(code::INTERNAL, "the player is not running"));
-            }
-            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                Ok(Ok(answered)) => {
-                    let mut body = serde_json::json!({ "version": answered.version });
-                    if let Some(entries) = answered.entries {
-                        // Back out to recordings, which is the grain a client
-                        // asked in (I17).
-                        let named: Vec<String> = entries
-                            .iter()
-                            .filter_map(|id| self.recording_of(*id))
-                            .map(|r| r.to_string())
-                            .collect();
-                        body["entries"] = serde_json::json!(named);
-                    }
-                    // **The same four fields the `queue` event carries** (#233),
-                    // so a view that just attached does not have to wait for one
-                    // of them to change before it can draw the queue correctly.
-                    if let Some((scope, shuffle, repeat, repeat_current)) = answered.modes {
-                        body["scope"] = serde_json::json!(scope.label());
-                        body["shuffle"] = serde_json::json!(shuffle);
-                        body["repeat"] = serde_json::json!(repeat);
-                        body["repeat_current"] = serde_json::json!(repeat_current);
-                    }
-                    Ok(body)
-                }
-                Ok(Err(stale)) => Err(RpcError::stale_version(stale.current)),
-                Err(_) => Err(RpcError::new(
+
+            let mutating = ask.mutating();
+            let Some(reply) = self.desk.programme(ask) else {
+                return Err(RpcError::new(
                     code::INTERNAL,
-                    "the control thread did not answer",
-                )),
+                    "the librarian is not running",
+                ));
+            };
+
+            if mutating {
+                // Best effort: a control thread that has stopped ticking is a separate
+                // failure, and the mutation landed either way.
+                self.control.ask(gmuse::engine::control::Ask::Resync);
+            }
+
+            match reply {
+                Reply::Settled { version } | Reply::Window { version, .. } => {
+                    Ok(serde_json::json!({ "version": version }))
+                }
+                // **The rarer case than the design assumed**, because a reshuffle is a
+                // reorder and keeps every token. This is a genuine replacement.
+                Reply::Stale { version } => Err(RpcError::stale_version(version)),
+                Reply::Look {
+                    version,
+                    mode,
+                    scope,
+                    shuffled,
+                    entries,
+                    total,
+                } => {
+                    use gmuse_library::programme::Mode;
+                    // **Recordings on the wire, rows underneath** — I17: only user-facing
+                    // grains cross, and a recording is what a person chooses.
+                    let named: Vec<String> = entries
+                        .iter()
+                        .filter_map(|e| self.recording_of(e.row))
+                        .map(|r| r.to_string())
+                        .collect();
+                    Ok(serde_json::json!({
+                        "version": version,
+                        "entries": named,
+                        "total": total,
+                        // **The same four fields the `queue` event carries** (#233), so a view
+                        // that just attached can draw the queue correctly without waiting for
+                        // one of them to change.
+                        "scope": scope.label(),
+                        "shuffle": shuffled,
+                        "repeat": mode == Mode::RepeatAll,
+                        "repeat_current": mode == Mode::RepeatCurrent,
+                    }))
+                }
             }
         }
 
@@ -3218,7 +3242,9 @@ fn run_engine(
                 // complaint against `--repl`, and routing here is what stops a
                 // second one being written.
                 Call::PlaybackGet { format } => self.playing(format),
-                Call::QueueGet => self.queue(gmuse::engine::control::QueueOp::Get),
+                Call::QueueGet => {
+                    self.programme(gmuse::librarian::programme::Ask::Look { limit: 500 })
+                }
                 Call::QueueEnqueue {
                     recordings,
                     base_version,
@@ -3246,8 +3272,11 @@ fn run_engine(
                             }
                         }
                     }
-                    self.queue(gmuse::engine::control::QueueOp::Enqueue {
-                        ids,
+                    // **`enqueue` is an insert at the end**, because a programme is one
+                    // list. The two-tier model — a queue that won unconditionally over a
+                    // pool walk — collapsed into a position in it (#257).
+                    self.programme(gmuse::librarian::programme::Ask::Push {
+                        rows: ids,
                         base: base_version,
                     })
                 }
@@ -3278,20 +3307,21 @@ fn run_engine(
                             }
                         }
                     }
-                    self.queue(gmuse::engine::control::QueueOp::Set {
-                        ids,
-                        base: base_version,
+                    self.programme(gmuse::librarian::programme::Ask::Play {
+                        rows: ids,
+                        window: 3,
+                        base: Some(base_version),
                     })
                 }
                 Call::QueueRemove {
                     index,
                     base_version,
-                } => self.queue(gmuse::engine::control::QueueOp::Remove {
+                } => self.programme(gmuse::librarian::programme::Ask::RemoveAt {
                     index,
                     base: base_version,
                 }),
                 Call::QueueClear { base_version } => {
-                    self.queue(gmuse::engine::control::QueueOp::Clear { base: base_version })
+                    self.programme(gmuse::librarian::programme::Ask::Clear { base: base_version })
                 }
                 Call::SetScope { mode } => {
                     let Some(mode) = gmuse::next::Scope::parse(&mode) else {
@@ -3300,7 +3330,17 @@ fn run_engine(
                             format!("{mode:?} is not an aaa mode"),
                         ));
                     };
-                    self.queue(gmuse::engine::control::QueueOp::SetScope(mode))
+                    // **A scope change rebuilds the programme**, anchored at what is
+                    // sounding — which only the engine's window knows, so the engine does
+                    // it. Routed as an instruction rather than an ask for that reason.
+                    if !self.control.ask(gmuse::engine::control::Ask::Do(
+                        gmuse_engine::instruction::Instruction::Scope(
+                            gmuse_engine::instruction::ScopeTo::Set(mode),
+                        ),
+                    )) {
+                        return Err(RpcError::new(code::INTERNAL, "the player is not running"));
+                    }
+                    Ok(serde_json::json!({ "accepted": true }))
                 }
 
                 Call::PlayerLoad { recording } => {
