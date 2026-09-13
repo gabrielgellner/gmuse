@@ -197,6 +197,35 @@ impl Desk {
         let (reports, scans) = unbounded();
         let published = Arc::clone(&current);
 
+        // **The right to append, claimed here and held for this desk's life** —
+        // #218. One process per log, enforced by the kernel rather than by §4.4
+        // being read.
+        //
+        // Failing to get it is not fatal and not silent: what comes back is a
+        // *reading* desk, which is the same shape `Desk::read_only` produces and
+        // which every `appender()` call site already handles. A caller that must
+        // append — the engine — checks and says so.
+        let writing = match &data_dir {
+            Some(dir) => match Appending::claim(dir) {
+                Ok(guard) => Some((dir.clone(), guard)),
+                Err(e) => {
+                    eprintln!(
+                        "librarian: another process is appending to {}, so this one will \
+                         only read — {e}",
+                        dir.display()
+                    );
+                    None
+                }
+            },
+            // No directory to write to, so nothing to claim: an in-memory log, which
+            // is what every test uses.
+            None => None,
+        };
+        let appends = data_dir.is_none() || writing.is_some();
+        // **Re-reading is a read**, so it keeps the path whether or not the append
+        // was claimed — a desk that lost the race still follows the log (#236).
+        let read_from = data_dir.clone();
+
         let thread = std::thread::Builder::new()
             .name("librarian".into())
             .spawn(move || {
@@ -214,12 +243,12 @@ impl Desk {
                         Job::Say(say) => {
                             say(&mut log);
                             moved = Changed::of(log.records().difference(&before));
-                            if let Some(dir) = &data_dir {
+                            if let Some((dir, appending)) = &writing {
                                 // A failed commit is not fatal: the in-memory
                                 // log is still right, and refusing the fact
                                 // because the disk refused it would lose the
                                 // rating as well as the write.
-                                let _ = commit(&mut log, dir);
+                                let _ = commit(&mut log, dir, appending);
                             }
                             None
                         }
@@ -304,11 +333,11 @@ impl Desk {
                             ) {
                                 crate::operations::populate::Assertion::Write => {
                                     log.assert_holdings(now, asserting);
-                                    if let Some(dir) = &data_dir {
+                                    if let Some((dir, appending)) = &writing {
                                         // Same reasoning as `Job::Say`: a refused
                                         // disk is not a reason to lose the answer
                                         // in memory.
-                                        let _ = commit(&mut log, dir);
+                                        let _ = commit(&mut log, dir, appending);
                                     }
                                 }
                                 crate::operations::populate::Assertion::Unchanged => {}
@@ -333,7 +362,7 @@ impl Desk {
                         // again is a fold's work, and `access-layers.md` §3a puts
                         // a derivation inside a read's reach.
                         Job::Reread => {
-                            if let Some(dir) = &data_dir {
+                            if let Some(dir) = &read_from {
                                 let (fresh, _damage) = Instance::open(dir, device, now);
                                 // The difference, so `Changed` stays narrow: a
                                 // rating another client wrote is one `Touched`,
@@ -373,7 +402,7 @@ impl Desk {
             current,
             scans,
             jobs: tx,
-            appends: true,
+            appends,
             thread: Some(thread),
         }
     }
@@ -540,6 +569,46 @@ impl Changed {
     }
 }
 
+/// **The right to append to a log, taken from the operating system** — #218.
+///
+/// §4.4 has always said the librarian is "the process's single appender", and
+/// nothing enforced it. It was reachable: `gmuse shelf import --write` opens the log
+/// and appends while an engine holds the same one, and they share a device id
+/// because it comes from `machine_id`.
+///
+/// **Measured, because the consequence is worse than a race.** `Record` implements
+/// `Ord` over the stamp alone while deriving `Eq` over both fields, so a
+/// `BTreeSet<Record>` treats two records with one stamp as *the same record* and
+/// keeps the first. Each process's clock starts its counter at 0 within a
+/// millisecond, so an import writing nine facts in one millisecond (counters 0–8)
+/// and an engine rating something in that same millisecond (counter 0) collide —
+/// and one fact is gone at the next fold. #238 makes that union lossless; this makes
+/// it unreachable.
+///
+/// **A guard, so the right is a value rather than a convention.** [`commit`] takes
+/// one by reference, so a caller that has not asked cannot write — and the asking
+/// is where the refusal belongs, since that is the moment there is still something
+/// useful to say.
+///
+/// Lives beside the **log** rather than beside a socket: two engines with different
+/// sockets and one data directory would be two appenders as surely as an engine and
+/// a CLI are.
+pub struct Appending {
+    _lock: crate::lock::Lock,
+}
+
+impl Appending {
+    /// Claim the right to append to the log in `data_dir`.
+    ///
+    /// Held for as long as the value lives, which for the engine is its whole run
+    /// and for a `shelf` subcommand is the operation.
+    pub fn claim(data_dir: &std::path::Path) -> Result<Appending, crate::lock::LockError> {
+        Ok(Appending {
+            _lock: crate::lock::acquire(&data_dir.join("append.lock"))?,
+        })
+    }
+}
+
 /// Persist what a named operation appended. **The one door.**
 ///
 /// [`Instance::flush`] is crate-private, so this is the only way facts reach
@@ -547,13 +616,20 @@ impl Changed {
 /// makes "one appender" a property of the build rather than of everyone's
 /// good intentions.
 ///
+/// **And now of the operating system too** (#218): it takes an [`Appending`], which
+/// only one process can hold for a given log.
+///
 /// It deliberately does **not** refresh the projection snapshot, though that
 /// is where such a thing would belong. The snapshot lives at one fixed path
 /// under the cache directory while the log is named by a parameter, so a
 /// write against any other data directory — every test that applies a
 /// proposal — would overwrite the snapshot of the real library with its own.
 /// Refreshing here needs the snapshot keyed by the log it describes first.
-pub fn commit(log: &mut Instance, data_dir: &std::path::Path) -> Result<usize, LogError> {
+pub fn commit(
+    log: &mut Instance,
+    data_dir: &std::path::Path,
+    _appending: &Appending,
+) -> Result<usize, LogError> {
     log.flush(data_dir)
 }
 

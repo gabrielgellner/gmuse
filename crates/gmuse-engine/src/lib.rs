@@ -15,13 +15,13 @@
 pub mod audio;
 pub mod engine;
 pub mod instruction;
-/// **The pidfile lock**, here because the engine is what needs one.
+/// **The pidfile lock, which lives in `gmuse-library`** — #218.
 ///
-/// Plain infrastructure rather than anything about sound, and it sits in this crate
-/// for the ordinary reason: `engine::claim` cannot reach up into the root, and the
-/// root can reach down here. The bare player's own lock in `main` uses it through
-/// the same door.
-pub mod lock;
+/// It was here for an hour, on the reasoning that the engine is what needs one.
+/// That was wrong by one crate: the thing with a single appender is the *log*, and
+/// the log is the library's. So it moved down, and both this crate's socket lock and
+/// the librarian's append lock are the same primitive.
+pub use gmuse_library::lock;
 /// The allocation guard, in the test binary only — #211.
 #[cfg(test)]
 pub mod rt_guard;

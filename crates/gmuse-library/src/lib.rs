@@ -34,6 +34,11 @@ pub mod facts;
 pub mod fixture;
 pub mod history;
 pub mod librarian;
+/// **The pidfile lock** — #218.
+///
+/// Here because the thing with a single appender is the log, and the log is this
+/// crate's. `gmuse-engine`'s socket lock is the same primitive through a re-export.
+pub mod lock;
 pub mod model;
 pub mod next;
 pub mod operations;

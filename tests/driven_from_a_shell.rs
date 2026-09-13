@@ -807,6 +807,109 @@ fn start_with_a_track(name: &str) -> (Engine, String) {
     (Engine { child, dir, socket }, recording)
 }
 
+/// **No process but the engine appends, and this is the test that proves it** —
+/// #218's second Done-when, §4.4.
+///
+/// It was reachable, and the consequence is worse than a race. Two processes on one
+/// machine share a device id, because it comes from `machine_id`; each `Instance`'s
+/// clock starts its counter at 0 within a millisecond; and `Record` implements `Ord`
+/// over the stamp alone while deriving `Eq` over both fields — so a
+/// `BTreeSet<Record>` treats two records with one stamp as the same record and keeps
+/// the first (#238).
+///
+/// An import writing nine facts in one millisecond uses counters 0–8 and an engine
+/// rating something in that millisecond uses counter 0. One fact then disappears at
+/// the next fold, with nothing said.
+///
+/// `librarian::Appending` makes that unreachable: one process holds the log's append
+/// lock, and the other is refused before it mints anything.
+#[test]
+fn a_second_process_cannot_append_to_a_log_the_engine_holds() {
+    let (engine, _recording) = start_with_a_track("one-appender");
+    let data = engine.dir.join("xdg").join("gmuse");
+
+    // A config pointing at the engine's own log, so the two really do collide. Kept
+    // outside the directory the import placed from, because `shelf import --write`
+    // carries non-audio files along with the audio (#239) — including this one.
+    let config = engine.dir.join("as-the-engine.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "data_dir = {:?}\nlibrary = [{:?}]\n",
+            data.display().to_string(),
+            engine.dir.display().to_string()
+        ),
+    )
+    .expect("write a config");
+
+    // **`remove`, not `scan`.** A scan now goes *to* the engine when one answers
+    // (#218), so it is the wrong operation to test a refusal with. `remove` has no
+    // method on the wire yet, which is exactly the case the refusal is for.
+    let refused = Command::new(binary())
+        .args(["shelf", "remove", "--write"])
+        .arg(engine.dir.join("nothing-here.wav"))
+        .env("GMUSE_CONFIG", &config)
+        .env("GMUSE_SOCKET", &engine.socket)
+        .output()
+        .expect("run shelf remove");
+
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a second appender was allowed: {said}"
+    );
+    // **Names the holder**, so the person knows what to reach instead. The pid is
+    // the whole reason `lock.rs` writes one into the file.
+    assert!(
+        said.contains("already running"),
+        "the refusal does not say who has it: {said}"
+    );
+    assert!(
+        said.contains("Stop the engine"),
+        "and does not say what to do instead: {said}"
+    );
+    // **Not a `Debug` dump.** `main`'s error type prints one, which is why this
+    // exits rather than returning — the first cut returned a `String` and the
+    // sentence came out quoted with `\n` in it.
+    assert!(
+        !said.contains("\\n"),
+        "the message printed as a Debug dump: {said}"
+    );
+
+    // And a dry run is unaffected, because reading takes no right to append.
+    let dry = Command::new(binary())
+        .args(["shelf", "scan"])
+        .env("GMUSE_CONFIG", &config)
+        .env("GMUSE_SOCKET", &engine.socket)
+        .output()
+        .expect("run shelf scan");
+    assert!(
+        dry.status.success(),
+        "a dry run was refused too: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+
+    // **And the one operation with a wire method goes to the engine instead of
+    // being refused**, which is what keeps the tools usable now that a running
+    // engine is the default.
+    let routed = Command::new(binary())
+        .args(["shelf", "scan", "--write"])
+        .env("GMUSE_CONFIG", &config)
+        .env("GMUSE_SOCKET", &engine.socket)
+        .output()
+        .expect("run shelf scan --write");
+    let out = String::from_utf8_lossy(&routed.stdout);
+    assert!(
+        routed.status.success(),
+        "a routable scan was refused: {}{out}",
+        String::from_utf8_lossy(&routed.stderr)
+    );
+    assert!(
+        out.contains("asked the engine"),
+        "it did the scan itself instead of asking: {out}"
+    );
+}
+
 /// **A view that never scans can still reach a copy** — #237.
 ///
 /// The librarian's rows come from the log, so an attached view could always *list*

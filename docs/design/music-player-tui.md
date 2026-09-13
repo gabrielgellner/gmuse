@@ -5143,6 +5143,52 @@ Append here as decisions are made. Format: date, decision, rationale.
   the 50 audio tests appearing in a new crate while the root's count fell by the same 50 is the whole evidence that
   nothing was left behind.
 
+- **2026-09-12** **One appender, taken from the kernel rather than from §4.4 being read** (#218, #238, §4.4).
+
+  §4.4 has always said the librarian is "the process's single appender". Nothing enforced it, and it was reachable:
+  `gmuse shelf import --write` opens the log and appends while an engine holds the same one. Since #233 made attaching
+  the default, an engine is usually running — so this stopped being theoretical the moment that landed.
+
+  **The consequence is worse than a race, and it is measured.** Two processes on one machine share a device id, because
+  it comes from `machine_id`. Each `Instance`'s clock starts its counter at 0 within a millisecond. And `Record`
+  implements `Ord` over the stamp alone while deriving `Eq` over both fields — so a `BTreeSet<Record>` treats two
+  records with one stamp as _the same record_ and keeps the first:
+
+  ```
+  engine stamp:   Stamp { wall: 1000, counter: 0, device: … }
+  importer stamp: Stamp { wall: 1000, counter: 0, device: … }
+  same stamp: true          records equal: false
+  two facts appended, 1 survived the union
+  ```
+
+  An import writing nine facts in one millisecond uses counters 0–8; an engine rating something in that millisecond
+  uses 0. One fact then disappears at the next fold, silently. `Stamp`'s own doc says the device is "the final tiebreak,
+  so two devices cannot produce an equal stamp" — two _processes_ claiming one device break exactly that.
+
+  **`librarian::Appending` is the right to append, as a value.** `commit` takes one by reference, so a caller that has
+  not claimed it cannot write; the lock lives beside the **log** rather than beside a socket, because two engines with
+  different sockets and one data directory would be two appenders as surely as an engine and a CLI are. A `Desk` that
+  loses the race comes back _reading_ — the same shape `read_only` produces, which every `appender()` call site already
+  handles since #219.
+
+  **Claimed before the work, not after it.** A scan of the live library takes nine seconds, and being told at the end
+  that the engine owns the log would be nine seconds of the wrong thing.
+
+  **What this does not finish.** #218 also asks for the six unplumbed `library.*` methods and for the writing `shelf`
+  subcommands to route through the engine. Only `scan` routes, because it is the only one with a method already on the
+  wire; the other six are refused while an engine runs, with a message saying to stop it. That is honest and it is a
+  real restriction, so the issue stays open for them — and the restriction is preferable to what it replaces, which was
+  losing a fact without saying so.
+
+  **The refusal exits rather than returning an error**, for the reason the player lock's refusal already gives: `main`'s
+  error type prints its `Debug` form, so a sentence written for a person came out as a quoted string with `\n` in it.
+  The first cut of this did exactly that, and the test now asserts the message is not a dump.
+
+  Two things found while verifying, both filed: **#238**, that `Record`'s `Ord` and `Eq` disagree at all — a lossless
+  union is a better failure than a silent drop even once the appender is single; and **#239**, that
+  `shelf import --write` carries every non-audio file out of the source directory, which had been quietly relocating
+  this session's scratch configs and invalidated two earlier verifications before I found it.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

@@ -310,6 +310,10 @@ fn shelf(log: &Instance, roots: &[std::path::PathBuf], device: Id<Device>, now: 
 }
 
 /// Read a proposal file and, if told to, append what it proposes.
+///
+/// **`appending` is `None` for a dry run**, which is why it is an option rather than
+/// always required: reading a proposal and saying what it would do needs no right to
+/// append, and demanding one would make `--write`'s absence cost a lock (#218).
 pub fn run(
     file: &Path,
     data_dir: &Path,
@@ -317,6 +321,7 @@ pub fn run(
     device: Id<Device>,
     now: i64,
     write: bool,
+    appending: Option<&crate::librarian::Appending>,
 ) -> Result<Outcome, ApplyError> {
     let text = std::fs::read_to_string(file).map_err(|source| ApplyError::Read {
         path: file.to_path_buf(),
@@ -412,11 +417,14 @@ pub fn run(
         .collect();
     let already = proposed.len() - fresh.len();
 
-    let written = if write {
-        log.merge(now, &fresh);
-        crate::librarian::commit(&mut log, data_dir)?
-    } else {
-        0
+    let written = match (write, appending) {
+        (true, Some(appending)) => {
+            log.merge(now, &fresh);
+            crate::librarian::commit(&mut log, data_dir, appending)?
+        }
+        // Asked to write with no right to: the caller failed to claim it and has
+        // already said so. Nothing is appended, which is what a dry run does too.
+        _ => 0,
     };
 
     Ok(Outcome {
@@ -553,23 +561,59 @@ mod tests {
         };
 
         std::fs::write(&file, format!("{edge}\n")).unwrap();
-        super::run(&file, &dir, &[], device, 100, true).expect("applies");
+        super::run(
+            &file,
+            &dir,
+            &[],
+            device,
+            100,
+            true,
+            Some(&crate::librarian::Appending::claim(&dir).expect("a test has the log to itself")),
+        )
+        .expect("applies");
         assert!(live(&dir), "the edge did not land");
 
         // **In the same file**, which is what a curation pass emits when a
         // term moves and moves back.
         std::fs::write(&file, format!("{undo}\n{edge}\n")).unwrap();
-        super::run(&file, &dir, &[], device, 200, true).expect("applies");
+        super::run(
+            &file,
+            &dir,
+            &[],
+            device,
+            200,
+            true,
+            Some(&crate::librarian::Appending::claim(&dir).expect("a test has the log to itself")),
+        )
+        .expect("applies");
         assert!(live(&dir), "a retraction two lines up swallowed the edge");
 
         // **And across runs**, where the retraction is history rather than
         // batch — the shape that actually bit.
         std::fs::write(&file, format!("{undo}\n")).unwrap();
-        super::run(&file, &dir, &[], device, 300, true).expect("applies");
+        super::run(
+            &file,
+            &dir,
+            &[],
+            device,
+            300,
+            true,
+            Some(&crate::librarian::Appending::claim(&dir).expect("a test has the log to itself")),
+        )
+        .expect("applies");
         assert!(!live(&dir), "the retraction did not take");
 
         std::fs::write(&file, format!("{edge}\n")).unwrap();
-        super::run(&file, &dir, &[], device, 400, true).expect("applies");
+        super::run(
+            &file,
+            &dir,
+            &[],
+            device,
+            400,
+            true,
+            Some(&crate::librarian::Appending::claim(&dir).expect("a test has the log to itself")),
+        )
+        .expect("applies");
         assert!(
             live(&dir),
             "a fact retracted last week read as already known"
@@ -622,13 +666,31 @@ mod tests {
 
         // **The repair**, which the replay guard used to swallow.
         std::fs::write(&file, format!("{}\n", named("Dolly Parton"))).unwrap();
-        let outcome = super::run(&file, &dir, &[], device, 300, true).expect("applies");
+        let outcome = super::run(
+            &file,
+            &dir,
+            &[],
+            device,
+            300,
+            true,
+            Some(&crate::librarian::Appending::claim(&dir).expect("a test has the log to itself")),
+        )
+        .expect("applies");
         assert_eq!(outcome.fresh, 1, "the right name read as already known");
         assert_eq!(now(&dir).as_deref(), Some("Dolly Parton"));
 
         // And saying it once more, when it is already the answer, writes
         // nothing — a run over an unchanged library stays quiet.
-        let again = super::run(&file, &dir, &[], device, 400, true).expect("applies");
+        let again = super::run(
+            &file,
+            &dir,
+            &[],
+            device,
+            400,
+            true,
+            Some(&crate::librarian::Appending::claim(&dir).expect("a test has the log to itself")),
+        )
+        .expect("applies");
         assert_eq!(again.fresh, 0, "a name already in force was written again");
     }
 

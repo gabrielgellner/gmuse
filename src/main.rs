@@ -395,6 +395,66 @@ fn drop_cache(path: Option<&std::path::Path>) {
 }
 
 /// One library operation, and then exit.
+/// **Claim the right to append, or say who has it** — #218, §4.4.
+///
+/// Every writing `shelf` subcommand asks this before it does its work, not after.
+/// A scan of the live library takes nine seconds, and being told at the end that
+/// the engine owns the log would be nine seconds of the wrong thing.
+///
+/// The refusal is what closes the hole this issue is about: two processes on one
+/// device id can mint colliding stamps, and `BTreeSet<Record>` keeps only the first
+/// (#238). One appender means the collision cannot happen; a loud failure means
+/// that if it somehow could, nothing is lost silently.
+/// **Hand a scan to the engine, if one is listening** — #218.
+///
+/// `None` means nothing answered, so the caller does it itself. Deliberately not
+/// auto-*starting* one: the tmux model is right for a view that wants to play music
+/// and wrong for a one-shot library operation, which would leave a daemon behind
+/// because it reconciled a directory.
+fn ask_the_engine_to_scan() -> Option<String> {
+    let socket = gmuse::engine::socket::default_path();
+    if !gmuse::engine::attach::is_live(&socket) {
+        return None;
+    }
+    let client =
+        gmuse_client::Client::connect(&socket, "gmuse-shelf", env!("CARGO_PKG_VERSION")).ok()?;
+    match client.call(
+        gmuse_proto::request::LibraryOp::Scan.method(),
+        Some(serde_json::json!({})),
+    ) {
+        Ok(answer) => Some(format!(
+            "asked the engine to reconcile {} root(s); it publishes what it finds on \
+             `library` — watch with `gmuse events --topics library`",
+            answer["roots"].as_u64().unwrap_or(0)
+        )),
+        // **Reachable, and worth reporting rather than falling through.** An engine
+        // with no roots configured refuses; doing the scan here instead would append
+        // beside it, which is the thing this issue is about.
+        Err(e) => Some(format!("the engine refused the scan: {e}")),
+    }
+}
+
+fn appending(data_dir: &std::path::Path) -> gmuse::librarian::Appending {
+    match gmuse::librarian::Appending::claim(data_dir) {
+        Ok(held) => held,
+        Err(e) => {
+            // **Exits rather than returning an error**, for the reason the player
+            // lock's refusal already gives: `main`'s error type prints its `Debug`
+            // form, so a sentence written for a person comes out as a quoted string
+            // with `\n` in it. The first cut of this returned a `String` and did
+            // exactly that.
+            eprintln!("{e}");
+            eprintln!(
+                "\nOnly one process may append to a log, so this one stops here.\n\
+                 Stop the engine and run this again. `gmuse shelf scan --write` asks\n\
+                 it instead; the other writing operations do not have a method on the\n\
+                 wire yet (#218)."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn run_library(
     op: &gmuse::cli::Shelf,
     loaded: &gmuse::config::Loaded,
@@ -454,10 +514,11 @@ fn run_library(
 
             let fresh = if *write {
                 let now = gmuse::history::now_ms();
+                let appending = appending(&loaded.data_dir);
                 for id in &coming {
                     log.restore_encoding(now, *id);
                 }
-                gmuse::librarian::commit(&mut log, &loaded.data_dir)?
+                gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?
             } else {
                 0
             };
@@ -568,7 +629,8 @@ fn run_library(
                     log.retire_encoding(now, *id);
                 }
                 let _ = before;
-                gmuse::librarian::commit(&mut log, &loaded.data_dir)?
+                let appending = appending(&loaded.data_dir);
+                gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?
             } else {
                 0
             };
@@ -588,6 +650,19 @@ fn run_library(
             }
         }
         gmuse::cli::Shelf::Scan { write } => {
+            // **Asked of the engine when one is answering** — #218, §4.2. A scan
+            // appends, and only one process may (§4.4); the engine reconciles the
+            // roots it was started with and publishes what it found on `library`, so
+            // a view learns without this process touching the log at all.
+            //
+            // `scan` is the one writing operation with a method already on the wire.
+            // The other six need their arguments plumbed, and until they are the
+            // refusal below says to stop the engine — which is honest, and is why
+            // this issue stays open for them.
+            if *write && let Some(reply) = ask_the_engine_to_scan() {
+                println!("{reply}");
+                return Ok(());
+            }
             let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
@@ -640,7 +715,8 @@ fn run_library(
             }
 
             if *write {
-                let n = gmuse::librarian::commit(&mut log, &loaded.data_dir)?;
+                let appending = appending(&loaded.data_dir);
+                let n = gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?;
                 eprintln!(
                     "{n} record(s) written ({} new)",
                     log.records().len() - before
@@ -1600,7 +1676,8 @@ fn run_library(
                 // record that says a file moved — and files move, by hand and
                 // by `render`.
                 if *write {
-                    let n = gmuse::librarian::commit(&mut log, &loaded.data_dir)?;
+                    let appending = appending(&loaded.data_dir);
+                    let n = gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?;
                     if n > 0 {
                         eprintln!("{n} record(s) written: the holdings moved");
                         drop_cache(cache_path.as_deref());
@@ -1782,7 +1859,8 @@ fn run_library(
                     }
                     eprintln!("{} filed into {name}", report.identified.len());
                 }
-                let n = gmuse::librarian::commit(&mut log, &loaded.data_dir)?;
+                let appending = appending(&loaded.data_dir);
+                let n = gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?;
                 eprintln!("{n} record(s) written");
                 // **Only when something actually changed.** A re-run that
                 // moves nothing and writes nothing has not made the cache
@@ -1836,7 +1914,8 @@ fn run_library(
                     gmuse::history::now_ms(),
                     &mut gmuse::model::ingest::Reads::default(),
                 );
-                let n = gmuse::librarian::commit(&mut library_log, &loaded.data_dir)?;
+                let appending = appending(&loaded.data_dir);
+                let n = gmuse::librarian::commit(&mut library_log, &loaded.data_dir, &appending)?;
                 eprintln!("{} folder(s) pruned, {n} record(s) written", done.emptied);
                 if done.moved > 0 || n > 0 {
                     drop_cache(cache_path.as_deref());
@@ -1882,6 +1961,10 @@ fn run_library(
             }
         }
         gmuse::cli::Shelf::Apply { file, write } => {
+            // **Claimed only for a real write.** A dry run reads the proposal and
+            // says what it would do; taking the log's append lock to do that would
+            // block the engine for no reason (#218).
+            let appending = write.then(|| appending(&loaded.data_dir));
             let outcome = gmuse::operations::apply::run(
                 file,
                 &loaded.data_dir,
@@ -1889,6 +1972,7 @@ fn run_library(
                 device,
                 gmuse::history::now_ms(),
                 *write,
+                appending.as_ref(),
             )?;
             println!("{outcome}");
             for (line, text) in &outcome.report.malformed {
