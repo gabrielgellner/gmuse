@@ -22,15 +22,37 @@ workflow:
     - if: $CI_PIPELINE_SOURCE == "web"
     # Started via an API trigger token.
     - if: $CI_PIPELINE_SOURCE == "trigger"
-    # Everything else — push, merge request, tag, schedule — creates nothing.
+    # **A push to `main` creates a pipeline, for the docs job only** (#247).
+    #
+    # This is the one exception to the rule above, and it does not contradict the
+    # reasoning: what that reasoning objects to is paying for apt-get, a rustup
+    # toolchain and a cold cargo registry to repeat checks the pre-push hook already
+    # ran. The `pages` job is not that job. It downloads one ~10 MB binary, runs a
+    # python script and a markdown build, and finishes in seconds — and unlike `verify`
+    # it does something the hook cannot do at all, which is publish.
+    #
+    # `verify` stays off this path by its own `rules` below, so a push to `main` runs
+    # the docs and nothing else.
+    - if: $CI_COMMIT_BRANCH == "main"
+    # Everything else — a push to another branch, a merge request, a tag — creates
+    # nothing.
     - when: never
 
 stages:
   - verify
+  - deploy
 
 # Runs automatically, but only inside a pipeline you started yourself.
+#
+# **Explicitly not on the push-to-`main` pipeline** the workflow rules now create for the
+# docs. Without this rule, adding that trigger would have quietly turned every push to
+# `main` into a full Rust build on a shared runner — which is the exact cost the comment
+# at the top of this file exists to avoid.
 verify:
   stage: verify
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "trigger"
   image: rust:1-slim
   before_script:
     - apt-get update -qq && apt-get install -y -qq cmake curl >/dev/null
@@ -51,3 +73,32 @@ verify:
       - target/
   variables:
     CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+
+# **The book** — #247. `docs/design/` rendered with mdBook, at the project's Pages URL.
+#
+# Cheap by construction: one binary download, no cargo build, no toolchain. The guard is
+# the point of the last line — `mdbook build` reports a broken include as a warning and
+# exits 0, so a book with a hole in it would otherwise publish itself.
+pages:
+  stage: deploy
+  image: rust:1-slim
+  rules:
+    # On a push to `main`, and by hand. Never on a branch or an MR: Pages has one
+    # published copy, so building it from anything but `main` would publish a draft.
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl python3 >/dev/null
+    - |
+      curl -fsSL -o /tmp/mdbook.tar.gz \
+        https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-musl.tar.gz
+      tar -xzf /tmp/mdbook.tar.gz -C /usr/local/bin
+  script:
+    - python3 tools/build_book.py
+    - mdbook build docs/book
+    - python3 tools/book_guard.py docs/book/book
+    - mv docs/book/book public
+  artifacts:
+    paths:
+      - public

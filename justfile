@@ -131,6 +131,28 @@ _bench filter:
         exit 1
     fi
 
+# Build the book: the information model and the layers — #247.
+#
+# `tools/build_book.py` derives `docs/book/src/` from `docs/design/`, so there is no
+# second copy of any claim. The guard below is not ceremony: **mdBook reports a broken
+# include as a WARN and exits 0**, leaving the literal `{{{{#include …}}` in the published
+# page — so a renamed document would silently produce a book with a hole. The generator
+# avoids includes entirely, and this checks the artifact rather than trusting it.
+docs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v mdbook >/dev/null 2>&1 || { echo "docs needs mdbook: cargo install mdbook" >&2; exit 1; }
+    python3 tools/build_book.py
+    mdbook build docs/book
+    python3 tools/book_guard.py docs/book/book
+
+# The book with live reload, for writing.
+docs-serve:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 tools/build_book.py
+    mdbook serve docs/book --open
+
 # Report deferrals whose issue has been closed — #252.
 #
 # **A recipe and not a test, and that split is the decision.** Whether `#123` is still

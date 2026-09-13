@@ -12,3 +12,7 @@
 # maturin writes the extension beside its Python source in a mixed layout, so
 # it lands in the tree rather than under /target.
 python/gmuse_core/*.so
+
+# The book is generated from docs/design/ by tools/build_book.py (just docs).
+docs/book/src/
+docs/book/book/

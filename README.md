@@ -62,6 +62,14 @@ cargo build --release --no-default-features
 MP3, FLAC, Ogg Vorbis, WAV, AAC/M4A, ALAC via [Symphonia], and Opus via [`symphonia-adapter-libopus`] (bundled libopus,
 statically linked).
 
+## The book
+
+The design documents are published as a book — the **information model** (what a library entry is, as against a file)
+and the **layers** (which part of the program may talk to which). Build it with `just docs`, or read it at the project's
+GitLab Pages URL.
+
+It is rendered from `docs/design/` rather than retold, so it cannot drift from the documents it publishes.
+
 ## Design notes
 
 Three threads, and the split is not negotiable — it is what determines whether playback is glitch-free:
