@@ -13,7 +13,7 @@
 //! ## And it dissolves a bug rather than guarding against one
 //!
 //! Those two lists had drifted in both directions: `vol`, `rate`, `prev`, `set` and
-//! `toggle` were admitted by `remote::is_remotable` and dropped by `apply` — each
+//! `toggle` were admitted by the old socket's `is_remotable` and dropped by `apply` — each
 //! answering `{"accepted": true}` and doing nothing — while `play` was handled and
 //! refused at the gate, so unreachable. #233 caught that with a pair of tests that
 //! scraped both functions' source and compared the names.

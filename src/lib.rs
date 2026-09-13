@@ -34,7 +34,6 @@ pub mod guides;
 // The pidfile lock lives in `gmuse-engine`, named here as it always was — #213.
 pub use gmuse_engine::lock;
 pub mod m3u;
-pub mod remote;
 pub mod session;
 /// The view bench, rehoused by #213 — see the module header.
 #[cfg(test)]

@@ -205,11 +205,15 @@ So a tool speaks in **paths** and the librarian translates. That is exactly the 
 events carrying paths, plus an `identify` closure supplied by something that has scanned. A tool emits `(path, fact)`;
 gmuse resolves the path and appends.
 
-### Why the remote socket is not this
+### Why the control socket is not this
 
-`--remote` exists and is deliberately narrow: `is_remotable` lists what may cross it, and it is the _player's_ controls
-— play, pause, next, status. It drives the thing in front of you. It is not, and should not become, a way to edit the
-library, because those are different lifetimes: the player is running or it is not, and the library is there either way.
+`gmuse ctl` is deliberately narrow on the transport side: `cmd::instruction::instruction_of` is the total function that
+says what may cross, and what crosses is the _player's_ controls — play, pause, next, what is playing. It drives the
+thing making sound. (It was `--remote` and `is_remotable` until #243; the door changed, the boundary did not.)
+
+The socket does now carry §8.4's named library writes, and that is not a contradiction of what follows — it is I15: a
+write goes through the one appender, so it must cross when an engine holds the log. What has not changed is that a tool
+must not _need_ it.
 
 A tool must be able to say something with no gmuse running at all.
 

@@ -82,26 +82,6 @@ struct App {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
-    // Before the lock, and before anything is opened: a remote client is not a
-    // player. It writes one line to the running player and prints the reply.
-    if let Some(line) = &args.remote {
-        return match gmuse::remote::send(&gmuse::remote::default_path(), line) {
-            Ok(reply) => {
-                println!("{reply}");
-                // A refusal from the player is the client's failure too, or a
-                // status bar would show a stale line and call it success.
-                if reply.starts_with("err ") {
-                    std::process::exit(1);
-                }
-                Ok(())
-            }
-            Err(err) => {
-                eprintln!("{err}");
-                std::process::exit(1);
-            }
-        };
-    }
-
     // **A library operation is not a launch**, so it happens before anything a
     // launch needs: no audio device, no cache, no store scan. `apply` does its
     // own scan of exactly the roots it was given, and opening a device for a
@@ -2189,17 +2169,6 @@ fn run_tui(
     }
     let first_run = log.records().is_empty();
 
-    // A socket that will not bind is a warning, not a failure: the player is
-    // still a player without one, and refusing to start over a missing remote
-    // would be the tail wagging the dog.
-    let server = match gmuse::remote::serve(&gmuse::remote::default_path()) {
-        Ok(server) => Some(server),
-        Err(err) => {
-            eprintln!("warning: {err}; --remote will not reach this player");
-            None
-        }
-    };
-
     // One scan, two shapes. The store is what the player still reads through;
     // the librarian is what it is moving to (#77), and building both from the
     // same pass is what keeps them from disagreeing.
@@ -2319,7 +2288,6 @@ fn run_tui(
         library: &library_view.library,
         player: Some(app.player.transport()),
         gapless: app.player.gapless(),
-        remote: server.as_ref(),
     };
     let mut state = gmuse::ui::Ui::new(library);
     // **The library connection, separate from the transport's** — #236.
@@ -2516,7 +2484,6 @@ fn run_tui(
                 library: &library_view.library,
                 player: Some(app.player.transport()),
                 gapless: app.player.gapless(),
-                remote: server.as_ref(),
             };
             match gmuse::ui::run(&mut terminal, &mut state, &ctx) {
                 Ok(stop) => stop,
@@ -2599,7 +2566,6 @@ fn run_tui(
             library: &library_view.library,
             player: Some(app.player.transport()),
             gapless: app.player.gapless(),
-            remote: server.as_ref(),
         };
         gmuse::ui::refresh_library(&mut state, &ctx);
     };
@@ -2611,7 +2577,6 @@ fn run_tui(
         library: &library_view.library,
         player: Some(app.player.transport()),
         gapless: app.player.gapless(),
-        remote: server.as_ref(),
     };
     gmuse::ui::save_session(&mut state, &ctx);
     // Written after the terminal is restored, so the summary is visible.
@@ -2928,6 +2893,97 @@ fn run_engine(
         }
 
         /// And back the other way, for reading the queue out.
+        /// **What is playing, as one reply** — #243, #248.
+        ///
+        /// The `playback` topic carries discontinuities and §7.8 forbids a steady
+        /// position stream, so a client arriving between two of them learns nothing
+        /// until the next one. A status bar cannot subscribe at all, and a view that
+        /// attached mid-album drew "stopped" over audible music.
+        ///
+        /// **The optional `format` renders engine-side, through the same template
+        /// language the config and the `:` line use.** That is the 2026-09-01
+        /// decision unchanged: this library's `now_playing` puts the title **last**,
+        /// so a bar truncating a pre-rendered line throws away the field it wanted.
+        /// A caller that wants fields ignores `format` and gets them.
+        fn playing(
+            &self,
+            format: Option<String>,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse_proto::{RpcError, error::code};
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            if !self
+                .control
+                .ask(gmuse::engine::control::Ask::Playing { reply: tx })
+            {
+                return Err(RpcError::new(code::INTERNAL, "the player is not running"));
+            }
+            let Ok(now) = rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+                return Err(RpcError::new(
+                    code::INTERNAL,
+                    "the control thread did not answer",
+                ));
+            };
+
+            let mut body = serde_json::json!({
+                "state": match now.state {
+                    gmuse::audio::State::Playing => "playing",
+                    gmuse::audio::State::Paused => "paused",
+                    gmuse::audio::State::Stopped => "stopped",
+                },
+                "recording": now.recording,
+                "pos_frames": now.pos_frames,
+                "stream_generation": now.generation,
+                "sample_rate": now.sample_rate,
+                "rate": now.rate,
+            });
+
+            // **Rendered only when asked, and a bad template is reported once.**
+            //
+            // A status bar with a typo in its format should say so rather than print
+            // a blank field forever — which is `render_with`'s rule from the old
+            // socket (§13, 2026-09-01), and the reason this is an error reply rather
+            // than a null field.
+            if let Some(template) = format {
+                let rendered = match gmuse::query::format::Template::parse(&template) {
+                    Ok(t) => self.render(&now.recording, &t),
+                    Err(e) => {
+                        return Err(RpcError::invalid_params("format", e.to_string()));
+                    }
+                };
+                body["rendered"] = serde_json::json!(rendered);
+            }
+            Ok(body)
+        }
+
+        /// The current track through a template, or an empty string when there is no
+        /// track.
+        ///
+        /// **Empty rather than absent when nothing plays**, because the one caller is
+        /// a status bar and "" is what it wants to print. A word it then has to filter
+        /// out would be a second thing to get wrong.
+        fn render(
+            &self,
+            recording: &Option<String>,
+            template: &gmuse::query::format::Template,
+        ) -> String {
+            use gmuse::model::rows::Listing;
+            let Some(id) = recording
+                .as_deref()
+                .and_then(|r| r.parse::<uuid::Uuid>().ok())
+                .map(gmuse::model::id::Id::from_uuid)
+            else {
+                return String::new();
+            };
+            let answer = self.desk.current();
+            let rows: &dyn Listing = &answer.library;
+            rows.rows()
+                .into_iter()
+                .find(|&row| rows.recording_of(row) == Some(id))
+                .and_then(|row| rows.listed(row))
+                .map(|listed| template.render(&listed))
+                .unwrap_or_default()
+        }
+
         fn recording_of(
             &self,
             id: gmuse::model::rows::CopyId,
@@ -3141,6 +3197,7 @@ fn run_engine(
                 // point of §7.12: two textual command languages is the standing
                 // complaint against `--repl`, and routing here is what stops a
                 // second one being written.
+                Call::PlaybackGet { format } => self.playing(format),
                 Call::QueueGet => self.queue(gmuse::engine::control::QueueOp::Get),
                 Call::QueueEnqueue {
                     recordings,
@@ -3251,7 +3308,7 @@ fn run_engine(
                         // agree with and the refusal carries the reason rather than
                         // a category.
                         let parsed = gmuse::cmd::parse::format(&cmd);
-                        match gmuse::remote::instruction_of(&cmd) {
+                        match gmuse::cmd::instruction::instruction_of(&cmd) {
                             Ok(instruction) => {
                                 self.control
                                     .ask(gmuse::engine::control::Ask::Do(instruction));

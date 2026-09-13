@@ -3,26 +3,35 @@
 //! A unix socket, an NDJSON envelope, and a handshake that refuses a client
 //! speaking a different major version.
 //!
-//! ## This generalises `remote.rs` rather than replacing it
+//! ## This generalised `remote.rs`, and `remote.rs` is now gone
 //!
-//! `remote.rs` is not a sketch: it has a listener thread off the audio path, a
-//! stale-socket story that is correct by construction, and status answered from
-//! a published snapshot so a status bar can never wedge a render. Those are the
-//! two structural ideas the engine needs, and they are kept. What changes is the
-//! framing — a line of the `:` language becomes a JSON-RPC object — and that
-//! this is on its way to being the *only* way in.
+//! `remote.rs` was not a sketch: it had a listener thread off the audio path, a
+//! stale-socket story that was correct by construction, and status answered from
+//! a published snapshot so a status bar could never wedge a render. Those are the
+//! two structural ideas the engine needs, and they were kept. What changed is the
+//! framing — a line of the `:` language became a JSON-RPC object — and that this
+//! is now the *only* way in.
 //!
-//! `--remote` is still here. §4.2 retires it in favour of `gmuse ctl`, and
-//! `gmuse ctl` is #217: removing the old door before the new one opens would
-//! leave a release with no way to drive a running player from a key binding.
+//! **`--remote` was removed in #243, and the condition it waited on was not the
+//! one §4.2 wrote down.** §4.2 said "removed when `gmuse ctl` exists, not
+//! before"; `ctl` existed for a while with `--remote` still carrying the one job
+//! it could not do, because 22 methods reported no playback state. A status bar
+//! polls, and nothing here answered a poll. So the real gate was `playback.get`,
+//! and the lesson is that "the new door exists" and "the new door opens" are
+//! different claims about a replacement.
 //!
 //! ## The stale socket needs no liveness check
 //!
 //! `UnixListener::bind` fails if the path exists, which normally means guessing
-//! whether a leftover socket belongs to a live process. It does not here, for
-//! the reason `remote.rs` already records: **the lock is taken before the bind**,
-//! so holding it proves no other engine is running and any socket present is
-//! stale by construction. The kernel made the liveness check, once.
+//! whether a leftover socket belongs to a live process. It does not here:
+//! **the lock is taken before the bind**, so holding it proves no other engine is
+//! running and any socket present is stale by construction. The kernel made the
+//! liveness check, once.
+//!
+//! This argument is the engine's own and does not lean on the one `remote.rs`
+//! made, which is just as well — #244 records that the TUI's copy of it stopped
+//! being true when an attached view stopped taking the player lock. The engine's
+//! `engine.lock` is taken by the process that binds, so nothing has loosened it.
 //!
 //! It is worth being precise about why the alternative is worse. Connecting to
 //! the socket to see whether anything answers is a race — nothing answers

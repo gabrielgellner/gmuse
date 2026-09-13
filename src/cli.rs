@@ -137,14 +137,6 @@ pub struct Cli {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub smart_artist_sort: bool,
 
-    /// Send one command to the running player and print its reply, then exit.
-    ///
-    /// A client, not a player: it opens no audio device, reads no library and
-    /// takes no lock. `--remote status` is what a status bar asks; the rest is
-    /// the same vocabulary as the `:` line, because there is only one.
-    #[arg(long, value_name = "COMMAND")]
-    pub remote: Option<String>,
-
     /// Drive the engine over the socket instead of opening a device — #219, #233.
     ///
     /// **The default, and a view rather than a player.** The TUI takes no audio
@@ -232,7 +224,7 @@ pub enum Command {
     },
     /// Send one command to the running engine and print the reply — §4.2.
     ///
-    /// **This is what `--remote` becomes.** The same job with a protocol behind
+    /// **This is what `--remote` became.** The same job with a protocol behind
     /// it, rather than a second ad-hoc IPC over the same socket-shaped problem.
     Ctl {
         /// The command, in the `:` line's language: `gmuse ctl seek +10`.

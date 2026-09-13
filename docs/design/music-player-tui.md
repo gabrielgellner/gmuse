@@ -577,7 +577,6 @@ src/
     statusline.rs   format-string rendering, mode indicators
     cmdline.rs      ':' input, search input
     settings.rs     view 7 — renders Bindings + settings
-  remote.rs         unix socket server + `--remote` client; one line in, one line out
 ```
 
 ---
@@ -617,8 +616,11 @@ defined by expressions, and view 6.
 _Note: the resampler was pulled forward out of milestone order (done 2026-08-27), because Opus playback is impossible
 without it on a 44.1k-only output device._
 
-**M9 — remote socket, MPRIS if wanted.** ✅ _socket done 2026-09-01._ `remote.rs`, `gmuse --remote`, and a fourth thread
-amended into §3. MPRIS not done and not currently wanted.
+**M9 — remote socket, MPRIS if wanted.** ✅ _socket done 2026-09-01; superseded 2026-09-13._ `remote.rs`,
+`gmuse --remote` and a fourth thread, amended into §3 — and all three removed in #243 once `gmuse ctl` could answer what
+M9 was really for, which was a status bar. The two structural ideas survived into the engine: a listener thread off the
+audio path, and status answered from a snapshot so a poll can never wedge a render. MPRIS not done and not currently
+wanted.
 
 ---
 
@@ -5499,6 +5501,45 @@ Append here as decisions are made. Format: date, decision, rationale.
   `pub(crate)`. Writing into a live player's `Shared` was tried first and failed for an unrelated reason: at
   `null::Pace::Fast` the renderer republishes its mapping in a tight loop and overwrote the test's frame, so it read 0
   and blamed the subtraction.
+
+- **2026-09-13** **A topic tells you when something changed; it cannot tell you what it is** (#243, #248, §7.4, §7.8).
+  Two bugs reported from use, a day apart, that turned out to be one absent method. The tmux status bar had been blank
+  since attaching became the default. And quitting the TUI and starting it again left the new view believing nothing was
+  playing — `gp` had no target and the status line said stopped over audible music, until the next track change, which
+  mid-album is twenty minutes away.
+
+  **Neither looked like the other and both were `playback.get` missing.** The protocol had 22 methods and not one
+  reported playback state; it exists only as an event, and §7.8 forbids a steady position stream, so a client that
+  arrives between two discontinuities has nothing to go on. A status bar cannot subscribe at all — it polls, on a tmux
+  timer — and a view that attaches mid-track is in the same position for a different reason.
+
+  **The design had already made this argument, for one topic, and not noticed it generalised.** `queue.get` returns the
+  modes on the read as well as on the event, commented _"so a view that attaches mid-stream knows them without waiting
+  for one to change."_ That sentence is this bug, written down, about `shuffle` and `repeat` — which matter far less
+  than what is playing. So the rule now lives in §7.8 rather than in one comment: **a client must be able to ask for a
+  topic's current value, not only be told when it changes.**
+
+  A second rule came out of writing it: **the asking and the telling must be built by one piece of code.** `sounded` is
+  that function and `playback_event` now frames its output, because a snapshot that can disagree with the stream is
+  worse than no snapshot — a client cannot tell which of the two is stale. They were written separately first and the
+  position base was subtracted in only one of them, which is precisely the disagreement a snapshot is meant to end.
+
+  **The removal that came with it corrects a gate this project wrote down wrong.** §4.2 said `--remote` is _"removed
+  when `gmuse ctl` exists, not before"_, and #217 made `ctl` exist — but the two doors then stood open for weeks,
+  because `ctl` could not do the one thing `--remote` was still being used for. `--remote`'s server lived in the _TUI_
+  and published from its render loop, so it answered only while a view was on screen, which is the opposite of what a
+  daemon is for. The condition to write down when retiring a mechanism is **which of its jobs the replacement can do**,
+  not whether the replacement is present.
+
+  `remote.rs` is gone, along with `ui::serve_remote`, `Context::remote` and `is_remotable` — which had no callers left,
+  because the engine translates and reports rather than asking permission first. `instruction_of` was the one thing in
+  that file that was never part of that door, and it moved to `cmd::instruction`: **not** into `gmuse-engine`, where it
+  looked like it belonged, because §4.3 is explicit that the engine crate is not the command language.
+
+  Two things nearly went wrong and are worth recording. `git checkout src/ui/remote_transport.rs`, meant to revert one
+  experimental line, discarded an hour of edits to that file — a surgical revert wants the edit undone by hand, not the
+  file restored. And a `--format` flag on `ctl` was written and could never have worked: `ctl` takes everything after
+  the command as part of the command, which is the documented rule that lets `seek -5` through. Params are a JSON word.
 
 ## 14. Prior art worth reading
 

@@ -26,12 +26,12 @@ Usable, and being pulled apart into an engine and its views.
 | The engine — one process, many views           | 🚧 the socket, the protocol and the librarian are in           |
 | Decks, mixing, MIDI                            | designed, not built                                            |
 
-`gmuse` runs the TUI. `gmuse engine` runs the daemon, and `gmuse ctl` and `gmuse events` drive it from a shell over a
-JSON-RPC socket — that much works today with no TUI attached. What the engine cannot do yet is play: attaching the audio
-path to it is the next piece, after which the TUI becomes a client like any other.
+`gmuse` runs the TUI, which attaches to an engine and starts one if none is listening — so quitting the view no longer
+stops the music. `gmuse engine` runs that daemon in the foreground, `gmuse ctl` sends it one command, and `gmuse events`
+prints its event stream as NDJSON. `gmuse ctl engine.shutdown` stops it.
 
-`--repl` is gone (it was a second player wearing a CLI); `--remote` still works and retires when `gmuse ctl` replaces it
-fully.
+`--repl` and `--remote` are both gone: the first was a second player wearing a CLI, and the second was a socket served
+by the _TUI_, so it went quiet exactly when the engine was doing its job. `gmuse ctl` is the one door now.
 
 ## Building
 
@@ -114,7 +114,6 @@ gmuse [OPTIONS] [FILE]
       --rescan               re-read every file, ignoring mtimes
       --no-cache             do not read or write the library cache
       --cache <PATH>         where the library cache lives      [env: GMUSE_CACHE]
-      --repl                 use the line prompt instead of the TUI
       --smart-artist-sort    sort artists ignoring a leading The/A/An  [default: true]
 ```
 

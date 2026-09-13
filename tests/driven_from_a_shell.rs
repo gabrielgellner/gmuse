@@ -1284,7 +1284,6 @@ fn the_views_queue_mirrors_the_engines_in_both_directions() {
         library: &held.library,
         player: None,
         gapless: None,
-        remote: None,
     };
 
     let mut ui = gmuse::ui::Ui::new(Default::default());
@@ -1642,6 +1641,70 @@ fn playback_continues_to_a_second_track_with_no_view_answering() {
     assert!(
         names.contains(&recording),
         "and the first one was the one asked for"
+    );
+}
+
+/// **A client that arrives mid-playback is told what is playing** — #243, #248, §7.8.
+///
+/// The `playback` topic carries discontinuities, and `playback_events_do_not_arrive_
+/// between_discontinuities` above asserts the silence between them. So a view that
+/// attached mid-album learned nothing until the next track change — it drew "stopped"
+/// over audible music and `gp` had no target. `playback.get` is the snapshot, and this
+/// is the case it exists for.
+#[test]
+fn a_late_client_can_ask_what_is_playing() {
+    let (engine, recording) = start_with_a_track("late");
+
+    // One client starts something, then goes away entirely.
+    {
+        let first = Client::connect(&engine.socket, "starter", "0").expect("connect");
+        first
+            .call(
+                "player.load",
+                Some(serde_json::json!({ "recording": recording })),
+            )
+            .expect("load");
+    }
+
+    // **Wait until it is actually playing before asking.** Without this the test
+    // passes against an engine that never started: `state: "stopped"` with
+    // `recording: null` is a correct answer to the wrong question, and it is the
+    // answer the bug gave too.
+    let late = Client::connect(&engine.socket, "late", "0").expect("connect");
+    let mut asked = serde_json::Value::Null;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        asked = late.call("playback.get", None).expect("ask");
+        if asked["state"].as_str() == Some("playing") {
+            break;
+        }
+    }
+
+    assert_eq!(
+        asked["state"].as_str(),
+        Some("playing"),
+        "the engine never started, so nothing was measured: {asked}"
+    );
+    assert_eq!(
+        asked["recording"].as_str(),
+        Some(recording.as_str()),
+        "a client that never saw an event was not told what is playing: {asked}"
+    );
+
+    // **And the same connection can ask for a line**, which is what a status bar
+    // needs: `now_playing` puts the title last, so a bar cannot truncate a rendered
+    // one to fit (§13, 2026-09-01).
+    let rendered = late
+        .call(
+            "playback.get",
+            Some(serde_json::json!({ "format": "{title}" })),
+        )
+        .expect("ask with a format");
+    assert!(
+        rendered["rendered"]
+            .as_str()
+            .is_some_and(|line| !line.is_empty()),
+        "a format produced no line: {rendered}"
     );
 }
 

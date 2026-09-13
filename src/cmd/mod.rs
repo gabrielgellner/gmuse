@@ -10,6 +10,7 @@
 
 pub mod bind;
 pub mod complete;
+pub mod instruction;
 pub mod keys;
 pub mod parse;
 
@@ -259,7 +260,7 @@ impl SettingKey {
     /// `None` means the engine can carry the change out on its own; `Some` is the
     /// reason it cannot, for a client to be told rather than left guessing.
     ///
-    /// This exists because `remote::is_remotable` said *every* `set` was fine to
+    /// This exists because the old socket's `is_remotable` said *every* `set` was fine to
     /// send and `engine::control::apply` handled none of them, so
     /// `gmuse ctl set shuffle=true` answered `{"accepted": true}` and did nothing.
     /// Two lists that drift is the failure; one property of the setting is the

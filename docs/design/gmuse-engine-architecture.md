@@ -220,8 +220,8 @@ There is a single `gmuse` binary, following the tmux model:
 | `gmuse mcp` (later)                          | Runs an MCP stdio server that maps tools onto protocol methods.                                                                                                   |
 | `gmuse shelf <op>`                           | The library operations. Read-only ones work with no engine (I15). A writing one does its work here and hands the facts to the engine if one holds the log (#218). |
 
-This supersedes today's `--remote <CMD>`, which is a second, ad-hoc IPC mechanism over the same socket-shaped problem.
-It should be removed rather than kept alongside: `gmuse ctl` is the same thing with a protocol behind it.
+This superseded `--remote <CMD>`, a second ad-hoc IPC mechanism over the same socket-shaped problem, which was removed
+in #243.
 
 **`--attach` is opt-in** (#219). Attached, playback is entirely the engine's: a view loads by recording, learns what is
 playing from the `playback` topic, and going away does not stop it.
@@ -267,10 +267,22 @@ does not describe what will happen. `next` and `prev` go to the engine too, thro
 So attaching is the **default**: `gmuse` starts an engine if none answers and attaches, which is the tmux model §4.2
 describes. `--no-attach` keeps playback in the process, which is what measuring the audio path wants.
 
-**`--remote` is removed when `gmuse ctl` exists, not before** (#214, #217). `--remote` is the only way to drive a
-running player from a key binding that is not focused on it, which is the reason §1 asked for a socket at all. Retiring
-it in the same change that stands the engine up would leave a release where that is simply not possible — so the two
-doors are open at once for exactly as long as it takes #217 to land the new one, and no longer.
+**`--remote` was removed in #243, and the gate this paragraph wrote down was the wrong one** (#214, #217, #243). It said
+"removed when `gmuse ctl` exists, not before", and the reasoning was right: `--remote` was the only way to drive a
+running player from a key binding that is not focused on it, which is why §1 asked for a socket at all.
+
+What the condition missed is that **`ctl` existing is not `ctl` answering the question `--remote` was asked for.** `ctl`
+landed in #217 and the two doors then stood open for longer than "no longer" suggests, because the protocol had 22
+methods and none of them reported playback state — so a status bar had nothing to poll, and `--remote status` was still
+the only way to ask. The real gate was `playback.get`.
+
+**The symptom that found it was not the status bar.** `--remote`'s server lived in the _TUI_, published from its render
+loop, so the bar went blank whenever the player ran without a view — the case the engine exists for. The same absent
+snapshot made a view that attached mid-album draw "stopped" over audible music (#248). One missing method, two unrelated
+-looking bugs, and neither visible from the fact that `ctl` existed.
+
+Generalised: when retiring a mechanism, the condition to write down is **which of its jobs the replacement can do**, not
+whether the replacement is present.
 
 ### 4.3 Crate layout
 
@@ -516,7 +528,7 @@ The first message on a connection MUST be `hello`:
 | Commands      | `player.play`, `player.pause`, `player.seek`, `queue.enqueue`, `queue.move`, `queue.remove`, `queue.clear`, `settings.set_scope`, `deck.load`, `deck.play`, `deck.cue`, `deck.loop`, `deck.sync`, `param.set`, `lane.put`, `lane.delete`, `mapping.learn`, `mapping.put`, `record.start`, `record.stop`, … | Mutations. Each is one variant of the typed `Command` enum.                                 |
 | Text commands | `cmd.exec_line`                                                                                                                                                                                                                                                                                            | A cmus-style command line, parsed by the engine into `Command` (§7.12)                      |
 | Library       | `library.apply`, `library.import`, `library.scan`, `library.restore`, `library.remove`, `library.compact`, `library.unfiled`, `library.edit`                                                                                                                                                               | The named write operations (§8.4). Long-running ones acknowledge and report through events. |
-| Queries       | `query.parse`, `query.run`, `queue.get`, `deck.get`, `lane.get`, `mapping.get`, `analysis.get`                                                                                                                                                                                                             | Reads                                                                                       |
+| Queries       | `query.parse`, `query.run`, `playback.get`, `queue.get`, `deck.get`, `lane.get`, `mapping.get`, `analysis.get`                                                                                                                                                                                             | Reads                                                                                       |
 | Subscriptions | `sub.subscribe`, `sub.unsubscribe`                                                                                                                                                                                                                                                                         | Topic-based event delivery (§7.8)                                                           |
 
 Method names are part of the public API. Rename them only with a protocol version bump.
@@ -660,6 +672,22 @@ pos(t) = pos_frames + (t_engine_ns − at_ns) · 1e-9 · rate · sample_rate    
 The engine emits a new `playback` event only when the state, rate, or position changes discontinuously: play, pause,
 seek, rate change (varispeed is just a rate change), track change, or loop wrap. It never emits a steady position
 stream.
+
+**And it can be asked for** — `playback.get` (#243, #248). The events above are discontinuities and there is
+deliberately no position stream, which means a client that connects _between_ two of them knows nothing until the next
+one. Mid-album that is the length of a track.
+
+`playback.get` answers the same fields the event carries, from the same three sources — one function builds both,
+because a snapshot that could disagree with the stream is worse than no snapshot: a client cannot tell which of the two
+is stale. It omits `at_ns`, which a client did not use; §7.8 already has it extrapolating from its own clock.
+
+An optional `format` renders the current track engine-side, through the same template language the config and the `:`
+line use. That is not a convenience: this library's `now_playing` puts the title **last**, so a bar that truncated a
+pre-rendered line would throw away the field it was looking at. A caller that wants fields ignores `format`.
+
+**Two rules follow for anything else added to a topic.** A client must be able to ask for the current value, not only be
+told when it changes — `queue.get` returns the modes for exactly this reason and playback went without for as long as it
+did because nobody noticed the asymmetry. And the asking and the telling must be built by one piece of code.
 
 **`pos_frames` is into the current track, and `recording` names the track that is sounding.** Both needed saying,
 because the engine got both wrong in the same place and the bug was one symptom (#246).

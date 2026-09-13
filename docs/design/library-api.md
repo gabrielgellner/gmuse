@@ -169,7 +169,7 @@ which is what the TSVs were chosen for in the first place.
 Three properties this shape has and a per-fact API would not:
 
 - **Bulk.** Nine hundred genre assignments in one process.
-- **Offline.** No player need be running. A socket cannot offer that, which is why `--remote` is not this.
+- **Offline.** No player need be running. A socket cannot offer that, which is why `gmuse ctl` is not this.
 - **Reviewable.** The file exists before it is applied, so `genre-uncertain.tsv` stops being a thing thrown away at the
   end of a pass and becomes the artefact that _is_ the pass.
 

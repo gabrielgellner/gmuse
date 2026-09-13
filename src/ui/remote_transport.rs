@@ -94,15 +94,72 @@ impl Drop for ReaderStop {
     }
 }
 
+/// Take a `playback` body into the cache.
+///
+/// **One function for the event and for the snapshot** — #248. They carry the same
+/// fields by design, and two readers of one shape is how a seeded view comes to
+/// disagree with the stream that then updates it. `at_ns` is the only field the
+/// snapshot omits, and this never used it: §7.8 lets a client extrapolate from its
+/// own clock, so arrival is the instant that matters here.
+fn absorb(held: &mut Heard, body: &serde_json::Value) {
+    if let Some(state) = body["state"].as_str() {
+        held.state = match state {
+            "playing" => State::Playing,
+            "paused" => State::Paused,
+            _ => State::Stopped,
+        };
+    }
+    // **Absent is not zero.** A `playback` event before any stream has published a
+    // mapping carries `null`, and taking that as frame 0 would jerk a playhead back
+    // to the start of the track.
+    if let Some(frames) = body["pos_frames"].as_u64() {
+        held.pos_frames = frames;
+    }
+    if let Some(rate) = body["sample_rate"].as_u64() {
+        held.sample_rate = (rate as u32).max(1);
+    }
+    // **Absent means one, not zero.** An engine that predates the field is running a
+    // stream; defaulting to zero would freeze a playhead that is moving.
+    held.rate = body["rate"].as_f64().unwrap_or(1.0);
+    // **Set on every event, `null` included.** Absent is not "unchanged" here the way
+    // `pos_frames` is: a stop publishes no recording, and keeping the last one would
+    // leave a view drawing a track as current after playback had ended.
+    held.recording = body["recording"]
+        .as_str()
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(Id::from_uuid);
+    held.at = Instant::now();
+}
+
 impl Remote {
-    /// Subscribe to `playback` and start keeping the cache fresh.
+    /// Subscribe to `playback`, ask what is playing, and keep the cache fresh.
     pub fn attach(client: Arc<Client>) -> Result<Self, gmuse_client::ClientError> {
         client.subscribe(&[Topic::Playback])?;
 
-        let heard = Arc::new(Mutex::new(Heard {
+        let mut seed = Heard {
             sample_rate: client.hello().sample_rate.max(1),
             ..Heard::default()
-        }));
+        };
+        // **Asked, because the stream will not say** — #248, #243.
+        //
+        // The `playback` topic carries discontinuities and §7.8 forbids a steady
+        // position stream, so a view that attached between two of them believed
+        // nothing was playing until the next track change — which mid-album is the
+        // length of a track. `gp` had no target and the status line said stopped over
+        // audible music.
+        //
+        // **After `subscribe`, and the order is load-bearing.** An event that lands
+        // between the two is newer than this snapshot and overwrites it on arrival.
+        // Seeding first and subscribing second is the version that drops an event.
+        //
+        // A refusal is not fatal: an engine too old to answer is one this view can
+        // still drive, and it degrades to the behaviour that prompted the issue
+        // rather than to no view at all.
+        if let Ok(now) = client.call(gmuse_proto::method::PLAYBACK_GET, None) {
+            absorb(&mut seed, &now);
+        }
+
+        let heard = Arc::new(Mutex::new(seed));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         {
@@ -120,37 +177,7 @@ impl Remote {
                             continue;
                         }
                         let mut held = heard.lock().expect("heard");
-                        if let Some(state) = event.body["state"].as_str() {
-                            held.state = match state {
-                                "playing" => State::Playing,
-                                "paused" => State::Paused,
-                                _ => State::Stopped,
-                            };
-                        }
-                        // **Absent is not zero.** A `playback` event before any
-                        // stream has published a mapping carries `null`, and
-                        // taking that as frame 0 would jerk a playhead back to
-                        // the start of the track.
-                        if let Some(frames) = event.body["pos_frames"].as_u64() {
-                            held.pos_frames = frames;
-                        }
-                        if let Some(rate) = event.body["sample_rate"].as_u64() {
-                            held.sample_rate = (rate as u32).max(1);
-                        }
-                        // **Set on every event, `null` included.** Absent is
-                        // not "unchanged" here the way `pos_frames` is: a stop
-                        // publishes no recording, and keeping the last one
-                        // would leave a view drawing a track as current after
-                        // playback had ended.
-                        // **Absent means one, not zero.** An engine that predates
-                        // the field is running a stream; defaulting to zero would
-                        // freeze a playhead that is moving.
-                        held.rate = event.body["rate"].as_f64().unwrap_or(1.0);
-                        held.recording = event.body["recording"]
-                            .as_str()
-                            .and_then(|s| s.parse::<uuid::Uuid>().ok())
-                            .map(Id::from_uuid);
-                        held.at = Instant::now();
+                        absorb(&mut held, &event.body);
                     }
                 })
                 .ok();
@@ -317,6 +344,58 @@ impl Transport for Remote {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A `playback.get` snapshot seeds the cache the same way an event does** —
+    /// #248, #243.
+    ///
+    /// The two bodies carry the same fields by design, and `absorb` is deliberately one
+    /// function so a seeded view cannot disagree with the stream that then updates it.
+    /// The one difference is that a snapshot has no `at_ns` — so this uses a body with
+    /// the field genuinely absent, which is the shape that would have caught a reader
+    /// that depended on it.
+    #[test]
+    fn a_snapshot_tells_a_fresh_view_what_is_playing() {
+        let recording = uuid::Uuid::new_v4();
+        // Exactly what `playback.get` answers: no `at_ns`, and nothing else added.
+        let snapshot = serde_json::json!({
+            "state": "playing",
+            "recording": recording.to_string(),
+            "pos_frames": 96_000,
+            "stream_generation": 2,
+            "sample_rate": 44_100,
+            "rate": 1.0,
+        });
+
+        let mut held = Heard::default();
+        // **The instrument is attached**: a default cache is the state the bug left a
+        // view in, so asserting it beforehand is what makes the change below mean
+        // something rather than describing a cache that was already right.
+        assert_eq!(
+            held.state,
+            State::Stopped,
+            "the default is not the bug's state"
+        );
+        assert!(held.recording.is_none());
+
+        absorb(&mut held, &snapshot);
+
+        assert_eq!(held.state, State::Playing);
+        assert_eq!(
+            held.recording.map(|id| id.as_uuid()),
+            Some(recording),
+            "a view that asked was still not told which track"
+        );
+        assert_eq!(held.sample_rate, 44_100, "the engine's rate was ignored");
+        // Two seconds at 48k is not two seconds at 44.1k, which is why the rate has to
+        // come from the same body rather than from the handshake.
+        assert_eq!(
+            Remote::extrapolated(&Heard {
+                state: State::Paused,
+                ..held
+            }),
+            Duration::from_secs_f64(96_000.0 / 44_100.0)
+        );
+    }
 
     /// **A playhead does not advance while nothing is sounding** — #212, I13.
     ///

@@ -478,10 +478,6 @@ pub struct Ui {
     /// How the now-playing description is written. Parsed at config load; the
     /// status line only renders it.
     pub now_playing: crate::query::format::Template,
-    /// Which track the remote snapshot last carried a clone of.
-    ///
-    /// So the clone happens when the track changes rather than on every tick.
-    remote_track: Option<crate::model::rows::CopyId>,
     /// The transport panel's headline (#34).
     pub transport_line: crate::query::format::Template,
     /// How a track row is written in the library tree.
@@ -670,7 +666,6 @@ impl Ui {
             guide_pane: Pane::Tree,
             theme: theme::Theme::default(),
             now_playing: crate::query::format::Template::default(),
-            remote_track: None,
             transport_line: crate::query::format::Template::transport_default(),
             // **The track number is grouped, so a single does not pay for a
             // column it has no value for.** A field with no value renders
@@ -875,8 +870,6 @@ pub struct Context<'a> {
     /// separately rather than widening `Transport`, so that what is temporary
     /// looks temporary.
     pub gapless: Option<&'a PlayerHandle>,
-    /// `None` in tests, and when the socket could not be bound.
-    pub remote: Option<&'a crate::remote::Server>,
 }
 
 /// which-key's own default is 200ms; this is the value the config that
@@ -962,64 +955,12 @@ where
         // seen, and a refusal is reported by the push that caused it.
         push_the_queue(ui, ctx);
         follow_the_engine_topics(ui, ctx);
-        serve_remote(ui, ctx);
         note_play_progress(ui, ctx);
         audit_underruns(ui, ctx);
         note_finished_scans(ui);
         ui.expire_status();
     }
     Ok(Stop::Quit)
-}
-
-/// Apply what the socket received, and publish what it should answer with.
-///
-/// Both halves live on this thread on purpose. Commands are applied through
-/// [`execute`] — the same door the `:` line and every key binding use, so a
-/// remote `pause` is not a second implementation of pausing. And the status is
-/// *published* rather than served: the listener thread reads the snapshot and
-/// replies on its own, so a status bar polling once a second never waits for a
-/// render and can never hold one up.
-fn serve_remote(ui: &mut Ui, ctx: &Context<'_>) {
-    let Some(server) = ctx.remote else { return };
-
-    // `try_iter` and not `for`: the channel stays open for the program's life,
-    // so iterating it would block here until the player shut down.
-    let pending: Vec<_> = server.commands.try_iter().collect();
-    for cmd in pending {
-        ui.audit.line("remote", &format!("{cmd:?}"));
-        execute(ui, ctx, cmd);
-    }
-
-    if let Some(player) = ctx.player {
-        let files: &dyn Listing = ctx.library;
-        let current = ui.playback.current.and_then(|id| files.listed(id));
-        // **An owned row, so another thread can render a caller's own
-        // template.** A borrow cannot cross one, which is the whole reason
-        // this used to reach past the seam for the record itself (#86).
-        //
-        // Taken only when the track *changes*, not every tick: it is a handful
-        // of `String`s and this loop runs five times a second.
-        let track = match (ui.playback.current, ui.remote_track) {
-            (Some(id), Some(seen)) if id == seen => None,
-            _ => current.as_ref().map(crate::model::rows::Listed::owned),
-        };
-        let next = crate::remote::Status {
-            state: Some(player.state()),
-            rendered: current.as_ref().map(|row| ui.now_playing.render(row)),
-            track,
-            position: player.position(),
-        };
-        // A poisoned lock is not worth losing the status over: the only writer
-        // is this line and the only reader formats a string.
-        let mut slot = match server.status.lock() {
-            Ok(slot) => slot,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        // Carry the previous clone forward when this tick did not make one.
-        let track = next.track.or_else(|| slot.track.take());
-        *slot = crate::remote::Status { track, ..next };
-        ui.remote_track = ui.playback.current;
-    }
 }
 
 /// **Read the log again when the engine says there is more of it** — #236, §8.7.
@@ -4465,7 +4406,7 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
     // **A setting the engine owns is sent to it** — #233, §6, §7.12.
     //
     // `SettingKey::not_the_engines` is the one property that decides, and the same
-    // one `remote::is_remotable` asks — so a key that reaches here as the engine's
+    // one `cmd::instruction::instruction_of` answers — so a key that reaches here as the engine's
     // is one the engine will carry out rather than accept and ignore.
     //
     // **Applied locally as well**, which is not redundant: the engine publishes on
@@ -7013,7 +6954,6 @@ mod tests {
             library: lib_of(&store),
             player: None,
             gapless: None,
-            remote: None,
         };
         let ui = ui_of(&store, true);
         let out = render(&ui, &ctx, 74, 12);
@@ -7038,7 +6978,6 @@ mod tests {
             library: lib_of(&store),
             player: None,
             gapless: None,
-            remote: None,
         };
         let mut ui = ui_of(&store, true);
         // Select "Various Artists" and expand it.
@@ -7073,7 +7012,6 @@ mod tests {
             library: lib_of(&store),
             player: None,
             gapless: None,
-            remote: None,
         };
         let mut ui = ui_of(&store, true);
         let rows = ui.tree.rows(&ui.library);
@@ -7129,7 +7067,6 @@ mod tests {
             library: lib_of(&store),
             player: None,
             gapless: None,
-            remote: None,
         };
         let mut ui = ui_of(&store, true);
         let rows = ui.tree.rows(&ui.library);
@@ -7151,7 +7088,6 @@ mod tests {
             library: lib_of(&store),
             player: None,
             gapless: None,
-            remote: None,
         };
         let mut ui = ui_of(&store, true);
         ui.view = View::Playlist;
@@ -7169,7 +7105,6 @@ mod tests {
             library: lib_of(&store),
             player: None,
             gapless: None,
-            remote: None,
         };
         let mut ui = ui_of(&store, true);
         let rows = ui.tree.rows(&ui.library).len();
@@ -7219,7 +7154,6 @@ mod tests {
             ))),
             player: None,
             gapless: None,
-            remote: None,
         }
     }
 
@@ -7234,7 +7168,6 @@ mod tests {
             library: lib_of(store),
             player: None,
             gapless: None,
-            remote: None,
         }
     }
 
@@ -7315,7 +7248,6 @@ mod tests {
             library,
             player: Some(&engine),
             gapless: None,
-            remote: None,
         };
         let mut ui = ui_of(&store, true);
         assert_eq!(ui.playback.current, None, "nothing chosen here");
@@ -7388,7 +7320,6 @@ mod tests {
             library,
             player: Some(&here),
             gapless: None,
-            remote: None,
         };
         let mut ui = ui_of(&store, true);
         ui.playback.current = Some(row);
@@ -7604,7 +7535,6 @@ mod tests {
             library,
             player: None,
             gapless: None,
-            remote: None,
         };
         let mut ui = Ui::new(Shelf::rebuild(library, true));
 
@@ -10753,7 +10683,6 @@ mod tests {
             library,
             player: Some(&engine),
             gapless: None,
-            remote: None,
         };
         let mut ui = ui_of(&store, true);
 
@@ -12884,7 +12813,6 @@ mod tests {
             library,
             player: None,
             gapless: None,
-            remote: None,
         };
         let mut ui = ui_with_history(&store, "rate-relinked");
         let dir = ui.data_dir.clone().unwrap();

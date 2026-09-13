@@ -102,6 +102,26 @@ pub enum Request {
     PlayerLoad {
         recording: String,
     },
+    /// **What is playing, right now, asked rather than waited for** — #243, #248.
+    ///
+    /// The `playback` topic reports *discontinuities* and §7.8 forbids a steady
+    /// position stream, so a client that connects between two of them learns
+    /// nothing until the next one — which mid-album is the length of a track. A
+    /// status bar polls and cannot subscribe at all; a view that attaches
+    /// mid-playback showed "stopped" over audible music.
+    ///
+    /// **The queue already answers its own version of this question.** `queue.get`
+    /// returns the modes on the read as well as on the event, *"so a view that
+    /// attaches mid-stream knows them without waiting for one to change"*. This is
+    /// that sentence applied to the topic it was always more true of.
+    ///
+    /// `format` renders the current track through the same template language the
+    /// config and the `:` line use. It exists because this library's `now_playing`
+    /// puts the **title last**, so a bar that truncated a pre-rendered line would
+    /// throw away the field it was looking at (§13, 2026-09-01).
+    PlaybackGet {
+        format: Option<String>,
+    },
     /// Start receiving events on these topics (§7.8).
     Subscribe {
         topics: Vec<crate::Topic>,
@@ -237,6 +257,7 @@ pub mod method {
     pub const ENGINE_SHUTDOWN: &str = "engine.shutdown";
     pub const TIME_NOW: &str = "time.now";
     pub const PLAYER_LOAD: &str = "player.load";
+    pub const PLAYBACK_GET: &str = "playback.get";
     pub const QUEUE_GET: &str = "queue.get";
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
     pub const QUEUE_SET: &str = "queue.set";
@@ -269,6 +290,7 @@ pub mod method {
         ENGINE_SHUTDOWN,
         TIME_NOW,
         PLAYER_LOAD,
+        PLAYBACK_GET,
         QUEUE_GET,
         QUEUE_ENQUEUE,
         QUEUE_SET,
@@ -345,6 +367,18 @@ impl Request {
                 Ok(Self::PlayerLoad {
                     recording: p.recording,
                 })
+            }
+            // **`format` is optional and absent is not empty.** A caller that wants
+            // fields gets fields; one that wants a line asks for it. An empty string
+            // would have to mean one of those and would silently be the wrong one.
+            method::PLAYBACK_GET => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default)]
+                    format: Option<String>,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::PlaybackGet { format: p.format })
             }
             method::QUEUE_GET => Ok(Self::QueueGet),
             method::QUEUE_ENQUEUE => {
@@ -429,6 +463,7 @@ impl Request {
             Self::EngineShutdown => method::ENGINE_SHUTDOWN,
             Self::TimeNow => method::TIME_NOW,
             Self::PlayerLoad { .. } => method::PLAYER_LOAD,
+            Self::PlaybackGet { .. } => method::PLAYBACK_GET,
             Self::QueueGet => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
             Self::QueueSet { .. } => method::QUEUE_SET,
@@ -480,7 +515,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 22, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 23, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

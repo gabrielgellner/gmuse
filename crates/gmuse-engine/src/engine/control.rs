@@ -57,6 +57,14 @@ pub enum Ask {
     /// path means hashing the file's audio, which is a read this thread may not
     /// do. So a `playback` event names what was asked for, not what was found.
     Load { recording: Id<Recording> },
+    /// **What is playing, as one answer** — #243, #248.
+    ///
+    /// Asked rather than derived from the event stream, because the events are
+    /// discontinuities (§7.8) and a client that arrives between two of them has
+    /// nothing to go on. The same reply channel as `Queue` and for the same
+    /// reason: `Held.playing` is owned by the loop below, so a connection worker
+    /// asks and waits one tick.
+    Playing { reply: Sender<Sounded> },
     /// A queue operation, with somewhere to put the answer.
     ///
     /// **A reply channel, because the state lives on this thread.** `Playing` is
@@ -89,6 +97,23 @@ pub enum QueueOp {
         base: Option<u64>,
     },
     SetScope(gmuse_library::next::Scope),
+}
+
+/// What is sounding, for a client that asked instead of waiting.
+///
+/// **The same fields the `playback` event carries**, which is the point: a snapshot
+/// and an event that disagreed about shape would make a client hold two parsers for
+/// one fact. `playback_event` and this are built from the same three sources.
+pub struct Sounded {
+    pub state: State,
+    pub recording: Option<String>,
+    /// Frames into the *current track* — see `playback_event` on why the base is
+    /// subtracted here rather than sent alongside.
+    pub pos_frames: Option<u64>,
+    pub generation: u32,
+    pub sample_rate: u32,
+    /// Zero when the device has gone, so a client knows not to extrapolate (#212).
+    pub rate: f64,
 }
 
 /// The queue as it stands after an operation.
@@ -415,6 +440,14 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                     // the honest report.
                     None => false,
                 }
+            }
+            // **Answered from the same three sources the event is built from**, and
+            // deliberately not from a cached copy of the last event: a snapshot that
+            // could disagree with the stream is worse than no snapshot, because a
+            // client cannot tell which one is stale.
+            Ok(Ask::Playing { reply }) => {
+                let _ = reply.send(sounded(player, &shared, held.playing.as_deref(), lost));
+                false
             }
             Ok(Ask::Queue { op, reply }) => {
                 let answered = match op {
@@ -838,16 +871,21 @@ fn load_picked(
 /// main player *and* each deck"; this is the main player, and #224 settled that
 /// the player is a deck plus a queue rather than a deck. A `deck` key here would
 /// claim a deck exists.
-fn playback_event(
+/// What is sounding, from the player, the shared atomics and the loop's own idea of
+/// which recording it is.
+///
+/// **One function, two callers** — `playback_event` frames it as an event and
+/// `Ask::Playing` hands it back as a reply. They were written separately first and
+/// the position base was subtracted in only one of them, which is exactly the kind
+/// of disagreement a snapshot is supposed to resolve rather than add to.
+fn sounded(
     player: &PlayerHandle,
     shared: &Arc<Shared>,
-    told: Told,
     recording: Option<&str>,
-    // Whether the device has gone, so the position is not advancing (#212).
     lost: bool,
-) -> Event {
+) -> Sounded {
     let sounding = shared.sounding();
-    // **Into this track, not into the stream** — I13, I17.
+    // **Into this track, not into the stream** — I13, I17, #246.
     //
     // A gapless transition deliberately does not flush, so the frame counter runs
     // straight across the join and `Shared::track_base` is what makes it mean
@@ -860,6 +898,44 @@ fn playback_event(
     // not a user-facing grain (I17) and nothing asks for one. It also makes a track
     // change the position discontinuity §7.8 already lists it as.
     let base = shared.track_base.load(std::sync::atomic::Ordering::Acquire);
+    Sounded {
+        state: player.state(),
+        recording: recording.map(str::to_owned),
+        pos_frames: sounding.map(|s| s.frame.saturating_sub(base)),
+        generation: shared.generation(),
+        sample_rate: player.device_rate(),
+        // **Zero when nothing is sounding** — #212, I13.
+        //
+        // A client extrapolates position locally between discontinuities (§7.8), so
+        // it needs to know when *not* to. A lost device stops the render step, which
+        // freezes `position_frames` — so the local `PlayerHandle::position` is honest
+        // by construction and a remote one was not: it took the frozen position, reset
+        // its own clock, and advanced forever while nothing played.
+        //
+        // `rate` is the field that already means this. It was the constant 1.0 with a
+        // note that varispeed does not exist yet; a stalled stream is rate 0, which is
+        // the same quantity honestly measured rather than a fourth run state invented
+        // for the case.
+        rate: if lost { 0.0 } else { 1.0 },
+    }
+}
+
+fn playback_event(
+    player: &PlayerHandle,
+    shared: &Arc<Shared>,
+    told: Told,
+    recording: Option<&str>,
+    // Whether the device has gone, so the position is not advancing (#212).
+    lost: bool,
+) -> Event {
+    // **`told` rather than a fresh read, for the two fields that name the stream.**
+    //
+    // The loop decided this event was worth publishing by comparing `told` to what it
+    // last announced; re-reading the state here could describe a *different* moment
+    // than the one that triggered the publish. `sounded` supplies everything that is
+    // a measurement rather than a decision.
+    let now = sounded(player, shared, recording, lost);
+    let at_ns = shared.sounding().map(|s| s.at_nanos);
     Event::new(
         Topic::Playback,
         serde_json::json!({
@@ -868,25 +944,12 @@ fn playback_event(
                 State::Paused => "paused",
                 State::Stopped => "stopped",
             },
-            "recording": recording,
-            "pos_frames": sounding.map(|s| s.frame.saturating_sub(base)),
+            "recording": now.recording,
+            "pos_frames": now.pos_frames,
             "stream_generation": told.generation,
-            "sample_rate": player.device_rate(),
-            "at_ns": sounding.map(|s| s.at_nanos),
-            // **Zero when nothing is sounding** — #212, I13.
-            //
-            // A client extrapolates position locally between discontinuities
-            // (§7.8), so it needs to know when *not* to. A lost device stops the
-            // render step, which freezes `position_frames` — so the local
-            // `PlayerHandle::position` is honest by construction and a remote one
-            // was not: it took the frozen position, reset its own clock, and
-            // advanced forever while nothing played.
-            //
-            // `rate` is the field that already means this. It was the constant 1.0
-            // with a note that varispeed does not exist yet; a stalled stream is
-            // rate 0, which is the same quantity honestly measured rather than a
-            // fourth run state invented for the case.
-            "rate": if lost { 0.0 } else { 1.0 },
+            "sample_rate": now.sample_rate,
+            "at_ns": at_ns,
+            "rate": now.rate,
         }),
     )
 }
