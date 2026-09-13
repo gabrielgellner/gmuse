@@ -17,6 +17,7 @@ description = "gmuse's audio path and engine"
 
 [dependencies]
 gmuse-ids = { path = "../gmuse-ids" }
+gmuse-lock = { path = "../gmuse-lock" }
 gmuse-library = { path = "../gmuse-library" }
 gmuse-proto = { path = "../gmuse-proto" }
 cpal = "0.18.2"

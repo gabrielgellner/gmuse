@@ -1,4 +1,12 @@
-//! One player at a time, enforced by the kernel rather than by a convention.
+//! One holder at a time, enforced by the kernel rather than by a convention.
+//!
+//! **A crate of its own since #257**, and the reason is a dependency rather than a size:
+//! the engine locks its socket, the librarian locks the log it appends to, and `main` locks
+//! the process. The engine may no longer depend on `gmuse-library`, where this lived, and
+//! the only crate below all three was `gmuse-ids` — whose charter forbids anything that
+//! walks a disk, which writing a pid into a file is.
+//!
+//! So it names no library concept and cannot: what it locks is a path somebody hands it.
 //!
 //! Two gmuse processes on one machine are not a corruption risk — that was
 //! measured before this was written, and the answer is narrower than it looks:

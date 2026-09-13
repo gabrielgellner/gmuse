@@ -12,6 +12,7 @@ repository = "https://gitlab.com/gabrielgellner/gmuse"
 # fails to build, and adding it here is the visible act.
 [dependencies]
 gmuse-ids = { path = "../gmuse-ids" }
+gmuse-lock = { path = "../gmuse-lock" }
 
 arc-swap = "1.7.1"
 crossbeam-channel = "0.5.16"

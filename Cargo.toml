@@ -6,6 +6,7 @@
 [workspace]
 members = [
   "crates/gmuse-ids",
+  "crates/gmuse-lock",
   "crates/gmuse-library",
   "crates/gmuse-proto",
   "crates/gmuse-client",

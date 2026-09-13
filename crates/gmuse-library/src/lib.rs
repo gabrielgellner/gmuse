@@ -38,7 +38,11 @@ pub mod librarian;
 ///
 /// Here because the thing with a single appender is the log, and the log is this
 /// crate's. `gmuse-engine`'s socket lock is the same primitive through a re-export.
-pub mod lock;
+/// **The process, socket and append locks** — moved to `gmuse-lock` by #257.
+///
+/// Re-exported because `gmuse::lock::acquire` is what `main` says, and because the
+/// librarian's `Appending::claim` is one of the three callers that made it a crate.
+pub use gmuse_lock as lock;
 pub mod model;
 pub mod next;
 pub mod operations;

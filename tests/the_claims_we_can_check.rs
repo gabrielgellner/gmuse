@@ -360,6 +360,93 @@ fn has_issue_reference(text: &str) -> bool {
 )]
 fn unused_example() {}
 
+/// **Which crate may depend on which, asserted against the manifests** — #257.
+///
+/// `layers.md`'s direction rule is "enforced by cargo, not by a test", and that is the right
+/// shape — a dependency that cannot compile beats one a test complains about. But cargo only
+/// enforces the edges that *exist*; it says nothing about an edge somebody adds. So this
+/// names every intended one, and a new one fails here with the reason it was excluded.
+///
+/// **The endpoint of #257 is one line of this table**: `gmuse-engine` without
+/// `gmuse-library`. The ratchet below counts reaches because that line cannot be written
+/// yet; when it can, the ratchet goes and this is strictly better, because an import spelled
+/// differently still needs the manifest edge.
+#[test]
+fn every_crate_depends_only_on_what_it_is_meant_to() {
+    // Ordered low to high. A crate may depend only on what is listed for it.
+    let intended: &[(&str, &[&str])] = &[
+        // **Names entities and reads nothing.** Its dependency list is the whole point of it
+        // existing: anything here lands on the protocol crate's graph.
+        ("gmuse-ids", &[]),
+        // **`std::fs` and an error enum.** Three callers, none of which may depend on the
+        // others — see §13's entry of 2026-09-13.
+        ("gmuse-lock", &[]),
+        // §4.3: it must not depend on engine internals, which is why the ids are separate.
+        ("gmuse-proto", &["gmuse-ids"]),
+        ("gmuse-client", &["gmuse-proto", "gmuse-ids"]),
+        // The librarian. Notably **not** `gmuse-proto`: the wire describes the library, and
+        // an edge the other way would let a fact be shaped by a message.
+        ("gmuse-library", &["gmuse-ids", "gmuse-lock"]),
+        // **`gmuse-library` is the line #257 removes.** Everything else here is settled.
+        (
+            "gmuse-engine",
+            &["gmuse-ids", "gmuse-lock", "gmuse-proto", "gmuse-library"],
+        ),
+    ];
+
+    let mut wrong: Vec<String> = Vec::new();
+    let mut seen = 0usize;
+    for (crate_name, allowed) in intended {
+        let manifest = Path::new("crates").join(crate_name).join("Cargo.toml");
+        let text = match std::fs::read_to_string(&manifest) {
+            Ok(text) => text,
+            Err(e) => {
+                wrong.push(format!("{}: {e}", manifest.display()));
+                continue;
+            }
+        };
+        seen += 1;
+        // `[dependencies]` only — a dev-dependency is test scaffolding and does not put the
+        // crate on anybody's shipped graph.
+        let deps = section(&text, "[dependencies]");
+        for line in deps.lines() {
+            let Some(name) = line.split('=').next().map(str::trim) else {
+                continue;
+            };
+            if !name.starts_with("gmuse-") {
+                continue;
+            }
+            if !allowed.contains(&name) {
+                wrong.push(format!(
+                    "{crate_name} depends on {name}, which is not intended"
+                ));
+            }
+        }
+    }
+
+    // **The instrument is attached.** A renamed directory would read every manifest as
+    // missing and the loop would find nothing to complain about.
+    assert_eq!(
+        seen,
+        intended.len(),
+        "only {seen} of {} manifests were read, so this checked almost nothing",
+        intended.len()
+    );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// One `[section]` of a manifest, up to the next one.
+fn section<'a>(text: &'a str, header: &str) -> &'a str {
+    let Some(at) = text.find(header) else {
+        return "";
+    };
+    let body = &text[at + header.len()..];
+    match body.find("\n[") {
+        Some(end) => &body[..end],
+        None => body,
+    }
+}
+
 /// **The audio engine's reaches into the library may only go down** — #257.
 ///
 /// The decision is that `gmuse-engine` does not depend on `gmuse-library` at all, and the
@@ -381,12 +468,12 @@ fn unused_example() {}
 ///
 /// What is left is almost entirely `use` lines and the `Desk`: the librarian's identity, the
 /// `Ask`/`Reply` vocabulary that becomes a channel, `Scope`, `Touched`/`Changed`, and two
-/// stragglers with reasons of their own — `history::now_ms`, which stamps a rate fact the
-/// engine should not be appending, and `lock`, whose 193 lines of `std::fs` want a crate of
-/// their own because the engine, the librarian and `main` all need them.
+/// straggler with a reason of its own: `history::now_ms`, which stamps a rate fact the engine
+/// should not be appending at all. `lock` is gone — it is `gmuse-lock` now, for the reason
+/// that made it a crate rather than a shared module.
 #[test]
 fn the_engine_does_not_reach_further_into_the_library() {
-    const CEILING: usize = 12;
+    const CEILING: usize = 11;
 
     let engine = Path::new("crates").join("gmuse-engine").join("src");
     let mut found: BTreeMap<PathBuf, usize> = BTreeMap::new();

@@ -1,0 +1,22 @@
+[package]
+name = "gmuse-lock"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "One holder at a time, enforced by the kernel"
+repository = "https://gitlab.com/gabrielgellner/gmuse"
+
+# **A crate because three things need it and none of them may depend on the
+# others** — #257.
+#
+# The engine locks its socket, the librarian locks the log it appends to, and
+# `main` locks the process. Under #257 the engine must not depend on
+# `gmuse-library`, which is where this lived, and the only crate below all three
+# was `gmuse-ids` — whose own charter forbids "anything that decodes, walks a
+# disk or opens a socket", and this opens a file and writes a pid into it.
+#
+# So: the smallest crate in the workspace, `std::fs` and one error enum. Nothing
+# here knows what a library is, and that is the whole point of it being separate
+# rather than shared.
+[dependencies]
+thiserror = "2.0.20"

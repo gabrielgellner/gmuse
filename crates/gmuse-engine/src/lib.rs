@@ -21,7 +21,12 @@ pub mod instruction;
 /// That was wrong by one crate: the thing with a single appender is the *log*, and
 /// the log is the library's. So it moved down, and both this crate's socket lock and
 /// the librarian's append lock are the same primitive.
-pub use gmuse_library::lock;
+/// **The socket lock** — `gmuse-lock`, not `gmuse-library` (#257).
+///
+/// It came through the library crate, which is the shape this refactor is removing: the
+/// engine reached a file lock by way of the thing that owns the log. Re-exported rather
+/// than imported at each site so `crate::lock::` keeps reading the same.
+pub use gmuse_lock as lock;
 /// The allocation guard, in the test binary only — #211.
 #[cfg(test)]
 pub mod rt_guard;

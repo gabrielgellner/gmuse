@@ -842,6 +842,7 @@ dependencies = [
  "crossbeam-channel",
  "gmuse-ids",
  "gmuse-library",
+ "gmuse-lock",
  "gmuse-proto",
  "rtrb",
  "rubato",
@@ -871,6 +872,7 @@ dependencies = [
  "arc-swap",
  "crossbeam-channel",
  "gmuse-ids",
+ "gmuse-lock",
  "lofty",
  "postcard",
  "serde",
@@ -882,6 +884,13 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "gmuse-lock"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
 ]
 
 [[package]]

@@ -5896,6 +5896,22 @@ Append here as decisions are made. Format: date, decision, rationale.
   librarian can die and restart inside it, and the engine stops at a track boundary rather than mid-bar. That is the
   argument for two or three rather than one, and it is better than the latency one.
 
+- **2026-09-13** **`gmuse-lock` is a crate because three things need it and none may depend on the others** (#257). The
+  engine locks its socket, the librarian locks the log it appends to, and `main` locks the process. It lived in
+  `gmuse-library`, which #257 forbids the engine from depending on — and the only crate below all three was `gmuse-ids`,
+  whose charter is "everything that can name an entity, and nothing that can read a file". Writing a pid into a file is
+  reading a file, so bending that charter to avoid a crate would have cost the one property `gmuse-ids` exists to hold:
+  that nothing on the protocol's dependency graph can walk a disk.
+
+  **The alternative considered and rejected was duplication** — the engine keeping its own 40-line `File::try_lock`
+  helper. It is 193 lines with a genuinely subtle header (why an OS lock and not a pidfile, why `$XDG_STATE_HOME` and
+  not `data_dir`, and what the lock explicitly does _not_ protect), and two copies of that reasoning is exactly the
+  drift this project keeps paying for. `next::shuffled` had just demonstrated it: a ported copy was wrong invisibly
+  because `split_mix64` does not advance its argument.
+
+  So: the smallest crate in the workspace, `std::fs` and one error enum. `gmuse-library` re-exports it as `lock`,
+  because `gmuse::lock::acquire` is what `main` says and the librarian's `Appending::claim` is one of the three callers.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
