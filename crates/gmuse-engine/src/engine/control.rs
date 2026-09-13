@@ -133,6 +133,10 @@ impl Control {
     /// be told 0 Hz and have no way to learn better.
     pub fn start(
         null_audio: bool,
+        // **What opened the first stream, and what will open the next** — #241.
+        // `preferred_config` matches `--device` by substring, so holding the whole
+        // config is what lets a retry honour the intent rather than guess at it.
+        cfg: PlayerConfig,
         desk: Arc<Desk>,
         // **What `rescan` reconciles.** Held here rather than asked for per
         // command: the roots are the engine's configuration and a command carries
@@ -151,44 +155,124 @@ impl Control {
             std::thread::Builder::new()
                 .name("gmuse-engine-control".into())
                 .spawn(move || {
-                    // **Opened on this thread**, because the handle cannot cross
-                    // one.
-                    let cfg = PlayerConfig {
-                        device: None,
-                        rate: None,
-                        resample: Default::default(),
-                        volume: 1.0,
+                    // **Opened on this thread**, because the handle cannot cross one.
+                    let open = |cfg: PlayerConfig| {
+                        if null_audio {
+                            // Wall speed, not `Fast`: a headless engine is still
+                            // playing for somebody, and nothing downstream should be
+                            // able to tell which backend it is.
+                            PlayerHandle::headless(cfg, null::Pace::RealTime)
+                        } else {
+                            PlayerHandle::new(cfg)
+                        }
                     };
-                    let player = if null_audio {
-                        // Wall speed, not `Fast`: a headless engine is still
-                        // playing for somebody, and nothing downstream should
-                        // be able to tell which backend it is.
-                        PlayerHandle::headless(cfg, null::Pace::RealTime)
-                    } else {
-                        PlayerHandle::new(cfg)
-                    };
-                    let player = match player {
+                    let mut player = match open(cfg.clone()) {
                         Ok(player) => {
+                            // **Both facts before `ready`, not merely before the loop.**
+                            // `Control::start` returns the moment this send lands and a
+                            // `hello` can arrive immediately after — so anything stored
+                            // later is a placeholder somebody can read. It used to be
+                            // stored just below and the window was microseconds; #241
+                            // put a librarian fold between the two and the window became
+                            // the fold, which `the_engine_plays_a_track_and_says_so`
+                            // caught as a rate of 0.
+                            facts
+                                .sample_rate
+                                .store(player.device_rate(), Ordering::Release);
+                            facts
+                                .stream_generation
+                                .store(player.stream_generation(), Ordering::Release);
                             let _ = ready_tx.send(Ok(player.device_rate()));
                             player
                         }
+                        // **No device at startup is fatal, and a device *lost* is
+                        // not** — #241. The asymmetry is deliberate: `start` blocks
+                        // until a player opens and the socket is not bound until it
+                        // returns, so an engine waiting here would never answer a
+                        // handshake and a view's auto-start (§4.2) would time out
+                        // against silence. Failing with "no output device available" is
+                        // the useful answer. Once a stream has existed, the socket is
+                        // up and clients are connected — so waiting is the useful one.
                         Err(e) => {
                             let _ = ready_tx.send(Err(e));
                             return;
                         }
                     };
 
-                    // **Both facts before the loop.** The rate was stored here
-                    // and the generation only inside the tick, so a `hello`
-                    // arriving before the first tick was answered with
-                    // generation 0 — a placeholder again, by a different route.
-                    facts
-                        .sample_rate
-                        .store(player.device_rate(), Ordering::Release);
-                    facts
-                        .stream_generation
-                        .store(player.stream_generation(), Ordering::Release);
-                    run(&player, &rx, &facts, &desk, &roots, &engine, &stopping);
+                    // **Everything that outlives a stream** (#241), so a cable coming
+                    // out does not empty the queue.
+                    let mut held = Held {
+                        queue: super::queue::Playing::new(pool_of(&desk)),
+                        playing: None,
+                        pending: None,
+                        announced: 0,
+                        folded: desk.current(),
+                        generation: player.stream_generation(),
+                    };
+
+                    loop {
+                        // **Again each time round**, because a rebuilt device may run at
+                        // another rate and the generation has moved.
+                        facts
+                            .sample_rate
+                            .store(player.device_rate(), Ordering::Release);
+                        facts
+                            .stream_generation
+                            .store(held.generation, Ordering::Release);
+
+                        let wiring = Wiring {
+                            asks: &rx,
+                            facts: &facts,
+                            desk: &desk,
+                            roots: &roots,
+                            engine: &engine,
+                            stop: &stopping,
+                        };
+                        match run(&player, &mut held, wiring) {
+                            Ran::Stopped => return,
+                            Ran::DeviceLost => {}
+                        }
+
+                        // **Where it was, before the handle that knew goes.**
+                        let was = player.position();
+                        let resuming = held.playing.clone();
+                        drop(player);
+
+                        // **Wait for a device, honouring the intent that opened the
+                        // first one** — #241. `preferred_config` matches `--device` by
+                        // substring, so a named interface is waited for and nothing
+                        // else is taken; with no flag it takes whatever is default now.
+                        //
+                        // A poll, and not for want of trying: after a `DeviceLost` no
+                        // callback runs, so cpal has no `DeviceChanged` to give us.
+                        // Enumeration is the only signal there is.
+                        let Some(fresh) = wait_for_a_device(&open, &cfg, &stopping) else {
+                            return;
+                        };
+                        player = fresh;
+                        // **Monotonic, so a generation never repeats.** A fresh handle
+                        // starts its own at zero; passing that through would make the
+                        // number go backwards and a `When::Frame` uncheckable (#212).
+                        held.generation = held.generation.saturating_add(1);
+
+                        // **Loaded and positioned, and left paused** — #241's decision.
+                        // Nothing starts audio nobody asked for: a cable knocked out at
+                        // 3am must not start the music again when the device reappears.
+                        // The same three commands `restore_session` uses, for the same
+                        // reason.
+                        if let Some(recording) = resuming
+                            .as_deref()
+                            .and_then(|r| r.parse::<uuid::Uuid>().ok())
+                            .map(gmuse_library::model::id::Id::from_uuid)
+                            && let Some(source) = source_for(&desk, recording)
+                        {
+                            player.load(source);
+                            if was > Duration::ZERO {
+                                player.seek(crate::audio::SeekTo::Absolute(was));
+                            }
+                            player.pause();
+                        }
+                    }
                 })
                 .map_err(|e| crate::audio::AudioError::Device(e.to_string()))?
         };
@@ -235,37 +319,74 @@ struct Told {
 }
 
 /// The loop: apply what is asked, and say what changed.
-fn run(
-    player: &PlayerHandle,
-    asks: &Receiver<Ask>,
-    facts: &Arc<Facts>,
-    desk: &Arc<Desk>,
-    roots: &[std::path::PathBuf],
-    engine: &Arc<std::sync::OnceLock<Arc<super::Engine>>>,
-    stop: &Arc<AtomicBool>,
-) {
+/// **What outlives a stream** — #241.
+///
+/// A cable coming out must not empty the queue. So everything the control thread
+/// remembers between ticks lives here, owned by the thread body rather than by `run`,
+/// and a rebuilt player is handed the same `Held` back.
+struct Held {
+    /// The queue, the modes and the materialised pool (#232).
+    queue: super::queue::Playing,
+    /// What the `playback` event names.
+    playing: Option<String>,
+    /// What was spliced on and has not started yet.
+    ///
+    /// `set_next` hands the decoder a track to join onto the end of the current one;
+    /// nothing has played it yet, so `playing` must not name it. Promoted when the
+    /// current track finishes, which is the moment the join happens.
+    ///
+    /// Without this the `playback` event kept naming the first recording after a
+    /// gapless join — the engine had moved on and was telling every view it had not.
+    pending: Option<String>,
+    /// The queue version last published, so an unchanged one publishes nothing.
+    announced: u64,
+    /// The librarian's last published fold, to notice a new one by pointer.
+    folded: std::sync::Arc<gmuse_library::librarian::Answer>,
+    /// **The engine's own count of streams**, monotonic across rebuilds.
+    ///
+    /// Not the handle's: a rebuilt `PlayerHandle` has a fresh `Shared` whose generation
+    /// starts at zero, so passing that through would make the number go *backwards*
+    /// after a device came back. A generation that can repeat is one a `When::Frame`
+    /// cannot be checked against, which is the whole point of #212.
+    generation: u32,
+}
+
+/// Why the loop gave up the stream.
+enum Ran {
+    /// Asked to stop. Nothing is rebuilt.
+    Stopped,
+    /// The device went. The caller rebuilds and calls again (#241).
+    DeviceLost,
+}
+
+/// **What outlives every stream, as opposed to every tick** — #241.
+///
+/// [`Held`] is the state a rebuild carries forward; this is the wiring it carries it
+/// through. Bundled because a rebuild loop means `run` is called more than once, and
+/// eight arguments at a call site say nothing about which of them could change between
+/// calls. None of these can.
+#[derive(Clone, Copy)]
+struct Wiring<'a> {
+    asks: &'a Receiver<Ask>,
+    facts: &'a Arc<Facts>,
+    desk: &'a Arc<Desk>,
+    roots: &'a [std::path::PathBuf],
+    engine: &'a Arc<std::sync::OnceLock<Arc<super::Engine>>>,
+    stop: &'a Arc<AtomicBool>,
+}
+
+fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
+    let Wiring {
+        asks,
+        facts,
+        desk,
+        roots,
+        engine,
+        stop,
+    } = w;
     let shared = player.shared();
     let mut told: Option<Told> = None;
-    let mut playing: Option<String> = None;
-    // Whether the device has gone; see the `DeviceLost` arm below.
     let mut lost = false;
-
-    // **The pool, materialised** — #232. §4.4 forbids this thread from running
-    // a query, so it holds one instead and rebuilds it when the librarian
-    // publishes a change. Answering `NeedNext` is then a lookup.
-    let mut queue = super::queue::Playing::new(pool_of(desk));
-    // **What was spliced on but has not started yet.**
-    //
-    // `set_next` hands the decoder a track to join onto the end of the current
-    // one; nothing has played it yet, so `playing` must not name it. Promoted
-    // when the current track finishes, which is the moment the join happens.
-    //
-    // Without this the `playback` event kept naming the first recording after a
-    // gapless join — the engine had moved on and was telling every view it had
-    // not.
-    let mut pending: Option<String> = None;
-    let mut announced = queue.version();
-    let mut folded = desk.current();
 
     while !stop.load(Ordering::Acquire) {
         // **A timeout, not a blocking receive.** §5.1: this thread must wake on
@@ -276,16 +397,16 @@ fn run(
             Ok(Ask::Do(instruction)) => apply(
                 player,
                 instruction,
-                &mut queue,
+                &mut held.queue,
                 desk,
                 roots,
-                &mut pending,
-                &mut playing,
+                &mut held.pending,
+                &mut held.playing,
             ),
             Ok(Ask::Load { recording }) => {
                 match source_for(desk, recording) {
                     Some(source) => {
-                        playing = Some(recording.to_string());
+                        held.playing = Some(recording.to_string());
                         player.load(source);
                         true
                     }
@@ -298,39 +419,41 @@ fn run(
             Ok(Ask::Queue { op, reply }) => {
                 let answered = match op {
                     QueueOp::Get => {
-                        let (version, entries) = queue.get();
+                        let (version, entries) = held.queue.get();
                         Ok(Answered {
                             version,
                             entries: Some(entries),
-                            modes: Some(queue.modes()),
+                            modes: Some(held.queue.modes()),
                         })
                     }
                     QueueOp::Enqueue { ids, base } => {
-                        queue.enqueue(&ids, base).map(|version| Answered {
+                        held.queue.enqueue(&ids, base).map(|version| Answered {
                             version,
                             entries: None,
                             modes: None,
                         })
                     }
-                    QueueOp::Set { ids, base } => queue.set(&ids, base).map(|version| Answered {
-                        version,
-                        entries: None,
-                        modes: None,
-                    }),
+                    QueueOp::Set { ids, base } => {
+                        held.queue.set(&ids, base).map(|version| Answered {
+                            version,
+                            entries: None,
+                            modes: None,
+                        })
+                    }
                     QueueOp::Remove { index, base } => {
-                        queue.remove(index, base).map(|version| Answered {
+                        held.queue.remove(index, base).map(|version| Answered {
                             version,
                             entries: None,
                             modes: None,
                         })
                     }
-                    QueueOp::Clear { base } => queue.clear(base).map(|version| Answered {
+                    QueueOp::Clear { base } => held.queue.clear(base).map(|version| Answered {
                         version,
                         entries: None,
                         modes: None,
                     }),
                     QueueOp::SetScope(mode) => Ok(Answered {
-                        version: queue.set_scope(mode),
+                        version: held.queue.set_scope(mode),
                         entries: None,
                         modes: None,
                     }),
@@ -348,9 +471,9 @@ fn run(
         // playing should be playable next, and the cheapest way to know is the
         // pointer the librarian swapped.
         let now = desk.current();
-        if !Arc::ptr_eq(&folded, &now) {
-            queue.refresh(pool_of(desk));
-            folded = now;
+        if !Arc::ptr_eq(&held.folded, &now) {
+            held.queue.refresh(pool_of(desk));
+            held.folded = now;
         }
 
         // What the player has to say for itself. Draining rather than taking
@@ -363,14 +486,15 @@ fn run(
                 // needs a reply before it ends; a detached view cannot serve a
                 // deadline, so nothing is asked of one.
                 PlayerEvent::NeedNext => {
-                    match queue
+                    match held
+                        .queue
                         .take_next()
                         .and_then(|(id, _source)| recording_of(desk, id).map(|rec| (id, rec)))
                     {
                         Some((id, recording)) => match source_for(desk, recording) {
                             Some(source) => {
-                                pending = Some(recording.to_string());
-                                queue.now_playing(Some(id));
+                                held.pending = Some(recording.to_string());
+                                held.queue.now_playing(Some(id));
                                 player.set_next(Some(source));
                             }
                             // Named and not held: a row the library has and this
@@ -384,8 +508,8 @@ fn run(
                 }
                 PlayerEvent::Finished => {
                     // The join happened: what was spliced on is what is playing.
-                    if let Some(next) = pending.take() {
-                        playing = Some(next);
+                    if let Some(next) = held.pending.take() {
+                        held.playing = Some(next);
                     }
                     moved = true;
                 }
@@ -421,8 +545,8 @@ fn run(
         // `queue.get`; sending the entries would make every reorder carry the
         // whole list, and §7.10's coalescing already means a view that fell
         // behind sees one event rather than each.
-        let version = queue.version();
-        if version != announced {
+        let version = held.queue.version();
+        if version != held.announced {
             if let Some(engine) = engine.get() {
                 // **The modes ride along** — #233. A list plus `shuffle` plus
                 // `repeat` is the answer to "what plays next"; a view drawing the
@@ -430,7 +554,7 @@ fn run(
                 // describe what will happen. They are small, they change on the
                 // same events, and `set_scope`/`set_mode` already move the version
                 // — so there is nothing to add but the fields.
-                let (scope, shuffle, repeat, repeat_current) = queue.modes();
+                let (scope, shuffle, repeat, repeat_current) = held.queue.modes();
                 engine.publish(&Event::new(
                     Topic::Queue,
                     serde_json::json!({
@@ -442,7 +566,7 @@ fn run(
                     }),
                 ));
             }
-            announced = version;
+            held.announced = version;
         }
 
         if moved || told != Some(now) {
@@ -451,13 +575,71 @@ fn run(
                     player,
                     &shared,
                     now,
-                    playing.as_deref(),
+                    held.playing.as_deref(),
                     lost,
                 ));
             }
             told = Some(now);
         }
+
+        // **After the event, so every client knows before the stream changes.**
+        // A view should learn that nothing is sounding before it learns there is a
+        // new stream, or it spends the rebuild extrapolating a dead one.
+        if lost {
+            return Ran::DeviceLost;
+        }
     }
+    Ran::Stopped
+}
+
+/// **Wait for a device to come back, honouring the config that opened the first** —
+/// #241.
+///
+/// `None` means the engine was asked to stop while waiting, which is the one way out
+/// other than succeeding.
+///
+/// **A poll, and not for want of trying.** After a `DeviceLost` no callback runs, so
+/// cpal has no `DeviceChanged` to give us — enumeration is the only signal there is.
+/// So this asks, waits, and asks again.
+///
+/// Backed off to a second, which is the right order for a person plugging a cable in:
+/// fast enough that it feels immediate, slow enough that an engine with no device for
+/// a week is not spinning a host enumeration a hundred times a second.
+fn wait_for_a_device(
+    open: &impl Fn(PlayerConfig) -> Result<PlayerHandle, crate::audio::AudioError>,
+    cfg: &PlayerConfig,
+    stop: &Arc<AtomicBool>,
+) -> Option<PlayerHandle> {
+    let mut said = false;
+    while !stop.load(Ordering::Acquire) {
+        match open(cfg.clone()) {
+            Ok(player) => {
+                if said {
+                    eprintln!(
+                        "gmuse engine: a device again at {} Hz",
+                        player.device_rate()
+                    );
+                }
+                return Some(player);
+            }
+            Err(e) => {
+                // **Once, not every second.** A device that is gone for an hour would
+                // otherwise write three and a half thousand identical lines.
+                if !said {
+                    eprintln!(
+                        "gmuse engine: no output device ({e}); waiting{}",
+                        match cfg.device.as_deref() {
+                            Some(want) => format!(" for one matching {want:?}"),
+                            None => String::new(),
+                        }
+                    );
+                    said = true;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+    None
 }
 
 /// Every row the library holds, as the pool to pick from.
@@ -680,4 +862,126 @@ fn playback_event(
             "rate": if lost { 0.0 } else { 1.0 },
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The retry honours the config that opened the first stream, and gives up only
+    /// when asked to stop** — #241.
+    ///
+    /// This is where the policy lives, so this is what is worth testing: that it keeps
+    /// asking, that it hands back the first device it gets, and that a stop reaches it
+    /// while it is waiting. A poll rather than an event because after a `DeviceLost` no
+    /// callback runs and cpal has no `DeviceChanged` to give — so "keeps asking" is the
+    /// whole mechanism.
+    #[test]
+    fn waiting_for_a_device_keeps_asking_until_one_answers() {
+        let tries = std::sync::atomic::AtomicUsize::new(0);
+        let cfg = PlayerConfig {
+            device: Some("an interface".into()),
+            rate: None,
+            resample: Default::default(),
+            volume: 0.25,
+        };
+        let open = |asked: PlayerConfig| {
+            // **The config is passed through unchanged**, which is the decision: a
+            // named device is waited for and nothing else is taken.
+            assert_eq!(asked.device.as_deref(), Some("an interface"));
+            assert_eq!(
+                asked.volume, 0.25,
+                "and the fader position survives a rebuild"
+            );
+            let n = tries.fetch_add(1, Ordering::Relaxed);
+            if n < 2 {
+                Err(crate::audio::AudioError::Device("not yet".into()))
+            } else {
+                PlayerHandle::headless(asked, null::Pace::Fast)
+            }
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let player = wait_for_a_device(&open, &cfg, &stop);
+        assert!(player.is_some(), "it gave up while a device was coming");
+        assert_eq!(
+            tries.load(Ordering::Relaxed),
+            3,
+            "it asked twice more after being refused"
+        );
+    }
+
+    /// **A stop reaches it while it is waiting**, or an engine with no device could not
+    /// be shut down — #241.
+    #[test]
+    fn waiting_for_a_device_stops_when_asked() {
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                stop.store(true, Ordering::Release);
+            });
+        }
+        let cfg = PlayerConfig {
+            device: None,
+            rate: None,
+            resample: Default::default(),
+            volume: 1.0,
+        };
+        let never = |_: PlayerConfig| Err(crate::audio::AudioError::Device("gone".into()));
+        let waited = std::time::Instant::now();
+        assert!(
+            wait_for_a_device(&never, &cfg, &stop).is_none(),
+            "it produced a device from a closure that never yields one"
+        );
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "it did not notice the stop for {:?}",
+            waited.elapsed()
+        );
+    }
+
+    /// **A lost device reaches the control thread as an event** — #241, #212.
+    ///
+    /// The trigger, at the level cpal uses: its error callback sets `Shared::device_lost`
+    /// and the decoder turns that into the one event the loop acts on. Tested here
+    /// because the rebuild itself lives inside a thread that owns its player, and
+    /// reaching into that from a test would mean a door nothing else uses.
+    #[test]
+    fn a_lost_device_surfaces_as_one_event() {
+        let player = PlayerHandle::headless(
+            PlayerConfig {
+                device: None,
+                rate: None,
+                resample: Default::default(),
+                volume: 1.0,
+            },
+            null::Pace::Fast,
+        )
+        .expect("a headless player");
+
+        player.shared().device_lost.store(true, Ordering::Release);
+
+        let mut heard = 0;
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < until {
+            if let Ok(PlayerEvent::DeviceLost(_)) =
+                player.events().recv_timeout(Duration::from_millis(50))
+            {
+                heard += 1;
+                break;
+            }
+        }
+        assert_eq!(heard, 1, "the loss never reached the control thread");
+
+        // **Once, not once per tick.** The decoder swaps the flag rather than reading
+        // it, so a single failure is a single event — which is what lets the loop treat
+        // it as a discontinuity.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !matches!(player.events().try_recv(), Ok(PlayerEvent::DeviceLost(_))),
+            "the loss was reported twice"
+        );
+    }
 }

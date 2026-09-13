@@ -5395,6 +5395,47 @@ Append here as decisions are made. Format: date, decision, rationale.
   drop. The mechanism is entirely in place — the generation is in the handshake and every event, and the audio path
   already refuses a mapping across one — so whoever builds scheduling inherits a solved clock and a written-down rule.
 
+- **2026-09-12** **A lost device is retried, and the queue outlives the stream** (#241, §4.2, §7.8).
+
+  The stream was built once in `PlayerHandle::open` and never again, so unplugging an interface left the engine running
+  with no output for the rest of its life. Since #219 the daemon outlives the terminal; it did not outlive the
+  headphones.
+
+  **The policy, because it is a policy and the owner's to make.** Honour the intent that opened the first stream — a
+  named `--device` is waited for and nothing else taken, no flag takes whatever is default now. Reload the track, seek
+  to where the sound stopped, and **stay paused**: nothing starts audio nobody asked for, because a cable knocked out at
+  3am must not start the music again when the device reappears. The same three commands `restore_session` uses, for the
+  same reason.
+
+  **It is a poll, and not for want of trying.** After a `DeviceLost` no callback runs, so cpal has no `DeviceChanged` to
+  give — enumeration is the only signal there is. A second between asks, said once rather than once a second.
+
+  **`gmuse engine` had to learn the flags first.** It hardcoded a default `PlayerConfig`, so `--device` could not reach
+  it and "honour the intent" had no intent to honour. `gmuse --device ua-101 engine` means something now.
+
+  **Two structural things this forced, and both are improvements on their own.** `Held` is the state that outlives a
+  stream — the queue, the modes, the pool, what is playing — owned by the thread body rather than by the loop that has
+  the player, _because_ a cable must not empty the queue. And the published `stream_generation` is now the engine's own
+  monotonic count: a rebuilt handle starts a fresh `Shared` at zero, so passing that through would make the number go
+  backwards, and a generation that can repeat is one a `When::Frame` cannot be checked against (#212).
+
+  **No device at startup stays fatal**, and the asymmetry is deliberate: `start` blocks until a player opens and the
+  socket is not bound until it returns, so an engine waiting there would never answer a handshake and a view's
+  auto-start would time out against silence. Found by running it — the first verification expected a wait and got a
+  clean refusal, which turned out to be the better behaviour.
+
+  **And the change introduced a race that a test caught.** `Control::start` returns the moment `ready` lands, so the
+  facts a `hello` reads must be stored before that send. They were stored just after it, where the window was
+  microseconds; putting a librarian fold between the two made the window the fold, and
+  `the_engine_plays_a_track_and_says_so` reported a device rate of 0. An existing test, not a new one — which is the
+  argument for having written it.
+
+  **What is not covered, said plainly.** The composition — loss, publish `rate: 0`, rebuild, reload, seek, pause — is
+  not exercised end to end, because reaching it needs a real device to disappear. Its parts are: `wait_for_a_device` is
+  tested for retrying, for honouring the config, and for noticing a stop; `a_lost_device_surfaces_as_one_event` tests
+  the trigger at the level cpal uses it. The twenty lines that join them are straight-line code and are read rather than
+  run.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

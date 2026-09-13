@@ -211,7 +211,7 @@ There is a single `gmuse` binary, following the tmux model:
 
 | Invocation                                   | Behaviour                                                                                                                                                         |
 | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gmuse engine [--foreground] [--null-audio]` | Runs the engine daemon. `--null-audio` uses a virtual output clock (§14).                                                                                         |
+| `gmuse engine [--foreground] [--null-audio]` | Runs the engine daemon; takes the same `--device`, `--rate`, `-q` and `-v` a local player does (#241). `--null-audio` uses a virtual output clock (§14).          |
 | `gmuse`                                      | Starts the TUI as a view: no device, no player lock. Spawns `gmuse engine` if none answers, then attaches (#233).                                                 |
 | `gmuse --no-attach`                          | Starts the TUI with playback in this process: one device, one lock, playback that ends with the program.                                                          |
 | `gmuse ctl <command…>`                       | Sends one command, either typed arguments or passed through as `cmd.exec_line`, prints the result, and exits.                                                     |
@@ -660,6 +660,26 @@ pos(t) = pos_frames + (t_engine_ns − at_ns) · 1e-9 · rate · sample_rate    
 The engine emits a new `playback` event only when the state, rate, or position changes discontinuously: play, pause,
 seek, rate change (varispeed is just a rate change), track change, or loop wrap. It never emits a steady position
 stream.
+
+**A lost device is retried, and the queue outlives it** (#241). The stream was built once and never again, so unplugging
+an interface left the engine running with no output for the rest of its life — the daemon outlived the terminal and not
+the headphones. Now the control loop gives the stream up, the thread rebuilds, and `Held` carries the queue, the modes
+and the pool across. The policy, because it is a policy and not a mechanism:
+
+- **Honour the intent that opened the first stream.** `preferred_config` matches `--device` by substring, so a named
+  interface is waited for and nothing else is taken; with no flag it takes whatever is default now. `gmuse engine`
+  accepts those flags as of #241 — before it, the engine hardcoded the defaults and there was no intent to honour.
+- **Poll, because there is no event.** After a `DeviceLost` no callback runs, so cpal has no `DeviceChanged` to give.
+  Enumeration is the only signal; the wait is a second, and it says so once rather than once a second.
+- **Reload, seek, stay paused.** Nothing starts audio nobody asked for: a cable knocked out at 3am must not start the
+  music again when the device reappears. The same three commands `restore_session` uses, for the same reason.
+- **No device at startup stays fatal**, and the asymmetry is deliberate: `start` blocks until a player opens and the
+  socket is not bound until it returns, so an engine waiting there would never answer a handshake and a view's
+  auto-start would time out against silence.
+
+**The generation is the engine's own count, not the handle's.** A rebuilt `PlayerHandle` starts a fresh `Shared` whose
+generation is zero, so passing that through would make the number go _backwards_ — and a generation that can repeat is
+one a `When::Frame` cannot be checked against, which is the whole point of #212.
 
 **`rate` is 0 when nothing is sounding** (#212). A lost device stops the render step, so the engine's position freezes —
 `PlayerHandle::position` reads the frames the render step handed over and is honest by construction. A remote view has

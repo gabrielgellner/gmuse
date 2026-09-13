@@ -135,7 +135,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         null_audio,
     }) = &args.command
     {
-        return run_engine(*foreground, *null_audio);
+        // The same flags a local player takes: `gmuse --device ua-101 engine` now means
+        // something (#241).
+        return run_engine(*foreground, *null_audio, args.player_config());
     }
 
     if let Some(gmuse::cli::Command::Shelf(op)) = &args.command {
@@ -2723,7 +2725,14 @@ fn surviving_holders<'a>(
 /// standing a door up before there is anything behind it is deliberate: §15
 /// wants the protocol operable from a shell before the TUI depends on it, and
 /// the handshake is what a client has to get right first.
-fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_engine(
+    foreground: bool,
+    null_audio: bool,
+    // **What device to open, and to reopen** — #241. The engine hardcoded
+    // `PlayerConfig::default`-shaped values, so `--device` could not reach it at all
+    // and "honour the intent that opened the first stream" had no intent to honour.
+    cfg: gmuse::audio::PlayerConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::Arc;
 
     // **Detaching is not built.** Said out loud rather than accepting the flag
@@ -3329,6 +3338,7 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
     let control = Arc::new(
         gmuse::engine::control::Control::start(
             null_audio,
+            cfg,
             Arc::clone(&desk),
             roots.clone(),
             Arc::clone(&engine_slot),
