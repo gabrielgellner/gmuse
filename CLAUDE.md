@@ -39,6 +39,12 @@ with the measurement that killed it. §16 is the rules in one place.
 [`docs/design/layers.md`](docs/design/layers.md) says which system may talk to which — the librarian, the player, the
 scanner and the `tools/` scripts. Read it before adding a caller in either direction.
 
+[`docs/design/playback-programme.md`](docs/design/playback-programme.md) is **settled design, not built**: who decides
+what plays next. Read it before touching the queue, shuffle, repeat or "up next" — the rule it turns on is that **a
+playback mode is a rule the librarian answers, not state the engine holds.** The librarian owns the ordered programme;
+the engine holds a window of two or three `(token, path)` pairs and no ordering policy, so there is no `repeat` message
+and nothing for a UI to read from the engine. `deck.loop` is a different feature, not the same one at its extremes.
+
 [`docs/design/access-layers.md`](docs/design/access-layers.md) is a **proposal, partly built**: which layer inside the
 librarian may talk to which — the log, the projection, the query, the adapters. Read it before adding anything to a read
 path. The rule it turns on is that **a read never touches the filesystem and never folds the log**.

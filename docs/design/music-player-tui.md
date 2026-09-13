@@ -5872,6 +5872,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   **110.0 MB where a Desk held 185.5**, and `Listing::about` takes the rows rather than a `bool` — which is the honest
   signature, because whether to include history is the caller's question and finding it was never the librarian's.
 
+- **2026-09-13** **A playback mode is a rule the librarian answers, not state the engine holds** (#257, #235, #233).
+  Settled in `docs/design/playback-programme.md`. The librarian owns an ordered, editable, versioned **programme**; the
+  audio engine holds a **window** of two or three `(token, path)` pairs and no ordering policy at all. Every mode is
+  then one function — `follows(token)` is the next item, or the first, or the same token — so **the engine cannot tell
+  which mode is in force and there is no `repeat` message to send.** Turning one on or off is the window-replace message
+  that already exists.
+
+  Two wrong turns are worth keeping, because both were arguments from the wrong unit. First: repeat-current as a
+  one-item circular programme, which loses your place — the fix is not an engine-side override but leaving the programme
+  alone and changing what a _refill answers_, which preserves the place because the programme was never disturbed.
+  Second: "repeat-current **is** `deck.loop` at its extremes", which inverted the relationship. A programme's unit is a
+  recording and a loop's is a time range inside a sounding track, so "repeat bars 33–40" cannot be a programme entry —
+  **a general mechanism able to imitate a specific one does not own it.**
+
+  The refill is addressed by the last token held plus the programme version, which keeps the property that made the
+  stateless cursor worth having: `follows(T3)` is idempotent, so a lost message costs a retry rather than a sequence
+  number, and the librarian holds no cursor that could drift from the engine's. A mid-flight reshuffle is `StaleVersion`
+  and `resync_required`, both already in the protocol — the sign that the decomposition cuts along a real joint is that
+  it needed no new concept.
+
+  And the window turned out to have a second job. It is **availability** insurance, not only latency insurance: a
+  librarian can die and restart inside it, and the engine stops at a track boundary rather than mid-bar. That is the
+  argument for two or three rather than one, and it is better than the latency one.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

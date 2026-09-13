@@ -112,6 +112,13 @@ MODEL = [
                 "direction rule, which is now a compile error rather than a convention.",
             ),
             Doc(
+                file="playback-programme.md",
+                title="Who decides what plays next",
+                standing="**Settled design, not built.** The playback half of #257 — the programme, "
+                "the window, and why every repeat mode is one function the librarian answers.",
+                split=True,
+            ),
+            Doc(
                 file="access-layers.md",
                 title="Inside the librarian",
                 standing="**Proposal, partly built.** Which layer inside the librarian may talk to "
