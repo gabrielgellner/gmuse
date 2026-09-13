@@ -1776,6 +1776,87 @@ mod reachability {
         );
     }
 
+    /// **Every fact in the live log survives the format the protocol parses into** —
+    /// #240.
+    ///
+    /// The test that would have turned a panic into a failure. `serde_json::to_value`
+    /// is what the wire's ingress builds before typing a line (I4), and `to_string` is
+    /// what the log writes — and they are not the same: a `u128` writes exactly and
+    /// cannot be a `Value`, so a fact carrying an audio id crossed the log fine and the
+    /// wire not at all.
+    ///
+    /// Reading the *real* log rather than building 54 variants by hand, because that is
+    /// the set that actually exists and the one whose shapes surprised us. Skipped when
+    /// there is no log to read, which is every machine but this one — so it is a
+    /// ratchet here and silent in CI, and `an_audio_id_survives_the_value_the_protocol_parses_into`
+    /// in `gmuse-ids` is what holds the line everywhere.
+    #[test]
+    fn every_fact_in_the_log_survives_the_protocols_encoding() {
+        let Some(dir) = std::env::var_os("HOME").map(|h| {
+            std::path::PathBuf::from(h)
+                .join("MusicLibrary")
+                .join(".gmuse")
+        }) else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        let mut checked = 0usize;
+        let mut kinds: std::collections::BTreeSet<String> = Default::default();
+        for path in entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in text.lines() {
+                let Ok(record) = serde_json::from_str::<Record>(line) else {
+                    continue;
+                };
+                // **The fact's own tag, taken from the fact** — not from the record's
+                // first key, which is `stamp`. The first version of this did that and
+                // so believed there was one kind of fact in the library: it checked a
+                // single record and passed, which is the sixth time in one day.
+                let written = serde_json::to_string(&record.fact).expect("the log wrote it");
+                let name = written
+                    .trim_start_matches('{')
+                    .split('"')
+                    .nth(1)
+                    .unwrap_or("?")
+                    .to_string();
+                // One of each kind is enough, and the live log holds 280,000 records.
+                if !kinds.insert(name.clone()) {
+                    continue;
+                }
+                checked += 1;
+                let value = serde_json::to_value(&record.fact).unwrap_or_else(|e| {
+                    panic!("a {name} cannot be a `Value`, so it cannot cross the wire: {e}")
+                });
+                let back: Fact = serde_json::from_value(value)
+                    .unwrap_or_else(|e| panic!("a {name} does not read back: {e}"));
+                assert_eq!(
+                    serde_json::to_string(&back).expect("encodes"),
+                    written,
+                    "a {name} changed going through a `Value`"
+                );
+            }
+        }
+        // **Says what it looked at.** A walk that found no log is the ordinary case off
+        // this machine, and a silent pass over zero facts is the failure this project
+        // has paid for five times.
+        eprintln!("{checked} fact kind(s) round-tripped: {kinds:?}");
+        // **Either it read a library or it read nothing.** Anything in between means
+        // the parse is wrong, which is exactly how the first version of this passed
+        // while looking at one record.
+        assert!(
+            checked == 0 || checked > 10,
+            "only {checked} kind(s) came out of a real log: {kinds:?}"
+        );
+    }
+
     /// **Every variant says whether a view may propose it** — #236.
     ///
     /// The same ratchet as `every_fact_names_its_blast_radius` and for the same

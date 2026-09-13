@@ -595,6 +595,13 @@ Focus is therefore control state (§6), and a `decks` event carries it so views 
 - **Only user-facing grains cross the wire** (I17). `RecordingRef` names a performance; a holding names which bytes on
   which device and stays inside the librarian, which resolves one to the other (§8.6). A holding is device-scoped, so
   putting one on the wire would publish a reference that means nothing on the next machine.
+- **An `AudioId` crosses as `v1:8d2b…`, and that is not cosmetic** (#240). It holds a `u128`, and a `serde_json::Number`
+  is an `i64`, a `u64` or an `f64` — so the derived `{scheme, hash}` form was valid JSON that could not be a `Value`,
+  and this protocol parses a line into one before typing it (I4). Every fact carrying an audio id was uncrossable, and
+  the first attempt to send one panicked. `is_human_readable` keeps postcard's binary form unchanged, so no cache moved;
+  the integer spelling in 280,000 existing log records still reads, for ever rather than for a migration. The general
+  lesson is the narrow one: **a wire type must survive `to_value`, not merely `to_string`**, and
+  `every_fact_in_the_log_survives_the_protocols_encoding` is what checks it.
 - **Interim:** until that is settled, references MAY be `EngineRef { generation, index }`. The engine rejects any
   reference whose `generation` does not match the running engine with `StaleReference`. A bare `u32` MUST NOT appear on
   the wire.

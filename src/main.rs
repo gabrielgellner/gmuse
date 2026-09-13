@@ -439,29 +439,15 @@ fn land(
             let counted = facts.len();
             let client =
                 gmuse_client::Client::connect(&socket, "gmuse-shelf", env!("CARGO_PKG_VERSION"))?;
-            // **As text, one fact per line, because a `Value` cannot hold the numbers
-            // these carry** — #240.
+            // **An array of facts, like `library.edit`** — one shape for one thing.
             //
-            // An audio id is an xxhash3_128, so it serialises a `u128`. `to_string`
-            // writes it exactly and `from_str` reads it back, which is why the log has
-            // always been fine. `to_value` cannot: `serde_json::Number` holds i64, u64
-            // or f64, and 187646888898413691098496886067505897950 is none of them.
-            //
-            // The protocol's ingress parses a line into `Value` before typing it (I4),
-            // so nothing shaped as a JSON *array* of facts can carry one — which is
-            // why `library.edit` never met this, a view's facts being ratings and
-            // plays that carry no hashes.
-            //
-            // So the facts cross as a **string**, which is what §8.4 called this
-            // operation from the start: "a file of proposed facts". A file is text.
-            let mut ndjson = String::new();
-            for fact in &facts {
-                ndjson.push_str(&serde_json::to_string(fact)?);
-                ndjson.push('\n');
-            }
+            // It could not be, until #240: an audio id serialised as a `u128` and a
+            // `serde_json::Value` cannot hold one, so this sent NDJSON in a string to
+            // get around the protocol's `Value`-shaped ingress. `AudioId` says
+            // `"v1:8d2f…"` now, so the dodge is gone and so is the second shape.
             client.call(
                 gmuse_proto::request::LibraryOp::Apply.method(),
-                Some(serde_json::json!({ "facts": ndjson })),
+                Some(serde_json::json!({ "facts": facts })),
             )?;
             eprintln!("{counted} fact(s) handed to the running engine");
             Ok(counted)
@@ -2949,36 +2935,15 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
 
             #[derive(serde::Deserialize)]
             struct Apply {
-                /// **NDJSON, not an array** — #240. One fact per line, parsed with
-                /// `from_str`: an audio id is a `u128` and a `serde_json::Value`
-                /// cannot hold one, so a fact carrying a hash cannot arrive as part
-                /// of a parsed `Value` at all. `library.edit`'s array form is fine
-                /// because a view's facts carry no hashes.
-                facts: String,
+                facts: Vec<gmuse::facts::Fact>,
             }
             let Ok(apply) = serde_json::from_value::<Apply>(params) else {
                 return Err(RpcError::invalid_params(
                     "facts",
-                    "library.apply takes {facts: \"<one fact per line>\"}, in the \
-                     log's own encoding",
+                    "library.apply takes {facts: [...]}, in the log's own encoding",
                 ));
             };
-            let mut facts = Vec::new();
-            for (nth, line) in apply.facts.lines().enumerate() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<gmuse::facts::Fact>(line) {
-                    Ok(fact) => facts.push(fact),
-                    Err(e) => {
-                        return Err(RpcError::invalid_params(
-                            "facts",
-                            format!("line {} is not a fact: {e}", nth + 1),
-                        ));
-                    }
-                }
-            }
+            let facts = apply.facts;
             if facts.is_empty() {
                 return Err(RpcError::invalid_params("facts", "nothing to append"));
             }

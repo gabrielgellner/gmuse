@@ -5284,6 +5284,39 @@ Append here as decisions are made. Format: date, decision, rationale.
   its `write_text`, and each was caught by grepping for what was supposedly added. One of them would otherwise have left
   the client sending `to_value` while the engine expected text, and the failure would have looked like a protocol bug.
 
+- **2026-09-12** **An audio id crosses text formats as `v1:8d2b…` and binary ones unchanged** (#240, I4, §7.6).
+
+  The derive wrote `{"scheme":1,"hash":187646888898413691098496886067505897950}`. Valid JSON, and unusable as _data_:
+  `serde_json::Number` holds an `i64`, a `u64` or an `f64`, and a 128-bit hash is none of them. `to_string` wrote it and
+  `from_str` read it back — **so the log was always fine**, which is exactly why this hid — but `to_value` answered
+  "number out of range", and the protocol's ingress parses a line into a `Value` before typing it. So no fact carrying
+  an audio id could cross the wire at all, and #218 found it the hard way: `json!` unwraps, so the first attempt
+  _panicked_ inside a library operation.
+
+  **`is_human_readable` is what lets one impl serve both formats**, and learning that cost three failures worth
+  recording. A plain string form broke postcard twice — `collect_str` answers `WontImplement`, because a length-prefixed
+  format needs the length first; and `#[serde(untagged)]` cannot read the _old_ shape at all, because it buffers into
+  serde's `Content` and that has no `u128`. Then a hand-written visitor with only `visit_map` still failed, because a
+  compact format writes a struct as its fields in order and hands the visitor a `SeqAccess`.
+
+  So JSON gets the spelling `Display` has always used — greppable, and it says what made it — and postcard keeps the
+  struct. Which also means **no cache version moved**: three were bumped and then unbumped once the binary form turned
+  out to be unchanged.
+
+  **The old integer form reads for ever**, not for a migration window, because an append-only log is not rewritten for a
+  spelling change. Verified against the live library: 7,267 holdings still check out, and the Python tools still open
+  it.
+
+  **And the test that would have turned the panic into a failure now exists.** It reads the _real_ log and round-trips
+  every kind of fact in it through `to_value` — 39 kinds, which is the set that actually exists rather than 54
+  hand-built ones. It skips silently where there is no library, so `gmuse-ids`'s own two tests are what hold the line in
+  CI.
+
+  That test also passed while checking nothing on its first run: it took the record's first JSON key as the fact's kind,
+  which is `stamp`, so it believed the library held one kind of fact and checked a single record. It asserts a spread
+  now — "either it read a library or it read nothing" — which is the sixth instance in one day of the failure the entry
+  above is about, and the second where the fix was a count.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
