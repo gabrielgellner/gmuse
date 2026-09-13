@@ -138,6 +138,8 @@ _bench filter:
 # include as a WARN and exits 0**, leaving the literal `{{{{#include …}}` in the published
 # page — so a renamed document would silently produce a book with a hole. The generator
 # avoids includes entirely, and this checks the artifact rather than trusting it.
+
+# Build the book from docs/design/ — open docs/book/book/index.html
 docs:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -151,7 +153,7 @@ docs:
     mdbook build docs/book
     python3 tools/book_guard.py docs/book/book
 
-# The book with live reload, for writing.
+# Serve the book with live reload and open it in a browser
 docs-serve:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -169,6 +171,8 @@ docs-serve:
 #
 # So this is the half that cannot be automated honestly, made cheap enough to run
 # deliberately. The audit it replaces took an afternoon and found ten.
+
+# Report deferrals whose issue has since closed (needs glab)
 stale-claims:
     #!/usr/bin/env bash
     set -uo pipefail
