@@ -401,6 +401,19 @@ pub struct Ui {
     /// steal each other's events. Transport and library are two subscriptions, so
     /// they get two sockets, which the engine is built to serve.
     pub engine: Option<std::sync::Arc<gmuse_client::Client>>,
+    /// **The queue as the engine last confirmed it** — #233, §7.7.
+    ///
+    /// `ui.queue` is the working copy a person edits; this is what the engine
+    /// agreed to. The difference between them is an unsent edit, which is how
+    /// [`push_the_queue`] knows there is one without every gesture having to
+    /// remember to say so.
+    ///
+    /// Empty, at version 0, when playback is in this process — there is nothing to
+    /// mirror.
+    queue_mirror: Vec<CopyId>,
+    /// The version [`push_the_queue`] computes an edit against. Zero means "not
+    /// read yet", which is why a push waits for the first `queue.get`.
+    queue_version: u64,
     /// A restored track has been loaded but its seek has not landed yet.
     ///
     /// Loading emits `Loaded`, which is a save point — and at that instant the
@@ -642,6 +655,8 @@ impl Ui {
             counted_current: false,
             followed: None,
             engine: None,
+            queue_mirror: Vec::new(),
+            queue_version: 0,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
@@ -750,6 +765,15 @@ impl Ui {
     }
 
     /// Show a message for a few seconds, then get out of the way.
+    /// **The queue version this view last agreed with the engine on** — #233.
+    ///
+    /// A reader rather than a public field: the version and the mirror move
+    /// together, and a caller that could set one without the other would have a
+    /// view that thinks it is up to date and is not.
+    pub fn queue_version(&self) -> u64 {
+        self.queue_version
+    }
+
     pub fn notify(&mut self, message: impl Into<String>) {
         self.status = message.into();
         self.status_until = Some(Instant::now() + Duration::from_secs(4));
@@ -933,7 +957,11 @@ where
         }
         drain_player_events(ui, ctx);
         follow_the_engine(ui, ctx);
-        follow_the_library(ui);
+        // **Out before in.** A local edit is offered first, then the engine's
+        // answer is taken — so `read_the_queue` never discards an edit nobody had
+        // seen, and a refusal is reported by the push that caused it.
+        push_the_queue(ui, ctx);
+        follow_the_engine_topics(ui, ctx);
         serve_remote(ui, ctx);
         note_play_progress(ui, ctx);
         audit_underruns(ui, ctx);
@@ -1011,28 +1039,48 @@ fn serve_remote(ui: &mut Ui, ctx: &Context<'_>) {
 /// **`Stop::Refold` is the door**, not a refresh in place. The shelf is a
 /// projection of the librarian and `main` owns the borrow, which is the whole
 /// reason the loop hands back a reason rather than acting (#120).
-fn follow_the_library(ui: &mut Ui) {
+fn follow_the_engine_topics(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(client) = ui.engine.clone() else {
         return;
     };
-    let mut heard = 0;
+    let mut library = 0;
     let mut scope = None;
+    let mut queue_moved = false;
     // `try_iter`, not `for`: the channel stays open for the program's life, so
     // iterating it would block the draw loop here.
+    //
+    // **One drain for both topics.** Two functions each reading this channel would
+    // steal each other's events — the same hazard that makes the library and the
+    // transport hold separate *connections*.
     for event in client.events().try_iter() {
-        if event.topic != gmuse_proto::Topic::Library {
-            continue;
+        match event.topic {
+            gmuse_proto::Topic::Library => {
+                library += 1;
+                scope = event.body["scope"].as_str().map(str::to_string).or(scope);
+            }
+            // **Coalesced to one read.** The payload carries the version and the
+            // modes; `queue.get` brings the entries, so several events in a tick
+            // are one round trip.
+            gmuse_proto::Topic::Queue => queue_moved = true,
+            _ => {}
         }
-        heard += 1;
-        scope = event.body["scope"].as_str().map(str::to_string).or(scope);
     }
-    if heard == 0 {
+
+    // **Or once, because nothing has been read yet.** A `queue` event fires when
+    // the version *changes*, so a view that attached to a settled engine would
+    // never hear one and would never learn the queue. Self-healing rather than
+    // ordered against the subscription in `main`.
+    if queue_moved || ui.queue_version == 0 {
+        read_the_queue(ui, ctx);
+    }
+
+    if library == 0 {
         return;
     }
     ui.audit.line(
         "library",
         &format!(
-            "{heard} change(s) from the engine, scope {}",
+            "{library} change(s) from the engine, scope {}",
             scope.as_deref().unwrap_or("unsaid")
         ),
     );
@@ -1044,6 +1092,153 @@ fn follow_the_library(ui: &mut Ui) {
     ui.desk.settled();
     ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
     ui.stop = Some(Stop::Refold);
+}
+
+/// **Take the engine's queue as this view's** — #233, §6, §7.7.
+///
+/// The queue is control state and the engine owns it: it is what `NeedNext` is
+/// answered from, so a view holding a second copy would draw a list nobody plays
+/// from. This replaces the working copy wholesale rather than merging, which is
+/// what a mirror means — and `push_the_queue` runs first in the tick, so there is
+/// never an unoffered edit here to lose.
+///
+/// **The modes come with it.** A list plus `shuffle` plus `repeat` is the answer to
+/// "what plays next"; drawing the list while owning the modes would draw a queue
+/// that does not describe what will happen.
+pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(client) = ui.engine.clone() else {
+        return;
+    };
+    let answer = match client.call_within(
+        gmuse_proto::request::method::QUEUE_GET,
+        None,
+        std::time::Duration::from_secs(2),
+    ) {
+        Ok(answer) => answer,
+        Err(e) => {
+            ui.audit.line("queue", &format!("could not read: {e}"));
+            return;
+        }
+    };
+
+    let here = holdings_here(ctx);
+    let mut entries = Vec::new();
+    let mut absent = 0;
+    for name in answer["entries"].as_array().into_iter().flatten() {
+        let found = name
+            .as_str()
+            .and_then(|s| s.parse::<uuid::Uuid>().ok())
+            .map(Id::from_uuid)
+            .and_then(|r| here.get(&r).copied());
+        match found {
+            Some(id) => entries.push(id),
+            // **Counted, not dropped in silence.** The engine can queue a recording
+            // this device holds no copy of, and a pane shorter than the engine's
+            // queue is one whose indices do not line up with it.
+            None => absent += 1,
+        }
+    }
+    if absent > 0 {
+        ui.audit.line(
+            "queue",
+            &format!("{absent} queued recording(s) have no copy here"),
+        );
+    }
+
+    ui.queue.clear();
+    for id in &entries {
+        ui.queue.push_back(*id);
+    }
+    ui.queue_mirror = entries;
+    ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
+    ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
+
+    if let Some(label) = answer["scope"].as_str()
+        && let Some(mode) = crate::next::Scope::parse(label)
+    {
+        ui.playback.scope = mode;
+    }
+    if let Some(on) = answer["shuffle"].as_bool() {
+        ui.playback.shuffle = on;
+    }
+    if let Some(on) = answer["repeat"].as_bool() {
+        ui.playback.repeat = on;
+    }
+    if let Some(on) = answer["repeat_current"].as_bool() {
+        ui.playback.repeat_current = on;
+    }
+}
+
+/// **Offer an edit of the queue, computed against the version it was read at** —
+/// #233, §7.7, §8.8.
+///
+/// One place rather than at each gesture. `ui.queue` is edited by put, delete, undo,
+/// enqueue and playing from the queue pane, and pushing at every one of those is
+/// five call sites to keep in step — plus the sixth somebody adds later. Comparing
+/// against the mirror catches all of them, including that sixth.
+///
+/// **Optimistic, which §8.8 says is right for a queue.** Two views reordering at
+/// once *is* a lost update, so the version the edit was computed against goes with
+/// it, and a stale one is refused rather than silently winning.
+pub fn push_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(client) = ui.engine.clone() else {
+        return;
+    };
+    // Nothing read yet, so there is no version to compute against — and nothing
+    // that could have been edited either.
+    if ui.queue_version == 0 {
+        return;
+    }
+    let now: Vec<CopyId> = ui.queue.entries().copied().collect();
+    if now == ui.queue_mirror {
+        return;
+    }
+
+    let recordings: Vec<String> = now
+        .iter()
+        .filter_map(|id| recording_of(ctx, *id))
+        .map(|r| r.to_string())
+        .collect();
+    if recordings.len() != now.len() {
+        // A row with no recording cannot be named on the wire (I17), so the edit
+        // cannot be expressed at all. Said, and the mirror put back, rather than
+        // sending the part of it that happens to be nameable.
+        ui.notify("that queue holds a row the library cannot name, so it was not sent");
+        ui.queue.clear();
+        for id in &ui.queue_mirror.clone() {
+            ui.queue.push_back(*id);
+        }
+        return;
+    }
+
+    match client.call_within(
+        gmuse_proto::request::method::QUEUE_SET,
+        Some(serde_json::json!({
+            "recordings": recordings,
+            "base_version": ui.queue_version,
+        })),
+        std::time::Duration::from_secs(2),
+    ) {
+        Ok(answer) => {
+            ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
+            ui.queue_mirror = now;
+        }
+        Err(e) => {
+            // **A stale version is somebody else's edit, not a failure.** Re-read
+            // and say so: the alternative is this view's copy quietly winning,
+            // which is the lost update the version exists to prevent.
+            let stale = e
+                .rpc()
+                .is_some_and(|r| r.code == gmuse_proto::error::code::STALE_VERSION);
+            ui.notify(if stale {
+                "the queue moved under that edit — showing the engine's".to_string()
+            } else {
+                format!("the queue edit did not land: {e}")
+            });
+            ui.audit.line("queue", &format!("refused: {e}"));
+            read_the_queue(ui, ctx);
+        }
+    }
 }
 
 /// **Adopt what the engine says is playing** — #219, §7.8.
@@ -1302,7 +1497,7 @@ fn propose(ui: &mut Ui, say: impl FnOnce(&mut crate::model::instance::Instance))
             ui.audit
                 .line("record", &format!("{counted} fact(s) sent to the engine"));
             // **Nothing is refreshed here.** The engine publishes a `library`
-            // event when the facts land, and `follow_the_library` is what acts on
+            // event when the facts land, and `follow_the_engine_topics` is what acts on
             // it — so what the screen shows comes from the log rather than from
             // this view assuming its own write succeeded.
         }
@@ -1458,6 +1653,16 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
 /// The queue pop lives here rather than in `next()`, which stays pure — see
 /// DESIGN §5 and the note on [`Source::Queue`].
 fn advance(ui: &mut Ui, ctx: &Context<'_>, forward: bool) {
+    // **The engine picks when the engine owns the queue** — #233. It holds the
+    // queue, the pool and the modes; resolving here would pop a queue nobody plays
+    // from and load a track the engine did not choose. What it picked arrives on
+    // `playback`, and `follow_the_engine` adopts it.
+    if let Some(player) = ctx.player
+        && player.skip(forward)
+    {
+        return;
+    }
+
     // **Step past what cannot be played** — #155. The library holds rows for
     // tracks it has no file of, so a pool laid over an album is now allowed to
     // contain gaps; stopping dead at one is exactly the "a view that silently
@@ -4236,6 +4441,28 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
     // done once, is not a diagnostic.
     ui.audit
         .line("setting", &format!("{}={}", key.name(), value));
+
+    // **A setting the engine owns is sent to it** — #233, §6, §7.12.
+    //
+    // `SettingKey::not_the_engines` is the one property that decides, and the same
+    // one `remote::is_remotable` asks — so a key that reaches here as the engine's
+    // is one the engine will carry out rather than accept and ignore.
+    //
+    // **Applied locally as well**, which is not redundant: the engine publishes on
+    // its 50 ms tick and a keypress that took that long to show would feel like a
+    // dropped key. What comes back on `queue` confirms it, or corrects it if
+    // another view got there first.
+    if key.not_the_engines().is_none()
+        && let Some(client) = ui.engine.clone()
+    {
+        let line = format!("set {}={}", key.name(), value);
+        if let Err(e) = client.notify(
+            gmuse_proto::request::method::EXEC_LINE,
+            Some(serde_json::json!({ "line": line })),
+        ) {
+            ui.audit.line("setting", &format!("not sent: {e}"));
+        }
+    }
 
     match (key, value) {
         (SettingKey::Scope, SettingValue::Scope(mode)) => ui.playback.scope = mode,

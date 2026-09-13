@@ -175,7 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // second one would refuse the thing attaching is for. The engine's own
     // `engine.lock` is what keeps there being one player, and #214 made losing
     // that race a clean refusal rather than a crash.
-    let _lock = if args.no_lock || args.attach {
+    let _lock = if args.no_lock || args.attached() {
         None
     } else {
         match gmuse::lock::acquire(&gmuse::lock::default_path()) {
@@ -208,7 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // engine opens the device. Opening one here first and then attaching would
     // mean two processes holding it, and on CoreAudio the second one simply gets
     // silence rather than an error.
-    let player = if args.attach {
+    let player = if args.attached() {
         let client = std::sync::Arc::new(gmuse::engine::attach::attach(
             "gmuse-tui",
             env!("CARGO_PKG_VERSION"),
@@ -628,6 +628,16 @@ fn run_library(
                 report.duplicates.len(),
                 report.unreadable.len(),
             );
+            // **The one refusal that must not be read as "nothing changed"** —
+            // #233. An empty result over a library that had files means the roots
+            // are wrong, and the scan declines rather than erasing them.
+            if let Some(had) = report.would_empty {
+                eprintln!(
+                    "refused: this found none of the {had} file(s) the library holds, \
+                     so its holdings were left alone — are the roots right? {:?}",
+                    loaded.library
+                );
+            }
 
             if *write {
                 let n = gmuse::librarian::commit(&mut log, &loaded.data_dir)?;
@@ -2166,7 +2176,9 @@ fn run_tui(
         match gmuse::engine::attach::attach("gmuse-tui-library", env!("CARGO_PKG_VERSION")) {
             Ok(client) => {
                 let client = std::sync::Arc::new(client);
-                if let Err(e) = client.subscribe(&[gmuse_proto::Topic::Library]) {
+                if let Err(e) =
+                    client.subscribe(&[gmuse_proto::Topic::Library, gmuse_proto::Topic::Queue])
+                {
                     eprintln!("library: cannot follow the engine's changes: {e}");
                 } else {
                     state.engine = Some(client);
@@ -2674,6 +2686,15 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                             .collect();
                         body["entries"] = serde_json::json!(named);
                     }
+                    // **The same four fields the `queue` event carries** (#233),
+                    // so a view that just attached does not have to wait for one
+                    // of them to change before it can draw the queue correctly.
+                    if let Some((scope, shuffle, repeat, repeat_current)) = answered.modes {
+                        body["scope"] = serde_json::json!(scope.label());
+                        body["shuffle"] = serde_json::json!(shuffle);
+                        body["repeat"] = serde_json::json!(repeat);
+                        body["repeat_current"] = serde_json::json!(repeat_current);
+                    }
                     Ok(body)
                 }
                 Ok(Err(stale)) => Err(RpcError::stale_version(stale.current)),
@@ -2915,6 +2936,38 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                         base: base_version,
                     })
                 }
+                // **The whole list, for a view that holds a mirror** — #233.
+                // Resolved the same way `enqueue` resolves, because a recording
+                // is the grain a person chooses (I17) and the row that draws it
+                // is the librarian's business.
+                Call::QueueSet {
+                    recordings,
+                    base_version,
+                } => {
+                    let mut ids = Vec::with_capacity(recordings.len());
+                    for raw in &recordings {
+                        let Ok(uuid) = raw.parse::<uuid::Uuid>() else {
+                            return Err(RpcError::invalid_params(
+                                "recordings",
+                                format!("{raw:?} is not a recording id"),
+                            ));
+                        };
+                        match self.row_of(gmuse::model::id::Id::from_uuid(uuid)) {
+                            Some(id) => ids.push(id),
+                            None => {
+                                return Err(RpcError::new(
+                                    code::NOT_FOUND,
+                                    format!("the library has no row for {raw}"),
+                                )
+                                .with_data(serde_json::json!({ "ref": raw })));
+                            }
+                        }
+                    }
+                    self.queue(gmuse::engine::control::QueueOp::Set {
+                        ids,
+                        base: base_version,
+                    })
+                }
                 Call::QueueRemove {
                     index,
                     base_version,
@@ -3047,6 +3100,7 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
         gmuse::engine::control::Control::start(
             null_audio,
             Arc::clone(&desk),
+            roots.clone(),
             Arc::clone(&engine_slot),
         )
         .unwrap_or_else(|e| die(e)),

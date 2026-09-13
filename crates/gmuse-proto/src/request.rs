@@ -62,6 +62,21 @@ pub enum Request {
         recordings: Vec<String>,
         base_version: Option<u64>,
     },
+    /// **The queue is now this list** — #233, §7.7.
+    ///
+    /// For a view that holds a mirror and edits it. A TUI's queue gestures are
+    /// vim's — put before, put after, delete three, undo — and every one of them
+    /// is "the queue is now this". Naming them individually would need `insert`,
+    /// `move` and a transaction, each having to agree with the others about
+    /// indices.
+    ///
+    /// `base_version` is **required** here and optional on `enqueue`: appending to
+    /// a list somebody else also appended to loses nothing, while replacing a list
+    /// you have not read is a lost update by construction.
+    QueueSet {
+        recordings: Vec<String>,
+        base_version: u64,
+    },
     /// Remove one entry by position.
     QueueRemove {
         index: usize,
@@ -224,6 +239,7 @@ pub mod method {
     pub const PLAYER_LOAD: &str = "player.load";
     pub const QUEUE_GET: &str = "queue.get";
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
+    pub const QUEUE_SET: &str = "queue.set";
     pub const QUEUE_REMOVE: &str = "queue.remove";
     pub const QUEUE_CLEAR: &str = "queue.clear";
     pub const SET_SCOPE: &str = "settings.set_scope";
@@ -255,6 +271,7 @@ pub mod method {
         PLAYER_LOAD,
         QUEUE_GET,
         QUEUE_ENQUEUE,
+        QUEUE_SET,
         QUEUE_REMOVE,
         QUEUE_CLEAR,
         SET_SCOPE,
@@ -343,6 +360,18 @@ impl Request {
                     base_version: p.base_version,
                 })
             }
+            method::QUEUE_SET => {
+                #[derive(Deserialize)]
+                struct P {
+                    recordings: Vec<String>,
+                    base_version: u64,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueueSet {
+                    recordings: p.recordings,
+                    base_version: p.base_version,
+                })
+            }
             method::QUEUE_REMOVE => {
                 #[derive(Deserialize)]
                 struct P {
@@ -402,6 +431,7 @@ impl Request {
             Self::PlayerLoad { .. } => method::PLAYER_LOAD,
             Self::QueueGet => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
+            Self::QueueSet { .. } => method::QUEUE_SET,
             Self::QueueRemove { .. } => method::QUEUE_REMOVE,
             Self::QueueClear { .. } => method::QUEUE_CLEAR,
             Self::SetScope { .. } => method::SET_SCOPE,
@@ -450,7 +480,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 21, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 22, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

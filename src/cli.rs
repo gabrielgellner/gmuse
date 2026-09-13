@@ -117,19 +117,21 @@ pub struct Cli {
     #[arg(long, value_name = "COMMAND")]
     pub remote: Option<String>,
 
-    /// Drive the engine over the socket instead of opening a device — #219.
+    /// Drive the engine over the socket instead of opening a device — #219, #233.
     ///
-    /// **A view, not a player.** The TUI takes no audio device and no player
-    /// lock; it asks the engine, renders what the `playback` topic says, and
-    /// leaves what is playing alone when it starts and when it exits. Starts an
-    /// engine if none answers, which is §4.2's tmux model.
+    /// **The default, and a view rather than a player.** The TUI takes no audio
+    /// device and no player lock; it asks the engine, renders what the `playback`
+    /// and `queue` topics say, and leaves what is playing alone when it starts and
+    /// when it exits. It starts an engine if none answers, which is §4.2's tmux
+    /// model — so `gmuse` still just plays music, and now quitting it does not stop
+    /// the music.
     ///
-    /// Not yet the default, and the reason is #233: an attached view still
-    /// draws its *own* queue while the engine plays from the one it owns. So
-    /// enqueueing in an attached TUI does not change what plays next. Pressing
-    /// enter does, because that is a `player.load`.
+    /// `--attach=false` (or `--no-attach`) goes back to a player in this process:
+    /// one device, one lock, playback that ends when the program does. Worth
+    /// keeping for measuring the audio path, where a second process between the
+    /// keypress and the callback is noise.
     ///
-    /// **`GMUSE_ATTACH=1` works**, which needed saying in code. clap's `bool`
+    /// **`GMUSE_ATTACH=0` works**, which needed saying in code. clap's `bool`
     /// parser accepts `true` and `false` and nothing else, so the first thing
     /// anyone writes in a shell profile is an error message — and it is an
     /// error message about the *flag*, which reads as the flag being broken
@@ -139,10 +141,17 @@ pub struct Cli {
         env = "GMUSE_ATTACH",
         num_args = 0..=1,
         default_missing_value = "true",
-        default_value_t = false,
+        default_value_t = true,
         value_parser = truthy,
     )]
     pub attach: bool,
+
+    /// Keep playback in this process, which `--attach=false` also does.
+    ///
+    /// A spelling, not a second setting: `--no-attach` is what a person reaches
+    /// for, and clap does not generate it for a flag that takes an optional value.
+    #[arg(long, conflicts_with = "attach")]
+    pub no_attach: bool,
 
     /// Start even if another gmuse is already running.
     ///
@@ -615,6 +624,14 @@ impl Cli {
             .collect()
     }
 
+    /// **Whether playback belongs to this process** — #233.
+    ///
+    /// One answer from two spellings, resolved at the boundary so nothing below
+    /// reads either flag.
+    pub fn attached(&self) -> bool {
+        self.attach && !self.no_attach
+    }
+
     pub fn player_config(&self) -> PlayerConfig {
         PlayerConfig {
             device: self.device.clone(),
@@ -642,20 +659,39 @@ mod tests {
     /// '--attach'" reads as the flag being broken. Found by running it.
     #[test]
     fn attach_takes_the_spellings_of_yes_that_people_write() {
-        assert!(!parse(&[]).attach, "off unless asked");
-        assert!(parse(&["--attach"]).attach, "the bare flag");
+        assert!(parse(&[]).attached(), "attached by default, since #233");
+        assert!(parse(&["--attach"]).attached(), "the bare flag");
         for yes in ["1", "true", "yes", "on", "TRUE"] {
             assert!(
-                parse(&["--attach", yes]).attach,
+                parse(&["--attach", yes]).attached(),
                 "{yes:?} should mean attached"
             );
         }
         for no in ["0", "false", "no", "off"] {
-            assert!(!parse(&["--attach", no]).attach, "{no:?} should mean local");
+            assert!(
+                !parse(&["--attach", no]).attached(),
+                "{no:?} should mean local"
+            );
         }
         assert!(
             Cli::try_parse_from(["gmuse", "--attach", "maybe"]).is_err(),
             "and it refuses what it cannot read rather than guessing"
+        );
+    }
+
+    /// **`--no-attach` is the spelling a person reaches for** — #233.
+    ///
+    /// clap does not generate one for a flag with an optional value, so it is its
+    /// own argument and `Cli::attached` is the one place the two are resolved.
+    /// Without that, something below would read whichever flag its author
+    /// remembered.
+    #[test]
+    fn no_attach_is_the_way_back_to_a_player_in_this_process() {
+        assert!(!parse(&["--no-attach"]).attached());
+        assert!(!parse(&["--attach=false"]).attached());
+        assert!(
+            Cli::try_parse_from(["gmuse", "--attach", "--no-attach"]).is_err(),
+            "asking for both is a contradiction, not a precedence puzzle"
         );
     }
 

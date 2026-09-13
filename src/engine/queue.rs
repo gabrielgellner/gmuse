@@ -118,6 +118,28 @@ impl Playing {
         Ok(self.moved())
     }
 
+    /// **Replace the queue wholesale** — #233, §7.7, §8.8.
+    ///
+    /// The one a *view* uses, and the reason it exists beside `enqueue`. A TUI
+    /// edits its queue with vim gestures — put before, put after, delete three,
+    /// undo — and every one of those is "the queue is now this list". Expressing
+    /// them as named operations would need `insert`, `move`, `set` and a
+    /// transaction anyway, and each would have to agree with the others about
+    /// indices.
+    ///
+    /// `enqueue` stays for a caller that holds no mirror: a script adding a track
+    /// should not have to read the queue first, and §7.7 makes `base_version`
+    /// optional there for exactly that reason. Here it is required, because
+    /// replacing a list you have not read is a lost update by construction.
+    pub fn set(&mut self, ids: &[CopyId], base: u64) -> Result<u64, Stale> {
+        self.agreed(Some(base))?;
+        self.queue.clear();
+        for id in ids {
+            self.queue.push_back(*id);
+        }
+        Ok(self.moved())
+    }
+
     pub fn set_scope(&mut self, mode: Scope) -> u64 {
         self.playback.scope = mode;
         self.moved()
@@ -125,6 +147,85 @@ impl Playing {
 
     pub fn scope(&self) -> Scope {
         self.playback.scope
+    }
+
+    /// **What plays next, as a view needs to draw it** — #233.
+    ///
+    /// On the `queue` event beside the version, because these decide what the
+    /// queue *means*: a list plus `shuffle` plus `repeat` is the answer to "what
+    /// is next", and a view showing the list while owning the modes would show a
+    /// queue that does not describe what will happen.
+    pub fn modes(&self) -> (Scope, bool, bool, bool) {
+        (
+            self.playback.scope,
+            self.playback.shuffle,
+            self.playback.repeat,
+            self.playback.repeat_current,
+        )
+    }
+
+    /// Set one of them, by the same key the `:` line uses.
+    ///
+    /// **Returns the new version**, because these move what plays next as surely
+    /// as an enqueue does — so a view is told, through the same event.
+    pub fn set_mode(&mut self, key: crate::cmd::SettingKey, on: bool) -> u64 {
+        use crate::cmd::SettingKey as K;
+        match key {
+            K::Shuffle => {
+                self.playback.shuffle = on;
+                // **Reseeded on the way in**, which is what the view does: the
+                // order a shuffle produces is a function of the seed, and turning
+                // it on twice should not replay the same lap.
+                if on {
+                    self.playback.reshuffle();
+                }
+            }
+            K::Repeat => self.playback.repeat = on,
+            K::RepeatCurrent => self.playback.repeat_current = on,
+            // `Scope` is not a bool and has `set_scope`; everything else is a
+            // view's or unwired, which `SettingKey::not_the_engines` says and
+            // `remote::is_remotable` refuses before it gets here.
+            _ => {}
+        }
+        self.moved()
+    }
+
+    /// Whether one of them is on, for a toggle.
+    pub fn mode(&self, key: crate::cmd::SettingKey) -> bool {
+        use crate::cmd::SettingKey as K;
+        match key {
+            K::Shuffle => self.playback.shuffle,
+            K::Repeat => self.playback.repeat,
+            K::RepeatCurrent => self.playback.repeat_current,
+            _ => false,
+        }
+    }
+
+    /// **The track before this one in the pool** — #233.
+    ///
+    /// Named `take_prev` for symmetry and it consumes nothing: `next::prev` walks
+    /// the *pool* backwards and never looks at the queue, which is the thing an
+    /// earlier note here got wrong. The objection recorded in `control.rs` was
+    /// that going back is not the inverse of `take_next` because the queue is
+    /// consumed by being played from — true, and not what `prev` ever meant. A
+    /// view's `prev` has always been "the previous row in the pool's order", so
+    /// the engine doing exactly that is faithful rather than inventive.
+    ///
+    /// A play *history* remains a design question, and it is a different feature
+    /// from this one.
+    pub fn take_prev(&self) -> Option<CopyId> {
+        gmuse_library::next::prev(NextInput {
+            queue: &self.queue,
+            active: ActiveSource::Library,
+            library: &self.pool,
+            playlist: &self.playlist,
+            current: self.playback.current,
+            scope: self.playback.scope,
+            shuffle: self.playback.shuffle,
+            repeat: self.playback.repeat,
+            repeat_current: self.playback.repeat_current,
+            rng_state: self.playback.rng_state,
+        })
     }
 
     /// **The pool, rebuilt.** Called when the librarian publishes a change, so

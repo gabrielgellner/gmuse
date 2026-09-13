@@ -212,8 +212,8 @@ There is a single `gmuse` binary, following the tmux model:
 | Invocation                                   | Behaviour                                                                                                          |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `gmuse engine [--foreground] [--null-audio]` | Runs the engine daemon. `--null-audio` uses a virtual output clock (§14).                                          |
-| `gmuse`                                      | Starts the TUI with playback in this process. Still the default; see the note below.                               |
-| `gmuse --attach`                             | Starts the TUI as a view: no device, no player lock. Spawns `gmuse engine` if none answers, then attaches (#219).  |
+| `gmuse`                                      | Starts the TUI as a view: no device, no player lock. Spawns `gmuse engine` if none answers, then attaches (#233).  |
+| `gmuse --no-attach`                          | Starts the TUI with playback in this process: one device, one lock, playback that ends with the program.           |
 | `gmuse ctl <command…>`                       | Sends one command, either typed arguments or passed through as `cmd.exec_line`, prints the result, and exits.      |
 | `gmuse query <expr> [--json]`                | Runs a query and prints the results (NDJSON with `--json`).                                                        |
 | `gmuse events [--topics …]`                  | Subscribes and prints events as NDJSON. Useful for debugging and for the agent.                                    |
@@ -258,9 +258,14 @@ two writers that disagreed would take turns adding and removing the difference o
 the same reason: one assertion on the live library is **957 KB** for 7,267 entries, and `shelf compact` exists to drop
 the superseded ones.
 
-What remains before `--attach` could be the default is the **queue** (#233). An attached view draws its own while the
-engine plays from the one it owns, so enqueueing there does not change what plays next. Pressing enter does, because
-that is a `player.load`.
+**And the queue is the engine's** (#233). `ui.queue` is a mirror: read with `queue.get`, replaced when the `queue` event
+says the version moved, and edited by sending `queue.set` with the version it was read at — so two views reordering at
+once is a refusal rather than a lost update (§8.8). The modes ride on the same event, because a list plus `shuffle` plus
+`repeat` is the answer to "what plays next", and a view drawing the list while owning the modes would draw a queue that
+does not describe what will happen. `next` and `prev` go to the engine too, through `Transport::skip`.
+
+So attaching is the **default**: `gmuse` starts an engine if none answers and attaches, which is the tmux model §4.2
+describes. `--no-attach` keeps playback in the process, which is what measuring the audio path wants.
 
 **`--remote` is removed when `gmuse ctl` exists, not before** (#214, #217). `--remote` is the only way to drive a
 running player from a key binding that is not focused on it, which is the reason §1 asked for a socket at all. Retiring

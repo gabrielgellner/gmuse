@@ -194,8 +194,20 @@ impl Transport for Remote {
         }
     }
 
+    /// **Resume, which is `pause` when paused** — #225.
+    ///
+    /// `play` is not on the wire and that is deliberate: it starts the *selected*
+    /// track, so it needs a cursor. Resuming is `pause`, which toggles — so this
+    /// has to know the run state, and it does, from the event stream.
+    ///
+    /// #225 is the argument for the protocol carrying three distinct verbs, and
+    /// this is exactly the case it names: a toggle resolved by the sender races
+    /// itself. The race is one keypress wide and `play` is not a repeating key, so
+    /// it is a small wrong rather than the fluttering one #225 is really about.
     fn play(&self) {
-        self.line("play");
+        if self.state() != State::Playing {
+            self.line("pause");
+        }
     }
 
     fn pause(&self) {
@@ -228,6 +240,16 @@ impl Transport for Remote {
             Some(serde_json::json!({ "recording": recording.to_string() })),
         );
         Accepted::Yes
+    }
+
+    /// **The engine picks, because it owns the queue and the pool** — #232, #233.
+    ///
+    /// `prev` works too, and used to be refused: `next::prev` walks the pool
+    /// backwards and never reads the queue, so "the previous row in the pool's
+    /// order" is what it always meant in a view and is now what it means here.
+    fn skip(&self, forward: bool) -> bool {
+        self.line(if forward { "next" } else { "prev" });
+        true
     }
 
     fn playing(&self) -> Option<Id<Recording>> {

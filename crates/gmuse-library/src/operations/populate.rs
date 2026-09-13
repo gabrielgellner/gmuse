@@ -61,6 +61,13 @@ pub enum Admits {
 pub struct Report {
     /// Audio files seen on disk.
     pub files: usize,
+    /// **The holdings were not written, because they were empty and the log's were
+    /// not** — #233. `Some(n)` is how many this pass would have erased.
+    ///
+    /// Reported rather than silent: it means the roots are almost certainly wrong,
+    /// and a scan that says "7,267 files, nothing written" needs to say which of
+    /// those two it is refusing to do.
+    pub would_empty: Option<usize>,
     /// Files that became a recording and an encoding.
     pub ingested: usize,
     /// Files that could not be read as audio at all. **Not** files with bad
@@ -317,20 +324,61 @@ pub fn reconcile(
         report.ingested += 1;
     }
 
-    // **Only when the set actually changed** (#148). Holdings supersede, so
-    // re-asserting an identical set folds to exactly what is already there —
-    // and a scan that publishes regardless makes every no-op run grow the log
-    // by one record that says nothing.
-    let unchanged = instance
-        .catalogue()
-        .holdings
-        .get(&instance.device())
-        .is_some_and(|there| there.held == held);
-    if !unchanged {
-        instance.assert_holdings(now, held);
+    match worth_asserting(&held, instance.holdings_asserted(instance.device())) {
+        Assertion::Write => instance.assert_holdings(now, held),
+        Assertion::Unchanged => {}
+        Assertion::WouldEmpty { had } => report.would_empty = Some(had),
     }
     report.elapsed = started.elapsed();
     report
+}
+
+/// **Whether a scan's holdings are worth writing down** — #148, #233.
+///
+/// Both writers of `HoldingsAsserted` ask this, because they write the same
+/// superseding fact and disagreeing about when would make the log grow by the
+/// disagreement.
+pub enum Assertion {
+    /// Different from what the log says. Write it.
+    Write,
+    /// Identical (#148). Holdings supersede, so re-asserting folds to exactly what
+    /// is already there — and writing regardless makes every no-op pass grow the
+    /// log by a record that says nothing. On the live library that record is
+    /// 957 KB.
+    Unchanged,
+    /// **Empty, over a library that had files.** Almost always the wrong roots.
+    ///
+    /// `had` is how many it would have erased. The precedent is three lines away in
+    /// `librarian`'s cache write — "never an empty one over a good one — that is
+    /// how a working library becomes an empty one" — and this is the same failure
+    /// against the log, which is worse because a cache can be rebuilt from a scan
+    /// and the log is the thing the scan is *for*.
+    ///
+    /// Paid for: a `gmuse` launched with `GMUSE_ROOTS` pointing at a scratch
+    /// directory and a config pointing at the real library asserted `{}` over
+    /// 7,267 entries, and every row in the library became unplayable until the next
+    /// real scan. Nothing in the design stopped it, because nothing had written
+    /// holdings from a launch before #237.
+    ///
+    /// A library that genuinely emptied is still assertable — by a scan whose roots
+    /// really are empty, which has no files to *find* and so cannot be told from
+    /// this. That case wants an explicit operation (`forget`), which
+    /// `library-api.md` §2 already names, rather than a scan guessing.
+    WouldEmpty { had: usize },
+}
+
+/// The decision, so that both writers make it the same way.
+pub fn worth_asserting(
+    asserting: &BTreeMap<Id<Encoding>, String>,
+    on_record: Option<&BTreeMap<Id<Encoding>, String>>,
+) -> Assertion {
+    match on_record {
+        Some(there) if there == asserting => Assertion::Unchanged,
+        Some(there) if asserting.is_empty() && !there.is_empty() => {
+            Assertion::WouldEmpty { had: there.len() }
+        }
+        _ => Assertion::Write,
+    }
 }
 
 /// Read a disk into an instance's log, cataloguing whatever it finds.

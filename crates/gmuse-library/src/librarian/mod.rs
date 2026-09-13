@@ -298,13 +298,29 @@ impl Desk {
                                 })
                                 .filter(|(encoding, _)| known.encodings.contains_key(encoding))
                                 .collect();
-                            if log.holdings_asserted(device) != Some(&asserting) {
-                                log.assert_holdings(now, asserting);
-                                if let Some(dir) = &data_dir {
-                                    // Same reasoning as `Job::Say`: a refused
-                                    // disk is not a reason to lose the answer
-                                    // in memory.
-                                    let _ = commit(&mut log, dir);
+                            match crate::operations::populate::worth_asserting(
+                                &asserting,
+                                log.holdings_asserted(device),
+                            ) {
+                                crate::operations::populate::Assertion::Write => {
+                                    log.assert_holdings(now, asserting);
+                                    if let Some(dir) = &data_dir {
+                                        // Same reasoning as `Job::Say`: a refused
+                                        // disk is not a reason to lose the answer
+                                        // in memory.
+                                        let _ = commit(&mut log, dir);
+                                    }
+                                }
+                                crate::operations::populate::Assertion::Unchanged => {}
+                                // **Said out loud, on the one channel this thread
+                                // has.** It means the roots are almost certainly
+                                // wrong, and the alternative is a library that
+                                // silently stops being playable.
+                                crate::operations::populate::Assertion::WouldEmpty { had } => {
+                                    eprintln!(
+                                        "scan: found no files the library knows, so its {had} \
+                                     holdings were left alone — are the roots right? {roots:?}"
+                                    )
                                 }
                             }
                             scanned = Some(report);

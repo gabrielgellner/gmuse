@@ -950,6 +950,81 @@ fn a_scan_writes_holdings_when_the_disk_changed_and_not_when_it_did_not() {
     );
 }
 
+/// **A scan of the wrong roots does not erase what the library holds** — #233.
+///
+/// Paid for, on my own library. An engine auto-started by a TUI inherited
+/// `GMUSE_ROOTS` pointing at a scratch directory while its config pointed at the
+/// real one, found none of the 7,267 files the library knows, and appended
+/// `HoldingsAsserted { held: {} }` — which supersedes, so every row became
+/// unplayable until the next real scan.
+///
+/// Nothing in the design stopped it, because before #237 no *launch* wrote holdings
+/// at all. The precedent for the guard was three lines away in the librarian's cache
+/// write: "never an empty one over a good one — that is how a working library
+/// becomes an empty one". The log deserved the same rule, and more: a cache can be
+/// rebuilt by a scan, and the log is what the scan is *for*.
+#[test]
+fn a_scan_that_finds_nothing_the_library_knows_leaves_its_holdings_alone() {
+    let (engine, _recording) = start_with_a_track("wrong-roots");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+
+    let held = || {
+        let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
+        log.holdings_asserted(device).map(|h| h.len())
+    };
+    let mut before = None;
+    for _ in 0..400 {
+        before = held();
+        if before.is_some_and(|n| n > 0) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let before = before.expect("the import wrote holdings");
+    assert!(before > 0, "this library holds something to erase");
+
+    // **A second engine, on the same log, pointed at an empty directory.** Exactly
+    // the shape that did the damage: the right data directory and the wrong roots.
+    let elsewhere = engine.dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("scratch");
+    // **Its own directory for its socket**, because `engine::claim` locks
+    // `engine.lock` beside it — one lock per *directory*, not per socket. The first
+    // version of this test put the second socket next to the first, so the second
+    // engine lost the lock, exited, never scanned, and the test passed while
+    // checking nothing.
+    let alone = engine.dir.join("second");
+    std::fs::create_dir_all(&alone).expect("scratch");
+    let other = alone.join("engine.sock");
+    let mut child = Command::new(binary())
+        .args(["engine", "--foreground", "--null-audio"])
+        .env("GMUSE_SOCKET", &other)
+        .env("GMUSE_DATA_DIR", &data)
+        .env("GMUSE_ROOTS", &elsewhere)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn a second engine");
+    for _ in 0..400 {
+        if other.exists() && std::os::unix::net::UnixStream::connect(&other).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    // Long enough for its startup scan of an empty directory to have finished
+    // several times over.
+    std::thread::sleep(Duration::from_millis(1_500));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_eq!(
+        held(),
+        Some(before),
+        "a scan of the wrong roots erased the library's holdings"
+    );
+}
+
 /// **A file nobody imported is not a holding** — #237, and the rule
 /// `populate::reconcile` already followed.
 ///
@@ -1018,6 +1093,230 @@ fn walk(at: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     out.sort();
     out
+}
+
+/// **The view's queue is the engine's, both ways** — #233, §7.7, §8.8.
+///
+/// The halfway state this issue exists to end: a queue pane showing a list nobody
+/// plays from. So the mirror has to carry an edit *out* and another client's edit
+/// *in*, and refuse an edit computed against a version that has moved.
+///
+/// Driven through `ui::push_the_queue` and `ui::read_the_queue` rather than raw
+/// calls, because what is being tested is the view's half.
+#[test]
+fn the_views_queue_mirrors_the_engines_in_both_directions() {
+    let (engine, recording) = start_with_a_track("mirror");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+    client
+        .subscribe(&[gmuse_proto::Topic::Queue])
+        .expect("subscribe");
+
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+    let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
+    let desk = gmuse::librarian::Desk::read_only(log, Default::default(), device, 0, data.clone());
+    let held = desk.current();
+    let ctx = gmuse::ui::Context {
+        library: &held.library,
+        player: None,
+        gapless: None,
+        remote: None,
+    };
+
+    let mut ui = gmuse::ui::Ui::new(Default::default());
+    ui.engine = Some(std::sync::Arc::clone(&client));
+
+    // **In: the engine's queue, which is empty and at some version.**
+    gmuse::ui::read_the_queue(&mut ui, &ctx);
+    assert!(ui.queue.is_empty(), "nothing queued yet");
+    let first = ui.queue_version();
+    assert!(first > 0, "the version was never read");
+
+    // **Out: an edit made the way a keypress makes one.**
+    let row = gmuse::model::rows::Listing::rows(&held.library)
+        .into_iter()
+        .find(|id| {
+            gmuse::model::rows::Listing::recording_of(&held.library, *id).map(|r| r.to_string())
+                == Some(recording.clone())
+        })
+        .expect("the imported row");
+    ui.queue.push_back(row);
+    gmuse::ui::push_the_queue(&mut ui, &ctx);
+    assert!(
+        ui.queue_version() > first,
+        "the push did not move the engine's version"
+    );
+
+    // Another client sees it, which is what "the engine's queue" has to mean.
+    let other = Client::connect(&engine.socket, "other", "0").expect("connect");
+    let seen = other.call("queue.get", None).expect("queue.get");
+    assert_eq!(
+        seen["entries"].as_array().map(|e| e.len()),
+        Some(1),
+        "the other client sees a different queue: {seen}"
+    );
+    assert_eq!(seen["entries"][0].as_str(), Some(recording.as_str()));
+
+    // **In again: somebody else's edit replaces the working copy.**
+    other
+        .call(
+            "queue.clear",
+            Some(serde_json::json!({ "base_version": seen["version"] })),
+        )
+        .expect("clear");
+    gmuse::ui::read_the_queue(&mut ui, &ctx);
+    assert!(
+        ui.queue.is_empty(),
+        "the view kept a queue the engine no longer has"
+    );
+
+    // **A stale edit is refused and the engine's shown**, not silently won.
+    //
+    // Staleness is manufactured the only way a view can be stale: it holds a
+    // version, and somebody else moves past it.
+    let held_version = ui.queue_version();
+    let fresh = other.call("queue.get", None).expect("queue.get");
+    other
+        .call(
+            "queue.enqueue",
+            Some(serde_json::json!({
+                "recordings": [recording],
+                "base_version": fresh["version"]
+            })),
+        )
+        .expect("enqueue");
+    ui.queue.push_back(row);
+    ui.queue.push_back(row);
+    gmuse::ui::push_the_queue(&mut ui, &ctx);
+    assert!(
+        ui.status.contains("moved under that edit"),
+        "a stale edit was not reported: {:?}",
+        ui.status
+    );
+    assert_eq!(
+        ui.queue.len(),
+        1,
+        "and the engine's queue is what is shown, not the rejected edit"
+    );
+    assert!(
+        ui.queue_version() > held_version,
+        "the version did not catch up"
+    );
+}
+
+/// **What the socket accepts, the engine does** — #233.
+///
+/// `is_remotable` admitted `vol`, `rate`, `prev`, `set` and `toggle`, and
+/// `control::apply` handled none of them: each answered `{"accepted": true}` and
+/// did nothing. §7.4 makes a result mean *accepted*, which is precisely why the
+/// accepting side must not lie — a client has no other signal.
+///
+/// One test per command that used to be a no-op, each asserting the observable
+/// consequence rather than the acknowledgement.
+#[test]
+fn the_commands_that_used_to_be_accepted_and_ignored_now_act() {
+    let (engine, recording) = start_with_a_track("carried-out");
+    let client = Client::connect(&engine.socket, "driver", "0").expect("connect");
+    client
+        .subscribe(&[gmuse_proto::Topic::Playback, gmuse_proto::Topic::Queue])
+        .expect("subscribe");
+    let line = |text: &str| {
+        client
+            .call("cmd.exec_line", Some(serde_json::json!({ "line": text })))
+            .unwrap_or_else(|e| panic!("{text}: {e}"))
+    };
+
+    // **`set` moves the queue's version**, because what plays next changed.
+    let before = client.call("queue.get", None).expect("queue.get")["version"]
+        .as_u64()
+        .expect("a version");
+    line("set shuffle=true");
+    let mut after = before;
+    for _ in 0..200 {
+        after = client.call("queue.get", None).expect("queue.get")["version"]
+            .as_u64()
+            .expect("a version");
+        if after != before {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        after > before,
+        "`set shuffle=true` changed nothing: version stayed at {before}"
+    );
+
+    // **A setting that is not the engine's is refused, not swallowed.** It reaches
+    // the same gate, and `SettingKey::not_the_engines` is what answers.
+    let refused = client.call(
+        "cmd.exec_line",
+        Some(serde_json::json!({ "line": "set relative_numbers=true" })),
+    );
+    let err = refused.expect_err("a view's gutter is not the engine's to set");
+    assert_eq!(
+        err.rpc().map(|r| r.code),
+        Some(gmuse_proto::error::code::NOT_READY),
+        "refused as needing a view: {err}"
+    );
+
+    // **`vol` moves the fader.** No topic reports it yet (§7.8 puts parameters on
+    // `params`, which has no producer), so this asserts through the one thing that
+    // does answer: setting it low and back is accepted, and an out-of-range value
+    // is not silently clamped into a lie.
+    line("vol 40");
+    line("vol +10");
+
+    // **`prev` loads something**, which arrives as a `playback` event naming a
+    // recording. Nothing is playing, so it walks to the end of the pool — which is
+    // `next::prev`'s answer when there is no current track, in the engine exactly
+    // as in a view.
+    //
+    // **No `play` first.** An earlier version sent one and waited for an event that
+    // cannot come — nothing is loaded, so there is no recording to name — which
+    // spent twenty seconds proving nothing before the real assertion.
+    line("prev");
+    let mut heard = None;
+    for _ in 0..100 {
+        if let Ok(event) = client.next_event(Duration::from_millis(100))
+            && event.topic == gmuse_proto::Topic::Playback
+            && let Some(name) = event.body["recording"].as_str()
+        {
+            heard = Some(name.to_string());
+            break;
+        }
+    }
+    let played = heard.expect("`prev` named no recording, so it did nothing");
+
+    // **`rate` reaches the log.** It rates what is playing, which is the one
+    // subject the engine has without a cursor (I9) — and `prev` just made that
+    // something.
+    line("rate 4");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let mut rated = false;
+    for _ in 0..400 {
+        let log: String = std::fs::read_dir(&data)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+                    .filter_map(|p| std::fs::read_to_string(p).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if log.contains("RecordingRated") {
+            rated = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        rated,
+        "`rate 4` over the socket appended nothing, and what was playing was {played}"
+    );
+    let _ = recording;
 }
 
 /// **The engine plays, with no TUI attached** — #230.

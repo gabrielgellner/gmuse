@@ -4867,6 +4867,69 @@ Append here as decisions are made. Format: date, decision, rationale.
   D-14's unification survives intact: cue is one verb across both because the default cue point is the track start,
   which is a statement about the _verb_, not about the run-state enum.
 
+- **2026-09-12** **The queue is the engine's, and attaching is the default** (#233, I9, I11, §6, §7.7).
+
+  The halfway state #233 exists to end: a queue pane showing a list nobody plays from. `ui.queue` is a mirror now — read
+  with `queue.get`, replaced when the `queue` event says the version moved, and edited by sending `queue.set` with the
+  version it was read at. `next` and `prev` go through `Transport::skip`, whose local answer is `false` meaning "you
+  resolve it", so the in-process path is untouched.
+
+  **One push per tick rather than one per gesture.** `ui.queue` is edited by put, delete, undo, enqueue and playing from
+  the queue pane, and a send at each is five call sites to keep in step plus the sixth somebody adds later. Comparing
+  the working copy against the mirror catches all of them, including the sixth.
+
+  **`queue.set` is a new method beside `queue.enqueue`, and both earn their place.** A TUI's gestures are all "the queue
+  is now this list"; naming them individually would need `insert`, `move` and a transaction, each agreeing with the
+  others about indices. `enqueue` stays for a caller that holds no mirror — a script should not have to read the queue
+  to add a track — which is why §7.7 makes `base_version` optional there and required here.
+
+  **The modes ride on the `queue` event**, because a list plus `shuffle` plus `repeat` is the answer to "what plays
+  next". A view drawing the list while owning the modes draws a queue that does not describe what will happen.
+
+  ## What this turned up, which was worse than what it changed
+
+  **The engine accepted five commands and did none of them.** `remote::is_remotable` admitted `vol`, `rate`, `prev`,
+  `set` and `toggle`; `control::apply` handled none. Each answered `{"accepted": true}` and nothing happened — and §7.4
+  makes a result mean _accepted_, so that acknowledgement is the only signal a client has. It also drifted the other
+  way: `play` was handled here and refused at the gate, so that arm had always been unreachable.
+
+  Two lists that drift is the failure, so there is one property now — `SettingKey::not_the_engines`, asked by both sides
+  — and two tests comparing the gate's names against `apply`'s. They caught the `play` arm immediately, then caught
+  themselves: the first version scraped `Command::` out of _comments_, so a sentence explaining an exclusion counted as
+  handling it. Comments are stripped now, which is the same mistake a dependency-graph scrape in this repo made by
+  counting string literals.
+
+  **`prev` was refused on a mistaken reading.** A note in `control.rs` said going back is not the inverse of `take_next`
+  because the queue is consumed by being played from — true, and not what `prev` means. `next::prev` walks the _pool_
+  backwards and never reads the queue, so a view's `prev` has always been "the previous row in the pool's order", and
+  the engine doing the same is faithful rather than inventive. A play _history_ remains a design question and a
+  different feature.
+
+  **`play` does not cross, so `Remote::play` sends `pause`.** `play` starts the _selected_ track and needs a cursor.
+  Resuming is `pause`, which toggles, so the view resolves it against the run state it just read — exactly the race #225
+  argues the protocol should remove by carrying three distinct verbs. One keypress wide, and `play` is not a repeating
+  key.
+
+  ## And a real library got damaged proving it
+
+  A `gmuse` launched with `GMUSE_ROOTS` pointing at a scratch directory and its config at the real library auto-started
+  an engine, which scanned the wrong roots, found none of the 7,267 files the library knows, and appended
+  `HoldingsAsserted { held: {} }`. Holdings supersede, so every row in the library became unplayable. Repaired with
+  `shelf scan --write`, which is the operation for exactly that.
+
+  Nothing in the design stopped it, because before #237 no launch wrote holdings at all — so #237 sharpened a foot-gun
+  that had nothing to point at. The guard was already written three lines away, for the cache: "never an empty one over
+  a good one — that is how a working library becomes an empty one". The log deserves it more, because a cache is rebuilt
+  by a scan and the log is what the scan is _for_. `populate::worth_asserting` is now the one decision both writers
+  make, and an empty result over a non-empty assertion is refused out loud with the count it would have erased.
+
+  A library that genuinely emptied is still assertable, by a scan whose roots really are empty — which cannot be told
+  from this case and wants `forget`, which `library-api.md` §2 already names, rather than a scan guessing.
+
+  **Two of this change's own tests passed while checking nothing** and were found by reverting the fix each was for: one
+  spun twenty seconds waiting for an event that cannot arrive, and one put a second engine's socket beside the first's,
+  so it lost `engine.lock` — which is per _directory_ — exited, never scanned, and proved nothing.
+
 - **2026-09-12** **Holdings are in the log, because a process that cannot scan still has to reach a copy** (#237, #85,
   #148).
 

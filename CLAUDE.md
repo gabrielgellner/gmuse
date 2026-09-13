@@ -248,15 +248,15 @@ Verify playback against `ffprobe` durations and require an underrun count of zer
 
 Options are parsed with clap (derive), and each also reads an env var as a fallback:
 
-| Flag             | Env              | Effect                                                        |
-| ---------------- | ---------------- | ------------------------------------------------------------- |
-| `-d, --device`   | `GMUSE_DEVICE`   | Output device, matched by substring on the id                 |
-| `-r, --rate`     | `GMUSE_RATE`     | Force the device sample rate (to measure SRC cost)            |
-| `-q, --resample` | `GMUSE_RESAMPLE` | `fast`, `balanced`, or `high`                                 |
-| `-v, --volume`   | —                | Initial fader position, 1.0 is unity (see §13)                |
-| `--attach`       | `GMUSE_ATTACH`   | Drive the engine over the socket: no device, no lock (#219)   |
-| `--remote <CMD>` | —                | Send one command to the running player, print the reply, exit |
-| `--no-lock`      | —                | Start even if another gmuse holds the lock                    |
+| Flag             | Env              | Effect                                                         |
+| ---------------- | ---------------- | -------------------------------------------------------------- |
+| `-d, --device`   | `GMUSE_DEVICE`   | Output device, matched by substring on the id                  |
+| `-r, --rate`     | `GMUSE_RATE`     | Force the device sample rate (to measure SRC cost)             |
+| `-q, --resample` | `GMUSE_RESAMPLE` | `fast`, `balanced`, or `high`                                  |
+| `-v, --volume`   | —                | Initial fader position, 1.0 is unity (see §13)                 |
+| `--no-attach`    | `GMUSE_ATTACH=0` | Keep playback in this process; attaching is the default (#233) |
+| `--remote <CMD>` | —                | Send one command to the running player, print the reply, exit  |
+| `--no-lock`      | —                | Start even if another gmuse holds the lock                     |
 
 **Use clap with the derive API for anything CLI-shaped.** Parsing belongs at the boundary (§12): flags become typed
 values in `cli.rs` and travel down as `PlayerConfig`, so nothing below reads the environment or handles a raw string.

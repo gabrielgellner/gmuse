@@ -270,19 +270,27 @@ fn render_with(status: &Status, template: &str) -> String {
 /// Listed by what passes rather than what fails: a new `Command` variant should
 /// have to be considered, not inherit remotability by being forgotten.
 pub fn is_remotable(cmd: &Command) -> bool {
-    matches!(
-        cmd,
+    // **Key by key for a setting** — #233. This used to admit every `Set`, and
+    // `engine::control::apply` handled none of them: `set relative_numbers=true`
+    // over the socket answered `{"accepted": true}` and could not possibly have
+    // meant anything. `SettingKey::not_the_engines` is the one property both
+    // sides ask, so the gate and the doing cannot drift.
+    match cmd {
+        Command::Set { key, .. } | Command::Toggle(key) => key.not_the_engines().is_none(),
+        // **Not `Play`**, and the test below says why: it starts the *selected*
+        // track, so down a socket it would start whatever row a cursor sits on.
+        // Resuming is `pause`, which toggles — #225 is where the protocol gets
+        // three distinct verbs instead of one that depends on the run state.
         Command::Pause
-            | Command::Stop
-            | Command::Next
-            | Command::Prev
-            | Command::Seek(_)
-            | Command::Vol(_)
-            | Command::Rate(_)
-            | Command::Rescan
-            | Command::Set { .. }
-            | Command::Toggle(_)
-    )
+        | Command::Stop
+        | Command::Next
+        | Command::Prev
+        | Command::Seek(_)
+        | Command::Vol(_)
+        | Command::Rate(_)
+        | Command::Rescan => true,
+        _ => false,
+    }
 }
 
 /// Send one line to the running player and return its reply.

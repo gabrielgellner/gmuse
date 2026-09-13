@@ -254,6 +254,47 @@ impl ReplayGainMode {
 }
 
 impl SettingKey {
+    /// **Who owns this setting** — §6, #233.
+    ///
+    /// `None` means the engine can carry the change out on its own; `Some` is the
+    /// reason it cannot, for a client to be told rather than left guessing.
+    ///
+    /// This exists because `remote::is_remotable` said *every* `set` was fine to
+    /// send and `engine::control::apply` handled none of them, so
+    /// `gmuse ctl set shuffle=true` answered `{"accepted": true}` and did nothing.
+    /// Two lists that drift is the failure; one property of the setting is the
+    /// fix, and `every_remotable_command_is_one_the_engine_carries_out` keeps the
+    /// gate and the doing in step.
+    pub fn not_the_engines(self) -> Option<&'static str> {
+        match self {
+            // **What plays next**, which §6 assigns to the control thread and
+            // `engine::queue::Playing` holds.
+            SettingKey::Scope
+            | SettingKey::Shuffle
+            | SettingKey::Repeat
+            | SettingKey::RepeatCurrent => None,
+
+            // **A view's own**, and meaningless to a process with no screen.
+            SettingKey::AlbumHeaders => Some("album headers are a view's layout"),
+            SettingKey::RelativeNumbers => Some("relative numbers are a view's gutter"),
+            SettingKey::WhichKeyDelay => Some("the which-key delay is a view's timing"),
+            SettingKey::SmartArtistSort => Some("smart artist sort is how a view files its rows"),
+
+            // **The engine's, and not wired.** Said with the reason rather than
+            // lumped in with a view's, because the answer changes: these want
+            // plumbing, not a different owner.
+            SettingKey::ReplayGain => {
+                Some("replaygain decides a load's gain and the engine does not read it yet")
+            }
+            SettingKey::ResampleQuality => Some("the resampler is fixed when the stream opens"),
+            // **Nothing reads it at all**, here or in the engine: `next.rs` takes
+            // scope, shuffle, repeat and repeat_current, and there is no
+            // `continue` in `NextInput`. Refusing it over the wire is honest
+            // about a setting that does nothing anywhere.
+            SettingKey::Continue => Some("nothing reads `continue` yet, in either process"),
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             SettingKey::Scope => "scope",

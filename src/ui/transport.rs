@@ -130,6 +130,19 @@ pub trait Transport {
         None
     }
 
+    /// **Move to the next or previous track, if the transport picks.**
+    ///
+    /// `false` from a local player, which is not a refusal: in process the *view*
+    /// owns the queue and the pool, so it resolves the next track itself and then
+    /// loads it. Over a socket the engine owns both (#232), and a view that
+    /// resolved locally would pop a queue nobody plays from.
+    ///
+    /// So the answer means "I dealt with it", and the caller falls through to its
+    /// own path when it is `false`.
+    fn skip(&self, _forward: bool) -> bool {
+        false
+    }
+
     /// **Whether playback was here before this view was, and will be after.**
     ///
     /// `false` in process: the player *is* this program, so when it starts
