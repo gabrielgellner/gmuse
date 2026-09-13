@@ -1735,9 +1735,27 @@ fn the_engine_plays_a_track_and_says_so() {
     // **The load names what plays.** Resolving a path back to a recording would
     // mean hashing the file, which §4.4 forbids on this thread — so the event
     // can only name it because the request did.
-    let loaded = client
-        .next_event(Duration::from_secs(10))
-        .expect("a playback event for the load");
+    //
+    // **The first event may name nothing, and that is §7.4 rather than a gap.**
+    // "A command's `result` means the command was accepted… Execution is reported
+    // through events." The load is queued for the librarian now (#259), so the
+    // acknowledgement and the sound are separated by a tick — and the tick that
+    // publishes first is the one that says, truthfully, that nothing is playing
+    // yet. This waits for the event that reports the execution.
+    //
+    // It is a *bounded* wait on a named condition, not a sleep: if no event ever
+    // names the recording the expect below fails, which is the whole assertion.
+    let mut loaded = None;
+    for _ in 0..100 {
+        let Ok(event) = client.next_event(Duration::from_millis(200)) else {
+            continue;
+        };
+        if event.topic == gmuse_proto::Topic::Playback && event.body["recording"] == recording {
+            loaded = Some(event);
+            break;
+        }
+    }
+    let loaded = loaded.expect("a playback event naming the loaded recording");
     assert_eq!(loaded.topic, gmuse_proto::Topic::Playback);
     assert_eq!(loaded.body["recording"], recording);
     assert_eq!(loaded.body["sample_rate"], 48_000);

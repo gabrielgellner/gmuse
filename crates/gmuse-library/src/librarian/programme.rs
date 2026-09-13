@@ -258,6 +258,23 @@ pub struct Shown {
     pub row: CopyId,
 }
 
+/// **What is true of the programme, carried by every reply** — #259.
+///
+/// So a caller never has to *ask* for the version or the toggles: every answer refreshes
+/// them. That is what lets the engine hold them as cached state instead of sending a `Look`
+/// before each mode change and once per publish — and an ask the engine does not send is an
+/// ask that cannot block it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Standing {
+    pub version: u64,
+    pub mode: Mode,
+    /// How the order was made — what a view draws its toggles from.
+    pub scope: crate::next::Scope,
+    pub shuffled: bool,
+    /// How many entries the programme holds.
+    pub total: usize,
+}
+
 /// What came back.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
@@ -266,25 +283,19 @@ pub enum Reply {
     /// **Shorter than asked for is not an error.** A `OnceThrough` programme runs out, and
     /// a row whose audio this device does not hold is skipped rather than cueing a path
     /// that cannot be opened.
-    Window { version: u64, cues: Vec<Cued> },
+    Window { standing: Standing, cues: Vec<Cued> },
     /// **The token is not in this programme.** Ask for a window from the top.
     ///
     /// The rarer case than the design document assumed, because a reshuffle is a
     /// [`Ask::Reorder`] and keeps every token — so this means a genuine replacement.
-    Stale { version: u64 },
-    /// The programme, for drawing.
+    Stale { standing: Standing },
+    /// The programme, for drawing. `entries` may be a `limit`ed prefix of `standing.total`.
     Look {
-        version: u64,
-        mode: Mode,
-        /// How the order was made — what a view draws its toggles from.
-        scope: crate::next::Scope,
-        shuffled: bool,
+        standing: Standing,
         entries: Vec<Shown>,
-        /// How many the programme holds, which `entries` may be a `limit`ed prefix of.
-        total: usize,
     },
-    /// A mutation landed. The version it landed at.
-    Settled { version: u64 },
+    /// A mutation landed.
+    Settled { standing: Standing },
 }
 
 /// Apply one ask to the programme, resolving rows to paths through the fold.
@@ -292,6 +303,17 @@ pub enum Reply {
 /// **Called only from the librarian thread**, which is what makes it the single decider of
 /// what plays next. It takes the fold rather than holding one, so it cannot go stale
 /// against what the librarian published.
+/// What is true of the programme right now.
+fn standing(plan: &crate::programme::Programme) -> Standing {
+    Standing {
+        version: plan.version().as_u64(),
+        mode: plan.mode(),
+        scope: plan.scope(),
+        shuffled: plan.shuffled(),
+        total: plan.len(),
+    }
+}
+
 pub(crate) fn answer(
     plan: &mut crate::programme::Programme,
     library: &crate::model::seam::Librarian,
@@ -309,7 +331,7 @@ pub(crate) fn answer(
         && base != plan.version().as_u64()
     {
         return Reply::Stale {
-            version: plan.version().as_u64(),
+            standing: standing(plan),
         };
     }
 
@@ -317,7 +339,7 @@ pub(crate) fn answer(
         Ask::Play { rows, window, .. } => {
             plan.replace(rows);
             Reply::Window {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
                 cues: cues_for(plan.head(window), library, device),
             }
         }
@@ -332,7 +354,6 @@ pub(crate) fn answer(
             let ordered = pool(library, at, scope, shuffle, seed);
             plan.replace(ordered);
             plan.made_by(scope, shuffle);
-            let version = plan.version().as_u64();
 
             // **Cue from the row the person picked, not from the head.** `at` may be
             // absent (play the album) or no longer in the pool at all — a scope narrowed
@@ -344,7 +365,7 @@ pub(crate) fn answer(
                 None => plan.head(window),
             };
             Reply::Window {
-                version,
+                standing: standing(plan),
                 cues: cues_for(entries, library, device),
             }
         }
@@ -380,13 +401,13 @@ pub(crate) fn answer(
                 None => Vec::new(),
             };
             Reply::Window {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
                 cues: cues_for(entries, library, device),
             }
         }
 
         Ask::Head { n } => Reply::Window {
-            version: plan.version().as_u64(),
+            standing: standing(plan),
             cues: cues_for(plan.head(n), library, device),
         },
 
@@ -394,11 +415,11 @@ pub(crate) fn answer(
             let token = EntryToken::from_u64(token);
             if plan.entry(token).is_none() {
                 return Reply::Stale {
-                    version: plan.version().as_u64(),
+                    standing: standing(plan),
                 };
             }
             Reply::Window {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
                 cues: cues_for(plan.after(token, n), library, device),
             }
         }
@@ -407,11 +428,11 @@ pub(crate) fn answer(
             let token = EntryToken::from_u64(token);
             if plan.entry(token).is_none() {
                 return Reply::Stale {
-                    version: plan.version().as_u64(),
+                    standing: standing(plan),
                 };
             }
             Reply::Window {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
                 cues: cues_for(plan.before(token, n), library, device),
             }
         }
@@ -431,7 +452,7 @@ pub(crate) fn answer(
             plan.reorder_by_row(&ordered);
             plan.made_by(plan.scope(), on);
             Reply::Settled {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
             }
         }
 
@@ -469,21 +490,21 @@ pub(crate) fn answer(
             // do differently.
             plan.reorder(&order);
             Reply::Settled {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
             }
         }
 
         Ask::SetMode(mode) => {
             plan.set_mode(mode);
             Reply::Settled {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
             }
         }
 
         Ask::Insert { at, rows } => {
             plan.insert(at, rows);
             Reply::Settled {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
             }
         }
 
@@ -491,14 +512,14 @@ pub(crate) fn answer(
             let tokens: Vec<EntryToken> = tokens.into_iter().map(EntryToken::from_u64).collect();
             plan.remove(&tokens);
             Reply::Settled {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
             }
         }
 
         Ask::Push { rows, .. } => {
             plan.push(rows);
             Reply::Settled {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
             }
         }
 
@@ -508,22 +529,19 @@ pub(crate) fn answer(
                 plan.remove(&[token]);
             }
             Reply::Settled {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
             }
         }
 
         Ask::Clear { .. } => {
             plan.clear();
             Reply::Settled {
-                version: plan.version().as_u64(),
+                standing: standing(plan),
             }
         }
 
         Ask::Look { limit } => Reply::Look {
-            version: plan.version().as_u64(),
-            mode: plan.mode(),
-            scope: plan.scope(),
-            shuffled: plan.shuffled(),
+            standing: standing(plan),
             entries: plan
                 .entries()
                 .iter()
@@ -533,7 +551,6 @@ pub(crate) fn answer(
                     row: e.row,
                 })
                 .collect(),
-            total: plan.len(),
         },
     }
 }
@@ -658,7 +675,7 @@ mod tests {
         assert_eq!(rows.len(), 3, "the fixture did not make three rows");
         let mut plan = Programme::new();
 
-        let Reply::Window { cues, version } = ask(
+        let Reply::Window { cues, standing } = ask(
             &mut plan,
             &l,
             Ask::Play {
@@ -671,7 +688,10 @@ mod tests {
         };
 
         assert_eq!(cues.len(), 2, "the window was not the size asked for");
-        assert!(version > 0, "a play left the version at zero");
+        assert!(
+            standing.version > 1,
+            "a play left the version where it started"
+        );
         for cue in &cues {
             assert!(
                 cue.path.starts_with("/m/Luna/"),
@@ -732,7 +752,7 @@ mod tests {
         );
 
         match ask(&mut plan, &l, Ask::After { token: 9_999, n: 2 }) {
-            Reply::Stale { version } => assert!(version > 0),
+            Reply::Stale { standing } => assert!(standing.version > 0),
             other => panic!("an unknown token was answered with {other:?}"),
         }
     }
@@ -791,18 +811,12 @@ mod tests {
         );
         ask(&mut plan, &l, Ask::SetMode(Mode::RepeatAll));
 
-        let Reply::Look {
-            mode,
-            entries,
-            total,
-            ..
-        } = ask(&mut plan, &l, Ask::Look { limit: 2 })
-        else {
+        let Reply::Look { standing, entries } = ask(&mut plan, &l, Ask::Look { limit: 2 }) else {
             panic!("a look did not answer with one");
         };
-        assert_eq!(mode, Mode::RepeatAll, "the mode was not reported");
+        assert_eq!(standing.mode, Mode::RepeatAll, "the mode was not reported");
         assert_eq!(entries.len(), 2, "the limit was not applied");
-        assert_eq!(total, 3, "a limited look misreported the length");
+        assert_eq!(standing.total, 3, "a limited look misreported the length");
     }
 
     /// **The mode is never in a cue**, which is the decision the whole design rests on.
@@ -902,11 +916,14 @@ mod tests {
         let playing = cues[1].token;
 
         // A second job sees the same programme — the thread kept it.
-        let Some(Reply::Look { entries, total, .. }) = desk.programme(Ask::Look { limit: 10 })
+        let Some(Reply::Look { entries, standing }) = desk.programme(Ask::Look { limit: 10 })
         else {
             panic!("the desk did not answer a Look");
         };
-        assert_eq!(total, 3, "the programme did not survive the first job");
+        assert_eq!(
+            standing.total, 3,
+            "the programme did not survive the first job"
+        );
         let order: Vec<u64> = entries.iter().map(|e| e.token).collect();
         assert!(
             order.contains(&playing),
@@ -977,7 +994,10 @@ mod tests {
         assert!(
             matches!(
                 ask(&mut plan, &l, Ask::Look { limit: 10 }),
-                Reply::Look { total: 3, .. }
+                Reply::Look {
+                    standing: Standing { total: 3, .. },
+                    ..
+                }
             ),
             "the reorder did not keep three entries"
         );
@@ -1340,17 +1360,14 @@ mod tests {
                 window: 1,
             },
         );
-        let Reply::Look {
-            scope, shuffled, ..
-        } = ask(&mut plan, &l, Ask::Look { limit: 0 })
-        else {
+        let Reply::Look { standing, .. } = ask(&mut plan, &l, Ask::Look { limit: 0 }) else {
             panic!("no look");
         };
         assert_eq!(
-            scope,
+            standing.scope,
             crate::next::Scope::Outer,
             "the scope was not recorded"
         );
-        assert!(shuffled, "the shuffle was not recorded");
+        assert!(standing.shuffled, "the shuffle was not recorded");
     }
 }

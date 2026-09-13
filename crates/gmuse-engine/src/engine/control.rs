@@ -248,7 +248,8 @@ impl Control {
                             .as_deref()
                             .and_then(|r| r.parse::<uuid::Uuid>().ok())
                             .map(gmuse_ids::id::Id::from_uuid)
-                            && let Some(cue) = super::queue::Playing::resume(&desk, recording)
+                            && let Some(cue) =
+                                super::queue::Playing::cue_for_recovery(&desk, recording)
                         {
                             player.load(source_of(&cue, 1.0));
                             if was > Duration::ZERO {
@@ -387,18 +388,14 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 &mut held.pending,
                 &mut held.playing,
             ),
+            // **Queued rather than waited for** — #259. The librarian may be reconciling
+            // 7,267 files, and a play gesture that timed out answered `accepted: true` while
+            // doing nothing. It is loaded on the tick its answer arrives, so the `playback`
+            // event follows the sound rather than the request — which is what §7.8 says an
+            // event is for.
             Ok(Ask::Load { recording }) => {
-                match held.queue.start(desk, recording) {
-                    Some(cue) => {
-                        held.playing = Some(recording.to_string());
-                        player.load(source_of(&cue, player.volume()));
-                        true
-                    }
-                    // Nothing this device holds. Not an error the player can
-                    // act on, and the `playback` event that does not follow is
-                    // the honest report.
-                    None => false,
-                }
+                held.queue.start(recording);
+                false
             }
             // **Answered from the same three sources the event is built from**, and
             // deliberately not from a cached copy of the last event: a snapshot that
@@ -415,7 +412,7 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
             // programme as it now stands, which is what makes a `queue.set` audible at the
             // next track rather than two tracks later.
             Ok(Ask::Resync) => {
-                held.queue.reopen(desk);
+                held.queue.resync();
                 false
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => false,
@@ -430,12 +427,16 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
         // fresh window is cheap and is the only thing that could be wrong.
         let now = desk.current();
         if !Arc::ptr_eq(&held.folded, &now) {
-            held.queue.reopen(desk);
+            held.queue.resync();
             held.folded = now;
         }
 
-        // **Top the window up, without waiting** — the refill is off every deadline.
-        held.queue.keep_topped_up(desk);
+        // **One tick of the programme pipeline, and nothing waits** — #259. Absorbs a reply
+        // if one arrived, sends the next ask if the line is free, tops the window up if it is
+        // short. A gesture whose answer is here gets loaded now.
+        if let Some(cue) = held.queue.tick(desk) {
+            moved |= load_picked(player, &mut held.pending, &mut held.playing, Some(cue));
+        }
 
         // What the player has to say for itself. Draining rather than taking
         // one: a track change can arrive as `Finished` then `Loaded` in the
@@ -524,7 +525,7 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 // describe what will happen. They are small, they change on the
                 // same events, and `set_scope`/`set_mode` already move the version
                 // — so there is nothing to add but the fields.
-                let (scope, shuffle, repeat, repeat_current) = held.queue.modes(desk);
+                let (scope, shuffle, repeat, repeat_current) = held.queue.modes();
                 engine.publish(&Event::new(
                     Topic::Queue,
                     serde_json::json!({
@@ -684,7 +685,9 @@ fn apply(
         // being abandoned rather than played out, so there is nothing to join onto
         // and `pending` is not the right slot.
         Instruction::Next => {
-            let picked = queue.skip_next(desk);
+            // **Instant when the window holds it**, which is the common case: a `next` that
+            // had to ask would feel like a key that sometimes works.
+            let picked = queue.skip_next();
             load_picked(player, pending, playing, picked)
         }
         // **`prev` is the pool's previous, and always was.** An earlier note here
@@ -696,8 +699,10 @@ fn apply(
         //
         // A play *history* is still a design question, and a different feature.
         Instruction::Prev => {
-            let picked = queue.take_prev(desk);
-            load_picked(player, pending, playing, picked)
+            // **Always asked**, because what precedes the position is never in the window —
+            // a window looks forwards. Loaded on the tick the answer arrives.
+            queue.skip_prev();
+            false
         }
 
         // **A volume change is not a transport discontinuity**, so §7.8 has nothing
@@ -732,15 +737,15 @@ fn apply(
 
         // **What plays next** — §6 assigns these to the control thread.
         Instruction::Mode(which, to) => {
-            queue.set_mode(desk, which, to);
+            queue.set_mode(which, to);
             false
         }
         Instruction::Scope(to) => {
             let mode = match to {
                 ScopeTo::Set(mode) => mode,
-                ScopeTo::Cycle => queue.scope(desk).cycle(),
+                ScopeTo::Cycle => queue.scope().cycle(),
             };
-            queue.set_scope(desk, mode);
+            queue.set_scope(mode);
             false
         }
 

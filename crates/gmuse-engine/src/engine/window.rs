@@ -56,7 +56,7 @@ pub struct Cue {
 ///
 /// **Two, so `NeedNext` is answered from memory and the refill is never on the deadline.**
 /// One would mean asking at the moment the decoder asks, which is the shape this replaces.
-const KEEP: usize = 3;
+pub const KEEP: usize = 3;
 
 /// The cues in hand, and whether an ask is outstanding.
 #[derive(Debug, Default)]

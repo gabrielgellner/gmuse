@@ -2868,20 +2868,13 @@ fn run_engine(
             }
 
             match reply {
-                Reply::Settled { version } | Reply::Window { version, .. } => {
-                    Ok(serde_json::json!({ "version": version }))
+                Reply::Settled { standing } | Reply::Window { standing, .. } => {
+                    Ok(serde_json::json!({ "version": standing.version }))
                 }
                 // **The rarer case than the design assumed**, because a reshuffle is a
                 // reorder and keeps every token. This is a genuine replacement.
-                Reply::Stale { version } => Err(RpcError::stale_version(version)),
-                Reply::Look {
-                    version,
-                    mode,
-                    scope,
-                    shuffled,
-                    entries,
-                    total,
-                } => {
+                Reply::Stale { standing } => Err(RpcError::stale_version(standing.version)),
+                Reply::Look { standing, entries } => {
                     use gmuse_library::programme::Mode;
                     // **Recordings on the wire, rows underneath** — I17: only user-facing
                     // grains cross, and a recording is what a person chooses.
@@ -2891,16 +2884,16 @@ fn run_engine(
                         .map(|r| r.to_string())
                         .collect();
                     Ok(serde_json::json!({
-                        "version": version,
+                        "version": standing.version,
                         "entries": named,
-                        "total": total,
+                        "total": standing.total,
                         // **The same four fields the `queue` event carries** (#233), so a view
                         // that just attached can draw the queue correctly without waiting for
                         // one of them to change.
-                        "scope": scope.label(),
-                        "shuffle": shuffled,
-                        "repeat": mode == Mode::RepeatAll,
-                        "repeat_current": mode == Mode::RepeatCurrent,
+                        "scope": standing.scope.label(),
+                        "shuffle": standing.shuffled,
+                        "repeat": standing.mode == Mode::RepeatAll,
+                        "repeat_current": standing.mode == Mode::RepeatCurrent,
                     }))
                 }
             }

@@ -21,11 +21,16 @@
 //!   control loop polls it. Jobs are FIFO, so a refill queued behind a scan of 7,267 files
 //!   would wait seconds, and I16 keeps the librarian off this thread precisely so a long
 //!   job cannot stall transport.
-//! - **A gesture blocks, and that is a measured defect rather than a trade.** `prev`, a mode
-//!   change, a scope change and the socket's `queue.*` all wait on the librarian. The round
-//!   trip is microseconds warm — and **9.45s on the first gesture after a launch**, because
-//!   a launch reconciles 7,267 files and jobs are served FIFO. **#259** has the measurement
-//!   and the options; see `PATIENCE`.
+//! - **A gesture never blocks either** — #259. It goes on a line with an [`Awaiting`] saying
+//!   what its answer means, and a later tick absorbs the reply and acts. So a play gesture
+//!   arriving while the librarian is reconciling 7,267 files is **late, not lost**; before,
+//!   it answered `accepted: true` and did nothing.
+//!
+//!   The one exception is `cue_for_recovery`, which runs on the device-recovery thread where
+//!   nothing is playing and nothing has a deadline.
+//!
+//!   **The latency behind a launch scan is #260**, not this: a bare `Look` costs 9.26s on the
+//!   first call too, because the scan walks the disk on the librarian thread.
 //!
 //! ## What it decides: nothing
 //!
@@ -36,34 +41,59 @@
 use std::sync::Arc;
 
 use gmuse_library::librarian::Desk;
-use gmuse_library::librarian::programme::{Ask, Cued, Reply};
+use gmuse_library::librarian::programme::{Ask, Cued, Reply, Standing};
 use gmuse_library::next::Scope;
 use gmuse_library::programme::Mode as Rule;
 
 use crate::instruction::{Mode, Switch};
 
-use super::window::{Cue, Window};
+use super::window::{Cue, KEEP, Window};
 
-/// How long a gesture waits on the librarian before giving up.
+/// **What an outstanding ask was for, and therefore what to do with its answer** — #259.
 ///
-/// **Measured, and no value here is right — see the note below.** On the real library the
-/// first `player.load` after a launch takes **9.45s** and the second takes **0.41s**,
-/// because a launch reconciles 7,267 files and the librarian serves jobs FIFO: the play
-/// gesture queues behind the scan. A 2s budget makes that gesture silently do nothing; a
-/// budget long enough to survive it stalls transport for nine seconds.
-///
-/// So the bound is not the fix, and a gesture blocking the control thread at all is the
-/// defect. The refill already has the right shape — `programme_later`, polled on a later
-/// tick — and the gestures need it too. **#259.**
-const PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+/// The control thread never waits on the librarian. A gesture puts an ask on the pipeline
+/// and says here what the answer means; a later tick absorbs it and acts. So a play gesture
+/// arriving while the librarian is reconciling 7,267 files is *late*, not *lost* — which is
+/// the difference the 9.45s measurement made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Awaiting {
+    /// Extend the window. What a refill is.
+    Refill,
+    /// Replace the window and load its first cue — a play gesture, or `next` off the end.
+    LoadFirst,
+    /// Replace the window and load the *only* cue, which is behind the position — `prev`.
+    LoadBack,
+    /// Replace the window, load nothing. A view changed the programme under us.
+    Resync,
+    /// Replace the window but keep the position: the cues changed, the playing entry did not.
+    ResyncAt(u64),
+    /// **Then ask what follows the position**, because a mode change made the window wrong
+    /// rather than short. The second step of a two-step gesture.
+    ThenResync,
+    /// Nothing to do but free the slot and refresh `standing`.
+    Noted,
+}
 
-/// The cues in hand, and the door to the programme behind them.
+/// How many asks may wait to be sent before one is dropped.
+///
+/// **Four, and a drop is reported rather than silent.** Gestures are human-paced and the
+/// window answers `next` without asking at all, so a backlog means the librarian is busy;
+/// growing the queue without bound would turn one slow scan into thousands of queued jobs.
+const BACKLOG: usize = 4;
+
+/// The cues in hand, the programme's standing state, and the asks in flight.
 pub struct Playing {
     window: Window,
-    /// A refill that has been asked for and not yet absorbed.
-    refill: Option<crossbeam_channel::Receiver<Reply>>,
-    /// Seeds the next reshuffle. **Bumped per reshuffle so two are different orders**, and
-    /// held here because a seed is not a library fact.
+    /// **What the programme says about itself, cached.** Refreshed by every reply, so
+    /// nothing has to *ask* for the version or the toggles — an ask not sent is an ask that
+    /// cannot block (#259).
+    standing: Standing,
+    /// Asks not yet sent, oldest first.
+    queued: std::collections::VecDeque<(Ask, Awaiting)>,
+    /// The one ask in flight. **One at a time**, so replies cannot arrive out of order and
+    /// a later gesture cannot overtake the refill it depends on.
+    flight: Option<(crossbeam_channel::Receiver<Reply>, Awaiting)>,
+    /// Seeds the next reshuffle, bumped per reshuffle so two are different orders.
     seed: u64,
 }
 
@@ -71,7 +101,9 @@ impl Playing {
     pub fn new() -> Self {
         Self {
             window: Window::new(),
-            refill: None,
+            standing: Standing::default(),
+            queued: std::collections::VecDeque::new(),
+            flight: None,
             seed: 0x5EED,
         }
     }
@@ -81,338 +113,314 @@ impl Playing {
         self.window.take()
     }
 
-    /// What is cued after the current one, without consuming it.
     pub fn peek(&self) -> Option<&Cue> {
         self.window.peek()
     }
 
-    /// The programme version the window came from.
+    /// The programme version, from the cache. **No round trip.**
     pub fn version(&self) -> u64 {
-        self.window.version()
+        self.standing.version
     }
 
-    /// **Top the window up, without waiting for the answer.**
+    /// The four fields the `queue` event carries (#233), from the cache.
     ///
-    /// Called every tick of the control loop. Does nothing while an ask is outstanding or
-    /// the window is long enough, so it is a load and a comparison in the common case.
-    pub fn keep_topped_up(&mut self, desk: &Arc<Desk>) {
-        // Absorb an answer that has arrived.
-        if let Some(rx) = &self.refill {
-            match rx.try_recv() {
-                Ok(Reply::Window { version, cues }) => {
-                    self.window.extend(version, cues.into_iter().map(cue_of));
-                    self.refill = None;
-                }
-                // **The position is gone, so take the top of the programme.** A view
-                // replaced the queue while this was in flight; playing on from a token
-                // that no longer exists is not an option, and asking again from the same
-                // token would loop.
-                Ok(Reply::Stale { .. }) => {
-                    self.refill = None;
-                    self.window.answered();
-                    self.reopen(desk);
-                }
-                Ok(_) => {
-                    // A `Settled` or `Look` cannot arrive here: this receiver was created
-                    // for an `After`. Absorbed rather than ignored so the slot frees.
-                    self.refill = None;
-                    self.window.answered();
-                }
-                Err(crossbeam_channel::TryRecvError::Empty) => return,
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    self.refill = None;
-                    self.window.answered();
-                }
+    /// **Read rather than asked**, and that matters: this is on the publish path, so an ask
+    /// here put a librarian round trip in the control loop every time the version moved.
+    pub fn modes(&self) -> (Scope, bool, bool, bool) {
+        (
+            self.standing.scope,
+            self.standing.shuffled,
+            self.standing.mode == Rule::RepeatAll,
+            self.standing.mode == Rule::RepeatCurrent,
+        )
+    }
+
+    pub fn scope(&self) -> Scope {
+        self.standing.scope
+    }
+
+    /// **One tick of the pipeline.** Absorb a reply if one has arrived, then send the next
+    /// ask if the line is free, then top the window up if it is short.
+    ///
+    /// Returns the cue to load, if the answer that arrived was a gesture's. The caller loads
+    /// it, because loading is the player's business and this file's is the programme.
+    pub fn tick(&mut self, desk: &Arc<Desk>) -> Option<Cue> {
+        let loaded = self.absorb();
+        self.send_next(desk);
+        self.top_up();
+        loaded
+    }
+
+    /// Take the reply if there is one, and act on it.
+    fn absorb(&mut self) -> Option<Cue> {
+        let (rx, what) = self.flight.as_ref()?;
+        let what = *what;
+        let reply = match rx.try_recv() {
+            Ok(reply) => reply,
+            Err(crossbeam_channel::TryRecvError::Empty) => return None,
+            // The librarian is gone. Free the line; the next tick may try again.
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                self.flight = None;
+                self.window.answered();
+                return None;
             }
+        };
+        self.flight = None;
+
+        // **Every reply refreshes the cache**, whatever it was asked for.
+        if let Some(standing) = standing_of(&reply) {
+            self.standing = standing;
         }
 
+        let cues: Vec<Cue> = match reply {
+            Reply::Window { cues, .. } => cues.into_iter().map(cue_of).collect(),
+            // The position is gone — a view replaced the programme. Take the top of it
+            // rather than playing on from a token that no longer exists.
+            Reply::Stale { .. } => {
+                self.window.answered();
+                self.push(Ask::Head { n: KEEP }, Awaiting::Resync);
+                return None;
+            }
+            Reply::Settled { .. } | Reply::Look { .. } => {
+                self.window.answered();
+                if what == Awaiting::ThenResync {
+                    // A mode change landed; now the window has to reflect it.
+                    match self.window.from() {
+                        Some(at) => {
+                            self.push(Ask::After { token: at, n: KEEP }, Awaiting::ResyncAt(at))
+                        }
+                        None => self.push(Ask::Head { n: KEEP }, Awaiting::Resync),
+                    }
+                }
+                return None;
+            }
+        };
+
+        let version = self.standing.version;
+        match what {
+            Awaiting::Refill => {
+                self.window.extend(version, cues);
+                None
+            }
+            Awaiting::LoadFirst => {
+                self.window.replace(version, cues);
+                self.window.take()
+            }
+            Awaiting::LoadBack => {
+                let back = cues.first().cloned();
+                self.window.replace(version, cues);
+                // **The position moves backwards too**, or the next refill carries on from
+                // where we *were* and the track after `prev` is the one we just left.
+                if let Some(cue) = &back {
+                    self.window.resume_at(cue.token);
+                }
+                self.window.take()
+            }
+            Awaiting::Resync => {
+                self.window.replace(version, cues);
+                None
+            }
+            Awaiting::ResyncAt(at) => {
+                self.window.replace(version, cues);
+                self.window.resume_at(at);
+                None
+            }
+            // A `Window` is not what these were for; the cache is refreshed either way.
+            Awaiting::ThenResync | Awaiting::Noted => None,
+        }
+    }
+
+    /// Send the oldest queued ask, if the line is free.
+    fn send_next(&mut self, desk: &Arc<Desk>) {
+        if self.flight.is_some() {
+            return;
+        }
+        let Some((ask, what)) = self.queued.pop_front() else {
+            return;
+        };
+        match desk.programme_later(ask) {
+            Some(rx) => self.flight = Some((rx, what)),
+            // The librarian is gone; nothing to do and nothing to wait for.
+            None => self.window.answered(),
+        }
+    }
+
+    /// Ask for more when the window is short and nothing is already on the way.
+    fn top_up(&mut self) {
         if !self.window.wants_more() {
             return;
         }
+        if self.pending(Awaiting::Refill) {
+            return;
+        }
         // **From the end of what is held**, not from the playing position — see
-        // `Window::tail`. Addressing a refill from `from` re-fetches entries already in hand
-        // and the queue walks two tracks for ever.
+        // `Window::tail`. Addressing a refill from `from` re-fetches entries already in
+        // hand and the queue walks two tracks for ever.
         let Some(from) = self.window.tail() else {
             return;
         };
         let n = self.window.short_by();
-        if let Some(rx) = desk.programme_later(Ask::After { token: from, n }) {
-            self.window.asked();
-            self.refill = Some(rx);
+        self.window.asked();
+        self.push(Ask::After { token: from, n }, Awaiting::Refill);
+    }
+
+    fn pending(&self, what: Awaiting) -> bool {
+        self.flight.as_ref().is_some_and(|(_, w)| *w == what)
+            || self.queued.iter().any(|(_, w)| *w == what)
+    }
+
+    /// Put an ask on the line.
+    ///
+    /// **Drops the oldest when full, and says so.** A backlog means the librarian is busy;
+    /// an unbounded queue would turn one slow scan into thousands of jobs, and a silent drop
+    /// would be a gesture that did nothing for no stated reason.
+    fn push(&mut self, ask: Ask, what: Awaiting) {
+        if self.queued.len() >= BACKLOG {
+            let dropped = self.queued.pop_front();
+            eprintln!(
+                "gmuse engine: the librarian is behind, so a queued {:?} was dropped",
+                dropped.map(|(_, w)| w)
+            );
         }
+        self.queued.push_back((ask, what));
     }
 
-    /// **Throw the window away and cue the start of the programme as it stands.**
+    /// **Where one recording's audio is, waiting for the answer** — device recovery only.
     ///
-    /// For a `Stale` refill and for a view that replaced the queue. `Ask::Head` rather than
-    /// `Ask::Open`, and the difference is the whole meaning of a resync: **the programme is
-    /// right and this side's copy of it is not**, so nothing may be rebuilt.
-    pub fn reopen(&mut self, desk: &Arc<Desk>) {
-        let Some(Reply::Window { version, cues }) = ask(desk, Ask::Head { n: 3 }) else {
-            return;
-        };
-        self.window.replace(version, cues.into_iter().map(cue_of));
-    }
-
-    /// **Open a programme over the library and cue from one row** — a play gesture.
-    pub fn open(
-        &mut self,
-        desk: &Arc<Desk>,
-        at: Option<gmuse_ids::copy::CopyId>,
-        scope: Scope,
-        shuffle: bool,
-        window: usize,
-    ) -> Option<Cue> {
-        let reply = ask(
-            desk,
-            Ask::Open {
-                at,
-                scope,
-                shuffle,
-                seed: self.seed,
-                window,
-            },
-        )?;
-        let Reply::Window { version, cues } = reply else {
-            return None;
-        };
-        self.window.replace(version, cues.into_iter().map(cue_of));
-        self.window.take()
-    }
-
-    /// **Play this recording, opening a programme around it** — for `Ask::Load`.
+    /// The one place a blocking ask is right, and it is not the control loop: this runs on
+    /// the recovery thread after a `DeviceLost`, which is already sitting in
+    /// `wait_for_a_device` polling for hardware. Nothing is playing, nothing is waiting on a
+    /// deadline, and the alternative is not restoring the session at all.
     ///
-    /// The window is replaced, because the programme was: what follows the picked track is
-    /// whatever the new programme says, which is the point of picking one.
-    pub fn start(
-        &mut self,
+    /// Everything else goes through the pipeline, because on the control thread a wait is a
+    /// transport stall — see the module header and #259.
+    pub fn cue_for_recovery(
         desk: &Arc<Desk>,
         recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
     ) -> Option<Cue> {
-        let Reply::Window { version, cues } = ask(
-            desk,
-            Ask::Start {
-                recording,
-                window: 3,
-            },
-        )?
-        else {
-            return None;
-        };
-        self.window.replace(version, cues.into_iter().map(cue_of));
-        self.window.take()
-    }
-
-    /// **The same, without a `Playing` to hold the window** — the session resume.
-    ///
-    /// Runs inside the device callback, where `Held` has not been built yet, so it can only
-    /// answer "what to load". The window it opened is picked up by the first `reopen`.
-    pub fn resume(
-        desk: &Arc<Desk>,
-        recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
-    ) -> Option<Cue> {
-        let Reply::Window { cues, .. } = ask(
-            desk,
-            Ask::Start {
-                recording,
-                window: 1,
-            },
-        )?
-        else {
-            return None;
-        };
-        cues.into_iter().next().map(cue_of)
-    }
-
-    /// **Open a programme over the whole library, if there is not one yet.**
-    ///
-    /// The old design had an *implicit* programme: the pool was the whole library, always, and
-    /// a cursor walked it. So `next` with nothing playing played the first row and `prev`
-    /// played the last, and two integration tests assert exactly that. With an explicit
-    /// programme those gestures have nothing to walk until one exists.
-    ///
-    /// **Lazy rather than at startup, and the reason is a question this does not settle.**
-    /// Opening one eagerly makes `queue.get` return 7,271 rows, because a programme *is* the
-    /// play order and the play order is the library. That is arguably right — "up next" is
-    /// then well-defined — but the wire's `queue.get` has always meant "what I queued", and
-    /// two tests say so. Deferring the open keeps that meaning until something plays, and
-    /// then it changes. **Which of the two `queue.get` should mean is a protocol decision,
-    /// not a refactor** — #257.
-    fn open_library_if_empty(&mut self, desk: &Arc<Desk>) {
-        let empty = matches!(
-            ask(desk, Ask::Look { limit: 0 }),
-            Some(Reply::Look { total: 0, .. })
-        );
-        if !empty {
-            return;
+        let rx = desk.programme_later(Ask::Start {
+            recording,
+            window: 1,
+        })?;
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(Reply::Window { cues, .. }) => cues.into_iter().next().map(cue_of),
+            _ => None,
         }
-        let _ = ask(
-            desk,
-            Ask::Open {
-                at: None,
-                scope: Scope::All,
-                shuffle: false,
-                seed: self.seed,
-                window: 0,
+    }
+
+    /// **Play this recording, opening a programme around it.** Acts on a later tick.
+    pub fn start(&mut self, recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>) {
+        self.push(
+            Ask::Start {
+                recording,
+                window: KEEP,
             },
+            Awaiting::LoadFirst,
         );
     }
 
-    /// **Skip forward as a gesture**, which may ask where `NeedNext` may not.
+    /// **Skip forward.** From the window if it has one, else asked for.
     ///
-    /// Distinct from [`take_next`] on purpose. `NeedNext` is on the decoder's deadline and
-    /// must answer from the window or not at all; a person pressing a key is waiting anyway,
-    /// and with nothing playing the answer is the head of the programme rather than nothing.
-    ///
-    /// [`take_next`]: Playing::take_next
-    pub fn skip_next(&mut self, desk: &Arc<Desk>) -> Option<Cue> {
+    /// Returns the cue immediately in the common case, which is what makes `next` feel
+    /// instant: the window already holds it and nothing is asked at all.
+    pub fn skip_next(&mut self) -> Option<Cue> {
         if let Some(cue) = self.window.take() {
             return Some(cue);
         }
-        self.open_library_if_empty(desk);
-        let Reply::Window { version, cues } = ask(desk, Ask::Head { n: 3 })? else {
-            return None;
-        };
-        self.window.replace(version, cues.into_iter().map(cue_of));
-        self.window.take()
+        if self.standing.total == 0 {
+            // **The whole library, which is what the old design's pool implicitly was.** A
+            // cursor walked it, so `next` with nothing playing played the first row. With an
+            // explicit programme there is nothing to walk until one exists.
+            self.push(self.over_the_library(KEEP), Awaiting::LoadFirst);
+        } else {
+            self.push(Ask::Head { n: KEEP }, Awaiting::LoadFirst);
+        }
+        None
     }
 
-    /// **The previous entry, loaded rather than spliced.**
-    ///
-    /// With nothing playing it is the *last* entry, which is what `next::step` did when it
-    /// had no current track: start at whichever end we are walking from.
-    pub fn take_prev(&mut self, desk: &Arc<Desk>) -> Option<Cue> {
-        let reply = match self.window.from() {
-            Some(from) => ask(desk, Ask::Before { token: from, n: 1 })?,
-            None => {
-                self.open_library_if_empty(desk);
-                ask(desk, Ask::Tail { n: 1 })?
-            }
-        };
-        let Reply::Window { version, cues } = reply else {
-            return None;
-        };
-        let cue = cues.into_iter().next().map(cue_of)?;
-        // **The position moves backwards too**, or the next refill would carry on from where
-        // we *were* and the track after `prev` would be the one we just left.
-        self.window.replace(version, std::iter::empty());
-        self.window.resume_at(cue.token);
-        Some(cue)
+    /// A programme over the whole library, in the narrowing and order already in force.
+    fn over_the_library(&self, window: usize) -> Ask {
+        Ask::Open {
+            at: None,
+            scope: self.standing.scope,
+            shuffle: self.standing.shuffled,
+            seed: self.seed,
+            window,
+        }
     }
 
-    /// **A mode change**, forwarded and then resynced.
-    ///
-    /// Resynced because the mode changes what follows: the window was filled under the old
-    /// rule and its second entry may now be wrong.
-    pub fn set_mode(&mut self, desk: &Arc<Desk>, which: Mode, to: Switch) -> u64 {
-        let Some(Reply::Look { mode, shuffled, .. }) = ask(desk, Ask::Look { limit: 0 }) else {
-            return self.window.version();
-        };
+    /// **Go back.** With nothing playing that is the *last* entry, which is what
+    /// `next::step` did with no current track: start at whichever end we walk from.
+    pub fn skip_prev(&mut self) {
+        if let Some(from) = self.window.from() {
+            self.push(Ask::Before { token: from, n: 1 }, Awaiting::LoadBack);
+            return;
+        }
+        // **Two asks, in order**, because the line is FIFO: build a programme if there is
+        // none, then take its last entry. `next::step` did the same with no current track —
+        // start at whichever end we are walking from.
+        if self.standing.total == 0 {
+            self.push(self.over_the_library(0), Awaiting::Noted);
+        }
+        self.push(Ask::Tail { n: 1 }, Awaiting::LoadBack);
+    }
+
+    /// **A mode change**, then a resync — the window was filled under the old rule.
+    pub fn set_mode(&mut self, which: Mode, to: Switch) -> u64 {
         let on = |now: bool| match to {
             Switch::On => true,
             Switch::Off => false,
             Switch::Flip => !now,
         };
-
-        let settled = match which {
-            Mode::Shuffle => ask(
-                desk,
-                Ask::Shuffle {
-                    on: on(shuffled),
-                    seed: self.next_seed(),
-                },
-            ),
-            Mode::Repeat => ask(
-                desk,
-                Ask::SetMode(if on(mode == Rule::RepeatAll) {
-                    Rule::RepeatAll
-                } else {
-                    Rule::OnceThrough
-                }),
-            ),
-            Mode::RepeatCurrent => ask(
-                desk,
-                Ask::SetMode(if on(mode == Rule::RepeatCurrent) {
-                    Rule::RepeatCurrent
-                } else {
-                    Rule::OnceThrough
-                }),
-            ),
+        let ask = match which {
+            Mode::Shuffle => Ask::Shuffle {
+                on: on(self.standing.shuffled),
+                seed: self.next_seed(),
+            },
+            Mode::Repeat => Ask::SetMode(if on(self.standing.mode == Rule::RepeatAll) {
+                Rule::RepeatAll
+            } else {
+                Rule::OnceThrough
+            }),
+            Mode::RepeatCurrent => Ask::SetMode(if on(self.standing.mode == Rule::RepeatCurrent) {
+                Rule::RepeatCurrent
+            } else {
+                Rule::OnceThrough
+            }),
         };
-
-        let version = match settled {
-            Some(Reply::Settled { version }) => version,
-            _ => self.window.version(),
-        };
-        self.resync_after(desk, version);
-        version
+        self.push(ask, Awaiting::ThenResync);
+        self.standing.version
     }
 
     /// **A scope change**, which rebuilds the pool around what is sounding.
-    pub fn set_scope(&mut self, desk: &Arc<Desk>, scope: Scope) -> u64 {
+    ///
+    /// `ResyncAt` rather than `LoadFirst`: a narrowing is not a restart, so what is playing
+    /// keeps playing and only what follows it changes.
+    pub fn set_scope(&mut self, scope: Scope) -> u64 {
         let at = self.window.from();
-        let Some(Reply::Window { version, cues }) = ask(
-            desk,
+        self.push(
             Ask::Rescope {
                 at,
                 scope,
-                shuffle: self.shuffled(desk),
+                shuffle: self.standing.shuffled,
                 seed: self.seed,
-                window: 3,
+                window: KEEP,
             },
-        ) else {
-            return self.window.version();
-        };
-        // **The first cue is what is already sounding**, so it is dropped rather than
-        // queued to play again: a scope change is not a restart.
-        let mut cues = cues.into_iter();
-        if at.is_some() {
-            cues.next();
-        }
-        self.window.replace(version, cues.map(cue_of));
-        version
+            match at {
+                Some(token) => Awaiting::ResyncAt(token),
+                None => Awaiting::Resync,
+            },
+        );
+        self.standing.version
     }
 
-    /// The four fields the `queue` event carries (#233), read from the librarian.
-    pub fn modes(&self, desk: &Arc<Desk>) -> (Scope, bool, bool, bool) {
-        match ask(desk, Ask::Look { limit: 0 }) {
-            Some(Reply::Look {
-                mode,
-                scope,
-                shuffled,
-                ..
-            }) => (
-                scope,
-                shuffled,
-                mode == Rule::RepeatAll,
-                mode == Rule::RepeatCurrent,
-            ),
-            _ => Default::default(),
-        }
-    }
-
-    /// The narrowing in force, read from the librarian.
-    pub fn scope(&self, desk: &Arc<Desk>) -> Scope {
-        match ask(desk, Ask::Look { limit: 0 }) {
-            Some(Reply::Look { scope, .. }) => scope,
-            _ => Scope::default(),
-        }
-    }
-
-    fn shuffled(&self, desk: &Arc<Desk>) -> bool {
-        matches!(ask(desk, Ask::Look { limit: 0 }), Some(Reply::Look { shuffled, .. }) if shuffled)
-    }
-
-    /// Refill from the current position under the new rule, discarding what was held.
-    fn resync_after(&mut self, desk: &Arc<Desk>, version: u64) {
-        let Some(from) = self.window.from() else {
-            return;
-        };
-        if let Some(Reply::Window { cues, .. }) = ask(desk, Ask::After { token: from, n: 3 }) {
-            self.window.replace(version, cues.into_iter().map(cue_of));
-            // `replace` clears `from`, and the position has not actually moved.
-            self.window.resume_at(from);
-        }
+    /// **A view changed the programme; take a fresh window.**
+    ///
+    /// `Ask::Head` rather than `Ask::Open`, and the difference is the whole meaning of a
+    /// resync: the programme is right and this side's copy of it is not, so nothing may be
+    /// rebuilt.
+    pub fn resync(&mut self) {
+        self.push(Ask::Head { n: KEEP }, Awaiting::Resync);
     }
 
     fn next_seed(&mut self) -> u64 {
@@ -430,9 +438,14 @@ impl Default for Playing {
     }
 }
 
-/// One bounded round trip to the librarian.
-fn ask(desk: &Arc<Desk>, what: Ask) -> Option<Reply> {
-    desk.programme_later(what)?.recv_timeout(PATIENCE).ok()
+/// The standing state any reply carries.
+fn standing_of(reply: &Reply) -> Option<Standing> {
+    match reply {
+        Reply::Window { standing, .. }
+        | Reply::Stale { standing }
+        | Reply::Look { standing, .. }
+        | Reply::Settled { standing } => Some(*standing),
+    }
 }
 
 /// The librarian's cue, as this side holds it.
