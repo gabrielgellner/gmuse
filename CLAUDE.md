@@ -233,6 +233,24 @@ atomics. On underrun it writes silence and bumps a counter.
 Violating this produces clicks and dropouts that **will not show up in tests** — only in listening. Anything expensive
 (decoding, resampling) belongs on the decoder thread.
 
+## A test is not finished until it has been seen to fail
+
+**Revert the fix, run the test, watch it fail, put the fix back.** A minute, and it is the only thing that separates a
+test from a comment. Five tests in one day ran, passed, and could not have failed — the Decision Log entry of 2026-09-12
+lists them and why this codebase invites it.
+
+The shape is always one of two. A predicate that is **vacuously true**: `assert!(0 <= 0)` because the thing it counted
+was empty, or "every X is named" over a list that parsed to nothing. Or a harness that **silently does less than it
+claims**: no test matched the filter, no client connected, no lock was taken, no process started.
+
+So write the second assertion, the one that proves the instrument was attached: `assert!(variants.len() > 50)` before
+checking which are named, `assert!(found >= 10)` before checking what they call, `assert!(before > 0)` before checking
+that a count did not grow. Four of the five would have died to that line.
+
+This bites here rather than everywhere because the interesting claims in this project are **absences** — no path crosses
+the wire, no second appender, no command accepted and ignored — and an absence is asserted by showing a set is empty.
+`assert!(x.is_empty())` passes identically whether nothing is wrong or nothing was looked at.
+
 ## Measurement
 
 Two lessons already paid for, recorded in the design doc's Decision Log:

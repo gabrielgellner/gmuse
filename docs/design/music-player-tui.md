@@ -4867,101 +4867,62 @@ Append here as decisions are made. Format: date, decision, rationale.
   D-14's unification survives intact: cue is one verb across both because the default cue point is the track start,
   which is a statement about the _verb_, not about the run-state enum.
 
-- **2026-09-12** **The queue is the engine's, and attaching is the default** (#233, I9, I11, §6, §7.7).
+- **2026-09-12** **`aaa_mode` becomes `Scope`, because the three values are tree depths and not music** (#234).
 
-  The halfway state #233 exists to end: a queue pane showing a list nobody plays from. `ui.queue` is a mirror now — read
-  with `queue.get`, replaced when the `queue` event says the version moved, and edited by sending `queue.set` with the
-  version it was read at. `next` and `prev` go through `Transport::skip`, whose local answer is `false` meaning "you
-  resolve it", so the in-process path is untouched.
+  `AaaMode` was `All | Artist | Album`, and `next::pool` narrowed the candidate pool with it — through `Shelf::locate`,
+  which returns the **outer and inner keys of the grouping tree**, and `artist_tracks(&SortKey)` /
+  `album_tracks(&SortKey, &SortKey)`, which take generic sort keys. The tree is grouped by
+  `Levels::By { outer: Level, inner: Level }` where `Level { field, at }` is any query field with an optional hierarchy
+  depth, and `levels` is user-settable.
 
-  **One push per tick rather than one per gesture.** `ui.queue` is edited by put, delete, undo, enqueue and playing from
-  the queue pane, and a send at each is five call sites to keep in step plus the sixth somebody adds later. Comparing
-  the working copy against the mirror catches all of them, including the sixth.
+  So the name was already wrong, demonstrably: group by `genre,year`, set `aaa_mode=album`, and the player keeps playing
+  **within the current year**. That is the mechanism working correctly, and nothing about the setting's name would let
+  anybody predict it. The three values are the three depths of a two-level tree — the whole pool, the outer key, the
+  inner key — which is what `Scope { All | Outer | Inner }` says.
 
-  **`queue.set` is a new method beside `queue.enqueue`, and both earn their place.** A TUI's gestures are all "the queue
-  is now this list"; naming them individually would need `insert`, `move` and a transaction, each agreeing with the
-  others about indices. `enqueue` stays for a caller that holds no mirror — a script should not have to read the queue
-  to add a track — which is why §7.7 makes `base_version` optional there and required here.
+  **The rename now, the query-defined pool later.** Level-narrowing cannot reach a dimension that is not currently
+  grouped — "shuffle within this genre" while grouped by artist and album is inexpressible as a tree lookup — and a pool
+  defined by a query can. But the two are not interchangeable: `Scope` is _relative to what is playing_ and a query is
+  absolute, so the query form is `album = album_of(current)` re-resolved on every track change. That is strictly more
+  machinery than a map lookup into a tree that is already built, so the cheap form stays and the general one arrives
+  beside it (#235).
 
-  **The modes ride on the `queue` event**, because a list plus `shuffle` plus `repeat` is the answer to "what plays
-  next". A view drawing the list while owning the modes draws a queue that does not describe what will happen.
+  `:set aaa_mode=…` survives as an alias, because a config file on disk should not stop working over a rename. The wire
+  spelling does not: `settings.set_aaa_mode` shipped hours earlier in #232 and nothing depends on it yet, which is the
+  one moment renaming a protocol method is free. §7.4's method names are public API precisely so that this is not true
+  later.
 
-  ## What this turned up, which was worse than what it changed
+  This is the second thing the 2026-09-12 cmus entry was written for, arriving the same day: an inherited name on a
+  mechanism that outgrew it. The reference stays useful; the vocabulary stops being binding.
 
-  **The engine accepted five commands and did none of them.** `remote::is_remotable` admitted `vol`, `rate`, `prev`,
-  `set` and `toggle`; `control::apply` handled none. Each answered `{"accepted": true}` and nothing happened — and §7.4
-  makes a result mean _accepted_, so that acknowledgement is the only signal a client has. It also drifted the other
-  way: `play` was handled here and refused at the gate, so that arm had always been unreachable.
+- **2026-09-12** **A view attaches and playback stops being its own** (#219, I11, I15). `gmuse --attach` takes no audio
+  device and no player lock: it loads by recording, learns what is playing from the `playback` topic, and its going away
+  is not a stop. Two things had to move for that, and both were guards rather than features.
 
-  Two lists that drift is the failure, so there is one property now — `SettingKey::not_the_engines`, asked by both sides
-  — and two tests comparing the gate's names against `apply`'s. They caught the `play` arm immediately, then caught
-  themselves: the first version scraped `Command::` out of _comments_, so a sentence explaining an exclusion counted as
-  handling it. Comments are stripped now, which is the same mistake a dependency-graph scrape in this repo made by
-  counting string literals.
+  **A session restore had to learn not to run.** Restoring loads, seeks and pauses — three commands that, aimed at an
+  engine mid-track, destroy exactly what attaching preserves. The guard is `Transport::outlives_this_view`, on the seam
+  rather than a flag in `main`, so the next restore path inherits it instead of having to remember. The view's own half
+  — the view number, the open playlist, the settings — still comes back, because that is not playback.
 
-  **`prev` was refused on a mistaken reading.** A note in `control.rs` said going back is not the inverse of `take_next`
-  because the queue is consumed by being played from — true, and not what `prev` means. `next::prev` walks the _pool_
-  backwards and never reads the queue, so a view's `prev` has always been "the previous row in the pool's order", and
-  the engine doing the same is faithful rather than inventive. A play _history_ remains a design question and a
-  different feature.
+  **And `current` had to be followed rather than owned.** An attached view does not choose every track: the engine
+  splices the next one (#232) and another view's keypress is just as real. `Transport::playing` answers over a socket
+  and is `None` in process, which is not "nothing playing" but "you chose it, you know". The local default being `None`
+  is why `outlives_this_view` guards the follow as well — without it, every ordinary launch would have `current` cleared
+  on the first tick: audio still playing, status line saying nothing was on, and no test failing.
 
-  **`play` does not cross, so `Remote::play` sends `pause`.** `play` starts the _selected_ track and needs a cursor.
-  Resuming is `pause`, which toggles, so the view resolves it against the run state it just read — exactly the race #225
-  argues the protocol should remove by carrying three distinct verbs. One keypress wide, and `play` is not a repeating
-  key.
+  **And an attached view holds a reading desk, which is a capability rather than a flag.** I15 lets a view fold the log
+  directly — that is what keeps browsing off the socket — and does not let it add to the log. The reason is sharper than
+  a race: `durable::log_path` is one file per **device**, the device comes from `machine_id`, and `Stamp.device` is
+  documented as "the final tiebreak, so two devices cannot produce an equal stamp". Two processes on one machine would
+  be two appenders claiming to be one device, each with its own `flushed` watermark and its own counter inside the same
+  millisecond.
 
-  ## And a real library got damaged proving it
+  The first cut of this was `if ui.attached` inside `ui::record`, which happened to cover the only `say` in the UI and
+  would not have covered the next one. `Desk::read_only` has no `Appender`, and `Desk::appender` answers an `Option` —
+  the same shape `Context::gapless` uses, so a caller that wants to append has to say what it does when it cannot. Three
+  places that asked `if attached` now ask for an appender and get `None`: the launch scan, `:rescan`, and `record`.
 
-  A `gmuse` launched with `GMUSE_ROOTS` pointing at a scratch directory and its config at the real library auto-started
-  an engine, which scanned the wrong roots, found none of the 7,267 files the library knows, and appended
-  `HoldingsAsserted { held: {} }`. Holdings supersede, so every row in the library became unplayable. Repaired with
-  `shelf scan --write`, which is the operation for exactly that.
-
-  Nothing in the design stopped it, because before #237 no launch wrote holdings at all — so #237 sharpened a foot-gun
-  that had nothing to point at. The guard was already written three lines away, for the cache: "never an empty one over
-  a good one — that is how a working library becomes an empty one". The log deserves it more, because a cache is rebuilt
-  by a scan and the log is what the scan is _for_. `populate::worth_asserting` is now the one decision both writers
-  make, and an empty result over a non-empty assertion is refused out loud with the count it would have erased.
-
-  A library that genuinely emptied is still assertable, by a scan whose roots really are empty — which cannot be told
-  from this case and wants `forget`, which `library-api.md` §2 already names, rather than a scan guessing.
-
-  **Two of this change's own tests passed while checking nothing** and were found by reverting the fix each was for: one
-  spun twenty seconds waiting for an event that cannot arrive, and one put a second engine's socket beside the first's,
-  so it lost `engine.lock` — which is per _directory_ — exited, never scanned, and proved nothing.
-
-- **2026-09-12** **Holdings are in the log, because a process that cannot scan still has to reach a copy** (#237, #85,
-  #148).
-
-  The librarian's rows always came from the log — `HoldingsAsserted` is a fact and any fold reads it. Which of those
-  rows this device can `open` came from the **store**, and `bridge::librarian` asserted the scan's answer _over_
-  whatever the log said. Holdings supersede whole, so a fold with an empty store erased the log's assertion.
-
-  That is exactly an attached view (#219): it never scans, so it arrived with nothing and refused every row it could
-  see. A view _with_ a cache was no better, because the cache is from the last local launch while the log is whatever
-  the engine reconciled a moment ago — asserting the cache with `now` puts the stale answer on top. Measured before the
-  fix: a reading desk over an import's log listed the row and answered `open=None`.
-
-  **Two changes.** A launch's scan writes what it found into the log, which only `gmuse shelf scan` did before; and the
-  fold treats the log as the answer, keeping the scan's map as a bootstrap for a log that has no assertion yet. One
-  source of truth, which is what `library-is-the-truth` already says about every other field.
-
-  **Both writers have to mean the same thing by "holds".** `populate::reconcile` asserts only encodings the library
-  knows, so this does too — two writers of one superseding fact that disagreed would take turns adding and removing the
-  difference on every pass. It is also right on its own terms: a file in a watched root is not a declaration that it
-  belongs here, which is one of the five inferences `library-api.md` §2 lists as wrong.
-
-  **The cost, measured.** One assertion on the live library is **957 KB** for 7,267 entries — so "only when it changed"
-  (#148's rule for the same fact) is load-bearing rather than tidy, and `shelf compact` exists to drop the superseded
-  ones. The extra `catalogue()` the filter needs is ~0.15s against a scan that takes 8.8s. And on the live library the
-  next launch appends **nothing**: the map this code would assert is identical to what the log already holds, all 7,267
-  locators still exist, and nothing moved.
-
-  **The first version of the test for this passed with the append removed**, because the import had already written
-  holdings and "the count did not grow" was true for the wrong reason. It now deletes a file and asserts the count
-  _does_ grow, then scans again and asserts it does not — which fails in both directions when the guard is wrong.
-
-  What is left before `--attach` could be the default is the queue (#233), not the library.
+  What an attached view then does with a fact it cannot append is the entry above (#236).
 
 - **2026-09-12** **An attached view writes by proposing facts, and reads by re-reading** (#236, I15, §8.4).
 
@@ -5004,62 +4965,143 @@ Append here as decisions are made. Format: date, decision, rationale.
   depends on a cache a local launch wrote, and a machine that has only ever run attached can list a record and not reach
   it. That is why `--attach` stays opt-in.
 
-- **2026-09-12** **A view attaches and playback stops being its own** (#219, I11, I15). `gmuse --attach` takes no audio
-  device and no player lock: it loads by recording, learns what is playing from the `playback` topic, and its going away
-  is not a stop. Two things had to move for that, and both were guards rather than features.
+- **2026-09-12** **Holdings are in the log, because a process that cannot scan still has to reach a copy** (#237, #85,
+  #148).
 
-  **A session restore had to learn not to run.** Restoring loads, seeks and pauses — three commands that, aimed at an
-  engine mid-track, destroy exactly what attaching preserves. The guard is `Transport::outlives_this_view`, on the seam
-  rather than a flag in `main`, so the next restore path inherits it instead of having to remember. The view's own half
-  — the view number, the open playlist, the settings — still comes back, because that is not playback.
+  The librarian's rows always came from the log — `HoldingsAsserted` is a fact and any fold reads it. Which of those
+  rows this device can `open` came from the **store**, and `bridge::librarian` asserted the scan's answer _over_
+  whatever the log said. Holdings supersede whole, so a fold with an empty store erased the log's assertion.
 
-  **And `current` had to be followed rather than owned.** An attached view does not choose every track: the engine
-  splices the next one (#232) and another view's keypress is just as real. `Transport::playing` answers over a socket
-  and is `None` in process, which is not "nothing playing" but "you chose it, you know". The local default being `None`
-  is why `outlives_this_view` guards the follow as well — without it, every ordinary launch would have `current` cleared
-  on the first tick: audio still playing, status line saying nothing was on, and no test failing.
+  That is exactly an attached view (#219): it never scans, so it arrived with nothing and refused every row it could
+  see. A view _with_ a cache was no better, because the cache is from the last local launch while the log is whatever
+  the engine reconciled a moment ago — asserting the cache with `now` puts the stale answer on top. Measured before the
+  fix: a reading desk over an import's log listed the row and answered `open=None`.
 
-  **And an attached view holds a reading desk, which is a capability rather than a flag.** I15 lets a view fold the log
-  directly — that is what keeps browsing off the socket — and does not let it add to the log. The reason is sharper than
-  a race: `durable::log_path` is one file per **device**, the device comes from `machine_id`, and `Stamp.device` is
-  documented as "the final tiebreak, so two devices cannot produce an equal stamp". Two processes on one machine would
-  be two appenders claiming to be one device, each with its own `flushed` watermark and its own counter inside the same
-  millisecond.
+  **Two changes.** A launch's scan writes what it found into the log, which only `gmuse shelf scan` did before; and the
+  fold treats the log as the answer, keeping the scan's map as a bootstrap for a log that has no assertion yet. One
+  source of truth, which is what `library-is-the-truth` already says about every other field.
 
-  The first cut of this was `if ui.attached` inside `ui::record`, which happened to cover the only `say` in the UI and
-  would not have covered the next one. `Desk::read_only` has no `Appender`, and `Desk::appender` answers an `Option` —
-  the same shape `Context::gapless` uses, so a caller that wants to append has to say what it does when it cannot. Three
-  places that asked `if attached` now ask for an appender and get `None`: the launch scan, `:rescan`, and `record`.
+  **Both writers have to mean the same thing by "holds".** `populate::reconcile` asserts only encodings the library
+  knows, so this does too — two writers of one superseding fact that disagreed would take turns adding and removing the
+  difference on every pass. It is also right on its own terms: a file in a watched root is not a declaration that it
+  belongs here, which is one of the five inferences `library-api.md` §2 lists as wrong.
 
-  What an attached view then does with a fact it cannot append is the entry above (#236).
+  **The cost, measured.** One assertion on the live library is **957 KB** for 7,267 entries — so "only when it changed"
+  (#148's rule for the same fact) is load-bearing rather than tidy, and `shelf compact` exists to drop the superseded
+  ones. The extra `catalogue()` the filter needs is ~0.15s against a scan that takes 8.8s. And on the live library the
+  next launch appends **nothing**: the map this code would assert is identical to what the log already holds, all 7,267
+  locators still exist, and nothing moved.
 
-- **2026-09-12** **`aaa_mode` becomes `Scope`, because the three values are tree depths and not music** (#234).
+  **The first version of the test for this passed with the append removed**, because the import had already written
+  holdings and "the count did not grow" was true for the wrong reason. It now deletes a file and asserts the count
+  _does_ grow, then scans again and asserts it does not — which fails in both directions when the guard is wrong.
 
-  `AaaMode` was `All | Artist | Album`, and `next::pool` narrowed the candidate pool with it — through `Shelf::locate`,
-  which returns the **outer and inner keys of the grouping tree**, and `artist_tracks(&SortKey)` /
-  `album_tracks(&SortKey, &SortKey)`, which take generic sort keys. The tree is grouped by
-  `Levels::By { outer: Level, inner: Level }` where `Level { field, at }` is any query field with an optional hierarchy
-  depth, and `levels` is user-settable.
+  What is left before `--attach` could be the default is the queue (#233), not the library.
 
-  So the name was already wrong, demonstrably: group by `genre,year`, set `aaa_mode=album`, and the player keeps playing
-  **within the current year**. That is the mechanism working correctly, and nothing about the setting's name would let
-  anybody predict it. The three values are the three depths of a two-level tree — the whole pool, the outer key, the
-  inner key — which is what `Scope { All | Outer | Inner }` says.
+- **2026-09-12** **The queue is the engine's, and attaching is the default** (#233, I9, I11, §6, §7.7).
 
-  **The rename now, the query-defined pool later.** Level-narrowing cannot reach a dimension that is not currently
-  grouped — "shuffle within this genre" while grouped by artist and album is inexpressible as a tree lookup — and a pool
-  defined by a query can. But the two are not interchangeable: `Scope` is _relative to what is playing_ and a query is
-  absolute, so the query form is `album = album_of(current)` re-resolved on every track change. That is strictly more
-  machinery than a map lookup into a tree that is already built, so the cheap form stays and the general one arrives
-  beside it (#235).
+  The halfway state #233 exists to end: a queue pane showing a list nobody plays from. `ui.queue` is a mirror now — read
+  with `queue.get`, replaced when the `queue` event says the version moved, and edited by sending `queue.set` with the
+  version it was read at. `next` and `prev` go through `Transport::skip`, whose local answer is `false` meaning "you
+  resolve it", so the in-process path is untouched.
 
-  `:set aaa_mode=…` survives as an alias, because a config file on disk should not stop working over a rename. The wire
-  spelling does not: `settings.set_aaa_mode` shipped hours earlier in #232 and nothing depends on it yet, which is the
-  one moment renaming a protocol method is free. §7.4's method names are public API precisely so that this is not true
-  later.
+  **One push per tick rather than one per gesture.** `ui.queue` is edited by put, delete, undo, enqueue and playing from
+  the queue pane, and a send at each is five call sites to keep in step plus the sixth somebody adds later. Comparing
+  the working copy against the mirror catches all of them, including the sixth.
 
-  This is the second thing the 2026-09-12 cmus entry was written for, arriving the same day: an inherited name on a
-  mechanism that outgrew it. The reference stays useful; the vocabulary stops being binding.
+  **`queue.set` is a new method beside `queue.enqueue`, and both earn their place.** A TUI's gestures are all "the queue
+  is now this list"; naming them individually would need `insert`, `move` and a transaction, each agreeing with the
+  others about indices. `enqueue` stays for a caller that holds no mirror — a script should not have to read the queue
+  to add a track — which is why §7.7 makes `base_version` optional there and required here.
+
+  **The modes ride on the `queue` event**, because a list plus `shuffle` plus `repeat` is the answer to "what plays
+  next". A view drawing the list while owning the modes draws a queue that does not describe what will happen.
+
+  **What this turned up was worse than what it changed: the engine accepted five commands and did none of them.**
+  `remote::is_remotable` admitted `vol`, `rate`, `prev`, `set` and `toggle`; `control::apply` handled none. Each
+  answered `{"accepted": true}` and nothing happened — and §7.4 makes a result mean _accepted_, so that acknowledgement
+  is the only signal a client has. It also drifted the other way: `play` was handled here and refused at the gate, so
+  that arm had always been unreachable.
+
+  Two lists that drift is the failure, so there is one property now — `SettingKey::not_the_engines`, asked by both sides
+  — and two tests comparing the gate's names against `apply`'s. They caught the `play` arm immediately, then caught
+  themselves: the first version scraped `Command::` out of _comments_, so a sentence explaining an exclusion counted as
+  handling it. Comments are stripped now, which is the same mistake a dependency-graph scrape in this repo made by
+  counting string literals.
+
+  **`prev` was refused on a mistaken reading.** A note in `control.rs` said going back is not the inverse of `take_next`
+  because the queue is consumed by being played from — true, and not what `prev` means. `next::prev` walks the _pool_
+  backwards and never reads the queue, so a view's `prev` has always been "the previous row in the pool's order", and
+  the engine doing the same is faithful rather than inventive. A play _history_ remains a design question and a
+  different feature.
+
+  **`play` does not cross, so `Remote::play` sends `pause`.** `play` starts the _selected_ track and needs a cursor.
+  Resuming is `pause`, which toggles, so the view resolves it against the run state it just read — exactly the race #225
+  argues the protocol should remove by carrying three distinct verbs. One keypress wide, and `play` is not a repeating
+  key.
+
+  **And a real library got damaged proving it.** A `gmuse` launched with `GMUSE_ROOTS` pointing at a scratch directory
+  and its config at the real library auto-started an engine, which scanned the wrong roots, found none of the 7,267
+  files the library knows, and appended `HoldingsAsserted { held: {} }`. Holdings supersede, so every row in the library
+  became unplayable. Repaired with `shelf scan --write`, which is the operation for exactly that.
+
+  Nothing in the design stopped it, because before #237 no launch wrote holdings at all — so #237 sharpened a foot-gun
+  that had nothing to point at. The guard was already written three lines away, for the cache: "never an empty one over
+  a good one — that is how a working library becomes an empty one". The log deserves it more, because a cache is rebuilt
+  by a scan and the log is what the scan is _for_. `populate::worth_asserting` is now the one decision both writers
+  make, and an empty result over a non-empty assertion is refused out loud with the count it would have erased.
+
+  A library that genuinely emptied is still assertable, by a scan whose roots really are empty — which cannot be told
+  from this case and wants `forget`, which `library-api.md` §2 already names, rather than a scan guessing.
+
+  **Two of this change's own tests passed while checking nothing** and were found by reverting the fix each was for: one
+  spun twenty seconds waiting for an event that cannot arrive, and one put a second engine's socket beside the first's,
+  so it lost `engine.lock` — which is per _directory_ — exited, never scanned, and proved nothing.
+
+- **2026-09-12** **A test that checks nothing is the failure this project keeps paying for, and reverting the fix is
+  what finds it.**
+
+  **The habit, stated as a rule.** A test written alongside a fix is not finished until it has been _seen to fail_. Undo
+  the change, run it, read the message, put the change back. It costs a minute, and it is the only thing that
+  distinguishes a test from a comment.
+
+  **Five in one day** — across #219, #236, #237 and #233 — that ran, passed, and could not have failed:
+
+  | what looked green                  | why it checked nothing                                                                                             |
+  | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+  | a boundary test over `src/ui`      | `read()` answered empty for a path it could not open, so the ratchet was `assert!(0 <= 0)`                         |
+  | `just bench-fold`                  | matched no test after the crate split: printed nothing, exited 0                                                   |
+  | the protocol transcript            | blessed `{"topics":[]}` as expected output — no client was passed, so it pinned a lie as truth                     |
+  | a scan's holdings count            | the import had already written holdings, so "the count did not grow" was true for the wrong reason                 |
+  | a second engine on the wrong roots | its socket sat beside the first's, so it lost `engine.lock` — which is per _directory_ — exited, and never scanned |
+
+  And two neighbours from the same habit, which are worth naming because they are what it looks like when the instrument
+  is wrong rather than absent: the command-drift ratchet scraped `Command::` out of **comments**, so a sentence
+  explaining an exclusion counted as handling it — reported a real arm as missing, a false _negative_; and a `prev`
+  assertion spent twenty seconds waiting for an event that cannot arrive, which was waste rather than a false pass, but
+  would have become one the first time that event _did_ arrive.
+
+  **Two families.** A predicate that is vacuously true — `0 <= 0`, or an empty set satisfying "all of". And a harness
+  that silently does less than it claims: no test matched, no client connected, no lock taken, no process started.
+
+  **Why it lands here rather than anywhere.** The tests worth writing in this codebase are about **absences** — no
+  locator crosses the wire, no second appender, no fact a view may not propose, no command accepted and ignored. An
+  absence is asserted by showing a set is empty, and the cheapest way to get an empty set is to look in the wrong place.
+  `assert!(x.is_empty())` passes identically whether nothing is wrong or nothing was examined.
+
+  So the load-bearing line is the _other_ one: **prove the harness saw something.** `assert!(variants.len() > 50)`
+  before checking which are named; `assert!(found >= 10)` before checking what they call; `assert!(before > 0)` before
+  checking it did not grow. Four of the five above die to a count; the fifth — the holdings one — needed both directions
+  asserted, because the guard could be wrong either way.
+
+  **What this is not.** Not an argument for fewer tests, or for coverage as a number: every one of the five was testing
+  the right thing, and the claim each made was correct. The instrument was not attached. And not a new process — there
+  is no checklist here, because a checklist is what the comment-scraping ratchet already was. One habit, one extra
+  assertion.
+
+  **It is also why a commit message states the test count.** "1,545 tests" is not a boast; it is the number whose
+  _stalling_ is the first sign of this, and `just ci` printing per-suite results is what made the crate split's silent
+  loss of 55 tests visible at all.
 
 ## 14. Prior art worth reading
 
