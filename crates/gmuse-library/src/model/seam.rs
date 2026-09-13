@@ -140,7 +140,14 @@ pub struct Librarian {
     /// files mints some 160,000 facts every launch, with this launch's stamps;
     /// showing those beside the handful somebody actually wrote would drown
     /// the ones worth reading in noise that says only "the disk was walked".
-    pub records: std::collections::BTreeSet<crate::facts::Record>,
+    ///
+    /// **A count, where this was the whole record set** — #256. Every fold cloned the
+    /// log into here: **75.5 MB of the 102 MB** a fold of the real library kept, held so
+    /// that a caller would not have to ask. The only production reader took its `len()`,
+    /// and the info panel it was carried for is still *proposal, not built*.
+    ///
+    /// `Desk::records()` is the door now, and it is a question rather than a copy.
+    pub record_count: usize,
     /// Every collection entry, in list order — see [`Catalogue::entries`].
     collected: BTreeSet<(Id<Collection>, OrdKey, Id<Recording>)>,
     /// Which slot each copy sits in — issue #78.
@@ -351,7 +358,7 @@ impl Librarian {
             merged: Default::default(),
             encoding_derived: Default::default(),
             held: Default::default(),
-            records: Default::default(),
+            record_count: 0,
             collected: Default::default(),
             placed: Default::default(),
         }
@@ -1041,10 +1048,19 @@ impl Librarian {
     /// its wire form carries that id, and that is true of every variant there
     /// is and every variant there will be — which is the same rule #106 asks a
     /// stale *reader* to follow, applied to a reader of the log.
-    pub fn facts_about(&self, focus: crate::model::focus::Focus) -> Vec<Happened> {
+    /// **Over records handed in, not records held** — #256.
+    ///
+    /// This read `self.records`, which is why every fold carried a clone of the whole
+    /// log — 75.5 MB of the 102 MB a fold of the real library kept, for a surface opened
+    /// deliberately and cached per focus. The librarian thread owns the log and can scan
+    /// it for one focus in answer to a question; `Desk::history` is that question.
+    pub fn facts_about(
+        &self,
+        records: &std::collections::BTreeSet<crate::facts::Record>,
+        focus: crate::model::focus::Focus,
+    ) -> Vec<Happened> {
         let id = focus.uuid().to_string();
-        let mut out: Vec<Happened> = self
-            .records
+        let mut out: Vec<Happened> = records
             .iter()
             .filter_map(|r| {
                 let wire = serde_json::to_value(&r.fact).ok()?;
@@ -1853,9 +1869,9 @@ impl crate::model::rows::Listing for Librarian {
     fn about(
         &self,
         focus: crate::model::focus::Focus,
-        history: bool,
+        happened: &[Happened],
     ) -> crate::model::about::About {
-        crate::model::about::of(self, focus, history)
+        crate::model::about::of(self, focus, happened)
     }
 
     /// Whether any narrower-of edge places a concept on this axis.

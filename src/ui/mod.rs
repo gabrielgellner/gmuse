@@ -5280,7 +5280,15 @@ pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<crate::model::about::Abo
     {
         return Some(about.clone());
     }
-    let about = crate::model::rows::Listing::about(ctx.library, focus, history);
+    // **Asked, and only when the history pane is open** — #256. It used to be a flag on
+    // a fold that carried a clone of the whole log; the log's owner answers it now, and
+    // the cache above means a focus change asks once rather than a redraw asking always.
+    let happened = if history {
+        ui.desk.history(focus)
+    } else {
+        Vec::new()
+    };
+    let about = crate::model::rows::Listing::about(ctx.library, focus, &happened);
     *ui.about.borrow_mut() = Some((focus, history, about.clone()));
     Some(about)
 }
@@ -7148,7 +7156,7 @@ mod tests {
         Context {
             library: Box::leak(Box::new(crate::bridge::imported(
                 store,
-                &ui.desk.current().library.records,
+                &ui.desk.records().expect("a live desk answers"),
                 crate::model::id::Id::derived(b"test"),
                 0,
             ))),
@@ -7973,7 +7981,7 @@ mod tests {
         // A relaunch folds the same log off disk — a playlist is facts now
         // (#118) — so the fixture merges the records rather than sharing state.
         fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
-        let carried = ui.desk.current().library.records.clone();
+        let carried = ui.desk.records().expect("a live desk answers");
         fresh
             .desk
             .appender()
@@ -8012,7 +8020,7 @@ mod tests {
         // A relaunch folds the same log off disk — a playlist is facts now
         // (#118) — so the fixture merges the records rather than sharing state.
         fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
-        let carried = ui.desk.current().library.records.clone();
+        let carried = ui.desk.records().expect("a live desk answers");
         fresh
             .desk
             .appender()
@@ -8061,7 +8069,7 @@ mod tests {
         // A relaunch folds the same log off disk — a playlist is facts now
         // (#118) — so the fixture merges the records rather than sharing state.
         fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
-        let carried = ui.desk.current().library.records.clone();
+        let carried = ui.desk.records().expect("a live desk answers");
         fresh
             .desk
             .appender()
@@ -11199,7 +11207,7 @@ mod tests {
         ui.playback.current = Some(id);
         record_play_if_earned(&mut ui, &ctx, Duration::from_secs(9999));
         assert!(ui.listened.plays.is_empty());
-        assert!(ui.desk.current().library.records.is_empty());
+        assert_eq!(ui.desk.current().library.record_count, 0);
     }
 
     /// **The bug this whole model exists to end.** A file is renumbered, and

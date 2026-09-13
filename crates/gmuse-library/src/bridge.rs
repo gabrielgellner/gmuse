@@ -123,12 +123,13 @@ pub fn librarian(
     }
 
     let mut l = Librarian::from_catalogue(&scratch.catalogue());
-    // **What was recorded, not what the scan re-derived** (#128). `scratch`
-    // now holds both: the log's facts and the ~160,000 the ingest above minted
-    // from 6,500 files, all stamped this launch. Only the first are things
-    // somebody or something *decided*, and they are what the info panel's
-    // history is about.
-    l.records = records.clone();
+    // **A count, where this used to clone the whole log** (#128, #256). `scratch` holds
+    // both the log's facts and whatever an ingest minted; only the first were ever
+    // wanted here, and carrying them cost **75.5 MB of the 102 MB** a fold of the real
+    // library kept. The info panel's history — the one reader — is a question for the
+    // log's owner now (`Desk::history`), asked when a focus changes and cached per
+    // focus, rather than a copy every fold pays for.
+    l.record_count = records.len();
     // Which device this is, so a row knows where it can be opened. The
     // librarian holds every holding; which of them is reachable *now* is a
     // fact about the machine, and this is the only place that knows it.

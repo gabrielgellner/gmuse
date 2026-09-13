@@ -5848,6 +5848,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   snapshot instead needs `fold` to build an `Answer` from a projection rather than from `log.records()`, which is #256's
   refactor — so the two issues meet there rather than being independent.
 
+- **2026-09-13** **A fold carried a copy of the whole log so one surface would not have to ask** (#256, #128). Measured
+  after #258, looking for where a Desk's memory actually goes — and the answer was not the fold I had measured. My probe
+  called `Librarian::from_catalogue` (26.5 MB); a Desk calls `bridge::librarian`, which keeps **102.0 MB** and peaks at
+  **185.5 MB**. The difference is one line: `l.records = records.clone()`.
+
+  So a Desk held the log twice — 83.5 MB in the `Instance` and 75.5 MB again in the `Librarian` — and the engine and
+  every attached view each hold a Desk.
+
+  **Its only reader is the info panel's history**, and I got that wrong twice on the way. First I grepped
+  `library.records` and concluded the field was read for a `len()` and some fixtures; `facts_about` reads `self.records`
+  from inside `seam.rs`, which that grep could not see. Then I supposed the info panel was unbuilt because
+  `info-panel.md` is marked _proposal, not built_ — but view 8 is live and `ui/mod.rs` reaches `facts_about` through the
+  `Listing` trait. **A field's readers are not findable by grepping the field's qualified name**, and a document's
+  status is not evidence about the code.
+
+  The shape it wanted is the one this whole milestone is about: **ask the thing that owns the log.**
+  `Desk::history(focus)` is a job on the librarian thread, which has both halves — the records to scan and the published
+  fold to turn an id in a fact into a name a person reads. Input 280,000 records, output a handful of rows about one
+  thing. And it is opened deliberately and cached per focus, so a focus change asks once where a redraw used to read a
+  copy that every fold had paid for.
+
+  **110.0 MB where a Desk held 185.5**, and `Listing::about` takes the rows rather than a `bool` — which is the honest
+  signature, because whether to include history is the caller's question and finding it was never the librarian's.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

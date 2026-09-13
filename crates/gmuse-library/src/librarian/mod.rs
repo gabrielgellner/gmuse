@@ -76,6 +76,26 @@ enum Job {
     Say(Box<dyn FnOnce(&mut Instance) + Send>),
     /// A scan reconciled the disk; these are the holdings now.
     Holdings(Holdings),
+    /// **Every record, for a caller that asked** — #256.
+    ///
+    /// Replaces `Librarian.records`, which was a clone of the whole log carried by
+    /// every fold: 75.5 MB of the 102 MB a fold of the real library kept, for a field
+    /// whose only production reader took its `len()`.
+    ///
+    /// On demand and over a channel, because the librarian thread owns the `Instance`
+    /// and is the only thing that can answer. A caller that wants the log pays for it
+    /// when it asks; a caller that wants a row pays nothing.
+    Records(Sender<std::collections::BTreeSet<crate::facts::Record>>),
+    /// **Who said what about one thing** — #256, the info panel's history.
+    ///
+    /// Answered here because this thread owns both halves: the log to scan, and the
+    /// published fold to resolve an id in a fact into a name a person reads. The answer
+    /// is a handful of rows about one focus, where the input is 280,000 records — which
+    /// is the whole argument for asking rather than holding a copy.
+    History {
+        focus: crate::model::focus::Focus,
+        reply: Sender<Vec<crate::model::seam::Happened>>,
+    },
     /// **Read the log again, because somebody else appended to it** — #236.
     ///
     /// For a reading desk following an engine (#219): the engine is the appender
@@ -176,6 +196,39 @@ impl Appender<'_> {
 }
 
 impl Desk {
+    /// **Every record the log holds** — #256.
+    ///
+    /// A clone, and the cost is the point: the log of a real library is 83.5 MB, and
+    /// `Librarian.records` used to hand every fold a copy of it so that callers would
+    /// not have to ask. The only production reader took its `len()`.
+    ///
+    /// So this is the door for the callers that genuinely want the log — a test
+    /// simulating a relaunch, and eventually the info panel, which `info-panel.md`
+    /// still marks *proposal, not built*. They pay when they ask.
+    ///
+    /// `None` if the librarian thread has gone, which for a live desk it has not.
+    pub fn records(&self) -> Option<std::collections::BTreeSet<crate::facts::Record>> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.jobs.send(Job::Records(tx)).ok()?;
+        rx.recv().ok()
+    }
+
+    /// **What the log says about one thing, newest first** — #256.
+    ///
+    /// The info panel's history. Asked rather than held: it used to read a clone of the
+    /// whole log that every fold carried, and it is opened deliberately and cached per
+    /// focus, so a question on focus change is the right shape for it.
+    ///
+    /// Empty if the librarian thread has gone — which for a live desk it has not, and an
+    /// empty history is the honest answer for a surface that cannot be told anything.
+    pub fn history(&self, focus: crate::model::focus::Focus) -> Vec<crate::model::seam::Happened> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        if self.jobs.send(Job::History { focus, reply: tx }).is_err() {
+            return Vec::new();
+        }
+        rx.recv().unwrap_or_default()
+    }
+
     /// Start the thread and publish the first fold.
     ///
     /// The first fold happens here, synchronously, so a caller never sees an
@@ -262,6 +315,21 @@ impl Desk {
                             // moved and none of them is named here.
                             moved = Changed::Wide;
                             held = Arc::new(fresh);
+                            None
+                        }
+                        // **A read, so it changes nothing and publishes nothing** —
+                        // #256. A dropped receiver means the caller gave up, which is
+                        // not this thread's problem.
+                        Job::Records(reply) => {
+                            let _ = reply.send(log.records().clone());
+                            None
+                        }
+                        // A read, like `Records`, and the reason it is not that one: it
+                        // returns rows about a focus rather than the log, so the 83.5 MB
+                        // never crosses the channel.
+                        Job::History { focus, reply } => {
+                            let answer = published.load();
+                            let _ = reply.send(answer.library.facts_about(log.records(), focus));
                             None
                         }
                         // **The scan runs here, and nothing waits on it.** It
@@ -954,6 +1022,59 @@ mod tests {
     ///
     /// Against the source, because no type can carry it: `flush` is an
     /// ordinary method and any module could call one.
+    /// **The history is a question the log's owner answers** — #256.
+    ///
+    /// It used to be a field: every fold carried a clone of the whole log so the info
+    /// panel could scan it — **75.5 MB of the 102 MB** a fold of the real library kept,
+    /// for a surface opened deliberately and cached per focus.
+    ///
+    /// **Both halves asserted.** That the door returns the facts about the thing asked
+    /// about, and that it does not return the facts about something else — a `facts_about`
+    /// that ignored its focus would pass the first.
+    #[test]
+    fn the_history_of_one_thing_comes_from_the_desk() {
+        let desk = Desk::detached(crate::fixture::device());
+        let asked = crate::model::id::Id::derived(b"the-one-asked-about");
+        let other = crate::model::id::Id::derived(b"a-different-recording");
+        desk.appender()
+            .expect("a detached desk appends")
+            .say(move |log| {
+                log.rate(100, asked, Some(4));
+                log.rate(110, other, Some(1));
+            });
+        desk.settled();
+
+        // **The instrument is attached**: a fold that recorded neither rating would give
+        // an empty history for both, and the second assertion below would pass.
+        assert_eq!(
+            desk.current().library.record_count,
+            2,
+            "the facts never landed, so there is no history to be right about"
+        );
+
+        let mine = desk.history(crate::model::focus::Focus::Recording(asked));
+        assert!(
+            !mine.is_empty(),
+            "the desk knows the fact and would not say so"
+        );
+        assert!(
+            mine.iter().all(|h| h.name.contains("Rated")),
+            "something other than the rating came back: {mine:?}"
+        );
+
+        let theirs = desk.history(crate::model::focus::Focus::Recording(other));
+        assert_eq!(
+            theirs.len(),
+            mine.len(),
+            "the other recording has one fact too"
+        );
+        assert_ne!(
+            mine.first().map(|h| h.at),
+            theirs.first().map(|h| h.at),
+            "both focuses got the same rows, so the focus is being ignored"
+        );
+    }
+
     /// **A write leaves a snapshot the next reader can use** — #258.
     ///
     /// `commit` used to leave the snapshot stale, so the first rating of a session sent

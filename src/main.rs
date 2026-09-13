@@ -2431,7 +2431,7 @@ fn run_tui(
     {
         // From the published fold; the log is on the far side of the channel.
         let held = desk.current();
-        let records = held.library.records.len();
+        let records = held.library.record_count;
         let known = held.listened.ratings.len() + held.listened.plays.len();
         drop(held);
         state.desk = desk;
