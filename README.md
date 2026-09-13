@@ -64,11 +64,17 @@ statically linked).
 
 ## The book
 
-The design documents are published as a book — the **information model** (what a library entry is, as against a file)
-and the **layers** (which part of the program may talk to which). Build it with `just docs`, or read it at the project's
-GitLab Pages URL.
+Two books at <https://gmuse-805512.gitlab.io>:
 
-It is rendered from `docs/design/` rather than retold, so it cannot drift from the documents it publishes.
+- **[The information model and the layers](https://gmuse-805512.gitlab.io/model/)** — what a library entry is, as
+  against a file, and which part of the program may talk to which.
+- **[The interaction model](https://gmuse-805512.gitlab.io/interaction/)** — how the player is driven, and the seven
+  guides the program itself ships.
+
+Build them with `just docs`.
+
+They are rendered from `docs/design/` and `docs/guides/` rather than retold, so they cannot drift from the documents
+they publish.
 
 ## Design notes
 

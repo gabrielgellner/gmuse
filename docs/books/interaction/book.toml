@@ -1,0 +1,35 @@
+# The book is assembled by `tools/build_book.py` — see `just docs`.
+#
+# `src/` is generated and gitignored: every chapter is derived from a document in
+# `docs/design/`, so there is no second copy of any claim to keep in step.
+
+[book]
+title = "gmuse — the interaction model"
+authors = ["Gabriel Gellner"]
+description = "How the player is driven: the tree, the motions, the query language, the transport vocabulary."
+src = "src"
+language = "en"
+
+[output.html]
+# Terminal-adjacent subject, so the mono default is left alone; the rest is mdBook's
+# own theme, which is good and needs no help.
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://gitlab.com/gabrielgellner/gmuse"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+# **No edit-url-template.** It would point at a generated file that is not in git;
+# each chapter carries a "Source:" link to the document it came from instead.
+# Long design documents, so in-page search matters more than usual.
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+
+[output.html.fold]
+enable = true
+level = 1
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

@@ -105,10 +105,20 @@ pages:
       tar -xzf /tmp/mermaid.tar.gz -C /usr/local/bin
   script:
     - python3 tools/build_book.py
-    - mdbook-mermaid install docs/book
-    - mdbook build docs/book
-    - python3 tools/book_guard.py docs/book/book
-    - mv docs/book/book public
+    - mkdir -p public
+    - cp docs/books/landing/index.html public/index.html
+    - |
+      for b in model interaction; do
+        mdbook-mermaid install "docs/books/$b"
+        mdbook build "docs/books/$b"
+        python3 tools/book_guard.py "docs/books/$b/book"
+        mv "docs/books/$b/book" "public/$b"
+      done
+    # **The landing page must survive the loop above**, which is the one way this could
+    # publish a site with no way in.
+    - test -s public/index.html
+    - test -f public/model/index.html
+    - test -f public/interaction/index.html
   artifacts:
     paths:
       - public

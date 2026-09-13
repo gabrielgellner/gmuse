@@ -139,27 +139,31 @@ _bench filter:
 # page — so a renamed document would silently produce a book with a hole. The generator
 # avoids includes entirely, and this checks the artifact rather than trusting it.
 
-# Build the book from docs/design/ — open docs/book/book/index.html
+# Build both books — open docs/books/<book>/book/index.html
 docs:
     #!/usr/bin/env bash
     set -euo pipefail
     command -v mdbook >/dev/null 2>&1 || { echo "docs needs mdbook: cargo install mdbook" >&2; exit 1; }
     command -v mdbook-mermaid >/dev/null 2>&1 || { echo "docs needs mdbook-mermaid: cargo install mdbook-mermaid" >&2; exit 1; }
     python3 tools/build_book.py
-    # Drops `mermaid.min.js` beside the book. Generated rather than committed — 2.5 MB
-    # of vendored javascript that the tool will reproduce — and idempotent on a
-    # `book.toml` that already names the preprocessor, so this is safe to repeat.
-    mdbook-mermaid install docs/book
-    mdbook build docs/book
-    python3 tools/book_guard.py docs/book/book
+    for b in model interaction; do
+        # Drops `mermaid.min.js` beside each book. Generated rather than committed —
+        # 2.5 MB of vendored javascript the tool reproduces — and idempotent on a
+        # `book.toml` that already names the preprocessor, so this is safe to repeat.
+        mdbook-mermaid install "docs/books/$b"
+        mdbook build "docs/books/$b"
+        python3 tools/book_guard.py "docs/books/$b/book"
+    done
 
-# Serve the book with live reload and open it in a browser
+# Serve a book with live reload (BOOK=model|interaction, default model)
 docs-serve:
     #!/usr/bin/env bash
     set -euo pipefail
     python3 tools/build_book.py
-    mdbook-mermaid install docs/book
-    mdbook serve docs/book --open
+    book="${BOOK:-model}"
+    mdbook-mermaid install "docs/books/$book"
+    # `BOOK=interaction just docs-serve` for the other one.
+    mdbook serve "docs/books/$book" --open
 
 # Report deferrals whose issue has been closed — #252.
 #

@@ -40,10 +40,16 @@ description of the program is the single most likely way to be misled by this bo
 
 A decision can be reopened — with an entry in the Decision Log, not on a whim.
 
-## What is not here
+## The companion book
 
-The interaction model: views, the tree, motions, the transport keymap, the `:` line. Those have their own documents and
-belong in a book of their own; this one is the information model and the layers. `NOT_IN_THIS_BOOK` in
-[`tools/build_book.py`](https://gitlab.com/gabrielgellner/gmuse/-/blob/main/tools/build_book.py) lists every design
-document that is excluded and why, and the build **fails** if a document is neither published nor listed — so nothing
-goes missing by being forgotten.
+[The interaction model](../interaction/) is how the player is _driven_ — the tree, the motions, the query language, and
+the transport vocabulary. It also publishes the seven guides the program ships, which are the same files `gmuse`
+compiles into its binary and draws as view 7.
+
+The two books meet at the query language: what you type after `:` filters the same projection the librarian folds.
+
+## What is in neither
+
+`NOT_IN_ANY_BOOK` in [`tools/build_book.py`](https://gitlab.com/gabrielgellner/gmuse/-/blob/main/tools/build_book.py)
+lists every document that is in no book and why, and the build **fails** if one is neither published nor listed — so
+nothing goes missing by being forgotten.

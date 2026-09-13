@@ -34,14 +34,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 DESIGN = ROOT / "docs" / "design"
-BOOK = ROOT / "docs" / "book"
-FRONT = BOOK / "front"
-SRC = BOOK / "src"
+GUIDES = ROOT / "docs" / "guides"
+BOOKS_DIR = ROOT / "docs" / "books"
 
 
 @dataclass
 class Doc:
-    """A design document, and how it enters the book."""
+    """A document, and how it enters a book."""
 
     file: str
     title: str
@@ -52,6 +51,11 @@ class Doc:
     #: Split on `##` headings into one page each. For the long ones only — a short
     #: document reads better whole than as four stubs.
     split: bool = False
+    #: Which directory it comes from. The guides are **not** copied here: they are
+    #: `include_str!`'d into the binary as view 7, so the file this reads is the file
+    #: the program ships. One source, two outputs — which was the argument for mdBook
+    #: fitting this repository at all (#247).
+    source: str = "design"
 
 
 @dataclass
@@ -61,7 +65,17 @@ class Part:
     docs: list[Doc] = field(default_factory=list)
 
 
-PARTS = [
+@dataclass
+class Book:
+    """One book, published at `/{key}/` on the Pages site."""
+
+    key: str
+    title: str
+    blurb: str
+    parts: list[Part] = field(default_factory=list)
+
+
+MODEL = [
     Part(
         title="The Information Model",
         intro="information-model.md",
@@ -131,26 +145,132 @@ PARTS = [
     ),
 ]
 
-#: Design documents deliberately not in this book, and why.
+INTERACTION = [
+    Part(
+        title="Using It",
+        intro="using-it.md",
+        docs=[
+            Doc(
+                file="moving-around.md",
+                title="Moving around",
+                standing="**A guide, and the program ships it.** This is view 7, verbatim.",
+                source="guides",
+            ),
+            Doc(
+                file="the-library-tree.md",
+                title="The library tree",
+                standing="**A guide.** One pane holding artists, their albums, and the tracks of "
+                "whichever albums you have open.",
+                source="guides",
+            ),
+            Doc(
+                file="finding-things.md",
+                title="Finding things",
+                standing="**A guide.** Search, filters, and the query language from the using end.",
+                source="guides",
+            ),
+            Doc(
+                file="building-playlists.md",
+                title="Building playlists",
+                standing="**A guide.** The vim gestures — yank, put, delete, undo — applied to a "
+                "list of tracks.",
+                source="guides",
+            ),
+            Doc(
+                file="saved-rules.md",
+                title="Rules that make lists",
+                standing="**A guide.** A named, persistent filter, which is a playlist that keeps "
+                "itself current.",
+                source="guides",
+            ),
+            Doc(
+                file="what-the-library-says.md",
+                title="What the library says",
+                standing="**A guide.** Reading and editing what the library holds about a track.",
+                source="guides",
+            ),
+            Doc(
+                file="format-strings.md",
+                title="Writing the lines",
+                standing="**A guide.** The format language, which the config, the `:` line and "
+                "`playback.get` all share.",
+                source="guides",
+            ),
+        ],
+    ),
+    Part(
+        title="Why It Is Shaped This Way",
+        intro="why-shaped.md",
+        docs=[
+            Doc(
+                file="tree-view-design.md",
+                title="The tree view",
+                standing="**Design.** Why one pane holds three levels, and why that reads as a "
+                "single buffer.",
+                split=True,
+            ),
+            Doc(
+                file="tree-navigation-design.md",
+                title="Navigating it",
+                standing="**Design.** Motions that use the shape rather than counting rows.",
+                split=True,
+            ),
+            Doc(
+                file="query-language.md",
+                title="The query language",
+                standing="**Design.** One language for the `:` line, the config, saved rules and "
+                "the socket.",
+                split=True,
+            ),
+            Doc(
+                file="transport-keymap-spec.md",
+                title="The transport vocabulary",
+                standing="**Proposal, not built.** The DJ-derived verbs the player's four cannot "
+                "express. Issues #225–#229.",
+                split=True,
+            ),
+            Doc(
+                file="info-panel.md",
+                title="The info panel",
+                standing="**Proposal, not built.** The surface that shows what the library says "
+                "about one thing, and who said it. The rule it turns on is that a claim is never "
+                "a value.",
+                split=True,
+            ),
+        ],
+    ),
+]
+
+BOOKS = [
+    Book(
+        key="model",
+        title="gmuse — the information model and the layers",
+        blurb="What the library is, and which part of the program may talk to which.",
+        parts=MODEL,
+    ),
+    Book(
+        key="interaction",
+        title="gmuse — the interaction model",
+        blurb="How the player is driven: the tree, the motions, the query language, "
+        "the transport vocabulary.",
+        parts=INTERACTION,
+    ),
+]
+
+
+#: Design documents deliberately in no book, and why.
 #:
 #: **An explicit list, so a new document cannot go unpublished by being forgotten.**
-#: The check at the bottom fails when `docs/design/` holds something that is neither
-#: published nor listed here — which is the same shape as every other claim in this
-#: repository that a machine can hold.
-NOT_IN_THIS_BOOK = {
+#: The check at the bottom fails when `docs/design/` or `docs/guides/` holds something
+#: that is neither published in some book nor listed here — which is the same shape as
+#: every other claim in this repository that a machine can hold.
+NOT_IN_ANY_BOOK = {
     "music-player-tui.md": "the project brief and its Decision Log; a book of its own",
     "gmuse-engine-architecture.md": "the engine's architecture; belongs with the brief",
     "identification-lessons.md": "a working document about this library's metadata",
     "ingestion-flow.md": "how a download becomes a row today; operational",
-    "info-panel.md": "a UI proposal, for the interaction-model book",
     "library-sync-design.md": "how logs merge; follows the information model",
-    "query-language.md": "the query language; for the interaction-model book",
-    "transport-keymap-spec.md": "the transport vocabulary; interaction model",
-    "tree-navigation-design.md": "navigation; interaction model",
-    "tree-view-design.md": "the tree view; interaction model",
     "vision-and-future.md": "directions, not design",
-    "domain-model-review.md": "published in Challenges",
-    "domain-model-second-opinion.md": "published in Challenges",
 }
 
 
@@ -200,94 +320,114 @@ def strip_title(body: str) -> str:
     return body
 
 
-def main() -> int:
-    if not DESIGN.is_dir():
-        print(f"no {DESIGN}", file=sys.stderr)
-        return 1
+def one(book: Book, published: set[str]) -> int:
+    """Generate one book's `src/`. Returns 0, or 1 having said what went wrong."""
+    where = BOOKS_DIR / book.key
+    front = where / "front"
+    src = where / "src"
+    if src.exists():
+        shutil.rmtree(src)
+    src.mkdir(parents=True)
 
-    if SRC.exists():
-        shutil.rmtree(SRC)
-    SRC.mkdir(parents=True)
-
-    # The introduction is written for the book and lives in `front/`.
-    intro = FRONT / "introduction.md"
+    intro = front / "introduction.md"
     if not intro.is_file():
         print(f"missing {intro}", file=sys.stderr)
         return 1
-    (SRC / "introduction.md").write_text(intro.read_text())
+    (src / "introduction.md").write_text(intro.read_text())
 
     summary = ["# Summary", "", "[Introduction](./introduction.md)", ""]
-    published: set[str] = set()
 
-    for part in PARTS:
+    for part in book.parts:
         summary.append(f"# {part.title}")
         summary.append("")
 
-        preface = FRONT / part.intro
+        preface = front / part.intro
         if not preface.is_file():
             print(f"missing {preface}", file=sys.stderr)
             return 1
         name = f"part-{slug(part.title)}.md"
-        (SRC / name).write_text(preface.read_text())
+        (src / name).write_text(preface.read_text())
         summary.append(f"- [About this part](./{name})")
 
         for doc in part.docs:
-            source = DESIGN / doc.file
+            home = GUIDES if doc.source == "guides" else DESIGN
+            source = home / doc.file
             if not source.is_file():
                 print(
-                    f"{doc.file} is in the book and not on disk — it moved or was "
-                    f"renamed, and a book that quietly loses a chapter is the thing "
-                    f"this script exists to avoid",
+                    f"{doc.file} is in the {book.key} book and not at {source} — it "
+                    f"moved or was renamed, and a book that quietly loses a chapter is "
+                    f"the thing this script exists to avoid",
                     file=sys.stderr,
                 )
                 return 1
             published.add(doc.file)
             body = strip_title(source.read_text())
             stem = slug(doc.title)
+            link = (
+                f"https://gitlab.com/gabrielgellner/gmuse/-/blob/main/docs/"
+                f"{'guides' if doc.source == 'guides' else 'design'}/{doc.file}"
+            )
+            header = f"> {doc.standing}\n>\n> Source: [`docs/{'guides' if doc.source == 'guides' else 'design'}/{doc.file}`]({link})"
 
             if not doc.split:
                 page = f"{stem}.md"
-                (SRC / page).write_text(
-                    f"# {doc.title}\n\n> {doc.standing}\n>\n"
-                    f"> Source: [`docs/design/{doc.file}`](https://gitlab.com/"
-                    f"gabrielgellner/gmuse/-/blob/main/docs/design/{doc.file})\n\n{body}\n"
-                )
+                (src / page).write_text(f"# {doc.title}\n\n{header}\n\n{body}\n")
                 summary.append(f"- [{doc.title}](./{page})")
                 continue
 
-            # Split: the document's own `##` headings become its chapters.
             parts = sections(body)
             landing = f"{stem}.md"
             preamble = parts[0][1] if parts and parts[0][0] == "" else ""
-            (SRC / landing).write_text(
-                f"# {doc.title}\n\n> {doc.standing}\n>\n"
-                f"> Source: [`docs/design/{doc.file}`](https://gitlab.com/"
-                f"gabrielgellner/gmuse/-/blob/main/docs/design/{doc.file})\n\n{preamble}\n"
+            # **The landing page lists what follows.** Several documents open straight
+            # into their first heading, which left the page above them a stub — a title,
+            # a status marker, and nothing to read or click. The contents are derived
+            # from the same split, so they cannot disagree with the sidebar.
+            contents = "\n".join(
+                f"- [{title}](./{stem}-{slug(title)}.md)" for title, _ in parts if title
+            )
+            (src / landing).write_text(
+                f"# {doc.title}\n\n{header}\n\n{preamble}\n\n## In this chapter\n\n{contents}\n"
             )
             summary.append(f"- [{doc.title}](./{landing})")
             for title, text in parts:
                 if not title:
                     continue
                 page = f"{stem}-{slug(title)}.md"
-                (SRC / page).write_text(f"{text}\n")
+                (src / page).write_text(f"{text}\n")
                 summary.append(f"  - [{title}](./{page})")
 
         summary.append("")
 
-    # **Nothing in `docs/design/` goes unpublished by being forgotten.**
-    on_disk = {p.name for p in DESIGN.glob("*.md")}
-    unaccounted = sorted(on_disk - published - set(NOT_IN_THIS_BOOK))
+    (src / "SUMMARY.md").write_text("\n".join(summary).rstrip() + "\n")
+    pages = len(list(src.glob("*.md"))) - 1
+    print(f"  {book.key}: {pages} pages")
+    return 0
+
+
+def main() -> int:
+    if not DESIGN.is_dir() or not GUIDES.is_dir():
+        print("no docs/design or docs/guides", file=sys.stderr)
+        return 1
+
+    published: set[str] = set()
+    for book in BOOKS:
+        if one(book, published) != 0:
+            return 1
+
+    # **Nothing goes unpublished by being forgotten.**
+    on_disk = {p.name for p in DESIGN.glob("*.md")} | {p.name for p in GUIDES.glob("*.md")}
+    unaccounted = sorted(on_disk - published - set(NOT_IN_ANY_BOOK))
     if unaccounted:
         print(
-            "these design documents are neither in the book nor listed as excluded:\n  "
+            "these documents are in no book and not listed as excluded:\n  "
             + "\n  ".join(unaccounted)
-            + "\n\nAdd each to PARTS or to NOT_IN_THIS_BOOK with a reason. A document "
+            + "\n\nAdd each to a book or to NOT_IN_ANY_BOOK with a reason. A document "
             "that is silently unpublished is the failure this list prevents.",
             file=sys.stderr,
         )
         return 1
 
-    stale = sorted(set(NOT_IN_THIS_BOOK) - on_disk - published)
+    stale = sorted(set(NOT_IN_ANY_BOOK) - on_disk)
     if stale:
         print(
             "these are listed as excluded and no longer exist:\n  " + "\n  ".join(stale),
@@ -295,11 +435,8 @@ def main() -> int:
         )
         return 1
 
-    (SRC / "SUMMARY.md").write_text("\n".join(summary).rstrip() + "\n")
-    pages = len(list(SRC.glob("*.md"))) - 1
-    print(f"book: {pages} pages from {len(published)} design documents")
+    print(f"book: {len(BOOKS)} books from {len(published)} documents")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

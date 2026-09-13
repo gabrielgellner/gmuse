@@ -108,19 +108,22 @@ into facts. Read `quality-albums.tsv` before assuming the library has never been
 
 ## The book
 
-`just docs` builds the design documents into an mdBook at `docs/book/book/index.html`; `just docs-serve` does it with
-live reload. A push to `main` publishes it to GitLab Pages.
+`just docs` builds both books; `just docs-serve` serves one with live reload (`BOOK=interaction just docs-serve` for the
+other). A push to `main` publishes them to GitLab Pages.
 
-**It holds no second copy of anything.** `tools/build_book.py` derives the chapters from `docs/design/`, splitting the
-long documents on their own `##` headings — so a renamed section renames a chapter rather than breaking one, and there
-is no paraphrase to go stale. The generator **fails** when a design document is neither published nor listed in
-`NOT_IN_THIS_BOOK` with a reason, so nothing goes unpublished by being forgotten.
+**They hold no second copy of anything.** `tools/build_book.py` derives the chapters from `docs/design/` and
+`docs/guides/`, splitting the long documents on their own `##` headings — so a renamed section renames a chapter rather
+than breaking one, and there is no paraphrase to go stale. The generator **fails** when a design document is neither
+published nor listed in `NOT_IN_ANY_BOOK` with a reason, so nothing goes unpublished by being forgotten.
 
 `tools/book_guard.py` inspects the built HTML, because **`mdbook build` reports a broken include as a warning and exits
 0** — a book with a hole in it would otherwise publish itself.
 
-Scope today is the information model and the layers. The interaction model — views, the tree, motions, the keymap — is a
-book of its own and is listed as excluded.
+**Two books**, published at `/model/` and `/interaction/` with a landing page between them. The interaction book also
+publishes `docs/guides/` — the seven files the binary `include_str!`s as view 7, so the guide on the web and the guide
+at `7` cannot disagree.
+
+`NOT_IN_ANY_BOOK` lists what is in neither and why; the build fails if a document is neither published nor listed.
 
 ## Workflow
 
@@ -131,7 +134,7 @@ just ci              # the full gate: fmt + lint + typecheck + test + build
 just ui [root]       # launch the TUI
 just play <file>     # play one file at the line prompt
 just bench           # resampler comparison table
-just docs            # build the book; `docs-serve` for live reload
+just docs            # build both books; `docs-serve` for live reload
 ```
 
 `just ci` is the quality gate and it runs **locally**. GitLab CI is deliberately minimal (a manual `verify` job) to

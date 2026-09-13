@@ -34,7 +34,13 @@ from pathlib import Path
 NOT_CHAPTERS = {"toc.html", "404.html", "print.html"}
 
 #: Below this many characters inside `<main>`, a chapter has lost its document.
-FLOOR = 300
+#:
+#: **200, and the number moved once for a reason worth keeping.** It was 300, chosen
+#: against the model book where the shortest real chapter held 466. The interaction book
+#: has a genuinely shorter one — `query-language.md`'s closing "Related" section, which
+#: is four links and 286 characters, and is not a defect. mdBook's own `404.html` holds
+#: 105, so 200 still clears the noise by a factor of two.
+FLOOR = 200
 
 #: Fewer pages than this and the book lost most of itself.
 LEAST = 20
@@ -51,7 +57,8 @@ LEAST = 20
 #: were inert here until it arrived, plus the layer diagrams in `layers.md` and
 #: `access-layers.md`. Raise it when a diagram is added — that is the point of a count
 #: rather than a "more than zero".
-DIAGRAMS = 4
+#: Keyed by book, because only the model book has diagrams today.
+DIAGRAMS = {"model": 4, "interaction": 0}
 
 
 def content(page: Path) -> int | None:
@@ -63,7 +70,10 @@ def content(page: Path) -> int | None:
 
 
 def main(argv: list[str]) -> int:
-    out = Path(argv[1] if len(argv) > 1 else "docs/book/book")
+    out = Path(argv[1] if len(argv) > 1 else "docs/books/model/book")
+    # `docs/books/<key>/book` — the key is what `DIAGRAMS` is keyed by.
+    key = out.parent.name
+    expected = DIAGRAMS.get(key, 0)
     if not out.is_dir():
         print(f"no book at {out} — run `just docs`", file=sys.stderr)
         return 1
@@ -109,9 +119,9 @@ def main(argv: list[str]) -> int:
         for p in pages
         if p.name != "print.html"
     )
-    if drawn < DIAGRAMS:
+    if drawn < expected:
         print(
-            f"{drawn} mermaid diagram(s) rendered, expected {DIAGRAMS} — either a "
+            f"{key}: {drawn} mermaid diagram(s) rendered, expected {expected} — either a "
             f"diagram was removed and DIAGRAMS needs lowering, or `mdbook-mermaid "
             f"install docs/book` has not been run and the published diagrams are inert",
             file=sys.stderr,
@@ -119,16 +129,14 @@ def main(argv: list[str]) -> int:
         return 1
 
     vendored = [p.name for p in out.glob("mermaid*.js")]
-    if not vendored:
+    if expected and not vendored:
         print(
             "no mermaid script in the output, so the diagrams above cannot draw",
             file=sys.stderr,
         )
         return 1
 
-    print(
-        f"book: {len(pages)} pages, {drawn} diagrams, checked at {out / 'index.html'}"
-    )
+    print(f"  {key}: {len(pages)} pages, {drawn} diagrams — {out / 'index.html'}")
     return 0
 
 

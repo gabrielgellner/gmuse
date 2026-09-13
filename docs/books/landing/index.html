@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>gmuse — design</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --ink:#4c4f69; --dim:#6c6f85; --rule:#ccd0da; --ground:#eff1f5; --accent:#179299; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#c6d0f5; --dim:#a5adce; --rule:#414559; --ground:#303446; --accent:#81c8be; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font: 17px/1.6 Georgia, "Times New Roman", serif;
+    display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 2rem;
+  }
+  main { max-width: 34rem; }
+  h1 { font-family: ui-monospace, Menlo, monospace; font-size: 2rem; margin: 0 0 .4rem; letter-spacing: -.02em; }
+  p.lede { color: var(--dim); margin: 0 0 2.5rem; }
+  a.book { display: block; text-decoration: none; color: inherit; border-top: 1px solid var(--rule); padding: 1.4rem 0; }
+  a.book:last-of-type { border-bottom: 1px solid var(--rule); }
+  a.book strong { display: block; color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-size: 1.05rem; margin-bottom: .3rem; }
+  a.book span { color: var(--dim); font-size: .95rem; }
+  a.book:hover span, a.book:focus-visible span { color: var(--ink); }
+  footer { margin-top: 2.5rem; font-size: .85rem; color: var(--dim); }
+  footer a { color: var(--accent); }
+</style>
+<main>
+  <h1>gmuse</h1>
+  <p class="lede">A terminal music player and library manager. These are its design documents, rendered rather than retold.</p>
+
+  <a class="book" href="./model/">
+    <strong>The information model and the layers</strong>
+    <span>What a library entry is, as against a file — facts, identity, the log — and which part of the program may talk to which.</span>
+  </a>
+  <a class="book" href="./interaction/">
+    <strong>The interaction model</strong>
+    <span>How the player is driven: the tree, the motions, the query language, and the transport vocabulary borrowed from DJ software.</span>
+  </a>
+
+  <footer>Built from <a href="https://gitlab.com/gabrielgellner/gmuse">the repository</a> on every push to <code>main</code>.</footer>
+</main>
