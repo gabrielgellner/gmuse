@@ -167,7 +167,7 @@ impl Control {
         // command: the roots are the engine's configuration and a command carries
         // no context (I9).
         roots: Vec<std::path::PathBuf>,
-        engine: Arc<std::sync::OnceLock<Arc<super::Engine>>>,
+        engine: Arc<std::sync::OnceLock<std::sync::Weak<super::Engine>>>,
     ) -> Result<Self, crate::audio::AudioError> {
         let (asks, rx) = unbounded::<Ask>();
         let (ready_tx, ready) = bounded::<Result<u32, crate::audio::AudioError>>(1);
@@ -396,7 +396,7 @@ struct Wiring<'a> {
     facts: &'a Arc<Facts>,
     desk: &'a Arc<Desk>,
     roots: &'a [std::path::PathBuf],
-    engine: &'a Arc<std::sync::OnceLock<Arc<super::Engine>>>,
+    engine: &'a Arc<std::sync::OnceLock<std::sync::Weak<super::Engine>>>,
     stop: &'a Arc<AtomicBool>,
 }
 
@@ -594,7 +594,7 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
         // behind sees one event rather than each.
         let version = held.queue.version();
         if version != held.announced {
-            if let Some(engine) = engine.get() {
+            if let Some(engine) = engine.get().and_then(|weak| weak.upgrade()) {
                 // **The modes ride along** — #233. A list plus `shuffle` plus
                 // `repeat` is the answer to "what plays next"; a view drawing the
                 // list while owning the modes would draw a queue that does not
@@ -617,7 +617,7 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
         }
 
         if moved || told != Some(now) {
-            if let Some(engine) = engine.get() {
+            if let Some(engine) = engine.get().and_then(|weak| weak.upgrade()) {
                 engine.publish(&playback_event(
                     player,
                     &shared,

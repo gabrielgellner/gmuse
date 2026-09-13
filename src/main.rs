@@ -2731,7 +2731,7 @@ fn run_engine(
         /// and the answerer needs the engine to publish through. A `OnceLock`
         /// rather than a channel back: written once at startup, read from
         /// connection threads.
-        engine: Arc<std::sync::OnceLock<Arc<gmuse::engine::Engine>>>,
+        engine: Arc<std::sync::OnceLock<std::sync::Weak<gmuse::engine::Engine>>>,
     }
     impl Bare {
         /// §8.4's named write operations, routed to the one appender.
@@ -3182,7 +3182,7 @@ fn run_engine(
                     // socket closing cannot tell that from a crash. The notice
                     // is queued before the flag is set, so the writers have it
                     // in hand before the shutdown drains them.
-                    if let Some(engine) = self.engine.get() {
+                    if let Some(engine) = self.engine.get().and_then(|weak| weak.upgrade()) {
                         engine.publish(&gmuse_proto::Event::new(
                             gmuse_proto::Topic::Engine,
                             serde_json::json!({ "stopping": true, "reason": "engine.shutdown" }),
@@ -3379,7 +3379,20 @@ fn run_engine(
     ));
 
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let engine_slot: Arc<std::sync::OnceLock<Arc<gmuse::engine::Engine>>> = Arc::default();
+    // **`Weak`, or nothing ever shuts down** — #245.
+    //
+    // Everything that holds this only wants to `publish`, and holding a strong
+    // reference made a cycle: the listener thread owns `Arc<Bare>`, `Bare` owns this
+    // slot, and the slot owned the `Engine` whose `Drop` is the only thing that stops
+    // the listener. So the count could not reach zero, `Drop` never ran, and the
+    // graceful shutdown it implements — set the flag, wake `accept`, join, unlink the
+    // socket — was unreachable code. Measured at 3 strong references where 1 was
+    // needed.
+    //
+    // `upgrade()` returning `None` is the honest answer to "publish this": the engine
+    // is going, so there is nobody to publish to.
+    let engine_slot: Arc<std::sync::OnceLock<std::sync::Weak<gmuse::engine::Engine>>> =
+        Arc::default();
 
     // **Claim the engine before opening a device** — #219. The lock is what
     // decides whether this process is *the* engine, and it used to be taken
@@ -3439,14 +3452,14 @@ fn run_engine(
     )
     .unwrap_or_else(|e| die(e));
     let engine = Arc::new(engine);
-    let _ = engine_slot.set(Arc::clone(&engine));
+    let _ = engine_slot.set(Arc::downgrade(&engine));
 
     // **What the librarian publishes becomes what the views are told.** The
     // announcer starts from the answer standing now, not from the first fold:
     // the startup fold is not news, and announcing it would tell every view to
     // re-query the moment it connected.
     let _announcer =
-        gmuse::engine::librarian::Announcer::start(Arc::clone(&desk), Arc::clone(&engine));
+        gmuse::engine::librarian::Announcer::start(Arc::clone(&desk), Arc::downgrade(&engine));
 
     // **The scan at engine start** — §8.9, and the 2026-09-10 decision that a
     // stale cache is the worse failure. Not waited on: the library is already

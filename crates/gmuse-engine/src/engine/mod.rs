@@ -195,6 +195,24 @@ impl Engine {
     }
 }
 
+/// **This is the graceful shutdown, and for a while it could not run** — #245.
+///
+/// Every holder of the engine wanted it in order to `publish`, and each held a strong
+/// `Arc`. That closed a cycle: the listener thread owns `Arc<dyn Answers>`, the answerer
+/// owns the slot the engine is published through, and the slot owned the engine — whose
+/// `Drop` is the only thing that stops the listener. So the count could not reach zero,
+/// none of the four steps below happened, and the process simply exited with the
+/// listener still in `accept` and the socket file still on disk. Measured at **3 strong
+/// references where 1 was needed**.
+///
+/// The slot holds a `Weak` now. Nothing else changed, because nothing else needed to:
+/// `upgrade()` returning `None` is the correct answer to "publish this" when the engine
+/// is going away.
+///
+/// **The lesson is about what a leaked `Arc` costs.** A cycle is usually filed under
+/// memory, and at process exit leaked memory is free — which is why this hid. What it
+/// actually cost was every side effect written into a destructor, and `Drop` is where
+/// this codebase puts "stop the thread, release the lock, unlink the path".
 impl Drop for Engine {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);

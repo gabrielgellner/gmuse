@@ -5541,6 +5541,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   file restored. And a `--format` flag on `ctl` was written and could never have worked: `ctl` takes everything after
   the command as part of the command, which is the documented rule that lets `seek -5` through. Params are a JSON word.
 
+- **2026-09-13** **A leaked `Arc` costs you a destructor, not memory** (#245, §4.2). Filed as litter — the engine left
+  its socket file behind after a clean `gmuse ctl engine.shutdown` — and the unlink turned out to be there already,
+  sitting in `Drop for Engine` alongside three other things that also were not happening.
+
+  Everything that held the engine held it in order to `publish`, and every one of them held a strong `Arc`. That closed
+  a cycle: the listener thread owns the answerer, the answerer owns the slot the engine is published through, and the
+  slot owned the engine — whose `Drop` is the only thing that stops the listener. Measured with `Arc::strong_count` at
+  the shutdown site: **3 where 1 was needed**, and a probe inside `Drop` that never printed.
+
+  So `drop(engine)` at the end of `run_engine` read like a shutdown and was a decrement. The listener was never asked to
+  stop and never joined; the process exited with it still blocked in `accept`. The socket file was the only _visible_
+  consequence, which is why this was filed as tidiness.
+
+  **The generalisable part is why it hid.** A reference cycle is filed under memory, and at process exit leaked memory
+  is free — so the usual reason to care did not apply and nothing complained. What it actually cost was every side
+  effect written into a destructor, and this codebase puts real work there: stop the thread, release the lock, unlink
+  the path. **`Drop` is a place where an unbroken cycle is a behaviour bug, not a space leak.**
+
+  The fix is one word — the slot holds a `Weak` — and nothing else needed changing, because `upgrade()` returning `None`
+  is the honest answer to "publish this" when the engine is going away.
+
+  The test asserts the socket is gone, and asserts it _existed_ first: "the file is not there" reads identically whether
+  it was cleaned up or never created. It also checks the acknowledgement came back before the process went, because a
+  shutdown that dropped the reply would pass the file check too.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

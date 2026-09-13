@@ -84,6 +84,53 @@ fn ctl(socket: &Path, args: &[&str]) -> (String, String, bool) {
     )
 }
 
+/// **A graceful stop actually stops** — #245.
+///
+/// `Drop for Engine` sets the flag, wakes `accept` by connecting to it, joins the
+/// listener and unlinks the socket. All four were unreachable: everything holding the
+/// engine in order to `publish` held a *strong* reference, and the listener thread owns
+/// the answerer, which owned the slot, which owned the engine — so the count could not
+/// reach zero and `Drop` never ran. Measured at 3 strong references where 1 was needed.
+///
+/// **The socket file is the observable half**, because the unlink is the last line of
+/// that `Drop`. Its absence afterwards is therefore evidence the whole body ran, which
+/// is why this is not merely a test about litter.
+#[test]
+fn a_graceful_stop_removes_its_socket() {
+    let engine = start("graceful");
+
+    // **The instrument is attached.** Without this the test passes against an engine
+    // that never bound at all — "the file is not there" reads identically whether it
+    // was cleaned up or never created, which is exactly the vacuous shape this
+    // codebase keeps finding.
+    assert!(
+        engine.socket.exists(),
+        "the engine never bound, so nothing was measured"
+    );
+
+    let (out, err, ok) = ctl(&engine.socket, &["engine.shutdown"]);
+    // The reply comes back *before* the process goes: a shutdown that dropped the
+    // answer on the floor would also pass the socket check below.
+    assert!(ok, "the shutdown was refused: {err}");
+    assert!(out.contains("stopping"), "no acknowledgement: {out:?}");
+
+    // It has to actually exit, or `Drop` has not run and the file below is still open.
+    let mut engine = engine;
+    let exited = (0..200).any(|_| match engine.child.try_wait() {
+        Ok(Some(_)) => true,
+        _ => {
+            std::thread::sleep(Duration::from_millis(25));
+            false
+        }
+    });
+    assert!(exited, "the engine did not exit after being told to stop");
+
+    assert!(
+        !engine.socket.exists(),
+        "the socket outlived a graceful shutdown, so Drop for Engine did not run"
+    );
+}
+
 #[test]
 fn the_engine_starts_and_answers_a_handshake() {
     let engine = start("handshake");

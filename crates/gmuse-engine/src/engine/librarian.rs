@@ -48,7 +48,7 @@ impl Announcer {
     /// the engine starts is not news — a client that connects later asks for
     /// what it needs, and announcing the startup fold would tell every view to
     /// re-query the moment it arrived.
-    pub fn start(desk: Arc<Desk>, engine: Arc<Engine>) -> Self {
+    pub fn start(desk: Arc<Desk>, engine: std::sync::Weak<Engine>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let version = Arc::new(AtomicU64::new(0));
 
@@ -62,7 +62,12 @@ impl Announcer {
                     let now = desk.current();
                     if !Arc::ptr_eq(&last, &now) {
                         let version = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Some(event) = super::library::change_for(&now.changed, version) {
+                        if let Some(event) = super::library::change_for(&now.changed, version)
+                            // **`None` means the engine is going**, which is not a
+                            // change worth announcing to nobody — see `Engine`'s
+                            // `Drop` on why this is a `Weak`.
+                            && let Some(engine) = engine.upgrade()
+                        {
                             engine.publish(&event);
                         }
                         last = now;
