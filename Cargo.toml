@@ -4,7 +4,13 @@
 # 84,000 lines into `crates/gmuse/` would bury that rename in a diff nobody can
 # read. Members arrive one at a time as the boundaries are drawn.
 [workspace]
-members = ["crates/gmuse-ids", "crates/gmuse-library", "crates/gmuse-proto", "crates/gmuse-client"]
+members = [
+  "crates/gmuse-ids",
+  "crates/gmuse-library",
+  "crates/gmuse-proto",
+  "crates/gmuse-client",
+  "crates/gmuse-engine",
+]
 
 [package]
 name = "gmuse"
@@ -27,6 +33,7 @@ gmuse-ids = { path = "crates/gmuse-ids" }
 gmuse-library = { path = "crates/gmuse-library" }
 gmuse-proto = { path = "crates/gmuse-proto" }
 gmuse-client = { path = "crates/gmuse-client" }
+gmuse-engine = { path = "crates/gmuse-engine" }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 cpal = "0.18.2"
 crossbeam-channel = "0.5.16"
@@ -51,8 +58,6 @@ symphonia = { version = "0.6.1", features = [
   "mp3",
   "isomp4",
 ] }
-# Opus via bundled libopus (statically linked). DESIGN §13.
-symphonia-adapter-libopus = { version = "0.3.0", optional = true }
 thiserror = "2.0.20"
 toml = "1.1.4"
 twox-hash = { version = "2.1.4", default-features = false, features = [
@@ -72,7 +77,11 @@ gmuse-library = { path = "crates/gmuse-library", features = ["testing"] }
 default = ["opus"]
 # Opus support. Compiles and statically links libopus; needs `cmake` at build
 # time. The only C dependency in the project.
-opus = ["dep:symphonia-adapter-libopus"]
+# **Turned on in `gmuse-engine`, which is where the decoder lives** — #213. The
+# adapter is no longer a direct dependency of this package: `--no-default-features`
+# has to reach the crate that registers it, or it drops the flag and keeps the C
+# dependency.
+opus = ["gmuse-engine/opus"]
 # **The Python door** — #197. Off by default, so an ordinary `cargo build`
 # neither needs a Python interpreter nor links against one; `maturin` turns it
 # on. The tools speak to the library through this rather than through files.

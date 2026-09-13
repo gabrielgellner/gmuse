@@ -33,6 +33,8 @@ use gmuse_library::next::{ActiveSource, NextInput, Playback, Scope, Source};
 use gmuse_library::playlist::{Playlist, Queue};
 use gmuse_library::shelf::Shelf;
 
+use crate::instruction::{Mode, Switch};
+
 /// The queue, the modes, and the pool they run over.
 ///
 /// **Versioned, and that is not symmetry with the library.** §8.8 is explicit
@@ -164,14 +166,22 @@ impl Playing {
         )
     }
 
-    /// Set one of them, by the same key the `:` line uses.
+    /// Set one of them.
     ///
     /// **Returns the new version**, because these move what plays next as surely
     /// as an enqueue does — so a view is told, through the same event.
-    pub fn set_mode(&mut self, key: crate::cmd::SettingKey, on: bool) -> u64 {
-        use crate::cmd::SettingKey as K;
-        match key {
-            K::Shuffle => {
+    ///
+    /// `Mode` has three arms and no catch-all: the `:` line's other settings are a
+    /// view's layout and are not expressible as an `Instruction` at all, which is
+    /// what #213 replaced a `_ => {}` here with.
+    pub fn set_mode(&mut self, which: Mode, to: Switch) -> u64 {
+        let on = match to {
+            Switch::On => true,
+            Switch::Off => false,
+            Switch::Flip => !self.mode(which),
+        };
+        match which {
+            Mode::Shuffle => {
                 self.playback.shuffle = on;
                 // **Reseeded on the way in**, which is what the view does: the
                 // order a shuffle produces is a function of the seed, and turning
@@ -180,24 +190,18 @@ impl Playing {
                     self.playback.reshuffle();
                 }
             }
-            K::Repeat => self.playback.repeat = on,
-            K::RepeatCurrent => self.playback.repeat_current = on,
-            // `Scope` is not a bool and has `set_scope`; everything else is a
-            // view's or unwired, which `SettingKey::not_the_engines` says and
-            // `remote::is_remotable` refuses before it gets here.
-            _ => {}
+            Mode::Repeat => self.playback.repeat = on,
+            Mode::RepeatCurrent => self.playback.repeat_current = on,
         }
         self.moved()
     }
 
-    /// Whether one of them is on, for a toggle.
-    pub fn mode(&self, key: crate::cmd::SettingKey) -> bool {
-        use crate::cmd::SettingKey as K;
-        match key {
-            K::Shuffle => self.playback.shuffle,
-            K::Repeat => self.playback.repeat,
-            K::RepeatCurrent => self.playback.repeat_current,
-            _ => false,
+    /// Whether one of them is on.
+    pub fn mode(&self, which: Mode) -> bool {
+        match which {
+            Mode::Shuffle => self.playback.shuffle,
+            Mode::Repeat => self.playback.repeat,
+            Mode::RepeatCurrent => self.playback.repeat_current,
         }
     }
 

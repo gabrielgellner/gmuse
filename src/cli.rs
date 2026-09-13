@@ -10,6 +10,34 @@ use clap::Parser;
 
 use crate::audio::{PlayerConfig, resample::Quality};
 
+/// **The resampler quality, as a command line spells it** — #213, §12.
+///
+/// A separate enum from `audio::resample::Quality` because this one carries
+/// clap's `ValueEnum` derive, and that derive is a CLI concern: having it on the
+/// audio type made `gmuse-engine` depend on clap to describe a sound. The two
+/// have the same three arms and [`Resample::quality`] is the boundary between
+/// them.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Resample {
+    /// Polynomial. Cheapest, with artefacts on some material.
+    Fast,
+    /// FFT. Transparent for fixed ratios, and the cheapest of the three.
+    #[default]
+    Balanced,
+    /// Sinc. Same quality as `balanced` at ~16x the cost.
+    High,
+}
+
+impl Resample {
+    pub fn quality(self) -> Quality {
+        match self {
+            Resample::Fast => Quality::Fast,
+            Resample::Balanced => Quality::Balanced,
+            Resample::High => Quality::High,
+        }
+    }
+}
+
 /// gmuse — Gabriel's MUSical Experience.
 ///
 /// A cmus-shaped terminal music player.
@@ -37,7 +65,7 @@ pub struct Cli {
 
     /// Resampler quality.
     #[arg(short = 'q', long, env = "GMUSE_RESAMPLE", default_value = "balanced")]
-    pub resample: Quality,
+    pub resample: Resample,
 
     /// Start fresh: do not restore the last session, and do not save this one.
     #[arg(long)]
@@ -636,7 +664,7 @@ impl Cli {
         PlayerConfig {
             device: self.device.clone(),
             rate: self.rate,
-            resample: self.resample,
+            resample: self.resample.quality(),
             volume: self.volume,
         }
     }

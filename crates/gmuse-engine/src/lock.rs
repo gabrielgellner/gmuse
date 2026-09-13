@@ -66,9 +66,17 @@ pub enum LockError {
     },
 }
 
-/// `$XDG_STATE_HOME/gmuse/lock`.
-pub fn default_path() -> PathBuf {
-    crate::config::default_state_dir().join(NAME)
+/// The lock file inside a state directory — `<state>/lock`.
+///
+/// **Takes the directory rather than working it out** — #213. The first cut of this
+/// crate copied `config::default_state_dir`'s XDG rule here, because
+/// `gmuse-engine` has no config module. Two copies of one rule is the drift this
+/// day was spent removing, and they had already diverged in the copying: one
+/// filtered a relative `XDG_STATE_HOME` and the other did not.
+///
+/// So the root passes what it already computes, and there is one rule.
+pub fn path_in(state_dir: &std::path::Path) -> PathBuf {
+    state_dir.join(NAME)
 }
 
 /// Take the lock, or say who has it.

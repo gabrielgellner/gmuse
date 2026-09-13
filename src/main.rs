@@ -178,7 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _lock = if args.no_lock || args.attached() {
         None
     } else {
-        match gmuse::lock::acquire(&gmuse::lock::default_path()) {
+        match gmuse::lock::acquire(&gmuse::lock::path_in(&gmuse::config::default_state_dir())) {
             Ok(held) => Some(held),
             Err(err @ gmuse::lock::LockError::Held { .. }) => {
                 eprintln!("{err}");
@@ -3007,23 +3007,24 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
 
                 Call::ExecLine { line } => match gmuse::cmd::parse::command(&line) {
                     Ok(cmd) => {
-                        // **Only what makes sense without a view.**
-                        // `is_remotable` already answers that question for the
-                        // socket — it was written for `--remote` and the set has
-                        // not changed just because the transport has.
-                        if gmuse::remote::is_remotable(&cmd) {
-                            let parsed = gmuse::cmd::parse::format(&cmd);
-                            self.control.ask(gmuse::engine::control::Ask::Apply(cmd));
-                            Ok(serde_json::json!({ "accepted": true, "parsed": parsed }))
-                        } else {
-                            Err(RpcError::new(
-                                code::NOT_READY,
-                                "that command needs a view: it moves a cursor or a selection",
-                            )
-                            .with_data(serde_json::json!({
-                                "reason": "not remotable",
-                                "parsed": gmuse::cmd::parse::format(&cmd),
-                            })))
+                        // **The translation is the gate** — #213. `instruction_of`
+                        // either produces something the control thread can carry
+                        // out or says why it cannot, so there is no second list to
+                        // agree with and the refusal carries the reason rather than
+                        // a category.
+                        let parsed = gmuse::cmd::parse::format(&cmd);
+                        match gmuse::remote::instruction_of(&cmd) {
+                            Ok(instruction) => {
+                                self.control
+                                    .ask(gmuse::engine::control::Ask::Do(instruction));
+                                Ok(serde_json::json!({ "accepted": true, "parsed": parsed }))
+                            }
+                            Err(why) => Err(RpcError::new(code::NOT_READY, why).with_data(
+                                serde_json::json!({
+                                    "reason": why,
+                                    "parsed": parsed,
+                                }),
+                            )),
                         }
                     }
                     // **`span` is null and that is honest.** §7.13 shapes this

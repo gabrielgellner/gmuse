@@ -1,0 +1,39 @@
+# **The audio path and the engine that drives it** — #213, §4.3.
+#
+# The last crate the split asks for, and the one whose boundary was not a rename:
+# see the Decision Log entry of 2026-09-12. What lives here is everything between
+# a decision and a sound — the RT callback, the decoder, the resampler, the
+# control thread, and the socket that lets something else make the decision.
+#
+# It does **not** depend on the root crate, which is the whole point: the root
+# holds the TUI and the command language, and a crate that both of those sit on
+# cannot reach back up to them.
+[package]
+name = "gmuse-engine"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "gmuse's audio path and engine"
+
+[dependencies]
+gmuse-ids = { path = "../gmuse-ids" }
+gmuse-library = { path = "../gmuse-library" }
+gmuse-proto = { path = "../gmuse-proto" }
+cpal = "0.18.2"
+crossbeam-channel = "0.5.16"
+rtrb = "0.4.0"
+rubato = "5.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+symphonia = { version = "0.6.1", features = ["aac", "alac", "mp3", "isomp4"] }
+# Opus via bundled libopus (statically linked). DESIGN §13.
+symphonia-adapter-libopus = { version = "0.3.0", optional = true }
+thiserror = "2.0.20"
+uuid = { version = "1.26.0", features = ["v4", "v5", "serde"] }
+
+[dev-dependencies]
+gmuse-library = { path = "../gmuse-library", features = ["testing"] }
+
+[features]
+default = []
+opus = ["dep:symphonia-adapter-libopus"]

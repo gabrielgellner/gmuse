@@ -801,6 +801,7 @@ dependencies = [
  "crossbeam-channel",
  "crossterm",
  "gmuse-client",
+ "gmuse-engine",
  "gmuse-ids",
  "gmuse-library",
  "gmuse-proto",
@@ -814,7 +815,6 @@ dependencies = [
  "serde",
  "serde_json",
  "symphonia",
- "symphonia-adapter-libopus",
  "thiserror 2.0.20",
  "toml",
  "twox-hash",
@@ -832,6 +832,25 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "gmuse-engine"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "crossbeam-channel",
+ "gmuse-ids",
+ "gmuse-library",
+ "gmuse-proto",
+ "rtrb",
+ "rubato",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "symphonia-adapter-libopus",
+ "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]

@@ -27,7 +27,12 @@ use rubato::{
 ///
 /// `Balanced` is the default: for the fixed rate ratios a music player deals
 /// in, the FFT resampler is both cheaper and cleaner than a mid-length sinc.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+/// **No `clap::ValueEnum` here** — #213. `-q/--resample` used to parse straight
+/// into this, which put a CLI parser's derive on a type in the audio path and
+/// meant this crate had to depend on clap. §12 already said where that belongs:
+/// strings become typed values at the *edge*, so `cli::Resample` carries the
+/// derive and converts.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum Quality {
     /// Polynomial. Cheapest, with artefacts on some material.
     Fast,

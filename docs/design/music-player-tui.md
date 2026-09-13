@@ -660,7 +660,10 @@ Ranked by how much time they will actually take:
 
 - Prefer explicit typed layers over abstraction. If a trait has one implementor, it is a struct.
 - Parse at the boundary; downstream code takes parsed types, never strings.
-- No `unsafe` outside `audio/`, and inside it only where cpal's API requires it.
+- No `unsafe`. **This said "outside `audio/`, and inside it only where cpal's API requires it", and #213 found it doubly
+  wrong**: there is none in the audio path — cpal's callback API never needed any — and there are two elsewhere, both
+  forced by a signature. `rt_guard.rs` must write `unsafe impl GlobalAlloc`, and `engine/socket.rs`'s tests must wrap
+  `std::env::set_var`, which edition 2024 made unsafe. A third needs an entry in §13.
 - No async. Threads and channels.
 - Errors: `thiserror` enums per module. No `anyhow` in library code; `main` may use it.
 - Do not add a dependency without recording it in the Decision Log below with a one-line rationale.
@@ -5102,6 +5105,43 @@ Append here as decisions are made. Format: date, decision, rationale.
   **It is also why a commit message states the test count.** "1,545 tests" is not a boast; it is the number whose
   _stalling_ is the first sign of this, and `just ci` printing per-suite results is what made the crate split's silent
   loss of 55 tests visible at all.
+
+- **2026-09-12** **`gmuse-engine`, and the crate split that was not a rename** (#213, §4.3, §12).
+
+  The last of the five crates. Four were mechanical, which is what the issue predicted for all of them — the split lands
+  after the design work precisely so that the code being moved already does not reach across the line. The engine did
+  reach across it, and the boundary is what made that visible.
+
+  **`control::apply` matched on `cmd::Command`.** Sixty-three variants, with `Up`, `Fold` and `PaneNext` among them; it
+  acted on ten and ignored the rest. A crate cannot depend on the crate that depends on it, so this had to be answered
+  rather than moved.
+
+  `Instruction` is the answer: ten variants, every one something the engine can do, and one total translation at the
+  ingress — `remote::instruction_of`, which either produces one or returns the reason it cannot. **That dissolves the
+  bug #233 guarded against** rather than guarding against it again. The gate and the doing were two lists that had
+  drifted in both directions — five commands accepted and silently ignored, one handled but unreachable — and #233
+  caught it with a pair of tests that scraped both functions' source and compared the names. A scrape is a poor guard
+  and that one knew it: its first version read `Command::` out of comments. One function and an exhaustive match is a
+  shape in which the disagreement cannot be written down, so both scrapes are deleted and what replaced them asserts
+  what each command _becomes_.
+
+  **Two smaller things the boundary flushed out**, both of the same kind — a rule in two places, or in the wrong one.
+
+  `resample::Quality` derived `clap::ValueEnum`, which meant describing a sound made the audio crate depend on a
+  command-line parser. §12 already said where that goes: `cli::Resample` carries the derive and converts at the edge.
+
+  And `lock::default_path` nearly became a second copy of `config::default_state_dir`'s XDG rule, because `gmuse-engine`
+  has no config module. The copy had already diverged in the copying — one filtered a relative `XDG_STATE_HOME`, the
+  other did not. It takes the directory as an argument now.
+
+  **What stayed behind, and why.** `engine::attach` connects to an engine and spawns one if none answers; that is what a
+  _view_ does, so it lives in the root beside the TUI. The command language stays there too, because the TUI produces it
+  and the config parses it and neither is below the engine. `lock` went the other way — plain infrastructure, but the
+  engine is what needs it and the root can reach down.
+
+  1,545 tests before and after, in one more suite. That accounting is the point of `just ci` printing per-suite results:
+  the 50 audio tests appearing in a new crate while the root's count fell by the same 50 is the whole evidence that
+  nothing was left behind.
 
 ## 14. Prior art worth reading
 

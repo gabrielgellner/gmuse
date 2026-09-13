@@ -20,7 +20,9 @@ pub use gmuse_library::{
     projection, query, shelf, text,
 };
 
-pub mod audio;
+// **The audio path lives in `gmuse-engine` and is named here as it always was**
+// — #213, the same trick the librarian's modules use above.
+pub use gmuse_engine::audio;
 pub mod audit;
 pub mod cli;
 pub mod cmd;
@@ -29,14 +31,9 @@ pub mod datadir;
 pub mod edit;
 pub mod engine;
 pub mod guides;
-pub mod lock;
+// The pidfile lock lives in `gmuse-engine`, named here as it always was — #213.
+pub use gmuse_engine::lock;
 pub mod m3u;
-/// The allocation guard, in the test binary only — #211.
-#[cfg(test)]
-pub mod rt_guard;
-#[cfg(test)]
-#[global_allocator]
-static RT_GUARD: rt_guard::Guarded = rt_guard::Guarded;
 pub mod remote;
 pub mod session;
 /// The view bench, rehoused by #213 — see the module header.

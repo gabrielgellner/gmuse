@@ -220,7 +220,11 @@ From §12 of the design doc, and these are load-bearing:
 - Prefer explicit typed layers over abstraction. A trait with one implementor is a struct.
 - Parse at the boundary — strings become typed values at the edge, and nothing downstream handles a raw string.
 - **No async.** Threads and channels. No `tokio`, no `async-std`.
-- No `unsafe` outside `src/audio/`, and there only where cpal requires it.
+- **No `unsafe`, with two exceptions that are not the one this rule used to name.** It said "outside `src/audio/`, and
+  there only where cpal requires it", and #213 found that doubly wrong: there is **no** `unsafe` in the audio path at
+  all — cpal's callback API never needed any — and there are two elsewhere, both forced by a signature rather than
+  chosen. `rt_guard.rs` must write `unsafe impl GlobalAlloc` because the trait is unsafe, and `engine/socket.rs`'s tests
+  must wrap `std::env::set_var`, which edition 2024 made unsafe. Adding a third needs a Decision Log entry.
 - `thiserror` enums per module. `anyhow` only in `main`.
 - **Do not add a dependency without recording it in the Decision Log** with a one-line rationale.
 

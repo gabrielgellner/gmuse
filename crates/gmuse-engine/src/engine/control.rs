@@ -33,17 +33,17 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use gmuse_proto::{Event, Topic};
 
 use crate::audio::{PlayerConfig, PlayerEvent, PlayerHandle, Shared, State, null};
-use crate::cmd::Command;
-use crate::librarian::Desk;
-use crate::model::entity::Recording;
-use crate::model::id::Id;
+use crate::instruction::{Fader, Instruction, ScopeTo};
+use gmuse_library::librarian::Desk;
+use gmuse_library::model::entity::Recording;
+use gmuse_library::model::id::Id;
 use gmuse_library::model::rows::Listing;
 
 /// What the connection workers can ask the player for.
 pub enum Ask {
     /// A command from the text language, already parsed and already checked
     /// remotable.
-    Apply(Command),
+    Do(Instruction),
     /// Play this recording.
     ///
     /// **By identity, never by path**, and the gate is deliberate:
@@ -271,9 +271,9 @@ fn run(
         // generation change are both discontinuities nobody sent it a command
         // about.
         let mut moved = match asks.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ask::Apply(command)) => apply(
+            Ok(Ask::Do(instruction)) => apply(
                 player,
-                &command,
+                instruction,
                 &mut queue,
                 desk,
                 roots,
@@ -483,10 +483,10 @@ fn source_for(desk: &Arc<Desk>, recording: Id<Recording>) -> Option<crate::audio
 /// Apply one text-language command. Returns whether it was a discontinuity.
 fn apply(
     player: &PlayerHandle,
-    command: &Command,
+    instruction: Instruction,
     queue: &mut super::queue::Playing,
     desk: &Arc<Desk>,
-    // Where `rescan` reconciles, which only the engine knows.
+    // Where `Rescan` reconciles, which only the engine knows.
     roots: &[std::path::PathBuf],
     pending: &mut Option<String>,
     // **What the `playback` event names.** A load starts immediately, unlike a
@@ -495,110 +495,69 @@ fn apply(
     // telling every view the old track was still playing.
     playing: &mut Option<String>,
 ) -> bool {
-    match command {
-        // **No `Command::Play` arm, and that is not an omission.** `play` starts
-        // the *selected* track, so it needs a cursor — `remote::is_remotable`
-        // refuses it and `play_is_refused_and_says_what_to_send_instead` records
-        // the reason. This arm existed and was unreachable, which the two drift
-        // tests below now make impossible in either direction.
-        //
-        // Resuming is `pause`, which toggles. #225 is the argument for the
-        // protocol carrying three distinct verbs so a sender does not have to
-        // resolve one against the run state.
-        Command::Pause => {
+    // **Exhaustive, with no catch-all** — #213. Every `Instruction` is something
+    // the engine can do, because that is the only way one can be constructed: the
+    // boundary's translation from `Command` either produces one or refuses with a
+    // reason. So a new variant does not compile until it is handled here, which is
+    // the guarantee two source-scraping tests used to approximate.
+    match instruction {
+        Instruction::Toggle => {
             player.toggle();
             true
         }
-        Command::Stop => {
+        Instruction::Stop => {
             player.stop();
             true
         }
-        Command::Seek(spec) => {
-            if let Some(to) = seek_of(spec) {
-                player.seek(to);
-                return true;
-            }
-            false
+        Instruction::Seek(to) => {
+            player.seek(to);
+            true
         }
-        // **Skip to the next track, which the engine can now answer** — #232
-        // gave it the queue, so `next` no longer needs a view to resolve it.
+        // **Skip to the next track, which the engine answers** — #232 gave it the
+        // queue, so `next` no longer needs a view to resolve it.
         //
         // Unlike `NeedNext` this is a *load*, not a splice: the current track is
-        // being abandoned rather than played out, so there is nothing to join
-        // onto and `pending` is not the right slot.
-        Command::Next => match queue
-            .take_next()
-            .and_then(|(id, _)| recording_of(desk, id).map(|rec| (id, rec)))
-        {
-            Some((id, recording)) => match source_for(desk, recording) {
-                Some(source) => {
-                    queue.now_playing(Some(id));
-                    *pending = None;
-                    *playing = Some(recording.to_string());
-                    player.load(source);
-                    true
-                }
-                None => false,
-            },
-            None => false,
-        },
-        // **`prev` is the pool's previous, and always was** — #233.
-        //
-        // An earlier note here refused this, on the grounds that going back is
-        // not the inverse of `take_next` because the queue is consumed by being
-        // played from. That is true and it is not what `prev` means: `next::prev`
-        // walks the *pool* backwards and never reads the queue, so a view's
-        // `prev` has always been "the previous row in the pool's order". The
-        // engine doing the same thing is faithful rather than inventive.
+        // being abandoned rather than played out, so there is nothing to join onto
+        // and `pending` is not the right slot.
+        Instruction::Next => {
+            let picked = queue.take_next().map(|(id, _)| id);
+            load_picked(player, queue, desk, pending, playing, picked)
+        }
+        // **`prev` is the pool's previous, and always was.** An earlier note here
+        // refused it, on the grounds that going back is not the inverse of
+        // `take_next` because the queue is consumed by being played from. True, and
+        // not what `prev` means: `next::prev` walks the *pool* backwards and never
+        // reads the queue, so a view's `prev` has always been "the previous row in
+        // the pool's order".
         //
         // A play *history* is still a design question, and a different feature.
-        Command::Prev => match queue
-            .take_prev()
-            .and_then(|id| recording_of(desk, id).map(|rec| (id, rec)))
-        {
-            Some((id, recording)) => match source_for(desk, recording) {
-                Some(source) => {
-                    queue.now_playing(Some(id));
-                    *pending = None;
-                    *playing = Some(recording.to_string());
-                    player.load(source);
-                    true
-                }
-                None => false,
-            },
-            None => false,
-        },
+        Instruction::Prev => {
+            let picked = queue.take_prev();
+            load_picked(player, queue, desk, pending, playing, picked)
+        }
 
-        // **A volume change is not a transport discontinuity**, so §7.8 has
-        // nothing to say about it and this returns `false` — but it *acts*, which
-        // it did not before. `is_remotable` admitted `vol` and this arm dropped
-        // it, so `gmuse ctl vol 50` answered `{"accepted": true}` and did nothing.
-        //
-        // The same arithmetic the view does: absolute sets, relative adds to what
-        // the fader is at now.
-        Command::Vol(spec) => {
-            let to = match spec {
-                crate::cmd::VolSpec::Absolute(v) => *v,
-                crate::cmd::VolSpec::Relative(d) => player.volume() + d,
+        // **A volume change is not a transport discontinuity**, so §7.8 has nothing
+        // to say about it and this returns `false` — it still acts, which before
+        // #233 it did not.
+        Instruction::Volume(fader) => {
+            let to = match fader {
+                Fader::To(v) => v,
+                Fader::By(d) => player.volume() + d,
             };
             player.set_volume(to);
             false
         }
 
-        // **A rating is about what is playing**, which is the one subject the
-        // engine has without a view. The view's fallback — rate whatever is under
-        // the cursor — is a view's, and `Ask::Apply` has no cursor by I9.
-        Command::Rate(spec) => {
+        // **A rating is about what is playing**, which is the one subject the engine
+        // has without a view. The view's fallback — rate whatever is under the
+        // cursor — is a view's, and an `Instruction` carries no cursor by I9.
+        Instruction::Rate(stars) => {
             let Some(recording) = playing
                 .as_deref()
                 .and_then(|r| r.parse::<uuid::Uuid>().ok())
                 .map(gmuse_library::model::id::Id::from_uuid)
             else {
                 return false;
-            };
-            let stars = match spec {
-                crate::cmd::RateSpec::Set(n) => Some(*n),
-                _ => None,
             };
             let now = gmuse_library::history::now_ms();
             if let Some(appender) = desk.appender() {
@@ -607,62 +566,58 @@ fn apply(
             false
         }
 
-        // **What plays next, set through the same keys the `:` line uses** —
-        // §7.12, #233. `SettingKey::not_the_engines` is what decides which keys
-        // reach here, and `is_remotable` refuses the rest before this.
-        Command::Set { key, value } => {
-            match value {
-                crate::cmd::SettingValue::Scope(mode) => {
-                    queue.set_scope(*mode);
-                }
-                crate::cmd::SettingValue::Bool(on) => {
-                    queue.set_mode(*key, *on);
-                }
-                // A setting the engine owns whose value is not a bool or a scope
-                // is one `not_the_engines` refuses, so there is nothing to do.
-                _ => {}
-            }
+        // **What plays next** — §6 assigns these to the control thread.
+        Instruction::Mode(which, to) => {
+            queue.set_mode(which, to);
             false
         }
-        Command::Toggle(key) => {
-            if *key == crate::cmd::SettingKey::Scope {
-                queue.set_scope(queue.scope().cycle());
-            } else {
-                let on = !queue.mode(*key);
-                queue.set_mode(*key, on);
-            }
+        Instruction::Scope(to) => {
+            let mode = match to {
+                ScopeTo::Set(mode) => mode,
+                ScopeTo::Cycle => queue.scope().cycle(),
+            };
+            queue.set_scope(mode);
             false
         }
 
-        // **A scan is the librarian's job, and `library.scan` is its front door.**
-        // Routed rather than duplicated: `roots` lives on the engine and the
-        // appender is the only thing that may start one (#237).
-        Command::Rescan => {
+        // **A scan is the librarian's job.** Routed rather than duplicated: `roots`
+        // lives on the engine and the appender is the only thing that may start one
+        // (#237).
+        Instruction::Rescan => {
             if let Some(appender) = desk.appender() {
                 appender.scan(roots.to_vec(), None);
             }
             false
         }
-
-        // **Everything else needs a view** — a cursor, a selection, a pane — and
-        // `remote::is_remotable` refuses it at the ingress. Reaching here means
-        // the gate and this match have drifted, which is what
-        // `every_remotable_command_is_one_the_engine_carries_out` exists to
-        // prevent: the previous drift made `set`, `prev`, `vol` and `rate` all
-        // answer `{"accepted": true}` and do nothing.
-        _ => false,
     }
 }
 
-/// Turn the text language's seek into the audio path's.
-fn seek_of(spec: &crate::cmd::SeekSpec) -> Option<crate::audio::SeekTo> {
-    use crate::audio::SeekTo;
-    match spec {
-        crate::cmd::SeekSpec::Absolute(secs) => {
-            Some(SeekTo::Absolute(Duration::from_secs_f64(secs.max(0.0))))
-        }
-        crate::cmd::SeekSpec::Relative(delta) => Some(SeekTo::Relative(*delta)),
-    }
+/// Load whatever the queue picked, or do nothing if it picked nothing.
+///
+/// Shared by `Next` and `Prev`, which differ only in how the pick is made — and
+/// having them differ in anything else is how the first version of `next` came to
+/// tell every view the old track was still playing.
+fn load_picked(
+    player: &PlayerHandle,
+    queue: &mut super::queue::Playing,
+    desk: &Arc<Desk>,
+    pending: &mut Option<String>,
+    playing: &mut Option<String>,
+    picked: Option<gmuse_library::model::rows::CopyId>,
+) -> bool {
+    let Some((id, recording)) = picked.and_then(|id| recording_of(desk, id).map(|r| (id, r)))
+    else {
+        // End of pool, or a row the library has and this device does not.
+        return false;
+    };
+    let Some(source) = source_for(desk, recording) else {
+        return false;
+    };
+    queue.now_playing(Some(id));
+    *pending = None;
+    *playing = Some(recording.to_string());
+    player.load(source);
+    true
 }
 
 /// §7.8's payload for the main player.
@@ -697,103 +652,4 @@ fn playback_event(
             "rate": 1.0,
         }),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    /// **Every command the socket admits is one this thread carries out** — #233.
-    ///
-    /// `remote::is_remotable` is the gate and `apply` is the doing, and they were
-    /// two independent lists. They drifted in both directions: `set`, `prev`,
-    /// `vol` and `rate` were admitted and silently ignored — `{"accepted": true}`
-    /// and nothing happened — while `play` was handled here and refused at the
-    /// gate.
-    ///
-    /// A source comparison rather than a call, because `apply` needs a
-    /// `PlayerHandle` and that needs a device. What it proves is the thing that
-    /// actually went wrong: a name on one list and not the other.
-    #[test]
-    fn every_remotable_command_is_one_the_engine_carries_out() {
-        let gate = body_of(
-            "src/remote.rs",
-            "pub fn is_remotable(cmd: &Command) -> bool {",
-        );
-        let doing = body_of("src/engine/control.rs", "fn apply(");
-
-        // Every `Command::X` the gate admits. `Set` and `Toggle` are named there
-        // too, and their arm delegates to `SettingKey::not_the_engines`.
-        let admitted: Vec<String> = names_in(&gate);
-        assert!(admitted.len() >= 9, "the gate was not parsed: {admitted:?}");
-        let handled = names_in(&doing);
-        let missing: Vec<&String> = admitted.iter().filter(|c| !handled.contains(c)).collect();
-        assert!(
-            missing.is_empty(),
-            "the socket admits these and `apply` does not name them, so they would \
-             be accepted and silently ignored: {missing:?}"
-        );
-    }
-
-    /// The other direction: nothing is handled here that the gate refuses.
-    ///
-    /// Not a symmetry for its own sake — a command `apply` acts on and the gate
-    /// rejects is a feature nobody can reach, which is how `play` sat unreachable
-    /// over `--remote` while working in process.
-    #[test]
-    fn nothing_the_engine_carries_out_is_refused_at_the_gate() {
-        let gate = names_in(&body_of(
-            "src/remote.rs",
-            "pub fn is_remotable(cmd: &Command) -> bool {",
-        ));
-        let doing = names_in(&body_of("src/engine/control.rs", "fn apply("));
-        let stranded: Vec<&String> = doing.iter().filter(|c| !gate.contains(c)).collect();
-        assert!(
-            stranded.is_empty(),
-            "`apply` acts on these and the socket refuses them, so nothing can \
-             reach them: {stranded:?}"
-        );
-    }
-
-    /// The `Command::X` names mentioned in a chunk of source, deduplicated.
-    ///
-    /// **Comments stripped first.** Both functions explain in prose which commands
-    /// they leave out and why, and a scrape that counted those would report a name
-    /// as handled because somebody wrote a sentence about not handling it. Learned
-    /// the hard way on a different scrape in this repo, which counted string
-    /// literals inside a forbidden-list.
-    fn names_in(text: &str) -> Vec<String> {
-        let code: String = text
-            .lines()
-            .map(|line| match line.find("//") {
-                Some(at) => &line[..at],
-                None => line,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let text = code.as_str();
-        let mut out = Vec::new();
-        for (at, _) in text.match_indices("Command::") {
-            let name: String = text[at + "Command::".len()..]
-                .chars()
-                .take_while(|c| c.is_alphanumeric())
-                .collect();
-            if !name.is_empty() && !out.contains(&name) {
-                out.push(name);
-            }
-        }
-        out.sort();
-        out
-    }
-
-    /// The body of a function, read from source by its signature line.
-    ///
-    /// Paths are relative to the crate root, which is where `cargo test` runs.
-    fn body_of(file: &str, signature: &str) -> String {
-        let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{file}: {e}"));
-        let start = text
-            .find(signature)
-            .unwrap_or_else(|| panic!("{file}: no {signature}"));
-        let rest = &text[start..];
-        let end = rest.find("\n}\n").expect("the end of the function");
-        rest[..end].to_string()
-    }
 }
