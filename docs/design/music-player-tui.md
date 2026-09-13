@@ -5839,6 +5839,11 @@ Append here as decisions are made. Format: date, decision, rationale.
   The sweep's test asserts both halves, and the second is the one that matters: a sweep that deleted everything would
   pass the first and cost a real library its fold every time anything else wrote.
 
+  **And retiring the old fixed-path file deleted the snapshot it had just saved.** `projection.postcard` is a name a
+  caller may still pass — a test in `projection/mod.rs` does — so removing it from "the directory being written to"
+  removed the wrong file. The pre-push hook caught it, which is the case for a test that names its own path rather than
+  taking one from the code under test.
+
   **Not done, and it is the half that saves the memory.** An attached TUI still calls `Instance::open`. Reading the
   snapshot instead needs `fold` to build an `Answer` from a projection rather than from `log.records()`, which is #256's
   refactor — so the two issues meet there rather than being independent.
