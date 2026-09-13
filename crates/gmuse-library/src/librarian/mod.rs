@@ -253,9 +253,27 @@ impl Desk {
     /// `None` if the librarian thread has gone, which for a live desk it has not. A
     /// caller that gets one has no programme to play and should stop rather than guess.
     pub fn programme(&self, ask: programme::Ask) -> Option<programme::Reply> {
+        self.programme_later(ask)?.recv().ok()
+    }
+
+    /// **The same ask, without waiting for the answer** — #257.
+    ///
+    /// For the engine's control thread, which must not block on this one. Jobs are FIFO,
+    /// so a refill queued behind a scan of 7,267 files would wait seconds — and I16 keeps
+    /// the librarian off the control thread precisely so a long job cannot stall
+    /// transport.
+    ///
+    /// **The window is what makes that safe.** The engine holds two or three cues, so it
+    /// is not waiting on this answer to play anything; it polls the receiver on a later
+    /// tick and absorbs the reply whenever it arrives. Two cues of four-minute tracks is
+    /// eight minutes of slack against a librarian that is busy.
+    pub fn programme_later(
+        &self,
+        ask: programme::Ask,
+    ) -> Option<crossbeam_channel::Receiver<programme::Reply>> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.jobs.send(Job::Programme { ask, reply: tx }).ok()?;
-        rx.recv().ok()
+        Some(rx)
     }
 
     /// Start the thread and publish the first fold.

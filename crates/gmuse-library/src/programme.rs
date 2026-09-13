@@ -197,6 +197,28 @@ impl Programme {
         self.position(token).map(|at| self.entries[at])
     }
 
+    /// The **first** entry holding this row.
+    ///
+    /// First, because a programme may hold one recording twice and a caller naming a row
+    /// has not said which occurrence it means. Anything that needs to be exact holds a
+    /// token — which is what tokens are for.
+    pub fn first_of(&self, row: CopyId) -> Option<Entry> {
+        self.entries.iter().copied().find(|e| e.row == row)
+    }
+
+    /// A window starting **at** this entry rather than after it.
+    ///
+    /// What a play gesture wants: the track a person picked is the first thing to sound, so
+    /// it is the first cue rather than something already playing.
+    pub fn window_at(&self, token: EntryToken, n: usize) -> Vec<Entry> {
+        let Some(first) = self.entry(token) else {
+            return Vec::new();
+        };
+        let mut out = vec![first];
+        self.extend_from(&mut out, token, n);
+        out
+    }
+
     /// **What follows this entry, under the mode in force.** The one function every
     /// playback mode collapses into.
     ///

@@ -43,6 +43,24 @@ pub enum Ask {
         rows: Vec<CopyId>,
         window: usize,
     },
+    /// **Build a programme from the library and cue from one row** — a play gesture.
+    ///
+    /// The caller names a row, a narrowing, and whether to shuffle; the librarian
+    /// materialises the pool, orders it, and cues from `at`. **The pool never crosses**,
+    /// which is the point of the ask existing: scope `All` is 7,271 rows and a caller has
+    /// no business holding them.
+    ///
+    /// `at` absent cues from the head — "play this album" rather than "play this track".
+    Open {
+        at: Option<CopyId>,
+        scope: crate::next::Scope,
+        shuffle: bool,
+        /// Seeds the permutation. **The same seed shuffles the same pool the same way**, so
+        /// a reshuffle is a new seed rather than a hidden `rand` call, and a test can assert
+        /// an order.
+        seed: u64,
+        window: usize,
+    },
     /// **The `n` cues after this token** — the refill.
     ///
     /// `version` is what the caller last saw. A mismatch is not by itself an error: the
@@ -146,6 +164,32 @@ pub(crate) fn answer(
             }
         }
 
+        Ask::Open {
+            at,
+            scope,
+            shuffle,
+            seed,
+            window,
+        } => {
+            let ordered = pool(library, at, scope, shuffle, seed);
+            plan.replace(ordered);
+            let version = plan.version().as_u64();
+
+            // **Cue from the row the person picked, not from the head.** `at` may be
+            // absent (play the album) or no longer in the pool at all — a scope narrowed
+            // under it, or it was forgotten — and starting at the top is what `next.rs`
+            // has always done in that case, for the same reason: it is the least
+            // surprising thing that is still playing something.
+            let entries = match at.and_then(|row| plan.first_of(row)) {
+                Some(entry) => plan.window_at(entry.token, window),
+                None => plan.head(window),
+            };
+            Reply::Window {
+                version,
+                cues: cues_for(entries, library, device),
+            }
+        }
+
         Ask::After { token, n } => {
             let token = EntryToken::from_u64(token);
             if plan.entry(token).is_none() {
@@ -217,6 +261,36 @@ pub(crate) fn answer(
     }
 }
 
+/// **The pool, narrowed and ordered.**
+///
+/// It lived in the engine, which held a materialised `Shelf` of the whole library and
+/// rebuilt it on every fold, because §4.4 forbids the control thread from running a query
+/// and `NeedNext` has a deadline. Here there is no deadline: this runs once per play
+/// gesture on the thread that already owns the fold, and what crosses afterwards is a
+/// window of three.
+///
+/// **`next::scoped` and `next::shuffled` are called rather than reimplemented.** A ported
+/// copy of the shuffle was written first and was wrong in a way nothing could have seen —
+/// `next::split_mix64` does not advance its argument, so a canonical SplitMix64 produces a
+/// different permutation from the same seed. One implementation is the only version of
+/// that check which cannot rot.
+fn pool(
+    library: &crate::model::seam::Librarian,
+    at: Option<CopyId>,
+    scope: crate::next::Scope,
+    shuffle: bool,
+    seed: u64,
+) -> Vec<CopyId> {
+    let members: std::collections::HashSet<CopyId> = Listing::rows(library).into_iter().collect();
+    let shelf = crate::shelf::Shelf::from_members(library, members, true);
+    let narrowed = crate::next::scoped(&shelf, at, scope);
+    if shuffle {
+        crate::next::shuffled(&narrowed, seed)
+    } else {
+        narrowed
+    }
+}
+
 /// Turn entries into cues, dropping any this device cannot open.
 ///
 /// **Dropped rather than cued with an unopenable path.** A row whose audio lives on a
@@ -282,8 +356,15 @@ mod tests {
             );
         }
         let l = crate::fixture::from_holdings(&held);
-        let mut rows = crate::model::rows::Listing::rows(&l);
-        rows.sort();
+        // **In the order a programme will hold them**, which is the shelf's — by who made
+        // it, then the release, then the track. Sorting by `CopyId` instead sorts by a uuid
+        // scalar, and `rows[2]` of four could then be the last entry a programme holds,
+        // which is how two tests below first read "the window was short".
+        let members: std::collections::HashSet<CopyId> =
+            crate::model::rows::Listing::rows(&l).into_iter().collect();
+        let rows = crate::shelf::Shelf::from_members(&l, members, true)
+            .sorted()
+            .to_vec();
         (l, rows)
     }
 
@@ -595,5 +676,131 @@ mod tests {
             ),
             other => panic!("the token went stale rather than running out: {other:?}"),
         }
+    }
+
+    /// **A play gesture builds the programme, and the picked row sounds first.**
+    #[test]
+    fn open_cues_from_the_row_that_was_picked() {
+        let (l, rows) = library(4);
+        let mut plan = Programme::new();
+
+        let picked = rows[2];
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Open {
+                at: Some(picked),
+                scope: crate::next::Scope::All,
+                shuffle: false,
+                seed: 0,
+                window: 2,
+            },
+        ) else {
+            panic!("an open did not answer with a window");
+        };
+
+        assert_eq!(plan.len(), 4, "the whole pool did not become the programme");
+        assert_eq!(cues.len(), 2, "the window was short");
+        assert_eq!(
+            plan.first_of(picked).map(|e| e.token.as_u64()),
+            Some(cues[0].token),
+            "the first cue was not the row that was picked"
+        );
+    }
+
+    /// **The pool never crosses** — the whole reason `Open` exists rather than `Play`.
+    ///
+    /// Scope `All` is 7,271 rows on the real library. A caller that had to send them would
+    /// be a caller holding a pool, which is what this design took away from the engine.
+    #[test]
+    fn open_sends_a_window_and_not_a_pool() {
+        let (l, rows) = library(20);
+        let mut plan = Programme::new();
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Open {
+                at: Some(rows[0]),
+                scope: crate::next::Scope::All,
+                shuffle: false,
+                seed: 0,
+                window: 3,
+            },
+        ) else {
+            panic!("no window");
+        };
+        assert_eq!(
+            plan.len(),
+            20,
+            "the pool was not materialised librarian-side"
+        );
+        assert_eq!(cues.len(), 3, "more than a window crossed");
+    }
+
+    /// **The shuffle is `next::shuffled`, not a copy of it.**
+    ///
+    /// A ported copy was written first and was wrong invisibly: `next::split_mix64` does not
+    /// advance its argument — the caller reassigns — so a canonical SplitMix64 that advances
+    /// internally gives a different permutation from the same seed. Nothing in the program
+    /// would have noticed, because no order is asserted anywhere else.
+    ///
+    /// So this asserts against `next::shuffled` directly. If `Ask::Open` ever grows its own
+    /// copy, the two diverge and this says so.
+    #[test]
+    fn open_shuffles_exactly_as_next_does() {
+        let (l, rows) = library(8);
+        let mut plan = Programme::new();
+        ask(
+            &mut plan,
+            &l,
+            Ask::Open {
+                at: None,
+                scope: crate::next::Scope::All,
+                shuffle: true,
+                seed: 12_345,
+                window: 1,
+            },
+        );
+
+        let members: std::collections::HashSet<CopyId> = rows.iter().copied().collect();
+        let shelf = crate::shelf::Shelf::from_members(&l, members, true);
+        let expected = crate::next::shuffled(shelf.sorted(), 12_345);
+
+        let got: Vec<CopyId> = plan.entries().iter().map(|e| e.row).collect();
+        assert_eq!(got.len(), 8, "the shuffled pool lost rows");
+        assert_ne!(
+            got,
+            shelf.sorted().to_vec(),
+            "a seed of 12345 left eight rows in sorted order, so shuffle did nothing"
+        );
+        assert_eq!(got, expected, "the order diverged from next::shuffled");
+    }
+
+    /// **A narrowing with nothing to narrow to falls back to the whole pool**, rather than
+    /// playing nothing.
+    ///
+    /// `next.rs` has always done this and says why: a scope that silently played nothing
+    /// would look like a broken player. Asserted here because `Ask::Open` is a second
+    /// caller of the rule and a fallback is the easiest thing to drop.
+    #[test]
+    fn a_narrowing_with_no_row_to_narrow_to_keeps_the_whole_pool() {
+        let (l, _rows) = library(5);
+        let mut plan = Programme::new();
+        ask(
+            &mut plan,
+            &l,
+            Ask::Open {
+                at: None,
+                scope: crate::next::Scope::Inner,
+                shuffle: false,
+                seed: 0,
+                window: 1,
+            },
+        );
+        assert_eq!(
+            plan.len(),
+            5,
+            "an unanchored narrowing emptied the programme"
+        );
     }
 }

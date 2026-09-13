@@ -298,27 +298,35 @@ fn step(input: &NextInput<'_>, dir: Direction) -> Option<(CopyId, Source)> {
 
 /// The candidate pool: the active source, narrowed by `scope` when that
 /// source is the library.
+/// **The library pool, narrowed by scope relative to one row.**
+///
+/// `pub(crate)` for the same reason as [`shuffled`]: the librarian's `Ask::Open` builds a
+/// programme from exactly this, and a second copy of the fallback rules would drift.
+pub(crate) fn scoped(shelf: &Shelf, at: Option<CopyId>, scope: Scope) -> Vec<CopyId> {
+    match scope {
+        Scope::All => shelf.sorted().to_vec(),
+        Scope::Outer | Scope::Inner => {
+            // Narrowing is relative to what is playing. With nothing playing there is no
+            // artist to narrow to, so fall back to the whole library rather than returning
+            // nothing at all.
+            let Some(current) = at else {
+                return shelf.sorted().to_vec();
+            };
+            let Some((artist, album)) = shelf.locate(current) else {
+                return shelf.sorted().to_vec();
+            };
+            match scope {
+                Scope::Outer => shelf.artist_tracks(artist),
+                _ => shelf.album_tracks(artist, album).to_vec(),
+            }
+        }
+    }
+}
+
 fn pool(input: &NextInput<'_>) -> Vec<CopyId> {
     match input.active {
         ActiveSource::Playlist => input.playlist.entries().to_vec(),
-        ActiveSource::Library => match input.scope {
-            Scope::All => input.library.sorted().to_vec(),
-            Scope::Outer | Scope::Inner => {
-                // Narrowing is relative to what is playing. With nothing
-                // playing there is no artist to narrow to, so fall back to the
-                // whole library rather than returning nothing at all.
-                let Some(current) = input.current else {
-                    return input.library.sorted().to_vec();
-                };
-                let Some((artist, album)) = input.library.locate(current) else {
-                    return input.library.sorted().to_vec();
-                };
-                match input.scope {
-                    Scope::Outer => input.library.artist_tracks(artist),
-                    _ => input.library.album_tracks(artist, album).to_vec(),
-                }
-            }
-        },
+        ActiveSource::Library => scoped(input.library, input.current, input.scope),
     }
 }
 
@@ -333,7 +341,13 @@ fn pool(input: &NextInput<'_>) -> Vec<CopyId> {
 ///
 /// The cost is that repeating a shuffled pool replays the same order unless
 /// the caller advances `rng_state`, which is what [`Source::Wrapped`] is for.
-fn shuffled(pool: &[CopyId], seed: u64) -> Vec<CopyId> {
+///
+/// **`pub(crate)` so the librarian's `Ask::Open` calls it rather than porting it.** A copy
+/// was written and was subtly wrong in a way nothing could have seen: `split_mix64` below
+/// does not advance its argument — the caller reassigns — so a canonical SplitMix64 that
+/// advances internally produces a different permutation from the same seed. Two shuffle
+/// orders that disagree invisibly is exactly the drift this codebase keeps paying for.
+pub(crate) fn shuffled(pool: &[CopyId], seed: u64) -> Vec<CopyId> {
     let mut order = pool.to_vec();
     let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
     // Fisher-Yates, so every permutation is equally likely and no track can
