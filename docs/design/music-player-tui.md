@@ -5625,6 +5625,35 @@ Append here as decisions are made. Format: date, decision, rationale.
   and a record. Same shape as the "seven tests" that turned out to be five on 2026-09-12: a count taken from a pattern
   rather than from reading each hit.
 
+- **2026-09-13** **The bounded queue was not the one that needed a limit** (#251, §7.10, I1). §7.10 says a client that
+  stays over the limit MAY be disconnected, and nothing did — `Outbox::over_limit` measured the condition and its
+  comment handed the decision to _"whoever owns the socket"_, who turned out to be nobody. Found by a dead-code sweep,
+  because an unreachable `pub fn` was the only visible trace of a missing policy.
+
+  **What it guards is the opposite of what the name suggests.** Events are bounded already: the overflow discards them
+  and puts back a resync notice, which is the whole of §7.10's slow-client story and needs no disconnect.
+  `push_response` has **no bound at all**, and deliberately — _"the bound is not their fault and somebody is waiting on
+  each."_ So the condition `over_limit` actually detects is a client with more unanswered questions outstanding than the
+  entire outbox holds: one that asks and never reads. That is unbounded growth in the engine, caused by a peer, which is
+  why the clause exists.
+
+  **`close()` could not do it, and that is the design content.** A `Client` has two threads and neither is waiting on
+  our condvar once the pressure is real: the writer is parked inside `write` with a full send buffer, and the reader is
+  parked inside `read`. `close()` releases a condvar nobody is on. So the connection now holds a third clone of its
+  socket for no purpose but `shutdown(Both)`, which returns both threads with an error — a path they already handled, so
+  nothing else changed.
+
+  It fires from `respond` rather than from the writer, for the same reason: **the thread that would notice is the thread
+  that is stuck.** And after the outbox lock is released, not inside it, because `hang_up` calls `close`, which takes
+  that lock — a deadlock that would appear only under exactly the load this exists to handle.
+
+  **The test needed two guards, and the second was nearly missed.** It completes a handshake first, because "the socket
+  is closed" reads identically whether we were hung up on or never let in. Then it fires 4,000 requests and reads none —
+  which fails with _"the engine kept answering 4000 unread requests without ever disconnecting"_ when the hang-up is
+  removed. The near-miss: the drain loop originally treated **any** read error as a disconnect, so a read _timeout_ on a
+  loaded machine would have passed as success. A timeout now panics with its own message. That is the third time this
+  week a test's failure path has been the thing that needed asserting.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

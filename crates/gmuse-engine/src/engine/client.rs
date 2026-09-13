@@ -44,6 +44,16 @@ pub struct Client {
     ready: Condvar,
     topics: Mutex<Vec<Topic>>,
     gone: AtomicBool,
+    /// **Something to hang up with** — #251, §7.10.
+    ///
+    /// A socket handle, so the engine can end a connection rather than only stop
+    /// queueing for it. `close()` alone cannot: it releases a writer waiting on the
+    /// condvar, but a writer already inside `write` is parked in the kernel with a full
+    /// send buffer, and the reader is parked in `read`. Shutting the socket down returns
+    /// both of them with an error, which is a path they already handle.
+    ///
+    /// `None` in tests that need no socket, which is most of them.
+    hangup: Mutex<Option<std::os::unix::net::UnixStream>>,
 }
 
 impl Client {
@@ -55,7 +65,31 @@ impl Client {
             // that never subscribes is never sent an event it did not want.
             topics: Mutex::new(Vec::new()),
             gone: AtomicBool::new(false),
+            hangup: Mutex::new(None),
         }
+    }
+
+    /// Give this client a socket to be hung up with — #251.
+    ///
+    /// Separate from `new` because the connection is built before its socket is cloned,
+    /// and because every test that does not have one would otherwise have to invent one.
+    pub fn on_socket(&self, stream: std::os::unix::net::UnixStream) {
+        *self.hangup.lock().expect("hangup") = Some(stream);
+    }
+
+    /// **End the connection, because this client is not reading** — #251, §7.10.
+    ///
+    /// §7.10 says a client that stays over the limit MAY be disconnected, and until now
+    /// nothing did: `over_limit` measured it and the comment handed the decision to
+    /// "whoever owns the socket", who was nobody.
+    ///
+    /// The reason it has to be a shutdown and not a `close` is [`Self::hangup`]: both of
+    /// this connection's threads are parked in the kernel, not on our condvar.
+    fn hang_up(&self) {
+        if let Some(socket) = self.hangup.lock().expect("hangup").as_ref() {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+        self.close();
     }
 
     pub fn subscribe(&self, topics: &[Topic]) -> Vec<Topic> {
@@ -80,12 +114,29 @@ impl Client {
     }
 
     /// Queue an answer. Never dropped, and never blocking.
+    ///
+    /// **This is the path §7.10's limit actually guards** (#251). Events are bounded by
+    /// the overflow — they are discarded and a resync notice replaces them — but
+    /// `push_response` has no bound at all, and deliberately: *"the bound is not their
+    /// fault and somebody is waiting on each."* So a client that asks and never reads
+    /// makes the engine hold every answer, without limit.
+    ///
+    /// Exceeding the capacity in *responses* therefore means something specific and
+    /// pathological: more unanswered questions outstanding than the whole outbox holds.
+    /// That is the condition to hang up on, and it is not the same as "slow".
     pub fn respond(&self, response: Response) {
-        {
+        let over = {
             let mut outbox = self.outbox.lock().expect("outbox");
             outbox.push_response(response);
-        }
+            outbox.over_limit()
+        };
         self.ready.notify_one();
+        // **After the lock, not inside it.** `hang_up` calls `close`, which takes the
+        // outbox lock — doing this while still holding it is a deadlock, and one that
+        // would only appear under exactly the load this exists to handle.
+        if over {
+            self.hang_up();
+        }
     }
 
     /// Offer an event. Ignored unless this client asked for the topic.

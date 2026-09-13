@@ -131,6 +131,98 @@ fn a_graceful_stop_removes_its_socket() {
     );
 }
 
+/// **A client that asks and never reads is hung up on** — #251, §7.10, I1.
+///
+/// §7.10 says a client staying over the limit MAY be disconnected, and for a while
+/// nothing did: `Outbox::over_limit` measured the condition and its comment handed the
+/// decision to "whoever owns the socket", who was nobody.
+///
+/// **Responses are the unbounded queue**, which is what makes this worth enforcing.
+/// Events are discarded on overflow and replaced by a resync notice; `push_response` has
+/// no bound at all, deliberately — somebody is waiting on each answer. So a client that
+/// fires requests and never reads makes the engine hold every reply, for ever.
+///
+/// A raw socket rather than `gmuse_client::Client`, because the client library reads its
+/// replies and the whole point here is not to.
+#[test]
+fn a_client_that_asks_and_never_reads_is_disconnected() {
+    use std::io::{Read, Write};
+
+    let engine = start("never-reads");
+    let mut sock = std::os::unix::net::UnixStream::connect(&engine.socket).expect("connect");
+
+    // **The instrument is attached.** Without a completed handshake this test would pass
+    // against an engine that refused the connection outright — "the socket is closed"
+    // reads identically whether we were hung up on or never let in.
+    writeln!(
+        sock,
+        r#"{{"jsonrpc":"2.0","id":"hello","method":"hello","params":{{"client":"greedy","protocol":"gmuse/0"}}}}"#
+    )
+    .expect("say hello");
+    sock.flush().expect("flush");
+    let mut greeting = [0u8; 1];
+    sock.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
+    assert!(
+        matches!(sock.read(&mut greeting), Ok(1)),
+        "the engine never answered the handshake, so nothing below is about being \
+         disconnected"
+    );
+
+    // Now ask a great deal and read none of it. Each `engine.status` reply is a few
+    // hundred bytes, so this is far more than any socket buffer will absorb — the
+    // remainder has to pile up in the engine's own outbox, which is the condition
+    // §7.10 names.
+    let mut asks = 0;
+    let mut refused = false;
+    for i in 0..4000 {
+        let line =
+            format!(r#"{{"jsonrpc":"2.0","id":"{i}","method":"engine.status","params":null}}"#);
+        if writeln!(sock, "{line}").is_err() || sock.flush().is_err() {
+            // The engine shut the socket down under us, which is the outcome.
+            refused = true;
+            break;
+        }
+        asks += 1;
+    }
+
+    // Either the write failed because we were hung up on, or it all went out and the
+    // read end is now closed. Both are the same verdict from this side.
+    if !refused {
+        let mut sink = [0u8; 65536];
+        let mut spins = 0;
+        loop {
+            match sock.read(&mut sink) {
+                Ok(0) => break, // EOF — hung up on
+                Ok(_) => {}     // draining the replies it did send
+                // **A timeout is not a disconnect**, and treating it as one would make
+                // this pass on a slow machine against an engine that never hung up —
+                // the read timeout above is a guard against hanging, not a verdict.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("the engine stopped answering but never closed: {e}")
+                }
+                Err(_) => break, // reset — also hung up on
+            }
+            spins += 1;
+            assert!(
+                spins < 2000,
+                "the engine kept answering {asks} unread requests without ever \
+                 disconnecting"
+            );
+        }
+    }
+
+    assert!(
+        asks > 0,
+        "no request was ever sent, so the limit was never approached"
+    );
+}
+
 #[test]
 fn the_engine_starts_and_answers_a_handshake() {
     let engine = start("handshake");

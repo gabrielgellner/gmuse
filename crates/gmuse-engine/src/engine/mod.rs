@@ -340,6 +340,13 @@ fn converse(
     };
 
     let conn = Arc::new(client::Client::new(client::DEFAULT_CAPACITY));
+    // **A handle to hang up with** — #251, §7.10. A third clone of the same socket,
+    // used for nothing but `shutdown`: a client that asks and never reads accumulates
+    // responses without bound, and ending the connection is the only way to stop it.
+    // Failing to clone costs the hang-up, not the connection.
+    if let Ok(hangup) = stream.try_clone() {
+        conn.on_socket(hangup);
+    }
     subscribers.add(Arc::clone(&conn));
 
     // The writer. It outlives the reader by design: a client that stops sending
