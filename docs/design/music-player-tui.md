@@ -5731,6 +5731,34 @@ Append here as decisions are made. Format: date, decision, rationale.
   The 5-run medians are worth keeping because a single sample said the opposite: 24.3 ms against main's 23.0 ms, where
   individual runs ranged 22.5–25.0 on both sides.
 
+- **2026-09-13** **DEPENDENCY: `mdbook-mermaid`, for two diagrams that ASCII was straining to hold** (#247). Added to
+  the docs build — not to any crate — so the rule about recording a dependency applies in spirit rather than to
+  `Cargo.toml`.
+
+  **What it buys.** A ` ```mermaid ` fence renders in the book. The two converted are `layers.md`'s four-systems diagram
+  (21 lines of box art) and `access-layers.md`'s four-layer stack (24 lines). Both were hand-counted column alignment;
+  the twelve smaller diagrams in these documents are left alone, because `release → medium → track` reads better as
+  three words than as a graph.
+
+  **What it cost.** 2.5 MB of vendored javascript and a second binary in the pages job. The javascript is _generated_
+  rather than committed — `mdbook-mermaid install` reproduces it and is idempotent on a `book.toml` that already names
+  the preprocessor.
+
+  **The finding that settled it.** `domain-model.md` already had two mermaid class diagrams, and
+  `gmuse-engine-architecture.md` has three more. GitLab renders mermaid natively in its file view, so they had always
+  looked right _there_ — and were inert code blocks in the book. So this did not introduce mermaid to the project; it
+  stopped the book from being the one place the existing diagrams did not draw.
+
+  **A silent failure, guarded.** The preprocessor is a separate binary and its assets are generated, so `mdbook build`
+  without `mdbook-mermaid install` leaves `additional-js` pointing at files that are not there — mdBook warns, **exits
+  0**, and publishes pages whose diagrams are dead. `book_guard.py` counts the rendered diagrams and fails on a
+  shortfall, which is the third check in that file to exist because mdBook's exit code means nothing.
+
+  **`<br>` only, and the reason is that I could not check.** The labels first used `<b>` and `<i>`. Whether those
+  survive mermaid's `securityLevel: 'strict'` sanitiser is version-dependent, no browser was available to look, and a
+  literal `<b>` showing inside a box is a worse outcome than unstyled text. `<br>` is universally supported; the
+  emphasis became parentheses. **An unverified assumption in published output is not worth a bold word.**
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

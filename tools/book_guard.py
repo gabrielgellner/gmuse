@@ -39,6 +39,20 @@ FLOOR = 300
 #: Fewer pages than this and the book lost most of itself.
 LEAST = 20
 
+#: Diagrams the book is expected to render through `mdbook-mermaid`.
+#:
+#: **A count, because the failure is silent otherwise.** The preprocessor is a separate
+#: binary and its assets are generated rather than committed, so running
+#: `mdbook build` without `mdbook-mermaid install` leaves `additional-js` pointing at
+#: files that are not there — mdBook warns, exits 0, and publishes pages whose diagrams
+#: are inert. Asserting the number rendered is the only thing that notices.
+#:
+#: Four: the two class diagrams in the domain model, which predate the preprocessor and
+#: were inert here until it arrived, plus the layer diagrams in `layers.md` and
+#: `access-layers.md`. Raise it when a diagram is added — that is the point of a count
+#: rather than a "more than zero".
+DIAGRAMS = 4
+
 
 def content(page: Path) -> int | None:
     """Characters of text inside `<main>`, or `None` if the page has no `<main>`."""
@@ -89,7 +103,32 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    print(f"book: {len(pages)} pages checked at {out / 'index.html'}")
+    # Occurrences, not pages: the domain model's chapter carries two.
+    drawn = sum(
+        p.read_text().count('class="mermaid"')
+        for p in pages
+        if p.name != "print.html"
+    )
+    if drawn < DIAGRAMS:
+        print(
+            f"{drawn} mermaid diagram(s) rendered, expected {DIAGRAMS} — either a "
+            f"diagram was removed and DIAGRAMS needs lowering, or `mdbook-mermaid "
+            f"install docs/book` has not been run and the published diagrams are inert",
+            file=sys.stderr,
+        )
+        return 1
+
+    vendored = [p.name for p in out.glob("mermaid*.js")]
+    if not vendored:
+        print(
+            "no mermaid script in the output, so the diagrams above cannot draw",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        f"book: {len(pages)} pages, {drawn} diagrams, checked at {out / 'index.html'}"
+    )
     return 0
 
 

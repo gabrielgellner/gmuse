@@ -16,6 +16,7 @@ language = "en"
 default-theme = "rust"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://gitlab.com/gabrielgellner/gmuse"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 # **No edit-url-template.** It would point at a generated file that is not in git;
 # each chapter carries a "Source:" link to the document it came from instead.
 # Long design documents, so in-page search matters more than usual.
@@ -27,3 +28,8 @@ use-boolean-and = true
 [output.html.fold]
 enable = true
 level = 1
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

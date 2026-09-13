@@ -13,28 +13,18 @@ caller, and it is what #252 is about.
 
 ## 1. Four systems, one library
 
-```
-                        ┌──────────────────────────────────────────┐
-                        │            THE LIBRARIAN                 │
-                        │          crates/gmuse-library            │
-                        │                                          │
-                        │   entities · facts · the log · the fold  │
-                        └──────────────────────────────────────────┘
-                             ▲              │              ▲
-              appends facts  │              │ answers      │  appends facts
-                             │              ▼              │
-   ┌─────────────────────────┴───┐  ┌───────────────┐  ┌───┴────────────────────┐
-   │  THE SCANNER                │  │  THE PLAYER   │  │  THE TOOLS             │
-   │  gmuse-library/operations/  │  │  src/ui       │  │  tools/*.py            │
-   │    populate, scan, ingest   │  │  gmuse-engine │  │                        │
-   │                             │  │               │  │  measure · enrich ·    │
-   │  files → Scanned → facts    │  │  asks & plays │  │  import · normalise    │
-   └─────────────────────────────┘  └───────────────┘  └────────────┬───────────┘
-                 ▲                                                  │
-                 │ reads                    writes tags             │
-      ┌──────────┴──────────────────────────────────────────────────▼─────────┐
-      │  FILES ON DISK — a serialization of the library, never its truth      │
-      └───────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    L["THE LIBRARIAN<br>crates/gmuse-library<br><br>entities · facts · the log · the fold"]
+    S["THE SCANNER<br>gmuse-library/operations/<br>populate, scan, ingest<br><br>files → Scanned → facts"]
+    P["THE PLAYER<br>src/ui<br>gmuse-engine<br><br>asks & plays"]
+    T["THE TOOLS<br>tools/*.py<br><br>measure · enrich<br>import · normalise"]
+    F["FILES ON DISK<br>a serialization of the library, never its truth"]
+    S -- "appends facts" --> L
+    T -- "appends facts" --> L
+    L -- "answers" --> P
+    F -- "reads" --> S
+    T -- "writes tags" --> F
 ```
 
 The librarian is the only thing that knows what the library _is_. Everything else either tells it something or asks it

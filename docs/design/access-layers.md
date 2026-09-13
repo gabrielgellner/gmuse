@@ -50,32 +50,21 @@ into every read**.
 
 ## 2. The four layers, and the one rule each
 
+```mermaid
+flowchart TD
+    OPS["named operations only"]:::entry --> L0
+    L0["L0 · FACTS — the append-only log<br>(the truth)<br>write: append a fact<br>read: the projector, and nothing else"]
+    L1["L1 · PROJECTION — a materialised view<br>(derived, disposable)<br>write: the projector, from facts<br>read: L2"]
+    L2["L2 · QUERY — the evaluator<br>(pure)<br>filter, levels, sort, format"]
+    L3["L3 · ADAPTERS — CLI · TUI · Python<br>(no logic)"]
+    L0 -- "fold, forward-only, resumable" --> L1
+    L1 --> L2
+    L2 --> L3
+    classDef entry stroke-dasharray: 4 3
 ```
-                   ┌──────────────────────────────────────────────┐
-   named           │  L0  FACTS          the append-only log      │   the truth
-   operations ────▶│      write: append a fact                    │
-   only            │      read:  the projector, and nothing else  │
-                   └───────────────────┬──────────────────────────┘
-                                       │  fold, forward-only, resumable
-                   ┌───────────────────▼──────────────────────────┐
-                   │  L1  PROJECTION     a materialised view      │   derived,
-                   │      write: the projector, from facts        │   disposable
-                   │      read:  L2                               │
-                   └───────────────────┬──────────────────────────┘
-                                       │
-                   ┌───────────────────▼──────────────────────────┐
-                   │  L2  QUERY          the evaluator            │   pure
-                   │      filter, levels, sort, format            │
-                   └───────────────────┬──────────────────────────┘
-                                       │
-                   ┌───────────────────▼──────────────────────────┐
-                   │  L3  ADAPTERS       CLI · TUI · Python       │   no logic
-                   └──────────────────────────────────────────────┘
 
-   THE FILESYSTEM is not a layer. It is reached only by named operations —
-   scan, import, verify, render, retire — which read bytes and append facts.
-   Nothing in L1, L2 or L3 may open a music file.
-```
+**The filesystem is not a layer.** It is reached only by named operations — scan, import, verify, render, retire — which
+read bytes and append facts. Nothing in L1, L2 or L3 may open a music file.
 
 **L0 — facts.** Append-only. The only write is appending a fact; there is no update and no delete. The only reader is
 the projector. Nothing else folds the log, and nothing else needs to.

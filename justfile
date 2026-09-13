@@ -142,7 +142,12 @@ docs:
     #!/usr/bin/env bash
     set -euo pipefail
     command -v mdbook >/dev/null 2>&1 || { echo "docs needs mdbook: cargo install mdbook" >&2; exit 1; }
+    command -v mdbook-mermaid >/dev/null 2>&1 || { echo "docs needs mdbook-mermaid: cargo install mdbook-mermaid" >&2; exit 1; }
     python3 tools/build_book.py
+    # Drops `mermaid.min.js` beside the book. Generated rather than committed — 2.5 MB
+    # of vendored javascript that the tool will reproduce — and idempotent on a
+    # `book.toml` that already names the preprocessor, so this is safe to repeat.
+    mdbook-mermaid install docs/book
     mdbook build docs/book
     python3 tools/book_guard.py docs/book/book
 
@@ -151,6 +156,7 @@ docs-serve:
     #!/usr/bin/env bash
     set -euo pipefail
     python3 tools/build_book.py
+    mdbook-mermaid install docs/book
     mdbook serve docs/book --open
 
 # Report deferrals whose issue has been closed — #252.

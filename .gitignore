@@ -16,3 +16,5 @@ python/gmuse_core/*.so
 # The book is generated from docs/design/ by tools/build_book.py (just docs).
 docs/book/src/
 docs/book/book/
+docs/book/mermaid.min.js
+docs/book/mermaid-init.js
