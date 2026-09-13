@@ -201,11 +201,6 @@ impl ReleaseGroup {
     /// **Asked of the secondary set**, because that is where MusicBrainz puts
     /// it: an `album/compilation` is both, and a flat enum that had to choose
     /// would answer "album" and lose the rule (#133).
-    #[allow(
-        dead_code,
-        reason = "nothing feeds `Vocabulary::effective_genres` in production, so nothing \
-                  needs to ask this yet; #253 is that gap"
-    )]
     pub fn is_compilation(&self) -> bool {
         self.secondary.contains(&ReleaseSecondary::Compilation)
     }

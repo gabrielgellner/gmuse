@@ -108,6 +108,22 @@ pub struct Librarian {
     pub identified: BTreeMap<Id<Recording>, crate::model::basis::Basis>,
     /// Which recordings were folded into which — `(was, is now)`.
     pub merged: Vec<(Id<Recording>, Id<Recording>)>,
+    /// **Which release group describes a recording that describes nothing itself** —
+    /// #74, #253.
+    ///
+    /// A row takes the recording's own concepts and falls back to a group's. Which
+    /// group is the whole question: a recording held on its album *and* on a
+    /// compilation was taking the group of the slot being drawn, so browsing the
+    /// compilation filed a rock song under `Pop`.
+    ///
+    /// **Non-compilations first, then lowest id.** The tie-break is not cosmetic — it
+    /// makes the answer a rule rather than whichever release the iteration reached
+    /// first, which is the same reason `row_of` fills in the canonical copy.
+    ///
+    /// Built once here rather than asked per row. `slots_of` is a full scan of every
+    /// track, and calling it from `row_of_via` would be O(rows × tracks) — the
+    /// per-row scan #123 spent a milestone removing.
+    pub described_by: BTreeMap<Id<Recording>, Id<ReleaseGroup>>,
     /// Which files were made out of which — `(source, derived)`, #132.
     pub encoding_derived: Vec<(Id<Encoding>, Id<Encoding>)>,
     /// **How much of each pressing is here, worked out once** — #134, #137.
@@ -325,6 +341,7 @@ impl Librarian {
             ratings: Default::default(),
             plays: Default::default(),
             concepts: Default::default(),
+            described_by: Default::default(),
             rows: Default::default(),
             locators: Default::default(),
             held_at: Default::default(),
@@ -838,6 +855,53 @@ impl Librarian {
         l.merged = cat.merges.redirects().collect();
         l.encoding_derived = cat.encoding_derived.iter().copied().collect();
         l.plays = cat.plays.clone();
+
+        // **One pass over the slots, not one per row** — #253. Every recording's
+        // groups, with compilations kept only as a last resort.
+        {
+            // **Best-so-far, not collect-then-sort.** The first version built a `Vec`
+            // per recording and sorted each one, which cost 1.9 ms of a 24.5 ms fold —
+            // measurable, and unnecessary: the answer is a minimum, and a minimum needs
+            // no list. `(false, _)` sorts before `(true, _)`, so a non-compilation
+            // wins and the id breaks the remaining tie identically every time.
+            // **Only recordings on more than one group get an entry.** For everything
+            // else the answer is the group of the slot being drawn, which is what the
+            // fallback already uses — so storing it would be a map the size of the
+            // library restating what the caller has in hand. This one holds the
+            // handful of recordings held on an album *and* a compilation, which is the
+            // only case the rule changes.
+            let mut best: BTreeMap<Id<Recording>, (bool, Id<ReleaseGroup>, bool)> = BTreeMap::new();
+            for track in l.spine.tracks.values() {
+                let Some(medium) = l.spine.media.get(&track.medium.id()) else {
+                    continue;
+                };
+                let Some(release) = l.spine.releases.get(&medium.release.id()) else {
+                    continue;
+                };
+                let group = release.group.id();
+                let compilation = l
+                    .spine
+                    .groups
+                    .get(&group)
+                    .is_some_and(|g| g.is_compilation());
+                let candidate = (compilation, group);
+                best.entry(track.recording.id())
+                    .and_modify(|held| {
+                        if held.1 != group {
+                            held.2 = true;
+                        }
+                        if candidate < (held.0, held.1) {
+                            (held.0, held.1) = candidate;
+                        }
+                    })
+                    .or_insert((compilation, group, false));
+            }
+            l.described_by = best
+                .into_iter()
+                .filter(|(_, (_, _, several))| *several)
+                .map(|(recording, (_, group, _))| (recording, group))
+                .collect();
+        }
         l.collections = cat.collections.clone();
         l.collected = cat.entries.clone();
 
@@ -1377,7 +1441,16 @@ impl Librarian {
                 .cloned()
                 .unwrap_or_default();
             if held.is_empty() {
-                held = group
+                // **The group that describes it, not the one being browsed** — #253.
+                // `described_by` prefers a non-compilation, so a rock song reached
+                // through _80s Hits_ keeps its album's genre rather than the
+                // compilation's `Pop`. Falls back to this row's own group, which is
+                // the answer whenever the recording sits on exactly one.
+                held = self
+                    .described_by
+                    .get(&recording)
+                    .copied()
+                    .or(group)
                     .and_then(|g| self.concepts.get(&(Described::ReleaseGroup(g), facet)))
                     .cloned()
                     .unwrap_or_default();
@@ -2991,6 +3064,160 @@ mod tests {
         assert!(
             l.reference.roles.is_empty(),
             "a codelist entry nobody defined"
+        );
+    }
+
+    /// **A compilation does not decide a track's genre, even when the track has none**
+    /// — #74, #253.
+    ///
+    /// The rule was already half here: a row takes the recording's own concepts and
+    /// falls back to the album's only where the recording carries none. What it fell
+    /// back to was **the group of the slot being drawn**, so a recording with no genre
+    /// of its own, held on both its album and a compilation, showed `Pop` when drawn
+    /// through the compilation.
+    ///
+    /// That is the case `Vocabulary::effective_genres` was written and tested for, and
+    /// #253 is that it was never called by anything. This asserts the rule where the
+    /// read actually happens.
+    ///
+    /// **The shape is a supported one**, which is why it matters: holding the same
+    /// recording on an album and on a compilation is what `shelf copies` exists to
+    /// describe rather than resolve.
+    #[test]
+    fn a_compilation_does_not_name_a_track_it_only_carries() {
+        use crate::model::facet::{ConceptRecord, GENRE};
+        use crate::model::spine::ReleaseSecondary;
+        use crate::projection::catalogue::{
+            Catalogue, Grouped, Placed, Pressed, Recorded, Released,
+        };
+
+        let artist = Id::derived(b"the-artist");
+        let mut cat = Catalogue::default();
+
+        // The album, and the compilation that also carries the track.
+        let album = Id::<ReleaseGroup>::derived(b"the-album");
+        let comp = Id::<ReleaseGroup>::derived(b"80s-hits");
+        cat.groups.insert(
+            album,
+            Grouped {
+                title: "The Album".into(),
+                artist,
+                first_released: None,
+                kind: Default::default(),
+                secondary: Default::default(),
+            },
+        );
+        cat.groups.insert(
+            comp,
+            Grouped {
+                title: "80s Hits".into(),
+                artist,
+                first_released: None,
+                kind: Default::default(),
+                secondary: [ReleaseSecondary::Compilation].into_iter().collect(),
+            },
+        );
+
+        let rec = Id::<Recording>::derived(b"the-song");
+        cat.recordings.insert(
+            rec,
+            Recorded {
+                title: "The Song".into(),
+                artist,
+            },
+        );
+
+        // A pressing, a disc and a slot for each group, so the recording really sits
+        // in both.
+        let slot_on = |cat: &mut Catalogue, group: Id<ReleaseGroup>, tag: &[u8]| {
+            let release = Id::<crate::model::entity::Release>::derived(tag);
+            cat.releases.insert(
+                release,
+                Released {
+                    group,
+                    title: "A Pressing".into(),
+                    musicbrainz: None,
+                    released: None,
+                    label: None,
+                    media: Some(1),
+                },
+            );
+            let medium = Id::<crate::model::entity::Medium>::derived(tag);
+            cat.media.insert(
+                medium,
+                Pressed {
+                    release,
+                    position: 1,
+                    format: None,
+                    tracks: Some(1),
+                },
+            );
+            let track = Id::<Track>::derived(tag);
+            cat.tracks.insert(
+                track,
+                Placed {
+                    medium,
+                    recording: rec,
+                    position: 1,
+                    title_on_release: None,
+                },
+            );
+            track
+        };
+        let _on_album = slot_on(&mut cat, album, b"album-slot");
+        let on_comp = slot_on(&mut cat, comp, b"comp-slot");
+
+        // Rock on the album, Pop on the compilation, and nothing on the recording.
+        let facet = Id::of_key(GENRE);
+        let genre = |cat: &mut Catalogue, label: &str, subject: Described| {
+            let concept = Id::<crate::model::entity::Concept>::in_facet(GENRE, label);
+            cat.concepts.insert(
+                concept,
+                ConceptRecord {
+                    facet,
+                    label: label.into(),
+                    node_label: false,
+                },
+            );
+            cat.assertions.insert(
+                (subject, concept, crate::model::reference::Source::Manual),
+                crate::model::ingest::Confidence::Confirmed,
+            );
+        };
+        genre(&mut cat, "Rock", Described::ReleaseGroup(album));
+        genre(&mut cat, "Pop", Described::ReleaseGroup(comp));
+
+        let l = Librarian::from_catalogue(&cat);
+
+        // **The instrument is attached.** Every assertion below is about which of two
+        // genres a row shows, and it means nothing if the fixture produced neither.
+        assert_eq!(l.spine.tracks.len(), 2, "the recording is not on both");
+        assert!(
+            l.concepts
+                .contains_key(&(Described::ReleaseGroup(album), facet)),
+            "the album has no genre, so there is nothing for the rule to prefer"
+        );
+        assert!(
+            l.concepts
+                .contains_key(&(Described::ReleaseGroup(comp), facet)),
+            "the compilation has no genre, so nothing could be wrongly preferred"
+        );
+        assert!(
+            !l.concepts.contains_key(&(Described::Recording(rec), facet)),
+            "the recording has a genre of its own, so the fallback is never reached"
+        );
+
+        let drawn = l
+            .drawn_of(
+                crate::model::rows::CopyId::On(on_comp),
+                &Default::default(),
+                &Lookup::Direct(&l),
+            )
+            .expect("a row through the compilation");
+        assert_eq!(
+            drawn.listed().on(facet),
+            ["Rock"],
+            "the compilation named a track it only carries"
         );
     }
 

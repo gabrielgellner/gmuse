@@ -5704,6 +5704,33 @@ Append here as decisions are made. Format: date, decision, rationale.
   advice is the one thing that has no mechanism — **name the condition, not the successor** — and it is advice precisely
   because nothing can check it.
 
+- **2026-09-13** **A rule can be right, tested, and unreachable** (#253, #74, #252). Found by `just stale-claims` on the
+  day it was written, through a chain neither half of which was visible alone.
+
+  `Spine::is_compilation` was silenced with _"the #74 rule that a compilation's genre loses to an album's is not wired
+  up"_; the recipe flagged #74 as closed. Following it found the reason **substantially right and specifically wrong**:
+  the rule _is_ written, in `Vocabulary::effective_genres`, with the compilation case asserted — and its only four call
+  sites are its own tests. **A tested function looks alive and a closed issue looks done**, which is why this sat.
+
+  **The read path had its own half of the rule**, and that is the part worth recording. `row_of_via` already took the
+  recording's own concepts and fell back to a group's, citing #74 while doing it. What it fell back to was _the group of
+  the slot being drawn_ — so a recording with no genre of its own, held on both its album and a compilation, showed the
+  compilation's `Pop` when browsed through the compilation. Two implementations of one rule over two data shapes, one
+  unreachable and one subtly wrong, each looking complete from where it sat.
+
+  So the fix went where the read is: `described_by` names the group a recording inherits from, non-compilations first
+  and lowest id after, so the answer is a rule rather than whichever release the iteration reached first — the same
+  reasoning `row_of` uses to fill in the canonical copy.
+
+  **Two measurements changed the implementation.** `slots_of` is a full scan of every track, so asking it per row would
+  have been O(rows × tracks) — the per-row scan #123 spent a milestone removing. Built once instead. And the first build
+  collected a `Vec` per recording and sorted each, costing **1.9 ms of a 24.5 ms fold**; the answer is a minimum and a
+  minimum needs no list. What remains is **~1.3 ms** on the fold, from one pass over the spine, and the map holds only
+  recordings on more than one group — for everything else the slot's group is already the answer.
+
+  The 5-run medians are worth keeping because a single sample said the opposite: 24.3 ms against main's 23.0 ms, where
+  individual runs ranged 22.5–25.0 on both sides.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
