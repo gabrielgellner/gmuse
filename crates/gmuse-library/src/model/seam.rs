@@ -1697,13 +1697,19 @@ impl Librarian {
 
 /// **Reading a collection back** — #92.
 ///
-/// Its own block because all of it is ahead of its callers: a playlist is
-/// still a file on disk until #92's UI half, and these are what that will
-/// read. `#[allow]` rather than `#[expect]` because tests exercise them, so
-/// the expectation would report itself unfulfilled under `cargo test`.
+/// Its own block because it was all ahead of its callers when written. `#[allow]`
+/// rather than `#[expect]` because tests exercise them, so an expectation would
+/// report itself unfulfilled under `cargo test` — that choice still stands, and #113
+/// is where the general preference for `expect` came from.
+///
+/// **The premise it used to name has expired** (#250). It said "a playlist is still a
+/// file on disk until #92's UI half"; a playlist is in the log now — `load_collection`
+/// resolves `Id::<Collection>::of_name` and reads no path — and #92 is closed. Three
+/// sibling attributes in `instance.rs` carried the same sentence over functions with
+/// six and eight call sites, and went when it did.
 #[allow(
     dead_code,
-    reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
+    reason = "read back by tests and by the collection surface; kept as one block"
 )]
 impl Librarian {
     /// What a collection holds, in order.

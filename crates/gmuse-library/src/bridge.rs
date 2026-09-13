@@ -1,10 +1,16 @@
 //! From what the scanner read to what the librarian holds — issue #77.
 //!
-//! **Transitional, and it dies with `Scan` (#86).** The player needs a
-//! `Librarian` to read through before `Scan` can go, and `Scan` cannot go
-//! until the player reads through a `Librarian`. This is the plank across that
-//! gap: the scanner still fills a store, and this turns a store into the
-//! catalogue the librarian projects from.
+//! **This was the plank and it is now the bridge** (#250). The header said
+//! *"transitional, and it dies with `Scan` (#86) … the scanner still fills a store,
+//! and this turns a store into the catalogue"*. #86 closed, the `Store` type is gone,
+//! and what happened to this module is the opposite of dying: `bridge::librarian` is
+//! the call the librarian's own fold makes, and the table further down this file
+//! attributes **76% of a 53 ms fold** to it. Load-bearing infrastructure, documented
+//! for years as scaffolding.
+//!
+//! So what it does now, plainly: it takes the holdings a scan produced and the records
+//! the log holds, and returns the `Librarian` everything reads through. `imported` is
+//! the same job for one arrival rather than a whole pass.
 //!
 //! ## Why not simply scan twice
 //!

@@ -119,11 +119,15 @@ pub enum Fact {
         /// which role, in what order, credited how, and there can be several
         /// of them. This field can say one artist and nothing about them.
         ///
-        /// It stays until #78 dissolves `Track`, because the tree projection
-        /// and `Row` still read it. When they ask for a credit instead, this
-        /// goes, and until then **the credit is authoritative**: anything that
-        /// needs to be right reads `credits`, and this is the fast path for
-        /// the two callers that predate it.
+        /// **It has no removal date, and saying so is the correction** (#250). This
+        /// read "it stays until #78 dissolves `Track`" — #78 is closed and `Track` is
+        /// still here, so the deferral named an owner that had stopped existing. The
+        /// tree projection and `Row` still read this field; when they ask for a credit
+        /// instead, it goes.
+        ///
+        /// Until then **the credit is authoritative**: anything that needs to be right
+        /// reads `credits`, and this is the fast path for the two callers that predate
+        /// it. That part was always the load-bearing half and is unchanged.
         artist: Id<Artist>,
     },
 

@@ -1,8 +1,13 @@
 # The layers, and what may talk to what
 
-**Status: partly built.** `src/model/` exists and is enforced; the seam to the player is a ratchet, not yet a wall; the
-tools still write files behind the library's back. This says where each piece belongs and why, so the remaining work has
-a shape rather than a direction.
+**Status: built, and the boundary is now a crate boundary.** The librarian is `crates/gmuse-library/`; the player and
+the command language are the root crate; the audio path and the engine are `crates/gmuse-engine/`. The direction rule
+below stopped being a ratchet and became a **compile error**, because a crate cannot depend on the crate that depends on
+it. The tools still write tags, which is the one file-writing §5 sanctions.
+
+**This file described the pre-crate tree until 2026-09-13** (#250) — every path in it had moved, and §6's "not true yet"
+list had inverted without anything failing. That is worth knowing about a document you are told to read before adding a
+caller, and it is what #252 is about.
 
 ---
 
@@ -11,7 +16,7 @@ a shape rather than a direction.
 ```
                         ┌──────────────────────────────────────────┐
                         │            THE LIBRARIAN                 │
-                        │              src/model                   │
+                        │          crates/gmuse-library            │
                         │                                          │
                         │   entities · facts · the log · the fold  │
                         └──────────────────────────────────────────┘
@@ -20,12 +25,13 @@ a shape rather than a direction.
                              │              ▼              │
    ┌─────────────────────────┴───┐  ┌───────────────┐  ┌───┴────────────────────┐
    │  THE SCANNER                │  │  THE PLAYER   │  │  THE TOOLS             │
-   │  src/model/populate, ingest │  │  src/ui       │  │  tools/*.py            │
-   │                             │  │  src/audio    │  │                        │
-   │  files → Scanned → facts    │  │  asks & plays │  │  measure · enrich ·     │
-   └─────────────────────────────┘  └───────────────┘  │  import · normalise     │
-                 ▲                                     └────────────┬───────────┘
-                 │ reads                    writes tags              │
+   │  gmuse-library/operations/  │  │  src/ui       │  │  tools/*.py            │
+   │    populate, scan, ingest   │  │  gmuse-engine │  │                        │
+   │                             │  │               │  │  measure · enrich ·    │
+   │  files → Scanned → facts    │  │  asks & plays │  │  import · normalise    │
+   └─────────────────────────────┘  └───────────────┘  └────────────┬───────────┘
+                 ▲                                                  │
+                 │ reads                    writes tags             │
       ┌──────────┴──────────────────────────────────────────────────▼─────────┐
       │  FILES ON DISK — a serialization of the library, never its truth      │
       └───────────────────────────────────────────────────────────────────────┘
@@ -40,15 +46,25 @@ something.
 
 > **The model must not know that any of the others exist.**
 
-Asserted, not merely intended: `model/seam.rs` walks `src/model/` and fails if anything imports `ui`, `cmd`, `audio`,
-`ratatui` or `crossterm`. It has caught two live mistakes so far — a renderer's sort key and a trait keyed by a type it
-should have named from its own side.
+**Now enforced by cargo, not by a test.** `gmuse-library` does not depend on the root crate and cannot: a dependency
+cycle is a build failure. So "the model must not know that any of the others exist" is no longer a property anyone has
+to remember — it is the reason the crate split was worth doing.
+
+`crates/gmuse-library/src/model/seam.rs` still walks the tree and still fails if anything in the librarian imports `ui`,
+`cmd`, `audio`, `ratatui` or `crossterm`. It is belt and braces now rather than the only line of defence, and it caught
+two live mistakes on the way here — a renderer's sort key, and a trait keyed by a type it should have named from its own
+side.
 
 The reverse is fine and expected. The player reaches into the model constantly; that is what a seam is for.
 
-The player's side of it is a **ratchet** rather than a rule, because it is not true yet: `src/ui/` still names `Store`
-36 times, and the test asserts _no worse than today_ so that the number can only fall. Five of those are outside test
-fixtures. It becomes an assertion when it reaches zero (#86).
+**The player's side reached zero and the ratchet became an assertion** (#86). `src/ui/` names `Store` no times, because
+there is no longer a `Store` type to name: every read that went through it goes to the librarian, which answers
+`rows::Listing`. The test now asserts zero rather than "no worse than today", so a new leak is a failure instead of a
+number to chase.
+
+One thing that ratchet taught, recorded in §13: the walk it depends on used to return an empty list for a directory that
+had moved, which turned the whole test into `assert!(0 <= 0)`. `read()` now fails loudly when its argument is not a
+directory. A boundary test that reads nothing passes for the wrong reason.
 
 ---
 
@@ -95,7 +111,7 @@ Two routes write to the library and they are not equals.
 No tool writes `Source::Manual`, and no tool appends to a log directly. **Volume is the whole reason.** A person
 mis-tags one recording; a matching pass mis-tags six hundred in a minute, and the three of 607 that the identification
 pass got wrong were found only by reading the file. A tool that could write `Manual` would be laundering its guesses
-into the one basis nothing downstream second-guesses. `src/model/seam.rs` asserts it.
+into the one basis nothing downstream second-guesses. `model/seam.rs` asserts it.
 
 (`Manual` is the existing name for what the addendum calls `Human`. It is on the wire in every proposal file, and the
 two say the same thing.)
@@ -147,8 +163,7 @@ do not reach it, so `Catalogue::unplaced_genres` is a standing review query, alo
 
 The assignment itself has no id, and must not grow one. A third identity beside the subject's and the concept's could
 only be random, which breaks convergent minting outright — two devices importing the same Discogs page have to emit the
-same row — or content-derived, which buys nothing because the content is already the key. `src/model/seam.rs` asserts
-this.
+same row — or content-derived, which buys nothing because the content is already the key. `model/seam.rs` asserts this.
 
 **Merging is union.** Two devices, two tools, two passes — all append, nothing is overwritten, and the fold decides what
 shows. That is what makes a second machine free and a second _tool_ free with it.
@@ -221,15 +236,20 @@ A tool must be able to say something with no gmuse running at all.
 
 ## 6. What is true today, and what is not
 
-**True.** The model exists, is enforced not to know about the player, and holds the whole vocabulary — entities, facts,
-the fold, the projections. Files become rows end to end. Two instances converge without coordinating.
+**True.** The model exists, cannot know about the player — a compile error, not a convention — and holds the whole
+vocabulary: entities, facts, the fold, the projections. Files become rows end to end. Two instances converge without
+coordinating. The player names no store (#86). There is one log (#82). The measurement that decides which copies need
+replacing is `Fact::EncodingMeasured`, keyed by encoding, and queryable. One appender per log, held by an OS lock and
+enforced by `Instance::flush` and `durable::rewrite` both being crate-private (#218, #249).
 
-**Not true yet.** The player still reads a `Store`. The tools still write files. There are two logs. The measurement
-that decides which copies need replacing lives in a TSV that has already been lost once.
+**Not true yet.** The tools still write tags directly, which §5 sanctions and §4 of `ingestion-flow.md` bounds. A read
+still folds on a cache miss rather than never — `access-layers.md`'s stricter rule is closer than it was, because
+`librarian::reading` is snapshot-first, but "never folds" is not the same as "rarely". `shelf query` is the path that
+moved; the others have not been measured.
 
-The gap between those two lists is the migration (#80–#86), and the ordering is not arbitrary: the tools cannot append
-facts until the log they append to is the only one (#82), and the player cannot stop reading a store until the librarian
-answers everything it asks (#77–#79).
+The migration this section used to be about (#80–#86) is done, and #87 is what is left of it. **The list above was
+inverted for some weeks before anyone noticed**, which is the entry in #252's evidence table: the code finished the work
+and no instrument existed to retire the sentence saying it had not.
 
 ---
 

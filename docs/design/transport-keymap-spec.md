@@ -7,8 +7,8 @@ Status: design, pre-implementation. Ordered by impact, not by build order.
 because their payloads — `DeckId`, `When`, `Lane`, `BindingTarget` — had no design. This is that design.
 
 **The Rust in this document is illustrative.** The crate paths it names (`crates/engine`, `crates/tui`) are not the ones
-that exist: the workspace is `gmuse-ids`, `gmuse-library`, `gmuse-proto`, `gmuse-client` and `gmuse`, with
-`gmuse-engine` and `gmuse-tui` still to be split out (§4.3). Four of the types it declares collide by name with types
+that exist: the workspace is `gmuse-ids`, `gmuse-library`, `gmuse-proto`, `gmuse-client` and `gmuse`, with `gmuse-tui`
+still to be split out (§4.3; `gmuse-engine` landed in #213). Four of the types it declares collide by name with types
 that already ship — see O-5 to O-8, which are integration decisions rather than defects in the reasoning above.
 
 ## 0. Scope

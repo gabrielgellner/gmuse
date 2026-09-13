@@ -5592,6 +5592,39 @@ Append here as decisions are made. Format: date, decision, rationale.
   first, and **asserts there is something to drop before asserting what happens** — the second-assertion discipline from
   the 2026-09-12 entry, applied to a setup step rather than to a predicate.
 
+- **2026-09-13** **The documents described the pre-crate tree, and the drift ran the safe direction** (#250, #252). An
+  audit of the refactor, claim by claim against the code. Ten findings, and nine of them were a sentence that had
+  stopped being true — **all nine understating what the code does**. The seam became a compile error, the `Store`
+  ratchet reached zero and became an assertion, the read path got its snapshot, and every document still described the
+  migration as pending.
+
+  That direction is worth naming because it is why nothing caught it. A doc that over-claims gets caught the first time
+  somebody relies on it. A doc that under-claims sends people to do work already done, or — worse, and this happened —
+  gets read as licence: `layers.md` §6 said "there are two logs" long after there was one, and it is the file CLAUDE.md
+  tells you to read **before adding a caller in either direction**.
+
+  The corrections themselves are ordinary. Two are worth keeping.
+
+  **`bridge.rs` had been scaffolding in its own header for months while becoming load-bearing.** It opened
+  _"transitional, and it dies with `Scan` (#86)"_; #86 closed, `Store` no longer exists as a type, and
+  `bridge::librarian` is the call the librarian's fold makes — the table in that same file attributes **76% of a 53 ms
+  fold** to it. A module can be promoted by everything around it changing while its own first paragraph stays still.
+
+  **A deferral is only a deferral while something still points at it.** `instance.rs` carried three
+  `#[allow(dead_code, reason = "… a playlist is still a file on disk until #92's UI half")]` attributes over functions
+  with **eight, four and six call sites**, and #92 was closed, and a playlist is in the log. All three attributes were
+  inert, unnecessary, and asserting a false premise. #113's preference for `expect` over `allow` exists for exactly this
+  — an expectation retires itself — and `seam.rs` documents choosing `allow` there on purpose, which is defensible and
+  is also how four dead sentences survived.
+
+  **A miscount, corrected here rather than left in the audit.** The report said "seven `until #N` deferrals cite closed
+  issues". Three were: `#78`'s promise to dissolve `Track` (closed, `Track` still exists), `#92`'s four attributes, and
+  `bridge.rs`'s `#86`. The other four are **past-tense history** — "was called `qualifier` until #117", "`Retired` was a
+  kind of alias until #176" — which are correct as written and are exactly the kind of comment this project should keep.
+  The grep conflated two grammars, and "stays until" versus "was until" is the whole difference between a live promise
+  and a record. Same shape as the "seven tests" that turned out to be five on 2026-09-12: a count taken from a pattern
+  rather than from reading each hit.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

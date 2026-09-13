@@ -1150,10 +1150,6 @@ impl Instance {
     ///
     /// Idempotent: the id derives from nothing, so the caller holds it and
     /// saying the same name twice is the same record.
-    #[allow(
-        dead_code,
-        reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
-    )]
     /// Name a query, or rewrite one that already has this name.
     pub fn save_view(
         &mut self,
@@ -1194,10 +1190,6 @@ impl Instance {
     /// **The position is the caller's**, because only the caller knows where
     /// in the list this is going — [`OrdKey::between`] takes the neighbours it
     /// is landing between, and the fold has no notion of "the end".
-    #[allow(
-        dead_code,
-        reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
-    )]
     /// Record what a collection was frozen from — #95.
     pub fn froze(
         &mut self,
@@ -1235,10 +1227,6 @@ impl Instance {
     ///
     /// The position identifies *which* entry, because a playlist may hold one
     /// recording twice and removing "the track" would be ambiguous.
-    #[allow(
-        dead_code,
-        reason = "the model is tested ahead of its callers; a playlist is still a file on disk until #92's UI half"
-    )]
     pub fn remove_from_collection(
         &mut self,
         now: i64,
