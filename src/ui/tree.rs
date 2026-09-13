@@ -17,6 +17,10 @@ use crate::shelf::{Shelf, SortKey};
 use crate::ui::fold::Expansion;
 
 /// One visible line.
+/// **What identifies a row across a rebuild** — a container by its path, a track by
+/// its id. Named because two methods and a search all pass it around (#131).
+pub type Mark = (Vec<SortKey>, Option<CopyId>);
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
     Artist {
@@ -787,6 +791,36 @@ impl TreeState {
             }
             None => false,
         }
+    }
+
+    /// **What the cursor is on, in terms that survive the list being rebuilt.**
+    ///
+    /// `folds` has been keyed on the ident path since it was written, "so expansion
+    /// survives a re-sort or a rescan" — and the cursor was the one thing not given the
+    /// same treatment. `rebuild_library` set it to zero, which was right while the only
+    /// callers were a `:view` change and a filter change: those produce a genuinely
+    /// different list, and no index into the old one means anything.
+    ///
+    /// It stopped being right when a librarian change started causing a rebuild. Rating
+    /// a track, or a play being counted halfway through one, sent the cursor to the top
+    /// of the tree — and the second happens with nobody touching the keyboard.
+    pub fn mark(&self, lib: &Shelf) -> Option<Mark> {
+        self.rows(lib).get(self.selected).map(Self::mark_of_inner)
+    }
+
+    /// Put the cursor back on what [`Self::mark`] remembered.
+    ///
+    /// **Falls back to where it was, not to the top.** If the row is gone — the track
+    /// was retired, the filter no longer admits it — the nearest thing to the truth is
+    /// the position the cursor held, clamped to the list that exists now. Row 0 is a
+    /// guess that happens to be wrong every time the list is longer than one.
+    pub fn point_at(&mut self, lib: &Shelf, mark: Option<Mark>) {
+        let rows = self.rows(lib);
+        self.selected =
+            match mark.and_then(|want| rows.iter().position(|r| Self::mark_of_inner(r) == want)) {
+                Some(at) => at,
+                None => self.selected.min(rows.len().saturating_sub(1)),
+            };
     }
 
     /// What identifies a row across a fold change: a track by its id, a

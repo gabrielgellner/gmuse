@@ -4407,9 +4407,29 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         ui.audit.line("view", &p);
         ui.notify(p);
     }
+    // **Where the cursor was, in terms that survive the rebuild.** Taken before the
+    // shelf is replaced, because a mark names a row by its path or its copy and both
+    // are read out of the list that is about to go.
+    let was = ui.tree.mark(&ui.library);
+    let was_sorted = ui.library.sorted().get(ui.sorted).copied();
+
     ui.library = Shelf::grouped(ctx.library, members, ui.levels, ui.smart_artist_sort);
-    ui.tree.selected = 0;
-    ui.sorted = 0;
+
+    // **Put back rather than reset.** This set both to zero, which was right while the
+    // only callers were a `:view` change and a filter change — those produce a genuinely
+    // different list and no index into the old one means anything.
+    //
+    // It stopped being right when a librarian change started causing a rebuild: rating a
+    // track sent the cursor to the top of the tree, and so did a play being counted
+    // halfway through one, which happens with nobody touching the keyboard. `folds` had
+    // been keyed on the ident path from the start "so expansion survives a re-sort or a
+    // rescan"; the cursor is the same question and was answered differently.
+    ui.tree.point_at(&ui.library, was);
+    ui.sorted = was_sorted
+        .and_then(|id| ui.library.sorted().iter().position(|got| *got == id))
+        // Gone from the list: stay where you were, clamped. Row 0 is a guess that is
+        // wrong every time the list is longer than one.
+        .unwrap_or_else(|| ui.sorted.min(ui.library.sorted().len().saturating_sub(1)));
     // Playlists and the queue are deliberately untouched: they hold TrackIds
     // straight into the Scan and are meant to cross catalogs.
     //
@@ -9906,8 +9926,18 @@ mod tests {
         assert!(out.contains(r#"saved="paak""#), "{out}");
     }
 
+    /// **A rebuilt list leaves the cursor in bounds, and on the same row where it can.**
+    ///
+    /// This asserted `ui.sorted == 0`, and its own comment said why: "the old row may not
+    /// exist any more; leaving the cursor there would index past the end". The intent was
+    /// *in bounds*; zero was the blunt way to be sure of it, and it pinned the bluntness
+    /// rather than the intent.
+    ///
+    /// That mattered once a librarian change started rebuilding the list: rating a track
+    /// sent the cursor to the top, and so did a play being counted halfway through one —
+    /// with nobody touching the keyboard.
     #[test]
-    fn switching_catalogs_resets_the_cursors() {
+    fn a_rebuilt_list_leaves_the_cursor_in_bounds() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = catalog_ui(&store);
@@ -9915,10 +9945,48 @@ mod tests {
         ui.sorted = ui.library.sorted().len() - 1;
 
         select_view(&mut ui, &ctx, "paak");
-        // The old row may not exist any more; leaving the cursor there would
-        // index past the end.
-        assert_eq!(ui.sorted, 0);
-        assert!(ui.sorted < ui.library.sorted().len());
+        assert!(
+            ui.sorted < ui.library.sorted().len(),
+            "the cursor is past the end of the narrowed list"
+        );
+    }
+
+    /// **A refold keeps the cursor where the person left it.**
+    ///
+    /// The bug, from using it: in the tree, the cursor jumped to the top of the list by
+    /// itself. `rebuild_library` reset it, which was invisible while only a `:view` change
+    /// caused one — and every librarian change causes one now, including the play this
+    /// program counts halfway through a track.
+    ///
+    /// `folds` had been keyed on the ident path from the start, "so expansion survives a
+    /// re-sort or a rescan". The cursor is the same question and was answered differently.
+    #[test]
+    fn a_refold_leaves_the_cursor_where_it_was() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        expand_to_tracks(&mut ui, &store);
+
+        // Somewhere that is not the top, and not the end either.
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "j");
+        let was = ui.tree.selected;
+        assert!(was > 0, "the premise: the cursor is not at the top");
+        let on = ui.tree.mark(&ui.library);
+        assert!(on.is_some(), "and it is on a row");
+
+        // What a rating, a play, or another client's edit now does.
+        refresh_library(&mut ui, &ctx);
+
+        assert_eq!(
+            ui.tree.selected, was,
+            "a refold moved the cursor, so the list jumps under the person reading it"
+        );
+        assert_eq!(
+            ui.tree.mark(&ui.library),
+            on,
+            "and it is on the same row, which is the claim that survives a re-sort"
+        );
     }
 
     /// **View 6 was a list and is the picker** (#97, #119). `6` opens it.

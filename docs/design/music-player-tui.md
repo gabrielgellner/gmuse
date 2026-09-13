@@ -5436,6 +5436,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   the trigger at the level cpal uses it. The twenty lines that join them are straight-line code and are read rather than
   run.
 
+- **2026-09-12** **A rebuilt list keeps the cursor, because a refold is not a new question.**
+
+  Reported from using it: in the tree, the cursor jumped to the top by itself. `rebuild_library` set `tree.selected` and
+  `sorted` to zero, which was defensible for its only callers — a `:view` change, a filter change, a catalog switch all
+  produce a genuinely different list, and no index into the old one means anything.
+
+  It stopped being defensible when a librarian change started causing a rebuild. `follow_the_engine_topics` turns a
+  `library` event into `Stop::Refold`, and the events arrive for the engine's startup scan, for another client's edit,
+  for a rating — and for **the play this program counts halfway through every track**. That last one is why it looked
+  random: the list jumped with nobody touching the keyboard.
+
+  **The mechanism was already there and already argued for.** `folds` has been keyed on the ident path since it was
+  written, "so expansion survives a re-sort or a rescan", and `reveal_row` already found a row again "by mark, not by
+  equality". The cursor is the same question; it had simply been answered differently, and nothing made the
+  inconsistency visible until a new caller arrived.
+
+  **And the test asserted the bluntness rather than the intent.** `switching_catalogs_resets_the_cursors` pinned
+  `ui.sorted == 0` while its own comment said why: "the old row may not exist any more; leaving the cursor there would
+  index past the end". In bounds was the requirement; zero was one way to get it. So a row that is gone now clamps to
+  where the cursor was rather than jumping to the top — which is better for a narrowing view too, and the test says what
+  it means.
+
+  The shape worth remembering: **a behaviour that is right for every caller it has can be wrong the moment a caller is
+  added**, and the reset was the only part of this pane's state that had not been asked to survive a rebuild.
+
 - **2026-09-13** **A track change is a discontinuity in two quantities, and the engine reported neither** (#246, I13,
   I17, §7.8). Found by listening rather than by a test: the view kept naming the track it started with, and that track's
   elapsed time ran past its own duration. Both halves lived in one payload, and they are worth separating because only
