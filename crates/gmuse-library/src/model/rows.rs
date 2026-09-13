@@ -198,6 +198,14 @@ pub struct Listed<'a> {
     /// Without this a cutoff cannot be read: an encoder's lowpass is a cliff
     /// and music is a slope, and `cutoff<16000` alone finds both.
     pub cliff_db: Option<u16>,
+    /// **What the numbers say, as against what the file claims** — #254, #87.
+    ///
+    /// `suspect` when the declared bitrate is not supported by the audio, `unmeasured`
+    /// when nothing has looked, `good` otherwise. Beside the two measurements because it
+    /// is derived from them and the bitrate, and on the row because `Row.verdict` has
+    /// said since #87 that this exists "so a re-buy list is a filter rather than a
+    /// separate pass" — and until now nothing could filter on it.
+    pub verdict: Option<crate::model::encoding::Verdict>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     /// **Whether the library holds a file for this row at all** — #155.
@@ -249,6 +257,14 @@ pub struct Drawn {
     /// Without this a cutoff cannot be read: an encoder's lowpass is a cliff
     /// and music is a slope, and `cutoff<16000` alone finds both.
     pub cliff_db: Option<u16>,
+    /// **What the numbers say, as against what the file claims** — #254, #87.
+    ///
+    /// `suspect` when the declared bitrate is not supported by the audio, `unmeasured`
+    /// when nothing has looked, `good` otherwise. Beside the two measurements because it
+    /// is derived from them and the bitrate, and on the row because `Row.verdict` has
+    /// said since #87 that this exists "so a re-buy list is a filter rather than a
+    /// separate pass" — and until now nothing could filter on it.
+    pub verdict: Option<crate::model::encoding::Verdict>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     pub held: bool,
@@ -301,6 +317,7 @@ impl Listed<'_> {
             bitrate: self.bitrate,
             cutoff_hz: self.cutoff_hz,
             cliff_db: self.cliff_db,
+            verdict: self.verdict,
             sample_rate: self.sample_rate,
             channels: self.channels,
             held: self.held,
@@ -352,6 +369,7 @@ impl Drawn {
             bitrate: self.bitrate,
             cutoff_hz: self.cutoff_hz,
             cliff_db: self.cliff_db,
+            verdict: self.verdict,
             sample_rate: self.sample_rate,
             channels: self.channels,
             held: self.held,
@@ -561,6 +579,7 @@ mod tests {
             bitrate: Some(320),
             cutoff_hz: Some(15_700),
             cliff_db: Some(5_200),
+            verdict: None,
             sample_rate: Some(44_100),
             channels: Some(2),
             held: true,

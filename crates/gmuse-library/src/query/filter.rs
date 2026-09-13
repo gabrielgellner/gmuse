@@ -1039,7 +1039,32 @@ pub(crate) fn texts_of(f: Field, s: &Subject<'_>, env: &Env<'_>) -> Vec<String> 
         Field::FileName => one(s
             .locator
             .and_then(|l| std::path::Path::new(l).file_name().and_then(|n| n.to_str()))),
-        _ => Vec::new(),
+        // **What the numbers say about the bytes** — #254. Lowercase, so a filter
+        // reads as a person writes it: `verdict=suspect`.
+        Field::Verdict => one(r.verdict.map(|v| match v {
+            crate::model::encoding::Verdict::Suspect => "suspect",
+            crate::model::encoding::Verdict::Unmeasured => "unmeasured",
+            crate::model::encoding::Verdict::Good => "good",
+        })),
+        // **Exhaustive, and the catch-all it replaces is why** — #254.
+        //
+        // This arm was `_ => Vec::new()`. Adding `Field::Verdict` above compiled
+        // against it, parsed, and matched **nothing** — `verdict=suspect` and
+        // `verdict?` both answered zero rows out of 7,271, which reads exactly like a
+        // field that is not implemented rather than one that is. The same shape as the
+        // two lists #213 dissolved: a gate and a doing that can disagree.
+        //
+        // Listed out, so the next numeric field added to the vocabulary fails to
+        // compile here instead of silently matching nothing.
+        Field::Year
+        | Field::Track
+        | Field::Disc
+        | Field::Duration
+        | Field::Bitrate
+        | Field::Cutoff
+        | Field::Cliff
+        | Field::SampleRate
+        | Field::Channels => Vec::new(),
     }
 }
 
@@ -1446,6 +1471,89 @@ mod tests {
         Expr::parse(expr)
             .expect("should parse")
             .compile(Env::default())(&subject)
+    }
+
+    /// **The name on a row is the name you filter by** — #254.
+    ///
+    /// `shelf query` prints `cutoff_hz` and `cliff_db`; the filter vocabulary said
+    /// `cutoff` and `cliff`. Reading a field name off the output, putting it in a
+    /// filter, and being told `unknown field` reads as "this is not implemented" — and
+    /// it is how #254 came to be filed claiming the measurements were unfilterable.
+    ///
+    /// Asserted against `Listed`'s own field names, so renaming a struct field without
+    /// renaming the query field fails here rather than in somebody's shell.
+    #[test]
+    fn a_measurement_is_filtered_by_the_name_the_row_prints() {
+        use crate::query::format::Field;
+
+        for name in ["cutoff_hz", "cliff_db"] {
+            assert!(
+                Field::parse(name).is_some(),
+                "{name} is printed on a row and refused by a filter"
+            );
+            assert!(
+                Field::names().contains(&name),
+                "{name} parses but is not offered, so the error message that misled \
+                 #254 still suggests the wrong spelling"
+            );
+        }
+
+        // The short forms keep working: a saved rule or a `now_playing` template may
+        // hold one, and breaking those to tidy a name would be the worse trade.
+        for old in ["cutoff", "cliff"] {
+            assert!(Field::parse(old).is_some(), "{old} stopped being accepted");
+        }
+        assert_eq!(Field::parse("cutoff"), Field::parse("cutoff_hz"));
+        assert_eq!(Field::parse("cliff"), Field::parse("cliff_db"));
+    }
+
+    /// **The re-buy list is a filter** — #254, #87, and what `query-language.md` §144
+    /// specified before anything implemented it.
+    ///
+    /// `Row.verdict` has carried this since #87, commented "so a re-buy list is a filter
+    /// rather than a separate pass", and no filter could ask for it.
+    ///
+    /// **Asserted on the wiring, not the arithmetic.** Whether 320k stopping at 15.7 kHz
+    /// is suspect is `Encoding::verdict`'s question and `seam.rs` already tests it; what
+    /// was missing is the path from a row to a filter, so this sets the verdict on the
+    /// row and asks.
+    ///
+    /// **Both directions, and that is the point.** `Field::Verdict` compiled against a
+    /// `_ => Vec::new()` catch-all in `texts_of` and matched *nothing* — zero rows out
+    /// of 7,271, indistinguishable from a field that does not exist. A test that only
+    /// checked "suspect is not found" would have passed against that.
+    #[test]
+    fn a_transcode_is_found_by_its_verdict() {
+        use crate::model::encoding::Verdict;
+
+        let asked = |verdict: Verdict, expr: &str| {
+            let t = track();
+            let (mut drawn, recording) = subject_of(&t);
+            drawn.verdict = Some(verdict);
+            let subject = Subject {
+                row: drawn.listed(),
+                locator: t.path.to_str(),
+                recording,
+            };
+            Expr::parse(expr)
+                .expect("should parse")
+                .compile(Env::default())(&subject)
+        };
+
+        assert!(
+            asked(Verdict::Suspect, "verdict=suspect"),
+            "the field parses and matches nothing, which is what a catch-all looks like"
+        );
+        assert!(
+            !asked(Verdict::Good, "verdict=suspect"),
+            "every row matched, so the filter is not reading the verdict at all"
+        );
+        assert!(asked(Verdict::Good, "verdict=good"));
+        assert!(asked(Verdict::Unmeasured, "verdict=unmeasured"));
+        assert!(
+            !asked(Verdict::Unmeasured, "verdict=good"),
+            "nobody having looked is not a clean bill of health"
+        );
     }
 
     /// **A key is a claim on an axis, so the query language already has it**

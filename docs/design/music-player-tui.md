@@ -5759,6 +5759,33 @@ Append here as decisions are made. Format: date, decision, rationale.
   literal `<b>` showing inside a box is a worse outcome than unstyled text. `<br>` is universally supported; the
   emphasis became parentheses. **An unverified assumption in published output is not worth a bold word.**
 
+- **2026-09-13** **One quantity, two names — and the cost was a wrong issue** (#254, #87, #213). `shelf query` prints
+  `cutoff_hz` and `cliff_db`; the filter vocabulary said `cutoff` and `cliff`. I read a field name off the output, put
+  it in a filter, was told `unknown field`, and **filed an issue claiming the measurements were unfilterable and that
+  CLAUDE.md's "a filter you can run" was false.** It was not: `cutoff < 16000` returns 1,040 rows of 7,271, and always
+  did.
+
+  The correction is the finding. A trap that catches the person who wrote the surrounding code twice in one afternoon is
+  not a naming nitpick — anyone scripting against `shelf query` takes the identical path. `cutoff_hz` is the name on
+  `Listed`, on `Drawn`, in the JSON and in the proposal format; only the query vocabulary disagreed, so that is the side
+  that moved. The short forms still parse, because a saved rule or a `now_playing` template may hold one.
+
+  **The catch-all underneath was the real defect.** Adding `Field::Verdict` — specified in `query-language.md` §111 and
+  §144 since it was written, and carried on `Row.verdict` since #87 with the comment _"so a re-buy list is a filter
+  rather than a separate pass"_ — compiled, parsed, and matched **nothing**. `texts_of` ended in `_ => Vec::new()`, so a
+  new text field silently answered zero rows out of 7,271, which is indistinguishable from a field that does not exist.
+
+  That is #213's lesson at a smaller scale: a gate and a doing that can disagree. `texts_of` is exhaustive now, so the
+  next field added to the vocabulary fails to compile there rather than matching nothing. **An exhaustive match is a
+  test you do not have to remember to write.**
+
+  It took three attempts to find, and the two wrong ones are worth recording because each looked like the answer: the
+  value was threaded onto `Drawn` and `Listed` and still matched nothing, then onto `query/rows.rs`'s per-copy override
+  (#186) and still matched nothing. Only the third — `filter.rs` keeping its _own_ extractors, separate from
+  `format.rs::value` — was it. One field name, four places.
+
+  The library now answers what the FFT pass was for: **879 suspect, 71 unmeasured, 6,073 good.**
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

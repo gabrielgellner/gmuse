@@ -1563,6 +1563,12 @@ impl Librarian {
             // so a 320 that came from a 128 shows up as the two disagreeing.
             cutoff_hz: shown.and_then(|e| e.cutoff_hz).map(|m| m.value),
             cliff_db: shown.and_then(|e| e.cliff_db).map(|m| m.value),
+            // **From the copy this row is about, not the canonical one.** `Row.verdict`
+            // asks the canonical encoding, which is right for "what is the best I hold";
+            // a row drawn for one file is about *that* file, and `--every-copy` exists so
+            // a person can ask per copy. Asking the canonical here would report a FLAC's
+            // verdict on the MP3 beside it.
+            verdict: shown.map(|e| e.verdict()),
             sample_rate: shown.and_then(|e| e.sample_rate),
             channels: shown.and_then(|e| e.channels),
             // **Of the recording, not of the slot** (#155). `shown` is empty

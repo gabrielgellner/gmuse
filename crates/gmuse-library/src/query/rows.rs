@@ -179,6 +179,11 @@ pub fn rows(
                     listed.bitrate = Some(e.bitrate);
                     listed.cutoff_hz = e.cutoff_hz.map(|m| m.value);
                     listed.cliff_db = e.cliff_db.map(|m| m.value);
+                    // **A verdict is per copy, like the measurements it is derived
+                    // from** — #254. Without this line `verdict=suspect` parsed and
+                    // matched nothing, because `listed()` answers about the *shown*
+                    // copy and every row here is about a different one.
+                    listed.verdict = Some(e.verdict());
                     listed.sample_rate = e.sample_rate;
                     listed.channels = e.channels;
                 }

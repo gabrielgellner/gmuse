@@ -80,6 +80,19 @@ pub enum Field {
     /// is a cliff and music is a slope, so this is what separates a transcode
     /// from a quiet recording — `cutoff<16000` on its own finds both.
     Cliff,
+    /// **What the numbers say, as against what the file claims** — #254.
+    ///
+    /// `suspect`, `unmeasured` or `good`. `query-language.md` has specified this twice
+    /// since it was written — §111 lists it under *observed* fields, and §144 gives
+    /// `any(encoding).verdict = suspect` annotated "the re-buy list — the point of the
+    /// FFT pass" — and nothing implemented it, so the re-buy list stayed a `tools/` pass
+    /// writing a TSV.
+    ///
+    /// Text rather than a number, because the three values are not ordered in a way a
+    /// person would mean: `unmeasured` sits between the other two in the enum so that
+    /// "nobody looked" is not silently ranked as bad, and `verdict > good` would be a
+    /// question with no answer.
+    Verdict,
     SampleRate,
     Channels,
     Path,
@@ -119,6 +132,10 @@ impl Field {
             | Field::Cliff
             | Field::SampleRate
             | Field::Channels => Kind::Number,
+            // **Text, though it sits beside two numbers.** `unmeasured` is between
+            // `suspect` and `good` in the enum so that "nobody looked" is not ranked as
+            // bad, which makes `verdict > good` a question with no answer.
+            Field::Verdict => Kind::Text,
         }
     }
 
@@ -143,8 +160,21 @@ impl Field {
             "release_held" => Field::ReleaseHeld,
             "duration" => Field::Duration,
             "bitrate" => Field::Bitrate,
-            "cutoff" => Field::Cutoff,
-            "cliff" => Field::Cliff,
+            // **`cutoff_hz` is the name, and `cutoff` still answers** — #254.
+            //
+            // One quantity had two spellings: `Listed.cutoff_hz`, the `shelf query` JSON
+            // key and the proposal format all carry the units, and only this vocabulary
+            // did not. The cost was measured on a person: reading `cutoff_hz` off the
+            // output, putting it in a filter, and being told `unknown field` reads as
+            // "the feature does not exist" — which is the conclusion #254 was filed on.
+            //
+            // The short forms stay because a saved rule or a `now_playing` template may
+            // hold one, and breaking those to tidy a name would be the worse trade.
+            // `FIXED` below lists only the canonical spelling, so the error message and
+            // the completions suggest the one that matches the output.
+            "cutoff_hz" | "cutoff" => Field::Cutoff,
+            "cliff_db" | "cliff" => Field::Cliff,
+            "verdict" => Field::Verdict,
             "samplerate" => Field::SampleRate,
             "channels" => Field::Channels,
             "path" => Field::Path,
@@ -193,6 +223,9 @@ impl Field {
             | Field::Bitrate
             | Field::Cutoff
             | Field::Cliff
+            // Derived from the two above and the declared bitrate, so it is observed
+            // twice over: a person cannot assert it and could not usefully.
+            | Field::Verdict
             | Field::SampleRate
             | Field::Channels
             | Field::Path
@@ -244,8 +277,9 @@ impl Field {
             Field::ReleaseHeld => "release_held",
             Field::Duration => "duration",
             Field::Bitrate => "bitrate",
-            Field::Cutoff => "cutoff",
-            Field::Cliff => "cliff",
+            Field::Cutoff => "cutoff_hz",
+            Field::Cliff => "cliff_db",
+            Field::Verdict => "verdict",
             Field::SampleRate => "samplerate",
             Field::Channels => "channels",
             Field::Path => "path",
@@ -274,6 +308,8 @@ impl Field {
         "artist",
         "bitrate",
         "channels",
+        "cliff_db",
+        "cutoff_hz",
         "disc",
         "display_title",
         "duration",
@@ -284,6 +320,7 @@ impl Field {
         "samplerate",
         "title",
         "track",
+        "verdict",
         "year",
     ];
 
@@ -339,6 +376,14 @@ impl Field {
             Field::Bitrate => r.bitrate?.to_string(),
             Field::Cutoff => r.cutoff_hz?.to_string(),
             Field::Cliff => r.cliff_db?.to_string(),
+            // Lowercase, so a filter reads as a person writes it — `verdict=suspect`,
+            // not `verdict=Suspect`. `Debug` would give the variant's spelling and make
+            // the comparison case-sensitive against a name nobody typed.
+            Field::Verdict => match r.verdict? {
+                crate::model::encoding::Verdict::Suspect => "suspect".into(),
+                crate::model::encoding::Verdict::Unmeasured => "unmeasured".into(),
+                crate::model::encoding::Verdict::Good => "good".into(),
+            },
             Field::SampleRate => r.sample_rate?.to_string(),
             Field::Channels => r.channels?.to_string(),
             // Refused at parse time, so this is unreachable rather than blank.

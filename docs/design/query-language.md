@@ -106,11 +106,11 @@ an `INSTEAD OF` trigger, or it is not updatable at all.
 — assert a year — and dragging a recording into that view must absolutely not rewrite its release date. The distinction
 is not whether the translation is clear. It is **who is entitled to author the fact**:
 
-| category                  | example                              | affordance                                           |
-| ------------------------- | ------------------------------------ | ---------------------------------------------------- |
-| **observed**              | `play_count`, `verdict`              | none — there is nothing a person asserts             |
-| **observed, correctable** | `year`, `mbid`, `title`              | not by default; an explicit correction, never a drag |
-| **authored**              | collection membership, genre, rating | yes, and it names the fact                           |
+| category                  | example                                          | affordance                                           |
+| ------------------------- | ------------------------------------------------ | ---------------------------------------------------- |
+| **observed**              | `play_count`, `verdict`, `cutoff_hz`, `cliff_db` | none — there is nothing a person asserts             |
+| **observed, correctable** | `year`, `mbid`, `title`                          | not by default; an explicit correction, never a drag |
+| **authored**              | collection membership, genre, rating             | yes, and it names the fact                           |
 
 > **An edit to a view is an edit to the facts that made it true. Only _authored_ facts get the affordance, and the
 > interface names the fact before it writes it.**
