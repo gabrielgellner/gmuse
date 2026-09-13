@@ -2175,6 +2175,16 @@ fn run_tui(
     for drift in &log.drifts {
         eprintln!("history: clock drift, {drift:?}");
     }
+    // **Said, because nothing else says it any more** — #238. A shared stamp used to
+    // announce itself by a fact going missing; now the order breaks the tie by the
+    // fact, so this line is the only sign that a device id is being claimed twice.
+    if log.collisions > 0 {
+        eprintln!(
+            "history: {} record(s) share a stamp with another — two processes or two \
+             machines are using one device id",
+            log.collisions
+        );
+    }
     let first_run = log.records().is_empty();
 
     // A socket that will not bind is a warning, not a failure: the player is

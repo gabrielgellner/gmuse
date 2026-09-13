@@ -88,7 +88,7 @@ pub struct Record {
 /// **`Measured` measured what?** An encoding, not a recording — which is the
 /// exact distinction this model spends its whole length drawing, thrown away
 /// by the name of the fact that carries it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Fact {
     /// An artist's label. **Descriptive** — §4 Type 1, so last writer wins and
     /// there is nothing to surface.
@@ -1689,11 +1689,40 @@ impl PartialOrd for Record {
     }
 }
 
-/// Records order by their stamp, which is total across devices — so a set of
-/// records has one iteration order everywhere.
+/// **By stamp, then by what it says** — #238.
+///
+/// The stamp leads, so iteration order is still chronological and total across devices,
+/// and `flush`'s `stamp > flushed` watermark and `compact`'s newest-per-device both mean
+/// what they meant.
+///
+/// **The fact is the tiebreak, and it is not decoration.** This compared stamps alone
+/// while `Eq` compared both fields, which violates `Ord`'s documented requirement that
+/// `cmp` answer `Equal` exactly when `==` does — and a `BTreeSet` believes `cmp`. So two
+/// records with one stamp and different facts were *the same record* to the set holding
+/// the whole log, and the second was **discarded in silence**:
+///
+/// ```text
+/// engine stamp:   Stamp { wall: 1000, counter: 0, device: … }
+/// importer stamp: Stamp { wall: 1000, counter: 0, device: … }
+/// same stamp: true          records equal: false
+/// two facts appended, 1 survived the union
+/// ```
+///
+/// #218 made the two-appender case unreachable by taking an append lock, and this is
+/// the other half: a stamp can still collide for reasons nothing can lock out — a clock
+/// that went backwards past a counter reset, a `machine_id` restored onto two machines,
+/// a replica synced from a device whose id was regenerated. In every one of those,
+/// losing a fact without a word is the worst available outcome for a log whose whole
+/// claim is that nothing is lost.
+///
+/// It also repairs `Changed::of`, which reads `records().difference(&before)`: a new
+/// fact arriving on a taken stamp was *invisible* to the set difference, so the
+/// projection would not have been told about it either.
 impl Ord for Record {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.stamp.cmp(&other.stamp)
+        self.stamp
+            .cmp(&other.stamp)
+            .then_with(|| self.fact.cmp(&other.fact))
     }
 }
 
@@ -1774,6 +1803,98 @@ mod reachability {
             "these facts are matched by a grouping rather than by name, so nobody \
              decided their blast radius: {missing:?}"
         );
+    }
+
+    /// **A colliding stamp keeps both facts rather than losing one** — #238.
+    ///
+    /// `Ord` compared stamps alone while `Eq` compared both fields, and a `BTreeSet`
+    /// believes `cmp` — so two records with one stamp were the same record to the set
+    /// holding the whole log, and the second went without a word.
+    ///
+    /// #218 locked out the way this happened in practice (two processes on one device
+    /// id). A stamp can still collide for reasons nothing can lock out: a clock that
+    /// went backwards past a counter reset, a `machine_id` restored onto two machines,
+    /// a replica from a device whose id was regenerated.
+    #[test]
+    fn two_facts_on_one_stamp_both_survive_the_union() {
+        let stamp = crate::model::clock::Stamp {
+            wall: 1_000,
+            counter: 0,
+            device: Id::derived(b"one machine"),
+        };
+        let rated = Record {
+            stamp,
+            fact: Fact::RecordingRated {
+                recording: Id::from_uuid(uuid::Uuid::from_u128(7)),
+                stars: Some(5),
+            },
+        };
+        let named = Record {
+            stamp,
+            fact: Fact::ArtistNamed {
+                artist: Id::from_uuid(uuid::Uuid::from_u128(8)),
+                name: "Aphex Twin".into(),
+            },
+        };
+        assert_eq!(rated.stamp, named.stamp, "the collision is the premise");
+        assert_ne!(rated, named, "and they are different records");
+
+        let mut both: BTreeSet<Record> = BTreeSet::new();
+        both.insert(rated.clone());
+        both.insert(named.clone());
+        assert_eq!(both.len(), 2, "one of two appended facts was discarded");
+        assert!(both.contains(&rated) && both.contains(&named));
+
+        // **The contract `Ord` documents**, which is what was actually broken: `cmp`
+        // must answer `Equal` exactly when `==` does.
+        assert_ne!(
+            rated.cmp(&named),
+            std::cmp::Ordering::Equal,
+            "`cmp` calls them equal while `==` does not"
+        );
+        assert_eq!(rated.cmp(&rated.clone()), std::cmp::Ordering::Equal);
+    }
+
+    /// **The stamp still leads, so everything that reads order still reads it** — #238.
+    ///
+    /// `flush` takes records with `stamp > flushed` and `compact` keeps the newest
+    /// holdings assertion per device; both would break if the fact sorted first. And
+    /// iteration stays chronological, which is what makes a fold reproducible.
+    #[test]
+    fn ordering_is_chronological_first_and_the_fact_only_breaks_a_tie() {
+        let device = Id::derived(b"one machine");
+        let at = |wall: i64, counter: u32| crate::model::clock::Stamp {
+            wall,
+            counter,
+            device,
+        };
+        // A fact that sorts *late* among facts, on an early stamp.
+        let early = Record {
+            stamp: at(1_000, 0),
+            fact: Fact::RecordingRated {
+                recording: Id::from_uuid(uuid::Uuid::from_u128(7)),
+                stars: Some(5),
+            },
+        };
+        // One that sorts *early* among facts, on a later stamp.
+        let later = Record {
+            stamp: at(2_000, 0),
+            fact: Fact::ArtistNamed {
+                artist: Id::from_uuid(uuid::Uuid::from_u128(8)),
+                name: "Aphex Twin".into(),
+            },
+        };
+        assert!(
+            later.fact < early.fact,
+            "the premise: these two facts sort the other way round"
+        );
+        assert!(early < later, "the stamp decides, not the fact");
+
+        let ordered: Vec<i64> = BTreeSet::from([later, early])
+            .into_iter()
+            .map(|r| r.stamp.wall)
+            .collect();
+        assert_eq!(ordered, vec![1_000, 2_000], "iteration is chronological");
     }
 
     /// **Every fact in the live log survives the format the protocol parses into** —

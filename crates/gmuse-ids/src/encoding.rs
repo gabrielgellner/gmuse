@@ -94,7 +94,21 @@ pub struct Gain {
 /// units differ because the quantities do — a gain is logarithmic and a peak
 /// is a fraction of full scale — and 1e-4 of full scale is far below anything
 /// the clipping guard can act on.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+// **`Ord` since #238**, so a `Record` can order by what it says as well as when.
+// Every field is an integer, which is why this is a derive rather than a decision —
+// the units were chosen that way so two devices reading one file agree exactly.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct Levels {
     pub track_cdb: Option<i32>,
     pub track_peak_e4: Option<u32>,

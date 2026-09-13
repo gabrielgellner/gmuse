@@ -55,7 +55,11 @@ pub struct LabelRecord {
 /// production" — and the player almost never cares which. Where it must care,
 /// it cares about this, which is closed and compiled in. That is what keeps
 /// "composer credits belong on a work" enforceable while the list stays open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+// **`Ord` since #238**, so a `Record` can order by what it says as well as when.
+// The order is declaration order and means nothing; nothing sorts by it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum RoleClass {
     Composer,
     Performer,

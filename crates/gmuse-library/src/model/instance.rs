@@ -178,6 +178,17 @@ pub struct Instance {
     /// Reported rather than swallowed, so a machine with a wrong clock is a
     /// thing someone gets told about.
     pub drifts: Vec<Drift>,
+    /// **Stamps two records share** — #238, and evidence of the same kind as a drift.
+    ///
+    /// `Stamp`'s own doc says the device is "the final tiebreak, so two devices cannot
+    /// produce an equal stamp", so one of these means that guarantee did not hold:
+    /// two processes claiming one device id (#218 locks that out), a clock that went
+    /// backwards past a counter reset, a `machine_id` restored onto a second machine.
+    ///
+    /// Nothing is *lost* to one any more — `Record`'s order breaks the tie by the fact
+    /// — which is precisely why it has to be counted. A condition that used to announce
+    /// itself by data going missing now announces itself here or not at all.
+    pub collisions: usize,
 }
 
 impl Instance {
@@ -186,6 +197,7 @@ impl Instance {
             clock: HybridClock::new(device),
             records: BTreeSet::new(),
             drifts: Vec::new(),
+            collisions: 0,
             flushed: None,
         }
     }
@@ -1478,12 +1490,20 @@ impl Instance {
                 drifts.push(Drift::Implausible { ahead_ms });
             }
         }
+        // **Adjacent pairs, because the set is ordered by stamp first** — so a
+        // collision is always neighbours and this is one pass with no allocation.
+        let collisions = records
+            .iter()
+            .zip(records.iter().skip(1))
+            .filter(|(a, b)| a.stamp == b.stamp)
+            .count();
         let flushed = durable::high_water(&records, device);
         (
             Instance {
                 clock,
                 records,
                 drifts,
+                collisions,
                 flushed,
             },
             damage,
@@ -1591,6 +1611,71 @@ mod tests {
             Some(4),
             "four stars, read back from disk"
         );
+    }
+
+    /// **A shared stamp is counted, because nothing else announces it any more** —
+    /// #238.
+    ///
+    /// It used to announce itself by a fact going missing: `Ord` compared stamps alone
+    /// and a `BTreeSet` believed it. Now the fact breaks the tie and both survive —
+    /// which is the fix, and which means the condition is silent unless something
+    /// counts it.
+    #[test]
+    fn a_shared_stamp_is_reported_rather_than_passed_over() {
+        let shared = dir("collisions");
+        let d = device(1);
+
+        // Two processes with one device id, writing in the same millisecond with
+        // counters that both start at zero. Written by hand, because an `Instance`
+        // will not mint a duplicate within itself.
+        let stamp = Stamp {
+            wall: 1_000,
+            counter: 0,
+            device: d,
+        };
+        let line = |fact: &Fact| {
+            format!(
+                "{}\n",
+                serde_json::to_string(&Record {
+                    stamp,
+                    fact: fact.clone()
+                })
+                .expect("encodes")
+            )
+        };
+        let rated = Fact::RecordingRated {
+            recording: recording(7),
+            stars: Some(5),
+        };
+        let named = Fact::ArtistNamed {
+            artist: Id::derived(b"an artist"),
+            name: "Aphex Twin".into(),
+        };
+        std::fs::write(
+            crate::model::durable::log_path(&shared, d),
+            format!("{}{}", line(&rated), line(&named)),
+        )
+        .expect("write a log");
+
+        let (log, damage) = Instance::open(&shared, d, 2_000);
+        assert!(damage.is_empty(), "both lines are well formed");
+        assert_eq!(log.records().len(), 2, "neither fact was lost");
+        assert_eq!(log.collisions, 1, "and the collision was noticed");
+
+        // A log with no collision says nothing, or the count would be noise.
+        let clean = dir("no-collisions");
+        let mut fresh = Instance::new(d);
+        fresh.rate(1_000, recording(7), Some(5));
+        fresh.rate(1_000, recording(8), Some(4));
+        crate::librarian::commit(
+            &mut fresh,
+            &clean,
+            &crate::librarian::Appending::claim(&clean).expect("a test has its log"),
+        )
+        .expect("writes");
+        let (back, _) = Instance::open(&clean, d, 2_000);
+        assert_eq!(back.records().len(), 2, "two facts in the same millisecond");
+        assert_eq!(back.collisions, 0, "which the counter kept apart");
     }
 
     /// **An append says the same thing whatever the log already holds** — #236.

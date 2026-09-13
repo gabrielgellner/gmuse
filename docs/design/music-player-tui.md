@@ -5317,6 +5317,43 @@ Append here as decisions are made. Format: date, decision, rationale.
   now — "either it read a library or it read nothing" — which is the sixth instance in one day of the failure the entry
   above is about, and the second where the fix was a count.
 
+- **2026-09-12** **A record orders by when it was said and then by what it says** (#238).
+
+  `Ord` compared stamps alone while `Eq` compared both fields. `Ord`'s documented requirement is that `cmp` answer
+  `Equal` exactly when `==` does, and a `BTreeSet` believes `cmp` — so two records with one stamp and different facts
+  were **the same record** to the set holding the whole log, and the second was discarded in silence:
+
+  ```text
+  engine stamp:   Stamp { wall: 1000, counter: 0, device: … }
+  importer stamp: Stamp { wall: 1000, counter: 0, device: … }
+  same stamp: true          records equal: false
+  two facts appended, 1 survived the union
+  ```
+
+  #218 made the way this _happened_ unreachable by taking an append lock. This is the other half: a stamp can still
+  collide for reasons nothing can lock out — a clock that went backwards past a counter reset, a `machine_id` restored
+  onto two machines, a replica synced from a device whose id was regenerated — and for a log whose whole claim is that
+  nothing is lost, losing a fact without a word is the worst available outcome.
+
+  It also repaired something nobody had noticed: `Changed::of` reads `records().difference(&before)`, so a new fact
+  arriving on a taken stamp was invisible to the set difference and the projection would not have been told about it
+  either.
+
+  **The stamp still leads**, so `flush`'s `stamp > flushed` watermark, `compact`'s newest-per-device, and chronological
+  iteration all mean what they meant — with a test that fails if the fact ever sorts first.
+
+  **`Fact` derives `Ord` cleanly**, which is not luck: two types needed it added (`Levels`, `RoleClass`) and both are
+  plain data. `Levels` is all integers because the units were chosen so that two devices reading one file agree exactly,
+  and that decision is what made this a derive rather than an argument.
+
+  **And a shared stamp is counted now, because nothing else announces it.** It used to announce itself by data going
+  missing; a condition whose only symptom was the bug is a condition nobody hears about once the bug is fixed.
+  `Instance` reports `collisions` beside `drifts` — evidence of the same kind, about a clock or an identity rather than
+  about a fact.
+
+  Measured on the live library: **279,941 records, 279,941 distinct stamps, 0 shared.** So this was reachable and had
+  not yet bitten, which is the best moment to fix it and the reason it was worth looking.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
