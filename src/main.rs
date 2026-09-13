@@ -1811,6 +1811,15 @@ fn run_library(
                     eprintln!("left where it is: {copy} — {why}");
                 }
                 eprintln!("{} file(s) placed, {} left alone", done.moved, plan.settled);
+                // **Said separately, because it is a rename nobody asked for** —
+                // #239. "1 file(s) placed" counted audio only, so a cover — or, when
+                // this carried anything at all, a stranger — followed in silence.
+                if done.assets > 0 {
+                    eprintln!(
+                        "{} release file(s) followed the audio (cover art, logs, cue sheets)",
+                        done.assets
+                    );
+                }
 
                 // **And again, because the bytes moved.** Identity is the
                 // audio, so a moved file is the same encoding at a new place,
@@ -1904,6 +1913,14 @@ fn run_library(
                 done.failed.len(),
                 plan.elsewhere
             );
+            // As above (#239): a file that moved without being counted is one
+            // nobody can check.
+            if done.assets > 0 {
+                eprintln!(
+                    "{} release file(s) followed the audio (cover art, logs, cue sheets)",
+                    done.assets
+                );
+            }
             if *write {
                 // **The locators follow the bytes.** Identity is the audio, so
                 // a moved file is the same encoding at a new place — and the

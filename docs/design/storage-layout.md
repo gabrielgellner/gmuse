@@ -219,6 +219,27 @@ Beirut/Lon Gisland/rip.log
 
 A convention, not a fact, and the rule holds: nothing may be recorded _only_ there.
 
+**What counts as one is a named list, because it had to be** (#239). `carry_assets` moved _everything_ left beside the
+audio after a placement, which is right for a release folder and wrong for anywhere else — and `shelf import --write`
+places from arbitrary paths, so "the folder the audio has gone from" can be `~/Downloads`. It carried a `config.toml`
+out of one three times in a single session before the cause turned up.
+
+The list is measured rather than imagined. Every non-audio file in the live library, by extension:
+
+| kind                        | extensions                                          | count |
+| --------------------------- | --------------------------------------------------- | ----- |
+| cover art                   | `jpg` `jpeg` `png` `bmp` `gif` (and `webp` `tif`)   | 190   |
+| what a rip leaves           | `log` `txt` (and `cue` `nfo` `accurip` `md5` `sfv`) | 28    |
+| a playlist over one release | `m3u8` (and `m3u`)                                  | 2     |
+| Ableton's track analysis    | `asd`                                               | 8     |
+| **not a record's**          | `ini` `db` — `desktop.ini` and `Thumbs.db`          | 6     |
+
+So on this library the rule leaves exactly six files behind, all of them something Windows Explorer wrote. `txt` is the
+one arguable entry and the measurement decides it: fourteen of them here are rip logs and track lists.
+
+**And a carried file is counted in the report**, separately from the audio placed — a rename nobody asked for and nobody
+was told about is how this went unnoticed.
+
 ---
 
 ## 10. What is left to build

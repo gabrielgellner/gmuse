@@ -511,11 +511,51 @@ pub fn retire(root: &Path, files: &[PathBuf], write: bool) -> Moved {
     out
 }
 
-/// Move whatever is left in a folder the audio has gone from.
+/// **What belongs to a release rather than to whoever owns the folder** — #239.
+///
+/// `carry_assets` moved *everything* left beside the audio, which is right for a
+/// release folder inside the library and wrong for anywhere else. `shelf import`
+/// places from arbitrary paths, so "the folder the audio has gone from" can be
+/// `~/Downloads` — and it carried a `config.toml` out of one three times in a single
+/// session before anybody noticed, because the report only counts audio.
+///
+/// **The list is measured, not imagined.** Every non-audio file in the live library,
+/// by extension: 137 jpg, 33 jpeg, 14 txt, 14 log, 11 bmp, 8 png, 8 asd, 2 m3u8,
+/// 1 gif — against 4 ini, 2 db, and the odd `toml`, `lock` and `jsonl` that are
+/// plainly not a record's. `storage-layout.md` §9 names the first three kinds by
+/// hand ("cover art, `rip.log` and a cue sheet"); this is that list with the shapes
+/// the disk actually holds.
+///
+/// `asd` is Ableton's per-track analysis, which travels with its track and is cheap
+/// to regenerate if it does not. `ini` and `db` are `desktop.ini` and `Thumbs.db`,
+/// which belong to whatever browsed the folder.
+///
+/// **`txt` is the one arguable entry**, and the measurement decides it: fourteen of
+/// them in this library are rip logs and track lists. A stray note carried out of a
+/// download folder is a small surprise, and the report now says how many followed.
+fn is_asset(path: &Path) -> bool {
+    /// Extensions a release's own files have, lowercased.
+    const ASSETS: &[&str] = &[
+        // Cover art, which is 189 of the library's 214 non-audio files.
+        "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", // What a rip leaves behind.
+        "log", "txt", "cue", "nfo", "accurip", "md5", "sfv",
+        // A playlist over one release, and Ableton's per-track analysis.
+        "m3u", "m3u8", "asd",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| ASSETS.contains(&e.as_str()))
+}
+
+/// Move a release's own files out of a folder its audio has gone from.
 ///
 /// **Only when no audio remains**, because a folder still holding music is a
 /// folder that has not moved: two albums under one directory would otherwise
 /// have the first one's move drag the second one's cover away.
+///
+/// **And only what [`is_asset`] admits**, because the folder may not be a release's
+/// at all — `shelf import` places from wherever it was pointed.
 fn carry_assets(was: &Path, now: &Path) -> usize {
     let Ok(entries) = std::fs::read_dir(was) else {
         return 0;
@@ -529,12 +569,12 @@ fn carry_assets(was: &Path, now: &Path) -> usize {
         return 0;
     }
     let mut moved = 0;
-    for asset in left {
+    for asset in left.iter().filter(|p| is_asset(p)) {
         let Some(name) = asset.file_name() else {
             continue;
         };
         let to = now.join(name);
-        if !to.exists() && std::fs::rename(&asset, &to).is_ok() {
+        if !to.exists() && std::fs::rename(asset, &to).is_ok() {
             moved += 1;
         }
     }
@@ -752,6 +792,66 @@ mod tests {
         assert!(root.join("An Artist/An Album/cover.jpg").exists());
         assert!(root.join("An Artist/An Album/rip.log").exists());
         assert!(!was.exists(), "the emptied folder stayed behind");
+    }
+
+    /// **A file that is not a release's own stays where it is** — #239.
+    ///
+    /// `shelf import --write` places from wherever it was pointed, so "the folder the
+    /// audio has gone from" can be `~/Downloads` — and this carried everything in it.
+    /// Found the hard way: a scratch `config.toml` was quietly moved into an album
+    /// folder three times in one session, invalidating two verifications before the
+    /// cause turned up, because the report only ever counted audio.
+    ///
+    /// Nothing was lost — it is a rename — but `~/Downloads/song.wav` dragging a
+    /// year of unrelated downloads into the library tree is not what "the cover goes
+    /// with the record" was for.
+    #[test]
+    fn what_is_not_a_releases_own_file_is_left_behind() {
+        let root = std::env::temp_dir().join("gmuse-storage-strangers");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A staging directory, outside the library, holding one track and a lot that
+        // is nobody's business.
+        let was = std::env::temp_dir().join("gmuse-storage-strangers-src");
+        let _ = std::fs::remove_dir_all(&was);
+        std::fs::create_dir_all(&was).unwrap();
+        std::fs::write(was.join("01 A Track.mp3"), b"audio").unwrap();
+        std::fs::write(was.join("cover.jpg"), b"art").unwrap();
+        for stranger in ["config.toml", "engine.lock", "notes.pdf", "Thumbs.db"] {
+            std::fs::write(was.join(stranger), b"not a record's").unwrap();
+        }
+
+        let plan = Plan {
+            moves: vec![(
+                Id::from_uuid(uuid::Uuid::from_u128(1)),
+                was.join("01 A Track.mp3"),
+                PathBuf::from("An Artist/An Album/01 A Track.mp3"),
+            )],
+            ..Default::default()
+        };
+        let done = carry_out(&plan, &root, true);
+
+        assert_eq!(
+            (done.moved, done.assets),
+            (1, 1),
+            "one track and one asset; the strangers are not assets"
+        );
+        assert!(
+            root.join("An Artist/An Album/cover.jpg").exists(),
+            "the cover did not follow, so the fix went too far"
+        );
+        for stranger in ["config.toml", "engine.lock", "notes.pdf", "Thumbs.db"] {
+            assert!(
+                was.join(stranger).exists(),
+                "{stranger} was carried into the library"
+            );
+            assert!(
+                !root.join("An Artist/An Album").join(stranger).exists(),
+                "{stranger} arrived in the album folder"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&was);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **A folder still holding music has not moved.** Two albums under one

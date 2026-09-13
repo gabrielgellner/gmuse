@@ -5189,6 +5189,31 @@ Append here as decisions are made. Format: date, decision, rationale.
   `shelf import --write` carries every non-audio file out of the source directory, which had been quietly relocating
   this session's scratch configs and invalidated two earlier verifications before I found it.
 
+- **2026-09-12** **An asset is a named kind of file, not whatever happened to be nearby** (#239, `storage-layout.md`
+  §9).
+
+  `storage::carry_assets` moved _everything_ left in a folder after the audio went, guarded only by "no audio remains".
+  That guard is right for the case it was written for (#149: two albums under one directory must not have the first
+  one's move drag the second's cover) and it assumes the folder is a **release folder**. `shelf import --write` places
+  from arbitrary paths, so the folder can be `~/Downloads`.
+
+  **Found by being bitten, not by reading.** A scratch `config.toml` "disappeared" three times in one session, and
+  because a missing config makes `config::load` fall back to defaults _silently_, two verifications were pointed at the
+  wrong library before the cause turned up. The report said `1 file(s) placed` throughout, because it counted audio.
+
+  **The list is measured.** Every non-audio file in the live library: 190 images, 28 rip logs and track lists, 8 Ableton
+  `asd`, 2 `m3u8` — and 6 that are not a record's, all `desktop.ini` or `Thumbs.db`. So the rule leaves exactly six
+  files behind here, every one of them something Windows Explorer wrote. `txt` is the one arguable entry and the
+  fourteen in this library decide it: they are rip logs.
+
+  **And a carried file is now counted in the report**, separately from the audio. A rename nobody asked for and nobody
+  was told about is how this survived; the count is what makes the residual surprise — a stray `.jpg` in a download
+  folder — visible rather than silent.
+
+  What this does not attempt is deciding whether the source folder _was_ a release. That is the better signal and it is
+  a harder question ("a folder under a library root" is not the same as "a release folder"); an allowlist answers the
+  reported failure exactly, and the measurement says it costs nothing real.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
