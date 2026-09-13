@@ -23,6 +23,8 @@
 //! is how it finds out. [`Desk::settled`] is for the two places that must
 //! wait — a test, and quitting.
 
+pub mod programme;
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -95,6 +97,19 @@ enum Job {
     History {
         focus: crate::model::focus::Focus,
         reply: Sender<Vec<crate::model::seam::Happened>>,
+    },
+    /// **The programme: what plays next, and in what order** — #257.
+    ///
+    /// Here because this thread is the only one holding both halves the answer needs —
+    /// the programme itself, and the published fold that turns a row into a path. A
+    /// caller that resolved its own would be a second thing deciding what plays.
+    ///
+    /// **Not a log change.** The programme is playback state, not a fact; it publishes
+    /// nothing and appends nothing, so a `Look` costs the same as a `Records` and a
+    /// `Reorder` costs a permutation check.
+    Programme {
+        ask: programme::Ask,
+        reply: Sender<programme::Reply>,
     },
     /// **Read the log again, because somebody else appended to it** — #236.
     ///
@@ -229,6 +244,20 @@ impl Desk {
         rx.recv().unwrap_or_default()
     }
 
+    /// **Ask the programme what plays next, or change it** — #257.
+    ///
+    /// One round trip to the librarian thread. Off the decoder's deadline by design: the
+    /// engine holds a window of two or three cues and answers `NeedNext` locally, then
+    /// refills through here.
+    ///
+    /// `None` if the librarian thread has gone, which for a live desk it has not. A
+    /// caller that gets one has no programme to play and should stop rather than guess.
+    pub fn programme(&self, ask: programme::Ask) -> Option<programme::Reply> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.jobs.send(Job::Programme { ask, reply: tx }).ok()?;
+        rx.recv().ok()
+    }
+
     /// Start the thread and publish the first fold.
     ///
     /// The first fold happens here, synchronously, so a caller never sees an
@@ -289,6 +318,10 @@ impl Desk {
             .spawn(move || {
                 let mut log = log;
                 let mut held = held;
+                // **Playback state, not a fact.** It is not folded, not published
+                // and never written to the log — the programme says what will play,
+                // and what was played is a `RecordingPlayed` fact like any other.
+                let mut plan = crate::programme::Programme::new();
                 for job in rx {
                     // **Measured against the log before the job**, so what is
                     // published is what this job did rather than what the log
@@ -330,6 +363,19 @@ impl Desk {
                         Job::History { focus, reply } => {
                             let answer = published.load();
                             let _ = reply.send(answer.library.facts_about(log.records(), focus));
+                            None
+                        }
+                        // **Playback state, so it publishes nothing** — #257. The one
+                        // thread that holds both the order and the fold that resolves a
+                        // row to a path.
+                        Job::Programme { ask, reply } => {
+                            let answer = published.load();
+                            let _ = reply.send(programme::answer(
+                                &mut plan,
+                                &answer.library,
+                                device,
+                                ask,
+                            ));
                             None
                         }
                         // **The scan runs here, and nothing waits on it.** It

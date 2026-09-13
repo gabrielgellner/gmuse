@@ -57,6 +57,15 @@ impl EntryToken {
     pub fn as_u64(self) -> u64 {
         self.0
     }
+
+    /// A token that came back from a caller.
+    ///
+    /// **Not a constructor for a new entry** — only [`Programme`] mints those. A number
+    /// this programme never handed out simply fails to match, which is the answer the
+    /// refill protocol wants.
+    pub fn from_u64(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 /// One position in the programme, and what occupies it.
