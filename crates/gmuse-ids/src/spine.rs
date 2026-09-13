@@ -203,7 +203,8 @@ impl ReleaseGroup {
     /// would answer "album" and lose the rule (#133).
     #[allow(
         dead_code,
-        reason = "the #74 rule that a compilation's genre loses to an album's is not wired up"
+        reason = "nothing feeds `Vocabulary::effective_genres` in production, so nothing \
+                  needs to ask this yet; #253 is that gap"
     )]
     pub fn is_compilation(&self) -> bool {
         self.secondary.contains(&ReleaseSecondary::Compilation)

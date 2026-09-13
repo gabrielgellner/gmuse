@@ -131,6 +131,61 @@ _bench filter:
         exit 1
     fi
 
+# Report deferrals whose issue has been closed — #252.
+#
+# **A recipe and not a test, and that split is the decision.** Whether `#123` is still
+# open is a question for the issue tracker, and a test that needs the network is one
+# that gets `#[ignore]`d the first time it fails on a train. What *is* local —
+# that every deferral names an issue at all, and that no unreachable `pub fn` is
+# silent — lives in `tests/the_claims_we_can_check.rs` and runs in `ci`.
+#
+# So this is the half that cannot be automated honestly, made cheap enough to run
+# deliberately. The audit it replaces took an afternoon and found ten.
+stale-claims:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    command -v glab >/dev/null 2>&1 || { echo "stale-claims needs glab" >&2; exit 1; }
+    echo "Deferrals that name an issue, and whether that issue is still open:"
+    echo
+    # Forward-looking only. "was called `qualifier` until #117" is a record of something
+    # finished and correct as written; conflating the two grammars is what turned three
+    # findings into a reported seven (§13, 2026-09-13).
+    grep -rn -iE 'stays until|is not wired up|has no caller yet|gets a caller' \
+        --include='*.rs' src/ crates/ \
+        | grep -v 'tests/the_claims_we_can_check.rs' \
+        | while IFS= read -r hit; do
+        where="${hit%%:*}"
+        rest="${hit#*:}"
+        line="${rest%%:*}"
+        # The issue may be named on a neighbouring line of the same comment.
+        window=$(sed -n "$((line>3?line-3:1)),$((line+4))p" "$where" 2>/dev/null)
+        issues=$(grep -oE '#[0-9]+' <<<"$window" | sort -u | tr -d '#')
+        if [ -z "$issues" ]; then
+            printf '  %-58s %s\n' "$where:$line" "NAMES NO ISSUE"
+            continue
+        fi
+        for n in $issues; do
+            state=$(glab api "projects/:id/issues/$n" 2>/dev/null \
+                | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state","?"))' 2>/dev/null)
+            case "$state" in
+                closed) printf '  %-58s #%-5s %s  <-- look\n' "$where:$line" "$n" "$state" ;;
+                opened) printf '  %-58s #%-5s %s\n' "$where:$line" "$n" "$state" ;;
+                *)      printf '  %-58s #%-5s unknown\n' "$where:$line" "$n" ;;
+            esac
+        done
+    done
+    echo
+    echo "Reported, never decided. A closed issue is a reason to look, not a verdict:"
+    echo "a comment may cite the issue that CREATED the rule as well as the one that"
+    echo "would finish it, and both read the same to a grep. What each closed hit"
+    echo "means is one of:"
+    echo
+    echo "  - the work was done and the caveat is stale     -> delete the caveat"
+    echo "  - the issue closed without doing this part      -> re-own it, or reopen"
+    echo "  - the number is a citation, not an owner        -> nothing to do"
+    echo
+    echo "Only the middle one is a bug, and only reading the code tells you which."
+
 # Show what it costs to draw a view (#121). Runs in `ci` too — it is fast.
 bench-shelf:
     @just _bench drawing_a_view

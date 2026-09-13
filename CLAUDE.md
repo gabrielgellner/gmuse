@@ -260,6 +260,28 @@ This bites here rather than everywhere because the interesting claims in this pr
 the wire, no second appender, no command accepted and ignored — and an absence is asserted by showing a set is empty.
 `assert!(x.is_empty())` passes identically whether nothing is wrong or nothing was looked at.
 
+## A claim that nothing checks is the fourth way to be green and wrong
+
+§13's testing rule covers a predicate that is vacuously true and a harness that does less than it claims. **A sentence
+in a comment is the one with no instrument at all** — it fails silently, and an audit found ten of them in one afternoon
+(#250, #252).
+
+Two checks run in `just ci`, in `tests/the_claims_we_can_check.rs`:
+
+- **An unreachable `pub fn` must say why it is here.** `dead_code` never fires for a `pub` item in a library crate, so
+  `clippy -D warnings` cannot see one — which is how §7.10's disconnect policy went unimplemented with only an
+  unreferenced `over_limit` to show for it. A `//` comment or a `reason =` both count; the requirement is that a reader
+  gets an explanation.
+- **A deferral must name an issue.** Not that the issue is open — only that one is cited, because a deferral with no
+  owner can never be checked.
+
+`just stale-claims` asks the tracker which of those issues have closed. **A recipe and not a test**, because a test
+needing the network gets ignored and an ignored test looks like coverage. Its output is a brief, not a work list: a
+comment may cite the issue that created a rule as well as the one that would finish it.
+
+None of this catches the §4.2 shape — a gate that named a thing that existed rather than a capability that did not. That
+one has no mechanism, only the advice: **name the condition, not the successor.**
+
 ## Measurement
 
 Two lessons already paid for, recorded in the design doc's Decision Log:

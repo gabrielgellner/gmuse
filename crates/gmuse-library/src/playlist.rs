@@ -64,6 +64,13 @@ pub struct Queue {
     entries: VecDeque<CopyId>,
 }
 
+// The queue's standing is the same as the playlist's above: the types and their
+// semantics are defined here because §4 marks them INVARIANT, and the methods arrive
+// with their callers. **What changed since that was written is where the real queue
+// lives** — #233 gave it to the engine, and `engine::queue` is what decides what plays
+// next. This one is the view's mirror, built by `ui::Ui` and read back from
+// `queue.get`; so the block covers methods a mirror does not need rather than methods
+// nothing will ever need.
 #[allow(dead_code)]
 impl Queue {
     pub fn new() -> Self {

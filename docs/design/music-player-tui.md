@@ -5654,6 +5654,56 @@ Append here as decisions are made. Format: date, decision, rationale.
   loaded machine would have passed as success. A timeout now panics with its own message. That is the third time this
   week a test's failure path has been the thing that needed asserting.
 
+- **2026-09-13** **DECISION: a claim gets an instrument when the instrument is local** (#252, #253). The audit behind
+  #250 found ten load-bearing sentences that had gone false with nothing noticing, and three of the week's bugs were the
+  same shape. §13 already has a rule for the equivalent problem in tests — _a test is not finished until it has been
+  seen to fail_ — and it works because a test is executable. A sentence is not, and both failure modes look identical
+  from outside: nothing happens either way.
+
+  **What was adopted.** Two checks in `tests/the_claims_we_can_check.rs`, in the source-scraping style `seam.rs` already
+  established, plus one recipe:
+
+  - **Every unreachable `pub fn` says why it is here.** A `pub` item in a library crate never trips `dead_code`, so
+    `clippy -D warnings` cannot see it — which is exactly how §7.10's disconnect policy stayed unimplemented, its only
+    trace an unreferenced `Outbox::over_limit` (#251). The requirement is an explanation, not an attribute: writing it
+    forces somebody to say what would give the function a caller.
+  - **Every deferral names an issue.** Not whether that issue is open — only that one is cited, because a deferral with
+    no owner cannot be checked by anything, ever.
+  - **`just stale-claims`** asks the tracker which of those issues have closed.
+
+  **The split is the decision, not a compromise.** A test that needs the network is a test that gets `#[ignore]`d the
+  first time it fails on a train, and an ignored test is worse than an absent one because it looks like coverage. So the
+  local half runs in `ci` and the remote half is a recipe somebody runs deliberately. The audit it replaces took an
+  afternoon; the recipe takes seconds.
+
+  **And the recipe reports rather than decides**, which is the same position `shelf copies` and `shelf slots` take. A
+  closed issue is a reason to look: a comment may cite the issue that _created_ a rule as well as the one that would
+  finish it, and both read identically to a grep. Only reading the code separates "the work was done and the caveat is
+  stale" from "the issue closed without doing this part".
+
+  **It earned itself on the first run**, which is the part worth recording. `Spine::is_compilation` was silenced with
+  _"the #74 rule that a compilation's genre loses to an album's is not wired up"_; #74 is closed. Following it found the
+  reason substantially right and specifically wrong — the rule **is** written, in `Vocabulary::effective_genres`, tested
+  down to the compilation case, and **called by nothing but its own tests**. So genre reads union naively and a rock
+  song on _80s Hits_ is filed under `Pop` in practice. That is #253, and neither half was visible alone: a tested
+  function looks alive, and a closed issue looks done.
+
+  The run also deleted a dead `HistoryError` — a public error enum nothing constructed, returned or matched.
+
+  **Rejected: requiring a `reason =` inside the attribute.** The first version did, and flagged eleven sites whose plain
+  comment above already says what is missing — `Key::new`'s _"used by tests and by callers building a binding directly"_
+  is a better explanation than most `reason` strings. That would have been a formatting rule wearing a claim-quality
+  rule's clothes. A `//` comment counts as much as a `///` one.
+
+  **Rejected: a lint against prose, or a test per comment.** The comments in this codebase are most of why it is
+  navigable. What went stale is a much smaller set — claims that something is impossible, enforced, provisional, or
+  measured — and only that set is worth an instrument.
+
+  **Not solved, and worth being honest about.** §4.2's retirement gate would still have passed every check here: it
+  named a thing that existed rather than a capability that did not, and no scraper can tell those apart. The residual
+  advice is the one thing that has no mechanism — **name the condition, not the successor** — and it is advice precisely
+  because nothing can check it.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

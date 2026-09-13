@@ -289,18 +289,6 @@ pub struct History {
     dirty: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
-pub enum HistoryError {
-    #[error("writing {path}: {source}")]
-    Write {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("serialising the history: {0}")]
-    Encode(#[from] toml::ser::Error),
-}
-
 impl History {
     /// Read the history. Anything unreadable, unparseable, or from another
     /// version starts empty — losing counts is bad, but guessing at a field's

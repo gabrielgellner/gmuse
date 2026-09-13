@@ -31,6 +31,9 @@ impl Key {
         }
     }
 
+    /// The same, with control held. Used by the parser's round-trip tests and by the
+    /// table that enumerates every `C-<letter>` binding; the default keymap goes
+    /// through [`parse`] instead, so nothing in production calls it directly.
     #[allow(dead_code)]
     pub fn ctrl(code: KeyCode) -> Self {
         Self {

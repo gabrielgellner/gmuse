@@ -302,6 +302,12 @@ impl Vocabulary {
     /// non-compilations resolves it with data the model already carries;
     /// falling back to all of them keeps a compilation-only recording from
     /// having no genre at all.
+    /// **Tested, and called by nothing but its own tests** — #253, found by
+    /// `just stale-claims` on its first run. The rule below is implemented and the
+    /// compilation case is asserted; what is missing is a read path that uses it, so a
+    /// genre read still unions naively and a rock song on _80s Hits_ is filed under
+    /// `Pop` in practice. The rule is right and unreachable, which is a different
+    /// problem from the rule being absent.
     pub fn effective_genres(
         &self,
         recording: Id<crate::model::entity::Recording>,
