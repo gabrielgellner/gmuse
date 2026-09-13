@@ -4242,25 +4242,46 @@ mod perf {
         let device = crate::fixture::device();
         let scan = scan_of(200, 650);
 
+        use crate::accounting::{mb, measure};
+
         let t = Instant::now();
-        let mut log = Instance::new(device);
-        log.ingest(100, &scan);
+        let (log, log_kept, log_peak) = measure(|| {
+            let mut log = Instance::new(device);
+            log.ingest(100, &scan);
+            log
+        });
         let ingest = t.elapsed();
 
         let t = Instant::now();
-        let cat = log.catalogue();
+        let (cat, cat_kept, cat_peak) = measure(|| log.catalogue());
         let folded = t.elapsed();
 
         let t = Instant::now();
-        let mut l = Librarian::from_catalogue(&cat);
+        let (mut l, built_kept, built_peak) = measure(|| Librarian::from_catalogue(&cat));
         let built = t.elapsed();
         l.here(device);
 
         let rows = crate::model::rows::Listing::rows(&l).len();
+        // **Bytes beside the times, because #255 asked a question the times cannot
+        // answer.** A 7,271-row library sits at ~900 MB across two processes, each
+        // holding its own fold, and nothing in the design said what a fold should cost.
+        // `kept` is what the stage left behind; `peak` is what it needed on the way, and
+        // the gap between them is the transient a refold pays on every rating.
         eprintln!(
-            "\n{rows} rows, {} records\n  ingest          {ingest:>9.1?}\n  \
-             catalogue()     {folded:>9.1?}\n  from_catalogue  {built:>9.1?}",
-            log.records().len()
+            "\n{rows} rows, {} records\n\
+             \x20                  time        kept      peak\n  \
+             ingest          {ingest:>9.1?}  {:>7.1} MB {:>7.1} MB\n  \
+             catalogue()     {folded:>9.1?}  {:>7.1} MB {:>7.1} MB\n  \
+             from_catalogue  {built:>9.1?}  {:>7.1} MB {:>7.1} MB\n  \
+             {:>32} MB held by all three",
+            log.records().len(),
+            mb(log_kept),
+            mb(log_peak),
+            mb(cat_kept),
+            mb(cat_peak),
+            mb(built_kept),
+            mb(built_peak),
+            format!("{:.1}", mb(log_kept + cat_kept + built_kept)),
         );
 
         assert!(rows > 6000, "the bench needs a library to measure");

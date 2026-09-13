@@ -47,3 +47,16 @@ pub mod projection;
 pub mod query;
 pub mod shelf;
 pub mod text;
+
+/// **What the fold costs in bytes** — #255. Test-only; see the module docs for why an
+/// allocator rather than a profiler.
+#[cfg(test)]
+pub mod accounting;
+
+/// **Installed for the test binary only**, so a release build pays nothing for it.
+///
+/// The same shape as `gmuse-engine`'s `rt_guard`: that one proves the render step
+/// allocates nothing, this one says how much the fold allocates.
+#[cfg(test)]
+#[global_allocator]
+static ACCOUNTING: accounting::Accounting = accounting::Accounting;
