@@ -240,6 +240,31 @@ one arguable entry and the measurement decides it: fourteen of them here are rip
 **And a carried file is counted in the report**, separately from the audio placed — a rename nobody asked for and nobody
 was told about is how this went unnoticed.
 
+### An import takes the audio and nothing else
+
+The allowlist answered the worst of it. What answers the rest is asking **whose folder it is**: a release folder is in
+the library, and nothing outside it is this program's to move. So `carry_assets` runs only when the source is under the
+root — a `render` move takes a release from one place in the tree to another and the cover follows (#149's case, where
+both folders are the library's), while an `import` from `~/Downloads` takes the audio and leaves the folder as it found
+it.
+
+### The system's own files are removed, not carried
+
+`desktop.ini`, `Thumbs.db`, `.DS_Store`, an AppleDouble `._` fork. Each was written without being asked for, means
+nothing to anything but the file browser that wrote it, and is remade the moment that browser looks again — so a move
+drops them rather than spreading them, and `shelf tidy` sweeps the ones sitting in folders nothing is moving.
+
+**This is the one thing in a library that is removed rather than reported**, and it stays narrow deliberately. The
+standing rule is that a measurement marks a file and never moves it: a low-bitrate rip is recorded and queried, never
+quarantined, because what looks redundant depends on what the library is _for_. Nothing here depends on that —
+`Thumbs.db` is not a copy of anything and answers no question — and
+`junk_is_what_the_system_wrote_and_never_a_records_own_file` asserts both halves, because a list that grew into artwork
+would delete a record's own files.
+
+`shelf tidy` is a dry run that **names** every file before `--write` removes any, and it skips `.departed`: a
+tombstone's folder is not a place to sweep. Measured on this library: 7 removed — 3 `desktop.ini`, 2 `Thumbs.db`, 2
+`.DS_Store` — with one left inside `.departed` on purpose.
+
 ---
 
 ## 10. What is left to build

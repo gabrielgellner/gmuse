@@ -490,12 +490,63 @@ const NOT_THE_LIBRARY: &[&str] = &[
 ];
 
 /// Whether a walk should step into this.
-pub(crate) fn worth_entering(entry: &walkdir::DirEntry) -> bool {
+///
+/// **Public since #239**, because `shelf tidy` walks the disk for files nothing
+/// recorded, and it has to skip the same directories every other walk does — `.gmuse`
+/// holds the log and its lock, and `.departed` holds what `remove` retired. A second
+/// spelling of that list is how a sweep deletes the wrong thing.
+pub fn worth_entering(entry: &walkdir::DirEntry) -> bool {
     entry.depth() == 0
         || !entry
             .file_name()
             .to_str()
             .is_some_and(|name| NOT_THE_LIBRARY.contains(&name))
+}
+
+/// **A file the operating system wrote, which is nobody's music and nobody's
+/// asset** — #239.
+///
+/// A thumbnail cache, a folder's window position, a resource fork. Each is written
+/// without being asked for, means nothing to anything but the file browser that
+/// wrote it, and is remade the moment that browser looks again — so it is the one
+/// category of file in a library that can be *removed* rather than reported.
+///
+/// **Which is a narrow exception and stays narrow.** This project's standing rule is
+/// that a measurement marks a file and never moves it: a low-bitrate rip is recorded
+/// and queried, never quarantined, because what looks redundant depends on what the
+/// library is for. Nothing here depends on that — `Thumbs.db` is not a copy of
+/// anything, and the test below says the list may not grow into audio or artwork.
+///
+/// Measured: eight in the live library — 3 `desktop.ini`, 3 `Thumbs.db`, 2
+/// `.DS_Store` — against 190 images and 28 rip logs that are a record's own.
+pub fn is_junk(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    /// Matched case-insensitively, because these come off filesystems that do not
+    /// care and arrive spelled either way.
+    const EXACTLY: &[&str] = &[
+        // Windows Explorer: folder view settings and thumbnail caches.
+        "desktop.ini",
+        "thumbs.db",
+        "ehthumbs.db",
+        "ehthumbs_vista.db",
+        // macOS Finder: folder state, and the custom-icon file whose name ends in a
+        // carriage return.
+        ".ds_store",
+        ".localized",
+        "icon\r",
+        // Classic Mac OS desktop database, which still turns up on old volumes.
+        "desktop db",
+        "desktop df",
+    ];
+    let lower = name.to_ascii_lowercase();
+    if EXACTLY.contains(&lower.as_str()) {
+        return true;
+    }
+    // **AppleDouble**: the resource fork a non-HFS volume gets, named `._` plus the
+    // file it shadows. Matched by prefix because there is one per real file.
+    name.starts_with("._")
 }
 
 pub fn is_audio(path: &Path) -> bool {
@@ -548,6 +599,61 @@ pub(crate) fn split_genres(tag: Option<&str>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// **What the operating system writes, and nothing else** — #239.
+    ///
+    /// This is the one list in the project that authorises a *deletion*, so what
+    /// matters is both halves: every shape the disk actually holds is caught, and
+    /// nothing a record owns is. The counts are from the live library before the sweep:
+    /// 3 `desktop.ini`, 3 `Thumbs.db`, 2 `.DS_Store` — against 190 images and 28 rip
+    /// logs that are a release's own.
+    #[test]
+    fn junk_is_what_the_system_wrote_and_never_a_records_own_file() {
+        for name in [
+            "desktop.ini",
+            "Desktop.ini",
+            "DESKTOP.INI",
+            "Thumbs.db",
+            "thumbs.db",
+            "ehthumbs.db",
+            ".DS_Store",
+            ".ds_store",
+            ".localized",
+            "Desktop DB",
+            "._01 A Track.mp3",
+            "._cover.jpg",
+        ] {
+            assert!(
+                super::is_junk(std::path::Path::new(name)),
+                "{name} is something a file browser wrote"
+            );
+        }
+
+        // **The other half, and the one that would hurt.** A list that grew into
+        // artwork or audio would delete a record's own files, and the only thing
+        // standing between this and that is this assertion.
+        for name in [
+            "cover.jpg",
+            "folder.png",
+            "rip.log",
+            "tracklist.txt",
+            "album.cue",
+            "playlist.m3u8",
+            "01 A Track.mp3",
+            "01 A Track.flac",
+            "track.wav.asd",
+            "notes.toml",
+            "receipt.pdf",
+        ] {
+            assert!(
+                !super::is_junk(std::path::Path::new(name)),
+                "{name} would have been deleted"
+            );
+        }
+
+        // A file with no name at all is nobody's business either way.
+        assert!(!super::is_junk(std::path::Path::new("/")));
+    }
+
     /// How much of the library is safe from the failure that stranded a
     /// four-star rating.
     ///

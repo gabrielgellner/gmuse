@@ -910,6 +910,89 @@ fn a_second_process_cannot_append_to_a_log_the_engine_holds() {
     );
 }
 
+/// **`shelf tidy` names what it would remove, and removes nothing without `--write`**
+/// — #239.
+///
+/// The one operation in this project that *deletes*, so the dry run is the part that
+/// matters: a deletion a person cannot check first is one they have to take on trust.
+/// It also has to skip `.departed`, where `remove` keeps retired copies — a tombstone's
+/// folder is not a place to sweep.
+#[test]
+fn tidy_names_the_junk_before_it_removes_any_of_it() {
+    let (engine, _recording) = start_with_a_track("tidy");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let config = engine.dir.join("tidy.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "data_dir = {:?}\nlibrary = [{:?}]\n",
+            data.display().to_string(),
+            engine.dir.display().to_string()
+        ),
+    )
+    .expect("write a config");
+
+    // Junk beside the placed audio, and one inside `.departed` that must survive.
+    let album = engine.dir.join("Unknown Artist");
+    std::fs::write(album.join("desktop.ini"), b"explorer").expect("write junk");
+    std::fs::write(album.join(".DS_Store"), b"finder").expect("write junk");
+    std::fs::write(album.join("cover.jpg"), b"art").expect("write a cover");
+    let retired = engine.dir.join(".departed").join("An Artist");
+    std::fs::create_dir_all(&retired).expect("scratch");
+    std::fs::write(retired.join("Thumbs.db"), b"explorer").expect("write junk");
+
+    let dry = Command::new(binary())
+        .args(["shelf", "tidy"])
+        .env("GMUSE_CONFIG", &config)
+        .output()
+        .expect("run shelf tidy");
+    let named = String::from_utf8_lossy(&dry.stdout);
+    assert!(
+        named.contains("desktop.ini"),
+        "it did not name one: {named}"
+    );
+    assert!(named.contains(".DS_Store"), "or the other: {named}");
+    assert!(
+        String::from_utf8_lossy(&dry.stderr).contains("dry run"),
+        "a dry run did not say so"
+    );
+    assert!(
+        album.join("desktop.ini").exists(),
+        "a dry run removed something"
+    );
+
+    let done = Command::new(binary())
+        .args(["shelf", "tidy", "--write"])
+        .env("GMUSE_CONFIG", &config)
+        .output()
+        .expect("run shelf tidy --write");
+    assert!(done.status.success());
+    assert!(
+        !album.join("desktop.ini").exists() && !album.join(".DS_Store").exists(),
+        "the junk survived --write"
+    );
+    assert!(
+        album.join("cover.jpg").exists(),
+        "the cover was removed, which is the failure this must never have"
+    );
+    assert!(
+        retired.join("Thumbs.db").exists(),
+        "it swept `.departed`, where retired copies live"
+    );
+
+    // And again finds nothing, so the sweep is idempotent rather than repeating work.
+    let again = Command::new(binary())
+        .args(["shelf", "tidy"])
+        .env("GMUSE_CONFIG", &config)
+        .output()
+        .expect("run shelf tidy");
+    assert!(
+        String::from_utf8_lossy(&again.stdout).trim().is_empty(),
+        "it found something the second time: {}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+}
+
 /// **A view that never scans can still reach a copy** — #237.
 ///
 /// The librarian's rows come from the log, so an attached view could always *list*

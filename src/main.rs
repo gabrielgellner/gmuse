@@ -789,6 +789,61 @@ fn run_library(
                 // command in this block drops it.
             }
         }
+        gmuse::cli::Shelf::Tidy { write } => {
+            // **A walk, not a query** — these are not in the library and never were.
+            // Nothing recorded them, so nothing can be asked about them; the disk is
+            // the only place the answer lives.
+            //
+            // The same roots everything else uses, and `worth_entering` keeps it out
+            // of `.gmuse` and `.departed` — a tombstone's folder is not a place to
+            // tidy, and the data directory's own lock file is not junk.
+            let mut found: Vec<std::path::PathBuf> = Vec::new();
+            for root in roots {
+                for entry in walkdir::WalkDir::new(root)
+                    .into_iter()
+                    .filter_entry(gmuse::operations::scan::worth_entering)
+                    .flatten()
+                {
+                    let path = entry.path();
+                    if entry.file_type().is_file() && gmuse::operations::scan::is_junk(path) {
+                        found.push(path.to_path_buf());
+                    }
+                }
+            }
+            found.sort();
+
+            // Named, not counted: a deletion a person cannot check is one they have to
+            // take on trust, and there are few enough of these to print.
+            for path in &found {
+                println!("{}", path.display());
+            }
+
+            let mut gone = 0;
+            let mut failed = Vec::new();
+            if *write {
+                for path in &found {
+                    match std::fs::remove_file(path) {
+                        Ok(()) => gone += 1,
+                        Err(e) => failed.push((path.clone(), e.to_string())),
+                    }
+                }
+            }
+            for (path, why) in &failed {
+                eprintln!("could not remove {}: {why}", path.display());
+            }
+            eprintln!(
+                "{} file(s) the system left{}",
+                found.len(),
+                if *write {
+                    format!(", {gone} removed")
+                } else {
+                    String::new()
+                }
+            );
+            if !*write && !found.is_empty() {
+                eprintln!("dry run — nothing removed. Add --write.");
+            }
+        }
         gmuse::cli::Shelf::Names => {
             // **A read, so no scan** — #220. Walking the disk here answered
             // with what the tags say over what the library recorded, which is
@@ -1814,10 +1869,10 @@ fn run_library(
                 // **Said separately, because it is a rename nobody asked for** —
                 // #239. "1 file(s) placed" counted audio only, so a cover — or, when
                 // this carried anything at all, a stranger — followed in silence.
-                if done.assets > 0 {
+                if done.assets > 0 || done.discarded > 0 {
                     eprintln!(
-                        "{} release file(s) followed the audio (cover art, logs, cue sheets)",
-                        done.assets
+                        "{} release file(s) followed the audio, {} the system left removed",
+                        done.assets, done.discarded
                     );
                 }
 
@@ -1915,10 +1970,10 @@ fn run_library(
             );
             // As above (#239): a file that moved without being counted is one
             // nobody can check.
-            if done.assets > 0 {
+            if done.assets > 0 || done.discarded > 0 {
                 eprintln!(
-                    "{} release file(s) followed the audio (cover art, logs, cue sheets)",
-                    done.assets
+                    "{} release file(s) followed the audio, {} the system left removed",
+                    done.assets, done.discarded
                 );
             }
             if *write {

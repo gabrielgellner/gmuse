@@ -5214,6 +5214,38 @@ Append here as decisions are made. Format: date, decision, rationale.
   a harder question ("a folder under a library root" is not the same as "a release folder"); an allowlist answers the
   reported failure exactly, and the measurement says it costs nothing real.
 
+- **2026-09-12** **The system's own files are removed rather than carried, and an import takes only the audio** (#239,
+  `storage-layout.md` §9).
+
+  Two decisions on top of the allowlist that landed hours earlier, both the owner's call.
+
+  **An import takes the audio and nothing else.** The allowlist stopped a `config.toml` travelling; it did not stop a
+  `cover.jpg` travelling out of `~/Downloads`, and images following the audio out of a folder that is not a release's
+  was wanted less than it was tolerated. What settles it is the discriminator the earlier entry deferred: **whose folder
+  is it?** A release folder is in the library, so `carry_assets` runs only when the source is under the root. A `render`
+  move keeps #149's case intact — both folders are the library's and the cover follows. An `import` leaves the folder as
+  it found it.
+
+  **And what the operating system wrote is deleted.** `desktop.ini`, `Thumbs.db`, `.DS_Store`, an AppleDouble `._` fork:
+  each written without being asked for, meaningless to anything but the file browser that wrote it, and remade the
+  moment that browser looks again. A move drops them rather than spreading them, and `shelf tidy` sweeps the ones in
+  folders nothing is moving — 7 on this library, and a second run finds none.
+
+  **This is the project's one authorised deletion, and it is narrow on purpose.** The standing rule is that a
+  measurement marks a file and never moves it — a low-bitrate rip is recorded and queried, never quarantined, because
+  what looks redundant depends on what the library is _for_. That rule protects _copies of music_, and none of this is
+  one: `Thumbs.db` is not a copy of anything and answers no question. So the test asserts **both** halves — every shape
+  the disk holds is caught, and `cover.jpg`, `rip.log`, `album.cue`, `track.wav.asd` and a `.flac` are not — because a
+  list that grew into artwork would delete a record's own files, and that assertion is the only thing standing between
+  the two.
+
+  `shelf tidy` names every file before `--write` removes any, and skips `.departed`: a tombstone's folder is not a place
+  to sweep. One `desktop.ini` remains in there deliberately.
+
+  **An edit script reported success and wrote nothing**, again — the `carry_assets` rewrite died on a later assertion in
+  the same script, before its `write_text`. Caught by grepping for what was supposedly added rather than believing the
+  `ok`, which is what the entry two above says to do and the reason it says it.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

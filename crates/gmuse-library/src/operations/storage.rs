@@ -375,6 +375,12 @@ pub struct Moved {
     pub moved: usize,
     /// Cover art, rip logs and the like, carried along with their album.
     pub assets: usize,
+    /// **Files the operating system left, removed rather than carried** — #239.
+    ///
+    /// A thumbnail cache has no destination worth having, and the file browser writes
+    /// another the next time it looks. Counted because a deletion is reported even
+    /// when what it deleted was nobody's.
+    pub discarded: usize,
     /// A move that could not be made, and why. The file stays where it is.
     pub failed: Vec<(PathBuf, String)>,
     /// Directories left empty by a move and taken away.
@@ -434,7 +440,9 @@ pub fn carry_out(plan: &Plan, root: &Path, write: bool) -> Moved {
     // still holding music has not moved anywhere yet.
     if write {
         for (was, now) in &followed {
-            out.assets += carry_assets(was, now);
+            let carried = carry_assets(was, now, root);
+            out.assets += carried.moved;
+            out.discarded += carried.discarded;
         }
     }
     for was in followed.keys() {
@@ -501,7 +509,9 @@ pub fn retire(root: &Path, files: &[PathBuf], write: bool) -> Moved {
         // The cover goes with the record, as it does on a render (#149).
         for was in &emptied {
             if let Ok(under) = was.strip_prefix(root) {
-                out.assets += carry_assets(was, &departed.join(under));
+                let carried = carry_assets(was, &departed.join(under), root);
+                out.assets += carried.moved;
+                out.discarded += carried.discarded;
             }
         }
         for was in &emptied {
@@ -548,17 +558,32 @@ fn is_asset(path: &Path) -> bool {
         .is_some_and(|e| ASSETS.contains(&e.as_str()))
 }
 
-/// Move a release's own files out of a folder its audio has gone from.
+/// Move a release's own files out of a folder its audio has gone from, and drop what
+/// the operating system left there.
 ///
-/// **Only when no audio remains**, because a folder still holding music is a
-/// folder that has not moved: two albums under one directory would otherwise
-/// have the first one's move drag the second one's cover away.
+/// **Only inside the library**, which is the discriminator #239 deferred and the
+/// answer to what it deferred it for. A `render` move takes a release from one place
+/// in the tree to another and both folders are the library's — that is #149's case,
+/// where the cover has to follow. An `import` places from wherever it was pointed,
+/// and `~/Downloads` is not a release folder: nothing there is the library's to move
+/// or to delete, so an import takes the audio and nothing else.
 ///
-/// **And only what [`is_asset`] admits**, because the folder may not be a release's
-/// at all — `shelf import` places from wherever it was pointed.
-fn carry_assets(was: &Path, now: &Path) -> usize {
+/// **Only when no audio remains**, because a folder still holding music is a folder
+/// that has not moved: two albums under one directory would otherwise have the first
+/// one's move drag the second one's cover away.
+///
+/// **And only what [`is_asset`] admits.** What `scan::is_junk` admits is *removed*
+/// instead — a thumbnail cache has no destination worth having, and carrying one
+/// would spread it.
+fn carry_assets(was: &Path, now: &Path, root: &Path) -> Carried {
+    let mut out = Carried::default();
+    // Not the library's folder, so not the library's files. The audio has already
+    // gone; everything else stays exactly as it was found.
+    if !was.starts_with(root) {
+        return out;
+    }
     let Ok(entries) = std::fs::read_dir(was) else {
-        return 0;
+        return out;
     };
     let left: Vec<PathBuf> = entries
         .flatten()
@@ -566,19 +591,34 @@ fn carry_assets(was: &Path, now: &Path) -> usize {
         .filter(|p| p.is_file())
         .collect();
     if left.iter().any(|p| crate::operations::scan::is_audio(p)) {
-        return 0;
+        return out;
     }
-    let mut moved = 0;
-    for asset in left.iter().filter(|p| is_asset(p)) {
-        let Some(name) = asset.file_name() else {
+    for file in &left {
+        if crate::operations::scan::is_junk(file) {
+            if std::fs::remove_file(file).is_ok() {
+                out.discarded += 1;
+            }
+            continue;
+        }
+        if !is_asset(file) {
+            continue;
+        }
+        let Some(name) = file.file_name() else {
             continue;
         };
         let to = now.join(name);
-        if !to.exists() && std::fs::rename(asset, &to).is_ok() {
-            moved += 1;
+        if !to.exists() && std::fs::rename(file, &to).is_ok() {
+            out.moved += 1;
         }
     }
-    moved
+    out
+}
+
+/// What followed a release, and what was thrown away behind it.
+#[derive(Debug, Default, Clone, Copy)]
+struct Carried {
+    moved: usize,
+    discarded: usize,
 }
 
 /// Take away directories a move left empty, up to but never including `root`.
@@ -794,19 +834,21 @@ mod tests {
         assert!(!was.exists(), "the emptied folder stayed behind");
     }
 
-    /// **A file that is not a release's own stays where it is** — #239.
+    /// **An import takes the audio and nothing else** — #239, and the rule the issue
+    /// deferred.
     ///
     /// `shelf import --write` places from wherever it was pointed, so "the folder the
-    /// audio has gone from" can be `~/Downloads` — and this carried everything in it.
-    /// Found the hard way: a scratch `config.toml` was quietly moved into an album
-    /// folder three times in one session, invalidating two verifications before the
-    /// cause turned up, because the report only ever counted audio.
+    /// audio has gone from" can be `~/Downloads` — and this once carried everything in
+    /// it. Found the hard way: a scratch `config.toml` was quietly moved into an album
+    /// folder three times in one session, and because a missing config makes
+    /// `config::load` fall back to defaults *silently*, two verifications were pointed
+    /// at the wrong library before the cause turned up.
     ///
-    /// Nothing was lost — it is a rename — but `~/Downloads/song.wav` dragging a
-    /// year of unrelated downloads into the library tree is not what "the cover goes
-    /// with the record" was for.
+    /// An allowlist of asset kinds fixed the worst of it. What fixes the rest is
+    /// asking whose folder it is: a release folder is in the library, and nothing
+    /// outside it is this program's to move or to delete.
     #[test]
-    fn what_is_not_a_releases_own_file_is_left_behind() {
+    fn an_import_takes_the_audio_and_leaves_the_folder_as_it_found_it() {
         let root = std::env::temp_dir().join("gmuse-storage-strangers");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -816,9 +858,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&was);
         std::fs::create_dir_all(&was).unwrap();
         std::fs::write(was.join("01 A Track.mp3"), b"audio").unwrap();
-        std::fs::write(was.join("cover.jpg"), b"art").unwrap();
-        for stranger in ["config.toml", "engine.lock", "notes.pdf", "Thumbs.db"] {
-            std::fs::write(was.join(stranger), b"not a record's").unwrap();
+        let beside = ["cover.jpg", "config.toml", "notes.pdf", "Thumbs.db"];
+        for name in beside {
+            std::fs::write(was.join(name), b"not the library's").unwrap();
         }
 
         let plan = Plan {
@@ -832,25 +874,74 @@ mod tests {
         let done = carry_out(&plan, &root, true);
 
         assert_eq!(
-            (done.moved, done.assets),
-            (1, 1),
-            "one track and one asset; the strangers are not assets"
+            (done.moved, done.assets, done.discarded),
+            (1, 0, 0),
+            "the audio moved and nothing else was touched"
         );
-        assert!(
-            root.join("An Artist/An Album/cover.jpg").exists(),
-            "the cover did not follow, so the fix went too far"
-        );
-        for stranger in ["config.toml", "engine.lock", "notes.pdf", "Thumbs.db"] {
+        for name in beside {
             assert!(
-                was.join(stranger).exists(),
-                "{stranger} was carried into the library"
-            );
-            assert!(
-                !root.join("An Artist/An Album").join(stranger).exists(),
-                "{stranger} arrived in the album folder"
+                was.join(name).exists(),
+                "{name} was taken out of a folder that is not the library's"
             );
         }
         let _ = std::fs::remove_dir_all(&was);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Inside the library, the cover follows and the junk is dropped** — #149 and
+    /// #239 together.
+    ///
+    /// A `render` move takes a release from one place in the tree to another and both
+    /// folders are the library's, so the cover has to follow — that is the whole of
+    /// #149. What `desktop.ini` and `Thumbs.db` have instead is no destination worth
+    /// having: a file browser writes another the next time it looks, and carrying one
+    /// would only spread it.
+    ///
+    /// **The narrow exception to "a measurement marks a file and never moves it".**
+    /// Nothing here is a copy of anything, which is why the rule that keeps a
+    /// low-bitrate rip in place does not reach it.
+    #[test]
+    fn a_move_inside_the_library_carries_the_cover_and_drops_the_junk() {
+        let root = std::env::temp_dir().join("gmuse-storage-junk");
+        let _ = std::fs::remove_dir_all(&root);
+        let was = root.join("General").join("An Artist").join("An Album");
+        std::fs::create_dir_all(&was).unwrap();
+        std::fs::write(was.join("01 A Track.mp3"), b"audio").unwrap();
+        std::fs::write(was.join("cover.jpg"), b"art").unwrap();
+        std::fs::write(was.join("rip.log"), b"log").unwrap();
+        let junk = ["desktop.ini", "Thumbs.db", ".DS_Store", "._cover.jpg"];
+        for name in junk {
+            std::fs::write(was.join(name), b"the system wrote this").unwrap();
+        }
+
+        let plan = Plan {
+            moves: vec![(
+                Id::from_uuid(uuid::Uuid::from_u128(1)),
+                was.join("01 A Track.mp3"),
+                PathBuf::from("An Artist/An Album/01 A Track.mp3"),
+            )],
+            ..Default::default()
+        };
+        let done = carry_out(&plan, &root, true);
+        let now = root.join("An Artist").join("An Album");
+
+        assert_eq!(
+            (done.moved, done.assets, done.discarded),
+            (1, 2, 4),
+            "one track, two of the release's own files, four the system left"
+        );
+        assert!(now.join("cover.jpg").exists(), "the cover did not follow");
+        assert!(now.join("rip.log").exists(), "the log did not follow");
+        for name in junk {
+            assert!(
+                !now.join(name).exists(),
+                "{name} was carried into the album's new folder"
+            );
+        }
+        assert!(
+            !was.exists(),
+            "the emptied folder stayed behind, so the junk was left in it"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

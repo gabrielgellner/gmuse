@@ -607,6 +607,27 @@ pub enum Shelf {
     /// Nothing else prints an artist id, so without this neither is fixable by
     /// hand.
     Names,
+    /// **Remove the files the operating system left in the library** — #239.
+    ///
+    /// A thumbnail cache, a folder's window position, a resource fork. Each was
+    /// written without being asked for, means nothing to anything but the file
+    /// browser that wrote it, and is remade the moment that browser looks again.
+    ///
+    /// **The one thing in a library that is removed rather than reported.** This
+    /// project's standing rule is that a measurement marks a file and never moves it
+    /// — a low-bitrate rip is recorded and queried, never quarantined, because what
+    /// looks redundant depends on what the library is *for*. Nothing here depends on
+    /// that: `Thumbs.db` is not a copy of anything and answers no question.
+    ///
+    /// A move within the library already drops them (`shelf render --write`). This is
+    /// for the ones sitting in folders nothing is moving.
+    ///
+    /// **A dry run unless given `--write`**, like every other writing operation.
+    Tidy {
+        /// Remove what it found. Without this, nothing is deleted.
+        #[arg(long)]
+        write: bool,
+    },
     /// **What the tree would draw** — the levels, without a terminal (#182).
     ///
     /// `:view levels genre@1,album` reshapes the browser, and until now that
