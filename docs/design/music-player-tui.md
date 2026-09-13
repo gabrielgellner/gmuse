@@ -5436,6 +5436,45 @@ Append here as decisions are made. Format: date, decision, rationale.
   the trigger at the level cpal uses it. The twenty lines that join them are straight-line code and are read rather than
   run.
 
+- **2026-09-13** **A track change is a discontinuity in two quantities, and the engine reported neither** (#246, I13,
+  I17, §7.8). Found by listening rather than by a test: the view kept naming the track it started with, and that track's
+  elapsed time ran past its own duration. Both halves lived in one payload, and they are worth separating because only
+  one of them is a slip.
+
+  The name was hung off the wrong event. `held.pending → held.playing` was promoted on `PlayerEvent::Finished`, which a
+  splice does not send — `decode.rs` **asserts** `"a spliced track must not report Finished"`, because a gapless join is
+  deliberately continuous and `Finished` means the whole chain ran out. So the event published _at_ the join carried the
+  previous recording, and the correct name arrived once, with `state: "stopped"`. `Loaded` was already the right hook
+  and already carried the guarantee: `announce_boundaries` holds it back until the playhead is at the join and stores
+  `track_base` first. With three or more tracks it was worse than wrong by one — `pending` is overwritten at each join,
+  so `playing` skipped from the first track to the last.
+
+  The position was a **seam**, not a slip. `Shared::track_base` exists precisely because a gapless transition does not
+  flush, and `PlayerHandle::position` has always subtracted it; the wire sent the raw frame. So the same quantity was
+  honest in-process and silently wrong one process out, which is #212's shape again and the second time this exact seam
+  has produced a bug. What generalises: **when a reader inside the process computes something from two atomics, the wire
+  carrying only one of them is a bug waiting for a second client.** The fix subtracts engine-side — a stream offset is
+  not a user-facing grain (I17) and nothing asked for one — and that is also what makes "track change" belong in §7.8's
+  discontinuity list, which it did not before.
+
+  **And the test that covered this passed.** `playback_continues_to_a_second_track_with_no_view_answering` collected
+  distinct `recording` values over a 25-second window and asserted two appeared. Two did — the second at shutdown.
+  Collecting values over a window cannot tell "the engine advanced" from "the engine eventually admitted it had",
+  because the window swallows _when_. This is a new entry in the catalogue of green-but-vacuous shapes this project
+  keeps finding, and it is not one of the two already recorded: the predicate was not vacuous and the harness did
+  attach. It **measured the right thing over the wrong interval**. The fix is one line — ignore any event that is not
+  `state: "playing"` — and the assertion now says what a listener actually needs, which is a claim about the state a
+  name arrives with.
+
+  A third lesson, paid for in the same hour: the natural join is a clock, so a socket test for the position **passed
+  alone and failed inside `just ci`**. Thirty-four other tests starved the null renderer enough that a 1-second track
+  had not reached its join in 25 seconds, and the test reported three positions from the first track. A verdict that
+  depends on machine load is worse than no verdict. It is now a unit test that _states_ the join — a mapping at a known
+  frame with a `track_base` under it is exactly what the decoder leaves behind — which needed `Shared::new` widened to
+  `pub(crate)`. Writing into a live player's `Shared` was tried first and failed for an unrelated reason: at
+  `null::Pace::Fast` the renderer republishes its mapping in a tight loop and overwrote the test's frame, so it read 0
+  and blamed the subtraction.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

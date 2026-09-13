@@ -661,6 +661,21 @@ The engine emits a new `playback` event only when the state, rate, or position c
 seek, rate change (varispeed is just a rate change), track change, or loop wrap. It never emits a steady position
 stream.
 
+**`pos_frames` is into the current track, and `recording` names the track that is sounding.** Both needed saying,
+because the engine got both wrong in the same place and the bug was one symptom (#246).
+
+A gapless transition deliberately does not flush, so the engine's own frame counter runs straight across the join —
+`Shared::track_base` is what makes it a position rather than an offset, and `PlayerHandle::position` has always
+subtracted it. The wire did not, so an attached view's elapsed time never reset at a join and climbed past the duration
+of the track it was showing. The subtraction happens engine-side: a stream offset is not a user-facing grain (I17), and
+nothing has asked for one. **This is why "track change" appears in the discontinuity list above** — with a raw stream
+offset it would not be a position discontinuity at all.
+
+And the name is promoted when the boundary reaches the output, not when the chain ends. The decoder holds a `Loaded`
+back until the playhead is actually at the join and stores `track_base` first, so that event is the moment both facts
+become true together. A splice emits no `Finished` — the audio path asserts it — so hanging the promotion there named
+the finished track for the whole of the next one.
+
 **A lost device is retried, and the queue outlives it** (#241). The stream was built once and never again, so unplugging
 an interface left the engine running with no output for the rest of its life — the daemon outlived the terminal and not
 the headphones. Now the control loop gives the stream up, the thread rebuilds, and `Held` carries the queue, the modes

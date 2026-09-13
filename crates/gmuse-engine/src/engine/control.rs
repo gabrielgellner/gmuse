@@ -506,14 +506,28 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                         None => player.set_next(None),
                     }
                 }
-                PlayerEvent::Finished => {
-                    // The join happened: what was spliced on is what is playing.
+                // **The join happened here, and nowhere else.**
+                //
+                // This promotion used to hang off `Finished`, on the reasoning that
+                // finishing a track is when the next one takes over. It is not, and
+                // the audio path asserts so: `a spliced track must not report
+                // Finished` — a splice is deliberately continuous and `Finished` is
+                // emitted once, when the whole chain runs out. So `playing` caught up
+                // to `pending` only as everything stopped, and every event published
+                // in between named the track that had already ended.
+                //
+                // `Loaded` is the boundary reaching the output, and the decoder holds
+                // it back until the playhead is actually there (`announce_boundaries`)
+                // — which is the same reason it stores `track_base` first. An initial
+                // load arrives here too and needs nothing: `load_picked` set `playing`
+                // when it was asked for, so `pending` is `None` and this is a no-op.
+                PlayerEvent::Loaded { .. } => {
                     if let Some(next) = held.pending.take() {
                         held.playing = Some(next);
                     }
                     moved = true;
                 }
-                PlayerEvent::Loaded { .. } => {
+                PlayerEvent::Finished => {
                     moved = true;
                 }
                 // **Remembered, not just announced** — #212. The render step has
@@ -833,6 +847,19 @@ fn playback_event(
     lost: bool,
 ) -> Event {
     let sounding = shared.sounding();
+    // **Into this track, not into the stream** — I13, I17.
+    //
+    // A gapless transition deliberately does not flush, so the frame counter runs
+    // straight across the join and `Shared::track_base` is what makes it mean
+    // anything to a person; `PlayerHandle::position` has always subtracted it. The
+    // wire carried the raw stream offset, so an attached view's clock never reset at
+    // a join and ran past the track's own duration — honest locally, silently wrong
+    // one process away, which is #212's shape exactly.
+    //
+    // Subtracted here rather than sent as a second field, because a stream offset is
+    // not a user-facing grain (I17) and nothing asks for one. It also makes a track
+    // change the position discontinuity §7.8 already lists it as.
+    let base = shared.track_base.load(std::sync::atomic::Ordering::Acquire);
     Event::new(
         Topic::Playback,
         serde_json::json!({
@@ -842,7 +869,7 @@ fn playback_event(
                 State::Stopped => "stopped",
             },
             "recording": recording,
-            "pos_frames": sounding.map(|s| s.frame),
+            "pos_frames": sounding.map(|s| s.frame.saturating_sub(base)),
             "stream_generation": told.generation,
             "sample_rate": player.device_rate(),
             "at_ns": sounding.map(|s| s.at_nanos),
@@ -939,6 +966,81 @@ mod tests {
             waited.elapsed() < Duration::from_secs(5),
             "it did not notice the stop for {:?}",
             waited.elapsed()
+        );
+    }
+
+    /// **The reported position is into the track, not into the stream** — I13, I17, #246.
+    ///
+    /// A gapless transition deliberately does not flush, so `position_frames` runs
+    /// straight across the join and `Shared::track_base` is what makes it a position
+    /// rather than an offset. `PlayerHandle::position` has always subtracted it; the
+    /// wire did not, so an attached view's clock never reset at a join and climbed
+    /// past the duration of the track it was naming.
+    ///
+    /// **A unit test rather than a socket one, because the natural join is a clock.**
+    /// The first version waited for a real gapless advance under the null renderer and
+    /// passed alone and failed inside `just ci` — thirty-four other tests starving the
+    /// renderer meant the 1-second track had not reached its join inside a 25-second
+    /// window, and it reported `[1024, 1632, 1760]`, three positions from the first
+    /// track. A test whose verdict depends on machine load is worse than no test.
+    ///
+    /// So the join is *stated* instead of waited for: a mapping at a known frame and a
+    /// `track_base` under it is exactly the state the decoder leaves behind, and the
+    /// subtraction is the whole claim.
+    #[test]
+    fn the_reported_position_is_relative_to_the_current_track() {
+        let player = PlayerHandle::headless(
+            PlayerConfig {
+                device: None,
+                rate: None,
+                resample: Default::default(),
+                volume: 1.0,
+            },
+            null::Pace::Fast,
+        )
+        .expect("a headless player");
+        // **Not the player's own `Shared`.** `playback_event` takes the two separately,
+        // and the headless renderer at `Pace::Fast` republishes its mapping in a tight
+        // loop — a first version wrote a frame into the live one and read back the
+        // renderer's next value, reporting 0 for a reason that had nothing to do with
+        // the subtraction under test. So the player supplies only the device rate, and
+        // the state being asserted about is stated here.
+        let shared = std::sync::Arc::new(crate::audio::Shared::new());
+        let generation = 1;
+        shared
+            .stream_generation
+            .store(generation, Ordering::Release);
+
+        // The state a join leaves: the stream is 48,000 frames in, and the track
+        // playing started at 47,616 of them. `announce_boundaries` stores the base
+        // before it sends the `Loaded`, so this ordering is the real one.
+        shared.map_frame.store(48_000, Ordering::Relaxed);
+        shared.map_at_nanos.store(1, Ordering::Relaxed);
+        shared.map_generation.store(generation, Ordering::Relaxed);
+        shared.map_latency_nanos.store(0, Ordering::Relaxed);
+        // Even, so the mapping reads as complete rather than mid-write.
+        shared.map_seq.store(2, Ordering::Release);
+        shared.track_base.store(47_616, Ordering::Release);
+
+        // **The instrument is attached**, and this is the assertion that proves it:
+        // `sounding()` refuses a torn or stale mapping by returning `None`, and
+        // `pos_frames` would then be `null` — which is not zero and not 384, but would
+        // sail past a check that only looked for "not 48,000".
+        assert!(
+            shared.sounding().is_some(),
+            "the mapping was refused, so the event below has no position to report"
+        );
+
+        let told = Told {
+            state: crate::audio::State::Playing,
+            generation,
+        };
+        let event = playback_event(&player, &shared, told, Some("a-recording"), false);
+
+        assert_eq!(
+            event.body["pos_frames"].as_u64(),
+            Some(384),
+            "the wire carried the stream offset rather than the position in the track"
         );
     }
 

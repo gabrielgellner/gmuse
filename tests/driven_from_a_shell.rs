@@ -1605,16 +1605,26 @@ fn playback_continues_to_a_second_track_with_no_view_answering() {
     // test sent `pause` here and spent a while watching a paused player refuse
     // to reach the end of a track.
 
-    // **Wait for a second recording to be named.** The first track is a second
-    // long under the null renderer at wall speed, so the join happens on its
-    // own — and the only way a second recording can appear is if the engine
-    // chose it, because nobody told it one.
+    // **Wait for a second recording to be named, *while it is playing*.** The first
+    // track is a second long under the null renderer at wall speed, so the join
+    // happens on its own — and the only way a second recording can appear is if the
+    // engine chose it, because nobody told it one.
+    //
+    // **`while playing` is the whole assertion**, and without it this test passed
+    // against the bug. `held.playing` was promoted on `Finished`, which a splice
+    // never sends, so the second name arrived once — at the end of the pool, with
+    // `state: "stopped"`. Collecting names over the window saw two of them and
+    // called that an advance. What a listener actually needs is the name of the
+    // track that is *sounding*, which is a claim about the state it arrives with.
     let mut names = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(25);
     while std::time::Instant::now() < deadline {
         let Ok(event) = client.next_event(Duration::from_secs(3)) else {
             continue;
         };
+        if event.body["state"].as_str() != Some("playing") {
+            continue;
+        }
         if let Some(rec) = event.body["recording"].as_str()
             && !names.contains(&rec.to_string())
         {
@@ -1627,7 +1637,7 @@ fn playback_continues_to_a_second_track_with_no_view_answering() {
 
     assert!(
         names.len() >= 2,
-        "the engine never moved to a second track on its own; it named {names:?}"
+        "the engine never named a second track while playing; it named {names:?}"
     );
     assert!(
         names.contains(&recording),

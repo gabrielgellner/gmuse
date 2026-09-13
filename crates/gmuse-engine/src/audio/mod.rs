@@ -353,7 +353,14 @@ impl Shared {
         self.stream_generation.load(Ordering::Acquire)
     }
 
-    fn new() -> Self {
+    /// **`pub(crate)`, so the control thread's tests can state a stream's state.**
+    ///
+    /// Every field here is already `pub` — the render step writes them from a
+    /// callback that may not lock, so there is nothing to encapsulate. Only the
+    /// constructor was private, which left a test wanting to describe "48,000 frames
+    /// in, the track began at 47,616" with no way to say it except by borrowing a
+    /// live player's `Shared` and racing its renderer.
+    pub(crate) fn new() -> Self {
         Self {
             position_frames: AtomicU64::new(0),
             track_base: AtomicU64::new(0),
