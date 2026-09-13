@@ -1503,6 +1503,30 @@ impl Instance {
     /// that went around it would leave the projection snapshot describing a
     /// log that has moved, and the binary crate could put facts on disk
     /// without any named operation having been asked for.
+    /// **What a flush would write** — #218.
+    ///
+    /// This device's records that have not reached disk: exactly what [`flush`] picks,
+    /// by the same two conditions, so the two cannot disagree about what is
+    /// outstanding.
+    ///
+    /// For an operation that may not append. `librarian::commit` needs an `Appending`
+    /// and only one process per log can hold one, so a `shelf` subcommand running
+    /// beside an engine has done its work and has nowhere to put it — this is what it
+    /// sends instead, and the engine stamps and appends with its own clock.
+    ///
+    /// **Facts, not records.** A stamp says which device said something and in what
+    /// order; a client minting its own would put a second device id in one machine's
+    /// log, which is the contradiction the append lock exists to prevent.
+    pub fn pending(&self) -> Vec<&Fact> {
+        let device = self.clock.device();
+        self.records
+            .iter()
+            .filter(|r| r.stamp.device == device)
+            .filter(|r| self.flushed.is_none_or(|mark| r.stamp > mark))
+            .map(|r| &r.fact)
+            .collect()
+    }
+
     pub(crate) fn flush(&mut self, data_dir: &Path) -> Result<usize, LogError> {
         let device = self.clock.device();
         let pending: BTreeSet<Record> = self

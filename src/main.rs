@@ -395,62 +395,76 @@ fn drop_cache(path: Option<&std::path::Path>) {
 }
 
 /// One library operation, and then exit.
-/// **Claim the right to append, or say who has it** — #218, §4.4.
+/// **Land what an operation computed: in the log, or in the engine's** — #218, §4.4.
 ///
-/// Every writing `shelf` subcommand asks this before it does its work, not after.
-/// A scan of the live library takes nine seconds, and being told at the end that
-/// the engine owns the log would be nine seconds of the wrong thing.
+/// Every writing `shelf` subcommand does its work against an in-memory log and then
+/// has to put it somewhere. Only one process per log may append (#218), so "somewhere"
+/// has two answers and this is the one place that picks:
 ///
-/// The refusal is what closes the hole this issue is about: two processes on one
-/// device id can mint colliding stamps, and `BTreeSet<Record>` keeps only the first
-/// (#238). One appender means the collision cannot happen; a loud failure means
-/// that if it somehow could, nothing is lost silently.
-/// **Hand a scan to the engine, if one is listening** — #218.
+/// - **The append lock is free**, so this process is the appender: `commit`, as before.
+/// - **An engine holds it**, so it is: the facts go over the socket as `library.apply`
+///   and the engine stamps and appends them with its own clock.
+/// - **Neither** — the lock is held by something that is not answering — and the
+///   refusal says so rather than guessing.
 ///
-/// `None` means nothing answered, so the caller does it itself. Deliberately not
-/// auto-*starting* one: the tmux model is right for a view that wants to play music
-/// and wrong for a one-shot library operation, which would leave a daemon behind
-/// because it reconciled a directory.
-fn ask_the_engine_to_scan() -> Option<String> {
-    let socket = gmuse::engine::socket::default_path();
-    if !gmuse::engine::attach::is_live(&socket) {
-        return None;
-    }
-    let client =
-        gmuse_client::Client::connect(&socket, "gmuse-shelf", env!("CARGO_PKG_VERSION")).ok()?;
-    match client.call(
-        gmuse_proto::request::LibraryOp::Scan.method(),
-        Some(serde_json::json!({})),
-    ) {
-        Ok(answer) => Some(format!(
-            "asked the engine to reconcile {} root(s); it publishes what it finds on \
-             `library` — watch with `gmuse events --topics library`",
-            answer["roots"].as_u64().unwrap_or(0)
-        )),
-        // **Reachable, and worth reporting rather than falling through.** An engine
-        // with no roots configured refuses; doing the scan here instead would append
-        // beside it, which is the thing this issue is about.
-        Err(e) => Some(format!("the engine refused the scan: {e}")),
-    }
-}
-
-fn appending(data_dir: &std::path::Path) -> gmuse::librarian::Appending {
+/// **Facts rather than records**, and no stamp crosses. A stamp says which device said
+/// something and in what order; a client minting its own would put a second device id
+/// in one machine's log, which is the contradiction the lock exists to prevent.
+/// `Instance::pending` is exactly what `commit` would have flushed, by the same two
+/// conditions, so the two answers carry the same thing.
+///
+/// The same shape `ui::record` takes for a view (#236) — desk first, socket second —
+/// which is not a coincidence: it is the one question every writer in the program has
+/// to ask.
+fn land(
+    log: &mut gmuse::model::instance::Instance,
+    data_dir: &std::path::Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
     match gmuse::librarian::Appending::claim(data_dir) {
-        Ok(held) => held,
-        Err(e) => {
-            // **Exits rather than returning an error**, for the reason the player
-            // lock's refusal already gives: `main`'s error type prints its `Debug`
-            // form, so a sentence written for a person comes out as a quoted string
-            // with `\n` in it. The first cut of this returned a `String` and did
-            // exactly that.
-            eprintln!("{e}");
-            eprintln!(
-                "\nOnly one process may append to a log, so this one stops here.\n\
-                 Stop the engine and run this again. `gmuse shelf scan --write` asks\n\
-                 it instead; the other writing operations do not have a method on the\n\
-                 wire yet (#218)."
-            );
-            std::process::exit(1);
+        Ok(appending) => Ok(gmuse::librarian::commit(log, data_dir, &appending)?),
+        Err(held) => {
+            let facts = log.pending();
+            if facts.is_empty() {
+                // Nothing to land, so nothing to argue about. A dry-run-shaped pass
+                // that changed nothing must not fail because a player is running.
+                return Ok(0);
+            }
+            let socket = gmuse::engine::socket::default_path();
+            if !gmuse::engine::attach::is_live(&socket) {
+                eprintln!("{held}");
+                return Err("the log is held by something that is not answering on \
+                            the socket; stop it and run this again"
+                    .into());
+            }
+            let counted = facts.len();
+            let client =
+                gmuse_client::Client::connect(&socket, "gmuse-shelf", env!("CARGO_PKG_VERSION"))?;
+            // **As text, one fact per line, because a `Value` cannot hold the numbers
+            // these carry** — #240.
+            //
+            // An audio id is an xxhash3_128, so it serialises a `u128`. `to_string`
+            // writes it exactly and `from_str` reads it back, which is why the log has
+            // always been fine. `to_value` cannot: `serde_json::Number` holds i64, u64
+            // or f64, and 187646888898413691098496886067505897950 is none of them.
+            //
+            // The protocol's ingress parses a line into `Value` before typing it (I4),
+            // so nothing shaped as a JSON *array* of facts can carry one — which is
+            // why `library.edit` never met this, a view's facts being ratings and
+            // plays that carry no hashes.
+            //
+            // So the facts cross as a **string**, which is what §8.4 called this
+            // operation from the start: "a file of proposed facts". A file is text.
+            let mut ndjson = String::new();
+            for fact in &facts {
+                ndjson.push_str(&serde_json::to_string(fact)?);
+                ndjson.push('\n');
+            }
+            client.call(
+                gmuse_proto::request::LibraryOp::Apply.method(),
+                Some(serde_json::json!({ "facts": ndjson })),
+            )?;
+            eprintln!("{counted} fact(s) handed to the running engine");
+            Ok(counted)
         }
     }
 }
@@ -514,11 +528,10 @@ fn run_library(
 
             let fresh = if *write {
                 let now = gmuse::history::now_ms();
-                let appending = appending(&loaded.data_dir);
                 for id in &coming {
                     log.restore_encoding(now, *id);
                 }
-                gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?
+                land(&mut log, &loaded.data_dir)?
             } else {
                 0
             };
@@ -629,8 +642,7 @@ fn run_library(
                     log.retire_encoding(now, *id);
                 }
                 let _ = before;
-                let appending = appending(&loaded.data_dir);
-                gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?
+                land(&mut log, &loaded.data_dir)?
             } else {
                 0
             };
@@ -650,19 +662,12 @@ fn run_library(
             }
         }
         gmuse::cli::Shelf::Scan { write } => {
-            // **Asked of the engine when one is answering** — #218, §4.2. A scan
-            // appends, and only one process may (§4.4); the engine reconciles the
-            // roots it was started with and publishes what it found on `library`, so
-            // a view learns without this process touching the log at all.
-            //
-            // `scan` is the one writing operation with a method already on the wire.
-            // The other six need their arguments plumbed, and until they are the
-            // refusal below says to stop the engine — which is honest, and is why
-            // this issue stays open for them.
-            if *write && let Some(reply) = ask_the_engine_to_scan() {
-                println!("{reply}");
-                return Ok(());
-            }
+            // **It walks the disk here and lands the facts through `land`** — #218.
+            // An earlier cut handed the whole operation to the engine via
+            // `library.scan`; walking the disk locally and handing over what it found
+            // is better, because the person asking gets the report. The engine still
+            // reconciles on its own schedule, and `worth_asserting` means two scans
+            // that agree write nothing twice.
             let (mut log, _) = gmuse::model::instance::Instance::open(
                 &loaded.data_dir,
                 device,
@@ -715,8 +720,7 @@ fn run_library(
             }
 
             if *write {
-                let appending = appending(&loaded.data_dir);
-                let n = gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?;
+                let n = land(&mut log, &loaded.data_dir)?;
                 eprintln!(
                     "{n} record(s) written ({} new)",
                     log.records().len() - before
@@ -1731,8 +1735,7 @@ fn run_library(
                 // record that says a file moved — and files move, by hand and
                 // by `render`.
                 if *write {
-                    let appending = appending(&loaded.data_dir);
-                    let n = gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?;
+                    let n = land(&mut log, &loaded.data_dir)?;
                     if n > 0 {
                         eprintln!("{n} record(s) written: the holdings moved");
                         drop_cache(cache_path.as_deref());
@@ -1923,8 +1926,7 @@ fn run_library(
                     }
                     eprintln!("{} filed into {name}", report.identified.len());
                 }
-                let appending = appending(&loaded.data_dir);
-                let n = gmuse::librarian::commit(&mut log, &loaded.data_dir, &appending)?;
+                let n = land(&mut log, &loaded.data_dir)?;
                 eprintln!("{n} record(s) written");
                 // **Only when something actually changed.** A re-run that
                 // moves nothing and writes nothing has not made the cache
@@ -1986,8 +1988,7 @@ fn run_library(
                     gmuse::history::now_ms(),
                     &mut gmuse::model::ingest::Reads::default(),
                 );
-                let appending = appending(&loaded.data_dir);
-                let n = gmuse::librarian::commit(&mut library_log, &loaded.data_dir, &appending)?;
+                let n = land(&mut library_log, &loaded.data_dir)?;
                 eprintln!("{} folder(s) pruned, {n} record(s) written", done.emptied);
                 if done.moved > 0 || n > 0 {
                     drop_cache(cache_path.as_deref());
@@ -2034,19 +2035,23 @@ fn run_library(
         }
         gmuse::cli::Shelf::Apply { file, write } => {
             // **Claimed only for a real write.** A dry run reads the proposal and
-            // says what it would do; taking the log's append lock to do that would
-            // block the engine for no reason (#218).
-            let appending = write.then(|| appending(&loaded.data_dir));
-            let outcome = gmuse::operations::apply::run(
+            // says what it would do, and a dry run must not cost a lock.
+            let mut outcome = gmuse::operations::apply::run(
                 file,
                 &loaded.data_dir,
                 roots,
                 device,
                 gmuse::history::now_ms(),
                 *write,
-                appending.as_ref(),
             )?;
             println!("{outcome}");
+            // **Landed here, like every other operation's facts** (#218). `run` used
+            // to commit and now hands back its log, because where the facts go
+            // depends on whether an engine holds it and only this side knows.
+            if *write {
+                let n = land(&mut outcome.log, &loaded.data_dir)?;
+                eprintln!("{n} record(s) landed");
+            }
             for (line, text) in &outcome.report.malformed {
                 println!(
                     "  line {line}: {}",
@@ -2800,6 +2805,32 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
                 // by name rather than pretended at.
                 LibraryOp::Edit => self.edit(params),
 
+                // **The tool door** — §8.4's "a file of proposed facts", as a call.
+                //
+                // Wider than `edit` on purpose, and the difference is what each is
+                // *for* rather than what each is allowed. `edit` carries what a view
+                // emits and `Fact::is_an_edit` refuses the rest, which catches a view
+                // claiming a measurement it never took. This carries what an
+                // operation computed from files on disk — an import's reading of
+                // tags, a scan's holdings, a `remove`'s retirement — and no
+                // predicate can check that a caller really read them.
+                //
+                // So this is a **trust** boundary and it is worth saying which kind:
+                // the socket lives in the user's own state directory, and anything
+                // that can reach it can already read and write the files it is
+                // talking about. The gate on `edit` catches mistakes, not attackers,
+                // and this door is for callers whose whole job is the thing the gate
+                // would refuse.
+                LibraryOp::Apply => self.apply(params),
+
+                // **Compacting is the appender's, because it rewrites the log.**
+                // Dropping superseded holdings assertions is not an append at all, so
+                // no other process can do it while the engine holds the lock (#218).
+                LibraryOp::Compact => {
+                    self.desk.compact();
+                    Ok(serde_json::json!({ "accepted": true }))
+                }
+
                 other => Err(RpcError::new(
                     code::NOT_READY,
                     format!("library.{} has no arguments plumbed yet", other.as_str()),
@@ -2900,6 +2931,73 @@ fn run_engine(foreground: bool, null_audio: bool) -> Result<(), Box<dyn std::err
             let answer = self.desk.current();
             let rows: &dyn Listing = &answer.library;
             rows.recording_of(id)
+        }
+
+        /// **Facts an operation computed from the disk** — #218, §8.4.
+        ///
+        /// The tool door. See the `LibraryOp::Apply` arm above for why its gate is
+        /// wider than `edit`'s and what that does and does not buy.
+        fn apply(
+            &self,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse_proto::RpcError;
+
+            /// The same bound `edit` uses: a `:collect` over a large selection is the
+            /// biggest real batch, at two facts per recording.
+            const MOST: usize = 20_000;
+
+            #[derive(serde::Deserialize)]
+            struct Apply {
+                /// **NDJSON, not an array** — #240. One fact per line, parsed with
+                /// `from_str`: an audio id is a `u128` and a `serde_json::Value`
+                /// cannot hold one, so a fact carrying a hash cannot arrive as part
+                /// of a parsed `Value` at all. `library.edit`'s array form is fine
+                /// because a view's facts carry no hashes.
+                facts: String,
+            }
+            let Ok(apply) = serde_json::from_value::<Apply>(params) else {
+                return Err(RpcError::invalid_params(
+                    "facts",
+                    "library.apply takes {facts: \"<one fact per line>\"}, in the \
+                     log's own encoding",
+                ));
+            };
+            let mut facts = Vec::new();
+            for (nth, line) in apply.facts.lines().enumerate() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<gmuse::facts::Fact>(line) {
+                    Ok(fact) => facts.push(fact),
+                    Err(e) => {
+                        return Err(RpcError::invalid_params(
+                            "facts",
+                            format!("line {} is not a fact: {e}", nth + 1),
+                        ));
+                    }
+                }
+            }
+            if facts.is_empty() {
+                return Err(RpcError::invalid_params("facts", "nothing to append"));
+            }
+            if facts.len() > MOST {
+                return Err(RpcError::invalid_params(
+                    "facts",
+                    format!("{} facts is more than {MOST} in one call", facts.len()),
+                ));
+            }
+
+            let counted = facts.len();
+            let now = gmuse::history::now_ms();
+            // Stamped here, by the appender's clock, for the reason `edit` gives.
+            self.appender().say(move |log| {
+                for fact in facts {
+                    log.append_fact(now, fact);
+                }
+            });
+            Ok(serde_json::json!({ "accepted": true, "facts": counted }))
         }
 
         /// **Proposed facts, each checked before any is appended** — #236, §8.4.

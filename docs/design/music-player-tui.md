@@ -5246,6 +5246,44 @@ Append here as decisions are made. Format: date, decision, rationale.
   the same script, before its `write_text`. Caught by grepping for what was supposedly added rather than believing the
   `ok`, which is what the entry two above says to do and the reason it says it.
 
+- **2026-09-12** **A writing operation does its work here and hands the facts to whoever holds the log** (#218, #240,
+  §8.4, I15).
+
+  #218's enforcement landed first: one appender, taken from the kernel, so a `shelf` subcommand beside a running engine
+  was _refused_. Since attaching became the default an engine usually is running, which made every writing operation but
+  `scan` unusable. This is the other half — being refused is no use if the work then cannot happen.
+
+  **`land` is the one place that picks**, and it has the same shape `ui::record` has for a view (#236): the desk's
+  appender first, the socket second. Claim the lock and `commit`; or, if an engine holds it, send what `commit` would
+  have flushed and let the engine stamp and append it. `Instance::pending` is defined by the same two conditions `flush`
+  uses, so the two answers carry exactly the same facts.
+
+  **No stamp crosses.** A stamp says which device said something and in what order, and a client minting its own is the
+  contradiction the lock exists to prevent.
+
+  **It made `apply::run` stop writing**, which is the part that reads like a loss and is not. It used to commit; it
+  cannot, because _where_ its facts go depends on whether an engine holds the log and only the caller knows that. So it
+  hands back its instance and `main` lands it like every other operation's — one door instead of one door and an
+  exception.
+
+  **And a `u128` does not fit in a `serde_json::Value`.** The first routing attempt **panicked**. An audio id is an
+  xxhash3_128, so it serialises a `u128`: `to_string` writes 187646888898413691098496886067505897950 exactly and
+  `from_str` reads it back, which is why the log has always been fine. `to_value` cannot — `serde_json::Number` is i64,
+  u64 or f64 — and `json!` unwraps that.
+
+  Since the protocol's ingress parses a line into `Value` before typing it (I4), **nothing shaped as a JSON array of
+  facts can carry an audio id**. `library.edit` gets away with its array form only because a view's facts are ratings
+  and plays. So `library.apply` takes NDJSON in a string, which is what §8.4 called it from the start — "a file of
+  proposed facts", and a file is text.
+
+  That is a fix for one method and not for the shape of the problem, which is **#240**: the next method carrying a
+  `Fact` has the same trap and nothing marks it. What would have found this in a second is a test round-tripping every
+  `Fact` variant through the protocol's own encoding.
+
+  **Three edit scripts reported success and wrote nothing** during this change — each died on a later assertion before
+  its `write_text`, and each was caught by grepping for what was supposedly added. One of them would otherwise have left
+  the client sending `to_value` while the engine expected text, and the failure would have looked like a protocol bug.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

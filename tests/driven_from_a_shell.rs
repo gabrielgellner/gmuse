@@ -807,30 +807,27 @@ fn start_with_a_track(name: &str) -> (Engine, String) {
     (Engine { child, dir, socket }, recording)
 }
 
-/// **No process but the engine appends, and this is the test that proves it** —
-/// #218's second Done-when, §4.4.
+/// **A writing subcommand hands its facts to the engine rather than appending beside
+/// it** — #218, §4.4.
 ///
-/// It was reachable, and the consequence is worse than a race. Two processes on one
-/// machine share a device id, because it comes from `machine_id`; each `Instance`'s
-/// clock starts its counter at 0 within a millisecond; and `Record` implements `Ord`
-/// over the stamp alone while deriving `Eq` over both fields — so a
+/// Two processes on one machine share a device id, because it comes from `machine_id`;
+/// each `Instance`'s clock starts its counter at 0 within a millisecond; and `Record`
+/// implements `Ord` over the stamp alone while deriving `Eq` over both fields — so a
 /// `BTreeSet<Record>` treats two records with one stamp as the same record and keeps
-/// the first (#238).
+/// the first (#238). An import writing nine facts in one millisecond and an engine
+/// rating something in it collide, and one fact goes silently.
 ///
-/// An import writing nine facts in one millisecond uses counters 0–8 and an engine
-/// rating something in that millisecond uses counter 0. One fact then disappears at
-/// the next fold, with nothing said.
-///
-/// `librarian::Appending` makes that unreachable: one process holds the log's append
-/// lock, and the other is refused before it mints anything.
+/// `librarian::Appending` made that unreachable by refusing the second appender. This
+/// is the other half: being refused is no use if the operation then cannot happen, so
+/// `land` hands the facts over and the engine appends them with its own clock.
 #[test]
-fn a_second_process_cannot_append_to_a_log_the_engine_holds() {
+fn a_writing_subcommand_hands_its_facts_to_the_engine_that_holds_the_log() {
     let (engine, _recording) = start_with_a_track("one-appender");
     let data = engine.dir.join("xdg").join("gmuse");
 
     // A config pointing at the engine's own log, so the two really do collide. Kept
     // outside the directory the import placed from, because `shelf import --write`
-    // carries non-audio files along with the audio (#239) — including this one.
+    // once carried non-audio files along with the audio (#239) — including this one.
     let config = engine.dir.join("as-the-engine.toml");
     std::fs::write(
         &config,
@@ -842,38 +839,33 @@ fn a_second_process_cannot_append_to_a_log_the_engine_holds() {
     )
     .expect("write a config");
 
-    // **`remove`, not `scan`.** A scan now goes *to* the engine when one answers
-    // (#218), so it is the wrong operation to test a refusal with. `remove` has no
-    // method on the wire yet, which is exactly the case the refusal is for.
-    let refused = Command::new(binary())
-        .args(["shelf", "remove", "--write"])
-        .arg(engine.dir.join("nothing-here.wav"))
+    // **Something for the scan to actually say.** A new file would be a *stranger* —
+    // nobody imported it — and holdings name only what the library knows, so the scan
+    // would find nothing changed and hand over nothing, correctly. Removing a copy
+    // changes the set.
+    let placed: Vec<std::path::PathBuf> = walk(&engine.dir)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "wav"))
+        .collect();
+    assert!(!placed.is_empty(), "the fixture placed nothing: {placed:?}");
+    std::fs::remove_file(&placed[0]).expect("remove one copy");
+
+    let handed = Command::new(binary())
+        .args(["shelf", "scan", "--write"])
         .env("GMUSE_CONFIG", &config)
         .env("GMUSE_SOCKET", &engine.socket)
         .output()
-        .expect("run shelf remove");
-
-    let said = String::from_utf8_lossy(&refused.stderr);
+        .expect("run shelf scan --write");
+    let said = String::from_utf8_lossy(&handed.stderr);
     assert!(
-        !refused.status.success(),
-        "a second appender was allowed: {said}"
+        handed.status.success(),
+        "the operation could not happen at all: {said}"
     );
-    // **Names the holder**, so the person knows what to reach instead. The pid is
-    // the whole reason `lock.rs` writes one into the file.
+    // **Handed over, not committed here.** The distinction is the whole issue: this
+    // process did the disk work and the engine did the appending.
     assert!(
-        said.contains("already running"),
-        "the refusal does not say who has it: {said}"
-    );
-    assert!(
-        said.contains("Stop the engine"),
-        "and does not say what to do instead: {said}"
-    );
-    // **Not a `Debug` dump.** `main`'s error type prints one, which is why this
-    // exits rather than returning — the first cut returned a `String` and the
-    // sentence came out quoted with `\n` in it.
-    assert!(
-        !said.contains("\\n"),
-        "the message printed as a Debug dump: {said}"
+        said.contains("handed to the running engine"),
+        "it appended beside the engine instead of handing over: {said}"
     );
 
     // And a dry run is unaffected, because reading takes no right to append.
@@ -885,28 +877,12 @@ fn a_second_process_cannot_append_to_a_log_the_engine_holds() {
         .expect("run shelf scan");
     assert!(
         dry.status.success(),
-        "a dry run was refused too: {}",
+        "a dry run was refused: {}",
         String::from_utf8_lossy(&dry.stderr)
     );
-
-    // **And the one operation with a wire method goes to the engine instead of
-    // being refused**, which is what keeps the tools usable now that a running
-    // engine is the default.
-    let routed = Command::new(binary())
-        .args(["shelf", "scan", "--write"])
-        .env("GMUSE_CONFIG", &config)
-        .env("GMUSE_SOCKET", &engine.socket)
-        .output()
-        .expect("run shelf scan --write");
-    let out = String::from_utf8_lossy(&routed.stdout);
     assert!(
-        routed.status.success(),
-        "a routable scan was refused: {}{out}",
-        String::from_utf8_lossy(&routed.stderr)
-    );
-    assert!(
-        out.contains("asked the engine"),
-        "it did the scan itself instead of asking: {out}"
+        !String::from_utf8_lossy(&dry.stderr).contains("handed"),
+        "a dry run handed something over"
     );
 }
 

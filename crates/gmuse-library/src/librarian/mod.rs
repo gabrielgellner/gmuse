@@ -91,6 +91,11 @@ enum Job {
         /// `None` writes nothing, which is what a test wants.
         cache: Option<PathBuf>,
     },
+    /// **Rewrite the log without its superseded records** — #218, #201.
+    ///
+    /// The one job that removes rather than adds, which is why it is behind
+    /// [`Appender`]: a process that may not append certainly may not rewrite.
+    Compact,
     /// Nothing changed here — fold and publish anyway.
     Advance,
     /// Reply when everything queued before this has been published.
@@ -373,6 +378,24 @@ impl Desk {
                             }
                             None
                         }
+                        // **Not an append, and the only job that is not.**
+                        // `facts::compact` keeps the newest holdings assertion per
+                        // device and drops the rest; on the live library one of those
+                        // is 957 KB, so what this reclaims is real. `commit` only
+                        // ever adds, which is why this rewrites instead.
+                        Job::Compact => {
+                            let was = log.records().len();
+                            log.compact();
+                            if log.records().len() != was {
+                                if let Some((dir, appending)) = &writing
+                                    && let Err(e) = rewrite_all(&log, dir, appending)
+                                {
+                                    eprintln!("compact: {e}");
+                                }
+                                moved = Changed::Rebuild;
+                            }
+                            None
+                        }
                         Job::Advance => None,
                         Job::Settled(reply) => Some(reply),
                     };
@@ -431,6 +454,18 @@ impl Desk {
         let mut desk = Desk::open(log, held, device, now, Some(data_dir));
         desk.appends = false;
         desk
+    }
+
+    /// **Drop the superseded records nothing reads** — #218, #201.
+    ///
+    /// Behind [`Appender`] because it rewrites the log, which is strictly more than
+    /// appending to it: only the process holding the append lock may, and a
+    /// `shelf compact` beside a running engine has to ask rather than do.
+    ///
+    /// Returns immediately. What it dropped shows up as the next published fold
+    /// having fewer records, and the librarian thread commits the result.
+    pub fn compact(&self) {
+        let _ = self.jobs.send(Job::Compact);
     }
 
     /// **Read the log again** — for a view following an engine (#236, #219).
@@ -607,6 +642,42 @@ impl Appending {
             _lock: crate::lock::acquire(&data_dir.join("append.lock"))?,
         })
     }
+}
+
+/// **Write each device's log out again from what the instance now holds** — #218.
+///
+/// The counterpart to [`commit`], for the one operation that *removes*: compacting
+/// drops superseded records, and a file you can only append to cannot express that.
+///
+/// Per file rather than all-or-nothing, because each device's log holds that device's
+/// records and the fold is the same whichever subset has been compacted — so a
+/// half-finished run is simply finished by the next one.
+///
+/// Takes an [`Appending`] for the same reason [`commit`] does, and more so: a process
+/// that may not add to a log certainly may not rewrite it.
+pub fn rewrite_all(
+    log: &Instance,
+    data_dir: &std::path::Path,
+    _appending: &Appending,
+) -> Result<usize, LogError> {
+    let mut devices: std::collections::BTreeSet<Id<Device>> = Default::default();
+    for record in log.records() {
+        devices.insert(record.stamp.device);
+    }
+    let mut total = 0;
+    for each in devices {
+        let mine: std::collections::BTreeSet<_> = log
+            .records()
+            .iter()
+            .filter(|r| r.stamp.device == each)
+            .cloned()
+            .collect();
+        total += crate::model::durable::rewrite(
+            &crate::model::durable::log_path(data_dir, each),
+            &mine,
+        )?;
+    }
+    Ok(total)
 }
 
 /// Persist what a named operation appended. **The one door.**

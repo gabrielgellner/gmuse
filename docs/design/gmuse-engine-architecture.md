@@ -209,16 +209,16 @@ flowchart LR
 
 There is a single `gmuse` binary, following the tmux model:
 
-| Invocation                                   | Behaviour                                                                                                                                                                                            |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gmuse engine [--foreground] [--null-audio]` | Runs the engine daemon. `--null-audio` uses a virtual output clock (§14).                                                                                                                            |
-| `gmuse`                                      | Starts the TUI as a view: no device, no player lock. Spawns `gmuse engine` if none answers, then attaches (#233).                                                                                    |
-| `gmuse --no-attach`                          | Starts the TUI with playback in this process: one device, one lock, playback that ends with the program.                                                                                             |
-| `gmuse ctl <command…>`                       | Sends one command, either typed arguments or passed through as `cmd.exec_line`, prints the result, and exits.                                                                                        |
-| `gmuse query <expr> [--json]`                | Runs a query and prints the results (NDJSON with `--json`).                                                                                                                                          |
-| `gmuse events [--topics …]`                  | Subscribes and prints events as NDJSON. Useful for debugging and for the agent.                                                                                                                      |
-| `gmuse mcp` (later)                          | Runs an MCP stdio server that maps tools onto protocol methods.                                                                                                                                      |
-| `gmuse shelf <op>`                           | The library operations. Read-only ones work with no engine (I15). `scan --write` asks a running engine; the other writing ones are refused while one holds the log — #218 is open for their methods. |
+| Invocation                                   | Behaviour                                                                                                                                                         |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gmuse engine [--foreground] [--null-audio]` | Runs the engine daemon. `--null-audio` uses a virtual output clock (§14).                                                                                         |
+| `gmuse`                                      | Starts the TUI as a view: no device, no player lock. Spawns `gmuse engine` if none answers, then attaches (#233).                                                 |
+| `gmuse --no-attach`                          | Starts the TUI with playback in this process: one device, one lock, playback that ends with the program.                                                          |
+| `gmuse ctl <command…>`                       | Sends one command, either typed arguments or passed through as `cmd.exec_line`, prints the result, and exits.                                                     |
+| `gmuse query <expr> [--json]`                | Runs a query and prints the results (NDJSON with `--json`).                                                                                                       |
+| `gmuse events [--topics …]`                  | Subscribes and prints events as NDJSON. Useful for debugging and for the agent.                                                                                   |
+| `gmuse mcp` (later)                          | Runs an MCP stdio server that maps tools onto protocol methods.                                                                                                   |
+| `gmuse shelf <op>`                           | The library operations. Read-only ones work with no engine (I15). A writing one does its work here and hands the facts to the engine if one holds the log (#218). |
 
 This supersedes today's `--remote <CMD>`, which is a second, ad-hoc IPC mechanism over the same socket-shaped problem.
 It should be removed rather than kept alongside: `gmuse ctl` is the same thing with a protocol behind it.
