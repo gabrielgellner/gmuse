@@ -98,9 +98,18 @@ its album. A client re-deriving those is a second copy of a rule.
 
 **Absent folds mean everything open**, which is what a client that keeps no fold state wants and what `/` searches.
 
-`target` is either a pattern or an id. **The reply gives the index after the reveal, not before**: opening folds inserts
-rows above the match, so an index measured against the unfolded list is wrong by the time the view can use it. `/`
-searching a closed fold keeps working for the reason it always did — a closed fold still holds its rows.
+`pattern` or `id`, exactly one — both, or neither, is a bad request rather than a guess, refused in the parser before a
+tree gets built to find out. **The reply gives the index after the reveal, not before**: opening folds inserts rows
+above the match, so an index measured against the unfolded list is wrong by the time the view can use it. `/` searching
+a closed fold keeps working for the reason it always did — a closed fold still holds its rows.
+
+**`from` and `at` are both where the cursor is on screen.** The search runs over the unfolded tree and a cursor counts
+visible lines, so they are different coordinate systems — and feeding a reply straight back as the next request lands in
+the wrong one, which does not error, it just makes `n` find the same line for ever. The conversion happens
+librarian-side, by name rather than by index, because a name survives a fold change and a number does not. It is #131's
+"the coordinates the search runs in", one layer down.
+
+Both directions wrap. An asymmetry there is invisible with two matches and maddening with twenty.
 
 ## 5. A keystroke
 

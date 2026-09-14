@@ -121,6 +121,26 @@ pub enum Request {
         /// folds change and a name is not.
         anchor: Option<Anchor>,
     },
+    /// **Open the way to a line, and say where it lands** — #261.
+    ///
+    /// What `/`, `n` and a reveal-by-id ask. The reply is the folds to open and the index the
+    /// target sits at **once they are**: opening a fold inserts every line under it, so an
+    /// index measured against the unfolded list is stale before a client can use it.
+    ///
+    /// Searched with everything open, because a closed fold still holds its lines.
+    QueryReveal {
+        filter: Option<String>,
+        levels: Option<Vec<String>>,
+        folds: Option<Folds>,
+        /// Text to match. Exactly one of this and `id`.
+        pattern: Option<String>,
+        /// A track to find. Exactly one of this and `pattern`.
+        id: Option<gmuse_ids::copy::CopyId>,
+        /// Where a repeated `n` resumes from.
+        from: Option<usize>,
+        /// `N` rather than `n`.
+        backwards: Option<bool>,
+    },
     /// **Run a filter and get a page of rows** — §7.11, #261.
     ///
     /// Answered on the connection's own thread, from `Desk::current()` — one atomic load of a
@@ -355,6 +375,7 @@ pub mod method {
     pub const QUERY_PARSE: &str = "query.parse";
     pub const QUERY_RUN: &str = "query.run";
     pub const QUERY_TREE: &str = "query.tree";
+    pub const QUERY_REVEAL: &str = "query.reveal";
     pub const QUEUE_GET: &str = "queue.get";
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
     pub const QUEUE_SET: &str = "queue.set";
@@ -391,6 +412,7 @@ pub mod method {
         QUERY_PARSE,
         QUERY_RUN,
         QUERY_TREE,
+        QUERY_REVEAL,
         QUEUE_GET,
         QUEUE_ENQUEUE,
         QUEUE_SET,
@@ -550,6 +572,44 @@ impl Request {
                     anchor: p.anchor,
                 })
             }
+            method::QUERY_REVEAL => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default)]
+                    filter: Option<String>,
+                    #[serde(default)]
+                    levels: Option<Vec<String>>,
+                    #[serde(default)]
+                    folds: Option<Folds>,
+                    #[serde(default)]
+                    pattern: Option<String>,
+                    #[serde(default)]
+                    id: Option<gmuse_ids::copy::CopyId>,
+                    #[serde(default)]
+                    from: Option<usize>,
+                    #[serde(default)]
+                    backwards: Option<bool>,
+                }
+                let p: P = typed(method, params)?;
+                // **One target or the other, said here rather than downstream.** Both would be
+                // two questions in one call and neither is nothing to look for, and a handler
+                // discovering that has already built a tree to find out.
+                if p.pattern.is_some() == p.id.is_some() {
+                    return Err(RpcError::invalid_params(
+                        "pattern",
+                        "exactly one of `pattern` and `id`",
+                    ));
+                }
+                Ok(Self::QueryReveal {
+                    filter: p.filter,
+                    levels: p.levels,
+                    folds: p.folds,
+                    pattern: p.pattern,
+                    id: p.id,
+                    from: p.from,
+                    backwards: p.backwards,
+                })
+            }
             method::QUEUE_GET => {
                 #[derive(Deserialize)]
                 struct P {
@@ -659,6 +719,7 @@ impl Request {
             Self::QueryParse { .. } => method::QUERY_PARSE,
             Self::QueryRun { .. } => method::QUERY_RUN,
             Self::QueryTree { .. } => method::QUERY_TREE,
+            Self::QueryReveal { .. } => method::QUERY_REVEAL,
             Self::QueueGet { .. } => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
             Self::QueueSet { .. } => method::QUEUE_SET,
@@ -710,7 +771,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 26, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 27, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

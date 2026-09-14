@@ -3080,31 +3080,44 @@ fn run_engine(
         /// Grouped here because grouping is a library question. The *folding* is not, so the
         /// whole shape comes back and a client draws what it has open — which is also what
         /// `tree-view-design.md` says a search reads.
-        #[allow(clippy::too_many_arguments)]
-        fn tree(
-            &self,
-            filter: Option<String>,
-            levels: Option<Vec<String>>,
-            limit: Option<usize>,
-            cursor: Option<usize>,
+        /// Typed at the edge (§12): the wire says strings, and a sort key is already
+        /// normalised, so what a reply gave back goes straight in again.
+        fn folds_of(
             folds: Option<gmuse_proto::request::Folds>,
-            anchor: Option<gmuse_proto::request::Anchor>,
-        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
-            use gmuse::model::rows::Listing;
-            use gmuse_proto::RpcError;
-
-            // **Typed here, because this is the edge** (§12). The wire says strings; a sort
-            // key is already normalised, so what comes back from a reply goes straight back in.
-            let key = |text: &String| gmuse::shelf::SortKey::already(text);
-            let folds = folds.map(|f| {
+        ) -> Option<gmuse::fold::Expansion<gmuse::shelf::SortKey>> {
+            folds.map(|f| {
+                let key = |t: &String| gmuse::shelf::SortKey::already(t);
                 gmuse::fold::Expansion::from_parts(
                     f.level,
                     f.eager,
                     f.opened.iter().map(|p| p.iter().map(key).collect()),
                     f.closed.iter().map(|p| p.iter().map(key).collect()),
                 )
-            });
-            let anchor = anchor.map(|a| (a.path.iter().map(key).collect::<Vec<_>>(), a.id));
+            })
+        }
+
+        fn anchor_of(a: gmuse_proto::request::Anchor) -> gmuse::browse::Mark {
+            (
+                a.path
+                    .iter()
+                    .map(|t| gmuse::shelf::SortKey::already(t))
+                    .collect(),
+                a.id,
+            )
+        }
+
+        /// **The grouped shelf for this question, built once and kept** — #261.
+        ///
+        /// Shared by `query.tree` and `query.reveal` because they ask the same question of the
+        /// library and differ only in what they do with the answer — and because two copies of
+        /// this would be two caches, which is two answers to one question.
+        fn shelf_for(
+            &self,
+            filter: Option<String>,
+            levels: Option<Vec<String>>,
+        ) -> Result<(std::sync::Arc<gmuse::shelf::Shelf>, u64), gmuse_proto::RpcError> {
+            use gmuse::model::rows::Listing;
+            use gmuse_proto::RpcError;
 
             let raw = filter.clone();
             let filter = match filter.as_deref().map(gmuse::query::filter::Expr::parse) {
@@ -3144,39 +3157,87 @@ fn run_engine(
                 }
             };
 
-            let answer = self.desk.current();
             let version = self.moved.load(std::sync::atomic::Ordering::Acquire);
             let want = gmuse::wiring::kept::Asked {
                 version,
                 levels,
                 filter: filter.as_ref().map(|_| raw.clone().unwrap_or_default()),
             };
+            if let Some(ready) = self.trees.get(&want) {
+                return Ok((ready, version));
+            }
 
-            let shelf = match self.trees.get(&want) {
-                Some(ready) => ready,
-                None => {
-                    // **Which rows are in it**, which is the filter's job and not the tree's.
-                    let members: std::collections::HashSet<_> = match &filter {
-                        None => answer.library.rows().into_iter().collect(),
-                        Some(_) => gmuse::query::found::found(
-                            &answer.library,
-                            gmuse::history::now_ms(),
-                            filter.as_ref(),
-                        )
-                        .into_iter()
-                        .map(|f| f.row)
-                        .collect(),
-                    };
-                    let built = std::sync::Arc::new(gmuse::shelf::Shelf::grouped(
-                        &answer.library,
-                        members,
-                        levels,
-                        true,
-                    ));
-                    self.trees.keep(want, std::sync::Arc::clone(&built));
-                    built
-                }
+            let answer = self.desk.current();
+            // **Which rows are in it**, which is the filter's job and not the tree's.
+            let members: std::collections::HashSet<_> = match &filter {
+                None => answer.library.rows().into_iter().collect(),
+                Some(_) => gmuse::query::found::found(
+                    &answer.library,
+                    gmuse::history::now_ms(),
+                    filter.as_ref(),
+                )
+                .into_iter()
+                .map(|f| f.row)
+                .collect(),
             };
+            let built = std::sync::Arc::new(gmuse::shelf::Shelf::grouped(
+                &answer.library,
+                members,
+                levels,
+                true,
+            ));
+            self.trees.keep(want, std::sync::Arc::clone(&built));
+            Ok((built, version))
+        }
+
+        /// **Open the way to a line and say where it lands** — #261.
+        #[allow(clippy::too_many_arguments)]
+        fn reveal(
+            &self,
+            filter: Option<String>,
+            levels: Option<Vec<String>>,
+            folds: Option<gmuse_proto::request::Folds>,
+            pattern: Option<String>,
+            id: Option<gmuse::model::rows::CopyId>,
+            from: Option<usize>,
+            backwards: Option<bool>,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            let folds = Self::folds_of(folds).unwrap_or_default();
+            let (shelf, version) = self.shelf_for(filter, levels)?;
+            let want = match (pattern, id) {
+                (Some(needle), None) => gmuse::browse::Target::Pattern {
+                    needle,
+                    backwards: backwards.unwrap_or(false),
+                },
+                (None, Some(id)) => gmuse::browse::Target::Id(id),
+                // The parser refuses both and neither, so this is unreachable rather than
+                // lenient — and saying so beats a silent default that would search for "".
+                _ => unreachable!("the request parser requires exactly one target"),
+            };
+
+            // **`null` rather than an error when nothing matches.** A search that found nothing
+            // is an ordinary answer, and `/` says so on the status line rather than failing.
+            let found = gmuse::browse::reveal(&shelf, &folds, &want, from.unwrap_or(0));
+            Ok(serde_json::json!({
+                "open": found.as_ref().map(|f| f.open.clone()),
+                "at": found.as_ref().map(|f| f.at),
+                "library_version": version,
+            }))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn tree(
+            &self,
+            filter: Option<String>,
+            levels: Option<Vec<String>>,
+            limit: Option<usize>,
+            cursor: Option<usize>,
+            folds: Option<gmuse_proto::request::Folds>,
+            anchor: Option<gmuse_proto::request::Anchor>,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            let folds = Self::folds_of(folds);
+            let anchor = anchor.map(Self::anchor_of);
+            let (shelf, version) = self.shelf_for(filter, levels)?;
 
             // **The flatten is the cheap half and it is the half the folds decide** — 1.8ms
             // against the shelf's 370ms, so it runs every time and the cache never has to know
@@ -3560,6 +3621,17 @@ fn run_engine(
                     folds,
                     anchor,
                 } => self.tree(filter, levels, limit, cursor, folds, anchor),
+
+                // **Where a search lands, and what had to open for it to** — #261.
+                Call::QueryReveal {
+                    filter,
+                    levels,
+                    folds,
+                    pattern,
+                    id,
+                    from,
+                    backwards,
+                } => self.reveal(filter, levels, folds, pattern, id, from, backwards),
 
                 // **A page, anchored where playback is** — #257.
                 //

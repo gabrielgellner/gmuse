@@ -16,7 +16,7 @@
 /// `Row` was this module's own enum and is `browse::Node`, because the librarian is what
 /// builds a tree once the view stops holding one (`tree-over-the-wire.md`). Re-exported under
 /// the old name: every call site draws a *row*, and renaming 200 of them says nothing.
-pub use crate::browse::{Mark, Node as Row, Spine, spine_of};
+pub use crate::browse::{Mark, Node as Row, Spine, spine_of, stands_for};
 use crate::cmd::Motion;
 use crate::model::rows::CopyId;
 use crate::shelf::{Shelf, SortKey};
@@ -317,28 +317,7 @@ impl TreeState {
     /// An artist needs none — level 0 shows them. An album needs its artist. A
     /// track needs both, which is why this is a list and not a parent link.
     fn ancestors_of(row: &Row) -> Vec<Vec<SortKey>> {
-        match row {
-            Row::Artist { .. } => Vec::new(),
-            Row::Album { artist, .. } => vec![vec![artist.clone()]],
-            Row::Disc { artist, album, .. } => {
-                vec![vec![artist.clone()], vec![artist.clone(), album.clone()]]
-            }
-            // **And its disc where it has one** (#169), or revealing a track
-            // on disc 2 would open the record and stop at the header.
-            Row::Track {
-                artist,
-                album,
-                disc: Some(disc),
-                ..
-            } => vec![
-                vec![artist.clone()],
-                vec![artist.clone(), album.clone()],
-                vec![artist.clone(), album.clone(), disc.clone()],
-            ],
-            Row::Track { artist, album, .. } => {
-                vec![vec![artist.clone()], vec![artist.clone(), album.clone()]]
-            }
-        }
+        row.ancestors()
     }
 
     /// `zx` — close every fold, then reopen just the ones that were holding
@@ -644,43 +623,6 @@ fn is_fold_end(spine: &Spine, i: usize) -> bool {
     match spine.depth(i + 1) {
         Some(next) => Some(next) < spine.depth(i),
         None => spine.depth(i) > Some(0),
-    }
-}
-
-/// **The album name a collapsed row has to carry** — #135.
-///
-/// A group of one is not drawn, so the album name that used to be on the row
-/// above is nowhere. This puts it back on the row that replaced it — unless
-/// the title already begins with it, which is the shape a release named after
-/// its own lead track has: `Fake I.D` holding `Fake I.D (Original Mix)`.
-/// Printing both would be the noise this issue is about.
-///
-/// **One answer, asked by both the drawing and the search**, so what matches
-/// is what somebody can see. A haystack holding text nobody drew is the bug
-/// #131 fixed and this would otherwise reintroduce.
-pub fn stands_for(lib: &Shelf, row: &Row, title: &str) -> Option<String> {
-    let Row::Track {
-        artist,
-        album,
-        alone: true,
-        ..
-    } = row
-    else {
-        return None;
-    };
-    let name = lib.album_name(artist, album);
-    // **The count comes even when the name does not** (#137). One track of
-    // twelve is exactly the row somebody wants flagged, and it is the row
-    // #135 took the album header away from.
-    let short = lib
-        .album_total(artist, album)
-        .map(|total| format!("1 of {total}"));
-    let already = title.to_lowercase().starts_with(&name.to_lowercase());
-    match (name.is_empty() || already, short) {
-        (true, None) => None,
-        (true, Some(count)) => Some(count),
-        (false, None) => Some(name.to_string()),
-        (false, Some(count)) => Some(format!("{name}  {count}")),
     }
 }
 

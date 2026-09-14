@@ -237,6 +237,34 @@ impl Node {
         }
     }
 
+    /// **Every fold that must be open for this line to be on screen.**
+    ///
+    /// An artist needs none — level 0 shows them. An album needs its artist. A track needs
+    /// both, which is why this is a list and not a parent link — **and its disc where it has
+    /// one** (#169), or revealing a track on disc 2 opens the record and stops at the header.
+    pub fn ancestors(&self) -> Vec<Vec<SortKey>> {
+        match self {
+            Node::Artist { .. } => Vec::new(),
+            Node::Album { artist, .. } => vec![vec![artist.clone()]],
+            Node::Disc { artist, album, .. } => {
+                vec![vec![artist.clone()], vec![artist.clone(), album.clone()]]
+            }
+            Node::Track {
+                artist,
+                album,
+                disc: Some(disc),
+                ..
+            } => vec![
+                vec![artist.clone()],
+                vec![artist.clone(), album.clone()],
+                vec![artist.clone(), album.clone(), disc.clone()],
+            ],
+            Node::Track { artist, album, .. } => {
+                vec![vec![artist.clone()], vec![artist.clone(), album.clone()]]
+            }
+        }
+    }
+
     pub fn is_leaf(&self) -> bool {
         matches!(self, Node::Track { .. })
     }
@@ -454,6 +482,123 @@ impl<'a> From<&'a Node> for Drawn<'a> {
     }
 }
 
+/// **What this line is searched by** — #131, #135.
+///
+/// A track searches its **title and nothing else**. A flat list has to search the artist and
+/// the album too, because a row there is the only place they appear; the tree writes them on
+/// the lines *above*, so searching them here would make `/malibu` match the album line and
+/// every track under it, and `n` would then walk ten lines that matched for a reason nothing on
+/// them shows.
+///
+/// **And the album it stands in for, when it draws one** (#135). The rule above is "do not
+/// search what is written on the line above"; a group of one has no line above, so the name is
+/// written here instead — and searched here, because a haystack that is not drawn text is a
+/// match that paints nothing.
+///
+/// Every other line searches its label, which is what it draws.
+pub fn haystack(lib: &Shelf, node: &Node) -> crate::text::Haystack {
+    match node {
+        Node::Track { title, .. } => match stands_for(lib, node, title) {
+            Some(album) => crate::text::Haystack::of(&format!("{album} — {title}")),
+            None => crate::text::Haystack::of(title),
+        },
+        other => crate::text::Haystack::of(&other.label()),
+    }
+}
+
+/// **Open the way to a line, and say where it lands** — #261, `tree-over-the-wire.md` §4.
+///
+/// Returns the folds that have to be opened and the index the target then sits at. **The index
+/// is measured after the reveal, not before**: opening a fold inserts every line under it, so
+/// an index taken against the unfolded list is wrong by the time a client could use it.
+///
+/// `from` is where a repeated `n` resumes; `backwards` is `N`. A pattern that matches nothing,
+/// or an id the shelf does not hold, is `None` — there is nothing to open and nowhere to go.
+///
+/// **`from` and `at` are both where the cursor is on screen**, and that is not a detail: the
+/// search runs over the unfolded tree while a cursor counts visible lines, so the two are
+/// different coordinate systems, and a reply fed straight back as the next request lands in the
+/// wrong one — `n` then finds the same line for ever. The conversion happens here, by name
+/// rather than by index, because a name survives a fold change and a number does not. That is
+/// #131's lesson about "the coordinates the search runs in", one layer down.
+pub fn reveal(
+    lib: &Shelf,
+    folds: &Expansion<SortKey>,
+    want: &Target,
+    from: usize,
+) -> Option<Found> {
+    // **Searched unfolded, because a closed fold still holds its lines** — exactly as a closed
+    // fold in vim still holds its lines. Searching what is visible with the artists shut finds
+    // nothing at all, because the line it wants does not exist yet.
+    let all = flatten(lib, folds, true);
+
+    // Where the cursor is, in the coordinates the search runs in. A cursor at the head is the
+    // head of both lists, so the common case pays no second flatten.
+    let from = if from == 0 {
+        0
+    } else {
+        flatten(lib, folds, false)
+            .get(from)
+            .map(|here| here.mark())
+            .and_then(|mark| all.iter().position(|n| n.mark() == mark))
+            .unwrap_or(0)
+    };
+
+    let hit = match want {
+        Target::Id(id) => all
+            .iter()
+            .position(|n| matches!(n, Node::Track { id: this, .. } if this == id)),
+        Target::Pattern { needle, backwards } => {
+            let needle = crate::text::Needle::new(needle);
+            if needle.is_empty() {
+                return None;
+            }
+            let hits = |i: &usize| haystack(lib, &all[*i]).contains(&needle);
+            if *backwards {
+                // **`N` wraps too**, the other way. An asymmetry here would be invisible with
+                // two matches and maddening with twenty.
+                (0..from.min(all.len()))
+                    .rev()
+                    .find(hits)
+                    .or_else(|| (from.min(all.len())..all.len()).rev().find(hits))
+            } else {
+                (from + 1..all.len())
+                    .find(hits)
+                    // **Wraps**, because `/` does: a search that stopped at the end would make
+                    // the last match in a library unreachable from anywhere below it.
+                    .or_else(|| (0..=from.min(all.len().saturating_sub(1))).find(hits))
+            }
+        }
+    }?;
+
+    let open = all[hit].ancestors();
+    let mut opened = folds.clone();
+    for path in &open {
+        opened.open(path);
+    }
+    let mark = all[hit].mark();
+    let at = flatten(lib, &opened, false)
+        .iter()
+        .position(|n| n.mark() == mark)?;
+    Some(Found { open, at })
+}
+
+/// What [`reveal`] is looking for.
+pub enum Target {
+    /// A track by its id — what `reveal` on a now-playing row asks.
+    Id(CopyId),
+    /// Text, as `/` and `?` ask it.
+    Pattern { needle: String, backwards: bool },
+}
+
+/// Where a reveal landed, and what had to open for it to.
+pub struct Found {
+    /// Fold paths to open, in no particular order — a client applies all of them.
+    pub open: Vec<Vec<SortKey>>,
+    /// The index **after** those are applied.
+    pub at: usize,
+}
+
 /// The shape of these lines, and nothing else about them — #261.
 pub fn spine_of(rows: &[Node]) -> Spine {
     let mut spine = Spine::default();
@@ -525,5 +670,251 @@ impl Spine {
             .map(|c| c.to_digit(16).map(|d| d as u8))
             .collect::<Option<Vec<_>>>()
             .map(Spine)
+    }
+}
+
+/// **The album a track stands in for, when its group is not drawn** — #135, #137.
+///
+/// A record held as a single track has no album line, so the name has nowhere to be written
+/// except on the track. `None` when there is a line above to carry it, when the name would
+/// merely repeat the title, and when nothing counted the record.
+pub fn stands_for(lib: &Shelf, row: &Node, title: &str) -> Option<String> {
+    let Node::Track {
+        artist,
+        album,
+        alone: true,
+        ..
+    } = row
+    else {
+        return None;
+    };
+    let name = lib.album_name(artist, album);
+    // **The count comes even when the name does not** (#137). One track of twelve is exactly
+    // the row somebody wants flagged, and it is the row #135 took the album header away from.
+    let short = lib
+        .album_total(artist, album)
+        .map(|total| format!("1 of {total}"));
+    let already = title.to_lowercase().starts_with(&name.to_lowercase());
+    match (name.is_empty() || already, short) {
+        (true, None) => None,
+        (true, Some(count)) => Some(count),
+        (false, None) => Some(name.to_string()),
+        (false, Some(count)) => Some(format!("{name}  {count}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Tagged as Track;
+    use crate::operations::scan::Holdings as Scan;
+    use std::path::PathBuf;
+
+    /// Three artists and a record over two discs — the shapes a reveal has to get right.
+    ///
+    /// **More than one artist, because one cannot show the bug.** A reveal measured against the
+    /// unfolded list and one measured against the revealed list agree whenever everything above
+    /// the target is open, and with a single artist there is nothing above it to be shut.
+    ///
+    /// **Three, because two cannot show the other one.** With two matches, a forward search
+    /// that wraps and a backward search land on the same line, so `N` could be ignored entirely
+    /// and nothing would notice.
+    fn library() -> Shelf {
+        let mut s = Scan::new();
+        let mut add = |path: &str, artist: &str, album: &str, title: &str, disc: Option<u32>| {
+            s.upsert(Track {
+                path: PathBuf::from(path),
+                artist: Some(artist.into()),
+                album: Some(album.into()),
+                title: Some(title.into()),
+                discnumber: disc,
+                disc_total: disc.map(|_| 2),
+                ..Default::default()
+            });
+        };
+        add("/m/a1.mp3", "Aaa Band", "First", "Opener", None);
+        add("/m/a2.mp3", "Aaa Band", "First", "Second Track", None);
+        add("/m/m1.mp3", "Mmm Band", "Middle", "In Between", None);
+        add("/m/m2.mp3", "Mmm Band", "Middle", "Also Here", None);
+        add(
+            "/m/z1.mp3",
+            "Zzz Band",
+            "Later",
+            "Back in the USSR",
+            Some(1),
+        );
+        add("/m/z2.mp3", "Zzz Band", "Later", "Dear Prudence", Some(1));
+        add("/m/z3.mp3", "Zzz Band", "Later", "Birthday", Some(2));
+        add("/m/z4.mp3", "Zzz Band", "Later", "Yer Blues", Some(2));
+        Shelf::rebuild(&crate::fixture::from_holdings(&s), true)
+    }
+
+    fn shut() -> Expansion<SortKey> {
+        let mut folds = Expansion::default();
+        folds.opening_from(2);
+        folds
+    }
+
+    /// **The index comes back measured after the reveal, not before** — #261.
+    ///
+    /// Opening a fold inserts every line under it, so the two differ by however much was
+    /// revealed above the target. Here the target is under the *second* artist and the first
+    /// stays shut, so an index taken against the unfolded tree overshoots by that artist's
+    /// whole record — which is exactly the stale cursor the design says not to send.
+    #[test]
+    fn a_reveal_lands_where_the_revealed_tree_puts_it() {
+        let lib = library();
+        let folds = shut();
+        let target = Target::Pattern {
+            needle: "Yer Blues".into(),
+            backwards: false,
+        };
+        let found = reveal(&lib, &folds, &target, 0).expect("a track that is in the library");
+
+        let unfolded = flatten(&lib, &folds, true);
+        let before = unfolded
+            .iter()
+            .position(|n| matches!(n, Node::Track { title, .. } if title == "Yer Blues"))
+            .expect("it is in the unfolded tree");
+        assert_ne!(
+            found.at, before,
+            "the revealed index equals the unfolded one, so this fixture cannot tell them apart"
+        );
+
+        let mut opened = folds.clone();
+        for path in &found.open {
+            opened.open(path);
+        }
+        let after = flatten(&lib, &opened, false);
+        assert!(after.len() < unfolded.len(), "the reveal opened everything");
+        assert!(
+            matches!(&after[found.at], Node::Track { title, .. } if title == "Yer Blues"),
+            "landed on {:?}",
+            after.get(found.at).map(Node::label)
+        );
+    }
+
+    /// **A track on disc 2 needs its disc opened, not just its record** — #169.
+    ///
+    /// Revealing it without that opens the album and stops at the disc header, which looks like
+    /// a reveal that worked until you notice the cursor is on a line you did not search for.
+    #[test]
+    fn revealing_a_track_on_a_second_disc_opens_that_disc() {
+        let lib = library();
+        let folds = {
+            // The disc level opens by itself (#169), so it is shut by hand here — otherwise
+            // this passes whether or not `ancestors` names the disc.
+            let mut f = Expansion::default();
+            f.close(&[
+                crate::model::sortkey::sort_key("zzz band", true),
+                crate::model::sortkey::sort_key("later", false),
+                crate::model::sortkey::sort_key("002", false),
+            ]);
+            f
+        };
+        let target = Target::Pattern {
+            needle: "Yer Blues".into(),
+            backwards: false,
+        };
+        let found = reveal(&lib, &folds, &target, 0).expect("it is in the library");
+        assert!(
+            found.open.iter().any(|p| p.len() == 3),
+            "nothing opened the disc; opened {:?}",
+            found.open
+        );
+    }
+
+    /// **`n` moves on, then comes back round** — and the cursor it takes is the one on screen.
+    ///
+    /// The search runs unfolded and a cursor counts visible lines, so feeding a reply straight
+    /// back as the next request is a coordinate mistake — and a silent one: `n` simply finds
+    /// the same line for ever. This walks the cycle, which is the only way to see it.
+    #[test]
+    fn a_repeated_search_moves_on_and_then_comes_round() {
+        let lib = library();
+        let folds = Expansion::default();
+        let band = |from| {
+            reveal(
+                &lib,
+                &folds,
+                &Target::Pattern {
+                    needle: "Band".into(),
+                    backwards: false,
+                },
+                from,
+            )
+            .map(|f| f.at)
+        };
+
+        // The instrument: one match would make "moves on" and "comes round" the same answer.
+        let matches = flatten(&lib, &folds, true)
+            .iter()
+            .filter(|n| haystack(&lib, n).contains(&crate::text::Needle::new("Band")))
+            .count();
+        assert!(
+            matches >= 2,
+            "only {matches} lines match, so a cycle of one proves nothing"
+        );
+
+        // Walk the whole cycle: each `n` must land somewhere new until the last, which comes
+        // back to the start. A search that stood still and one that wrapped early both fail.
+        let first = band(0).expect("a line carries the word");
+        let mut seen = vec![first];
+        let mut at = first;
+        for _ in 1..matches {
+            at = band(at).expect("another line carries it");
+            assert!(
+                !seen.contains(&at),
+                "`n` came back to {at} after {seen:?} with matches still ahead"
+            );
+            seen.push(at);
+        }
+        assert_eq!(seen.len(), matches, "`n` did not visit every match");
+        assert_eq!(
+            band(at),
+            Some(first),
+            "`n` past the last match did not come round to {first}"
+        );
+    }
+
+    /// `N` looks the other way.
+    #[test]
+    fn a_backwards_search_goes_the_other_way() {
+        let lib = library();
+        let folds = Expansion::default();
+        let look = |backwards, from| {
+            reveal(
+                &lib,
+                &folds,
+                &Target::Pattern {
+                    needle: "Band".into(),
+                    backwards,
+                },
+                from,
+            )
+            .map(|f| f.at)
+        };
+        let ahead = look(false, 0).expect("something ahead");
+        assert!(ahead > 0, "a forward search stayed at the head");
+        let onwards = look(false, ahead).expect("and something after that");
+        let back = look(true, ahead).expect("and something behind");
+        assert_ne!(
+            onwards, back,
+            "`n` and `N` from {ahead} both landed on {back}, so this cannot see the direction"
+        );
+        assert!(back < ahead, "`N` from {ahead} went forwards to {back}");
+        assert!(
+            onwards > ahead,
+            "`n` from {ahead} went backwards to {onwards}"
+        );
+
+        // **And `N` from the head comes round to the last match**, the mirror of `n` wrapping
+        // at the end. Without this, "backwards never wraps" passes every assertion above,
+        // because each of them starts somewhere with a match already behind it.
+        assert_eq!(
+            look(true, 0),
+            Some(onwards),
+            "`N` from the head did not come round to the last match at {onwards}"
+        );
     }
 }

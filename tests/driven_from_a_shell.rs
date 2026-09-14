@@ -2610,3 +2610,76 @@ fn folds_travel_with_the_request_and_the_spine_comes_back() {
         "the anchor did not win over the cursor"
     );
 }
+
+/// **A search finds a line inside a closed fold, and says where it lands once opened** — #261.
+///
+/// Two rules meet here and both have bitten before. A closed fold still holds its lines, so the
+/// search runs over the unfolded tree — searching what is *visible* with the artists shut finds
+/// nothing at all, which is what #131 fixed in the view. And the index comes back measured
+/// **after** the reveal: opening a fold inserts every line under it, so an index taken against
+/// the unfolded list is stale before a client could use it.
+#[test]
+fn a_reveal_opens_the_way_and_says_where_it_landed() {
+    let (engine, _recording) = start_with_a_track("tree-reveal");
+    let client = Client::connect(&engine.socket, "browser", "0").expect("connect");
+
+    let ask =
+        |params: serde_json::Value| client.call("query.reveal", Some(params)).expect("reveal");
+    let tree = |params: serde_json::Value| client.call("query.tree", Some(params)).expect("tree");
+
+    // Everything shut, so anything found is found *through* a fold.
+    let shut = serde_json::json!({ "level": 0, "opened": [], "closed": [] });
+    let drawn = tree(serde_json::json!({ "limit": 100, "folds": shut }));
+    let visible = drawn["total"].as_u64().expect("a total");
+
+    // The title to look for comes from the open tree, so the fixture names it rather than this.
+    let open = tree(serde_json::json!({ "limit": 100 }));
+    let title = open["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find_map(|n| (n["kind"] == "track").then(|| n["title"].as_str().expect("title")))
+        .expect("a track in the open tree");
+    assert!(!title.is_empty(), "a blank title searches for nothing");
+    assert!(
+        (open["total"].as_u64().expect("a total")) > visible,
+        "the folds hid nothing, so this proves no search through one"
+    );
+
+    let found = ask(serde_json::json!({ "pattern": title, "folds": shut }));
+    let opened = found["open"].as_array().expect("something had to open");
+    assert!(
+        !opened.is_empty(),
+        "a track inside a shut fold was reached without opening anything"
+    );
+    let at = found["at"].as_u64().expect("somewhere to land");
+
+    // **The landing place is in the revealed tree, not the shut one.** Without the second
+    // flatten this index would be the unfolded one, which is the bug the design names.
+    let mut folds = shut.clone();
+    folds["opened"] = serde_json::json!(opened);
+    let after = tree(serde_json::json!({ "limit": 100, "folds": folds }));
+    let nodes = after["nodes"].as_array().expect("nodes");
+    assert!(
+        at < after["total"].as_u64().expect("a total"),
+        "landed at {at} in a tree of {} lines",
+        after["total"]
+    );
+    assert_eq!(
+        nodes[at as usize]["title"].as_str(),
+        Some(title),
+        "the cursor landed on the wrong line"
+    );
+
+    // A pattern nothing matches is an ordinary answer, not an error.
+    let nothing = ask(serde_json::json!({ "pattern": "zzz no such track zzz", "folds": shut }));
+    assert!(nothing["at"].is_null(), "a miss reported somewhere to go");
+
+    // Both targets, or neither, is a bad request rather than a guess.
+    assert!(
+        client
+            .call("query.reveal", Some(serde_json::json!({ "folds": shut })))
+            .is_err(),
+        "a reveal with no target was accepted"
+    );
+}
