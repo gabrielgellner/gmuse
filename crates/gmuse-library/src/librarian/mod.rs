@@ -71,6 +71,17 @@ pub struct Answer {
     pub scanning: bool,
 }
 
+/// **What a walk found, on its way back to the thread that owns the log** — #260.
+///
+/// Boxed in [`Job::Walked`] because the holdings of a real library are large and every other
+/// variant would grow to match.
+struct Walked {
+    fresh: crate::operations::scan::Holdings,
+    report: crate::operations::scan::ScanReport,
+    roots: Vec<PathBuf>,
+    cache: Option<PathBuf>,
+}
+
 /// A change to the log, or a reason to publish again.
 enum Job {
     /// Apply this to the log, flush it, and publish. Boxed because it
@@ -120,12 +131,25 @@ enum Job {
     Reread,
     /// Reconcile the disk under these roots, here rather than on the caller's
     /// thread.
+    ///
+    /// **The walk itself is not done here** — #260. It reads 7,267 files on the real
+    /// library and this thread serves every read, so a `Look` queued behind it waited
+    /// **9.26s** while a play gesture went unanswered. The walk goes to a thread of its own
+    /// and comes back as [`Job::Walked`].
     Scan {
         roots: Vec<PathBuf>,
         /// Where to persist what it found, so the next launch starts warm.
         /// `None` writes nothing, which is what a test wants.
         cache: Option<PathBuf>,
     },
+    /// **A walk finished; here is what it found** — #260.
+    ///
+    /// Everything after the walk stays on this thread, because all of it needs the log: the
+    /// catalogue fold, `worth_asserting`, and the append. Only the disk left.
+    ///
+    /// Not constructible from outside — `Job` is private, and the only sender is the walker
+    /// this thread spawned.
+    Walked(Box<Walked>),
     /// **Rewrite the log without its superseded records** — #218, #201.
     ///
     /// The one job that removes rather than adds, which is why it is behind
@@ -340,7 +364,31 @@ impl Desk {
                 // and never written to the log — the programme says what will play,
                 // and what was played is a `RecordingPlayed` fact like any other.
                 let mut plan = crate::programme::Programme::new();
-                for job in rx {
+
+                // **The walker's own channel, and not a clone of `rx`'s sender** — #260. A
+                // thread holding a sender to the channel it reads from is a channel that never
+                // closes, and this loop ends when its senders are dropped. Two receivers, one
+                // select, and shutdown works exactly as before.
+                let (walked_tx, walked_rx) = crossbeam_channel::unbounded::<Box<Walked>>();
+                // **One walk at a time.** A second `Scan` while one runs would read 7,267 files
+                // twice and race its own result; declining is what `scanning` already tells a
+                // view is happening.
+                let mut walking = false;
+
+                loop {
+                    let job = crossbeam_channel::select! {
+                        recv(rx) -> got => match got {
+                            Ok(job) => job,
+                            // Every `Desk` is gone. The walker, if any, is detached and will
+                            // find a closed channel when it finishes.
+                            Err(_) => break,
+                        },
+                        recv(walked_rx) -> got => match got {
+                            Ok(walked) => Job::Walked(walked),
+                            // Cannot happen: this thread holds `walked_tx` for its whole life.
+                            Err(_) => continue,
+                        },
+                    };
                     // **Measured against the log before the job**, so what is
                     // published is what this job did rather than what the log
                     // happens to hold. A scan that appends nothing is not a
@@ -403,17 +451,65 @@ impl Desk {
                         //
                         // Published twice on purpose: once to say it started,
                         // so a view can show it, and once with the result.
+                        // **The walk goes to its own thread** — #260. It reads 7,267 files on
+                        // the real library, and every job behind it waited: a bare `Look`,
+                        // which does no work at all, took 9.26s on the first call after a
+                        // launch and 0.04s thereafter.
+                        //
+                        // Nothing here waits for it. What comes back is `Job::Walked`, and
+                        // everything that needs the log happens there.
                         Job::Scan { roots, cache } => {
-                            published.store(Arc::new(fold(
-                                &log,
-                                &held,
-                                device,
-                                now,
-                                Changed::Nothing,
-                                true,
-                            )));
-                            let mut fresh = (*held).clone();
-                            let report = crate::operations::scan::scan(&mut fresh, &roots);
+                            if walking {
+                                eprintln!("scan: one is already running, so this one is declined");
+                                None
+                            } else {
+                                walking = true;
+                                // Published before the walk starts, so `scanning` is true for
+                                // the whole of it rather than for the instant it takes to
+                                // spawn.
+                                published.store(Arc::new(fold(
+                                    &log,
+                                    &held,
+                                    device,
+                                    now,
+                                    Changed::Nothing,
+                                    true,
+                                )));
+                                let mut fresh = (*held).clone();
+                                let back = walked_tx.clone();
+                                // Detached: nothing joins it. It owns everything it touches,
+                                // and a librarian that has gone leaves it a closed channel.
+                                let started = std::thread::Builder::new()
+                                    .name("gmuse-scan".into())
+                                    .spawn(move || {
+                                        let report =
+                                            crate::operations::scan::scan(&mut fresh, &roots);
+                                        let _ = back.send(Box::new(Walked {
+                                            fresh,
+                                            report,
+                                            roots,
+                                            cache,
+                                        }));
+                                    });
+                                if started.is_err() {
+                                    // **Said, and the flag cleared.** A scan that never starts
+                                    // must not leave `walking` true, or nothing scans again.
+                                    eprintln!("scan: could not start a walker thread");
+                                    walking = false;
+                                }
+                                None
+                            }
+                        }
+
+                        Job::Walked(walked) => {
+                            walking = false;
+                            let Walked {
+                                mut fresh,
+                                report,
+                                roots,
+                                cache,
+                            } = *walked;
+                            let _ = &mut fresh;
                             // **Persisted here, because the holdings are
                             // produced here.** Without it every launch is a
                             // cold pass: the read cache is what turns 24s into
@@ -1037,12 +1133,20 @@ mod tests {
         desk.appender()
             .expect("a test desk appends")
             .scan(vec![dir.clone()], None);
-        desk.settled();
 
+        // **The report is the completion signal, not `settled`** — #260. A scan's *job* now
+        // only starts a walker; `settled` drains the job queue and returns while the disk is
+        // still being read, which is the whole point. Waiting on `scans` is what the doc above
+        // has always said a caller does.
         assert!(
-            desk.scans.try_recv().is_ok(),
+            desk.scans
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
             "the scan never reported, so it never ran"
         );
+        // And the holdings it found are published, which happens on the librarian thread after
+        // the walk comes back.
+        desk.settled();
         let answer = desk.current();
         assert!(!answer.scanning, "it finished, so it should say so");
         assert_eq!(
