@@ -78,12 +78,20 @@ pub fn tree(
     smart_artist_sort: bool,
 ) -> Vec<Node> {
     let shelf = Shelf::grouped(library, members, levels, smart_artist_sort);
+    flatten(library, &shelf, levels)
+}
+
+/// The nodes of a shelf already built.
+///
+/// **Split out to be measured** — #261. A fold state that travels with a request is only
+/// affordable if this half is the cheap one.
+pub fn flatten(library: &Librarian, shelf: &Shelf, levels: Levels) -> Vec<Node> {
     let mut out = Vec::new();
 
     if levels.is_flat() {
         // **No grouping, so every row is a track** — which is what view 2 was.
         for id in shelf.sorted() {
-            if let Some(node) = track_of(library, &shelf, *id) {
+            if let Some(node) = track_of(library, shelf, *id) {
                 out.push(node);
             }
         }
@@ -103,7 +111,7 @@ pub fn tree(
                 total: shelf.album_total(outer, inner),
             });
             for id in tracks {
-                if let Some(node) = track_of(library, &shelf, *id) {
+                if let Some(node) = track_of(library, shelf, *id) {
                     out.push(node);
                 }
             }

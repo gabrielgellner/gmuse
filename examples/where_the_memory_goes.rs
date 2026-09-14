@@ -129,6 +129,37 @@ fn main() {
     });
     say("a second fold, retained", kept, peak);
 
+    // 6. What view 1 holds on top of all that — #261.
+    //
+    //    The `Shelf` is the ordering and the display names for every row, and the TUI keeps
+    //    one. Measured against what the navigator actually reads out of it, which is one
+    //    byte a row: `depth`, `is_leaf`, `is_expanded` and nothing else.
+    let members: std::collections::HashSet<_> = {
+        use gmuse::model::rows::Listing;
+        library.rows().into_iter().collect()
+    };
+    let rows = members.len();
+    assert!(rows > 1_000, "only {rows} rows — this measures nothing");
+    let levels = gmuse::shelf::Levels::default();
+    let (shelf, kept, peak) =
+        accounting::measure(|| gmuse::shelf::Shelf::grouped(&library, members, levels, true));
+    say("Shelf::grouped (view 1 holds one)", kept, peak);
+    let (nodes, kept, peak) =
+        accounting::measure(|| gmuse::browse::flatten(&library, &shelf, levels));
+    let drawn = nodes.len();
+    assert!(
+        drawn > 1_000,
+        "only {drawn} nodes — the flatten measured nothing"
+    );
+    say("  flattened to nodes", kept, peak);
+    println!(
+        "{:<34} {:>9.1} MB   {} rows, 1 byte each",
+        "  the navigator's whole input",
+        drawn as f64 / (1024.0 * 1024.0),
+        drawn
+    );
+    drop((shelf, nodes));
+
     println!("{}", "-".repeat(56));
     println!(
         "{:<34} {:>9.1} MB live   {:>9.1} MB RSS",

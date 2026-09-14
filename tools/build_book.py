@@ -223,6 +223,13 @@ INTERACTION = [
                 split=True,
             ),
             Doc(
+                file="tree-over-the-wire.md",
+                title="The tree over the wire",
+                standing="**Settled design, not built.** What a view holds once the library is the "
+                "librarian's: a screenful, a cursor, and four bits a row.",
+                split=True,
+            ),
+            Doc(
                 file="query-language.md",
                 title="The query language",
                 standing="**Design.** One language for the `:` line, the config, saved rules and "

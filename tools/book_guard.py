@@ -53,13 +53,15 @@ LEAST = 20
 #: files that are not there — mdBook warns, exits 0, and publishes pages whose diagrams
 #: are inert. Asserting the number rendered is the only thing that notices.
 #:
+#: Interaction has one, `tree-over-the-wire.md`'s keystroke sequence.
+#:
 #: Six: the two class diagrams in the domain model, which predate the preprocessor and
 #: were inert here until it arrived, the layer diagrams in `layers.md` and
 #: `access-layers.md`, and `playback-programme.md`'s actor graph and message sequence.
 #: Raise it when a diagram is added — that is the point of a count rather than a
 #: "more than zero".
 #: Keyed by book, because only the model book has diagrams today.
-DIAGRAMS = {"model": 6, "interaction": 0}
+DIAGRAMS = {"model": 6, "interaction": 1}
 
 
 def content(page: Path) -> int | None:

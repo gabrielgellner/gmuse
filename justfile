@@ -257,6 +257,11 @@ memory:
 query-cost data="~/MusicLibrary/.gmuse":
     cargo run --release --example where_a_query_goes -- {{data}}
 
+# Which half of a tree costs the 0.4s: the grouping or the flatten (#261). Needs the real library.
+[group('test')]
+tree-cost data="~/MusicLibrary/.gmuse":
+    cargo run --release --example where_the_tree_goes -- {{data}}
+
 # What each part of a fold costs, attributed (#255). Needs the real library.
 [group('test')]
 memory-parts data="~/MusicLibrary/.gmuse" roots="~/MusicLibrary":
