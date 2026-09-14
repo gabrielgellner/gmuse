@@ -534,6 +534,33 @@ pub trait Listing {
         let _ = ids;
     }
 
+    /// **Which copy this device holds of each recording named** — #261.
+    ///
+    /// The inverse of [`Listing::recording_of`], asked by everything that arrives holding
+    /// recordings rather than copies: the engine's queue, a restored session, a collection.
+    /// A recording outlives a file and a path, so it is what crosses the wire and what a
+    /// session stores — and a pane draws copies, so the pairing is made again on every launch.
+    ///
+    /// **Batched by what is wanted, not by what there is.** The default walks every row, which
+    /// is what the library is keyed by, and is why callers used to build the whole inverse map
+    /// once and look up a hundred times. That is the right trade in this process and the wrong
+    /// one over a socket, where the walk was one round trip per row: **706–956 ms** for 7,273
+    /// rows to answer a queue of 107.
+    ///
+    /// A recording held as several encodings answers with one of them. Which to prefer is
+    /// `shelf copies`' question and is not decidable here — this only says the device has one.
+    fn copies_of(
+        &self,
+        recordings: &[Id<crate::model::entity::Recording>],
+    ) -> std::collections::HashMap<Id<crate::model::entity::Recording>, CopyId> {
+        let want: std::collections::HashSet<_> = recordings.iter().copied().collect();
+        self.rows()
+            .into_iter()
+            .filter_map(|id| Some((self.recording_of(id)?, id)))
+            .filter(|(recording, _)| want.contains(recording))
+            .collect()
+    }
+
     /// How many distinct albums and artists a slice covers.
     ///
     /// Here rather than at the call site because it is the same fold every

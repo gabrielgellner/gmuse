@@ -3228,6 +3228,48 @@ fn a_remote_read_answers_what_a_local_one_does() {
         "only {answered} rows were anything at all, so equality proves nothing"
     );
 
+    // **The pairing, which the remote answers with one call and the default with a walk**
+    // — #261. Both directions matter: a recording the device holds must come back paired,
+    // and one it does not must come back absent rather than paired with something.
+    let recordings: Vec<_> = ids
+        .iter()
+        .filter_map(|id| local.recording_of(*id))
+        .collect();
+    assert!(
+        !recordings.is_empty(),
+        "no row named a recording, so the pairing below proves nothing"
+    );
+    let mine = local.copies_of(&recordings);
+    assert_eq!(
+        remote.copies_of(&recordings),
+        mine,
+        "the two disagree about which copy holds which recording"
+    );
+    assert_eq!(
+        mine.len(),
+        recordings
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        "a recording this device holds was left unpaired"
+    );
+
+    // A recording nobody holds pairs with nothing, in both.
+    let nobody: gmuse::model::id::Id<gmuse::model::entity::Recording> =
+        gmuse::model::id::Id::from_uuid(uuid::Uuid::nil());
+    let asked = [recordings[0], nobody];
+    let mine = local.copies_of(&asked);
+    assert_eq!(remote.copies_of(&asked), mine, "they differ on a stranger");
+    assert_eq!(mine.len(), 1, "the stranger was paired with something");
+
+    // Nothing asked for is nothing answered. The implementation also returns early rather than
+    // asking the engine at all, and this cannot see that — only a round-trip counter could, and
+    // the answer is the same either way.
+    assert!(
+        remote.copies_of(&[]).is_empty(),
+        "empty asked, not empty back"
+    );
+
     // And the panel's half, which is what `info-panel.md` is about.
     let focus =
         gmuse::model::focus::Focus::Recording(local.recording_of(ids[0]).expect("a recording"));

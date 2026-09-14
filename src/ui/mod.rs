@@ -1104,15 +1104,23 @@ pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
         }
     };
 
-    let here = holdings_here(ctx);
+    // The engine's queue names recordings; the pane draws copies. Named first, then asked
+    // about once (#261).
+    let queued: Vec<Option<Id<Recording>>> = answer["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|name| {
+            name.as_str()
+                .and_then(|s| s.parse::<uuid::Uuid>().ok())
+                .map(Id::from_uuid)
+        })
+        .collect();
+    let here = holdings_here(ctx, &queued.iter().flatten().copied().collect::<Vec<_>>());
     let mut entries = Vec::new();
     let mut absent = 0;
-    for name in answer["entries"].as_array().into_iter().flatten() {
-        let found = name
-            .as_str()
-            .and_then(|s| s.parse::<uuid::Uuid>().ok())
-            .map(Id::from_uuid)
-            .and_then(|r| here.get(&r).copied());
+    for name in queued {
+        let found = name.and_then(|r| here.get(&r).copied());
         match found {
             Some(id) => entries.push(id),
             // **Counted, not dropped in silence.** The engine can queue a recording
@@ -1846,7 +1854,12 @@ pub fn restore_session(
     // path, but a *handle* does not outlive the cache that issued it, so the
     // pairing has to be made again on every launch — which is the whole reason
     // the session cannot store handles and no longer stores paths either.
-    let here = holdings_here(ctx);
+    // **The queue and what was playing.** The track being resumed need not be in the queue —
+    // it usually is not, having just been taken off it — and asking only about the queue left
+    // `saved.current` unpairable, so a resume silently restored nothing.
+    let mut want = saved.queue.clone();
+    want.extend(saved.current.as_ref().map(|p| p.recording));
+    let here = holdings_here(ctx, &want);
 
     ui.queue.clear();
     let mut missing = 0;
@@ -2001,17 +2014,20 @@ fn source_for(
     ))
 }
 
-/// Which file holds each recording on this device, for one restore.
+/// Which file holds each of these recordings on this device.
 ///
-/// Built once rather than asked per row: it is a walk of the store either way,
-/// and a session naming a hundred queued recordings would otherwise walk it a
-/// hundred times.
-fn holdings_here(ctx: &Context<'_>) -> std::collections::HashMap<Id<Recording>, CopyId> {
+/// **Asked for what is wanted, not for everything** — #261. This used to invert the whole
+/// library and look up a hundred times, on the reasoning that it is a walk of the store either
+/// way. True in this process; over a socket the walk was one round trip per row, and the
+/// hundred lookups cost **706–956 ms** of asking about 7,273 rows nobody named. The seam
+/// batches now, so a caller hands over the recordings it is holding and the library answers
+/// those.
+fn holdings_here(
+    ctx: &Context<'_>,
+    recordings: &[Id<Recording>],
+) -> std::collections::HashMap<Id<Recording>, CopyId> {
     let rows: &dyn Listing = ctx.library;
-    rows.rows()
-        .into_iter()
-        .filter_map(|id| Some((rows.recording_of(id)?, id)))
-        .collect()
+    rows.copies_of(recordings)
 }
 
 /// Which recording a file holds, **as the model has it**.
@@ -3401,7 +3417,6 @@ fn load_collection(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     use crate::model::id::Id;
 
     let id = Id::<Collection>::of_name(name);
-    let held = holdings_here(ctx);
     let entries: Vec<_> = ui
         .listened
         .entries
@@ -3409,6 +3424,7 @@ fn load_collection(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         .filter(|(c, _, _)| *c == id)
         .map(|(_, _, recording)| *recording)
         .collect();
+    let held = holdings_here(ctx, &entries);
 
     let mut missing = 0;
     ui.playlist.clear();

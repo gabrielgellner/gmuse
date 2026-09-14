@@ -181,6 +181,24 @@ pub enum Request {
         /// `just read-cost`.
         ids: Vec<gmuse_ids::copy::CopyId>,
     },
+    /// **Which copy this device holds of each recording named** — #261.
+    ///
+    /// The inverse of `QueryRow`'s third answer, and asked by everything that arrives holding
+    /// recordings rather than copies: the engine's queue, a restored session, a collection. A
+    /// recording is what crosses the wire — it outlives a file and a path — and a pane draws
+    /// copies, so somebody has to make the pairing on every launch.
+    ///
+    /// **A list, because a caller holding one recording is holding all of them.** The client
+    /// used to invert the *whole library* to answer a hundred lookups — 7,273 rows, which is
+    /// one `recording_of` each and was 706–956 ms over a socket. Asking for what is wanted is
+    /// one round trip and a reply the size of the question.
+    ///
+    /// A recording held as several encodings answers with one of them, which is the same
+    /// answer the whole-library walk gave and the same one a pane can draw. Which copy to
+    /// prefer is `shelf copies`' question and is not decidable here.
+    QueryHoldings {
+        recordings: Vec<String>,
+    },
     /// **What the library says about one recording** — #261. The row it would draw, and which
     /// file to play for it on the devices given.
     QueryRecording {
@@ -454,6 +472,7 @@ pub mod method {
     pub const QUERY_REVEAL: &str = "query.reveal";
     pub const QUERY_UNDER: &str = "query.under";
     pub const QUERY_ROW: &str = "query.row";
+    pub const QUERY_HOLDINGS: &str = "query.holdings";
     pub const QUERY_RECORDING: &str = "query.recording";
     pub const QUERY_ABOUT: &str = "query.about";
     pub const QUERY_NAME: &str = "query.name";
@@ -499,6 +518,7 @@ pub mod method {
         QUERY_REVEAL,
         QUERY_UNDER,
         QUERY_ROW,
+        QUERY_HOLDINGS,
         QUERY_RECORDING,
         QUERY_ABOUT,
         QUERY_NAME,
@@ -734,6 +754,16 @@ impl Request {
                 let p: P = typed(method, params)?;
                 Ok(Self::QueryRow { ids: p.ids })
             }
+            method::QUERY_HOLDINGS => {
+                #[derive(Deserialize)]
+                struct P {
+                    recordings: Vec<String>,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryHoldings {
+                    recordings: p.recordings,
+                })
+            }
             method::QUERY_RECORDING => {
                 #[derive(Deserialize)]
                 struct P {
@@ -898,6 +928,7 @@ impl Request {
             Self::QueryReveal { .. } => method::QUERY_REVEAL,
             Self::QueryUnder { .. } => method::QUERY_UNDER,
             Self::QueryRow { .. } => method::QUERY_ROW,
+            Self::QueryHoldings { .. } => method::QUERY_HOLDINGS,
             Self::QueryRecording { .. } => method::QUERY_RECORDING,
             Self::QueryAbout { .. } => method::QUERY_ABOUT,
             Self::QueryName { .. } => method::QUERY_NAME,
@@ -955,7 +986,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 35, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 36, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

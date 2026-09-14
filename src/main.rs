@@ -3264,6 +3264,23 @@ fn run_engine(
                         })
                         .collect::<Vec<_>>(),
                 }),
+                // **The pairing a caller holding recordings needs** — #261. A recording is
+                // what crosses the wire; a pane draws copies.
+                Request::QueryHoldings { recordings } => {
+                    let want: std::collections::HashSet<
+                        gmuse::model::id::Id<gmuse::model::entity::Recording>,
+                    > = recordings.iter().filter_map(|r| r.parse().ok()).collect();
+                    // Walked once and filtered, rather than asked per recording: the library
+                    // is keyed by copy and the inverse is this walk either way.
+                    let held: Vec<_> = lib
+                        .rows()
+                        .into_iter()
+                        .filter_map(|id| Some((lib.recording_of(id)?, id)))
+                        .filter(|(recording, _)| want.contains(recording))
+                        .map(|(recording, id)| serde_json::json!([recording, id]))
+                        .collect();
+                    serde_json::json!({ "held": held })
+                }
                 Request::QueryRecording { recording, here } => {
                     let recording = recording.parse().map_err(|_| bad("recording"))?;
                     let here: Vec<_> = here.iter().filter_map(|d| d.parse().ok()).collect();
@@ -3822,6 +3839,7 @@ fn run_engine(
                 // **The read seam** — #261. One arm, because they differ only in what they ask
                 // about and every one of them is answered off the same published fold.
                 read @ (Call::QueryRow { .. }
+                | Call::QueryHoldings { .. }
                 | Call::QueryRecording { .. }
                 | Call::QueryAbout { .. }
                 | Call::QueryName { .. }

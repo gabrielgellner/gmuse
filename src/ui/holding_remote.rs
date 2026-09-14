@@ -542,6 +542,34 @@ impl crate::model::rows::Listing for Remote {
         self.warm(ids);
     }
 
+    /// **One trip for the pairing** — #261.
+    ///
+    /// The default inverts the library by walking every row, which over a socket is a round
+    /// trip each: 706–956 ms to answer a queue of a hundred. The engine holds the rows, so it
+    /// does the walk and sends back only the pairs asked for.
+    fn copies_of(
+        &self,
+        recordings: &[Id<crate::model::entity::Recording>],
+    ) -> std::collections::HashMap<Id<crate::model::entity::Recording>, CopyId> {
+        if recordings.is_empty() {
+            return Default::default();
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct Held {
+            held: Vec<(Id<crate::model::entity::Recording>, CopyId)>,
+        }
+        let names: Vec<String> = recordings.iter().map(|r| r.to_string()).collect();
+        let got: Held = self
+            .inner
+            .client
+            .call_typed(
+                gmuse_proto::request::method::QUERY_HOLDINGS,
+                Some(serde_json::json!({ "recordings": names })),
+            )
+            .unwrap_or_default();
+        got.held.into_iter().collect()
+    }
+
     fn listed(&self, id: CopyId) -> Option<crate::model::rows::Slip> {
         self.row_of(id).0
     }

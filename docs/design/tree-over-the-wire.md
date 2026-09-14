@@ -608,7 +608,40 @@ wrongly-refused question draws the same lines a round trip later, and a wrongly-
 nothing reporting it. Four mutations, each killing exactly the test that claims it — slicing from the asked window,
 dropping the end-of-tree case, letting the spine ignore its folds, and accepting any window under the same folds.
 
-## 17. What this does not decide
+## 17. The pairing was a whole-library walk to answer a hundred lookups
+
+The last thing §15 left: `holdings_here` inverted the entire library — 7,273 rows, one `recording_of` each — and its
+three callers then did about a hundred lookups in the map it built. **706–956 ms** over the socket, on every launch and
+on every queue event.
+
+The comment on it defended exactly the right trade for the wrong world: _"built once rather than asked per row: it is a
+walk of the store either way."_ True in this process, where the walk is map lookups. Over a socket, where the walk was a
+round trip per row, it is the reason the startup stall existed at all.
+
+**Every caller already knows which recordings it is holding.** The engine's queue names about a hundred; a restored
+session names its queue and the track it was playing; a collection names its entries. None of them wanted the library
+inverted — they wanted those recordings paired. So `Listing::copies_of` takes the recordings and answers those, with a
+default that does today's walk restricted to what was asked, and a `Remote` that sends them in one `query.holdings`.
+
+| asked for                 | before    | after     |
+| ------------------------- | --------- | --------- |
+| a queue of 110            | 706–956ms | **2.5ms** |
+| the whole library (7,273) | —         | 50.3ms    |
+
+`just pairing-cost` is the measurement.
+
+A recording held as several encodings still answers with one of them, which is what the whole-library walk did and what
+a pane can draw. Which copy to prefer is `shelf copies`' question and stays undecided here.
+
+**One caller wanted more than it asked for, and a test said so.** Restoring a session asks about `saved.queue`, but the
+track being resumed is usually _not_ in the queue — it has just been taken off it — so asking only about the queue left
+`saved.current` unpairable and a resume silently restored nothing.
+`resuming_does_not_immediately_save_over_the_position_it_restored` caught it, which is the case for a test that asserts
+a guard was raised rather than that nothing blew up: the old code could not have this bug, because a whole-library map
+contains everything by construction. **Narrowing what you ask for makes "what else did this depend on?" a live
+question**, and a map built from everything answers it silently.
+
+## 18. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.
