@@ -222,10 +222,21 @@ walking rather than listed, because a hardcoded pair passes just as well with on
 So what remains before the 40.6 MB comes off is a **second implementation in that one file** — `Holding` over the socket
 — and the detail reads behind `ctx.library`, which §1 explains have to land together.
 
-**The detail reads have a named blocker.** Most go through `Listing`, which is already a trait, but `Listing::listed`
-returns a `Listed<'a>` that _borrows the fold_. A socket implementation cannot return a borrow into something it does
-not have, so that half needs an owned row before it needs anything else — which is why it is a different-sized piece of
-work and not the next commit.
+**The detail reads needed an owned row first, and now have one.** Most go through `Listing`, which is already a trait,
+but `Listing::listed` returns a `Listed<'a>` that _borrows the fold_ — and a socket implementation has no fold to borrow
+from. `Slip` is the same row written out, and it **lends a `Listed` back**, so the format template, the list styling and
+every field still read exactly what they always did. Two representations, one reader.
+
+`just query-cost`:
+
+|                                   |             |
+| --------------------------------- | ----------- |
+| `Slip::of`, a screenful (40 rows) | **25.8 µs** |
+| `Slip::of`, every row (7,273)     | 3.0 ms      |
+
+Which is why `Listed` stays borrowed rather than being replaced: `query::filter` reads one per row of the whole library
+on every keystroke of a picker, where 3.0 ms would cost more than the query. One row is read once and drawn; the other
+is read 7,273 times and thrown away.
 
 ## 8. What this does not decide
 
