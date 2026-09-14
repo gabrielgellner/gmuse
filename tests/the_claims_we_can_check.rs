@@ -683,7 +683,7 @@ fn block<'a>(text: &'a str, header: &str) -> Option<&'a str> {
     None
 }
 
-/// **The tree view asks a seam, not a `Shelf`** — #261, `tree-over-the-wire.md`.
+/// **The view asks a seam, not a `Shelf`** — #261, `tree-over-the-wire.md`.
 ///
 /// `ui::tree` is the one place that browsed by holding the library's own projection, and while
 /// it did, an attached view had to fold the log to build one — which is the 40.6 MB the design
@@ -694,7 +694,7 @@ fn block<'a>(text: &'a str, header: &str) -> Option<&'a str> {
 /// nothing the moment one path reaches past it, and reaching past it compiles perfectly well —
 /// it is `use crate::shelf::Shelf` that would have to come back.
 #[test]
-fn the_tree_view_holds_no_projection_of_its_own() {
+fn a_follower_holds_no_projection_of_its_own() {
     let tree = std::fs::read_to_string("src/ui/tree.rs").expect("the tree view");
 
     // The instrument: this proves nothing if the file stopped being the tree view.
@@ -710,24 +710,44 @@ fn the_tree_view_holds_no_projection_of_its_own() {
 
     // `Shelf` may be named in the tests — they need a library to browse — and nowhere above
     // them. `#[cfg(test)]` marks the boundary, and the first one is where production ends.
-    let production = match tree.find("#[cfg(test)]") {
-        Some(at) => &tree[..at],
-        None => panic!("no tests in the tree view at all, which cannot be right"),
-    };
-    assert!(
-        production.len() > 10_000,
-        "only {} bytes of production code found before the first `#[cfg(test)]`",
-        production.len()
-    );
-    for (n, line) in production.lines().enumerate() {
-        let line = line.trim();
-        if line.starts_with("//") {
+    //
+    // **And the same for the view as a whole** (#261). `ui::holding` is the one place an
+    // implementation is chosen, and it is excluded by name rather than by lowering the bar:
+    // that is where the socket-backed one goes, so it is the one file that must name both.
+    // **Every file in the view, found rather than listed.** A hardcoded pair passes just as
+    // well with one of them deleted from it, which is §13's harness-does-less shape — and a
+    // file added to `src/ui/` later would not be covered by a list nobody remembered to grow.
+    let mut scanned = 0;
+    let mut lines = 0;
+    for entry in std::fs::read_dir("src/ui").expect("the view's directory") {
+        let path = entry.expect("an entry").path();
+        if path.extension().is_none_or(|e| e != "rs") {
             continue;
         }
-        assert!(
-            !line.contains("Shelf"),
-            "src/ui/tree.rs:{} names a `Shelf`: {line}",
-            n + 1
-        );
+        // `ui::holding` is the one place an implementation is chosen — excluded by name
+        // rather than by lowering the bar, because that is where the socket-backed one goes.
+        if path.file_name().is_some_and(|n| n == "holding.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("a view file");
+        let production = text.split("#[cfg(test)]").next().unwrap_or_default();
+        scanned += 1;
+        for (n, line) in production.lines().enumerate() {
+            lines += 1;
+            let line = line.trim();
+            if line.starts_with("//") {
+                continue;
+            }
+            assert!(
+                !line.contains("Shelf"),
+                "{}:{} names a `Shelf`: {line}",
+                path.display(),
+                n + 1
+            );
+        }
     }
+    assert!(
+        scanned >= 5 && lines > 5_000,
+        "{scanned} files and {lines} lines of the view scanned — the walk is not reading it"
+    );
 }

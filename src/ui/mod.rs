@@ -9,6 +9,7 @@
 /// to be able to read it. Re-exported here because it was `ui::fold` for its whole life and a
 /// path is not worth churning.
 pub use gmuse_library::fold;
+pub mod holding;
 pub mod list;
 pub mod picker;
 pub mod remote_transport;
@@ -42,7 +43,6 @@ use crate::model::rows::Listing;
 use crate::model::spine::Recording;
 use crate::next::{self, ActiveSource, Playback, Source};
 use crate::playlist::{Playlist, Queue};
-use crate::shelf::Shelf;
 use tree::{Pane, TreeState};
 
 /// The genuinely different **sets** — which is all a view can be now (#97).
@@ -511,7 +511,11 @@ pub struct Ui {
     pub track_line: crate::query::format::Template,
     /// The library projection. Owned rather than borrowed, because changing
     /// the active catalogs — or `smart_artist_sort` — rebuilds it.
-    pub library: Shelf,
+    /// **What the view holds a library for** — #261.
+    ///
+    /// `Holding`, not `Shelf`: the tree, the flat ordering and the counts, and no projection
+    /// the view could reach past them into. One implementation today; a socket is the other.
+    pub library: Box<dyn crate::browse::Holding>,
     // **`catalogs` lived here and is gone** (#119). What is selected is the
     // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
@@ -604,7 +608,7 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(library: Shelf) -> Self {
+    pub fn new(library: Box<dyn crate::browse::Holding>) -> Self {
         let mut ui = Self::bare(library);
         // Resolve the placeholder the defaults were written with, so the
         // shipped `<leader> ?` works before any config is read.
@@ -612,7 +616,7 @@ impl Ui {
         ui
     }
 
-    fn bare(library: Shelf) -> Self {
+    fn bare(library: Box<dyn crate::browse::Holding>) -> Self {
         Self {
             stop: None,
             split: None,
@@ -4383,7 +4387,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     let was = ui.tree.mark(&ui.library);
     let was_sorted = ui.library.sorted().get(ui.sorted).copied();
 
-    ui.library = Shelf::grouped(ctx.library, members, ui.levels, ui.smart_artist_sort);
+    ui.library = holding::of(ctx.library, members, ui.levels, ui.smart_artist_sort);
 
     // **Put back rather than reset.** This set both to zero, which was right while the
     // only callers were a `:view` change and a filter change — those produce a genuinely
@@ -6519,7 +6523,7 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
                             // it has nowhere else to be** (#135). A collapsed
                             // group has no row above to carry its name, and a
                             // name nobody drew is a name nobody can search.
-                            match tree::stands_for(&ui.library, row, listed.title) {
+                            match ui.library.standing_for(row, listed.title) {
                                 Some(album) => format!("{album} — {line}"),
                                 None => line,
                             }
@@ -6826,8 +6830,10 @@ fn highlight(theme: &theme::Theme, focused: bool) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // A test builds the thing production picks through `holding::of`.
     use crate::fixture::Tagged as Track;
     use crate::operations::scan::Holdings as Scan;
+    use crate::shelf::Shelf;
     use ratatui::backend::TestBackend;
     use std::time::{Duration, Instant};
 
@@ -7327,7 +7333,7 @@ mod tests {
 
     /// A `Ui` over the whole fixture library.
     fn ui_of(store: &Scan, smart: bool) -> Ui {
-        Ui::new(Shelf::rebuild(lib_of(store), smart))
+        Ui::new(Box::new(Shelf::rebuild(lib_of(store), smart)))
     }
 
     /// **A transport that is somewhere else**, like the engine over a socket.
@@ -7680,7 +7686,7 @@ mod tests {
             player: None,
             gapless: None,
         };
-        let mut ui = Ui::new(Shelf::rebuild(library, true));
+        let mut ui = Ui::new(Box::new(Shelf::rebuild(library, true)));
 
         let sorted: Vec<_> = ui.library.sorted().to_vec();
         let at = sorted

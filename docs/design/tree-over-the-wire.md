@@ -212,9 +212,20 @@ view, otherwise do not scroll — and the widget is handed offset zero with the 
 **`lines` has no caller left.** It stays as the tests' oracle: a claim about a page is only checkable against the whole
 it came from.
 
-So nothing in the view asks for the tree any more. What remains before the 40.6 MB comes off is a **second
-implementation** — `Browsing` over the socket — and the detail reads behind `ctx.library`, which §1 explains have to
-land together.
+So nothing in the view asks for the tree any more.
+
+**And the view names no projection at all.** `Holding` is `Browsing` plus what view 2 and the status line ask — the flat
+ordering and four counts — and `Ui::library` is one. `ui::holding` is the single place an implementation is chosen, and
+`a_follower_holds_no_projection_of_its_own` walks every file under `src/ui/` and refuses a `Shelf` outside it. Found by
+walking rather than listed, because a hardcoded pair passes just as well with one of them deleted from it.
+
+So what remains before the 40.6 MB comes off is a **second implementation in that one file** — `Holding` over the socket
+— and the detail reads behind `ctx.library`, which §1 explains have to land together.
+
+**The detail reads have a named blocker.** Most go through `Listing`, which is already a trait, but `Listing::listed`
+returns a `Listed<'a>` that _borrows the fold_. A socket implementation cannot return a borrow into something it does
+not have, so that half needs an owned row before it needs anything else — which is why it is a different-sized piece of
+work and not the next commit.
 
 ## 8. What this does not decide
 

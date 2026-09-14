@@ -2351,7 +2351,7 @@ fn run_tui(
         player: Some(app.player.transport()),
         gapless: app.player.gapless(),
     };
-    let mut state = gmuse::ui::Ui::new(library);
+    let mut state = gmuse::ui::Ui::new(Box::new(library));
     // **This counts plays only when the device is ours** — #257. Attached, the engine does it,
     // and both doing it would count every track twice.
     state.plays_here = !app.player.attached();

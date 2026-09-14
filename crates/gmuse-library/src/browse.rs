@@ -651,6 +651,135 @@ pub trait Browsing {
     fn find(&self, folds: &Expansion<SortKey>, want: &Target, from: usize) -> Option<Found>;
 }
 
+/// **Everything a view holds a library for** — #261.
+///
+/// [`Browsing`] is the tree; this adds what view 2 and the status line ask, which is the flat
+/// ordering and four counts. Together they are the whole of it: a view that names this names no
+/// projection, and the one implementation is a `Shelf` until a socket is the other.
+///
+/// **`sorted` lends rather than gives**, so a remote implementation has to keep the ordering it
+/// was told rather than fetch it per frame — which is right: 7,273 ids is 116 KB and the flat
+/// list scrolls through all of them.
+pub trait Holding: Browsing {
+    fn sorted(&self) -> &[CopyId];
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
+    fn artist_count(&self) -> usize;
+    fn album_count(&self) -> usize;
+
+    /// The album a track stands in for, where its group is not drawn — see [`stands_for`].
+    fn standing_for(&self, row: &Node, title: &str) -> Option<String>;
+
+    /// Which artist and record a copy is filed under.
+    fn locate(&self, id: CopyId) -> Option<(&SortKey, &SortKey)>;
+    /// Every track filed under one artist.
+    fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId>;
+    /// Every track on one record.
+    fn album_tracks(&self, artist: &SortKey, album: &SortKey) -> Vec<CopyId>;
+}
+
+/// An empty shelf, so a caller can move one out of a field and put it back.
+///
+/// `Box` is fundamental, so this is a local impl rather than an orphan.
+impl Default for Box<dyn Holding> {
+    fn default() -> Self {
+        Box::new(Shelf::default())
+    }
+}
+
+/// **Forwarded through the box**, so a caller holding one can pass `&it` where `&dyn Browsing`
+/// is wanted.
+///
+/// Without this every call site would have to write `&*ui.library` — fifty reborrows saying
+/// nothing, in a codebase where the whole point of the seam is that asking the library reads
+/// the same however the answer arrives.
+impl Browsing for Box<dyn Holding> {
+    fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node> {
+        (**self).lines(folds, unfolded)
+    }
+    fn spine(&self, folds: &Expansion<SortKey>) -> Spine {
+        (**self).spine(folds)
+    }
+    fn page(&self, folds: &Expansion<SortKey>, at: usize, limit: usize) -> Vec<Node> {
+        (**self).page(folds, at, limit)
+    }
+    fn at(&self, folds: &Expansion<SortKey>, mark: &Mark) -> Option<usize> {
+        (**self).at(folds, mark)
+    }
+    fn settle(&self, folds: &Expansion<SortKey>, seat: &[SortKey]) -> usize {
+        (**self).settle(folds, seat)
+    }
+    fn tracks_under(&self, node: &Node) -> Vec<CopyId> {
+        (**self).tracks_under(node)
+    }
+    fn openable_under(&self, path: &[SortKey]) -> Vec<Vec<SortKey>> {
+        (**self).openable_under(path)
+    }
+    fn find(&self, folds: &Expansion<SortKey>, want: &Target, from: usize) -> Option<Found> {
+        (**self).find(folds, want, from)
+    }
+}
+
+impl Holding for Box<dyn Holding> {
+    fn sorted(&self) -> &[CopyId] {
+        (**self).sorted()
+    }
+    fn len(&self) -> usize {
+        (**self).len()
+    }
+    fn is_empty(&self) -> bool {
+        (**self).is_empty()
+    }
+    fn artist_count(&self) -> usize {
+        (**self).artist_count()
+    }
+    fn album_count(&self) -> usize {
+        (**self).album_count()
+    }
+    fn standing_for(&self, row: &Node, title: &str) -> Option<String> {
+        (**self).standing_for(row, title)
+    }
+    fn locate(&self, id: CopyId) -> Option<(&SortKey, &SortKey)> {
+        (**self).locate(id)
+    }
+    fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId> {
+        (**self).artist_tracks(artist)
+    }
+    fn album_tracks(&self, artist: &SortKey, album: &SortKey) -> Vec<CopyId> {
+        (**self).album_tracks(artist, album)
+    }
+}
+
+impl Holding for Shelf {
+    fn sorted(&self) -> &[CopyId] {
+        Shelf::sorted(self)
+    }
+    fn len(&self) -> usize {
+        Shelf::len(self)
+    }
+    fn is_empty(&self) -> bool {
+        Shelf::is_empty(self)
+    }
+    fn artist_count(&self) -> usize {
+        Shelf::artist_count(self)
+    }
+    fn album_count(&self) -> usize {
+        Shelf::album_count(self)
+    }
+    fn standing_for(&self, row: &Node, title: &str) -> Option<String> {
+        stands_for(self, row, title)
+    }
+    fn locate(&self, id: CopyId) -> Option<(&SortKey, &SortKey)> {
+        Shelf::locate(self, id)
+    }
+    fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId> {
+        Shelf::artist_tracks(self, artist)
+    }
+    fn album_tracks(&self, artist: &SortKey, album: &SortKey) -> Vec<CopyId> {
+        Shelf::album_tracks(self, artist, album).to_vec()
+    }
+}
+
 impl Browsing for Shelf {
     fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node> {
         flatten(self, folds, unfolded)

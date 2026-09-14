@@ -15,7 +15,6 @@ use crate::model::entity::Encoding;
 use crate::model::id::Id;
 use crate::model::rows::CopyId;
 use crate::playlist::{Playlist, Queue};
-use crate::shelf::Shelf;
 
 /// Which list the player is walking through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,7 +60,12 @@ pub enum Source {
 pub struct NextInput<'a> {
     pub queue: &'a Queue,
     pub active: ActiveSource,
-    pub library: &'a Shelf,
+    /// **What is there to play, asked rather than held** — #261.
+    ///
+    /// `dyn Holding`, because the view that fills this in holds a seam rather than a shelf.
+    /// The whole of this file is what `playback-programme.md` moves to the librarian anyway
+    /// (#257, #235): a playback mode is a rule the librarian answers.
+    pub library: &'a dyn crate::browse::Holding,
     pub playlist: &'a Playlist,
     pub current: Option<CopyId>,
     pub scope: Scope,
@@ -259,7 +263,11 @@ fn step(input: &NextInput<'_>, dir: Direction) -> Option<(CopyId, Source)> {
 ///
 /// `pub(crate)` for the same reason as [`shuffled`]: the librarian's `Ask::Open` builds a
 /// programme from exactly this, and a second copy of the fallback rules would drift.
-pub(crate) fn scoped(shelf: &Shelf, at: Option<CopyId>, scope: Scope) -> Vec<CopyId> {
+pub(crate) fn scoped(
+    shelf: &dyn crate::browse::Holding,
+    at: Option<CopyId>,
+    scope: Scope,
+) -> Vec<CopyId> {
     match scope {
         Scope::All => shelf.sorted().to_vec(),
         Scope::Outer | Scope::Inner => {
@@ -274,7 +282,7 @@ pub(crate) fn scoped(shelf: &Shelf, at: Option<CopyId>, scope: Scope) -> Vec<Cop
             };
             match scope {
                 Scope::Outer => shelf.artist_tracks(artist),
-                _ => shelf.album_tracks(artist, album).to_vec(),
+                _ => shelf.album_tracks(artist, album),
             }
         }
     }
@@ -361,6 +369,7 @@ mod tests {
     use super::*;
     use crate::fixture::Tagged as Track;
     use crate::operations::scan::Holdings as Scan;
+    use crate::shelf::Shelf;
     use std::path::PathBuf;
 
     /// Three artists: A with two albums (2 + 1 tracks), B with one (2), C with
