@@ -918,8 +918,18 @@ pub enum Ask {
     Clear {
         base: Option<u64>,
     },
-    /// **The programme as it stands, for drawing it.** Up to `limit` entries.
+    /// **A page of the programme, for drawing it.**
+    ///
+    /// **A page, and not the whole thing, because the whole thing is the play order.** Under
+    /// the two-tier model this returned "what you explicitly queued" — usually nothing, or
+    /// three tracks. One list makes the programme the play order, and the play order after a
+    /// play gesture at scope `all` is 7,271 entries: a pane drawing all of it draws your
+    /// library, which is never the question being asked.
+    ///
+    /// `from` is where the page starts, and `None` means the head. A caller that knows what
+    /// is sounding passes that token, which makes the default view "up next".
     Look {
+        from: Option<u64>,
         limit: usize,
     },
 }
@@ -1055,10 +1065,18 @@ pub enum Reply {
     /// The rarer case than the design document assumed, because a reshuffle is a
     /// [`Ask::Reorder`] and keeps every token — so this means a genuine replacement.
     Stale { standing: Standing },
-    /// The programme, for drawing. `entries` may be a `limit`ed prefix of `standing.total`.
+    /// One page of the programme. `standing.total` is how many there are in all.
     Look {
         standing: Standing,
         entries: Vec<Shown>,
+        /// Where this page starts, counting from the head — so a view can say "showing 120 to
+        /// 170 of 7,271" rather than leaving a person to guess where they are.
+        at: usize,
+        /// **The token the next page starts at**, or `None` at the end.
+        ///
+        /// A token rather than an offset, for the same reason a refill is addressed by one: an
+        /// index shifts when somebody inserts above it, and a token does not.
+        next: Option<u64>,
     },
     /// A mutation landed.
     Settled { standing: Standing },

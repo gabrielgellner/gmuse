@@ -51,8 +51,18 @@ pub enum Request {
     EngineShutdown,
     /// The engine's clock, for offset estimation (§7.9).
     TimeNow,
-    /// Read the queue — §7.4.
-    QueueGet,
+    /// **Read a page of the programme** — §7.4, #257.
+    ///
+    /// A page rather than the whole thing, because the whole thing *is* the play order: after
+    /// a play gesture at scope `all` it is the library. `from` is the token to start at, and
+    /// omitting it means "where playback is" — which makes the default answer "up next", and
+    /// the only one that is meaningful whether or not anything was queued by hand.
+    QueueGet {
+        /// A token from a previous reply's `next`, or from `playback.get`'s `entry`.
+        from: Option<u64>,
+        /// How many entries. Omitted means a screenful.
+        limit: Option<usize>,
+    },
     /// Append recordings to the queue.
     ///
     /// **`base_version` is optional here and required on the mutating
@@ -380,7 +390,29 @@ impl Request {
                 let p: P = typed(method, params)?;
                 Ok(Self::PlaybackGet { format: p.format })
             }
-            method::QUEUE_GET => Ok(Self::QueueGet),
+            method::QUEUE_GET => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default)]
+                    from: Option<u64>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                }
+                // **Both optional, so a bare `queue.get` still works.** A client that asked
+                // for the queue before this existed was asking for what plays next, and that
+                // is what it still gets.
+                let p: P = match params {
+                    Some(_) => typed(method, params)?,
+                    None => P {
+                        from: None,
+                        limit: None,
+                    },
+                };
+                Ok(Self::QueueGet {
+                    from: p.from,
+                    limit: p.limit,
+                })
+            }
             method::QUEUE_ENQUEUE => {
                 #[derive(Deserialize)]
                 struct P {
@@ -464,7 +496,7 @@ impl Request {
             Self::TimeNow => method::TIME_NOW,
             Self::PlayerLoad { .. } => method::PLAYER_LOAD,
             Self::PlaybackGet { .. } => method::PLAYBACK_GET,
-            Self::QueueGet => method::QUEUE_GET,
+            Self::QueueGet { .. } => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
             Self::QueueSet { .. } => method::QUEUE_SET,
             Self::QueueRemove { .. } => method::QUEUE_REMOVE,

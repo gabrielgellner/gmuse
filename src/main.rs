@@ -2877,7 +2877,12 @@ fn run_engine(
                 // **The rarer case than the design assumed**, because a reshuffle is a
                 // reorder and keeps every token. This is a genuine replacement.
                 Reply::Stale { standing } => Err(RpcError::stale_version(standing.version)),
-                Reply::Look { standing, entries } => {
+                Reply::Look {
+                    standing,
+                    entries,
+                    at,
+                    next,
+                } => {
                     use gmuse_library::programme::Mode;
                     // **Recordings on the wire, rows underneath** — I17: only user-facing
                     // grains cross, and a recording is what a person chooses.
@@ -2890,6 +2895,10 @@ fn run_engine(
                         "version": standing.version,
                         "entries": named,
                         "total": standing.total,
+                        // **Where this page sits**, so a view can say where a person is in a
+                        // programme rather than leaving them to guess.
+                        "at": at,
+                        "next": next,
                         // **The same four fields the `queue` event carries** (#233), so a view
                         // that just attached can draw the queue correctly without waiting for
                         // one of them to change.
@@ -2945,6 +2954,24 @@ fn run_engine(
         /// decision unchanged: this library's `now_playing` puts the title **last**,
         /// so a bar truncating a pre-rendered line throws away the field it wanted.
         /// A caller that wants fields ignores `format` and gets them.
+        /// **Which programme entry is sounding**, for a page anchored where playback is.
+        ///
+        /// `None` when nothing is playing or the engine did not answer, which pages from the
+        /// head — the right answer either way: a programme nobody has started shows its
+        /// beginning.
+        fn playing_entry(&self) -> Option<u64> {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            if !self
+                .control
+                .ask(gmuse::engine::control::Ask::Playing { reply: tx })
+            {
+                return None;
+            }
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .ok()
+                .and_then(|now| now.entry)
+        }
+
         fn playing(
             &self,
             format: Option<String>,
@@ -2971,6 +2998,9 @@ fn run_engine(
                     gmuse::audio::State::Stopped => "stopped",
                 },
                 "recording": now.recording,
+                // **The programme entry**, so a client can ask for "up next" itself rather
+                // than relying on `queue.get`'s default (#257). Opaque: hand it back.
+                "entry": now.entry,
                 "pos_frames": now.pos_frames,
                 "stream_generation": now.generation,
                 "sample_rate": now.sample_rate,
@@ -3238,8 +3268,20 @@ fn run_engine(
                 // complaint against `--repl`, and routing here is what stops a
                 // second one being written.
                 Call::PlaybackGet { format } => self.playing(format),
-                Call::QueueGet => {
-                    self.programme(gmuse::librarian::programme::Ask::Look { limit: 500 })
+                // **A page, anchored where playback is** — #257.
+                //
+                // The anchor comes from the engine and the page from the librarian, which is
+                // the triangle doing exactly what it is for: *where am I* is a playback
+                // question and *what is the order* is a library one. Neither actor can answer
+                // both, and this is the one place that may ask each.
+                Call::QueueGet { from, limit } => {
+                    let from = from.or_else(|| self.playing_entry());
+                    self.programme(gmuse::librarian::programme::Ask::Look {
+                        from,
+                        // **A screenful, not a library.** Large enough that a view rarely
+                        // pages, small enough that the answer is never 7,271 rows.
+                        limit: limit.unwrap_or(100).min(1_000),
+                    })
                 }
                 Call::QueueEnqueue {
                     recordings,

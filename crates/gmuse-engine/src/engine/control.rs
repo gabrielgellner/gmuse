@@ -88,6 +88,14 @@ pub struct Sounded {
     pub sample_rate: u32,
     /// Zero when the device has gone, so a client knows not to extrapolate (#212).
     pub rate: f64,
+    /// **Which programme entry is sounding** — #257.
+    ///
+    /// Opaque: this side mints nothing and reads nothing from it. It is here because the
+    /// programme is the librarian's and *where you are in it* is this one's, so a view asking
+    /// for "up next" has to get the anchor from here and the page from there.
+    ///
+    /// Not the recording, which a programme may hold twice.
+    pub entry: Option<u64>,
 }
 
 /// What the handshake needs to report, published by this thread.
@@ -412,7 +420,13 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
             // could disagree with the stream is worse than no snapshot, because a
             // client cannot tell which one is stale.
             Ok(Ask::Playing { reply }) => {
-                let _ = reply.send(sounded(player, &shared, held.playing.as_deref(), lost));
+                let _ = reply.send(sounded(
+                    player,
+                    &shared,
+                    held.playing.as_deref(),
+                    held.sounding.as_ref().map(|(cue, _)| cue.token),
+                    lost,
+                ));
                 false
             }
             // **The programme moved, so the window did too** — #257.
@@ -575,6 +589,7 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                     &shared,
                     now,
                     held.playing.as_deref(),
+                    held.sounding.as_ref().map(|(cue, _)| cue.token),
                     lost,
                 ));
             }
@@ -854,6 +869,10 @@ fn sounded(
     player: &PlayerHandle,
     shared: &Arc<Shared>,
     recording: Option<&str>,
+    // **Which programme entry**, so "up next" has an anchor. Passed rather than read off a
+    // handle, because what is sounding is the control thread's and this function is shared
+    // with `playback_event`, which has the same three sources and no more.
+    entry: Option<u64>,
     lost: bool,
 ) -> Sounded {
     let sounding = shared.sounding();
@@ -871,6 +890,7 @@ fn sounded(
     // change the position discontinuity §7.8 already lists it as.
     let base = shared.track_base.load(std::sync::atomic::Ordering::Acquire);
     Sounded {
+        entry,
         state: player.state(),
         recording: recording.map(str::to_owned),
         pos_frames: sounding.map(|s| s.frame.saturating_sub(base)),
@@ -897,6 +917,8 @@ fn playback_event(
     shared: &Arc<Shared>,
     told: Told,
     recording: Option<&str>,
+    // Which programme entry is sounding — the anchor a view pages "up next" from.
+    entry: Option<u64>,
     // Whether the device has gone, so the position is not advancing (#212).
     lost: bool,
 ) -> Event {
@@ -906,7 +928,7 @@ fn playback_event(
     // last announced; re-reading the state here could describe a *different* moment
     // than the one that triggered the publish. `sounded` supplies everything that is
     // a measurement rather than a decision.
-    let now = sounded(player, shared, recording, lost);
+    let now = sounded(player, shared, recording, entry, lost);
     let at_ns = shared.sounding().map(|s| s.at_nanos);
     Event::new(
         Topic::Playback,
@@ -1163,7 +1185,7 @@ mod tests {
             state: crate::audio::State::Playing,
             generation,
         };
-        let event = playback_event(&player, &shared, told, Some("a-recording"), false);
+        let event = playback_event(&player, &shared, told, Some("a-recording"), None, false);
 
         assert_eq!(
             event.body["pos_frames"].as_u64(),

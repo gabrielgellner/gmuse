@@ -74,6 +74,32 @@ it and hands it back. Two things follow, and the design needs both:
 The distinction is the one the domain model already draws between a library entry and a file: **a programme entry has
 identity distinct from the recording it names.**
 
+### Reading it is a page, not the whole thing
+
+**The programme is the play order, and the play order is usually the library.** Under the two-tier model a queue view
+showed what you had explicitly queued — nothing, or three tracks. One list makes that view the whole programme: after a
+play gesture at scope `All`, 7,273 entries.
+
+So `queue.get` answers a **page**, anchored by default at what is sounding:
+
+```
+at: 6595    next: 6695    total: 7273
+entries: [the track playing, then what follows it…]
+```
+
+Which makes the default answer **"up next"** — the only one that is meaningful whether or not anything was queued by
+hand — while leaving the rest reachable by paging. A caller that wants elsewhere passes `from`; a caller that wants to
+continue passes the previous reply's `next`.
+
+**Addressed by token, not by offset**, for the same reason a refill is: an index shifts when something is inserted above
+it, and a token does not. A token the programme no longer holds pages from the head rather than answering with nothing,
+because a view cannot tell an empty page from an empty programme — and "your queue is empty" is the wrong thing to draw
+over a library that is playing.
+
+**The anchor comes from the engine and the page from the librarian**, which is the triangle doing what §1 says: _where
+am I_ is a playback question and _what is the order_ is a library one. `playback.get` reports the entry so a client can
+anchor its own paging.
+
 ## 3. An order is a library computation
 
 Every input to an interesting order is library data: a rating, a genre, a musical key, a play count, when the track was

@@ -280,18 +280,35 @@ pub(crate) fn answer(
             }
         }
 
-        Ask::Look { limit } => Reply::Look {
-            standing: standing(plan),
-            entries: plan
+        Ask::Look { from, limit } => {
+            // **From the head when the caller names nothing**, which is what a programme with
+            // nothing playing shows. A token this programme no longer holds is the same case:
+            // the alternative is an empty page, which a view cannot tell from an empty
+            // programme.
+            let at = from
+                .map(EntryToken::from_u64)
+                .and_then(|t| plan.position(t))
+                .unwrap_or(0);
+            let entries: Vec<Shown> = plan
                 .entries()
                 .iter()
+                .skip(at)
                 .take(limit)
                 .map(|e| Shown {
                     token: e.token.as_u64(),
                     row: e.row,
                 })
-                .collect(),
-        },
+                .collect();
+            Reply::Look {
+                standing: standing(plan),
+                at,
+                next: plan
+                    .entries()
+                    .get(at + entries.len())
+                    .map(|e| e.token.as_u64()),
+                entries,
+            }
+        }
     }
 }
 
@@ -559,7 +576,17 @@ mod tests {
         );
         ask(&mut plan, &l, Ask::SetMode(Mode::RepeatAll));
 
-        let Reply::Look { standing, entries } = ask(&mut plan, &l, Ask::Look { limit: 2 }) else {
+        let Reply::Look {
+            standing, entries, ..
+        } = ask(
+            &mut plan,
+            &l,
+            Ask::Look {
+                from: None,
+                limit: 2,
+            },
+        )
+        else {
             panic!("a look did not answer with one");
         };
         assert_eq!(standing.mode, Mode::RepeatAll, "the mode was not reported");
@@ -664,7 +691,12 @@ mod tests {
         let playing = cues[1].token;
 
         // A second job sees the same programme — the thread kept it.
-        let Some(Reply::Look { entries, standing }) = desk.programme(Ask::Look { limit: 10 })
+        let Some(Reply::Look {
+            entries, standing, ..
+        }) = desk.programme(Ask::Look {
+            from: None,
+            limit: 10,
+        })
         else {
             panic!("the desk did not answer a Look");
         };
@@ -741,7 +773,14 @@ mod tests {
         // Still valid — the token was carried, not re-minted.
         assert!(
             matches!(
-                ask(&mut plan, &l, Ask::Look { limit: 10 }),
+                ask(
+                    &mut plan,
+                    &l,
+                    Ask::Look {
+                        from: None,
+                        limit: 10
+                    }
+                ),
                 Reply::Look {
                     standing: Standing { total: 3, .. },
                     ..
@@ -1108,7 +1147,14 @@ mod tests {
                 window: 1,
             },
         );
-        let Reply::Look { standing, .. } = ask(&mut plan, &l, Ask::Look { limit: 0 }) else {
+        let Reply::Look { standing, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Look {
+                from: None,
+                limit: 0,
+            },
+        ) else {
             panic!("no look");
         };
         assert_eq!(
@@ -1117,5 +1163,131 @@ mod tests {
             "the scope was not recorded"
         );
         assert!(standing.shuffled, "the shuffle was not recorded");
+    }
+
+    /// **A look is a page, and the pages cover the programme exactly once.**
+    ///
+    /// The whole thing is never a useful answer: after a play gesture at scope `all` the
+    /// programme *is* the library, and a pane drawing 7,271 rows is drawing the library rather
+    /// than what plays next.
+    ///
+    /// Asserted by walking `next` to the end and comparing what came back to the programme —
+    /// so an overlap or a gap fails, not just a wrong count.
+    #[test]
+    fn looks_page_through_the_programme_without_gaps_or_overlap() {
+        let (l, rows) = library(9);
+        let mut plan = Programme::new();
+        ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows: rows.clone(),
+                window: 1,
+                base: None,
+            },
+        );
+
+        let mut seen: Vec<CopyId> = Vec::new();
+        let mut from = None;
+        let mut pages = 0;
+        loop {
+            let Reply::Look {
+                entries,
+                at,
+                next,
+                standing,
+            } = ask(&mut plan, &l, Ask::Look { from, limit: 4 })
+            else {
+                panic!("a look did not answer with one");
+            };
+            assert_eq!(standing.total, 9, "the total is not the whole programme");
+            assert_eq!(
+                at,
+                seen.len(),
+                "the page did not start where the last ended"
+            );
+            seen.extend(entries.iter().map(|e| e.row));
+            pages += 1;
+            assert!(pages < 10, "paging did not terminate");
+            match next {
+                Some(token) => from = Some(token),
+                None => break,
+            }
+        }
+
+        assert_eq!(pages, 3, "nine entries in fours is three pages");
+        assert_eq!(
+            seen,
+            plan.entries().iter().map(|e| e.row).collect::<Vec<_>>(),
+            "the pages do not reassemble the programme"
+        );
+    }
+
+    /// **A look anchored at a token starts there** — which is what makes the default "up
+    /// next" rather than "the top of your library".
+    #[test]
+    fn a_look_from_a_token_starts_at_it() {
+        let (l, rows) = library(6);
+        let mut plan = Programme::new();
+        ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows,
+                window: 1,
+                base: None,
+            },
+        );
+        let fourth = plan.entries()[3];
+
+        let Reply::Look { entries, at, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Look {
+                from: Some(fourth.token.as_u64()),
+                limit: 2,
+            },
+        ) else {
+            panic!("no look");
+        };
+        assert_eq!(at, 3, "the page did not report where it starts");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].token,
+            fourth.token.as_u64(),
+            "it did not start at the anchor"
+        );
+    }
+
+    /// **A token the programme no longer holds pages from the head**, rather than answering
+    /// with nothing.
+    ///
+    /// A view cannot tell an empty page from an empty programme, and "your queue is empty" is
+    /// the wrong thing to draw over a library that is playing.
+    #[test]
+    fn a_look_from_a_stale_token_starts_over() {
+        let (l, rows) = library(4);
+        let mut plan = Programme::new();
+        ask(
+            &mut plan,
+            &l,
+            Ask::Play {
+                rows,
+                window: 1,
+                base: None,
+            },
+        );
+        let Reply::Look { entries, at, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Look {
+                from: Some(9_999),
+                limit: 2,
+            },
+        ) else {
+            panic!("no look");
+        };
+        assert_eq!(at, 0, "an unknown token did not page from the head");
+        assert_eq!(entries.len(), 2, "it answered with nothing");
     }
 }
