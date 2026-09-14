@@ -411,6 +411,12 @@ pub struct Ui {
     /// steal each other's events. Transport and library are two subscriptions, so
     /// they get two sockets, which the engine is built to serve.
     pub engine: Option<std::sync::Arc<gmuse_client::Client>>,
+    /// **The library, when it is somewhere else** — #261.
+    ///
+    /// One handle, cheap to clone, read through two seams: `Holding` for the tree and the flat
+    /// list, `Listing` for what a row says. `None` for a detached view, which *is* the
+    /// librarian (§4.4) and folds its own.
+    pub reader: Option<crate::ui::holding_remote::Remote>,
     /// **Whether playback is in this process, and therefore whether this counts plays.**
     ///
     /// The engine counts its own now (#257), so an attached view doing it too would count
@@ -680,6 +686,7 @@ impl Ui {
             plays_here: false,
             followed: None,
             engine: None,
+            reader: None,
             queue_mirror: Vec::new(),
             queue_version: 0,
             resuming: false,
@@ -4400,7 +4407,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
 
     ui.library = holding::of(
         ctx.library.whole(),
-        ui.engine.clone(),
+        ui.reader.clone(),
         members,
         ui.levels,
         ui.smart_artist_sort,
@@ -5232,9 +5239,9 @@ pub enum InfoLine<'a> {
 pub fn info_lines<'a>(ui: &Ui, about: &'a crate::model::about::About) -> Vec<InfoLine<'a>> {
     let mut out = Vec::new();
     for section in &about.sections {
-        let folded = ui.info_folded.contains(section.title);
+        let folded = ui.info_folded.contains(&section.title);
         out.push(InfoLine::Header {
-            title: section.title,
+            title: &section.title,
             folded,
             rows: section.rows.len(),
         });

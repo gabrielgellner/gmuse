@@ -29,13 +29,13 @@ use crate::shelf::{Levels, Shelf};
 /// what a view with neither gets, and it draws an empty library rather than failing.
 pub fn of(
     fold: Option<&Librarian>,
-    engine: Option<std::sync::Arc<gmuse_client::Client>>,
+    engine: Option<crate::ui::holding_remote::Remote>,
     members: HashSet<CopyId>,
     levels: Levels,
     smart_artist_sort: bool,
 ) -> Box<dyn Holding> {
-    if let Some(client) = engine {
-        return Box::new(crate::ui::holding_remote::Remote::open(client));
+    if let Some(remote) = engine {
+        return Box::new(remote);
     }
     match fold {
         Some(library) => Box::new(Shelf::grouped(library, members, levels, smart_artist_sort)),

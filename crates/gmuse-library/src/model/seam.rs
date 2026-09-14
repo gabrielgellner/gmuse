@@ -2013,7 +2013,7 @@ pub struct Listing {
 /// - **`file_under` stops being a heuristic.** "Album artist, else artist" is
 ///   guessing at a fact the model states: ask the release group's credit, then
 ///   the recording's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Row {
     pub recording: Id<Recording>,
     pub title: String,

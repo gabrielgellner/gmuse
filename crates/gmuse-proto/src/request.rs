@@ -168,6 +168,38 @@ pub enum Request {
         /// nothing noticed the difference.
         id: Option<gmuse_ids::copy::CopyId>,
     },
+    /// **What the library says about one row** — #261.
+    ///
+    /// Three answers in one call because a caller drawing a row wants all three and they cost
+    /// one lookup: the row written out, where its file is, and which recording it is about.
+    /// `model::rows::Listing` is the seam these cross for; `Slip` is what makes it possible.
+    QueryRow {
+        id: gmuse_ids::copy::CopyId,
+    },
+    /// **What the library says about one recording** — #261. The row it would draw, and which
+    /// file to play for it on the devices given.
+    QueryRecording {
+        recording: String,
+        /// Devices the caller can reach. Empty means "wherever".
+        here: Vec<String>,
+    },
+    /// **What the library says about one thing, and who said it** — `info-panel.md`, #261.
+    QueryAbout {
+        focus: serde_json::Value,
+    },
+    /// **Resolve a name to a thing** — #129.
+    QueryName {
+        kind: String,
+        name: String,
+    },
+    /// Whether a facet places a row in the tree — one bit, asked per level.
+    QueryPlaces {
+        facet: String,
+    },
+    /// What a collection holds.
+    QueryEntries {
+        collection: String,
+    },
     /// **Run a filter and get a page of rows** — §7.11, #261.
     ///
     /// Answered on the connection's own thread, from `Desk::current()` — one atomic load of a
@@ -404,6 +436,12 @@ pub mod method {
     pub const QUERY_TREE: &str = "query.tree";
     pub const QUERY_REVEAL: &str = "query.reveal";
     pub const QUERY_UNDER: &str = "query.under";
+    pub const QUERY_ROW: &str = "query.row";
+    pub const QUERY_RECORDING: &str = "query.recording";
+    pub const QUERY_ABOUT: &str = "query.about";
+    pub const QUERY_NAME: &str = "query.name";
+    pub const QUERY_PLACES: &str = "query.places";
+    pub const QUERY_ENTRIES: &str = "query.entries";
     pub const QUEUE_GET: &str = "queue.get";
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
     pub const QUEUE_SET: &str = "queue.set";
@@ -442,6 +480,12 @@ pub mod method {
         QUERY_TREE,
         QUERY_REVEAL,
         QUERY_UNDER,
+        QUERY_ROW,
+        QUERY_RECORDING,
+        QUERY_ABOUT,
+        QUERY_NAME,
+        QUERY_PLACES,
+        QUERY_ENTRIES,
         QUEUE_GET,
         QUEUE_ENQUEUE,
         QUEUE_SET,
@@ -663,6 +707,65 @@ impl Request {
                     id: p.id,
                 })
             }
+            method::QUERY_ROW => {
+                #[derive(Deserialize)]
+                struct P {
+                    id: gmuse_ids::copy::CopyId,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryRow { id: p.id })
+            }
+            method::QUERY_RECORDING => {
+                #[derive(Deserialize)]
+                struct P {
+                    recording: String,
+                    #[serde(default)]
+                    here: Vec<String>,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryRecording {
+                    recording: p.recording,
+                    here: p.here,
+                })
+            }
+            method::QUERY_ABOUT => {
+                #[derive(Deserialize)]
+                struct P {
+                    focus: serde_json::Value,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryAbout { focus: p.focus })
+            }
+            method::QUERY_NAME => {
+                #[derive(Deserialize)]
+                struct P {
+                    kind: String,
+                    name: String,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryName {
+                    kind: p.kind,
+                    name: p.name,
+                })
+            }
+            method::QUERY_PLACES => {
+                #[derive(Deserialize)]
+                struct P {
+                    facet: String,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryPlaces { facet: p.facet })
+            }
+            method::QUERY_ENTRIES => {
+                #[derive(Deserialize)]
+                struct P {
+                    collection: String,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryEntries {
+                    collection: p.collection,
+                })
+            }
             method::QUEUE_GET => {
                 #[derive(Deserialize)]
                 struct P {
@@ -774,6 +877,12 @@ impl Request {
             Self::QueryTree { .. } => method::QUERY_TREE,
             Self::QueryReveal { .. } => method::QUERY_REVEAL,
             Self::QueryUnder { .. } => method::QUERY_UNDER,
+            Self::QueryRow { .. } => method::QUERY_ROW,
+            Self::QueryRecording { .. } => method::QUERY_RECORDING,
+            Self::QueryAbout { .. } => method::QUERY_ABOUT,
+            Self::QueryName { .. } => method::QUERY_NAME,
+            Self::QueryPlaces { .. } => method::QUERY_PLACES,
+            Self::QueryEntries { .. } => method::QUERY_ENTRIES,
             Self::QueueGet { .. } => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
             Self::QueueSet { .. } => method::QUEUE_SET,
@@ -825,7 +934,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 28, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 34, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

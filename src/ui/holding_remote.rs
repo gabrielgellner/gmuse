@@ -29,6 +29,7 @@ use gmuse_client::Client;
 
 use crate::browse::{Browsing, Found, Holding, Mark, Node, Spine, Target};
 use crate::fold::Expansion;
+use crate::model::id::Id;
 use crate::model::rows::CopyId;
 use crate::shelf::SortKey;
 
@@ -44,7 +45,17 @@ struct Last {
     albums: usize,
 }
 
+/// **Cheap to clone, because one process needs one of these** — #261.
+///
+/// A view reads the library through two seams: `Holding` for the tree and the flat list,
+/// `Listing` for what a row says. Both are this, and two of them would be two caches of the
+/// same answers and twice the asking. So the state is behind one `Arc` and a clone is a pointer.
+#[derive(Clone)]
 pub struct Remote {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     client: Arc<Client>,
     last: Mutex<Last>,
     /// The flat ordering, fetched once and lent thereafter.
@@ -53,6 +64,18 @@ pub struct Remote {
     /// signature is worth keeping: view 2 scrolls through all 7,273 and must not ask per frame.
     /// 116 KB against the 40.6 MB it replaces.
     sorted: Vec<CopyId>,
+    /// Rows already asked for, so a redraw asks about the same forty once.
+    #[allow(clippy::type_complexity)]
+    rows_kept: Mutex<
+        std::collections::HashMap<
+            CopyId,
+            (
+                Option<crate::model::rows::Slip>,
+                Option<crate::model::rows::Playable>,
+                Option<Id<crate::model::entity::Recording>>,
+            ),
+        >,
+    >,
 }
 
 impl Remote {
@@ -63,9 +86,12 @@ impl Remote {
             .filter_map(|n| serde_json::from_value(n.get("id")?.clone()).ok())
             .collect();
         Remote {
-            client,
-            last: Mutex::new(Last::default()),
-            sorted,
+            inner: Arc::new(Inner {
+                client,
+                last: Mutex::new(Last::default()),
+                sorted,
+                rows_kept: Mutex::new(std::collections::HashMap::new()),
+            }),
         }
     }
 
@@ -78,7 +104,7 @@ impl Remote {
         read: impl FnOnce(&Last) -> R,
     ) -> R {
         let want = (folds.parts(), at, limit);
-        let Ok(mut last) = self.last.lock() else {
+        let Ok(mut last) = self.inner.last.lock() else {
             return read(&Last::default());
         };
         if last.asked.as_ref() != Some(&want) {
@@ -111,7 +137,7 @@ impl Remote {
                 map.insert(k.clone(), v.clone());
             }
         }
-        let Ok(reply) = self.client.call("query.tree", Some(params)) else {
+        let Ok(reply) = self.inner.client.call("query.tree", Some(params)) else {
             return Last::default();
         };
         let n = |key: &str| reply.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -143,7 +169,7 @@ impl Remote {
         ) {
             map.insert("id".into(), v);
         }
-        let Ok(reply) = self.client.call("query.under", Some(params)) else {
+        let Ok(reply) = self.inner.client.call("query.under", Some(params)) else {
             return (Vec::new(), Vec::new());
         };
         // **A bare array of ids, not lines.** `query.under` answers what to play, and a
@@ -171,7 +197,7 @@ impl Browsing for Remote {
             folds.clone()
         };
         walk(
-            &self.client,
+            &self.inner.client,
             serde_json::json!({ "folds": parts_of(&folds) }),
         )
         .iter()
@@ -230,7 +256,7 @@ impl Browsing for Remote {
                 map.insert("backwards".into(), (*backwards).into());
             }
         }
-        let reply = self.client.call("query.reveal", Some(params)).ok()?;
+        let reply = self.inner.client.call("query.reveal", Some(params)).ok()?;
         Some(Found {
             open: paths_of(reply.get("open")?)?,
             at: reply.get("at")?.as_u64()? as usize,
@@ -240,23 +266,23 @@ impl Browsing for Remote {
 
 impl Holding for Remote {
     fn sorted(&self) -> &[CopyId] {
-        &self.sorted
+        &self.inner.sorted
     }
 
     fn len(&self) -> usize {
-        self.sorted.len()
+        self.inner.sorted.len()
     }
 
     fn is_empty(&self) -> bool {
-        self.sorted.is_empty()
+        self.inner.sorted.is_empty()
     }
 
     fn artist_count(&self) -> usize {
-        self.last.lock().map(|l| l.artists).unwrap_or(0)
+        self.inner.last.lock().map(|l| l.artists).unwrap_or(0)
     }
 
     fn album_count(&self) -> usize {
-        self.last.lock().map(|l| l.albums).unwrap_or(0)
+        self.inner.last.lock().map(|l| l.albums).unwrap_or(0)
     }
 
     /// **Already on the line**, because the library worked it out when it drew the page — the
@@ -357,4 +383,192 @@ fn paths_of(value: &serde_json::Value) -> Option<Vec<Vec<SortKey>>> {
             })
             .collect(),
     )
+}
+
+/// **The read seam, asked rather than folded** — #261, `tree-over-the-wire.md` §7.
+///
+/// Every question `model::rows::Listing` asks is answerable without a library now — the seam
+/// lends nothing — so this is the implementation that makes an attached view stop folding.
+///
+/// **Rows are kept, because a redraw asks about the same forty.** Keyed by id and cleared when
+/// the library moves, which is the same rule the tree's cache follows: a cache goes wrong by
+/// answering the wrong question, and "which fold was this" is half of every question here.
+impl crate::model::rows::Listing for Remote {
+    fn listed(&self, id: CopyId) -> Option<crate::model::rows::Slip> {
+        self.row_of(id).0
+    }
+
+    fn playable(&self, id: CopyId) -> Option<crate::model::rows::Playable> {
+        self.row_of(id).1
+    }
+
+    fn recording_of(&self, id: CopyId) -> Option<Id<crate::model::entity::Recording>> {
+        self.row_of(id).2
+    }
+
+    fn rows(&self) -> Vec<CopyId> {
+        self.inner.sorted.clone()
+    }
+
+    fn row(
+        &self,
+        recording: Id<crate::model::entity::Recording>,
+    ) -> Option<crate::model::seam::Row> {
+        self.recording(recording, &[]).0
+    }
+
+    fn chosen(
+        &self,
+        recording: Id<crate::model::entity::Recording>,
+        here: &[Id<crate::model::entity::Device>],
+        _prefers: &[crate::model::encoding::Format],
+    ) -> Option<(
+        String,
+        Id<crate::model::entity::Encoding>,
+        crate::model::encoding::Levels,
+    )> {
+        self.recording(recording, here).1
+    }
+
+    fn entries_of(
+        &self,
+        collection: Id<crate::model::entity::Collection>,
+    ) -> Vec<Id<crate::model::entity::Recording>> {
+        self.read(
+            "query.entries",
+            serde_json::json!({ "collection": collection.to_string() }),
+        )
+        .and_then(|r| serde_json::from_value(r.get("entries")?.clone()).ok())
+        .unwrap_or_default()
+    }
+
+    fn find(&self, of: crate::model::about::Kind, name: &str) -> crate::model::about::Found {
+        self.read(
+            "query.name",
+            serde_json::json!({ "kind": of.word(), "name": name }),
+        )
+        .and_then(|r| serde_json::from_value(r.get("found")?.clone()).ok())
+        // **Nothing by that name**, which is what a library with nothing to say answers, and
+        // what a library that could not be asked has to.
+        .unwrap_or(crate::model::about::Found::Nothing)
+    }
+
+    fn label_of(&self, focus: crate::model::focus::Focus) -> String {
+        self.about_of(focus).1
+    }
+
+    fn about(
+        &self,
+        focus: crate::model::focus::Focus,
+        _happened: &[crate::model::seam::Happened],
+    ) -> crate::model::about::About {
+        // **The history is the engine's**, not this side's. A claim's basis is the library's to
+        // state (`info-panel.md`), and a panel handed one could be handed a different one — so
+        // the argument is ignored here and the engine reads its own.
+        self.about_of(focus).0
+    }
+
+    fn places(&self, facet: Id<crate::model::entity::Facet>) -> bool {
+        self.read(
+            "query.places",
+            serde_json::json!({ "facet": facet.to_string() }),
+        )
+        .and_then(|r| r.get("places")?.as_bool())
+        .unwrap_or(false)
+    }
+}
+
+impl Remote {
+    /// One call, or nothing. A failed ask is an empty answer for the reason the tree's is.
+    fn read(&self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+        self.inner.client.call(method, Some(params)).ok()
+    }
+
+    /// The three things a row is asked for, in one call and kept.
+    fn row_of(
+        &self,
+        id: CopyId,
+    ) -> (
+        Option<crate::model::rows::Slip>,
+        Option<crate::model::rows::Playable>,
+        Option<Id<crate::model::entity::Recording>>,
+    ) {
+        if let Ok(kept) = self.inner.rows_kept.lock()
+            && let Some(held) = kept.get(&id)
+        {
+            return held.clone();
+        }
+        let got = self
+            .read("query.row", serde_json::json!({ "id": id }))
+            .map(|r| {
+                let at = |key: &str| r.get(key).cloned().unwrap_or(serde_json::Value::Null);
+                (
+                    serde_json::from_value(at("row")).ok().flatten(),
+                    at("locator")
+                        .as_str()
+                        .map(|l| crate::model::rows::Playable {
+                            locator: l.to_owned(),
+                            gain: None,
+                        }),
+                    serde_json::from_value(at("recording")).ok().flatten(),
+                )
+            })
+            .unwrap_or((None, None, None));
+        if let Ok(mut kept) = self.inner.rows_kept.lock() {
+            kept.insert(id, got.clone());
+        }
+        got
+    }
+
+    /// What a recording draws as, and which file to play for it.
+    #[allow(clippy::type_complexity)]
+    fn recording(
+        &self,
+        recording: Id<crate::model::entity::Recording>,
+        here: &[Id<crate::model::entity::Device>],
+    ) -> (
+        Option<crate::model::seam::Row>,
+        Option<(
+            String,
+            Id<crate::model::entity::Encoding>,
+            crate::model::encoding::Levels,
+        )>,
+    ) {
+        self.read(
+            "query.recording",
+            serde_json::json!({
+                "recording": recording.to_string(),
+                "here": here.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+            }),
+        )
+        .map(|r| {
+            let at = |key: &str| r.get(key).cloned().unwrap_or(serde_json::Value::Null);
+            (
+                serde_json::from_value(at("row")).ok().flatten(),
+                serde_json::from_value(at("chosen")).ok().flatten(),
+            )
+        })
+        .unwrap_or((None, None))
+    }
+
+    fn about_of(&self, focus: crate::model::focus::Focus) -> (crate::model::about::About, String) {
+        let empty = || crate::model::about::About {
+            kind: String::new(),
+            title: String::new(),
+            subtitle: None,
+            sections: Vec::new(),
+        };
+        self.read(
+            "query.about",
+            serde_json::json!({ "focus": serde_json::to_value(focus).unwrap_or_default() }),
+        )
+        .map(|r| {
+            let at = |key: &str| r.get(key).cloned().unwrap_or(serde_json::Value::Null);
+            (
+                serde_json::from_value(at("about")).unwrap_or_else(|_| empty()),
+                at("label").as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .unwrap_or_else(|| (empty(), String::new()))
+    }
 }

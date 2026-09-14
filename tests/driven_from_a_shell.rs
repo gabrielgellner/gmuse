@@ -3064,7 +3064,9 @@ fn an_attached_view_draws_the_same_pane_as_a_detached_one() {
 
     let mut there = gmuse::ui::Ui::new(gmuse::ui::holding::of(
         None,
-        Some(std::sync::Arc::clone(&client)),
+        Some(gmuse::ui::holding_remote::Remote::open(
+            std::sync::Arc::clone(&client),
+        )),
         members,
         levels,
         true,
@@ -3145,5 +3147,110 @@ fn a_client_that_follows_next_sees_the_whole_library() {
         seen,
         whole["nodes"].as_array().cloned().expect("nodes"),
         "the walked lines are not the ones a single page gives"
+    );
+}
+
+/// **The remote read seam answers what the local one does** — #261.
+///
+/// `Listing` is what a view reads a row through, and `Remote` answers all of it over the
+/// socket. Nothing points a `Context` at it yet — §7 of the document says why, with the
+/// measurement — so this is what says the implementation is right rather than merely present.
+///
+/// Asked of both and compared, like the tree's oracle: the failure here is not a crash but a
+/// row that is *nearly* right, and a wrong length or a missing credit reads as bad metadata.
+#[test]
+fn a_remote_read_answers_what_a_local_one_does() {
+    use gmuse::model::rows::Listing;
+
+    let (engine, _recording) = start_with_a_track("listing-oracle");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let data = engine.dir.join("xdg").join("gmuse");
+    let device: gmuse::model::id::Id<gmuse::model::entity::Device> = std::fs::read_dir(&data)
+        .expect("a data dir")
+        .flatten()
+        .find_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.strip_prefix("log-")?
+                .strip_suffix(".jsonl")?
+                .parse()
+                .ok()
+        })
+        .expect("the engine wrote a log named for its device");
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    let answer = desk.current();
+    let local: &dyn Listing = &answer.library;
+    let remote = gmuse::ui::holding_remote::Remote::open(client);
+
+    let ids = local.rows();
+    assert!(
+        ids.len() > 1,
+        "only {} rows — two readers of an empty library agree about nothing",
+        ids.len()
+    );
+    assert_eq!(
+        remote.rows(),
+        ids,
+        "the two disagree about which rows exist"
+    );
+
+    let mut answered = 0;
+    for id in &ids {
+        let mine = local.listed(*id);
+        assert_eq!(remote.listed(*id), mine, "the row for {id:?} differs");
+        answered += usize::from(mine.is_some());
+
+        assert_eq!(
+            remote.playable(*id).map(|p| p.locator),
+            local.playable(*id).map(|p| p.locator),
+            "the file for {id:?} differs"
+        );
+        let recording = local.recording_of(*id);
+        assert_eq!(
+            remote.recording_of(*id),
+            recording,
+            "the recording for {id:?} differs"
+        );
+
+        if let Some(r) = recording {
+            assert_eq!(remote.row(r), local.row(r), "the row for {r:?} differs");
+            assert_eq!(
+                remote.chosen(r, &[device], &[]),
+                local.chosen(r, &[device], &[]),
+                "the file chosen for {r:?} differs"
+            );
+        }
+    }
+    // The instrument: a library that answers `None` to everything agrees with itself.
+    assert!(
+        answered > 1,
+        "only {answered} rows were anything at all, so equality proves nothing"
+    );
+
+    // And the panel's half, which is what `info-panel.md` is about.
+    let focus =
+        gmuse::model::focus::Focus::Recording(local.recording_of(ids[0]).expect("a recording"));
+    assert_eq!(
+        remote.label_of(focus),
+        local.label_of(focus),
+        "the two label it differently"
+    );
+    assert!(
+        !local.label_of(focus).is_empty(),
+        "an unlabelled thing agrees with anything"
+    );
+    let mine = local.about(focus, &[]);
+    let theirs = remote.about(focus, &[]);
+    assert_eq!(theirs.title, mine.title, "the panel titles differ");
+    assert_eq!(theirs.kind, mine.kind, "the panel kinds differ");
+    assert!(
+        !mine.sections.is_empty(),
+        "an empty panel agrees with an empty panel"
+    );
+    assert_eq!(
+        theirs.sections.len(),
+        mine.sections.len(),
+        "the panels have different numbers of sections"
     );
 }

@@ -42,7 +42,9 @@ use crate::model::id::Id;
 /// `Facet`, `Hierarchy`, `Role`, `Label`, `Device` and `View` are absent for
 /// the same reason in reverse: nothing links to them yet. They arrive with the
 /// section that reaches them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Focus {
     Recording(Id<Recording>),
     /// A copy — the bytes. A row under the cursor is one of these.

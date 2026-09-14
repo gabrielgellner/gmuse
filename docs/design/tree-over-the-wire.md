@@ -311,7 +311,30 @@ empty — which is indistinguishable from a remote that answers nothing. So the 
 `an_attached_view_draws_the_same_pane_as_a_detached_one`, which renders both into a `TestBackend` and requires the same
 buffer.
 
-## 9. What this does not decide
+## 9. The read seam crossed, and why nothing uses it yet
+
+`Remote` answers every one of `Listing`'s questions over the socket, and `a_remote_read_answers_what_a_local_one_does`
+puts them all to it and to a locally folded library and requires the same answers.
+
+Six methods carry eleven questions, grouped by what a caller is asking _about_ — one row, one recording, one thing in
+the panel, a name, a facet, a collection. Three shapes had to stop holding `&'static str` to make the trip:
+`About::kind`, `Section::title`, and `Kind`, which is not `Deserialize` at all — its concept arm names an axis out of
+`facet::ALL`, and an axis is a term the library knows rather than a string a client may invent, so it is looked up by
+word.
+
+**And `Context::library` still points at the fold, which is measured rather than assumed.** Pointing it at the remote
+made an attached view _larger_:
+
+|                                   |          |
+| --------------------------------- | -------- |
+| attached view, reading the fold   | 74.9 MB  |
+| attached view, reading the socket | 104.1 MB |
+
+Because the fold is still there beside it. Two readers is worse than one, and the fold cannot go yet: **`ui.listened`
+comes out of it** — the ratings and the plays, in twenty-eight places — and that has no crossing. So the last step is
+one change and not two: `listened` over the wire, and `Desk::read_only` gone from an attached view in the same commit.
+
+## 10. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.

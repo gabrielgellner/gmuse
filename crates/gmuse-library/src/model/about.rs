@@ -46,23 +46,27 @@ use crate::model::reference::{CreditOn, Source};
 use crate::model::seam::Librarian;
 
 /// Everything the panel draws for one focus.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct About {
     /// The word for what this is — `Focus::kind`.
-    pub kind: &'static str,
+    /// **Owned** — #261. A panel that crossed a socket cannot carry a `&'static str`: serde
+    /// has nothing to mint one from, and the kind is a word the library chose rather than a
+    /// lifetime the reader shares.
+    pub kind: String,
     pub title: String,
     pub subtitle: Option<String>,
     pub sections: Vec<Section>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Section {
-    pub title: &'static str,
+    /// Owned for the same reason `About::kind` is — #261.
+    pub title: String,
     pub rows: Vec<Row>,
 }
 
 /// One line of a section.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Row {
     /// A structural edge, with somewhere to go.
     Link {
@@ -128,7 +132,7 @@ const AT_MOST: usize = 24;
 /// screen comes to cost 8% of a core.
 pub fn of(l: &Librarian, focus: Focus, happened: &[crate::model::seam::Happened]) -> About {
     let mut about = About {
-        kind: focus.kind(),
+        kind: focus.kind().to_owned(),
         title: label_of(l, focus),
         subtitle: None,
         sections: Vec::new(),
@@ -222,7 +226,10 @@ fn quoted(value: &str) -> String {
 }
 
 fn section(title: &'static str, rows: Vec<Row>) -> Section {
-    Section { title, rows }
+    Section {
+        title: title.to_owned(),
+        rows,
+    }
 }
 
 fn fact(label: &str, value: impl Into<String>) -> Row {
@@ -1059,7 +1066,7 @@ mod perf {
 }
 
 /// What naming a thing found — #129.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Found {
     One(Focus),
     /// Nothing by that name.
@@ -1144,6 +1151,23 @@ impl Kind {
     /// the reader wondering whether they typed the wrong name or asked the
     /// wrong question — and the field they wrote already says which one this
     /// was looking for.
+    /// Back from the word, for a kind that crossed the wire — #261.
+    ///
+    /// **Not `Deserialize`.** `Concept` holds a `&'static str` out of `facet::ALL`, and serde
+    /// cannot mint one from a borrowed document: an axis is a term the library knows, not a
+    /// string a client may invent. So this is a lookup rather than a parse, and an unknown
+    /// word is `None` rather than a concept nothing places.
+    pub fn of_word(word: &str) -> Option<Self> {
+        match word {
+            "artist" => Some(Kind::Artist),
+            "collection" => Some(Kind::Collection),
+            _ => crate::model::facet::ALL
+                .iter()
+                .find(|(key, _)| *key == word)
+                .map(|(key, _)| Kind::Concept(key)),
+        }
+    }
+
     pub fn word(self) -> &'static str {
         match self {
             Kind::Artist => "artist",

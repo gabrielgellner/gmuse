@@ -2346,6 +2346,12 @@ fn run_tui(
     let library = Shelf::project(&library_view.library, members, smart_artist_sort);
 
     let mut library_view = library_view;
+    // **`Context::library` still points at the fold, and that is measured rather than
+    // forgotten** — #261. `Remote` answers every `Listing` question over the socket now, and
+    // pointing this at it made an attached view *larger*: 74.9 MB to 104.1 MB, because the
+    // fold is still there beside it. The fold is still there because `ui.listened` — the
+    // ratings and plays — comes out of it and has no crossing yet. Two readers is worse than
+    // one, so this stays as it is until the fold can go in the same change.
     let ctx = gmuse::ui::Context {
         library: &library_view.library,
         player: Some(app.player.transport()),
@@ -2373,6 +2379,12 @@ fn run_tui(
                 {
                     eprintln!("library: cannot follow the engine's changes: {e}");
                 } else {
+                    // **The tree comes from here** — #261, §4.2: an attached view's librarian
+                    // is the engine. The same handle also answers `Listing`, which is what a
+                    // row says; `Context::library` will point at it when the fold can go.
+                    state.reader = Some(gmuse::ui::holding_remote::Remote::open(
+                        std::sync::Arc::clone(&client),
+                    ));
                     state.engine = Some(client);
                 }
             }
@@ -3190,6 +3202,71 @@ fn run_engine(
             Ok((built, version))
         }
 
+        /// **The read seam, answered over the wire** — #261.
+        ///
+        /// Six methods for eleven questions, grouped by what a caller is asking *about*: one
+        /// row, one recording, one thing in the panel, a name, a facet, a collection. They are
+        /// separate calls rather than one `library.read` with a tag because a reply shape a
+        /// client has to switch on is a reply shape nothing can document.
+        fn reading(
+            &self,
+            request: gmuse_proto::request::Request,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse::model::rows::Listing;
+            use gmuse_proto::RpcError;
+            use gmuse_proto::request::Request;
+            let answer = self.desk.current();
+            let lib = &answer.library;
+            let bad = |what: &'static str| RpcError::invalid_params(what, "not an id");
+
+            Ok(match request {
+                Request::QueryRow { id } => serde_json::json!({
+                    "row": lib.listed(id),
+                    "locator": lib.playable(id).map(|p| p.locator),
+                    "recording": lib.recording_of(id),
+                }),
+                Request::QueryRecording { recording, here } => {
+                    let recording = recording.parse().map_err(|_| bad("recording"))?;
+                    let here: Vec<_> = here.iter().filter_map(|d| d.parse().ok()).collect();
+                    serde_json::json!({
+                        "row": lib.row(recording),
+                        "chosen": lib.chosen(recording, &here, &[]),
+                    })
+                }
+                Request::QueryAbout { focus } => {
+                    let focus = serde_json::from_value(focus)
+                        .map_err(|e| RpcError::invalid_params("focus", e.to_string()))?;
+                    // **The history comes from here, not from the client.** A claim's basis is
+                    // the library's to state (`info-panel.md`), and a panel that was handed one
+                    // could be handed a different one.
+                    let happened = self.desk.history(focus);
+                    serde_json::json!({
+                        "about": lib.about(focus, &happened),
+                        "label": lib.label_of(focus),
+                    })
+                }
+                Request::QueryName { kind, name } => {
+                    let kind = gmuse::model::about::Kind::of_word(&kind)
+                        .ok_or_else(|| RpcError::invalid_params("kind", "not a kind"))?;
+                    serde_json::json!({ "found": lib.find(kind, &name) })
+                }
+                Request::QueryPlaces { facet } => {
+                    let facet = facet.parse().map_err(|_| bad("facet"))?;
+                    serde_json::json!({ "places": lib.places(facet) })
+                }
+                Request::QueryEntries { collection } => {
+                    let collection = collection.parse().map_err(|_| bad("collection"))?;
+                    serde_json::json!({ "entries": lib.entries_of(collection) })
+                }
+                other => {
+                    return Err(RpcError::new(
+                        gmuse_proto::error::code::METHOD_NOT_FOUND,
+                        format!("{} is not a read", other.method()),
+                    ));
+                }
+            })
+        }
+
         /// **What sits under one line** — #261.
         fn under(
             &self,
@@ -3701,6 +3778,15 @@ fn run_engine(
                     path,
                     id,
                 } => self.under(filter, levels, path, id),
+
+                // **The read seam** — #261. One arm, because they differ only in what they ask
+                // about and every one of them is answered off the same published fold.
+                read @ (Call::QueryRow { .. }
+                | Call::QueryRecording { .. }
+                | Call::QueryAbout { .. }
+                | Call::QueryName { .. }
+                | Call::QueryPlaces { .. }
+                | Call::QueryEntries { .. }) => self.reading(read),
 
                 // **A page, anchored where playback is** — #257.
                 //
