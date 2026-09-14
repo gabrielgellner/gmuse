@@ -321,10 +321,24 @@ impl Desk {
         now: i64,
         data_dir: Option<PathBuf>,
     ) -> Desk {
+        let catalogue = catalogued(&log);
+        Desk::spawn(log, catalogue, held, device, now, data_dir, true)
+    }
+
+    /// Start the thread. **`holds_records` is the difference between a librarian and a
+    /// follower** — see [`Desk::read_only`].
+    fn spawn(
+        log: Instance,
+        catalogue: Arc<Catalogue>,
+        held: Holdings,
+        device: Id<Device>,
+        now: i64,
+        data_dir: Option<PathBuf>,
+        holds_records: bool,
+    ) -> Desk {
         // The first answer is everything arriving at once, which is a rebuild
         // from the point of view of anyone holding derived state.
         let held = Arc::new(held);
-        let catalogue = catalogued(&log);
         // **Taken here, not on the thread** — #261. These say how far each log file has been
         // read, and the answer is "as far as `log` goes". Taking them on the librarian thread
         // took them at an unspecified moment *after* the caller had the desk — so an append
@@ -453,7 +467,16 @@ impl Desk {
                         // #256. A dropped receiver means the caller gave up, which is
                         // not this thread's problem.
                         Job::Records(reply) => {
-                            let _ = reply.send(log.records().clone());
+                            // **Read from disk when they are not in hand** — #261. A follower
+                            // holds no records; `Desk::records` is "the log", and answering
+                            // with an empty set would be a lie rather than a cost.
+                            let _ = reply.send(match holds_records {
+                                true => log.records().clone(),
+                                false => read_from
+                                    .as_deref()
+                                    .map(|dir| crate::model::durable::read_all(dir).0)
+                                    .unwrap_or_default(),
+                            });
                             None
                         }
                         // A read, like `Records`, and the reason it is not that one: it
@@ -461,7 +484,21 @@ impl Desk {
                         // never crosses the channel.
                         Job::History { focus, reply } => {
                             let answer = published.load();
-                            let _ = reply.send(answer.library.facts_about(log.records(), focus));
+                            // **The one thing a follower wants records for**, and it is already
+                            // a question rather than a copy (#256): asked on a focus change and
+                            // cached per focus, so reading the log for it is a cost a person
+                            // pays when they open the panel.
+                            let records = match holds_records {
+                                true => None,
+                                false => read_from
+                                    .as_deref()
+                                    .map(|dir| crate::model::durable::read_all(dir).0),
+                            };
+                            let _ = reply.send(
+                                answer
+                                    .library
+                                    .facts_about(records.as_ref().unwrap_or(log.records()), focus),
+                            );
                             None
                         }
                         // **Playback state, so it publishes nothing** — #257. The one
@@ -639,6 +676,24 @@ impl Desk {
                         // A file that *shrank* was rewritten — `shelf compact` is the only
                         // thing that does that — and an offset into it now names the middle of
                         // something else, so that one is read whole.
+                        // **A follower reloads the snapshot; an owner merges the tail** —
+                        // #261. A follower holds no records, so there is nothing to merge into
+                        // — and nothing to merge *from* either: the engine that appended also
+                        // refreshed the snapshot (`commit`, #258), so the fold is already on
+                        // disk. The tail is still read, because `Changed` has to be narrow: a
+                        // rating another client wrote is one `Touched`, not a `Rebuild` (#223).
+                        Job::Reread if !holds_records => {
+                            if let Some(dir) = &read_from {
+                                let (fresh, whole) = reread(dir, device, now, &mut ends);
+                                moved = if whole {
+                                    Changed::Wide
+                                } else {
+                                    Changed::of(&fresh)
+                                };
+                                catalogue = Arc::new(reading(dir, device, now).into_catalogue());
+                            }
+                            None
+                        }
                         Job::Reread => {
                             if let Some(dir) = &read_from {
                                 let (fresh, whole) = reread(dir, device, now, &mut ends);
@@ -740,16 +795,28 @@ impl Desk {
     /// cannot queue — so the absent `Appender` is the whole mechanism, and an
     /// earlier version of this passed `None` as belt and braces before there was
     /// anything to read back.
-    pub fn read_only(
-        log: Instance,
-        held: Holdings,
-        device: Id<Device>,
-        now: i64,
-        data_dir: PathBuf,
-    ) -> Desk {
-        // Not `..Desk::open(…)`: `Desk` has a `Drop`, so functional update would
-        // move out of a value that has to be dropped as a whole.
-        let mut desk = Desk::open(log, held, device, now, Some(data_dir));
+    pub fn read_only(held: Holdings, device: Id<Device>, now: i64, data_dir: PathBuf) -> Desk {
+        // **The snapshot, not the log** — #261. The engine refreshes it on every commit
+        // (`refresh_snapshot`, #258), so a follower reads 5.7 MB of postcard where it used to
+        // parse 87 MB of JSONL into **83.5 MB of records it has no use for**: production asks a
+        // view's desk for `current`, `advance`, `settled`, `reread` and `history`, and only the
+        // last of those wants a record at all.
+        //
+        // `reading` folds the log itself if the snapshot is stale or absent, so a first launch
+        // beside an engine that has never committed is slow and correct rather than wrong.
+        let projected = reading(&data_dir, device, now);
+        let catalogue = Arc::new(projected.into_catalogue());
+        // Empty, and it stays empty: a reading desk cannot `Say` — there is no `Appender` to
+        // queue one — so nothing ever appends to this.
+        let mut desk = Desk::spawn(
+            Instance::new(device),
+            catalogue,
+            held,
+            device,
+            now,
+            Some(data_dir),
+            false,
+        );
         desk.appends = false;
         desk
     }
@@ -1131,8 +1198,19 @@ fn reread(
     let mut whole = false;
 
     for path in crate::model::durable::logs_in(dir) {
-        let from = ends.iter().find(|(at, _)| *at == path).map(|(_, n)| *n);
-        match from.and_then(|from| crate::model::durable::read_from(&path, from)) {
+        // **A file we have no offset for starts at zero**, which reads all of it *through the
+        // tail* — so `Changed` stays per-fact narrow (#223) instead of collapsing to `Wide`.
+        //
+        // It did force a whole read, and that cost the narrowness the lattice exists for: a
+        // rating another client wrote is one `Touched`, and a view told `Wide` re-queries
+        // everything it draws. Only a file that *shrank* has to be read whole, because an
+        // offset into a rewritten log names the middle of something else.
+        let from = ends
+            .iter()
+            .find(|(at, _)| *at == path)
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        match crate::model::durable::read_from(&path, from) {
             Some((records, _damage, to)) => {
                 fresh.extend(records);
                 match ends.iter_mut().find(|(at, _)| *at == path) {
@@ -1220,7 +1298,11 @@ mod tests {
     /// is what this replaced, and it only ever covered the call sites that
     /// remembered to ask.
     #[test]
-    fn a_reading_desk_folds_the_log_and_has_nothing_to_append_with() {
+    fn a_reading_desk_reads_the_library_and_has_nothing_to_append_with() {
+        let dir = std::env::temp_dir().join("gmuse-reading-desk");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
         let song = Id::<Recording>::from_uuid(uuid::Uuid::from_u128(21));
         let mut log = Instance::new(device());
         log.append_fact(
@@ -1230,15 +1312,12 @@ mod tests {
                 stars: Some(4),
             },
         );
+        log.flush(&dir).expect("write the log");
 
-        let reading = Desk::read_only(
-            log,
-            Holdings::default(),
-            device(),
-            0,
-            // Nothing is read back here; `reread` has its own test.
-            std::env::temp_dir().join("gmuse-reading-desk"),
-        );
+        // **Pointed at a directory, not handed a log** — #261. A reading desk follows the
+        // projection snapshot the engine refreshes on commit, and folds the log itself when
+        // there is not one yet, which is this case.
+        let reading = Desk::read_only(Holdings::default(), device(), 0, dir.clone());
         assert!(
             reading.appender().is_none(),
             "there is nothing to append with, which is the whole difference"
@@ -1246,7 +1325,7 @@ mod tests {
         assert_eq!(
             reading.current().listened.ratings.get(&song).copied(),
             Some(4),
-            "and it folded the log it was given, because a read may"
+            "it did not read the library it was pointed at"
         );
 
         // The other side, or the assertion above would pass on a `Desk` that

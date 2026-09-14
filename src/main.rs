@@ -2196,7 +2196,17 @@ fn run_tui(
     let device = gmuse::model::id::Id::derived(machine.as_bytes());
     let now = gmuse::history::now();
     let now_ms = gmuse::history::now_ms();
-    let (log, damage) = gmuse::model::instance::Instance::open(&loaded.data_dir, device, now_ms);
+    // **Parsed only when this process owns the log** — #261.
+    //
+    // A view attached to an engine follows the projection snapshot instead, which is 5.7 MB of
+    // postcard against 87 MB of JSONL — and the 83.5 MB of records it parsed were used by
+    // nothing it does: production asks its desk for `current`, `advance`, `settled`, `reread`
+    // and `history`, and only the last wants a record at all.
+    let attached = app.player.attached();
+    let (log, damage) = match attached {
+        false => gmuse::model::instance::Instance::open(&loaded.data_dir, device, now_ms),
+        true => (gmuse::model::instance::Instance::new(device), Vec::new()),
+    };
     if !log.records().is_empty() {
         println!("history: {} records", log.records().len());
     }
@@ -2241,9 +2251,8 @@ fn run_tui(
     // So the difference is a capability rather than a flag: a reading desk has
     // no `Appender`, and the three places that used to ask `if attached` — the
     // scan below, `:rescan`, and `ui::record` — now ask for one and get `None`.
-    let desk = if app.player.attached() {
+    let desk = if attached {
         gmuse::librarian::Desk::read_only(
-            log,
             app.store.clone(),
             device,
             now_ms,

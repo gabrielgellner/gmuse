@@ -10838,7 +10838,6 @@ mod tests {
         ui.data_dir = Some(std::env::temp_dir().join("gmuse-attached-no-append"));
         let device = crate::model::id::Id::derived(b"attached");
         ui.desk = crate::librarian::Desk::read_only(
-            crate::model::instance::Instance::new(device),
             Default::default(),
             device,
             0,

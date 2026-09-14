@@ -144,6 +144,16 @@ fn main() {
     println!("{:<34} {:>9}", "records", records);
     println!("{:<34} {:>9}", "holdings", held.len());
 
+    // **What an attached view holds now** — #261. `Desk::read_only` follows the projection
+    // snapshot, so it parses no log and keeps no records.
+    let (follower, kept, peak) =
+        accounting::measure(|| gmuse::librarian::reading(&data, device, 0));
+    say("a follower's fold (the snapshot)", kept, peak);
+    assert!(
+        !follower.catalogue().recordings.is_empty(),
+        "the snapshot folded nothing, so the number above means nothing"
+    );
+
     // **What a view would hold if it kept only what it draws** — the question behind #261's
     // Goal 1: a view needs *rows*, not records and not a catalogue.
     let (drawn, kept, peak) = accounting::measure(|| {

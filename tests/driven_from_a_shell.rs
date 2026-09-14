@@ -556,8 +556,7 @@ fn a_view_that_cannot_append_proposes_a_rating_and_reads_it_back() {
 
     let device = gmuse::model::id::Id::derived(b"the-view");
     let song = gmuse::model::id::Id::<gmuse::model::entity::Recording>::derived(b"a song");
-    let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
-    let desk = gmuse::librarian::Desk::read_only(log, Default::default(), device, 0, data.clone());
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
 
     assert!(desk.appender().is_none(), "this is the attached shape");
     assert_eq!(
@@ -624,11 +623,10 @@ fn record_sends_a_fact_to_the_engine_when_this_view_cannot_append() {
 
     let device = gmuse::model::id::Id::derived(b"the-view");
     let song = gmuse::model::id::Id::<gmuse::model::entity::Recording>::derived(b"through record");
-    let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
 
     let mut ui = gmuse::ui::Ui::new(Default::default());
     ui.data_dir = Some(data.clone());
-    ui.desk = gmuse::librarian::Desk::read_only(log, Default::default(), device, 0, data.clone());
+    ui.desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
     ui.engine = Some(client);
     assert!(
         ui.desk.appender().is_none(),
@@ -1222,9 +1220,7 @@ fn a_reading_desk_with_no_store_can_still_open_what_the_engine_scanned() {
     // socket does.
     let mut opened = None;
     for _ in 0..400 {
-        let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
         let desk = gmuse::librarian::Desk::read_only(
-            log,
             // **Empty on purpose.** This is the whole point: no cache, no scan,
             // nothing but the log.
             Default::default(),
@@ -1501,8 +1497,7 @@ fn the_views_queue_mirrors_the_engines_in_both_directions() {
 
     let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
     let device = gmuse::model::id::Id::derived(machine.as_bytes());
-    let (log, _damage) = gmuse::model::instance::Instance::open(&data, device, 0);
-    let desk = gmuse::librarian::Desk::read_only(log, Default::default(), device, 0, data.clone());
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
     let held = desk.current();
     let ctx = gmuse::ui::Context {
         library: &held.library,

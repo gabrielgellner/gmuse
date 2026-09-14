@@ -165,6 +165,15 @@ impl Projected {
         &self.at
     }
 
+    /// **Take the catalogue and drop the rest** — #261.
+    ///
+    /// For a follower that wants the fold and not the position it was folded at.
+    /// `Catalogue` is deliberately not `Clone` — a copy of the library is what this whole
+    /// milestone is about — so a caller that needs to own one consumes the projection.
+    pub fn into_catalogue(self) -> Catalogue {
+        self.catalogue
+    }
+
     pub fn catalogue(&self) -> &Catalogue {
         &self.catalogue
     }
