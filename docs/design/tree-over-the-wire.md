@@ -560,16 +560,55 @@ was read which had not been named**, rather than that `ahead` was called at all.
 
 ### What this did not fix
 
-The tree's own read path, which `ahead` does not touch. Per key, in view 1: `j` 6 slow frames in 80 with a max of 305ms,
-`g` 3 in 12 with a max of 519ms — and `wire x0`, so these are `query.tree`/`query.page` calls, not rows. A jump across
-the library fetches a page and nothing batches or keeps it. The tree still reads far less than the queue did, which is
-why it was the fast one in the report, but a 500ms `gg` is the same shape of bug one layer over.
+`holdings_here`: `read_the_queue` calls it, it asks `recording_of` for all 7,273 rows, and that was **706–956ms** at
+startup. It is a map of the whole library rather than a screenful, so `ahead` is the wrong tool — it wants a method that
+answers the pairing in one reply.
 
-`holdings_here` is the other one: `read_the_queue` calls it, it asks `recording_of` for all 7,273 rows, and that was
-**706–956ms** at startup. It is a map of the whole library rather than a screenful, so `ahead` is the wrong tool — it
-wants a method that answers the pairing in one reply.
+## 16. The spine and the page evicted each other every frame
 
-## 16. What this does not decide
+**First, a correction.** §15 reported the tree spiking to 305ms on `j` and 519ms on `g`, and said a jump fetched a page
+that nothing kept. That was wrong, and it was the harness again: the pty driver drained its output once per keystroke, a
+pty holds about 16KB, and once it filled the child blocked inside `write()`. Every one of those spikes was gmuse waiting
+to be read from — which is why they were quantised at ~303ms, ~605ms, ~2.6s, and why only 0.3ms of a "303ms draw" was
+ever on the wire. Draining on a separate thread removed **every** slow frame. Three harness bugs in one investigation,
+all of the same §13 shape: an instrument that was not attached to the thing it claimed to measure.
+
+What was real is smaller and exact. A tree frame asks three questions —
+
+| caller          | question          |
+| --------------- | ----------------- |
+| `tree.len(lib)` | `(folds, 0, 0)`   |
+| `tree.page(…)`  | `(folds, 0, 41)`  |
+| `tree.row(lib)` | `(folds, sel, 1)` |
+
+— and the cache held **one reply keyed by the exact question**, so each evicted the last and none ever hit. Logged:
+`ASK at=0 limit=0 (held Some((0, 41)))` then `ASK at=0 limit=41 (held Some((0, 0)))`, alternating, **521 fetches over a
+run that needed one**.
+
+Two things were wrong with the key, and both are about a reply describing itself rather than the question it answered:
+
+1. **The spine arrives with every reply**, whatever window was asked for — it is four bits a line for the whole tree and
+   the navigator's only input. Keyed beside the window, the page threw it away. It is keyed by `folds` alone now.
+2. **A held window answers any window inside it.** `row()` asks for the one line under the cursor, which is a slice of
+   the forty-one just fetched. Matching the question exactly meant the narrower one evicted the wider one it had been
+   cut from.
+
+The range check is against the window **held**, not the window asked for: the engine answers from wherever it put the
+cursor — `at` comes back in the reply because an anchor beats a cursor and both are clamped — so `nodes[0]` is at the
+returned `at`, not the requested one. And `total` is carried so that a page which stops because the _tree_ stops is told
+apart from one that was cut short; without it, a cursor resting on the last line refetched on every frame.
+
+| view 1, per key | before                     | after                           |
+| --------------- | -------------------------- | ------------------------------- |
+| `j` / `k`       | 1.8ms, 1.0 trips/frame     | **0.28ms, 0.0 trips/frame**     |
+| `g` / `G`       | 2.3ms, 1.0–1.5 trips/frame | **0.31ms, 0.2–0.3 trips/frame** |
+
+**Asserted on `Last` directly rather than through a pane**, because neither failure is visible from outside: a
+wrongly-refused question draws the same lines a round trip later, and a wrongly-accepted one draws the wrong lines with
+nothing reporting it. Four mutations, each killing exactly the test that claims it — slicing from the asked window,
+dropping the end-of-tree case, letting the spine ignore its folds, and accepting any window under the same folds.
+
+## 17. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.

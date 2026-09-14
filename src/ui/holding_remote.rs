@@ -77,9 +77,54 @@ struct Last {
     asked: Option<(crate::fold::Parts<SortKey>, usize, usize)>,
     nodes: Vec<Node>,
     spine: Spine,
+    /// **Which fold state the spine belongs to, kept apart from the window** — #261.
+    ///
+    /// The spine comes back with *every* reply, whatever window was asked for, because it is
+    /// four bits a line for the whole tree and the navigator's only input. Keyed with the
+    /// window it arrived beside, it was evicted by the next question and asked for again:
+    /// `spine` wants `(folds, 0, 0)` and `page` wants `(folds, 0, 41)`, a frame asks both, and
+    /// one slot holds one — so **every frame made two round trips and neither ever hit**.
+    /// Measured at 521 fetches over a run that needed none after the first.
+    spine_for: Option<crate::fold::Parts<SortKey>>,
     at: usize,
+    /// How many lines the tree has, so a window that stops short is told apart from one that
+    /// was cut short — the last page of a list is shorter than the limit asked for, and would
+    /// otherwise be refetched on every frame the cursor spent at the bottom.
+    total: usize,
     artists: usize,
     albums: usize,
+}
+
+impl Last {
+    /// Whether the reply already held answers this question.
+    ///
+    /// **A held window answers any window inside it**, which is what makes a frame free: a pane
+    /// asks for the forty-one lines it draws and then asks again for the one under the cursor,
+    /// and the second is a slice of the first. Only the exact question was matched before, so
+    /// the narrower one evicted the wider one it had just been cut from.
+    ///
+    /// A `limit` of zero asks for no page at all — the spine and nothing else — and is answered
+    /// by any reply under the same folds, because every reply carries the spine.
+    fn answers(&self, want: &(crate::fold::Parts<SortKey>, usize, usize)) -> bool {
+        let (folds, at, limit) = want;
+        if *limit == 0 {
+            return self.spine_for.as_ref() == Some(folds);
+        }
+        let Some((held, _, _)) = self.asked.as_ref() else {
+            return false;
+        };
+        // **The window held, not the window asked for.** The engine answers from wherever it
+        // put the cursor — an anchor beats a cursor, and both are clamped to the tree's length —
+        // so the reply describes itself and the question does not.
+        let ends = self.at + self.nodes.len();
+        held == folds && *at >= self.at && (at + limit <= ends || ends >= self.total)
+    }
+
+    /// The lines of a window inside the one held.
+    fn slice(&self, at: usize, limit: usize) -> Vec<Node> {
+        let start = at.saturating_sub(self.at).min(self.nodes.len());
+        self.nodes[start..(start + limit).min(self.nodes.len())].to_vec()
+    }
 }
 
 /// **Cheap to clone, because one process needs one of these** — #261.
@@ -147,9 +192,18 @@ impl Remote {
         let Ok(mut last) = self.inner.last.lock() else {
             return read(&Last::default());
         };
-        if last.asked.as_ref() != Some(&want) {
+        if !last.answers(&want) {
+            let spine = (last.spine_for.as_ref() == Some(&want.0)).then(|| last.spine.clone());
             *last = self.fetch(folds, at, limit, serde_json::Value::Null);
             last.asked = Some(want);
+            // A reply always carries the spine, so this only matters when the reply did not
+            // arrive: a failed fetch is `Last::default()` and would otherwise lose a spine that
+            // is still true, leaving the navigator with an empty tree until the next success.
+            if last.spine.is_empty()
+                && let Some(spine) = spine
+            {
+                last.spine = spine;
+            }
         }
         read(&last)
     }
@@ -183,6 +237,7 @@ impl Remote {
         let n = |key: &str| reply.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         Last {
             asked: None,
+            spine_for: Some(folds.parts()),
             nodes: reply
                 .get("nodes")
                 .and_then(|v| v.as_array())
@@ -195,6 +250,7 @@ impl Remote {
                 .and_then(Spine::from_hex)
                 .unwrap_or_default(),
             at: n("at"),
+            total: n("total"),
             artists: n("artists"),
             albums: n("albums"),
         }
@@ -250,7 +306,7 @@ impl Browsing for Remote {
     }
 
     fn page(&self, folds: &Expansion<SortKey>, at: usize, limit: usize) -> Vec<Node> {
-        self.cached(folds, at, limit, |last| last.nodes.clone())
+        self.cached(folds, at, limit, |last| last.slice(at, limit))
     }
 
     /// Where a line is now.
@@ -744,5 +800,129 @@ impl Remote {
             )
         })
         .unwrap_or_else(|| (empty(), String::new()))
+    }
+}
+
+/// **What one reply may be asked for twice** — #261.
+///
+/// The cache holds one `query.tree` reply. Whether a second question is a round trip or free
+/// is decided entirely by [`Last::answers`], and neither answer is visible from outside: a
+/// wrongly-refused question draws the same lines a fetch later, and a wrongly-accepted one
+/// draws the wrong lines with no error anywhere. So it is asserted here, on the reply's own
+/// terms, rather than through a pane.
+#[cfg(test)]
+mod one_reply_answers_more_than_one_question {
+    use super::*;
+
+    fn folds() -> crate::fold::Parts<SortKey> {
+        Expansion::<SortKey>::default().parts()
+    }
+
+    /// A reply that landed at `at`, carrying `len` lines out of `total`.
+    fn held(at: usize, len: usize, total: usize) -> Last {
+        Last {
+            asked: Some((folds(), at, len)),
+            nodes: (0..len)
+                .map(|i| Node::Artist {
+                    key: SortKey::already(&format!("{}", at + i)),
+                    display: format!("{}", at + i),
+                    albums: 1,
+                    expanded: false,
+                })
+                .collect(),
+            spine: Spine::default(),
+            spine_for: Some(folds()),
+            at,
+            total,
+            artists: 0,
+            albums: 0,
+        }
+    }
+
+    #[test]
+    fn a_window_inside_the_one_held_is_not_asked_for_again() {
+        let last = held(10, 41, 1_000);
+        // The instrument: the wide question it was actually asked must hold, or every
+        // narrower one below is being checked against a cache that answers nothing.
+        assert!(
+            last.answers(&(folds(), 10, 41)),
+            "the reply does not answer the question it was the reply to"
+        );
+        assert!(
+            last.answers(&(folds(), 20, 5)),
+            "a slice of the held window"
+        );
+        assert!(last.answers(&(folds(), 50, 1)), "the last line held");
+
+        assert!(!last.answers(&(folds(), 5, 10)), "starts above the window");
+        assert!(!last.answers(&(folds(), 40, 20)), "runs past the window");
+        assert!(!last.answers(&(folds(), 200, 1)), "nowhere near it");
+    }
+
+    /// **A page at the end of the list is shorter than the limit, and is still whole.**
+    ///
+    /// Without this the cursor sitting on the last line refetched on every frame — the
+    /// question asks for forty-one lines, thirty come back because that is all there are, and
+    /// a plain length comparison calls that a short answer for ever.
+    #[test]
+    fn a_window_that_stops_because_the_tree_does_is_answered() {
+        let last = held(970, 30, 1_000);
+        assert!(
+            last.answers(&(folds(), 970, 41)),
+            "the tree ends at 1000 and the window reaches it"
+        );
+        assert!(last.answers(&(folds(), 990, 41)), "and past it");
+
+        // But a short window that stops early for any other reason is not whole.
+        let cut = held(10, 30, 1_000);
+        assert!(
+            !cut.answers(&(folds(), 10, 41)),
+            "thirty lines out of a thousand is not the end of anything"
+        );
+    }
+
+    /// **The spine is asked for with `limit: 0`, and every reply carries it.**
+    ///
+    /// It is the navigator's entire input and the same question every frame. Keyed with the
+    /// window it arrived beside, `spine` and `page` evicted each other and a frame made two
+    /// round trips that could never hit.
+    #[test]
+    fn the_spine_is_answered_by_any_reply_under_the_same_folds() {
+        let last = held(500, 41, 1_000);
+        assert!(
+            last.answers(&(folds(), 0, 0)),
+            "a spine asked for at the top, answered by a reply from the middle"
+        );
+
+        let mut stale = held(500, 41, 1_000);
+        stale.spine_for = None;
+        assert!(
+            !stale.answers(&(folds(), 0, 0)),
+            "a reply that carried no spine cannot answer for one"
+        );
+    }
+
+    /// The lines handed back are the ones asked for, counted from where the reply landed.
+    #[test]
+    fn a_slice_is_taken_from_where_the_reply_landed_not_where_it_was_asked() {
+        let last = held(10, 41, 1_000);
+        let got = last.slice(20, 5);
+        let names: Vec<_> = got
+            .iter()
+            .map(|n| match n {
+                Node::Artist { display, .. } => display.clone(),
+                _ => unreachable!("the fixture holds artists"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["20", "21", "22", "23", "24"],
+            "off by the window's start"
+        );
+
+        // And the whole window is still the whole window.
+        assert_eq!(last.slice(10, 41).len(), 41);
+        // A slice running past what is held is truncated rather than panicking.
+        assert_eq!(last.slice(45, 20).len(), 6);
     }
 }
