@@ -197,13 +197,18 @@ spine** — `go` asked for every line on every iteration of its count, so `3}` f
 two bits from each. `asks_for_what_it_needs` instruments a `Browsing` that counts what it was asked for, because whether
 a method flattened the tree to read one line is not visible in its result.
 
-**`lines` has two callers left, and both are in `src/ui/mod.rs`:**
+**The search haystack is gone.** `/` kept a second copy of the tree — every line, its folded text, and a conversion
+between that list's coordinates and the cursor's — dropped by hand whenever the fold changed. `find` answers all of it
+and answers in the cursor's own coordinates, so `run_search`, `search_cursor` and `place_search` each lost their tree
+branch entirely.
 
-- the **renderer**, which builds a `ListItem` per line and hands ratatui all 8,932 — it should build a screenful, and it
-  is also where `ctx.library.listed` is called once per line per frame;
-- the **search haystack**, which `find` replaces outright.
+**One caller of `lines` is left: the renderer.** It builds a `ListItem` per line and hands ratatui all 8,932, of which
+forty are on screen — and it is also where `ctx.library.listed` runs once per line per frame, which is where the two
+halves of §1 meet. Windowing it is not slicing: the scroll offset round-trips through ratatui, which adjusts it itself
+to bring the selection into view, so drawing a window means the view taking ownership of scrolling — `zt`/`zz`/`zb`, the
+`~` filler and `remember` all hang off that. Its own change.
 
-Until those go and a socket implements the trait, an attached view still folds the log to build its own `Shelf` — the
+Until it goes and a socket implements the trait, an attached view still folds the log to build its own `Shelf` — the
 40.6 MB in §1, still there.
 
 ## 8. What this does not decide

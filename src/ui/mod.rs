@@ -328,7 +328,6 @@ pub struct Ui {
     /// Without it, `incsearch` rebuilt 7,178 rows and folded 6,485 haystacks
     /// on every keystroke: 8.6ms a letter, where searching the visible rows
     /// had been free.
-    searchable: std::cell::RefCell<Option<(Vec<tree::Row>, Vec<crate::text::Haystack>)>>,
     /// The folds in force when the search began — #131.
     ///
     /// A full-library search opens the way to what it finds, so abandoning one
@@ -656,7 +655,6 @@ impl Ui {
             last_search: None,
             highlight: None,
             search_origin: None,
-            searchable: std::cell::RefCell::new(None),
             search_folds: None,
             mode: crate::cmd::Mode::default(),
             pending: Vec::new(),
@@ -2810,8 +2808,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             View::Tree => {
                 let leaf = ui
                     .tree
-                    .rows(&ui.library)
-                    .get(ui.tree.selected)
+                    .here(&ui.library)
                     .map(|r| r.is_leaf())
                     .unwrap_or(false);
                 if leaf {
@@ -4334,7 +4331,6 @@ pub fn refresh_library(ui: &mut Ui, ctx: &Context<'_>) {
     // the door every projection goes through after a refold — so the cache is
     // dropped here rather than in each of the places that cause one.
     ui.about.replace(None);
-    ui.searchable.replace(None);
     rebuild_library(ui, ctx);
     refresh_playlist_rows(ui);
     refresh_smart(ui, ctx);
@@ -5070,15 +5066,24 @@ fn run_search(ui: &mut Ui, ctx: &Context<'_>, pattern: &str, dir: SearchDir) {
     let needle = crate::text::Needle::new(pattern);
     let start = search_cursor(ui, ctx);
 
-    // **The tree's haystack is lent, not handed over.** It is every row in the
-    // library (#131), and copying it to look at it once would put the cost
-    // back that caching it took away.
-    let found = if in_the_tree(ui) {
-        with_searchable(ui, ctx, |_, hay| hunt(hay, &needle, start, dir))
-    } else {
-        hunt(&search_rows(ui, ctx), &needle, start, dir)
-    };
-    match found {
+    // **The tree asks the library, and the flat views search their own rows** — #261.
+    //
+    // The tree used to keep a haystack of every line, convert the cursor into that list's
+    // coordinates, hunt in it and hand the row back to be revealed. All four steps were the
+    // library's answer to one question, kept as a second copy of the tree that had to be
+    // dropped by hand whenever the fold changed.
+    if in_the_tree(ui) {
+        let lib = std::mem::take(&mut ui.library);
+        let hit = ui
+            .tree
+            .search(&lib, pattern, matches!(dir, SearchDir::Backward));
+        ui.library = lib;
+        if !hit {
+            ui.notify(format!("no match for {pattern:?}"));
+        }
+        return;
+    }
+    match hunt(&search_rows(ui, ctx), &needle, start, dir) {
         Some(index) => place_search(ui, ctx, index),
         None => ui.notify(format!("no match for {pattern:?}")),
     }
@@ -5112,99 +5117,16 @@ fn in_the_tree(ui: &Ui) -> bool {
     ui.view == View::Tree && !ui.levels.is_flat()
 }
 
-/// The tree's rows and their folded text, built once per shelf — #131.
-///
-/// Cloned out rather than lent, because the callers need `&mut ui` to move the
-/// cursor and a borrow of the cache would outlive that. The clone is of a list
-/// that is already built; what it saves is the *building*, which is the
-/// expensive half.
-fn with_searchable<R>(
-    ui: &Ui,
-    ctx: &Context<'_>,
-    read: impl FnOnce(&[tree::Row], &[crate::text::Haystack]) -> R,
-) -> R {
-    if ui.searchable.borrow().is_none() {
-        build_searchable(ui, ctx);
-    }
-    let held = ui.searchable.borrow();
-    let (rows, hay) = held.as_ref().expect("built just above");
-    read(rows, hay)
-}
-
-fn build_searchable(ui: &Ui, ctx: &Context<'_>) {
-    let rows: &dyn Listing = ctx.library;
-    let all = ui.tree.all_rows(&ui.library);
-    let hay: Vec<crate::text::Haystack> = all
-        .iter()
-        .map(|row| match row {
-            // **A track row searches its title, and nothing else** (#131).
-            //
-            // A flat list has to search the artist and the album too, because
-            // a row there is the only place they appear. The tree puts them on
-            // the rows *above*, so searching them here means `/malibu` matches
-            // the album row and every track under it — and `n` then walks ten
-            // rows that matched for a reason nothing on them shows.
-            //
-            // It also settles the painting: every haystack is now drawn text,
-            // so a match always paints. A row that matched invisibly was the
-            // shape of that problem.
-            // **And its album, when the album has no row of its own** (#135).
-            // The rule above is "do not search what is written on the row
-            // above"; a group of one is not drawn, so nothing is written
-            // there, and `/london zoo` would find nothing at all.
-            // **And the album it stands in for, when it draws one** (#135).
-            // The rule above is "do not search what is written on the row
-            // above"; a group of one has no row above, so the name is written
-            // here instead — and searched here, because a haystack that is not
-            // drawn text is a match that paints nothing.
-            tree::Row::Track { id, .. } => rows
-                .listed(*id)
-                .map(|r| match tree::stands_for(&ui.library, row, r.title) {
-                    Some(album) => crate::text::Haystack::of(&format!("{album} — {}", r.title)),
-                    None => crate::text::Haystack::of(r.title),
-                })
-                .unwrap_or_else(|| crate::text::Haystack::of("")),
-            other => crate::text::Haystack::of(&other.label()),
-        })
-        .collect();
-    *ui.searchable.borrow_mut() = Some((all, hay));
-}
-
 /// Where the cursor is, in the coordinates the search runs in — #131.
 ///
 /// The tree searches every row and the cursor counts visible ones, so without
 /// this the search would start from an index into a different list.
-fn search_cursor(ui: &Ui, ctx: &Context<'_>) -> usize {
-    if !in_the_tree(ui) {
-        return current_cursor(ui);
-    }
-    let Some(want) = ui
-        .tree
-        .rows(&ui.library)
-        .get(ui.tree.selected)
-        .map(tree::mark_of)
-    else {
-        return 0;
-    };
-    with_searchable(ui, ctx, |rows, _| {
-        rows.iter()
-            .position(|r| tree::mark_of(r) == want)
-            .unwrap_or(0)
-    })
+fn search_cursor(ui: &Ui, _ctx: &Context<'_>) -> usize {
+    current_cursor(ui)
 }
 
 /// Put the cursor on the row a search found, opening the way to it — #131.
-fn place_search(ui: &mut Ui, ctx: &Context<'_>, at: usize) {
-    if in_the_tree(ui) {
-        // One row out of the cache, not the whole list.
-        let row = with_searchable(ui, ctx, |rows, _| rows.get(at).cloned());
-        if let Some(row) = row {
-            let lib = std::mem::take(&mut ui.library);
-            ui.tree.reveal_row(&lib, &row);
-            ui.library = lib;
-        }
-        return;
-    }
+fn place_search(ui: &mut Ui, _ctx: &Context<'_>, at: usize) {
     set_cursor(ui, at);
 }
 
@@ -5329,7 +5251,7 @@ pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<crate::model::about::Abo
 fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
     match ui.view {
         View::Tree if ui.levels.is_flat() => ui.library.sorted().len(),
-        View::Tree => ui.tree.rows(&ui.library).len(),
+        View::Tree => ui.tree.total(&ui.library),
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlist_rows.len(),
             Pane::Tracks => ui.playlist.len(),
@@ -6537,6 +6459,13 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         return;
     }
 
+    // **The last whole-tree ask in the program** — #261, `tree-over-the-wire.md` §7.
+    //
+    // Every line becomes a `ListItem` and ratatui gets all 8,932 of them, forty of which are
+    // on screen. Windowing it is not a matter of slicing here: the scroll offset round-trips
+    // through ratatui, which adjusts it itself to bring the selection into view, so drawing a
+    // window means this taking ownership of the scrolling — `zt`/`zz`/`zb`, the `~` filler and
+    // `remember` all hang off it. Its own change.
     let rows = ui.tree.rows(&ui.library);
     // Artists, albums and tracks in one list. A track row is rendered through
     // the format template rather than labelled, because it has to look
@@ -12061,6 +11990,48 @@ mod tests {
             ui.status.is_empty(),
             "a title should still be findable: {}",
             ui.status
+        );
+    }
+
+    /// **`n` walks the tree's matches and `?` goes the other way** — #261.
+    ///
+    /// Both went untested while `/` was a haystack the view kept, and both survived their
+    /// mutation when the search moved to `Browsing::find`: a search that always started from
+    /// the head and one that ignored the direction still passed everything else.
+    #[test]
+    fn n_walks_the_trees_matches_and_a_question_mark_turns_round() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, "z");
+        press(&mut ui, &ctx, "R");
+
+        let here = |ui: &Ui| ui.tree.selected;
+        let search = |ui: &mut Ui, ctx: &Context<'_>, key: &str, text: &str| {
+            press(ui, ctx, key);
+            for c in text.chars() {
+                press(ui, ctx, &c.to_string());
+            }
+            press(ui, ctx, "enter");
+        };
+
+        // A word on more than one line, so "the next one" is a different line.
+        search(&mut ui, &ctx, "/", "a");
+        let first = here(&ui);
+        press(&mut ui, &ctx, "n");
+        let second = here(&ui);
+        assert_ne!(
+            first, second,
+            "`n` did not move on from {first}; the search restarts from the head"
+        );
+
+        // **And `?` goes back**, which a forward search that wrapped would also do — so this
+        // asserts it lands exactly where `n` came from rather than merely somewhere earlier.
+        press(&mut ui, &ctx, "N");
+        assert_eq!(
+            here(&ui),
+            first,
+            "`N` from {second} did not come back to {first}"
         );
     }
 

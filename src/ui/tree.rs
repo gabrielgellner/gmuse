@@ -78,7 +78,7 @@ impl TreeState {
     ///
     /// **One line, not the list it is in** — #261. Every method below wanted exactly this and
     /// flattened 8,932 of them to get it.
-    fn here(&self, lib: &dyn Browsing) -> Option<Row> {
+    pub fn here(&self, lib: &dyn Browsing) -> Option<Row> {
         lib.page(&self.folds, self.selected, 1).into_iter().next()
     }
 
@@ -98,6 +98,10 @@ impl TreeState {
     /// shut found nothing at all, because the album row it wanted did not
     /// exist yet. The search looks here and the reveal opens the way to what
     /// it found.
+    // Unreachable from production since #261 moved `/` to `Browsing::find`, and kept because
+    // the tests below are the oracle for what a search should find — they check the *rule*
+    // ("a closed fold still holds its rows") against a list they can see, which is what makes
+    // `find`'s answer checkable at all.
     pub fn all_rows(&self, lib: &dyn Browsing) -> Vec<Row> {
         self.flatten(lib, true)
     }
@@ -114,6 +118,8 @@ impl TreeState {
     ///
     /// The tree is three levels whatever `levels` groups by, so this is the
     /// same operation for `[artist, album]` and for `[genre, album]`.
+    // Unreachable from production since #261: `search` opens the way itself, through the same
+    // `ancestors` a reveal-by-id uses. Kept beside `all_rows` for the same reason.
     pub fn reveal_row(&mut self, lib: &dyn Browsing, row: &Row) {
         match row {
             Row::Artist { .. } => {}
@@ -138,6 +144,28 @@ impl TreeState {
         if let Some(at) = lib.at(&self.folds, &row.mark()) {
             self.selected = at;
         }
+    }
+
+    /// **Find the next line matching `needle`, and open the way to it** — #131, #261.
+    ///
+    /// One ask where there were three. The view used to hold a haystack of every line in the
+    /// library, convert its cursor into that list's coordinates, hunt, then hand the row back to
+    /// `reveal_row` — a cached second copy of the tree, kept in step by hand. `find` answers all
+    /// of it, and the answer comes back in the coordinates the cursor is already in.
+    ///
+    /// `false` when nothing matched, which is an ordinary answer: `/` says so on the status
+    /// line. Nothing moves and no fold opens.
+    pub fn search(&mut self, lib: &dyn Browsing, needle: &str, backwards: bool) -> bool {
+        let want = crate::browse::Target::Pattern {
+            needle: needle.to_owned(),
+            backwards,
+        };
+        let Some(found) = lib.find(&self.folds, &want, self.selected) else {
+            return false;
+        };
+        self.folds.open_all(found.open);
+        self.selected = found.at;
+        true
     }
 
     /// The fold state, to put back if a search is abandoned — #131.
