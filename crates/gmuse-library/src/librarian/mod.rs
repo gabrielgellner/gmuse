@@ -302,6 +302,16 @@ impl Desk {
 
     /// Start the thread and publish the first fold.
     ///
+    /// **`log` must be the one parsed from `data_dir`**, and that is a contract rather than a
+    /// convention since #258. A reread reads only what was *appended*, addressed from a byte
+    /// offset per file — and those offsets are taken from the files that exist when this is
+    /// called, on the reasoning that `log` was just parsed from them. Hand it a log from
+    /// somewhere else and the first reread finds nothing new, for ever.
+    ///
+    /// A log that is *empty* and a directory that is empty agree, which is the ordinary test
+    /// case; a file appearing afterwards has no offset and is read whole. The trap is only a
+    /// non-empty directory paired with a log that does not match it.
+    ///
     /// The first fold happens here, synchronously, so a caller never sees an
     /// empty library. Every fold after it is on the thread.
     pub fn open(
@@ -314,8 +324,21 @@ impl Desk {
         // The first answer is everything arriving at once, which is a rebuild
         // from the point of view of anyone holding derived state.
         let held = Arc::new(held);
+        let catalogue = catalogued(&log);
+        // **Taken here, not on the thread** — #261. These say how far each log file has been
+        // read, and the answer is "as far as `log` goes". Taking them on the librarian thread
+        // took them at an unspecified moment *after* the caller had the desk — so an append
+        // that landed in between was counted as already-read and never seen again.
+        //
+        // Found by a test that wrote the log right after `Desk::open` and passed alone while
+        // failing beside anything else, which is what a race looks like from outside.
+        let ends: crate::model::durable::Ends = data_dir
+            .as_deref()
+            .map(crate::model::durable::ends_in)
+            .unwrap_or_default();
         let current = Arc::new(ArcSwap::from_pointee(fold(
-            &log,
+            &catalogue,
+            log.records(),
             &held,
             device,
             now,
@@ -360,6 +383,10 @@ impl Desk {
             .spawn(move || {
                 let mut log = log;
                 let mut held = held;
+                // **Refreshed where the log changes, and nowhere else** — #261. `Job::Say`,
+                // `Job::Reread`, `Job::Walked` and `Job::Compact` are the four that change it;
+                // everything else publishes from the catalogue it already has.
+                let mut catalogue = catalogue;
                 // **Playback state, not a fact.** It is not folded, not published
                 // and never written to the log — the programme says what will play,
                 // and what was played is a `RecordingPlayed` fact like any other.
@@ -374,13 +401,11 @@ impl Desk {
                 // twice and race its own result; declining is what `scanning` already tells a
                 // view is happening.
                 let mut walking = false;
-                // **Where each log was last read to** — #258. `log` was just parsed from these
-                // files, so a reread starts at their ends rather than at nothing: the first
-                // library event costs a rating, not the library.
-                let mut ends: crate::model::durable::Ends = read_from
-                    .as_ref()
-                    .map(|dir| crate::model::durable::ends_in(dir))
-                    .unwrap_or_default();
+                // **Where each log was last read to** — #258, taken by `Desk::open` before this
+                // thread existed. `log` was just parsed from those files, so a reread starts at
+                // their ends rather than at nothing: the first library event costs a rating, not
+                // the library.
+                let mut ends = ends;
 
                 loop {
                     let job = crossbeam_channel::select! {
@@ -406,6 +431,7 @@ impl Desk {
                     let settled = match job {
                         Job::Say(say) => {
                             say(&mut log);
+                            catalogue = catalogued(&log);
                             moved = since(log.records(), before.as_ref());
                             if let Some((dir, appending)) = &writing {
                                 // A failed commit is not fatal: the in-memory
@@ -475,7 +501,8 @@ impl Desk {
                                 // the whole of it rather than for the instant it takes to
                                 // spawn.
                                 published.store(Arc::new(fold(
-                                    &log,
+                                    &catalogue,
+                                    log.records(),
                                     &held,
                                     device,
                                     now,
@@ -592,6 +619,9 @@ impl Desk {
                                     )
                                 }
                             }
+                            // The holdings assertion above may have appended, so the
+                            // catalogue has moved.
+                            catalogue = catalogued(&log);
                             scanned = Some(report);
                             moved = Changed::Wide;
                             held = Arc::new(fresh);
@@ -611,13 +641,24 @@ impl Desk {
                         // something else, so that one is read whole.
                         Job::Reread => {
                             if let Some(dir) = &read_from {
-                                let fresh = reread(dir, device, now, &mut ends);
-                                // The difference, so `Changed` stays narrow: a
-                                // rating another client wrote is one `Touched`,
-                                // not a `Rebuild`, and #223's lattice is the
-                                // whole point of measuring it.
-                                moved = since(&fresh, before.as_ref());
+                                let (fresh, whole) = reread(dir, device, now, &mut ends);
+                                // **Compared against the log itself, not a copy of it** — #261.
+                                //
+                                // A before-picture is only needed when the mutation happens
+                                // first, which is `Job::Say`. Here nothing has merged yet, so
+                                // `log.records()` *is* the before — and a tail read returns only
+                                // what is new, so in the ordinary case there is nothing to
+                                // compare at all.
+                                //
+                                // Narrow either way, which is the point: a rating another client
+                                // wrote is one `Touched`, not a `Rebuild` (#223).
+                                moved = if whole {
+                                    Changed::of(fresh.difference(log.records()))
+                                } else {
+                                    Changed::of(&fresh)
+                                };
                                 log.merge(now, &fresh);
+                                catalogue = catalogued(&log);
                             }
                             None
                         }
@@ -629,6 +670,12 @@ impl Desk {
                         Job::Compact => {
                             let was = log.records().len();
                             log.compact();
+                            // **Defensive, and known to be.** `compaction_cannot_change_what_
+                            // the_library_says` in `model/round_trip.rs` is the invariant: a
+                            // compact drops records nothing reads, so the catalogue it folds to
+                            // is the same one. Refreshed anyway, because the day that stops
+                            // being true a stale catalogue would be published silently.
+                            catalogue = catalogued(&log);
                             if log.records().len() != was {
                                 if let Some((dir, appending)) = &writing
                                     && let Err(e) = rewrite_all(&log, dir, appending)
@@ -649,7 +696,15 @@ impl Desk {
                     // erase what the job before it had to say. A reader that
                     // looked between the two would be told nothing happened.
                     if moved != Changed::Nothing {
-                        published.store(Arc::new(fold(&log, &held, device, now, moved, false)));
+                        published.store(Arc::new(fold(
+                            &catalogue,
+                            log.records(),
+                            &held,
+                            device,
+                            now,
+                            moved,
+                            false,
+                        )));
                     }
                     if let Some(report) = scanned {
                         let _ = reports.send(report);
@@ -1023,8 +1078,11 @@ pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Proj
 /// — so the default a catch-all would give is the wrong one.
 fn needs_a_before(job: &Job) -> bool {
     match job {
-        // The two that compute what moved by comparing.
-        Job::Say(_) | Job::Reread => true,
+        // **Only the one that mutates before it can look.** `say` is an opaque closure: it
+        // has changed the log by the time anything can compare, so the comparison needs a
+        // copy. `Reread` merges *after* it decides, so `log.records()` is its before-picture
+        // and no copy is needed (#261).
+        Job::Say(_) => true,
         // These say what moved without comparing — a scan is `Wide`, a compact names its own —
         // or move nothing at all, which is every read.
         Job::Holdings(_)
@@ -1032,6 +1090,7 @@ fn needs_a_before(job: &Job) -> bool {
         | Job::Walked(_)
         | Job::Compact
         | Job::Advance
+        | Job::Reread
         | Job::Records(_)
         | Job::History { .. }
         | Job::Programme { .. }
@@ -1067,7 +1126,7 @@ fn reread(
     device: Id<Device>,
     now: i64,
     ends: &mut crate::model::durable::Ends,
-) -> BTreeSet<crate::facts::Record> {
+) -> (BTreeSet<crate::facts::Record>, bool) {
     let mut fresh = BTreeSet::new();
     let mut whole = false;
 
@@ -1093,29 +1152,44 @@ fn reread(
         fresh.extend(all.records().iter().cloned());
         *ends = crate::model::durable::ends_in(dir);
     }
-    fresh
+    // **Whether everything was re-read**, because that decides whether the caller has to
+    // compare: a tail is only-new by construction, a whole file is not.
+    (fresh, whole)
 }
 
 /// The one fold, and the only place it happens.
 fn fold(
-    log: &Instance,
+    // **The catalogue is held, not folded here** — #261. The thread refreshes it where the log
+    // changes; a publish that changes nothing — `Advance`, new holdings, the "scanning" answer
+    // a scan puts up before it starts — used to refold 280,000 records to say so.
+    //
+    // It is also what lets a reading desk exist without the records: its catalogue comes from
+    // the projection snapshot, which the engine refreshes on every commit.
+    catalogue: &Arc<crate::projection::catalogue::Catalogue>,
+    records: &BTreeSet<crate::facts::Record>,
     held: &Arc<Holdings>,
     device: Id<Device>,
     now: i64,
     changed: Changed,
     scanning: bool,
 ) -> Answer {
-    // **Folded once** — #256. It was folded twice: `bridge::librarian` built a scratch copy
-    // of every record and folded that, and `listened` folded the same records again. 34ms and
-    // 11.8 MB, twice, on top of an 83.5 MB copy that existed to reach the same answer.
-    let catalogue = log.catalogue();
     Answer {
-        library: crate::bridge::librarian_from(&catalogue, held, log.records(), device, now),
-        listened: Arc::new(catalogue),
+        library: crate::bridge::librarian_from(catalogue, held, records, device, now),
+        listened: Arc::clone(catalogue),
         changed,
         holdings: Arc::clone(held),
         scanning,
     }
+}
+
+/// **The catalogue to publish from** — one fold of the log, named so the four places that
+/// refresh it read the same.
+///
+/// The holdings bootstrap is *not* here: `bridge::librarian_from` still owns it, because it is
+/// the thing that needs a `Librarian` with holdings and the rule for standing the scan's map in
+/// belongs with it (#261).
+fn catalogued(log: &Instance) -> Arc<Catalogue> {
+    Arc::new(log.catalogue())
 }
 
 #[cfg(test)]
@@ -1519,6 +1593,83 @@ mod tests {
     /// Quitting does not lose what was queued. A rating appended a moment
     /// before exit is still on the librarian thread, so `Drop` draining the
     /// queue before it joins is the only thing between it and the disk.
+    /// **A reread publishes a catalogue that includes what arrived** — #261.
+    ///
+    /// The thread keeps its catalogue now and refreshes it where the log changes. A refresh
+    /// forgotten publishes a **stale** catalogue: every view draws what was true a moment ago
+    /// and nothing says so.
+    ///
+    /// **The log arrives while the desk is running**, which is the real case (#236: the engine
+    /// appends and a view learns from the `library` topic) — and it has to be, because the tail
+    /// offsets are taken from the files that exist when the desk starts. A first version wrote
+    /// the log *before* the desk and read nothing: see `Desk::open` on that contract.
+    #[test]
+    fn a_reread_publishes_a_catalogue_that_includes_what_arrived() {
+        let dir = std::env::temp_dir().join("gmuse-librarian-reread-cat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rec = Id::<Recording>::from_uuid(uuid::Uuid::from_u128(77));
+        let desk = Desk::open(
+            Instance::new(device()),
+            Holdings::default(),
+            device(),
+            2_000,
+            Some(dir.clone()),
+        );
+        assert!(
+            !desk.current().listened.ratings.contains_key(&rec),
+            "the desk started with the rating, so the reread below proves nothing"
+        );
+
+        // Somebody else's process appends — which is what a view's reread is for.
+        let mut theirs = Instance::new(device());
+        theirs.rate(1_000, rec, Some(5));
+        theirs.flush(&dir).expect("write the log");
+
+        desk.reread();
+        desk.settled();
+
+        assert_eq!(
+            desk.current().listened.ratings.get(&rec).copied(),
+            Some(5),
+            "the published catalogue does not have what the reread merged — it is stale"
+        );
+    }
+
+    /// **A scan publishes the holdings it asserted** — #261, the `Job::Walked` refresh.
+    #[test]
+    fn a_scan_publishes_the_holdings_it_asserted() {
+        let dir = std::env::temp_dir().join("gmuse-librarian-scan-cat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let desk = Desk::open(
+            Instance::new(device()),
+            Holdings::default(),
+            device(),
+            1_000,
+            Some(dir.clone()),
+        );
+        assert!(
+            !desk.current().listened.holdings.contains_key(&device()),
+            "the desk already asserts holdings, so this proves nothing"
+        );
+
+        desk.appender()
+            .expect("a test desk appends")
+            .scan(vec![dir.clone()], None);
+        desk.scans
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the scan reported");
+        desk.settled();
+
+        assert!(
+            desk.current().listened.holdings.contains_key(&device()),
+            "the scan asserted holdings and the published catalogue does not show them"
+        );
+    }
+
     #[test]
     fn dropping_the_desk_flushes_what_was_still_queued() {
         let dir = std::env::temp_dir().join("gmuse-librarian-drop");
