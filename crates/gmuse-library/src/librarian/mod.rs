@@ -341,11 +341,12 @@ impl Desk {
         data_dir: Option<PathBuf>,
     ) -> Desk {
         let catalogue = catalogued(&log);
-        Desk::spawn(log, catalogue, held, device, now, data_dir, true)
+        Desk::spawn(log, catalogue, held, device, now, data_dir, true, true)
     }
 
     /// Start the thread. **`holds_records` is the difference between a librarian and a
     /// follower** — see [`Desk::read_only`].
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         log: Instance,
         catalogue: Arc<Catalogue>,
@@ -354,6 +355,9 @@ impl Desk {
         now: i64,
         data_dir: Option<PathBuf>,
         holds_records: bool,
+        // **Whether anything reads `Answer::library`** — see `fold`. A view whose rows come
+        // over a socket reads none of it and should not pay 26.5 MB to derive it.
+        derives: bool,
     ) -> Desk {
         // The first answer is everything arriving at once, which is a rebuild
         // from the point of view of anyone holding derived state.
@@ -377,6 +381,7 @@ impl Desk {
             now,
             Changed::Rebuild,
             false,
+            derives,
         )));
         let (tx, rx) = unbounded::<Job>();
         let (reports, scans) = unbounded();
@@ -564,6 +569,7 @@ impl Desk {
                                     now,
                                     Changed::Nothing,
                                     true,
+                                    derives,
                                 )));
                                 let mut fresh = (*held).clone();
                                 let back = walked_tx.clone();
@@ -778,6 +784,7 @@ impl Desk {
                             now,
                             moved,
                             false,
+                            derives,
                         )));
                     }
                     if let Some(report) = scanned {
@@ -814,7 +821,31 @@ impl Desk {
     /// cannot queue — so the absent `Appender` is the whole mechanism, and an
     /// earlier version of this passed `None` as belt and braces before there was
     /// anything to read back.
+    /// **A desk for a view whose librarian is somewhere else** — #261.
+    ///
+    /// It folds the log's catalogue, because `listened` — the ratings and the plays — comes
+    /// out of it and there is no crossing for that yet. It does **not** derive a `Librarian`
+    /// from it: that is 26.5 MB on the real library, built on top of the catalogue's 11.8 MB,
+    /// and an attached view reads none of it — its rows come over the socket
+    /// (`ui::holding_remote`), which §4.2 says is where its librarian is.
+    ///
+    /// `Answer::library` is therefore empty from one of these, and a caller that reads it gets
+    /// an empty library rather than a wrong one. `tree-over-the-wire.md` §9 has the numbers.
+    pub fn following(held: Holdings, device: Id<Device>, now: i64, data_dir: PathBuf) -> Desk {
+        Self::reading(held, device, now, data_dir, false)
+    }
+
     pub fn read_only(held: Holdings, device: Id<Device>, now: i64, data_dir: PathBuf) -> Desk {
+        Self::reading(held, device, now, data_dir, true)
+    }
+
+    fn reading(
+        held: Holdings,
+        device: Id<Device>,
+        now: i64,
+        data_dir: PathBuf,
+        derives: bool,
+    ) -> Desk {
         // **The snapshot, not the log** — #261. The engine refreshes it on every commit
         // (`refresh_snapshot`, #258), so a follower reads 5.7 MB of postcard where it used to
         // parse 87 MB of JSONL into **83.5 MB of records it has no use for**: production asks a
@@ -835,6 +866,7 @@ impl Desk {
             now,
             Some(data_dir),
             false,
+            derives,
         );
         desk.appends = false;
         desk
@@ -1336,6 +1368,7 @@ fn reread(
 }
 
 /// The one fold, and the only place it happens.
+#[allow(clippy::too_many_arguments)]
 fn fold(
     // **The catalogue is held, not folded here** — #261. The thread refreshes it where the log
     // changes; a publish that changes nothing — `Advance`, new holdings, the "scanning" answer
@@ -1350,9 +1383,22 @@ fn fold(
     now: i64,
     changed: Changed,
     scanning: bool,
+    // **Whether anything will read `Answer::library`** — #261.
+    //
+    // `librarian_from` is 26.5 MB on the real library, built on top of the 11.8 MB catalogue it
+    // derives from, and a view attached to an engine reads none of it: its rows come over the
+    // socket (`ui::holding_remote`). What it still needs from a fold is `listened` — the
+    // ratings and the plays — which is the catalogue itself.
+    //
+    // So this is not an optimisation of the fold; it is not folding the half nobody asked for.
+    derives: bool,
 ) -> Answer {
     Answer {
-        library: crate::bridge::librarian_from(catalogue, held, records, device, now),
+        library: if derives {
+            crate::bridge::librarian_from(catalogue, held, records, device, now)
+        } else {
+            Librarian::default()
+        },
         listened: Arc::clone(catalogue),
         changed,
         holdings: Arc::clone(held),

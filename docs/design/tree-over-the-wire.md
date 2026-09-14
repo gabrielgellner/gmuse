@@ -322,17 +322,32 @@ the panel, a name, a facet, a collection. Three shapes had to stop holding `&'st
 `facet::ALL`, and an axis is a term the library knows rather than a string a client may invent, so it is looked up by
 word.
 
-**And `Context::library` still points at the fold, which is measured rather than assumed.** Pointing it at the remote
-made an attached view _larger_:
+**And it is wired in — but only with the other half of the change.** Pointing `Context::library` at the remote _by
+itself_ made an attached view larger, 74.9 MB to 104.1 MB, because the fold was still there beside it and the process
+held two readers. What makes it a saving is that with a reader there is nothing left to read the fold's `Librarian`, so
+it is never derived.
 
-|                                   |          |
-| --------------------------------- | -------- |
-| attached view, reading the fold   | 74.9 MB  |
-| attached view, reading the socket | 104.1 MB |
+`Desk::following` is that desk: it folds the log's catalogue, because `listened` — the ratings and the plays — comes out
+of it and has no crossing yet, and derives no `Librarian` from it. `Answer::library` is empty from one of those, and a
+caller that reads it gets an empty library rather than a wrong one.
 
-Because the fold is still there beside it. Two readers is worse than one, and the fold cannot go yet: **`ui.listened`
-comes out of it** — the ratings and the plays, in twenty-eight places — and that has no crossing. So the last step is
-one change and not two: `listened` over the wire, and `Desk::read_only` gone from an attached view in the same commit.
+`just memory-parts` says why that is where the weight sits:
+
+|                                          |         |
+| ---------------------------------------- | ------- |
+| `Projected::advance`, the catalogue      | 11.8 MB |
+| `Librarian::from_catalogue` on top of it | 26.5 MB |
+
+And the whole thing, against the real library with an engine running:
+
+|                                     |             |
+| ----------------------------------- | ----------- |
+| attached view, at the start of #261 | 123.8 MB    |
+| after the tree moved over the wire  | 74.9 MB     |
+| **now**                             | **28.3 MB** |
+
+What is left in those 28 MB is the catalogue: 11.8 MB of ratings, plays, collections and saved views, folded here
+because `Listened` has no crossing. That is the next thing, and it is smaller than everything before it.
 
 ## 10. What this does not decide
 

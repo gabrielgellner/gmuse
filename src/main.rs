@@ -2251,7 +2251,26 @@ fn run_tui(
     // So the difference is a capability rather than a flag: a reading desk has
     // no `Appender`, and the three places that used to ask `if attached` — the
     // scan below, `:rescan`, and `ui::record` — now ask for one and get `None`.
-    let desk = if attached {
+    // **The library, when it is somewhere else** — #261, §4.2. Opened before the desk, because
+    // whether this process derives a `Librarian` at all depends on whether anything will read
+    // it: with a reader, nothing does, and that is 26.5 MB not folded.
+    let reader: Option<gmuse::ui::holding_remote::Remote> = attached
+        .then(|| {
+            gmuse::engine::attach::attach("gmuse-tui-reads", env!("CARGO_PKG_VERSION"))
+                .inspect_err(|e| eprintln!("library: cannot read through the engine: {e}"))
+                .ok()
+                .map(|c| gmuse::ui::holding_remote::Remote::open(std::sync::Arc::new(c)))
+        })
+        .flatten();
+    let desk = if attached && reader.is_some() {
+        // Folds the catalogue for `listened`, derives nothing.
+        gmuse::librarian::Desk::following(
+            app.store.clone(),
+            device,
+            now_ms,
+            loaded.data_dir.clone(),
+        )
+    } else if attached {
         gmuse::librarian::Desk::read_only(
             app.store.clone(),
             device,
@@ -2284,7 +2303,9 @@ fn run_tui(
         appender.scan(app.roots.clone(), app.cache_path.clone());
     }
     let library_view = desk.current();
-    let known = library_view.library.recordings().count();
+    // **Counted through whichever library this view reads**, which is the engine's when there
+    // is one — `library_view.library` is empty then, by construction.
+    let known = gmuse::model::rows::Listing::rows(reading(&reader, &library_view)).len();
     println!(
         "librarian: {known} recordings in {:.1}s",
         assembling.elapsed().as_secs_f64()
@@ -2330,7 +2351,7 @@ fn run_tui(
     let listened = &*library_view.listened;
     let members = composed
         .resolve(
-            &library_view.library,
+            reading(&reader, &library_view),
             listened,
             gmuse::query::filter::Env {
                 listened: Some(listened),
@@ -2338,26 +2359,39 @@ fn run_tui(
                 now,
             },
         )
-        .copies(&library_view.library);
+        .copies(reading(&reader, &library_view));
 
     // **Grouped by what the model says, not by what the tags carry** (#84).
     // The librarian has to exist first, which is why this sits below rather
     // than beside the membership it is built from.
-    let library = Shelf::project(&library_view.library, members, smart_artist_sort);
+    // **Only a detached view groups its own shelf.** With a reader, `ui::holding` picks the
+    // remote on the first refresh and this one would be a shelf over an empty library.
+    let library: Box<dyn gmuse::browse::Holding> = match &reader {
+        Some(r) => Box::new(r.clone()),
+        None => Box::new(Shelf::project(
+            &library_view.library,
+            members,
+            smart_artist_sort,
+        )),
+    };
 
     let mut library_view = library_view;
-    // **`Context::library` still points at the fold, and that is measured rather than
-    // forgotten** — #261. `Remote` answers every `Listing` question over the socket now, and
-    // pointing this at it made an attached view *larger*: 74.9 MB to 104.1 MB, because the
-    // fold is still there beside it. The fold is still there because `ui.listened` — the
-    // ratings and plays — comes out of it and has no crossing yet. Two readers is worse than
-    // one, so this stays as it is until the fold can go in the same change.
+    /// Where the library is read from: the engine, or this process's own fold.
+    fn reading<'a>(
+        reader: &'a Option<gmuse::ui::holding_remote::Remote>,
+        lv: &'a gmuse::librarian::Answer,
+    ) -> &'a dyn gmuse::model::rows::Listing {
+        match reader {
+            Some(r) => r,
+            None => &lv.library,
+        }
+    }
     let ctx = gmuse::ui::Context {
-        library: &library_view.library,
+        library: reading(&reader, &library_view),
         player: Some(app.player.transport()),
         gapless: app.player.gapless(),
     };
-    let mut state = gmuse::ui::Ui::new(Box::new(library));
+    let mut state = gmuse::ui::Ui::new(library);
     // **This counts plays only when the device is ours** — #257. Attached, the engine does it,
     // and both doing it would count every track twice.
     state.plays_here = !app.player.attached();
@@ -2370,6 +2404,10 @@ fn run_tui(
     //
     // The engine is certainly up by now: `Playback::Attached` only exists because
     // `attach` connected to one.
+    // **Set before the subscription, not inside it** — #261. The desk above already skipped
+    // deriving a `Librarian` because there is a reader, so a view that lost its *events* and
+    // kept no reader would draw an empty library rather than a stale one.
+    state.reader = reader.clone();
     if app.player.attached() {
         match gmuse::engine::attach::attach("gmuse-tui-library", env!("CARGO_PKG_VERSION")) {
             Ok(client) => {
@@ -2379,12 +2417,6 @@ fn run_tui(
                 {
                     eprintln!("library: cannot follow the engine's changes: {e}");
                 } else {
-                    // **The tree comes from here** — #261, §4.2: an attached view's librarian
-                    // is the engine. The same handle also answers `Listing`, which is what a
-                    // row says; `Context::library` will point at it when the fold can go.
-                    state.reader = Some(gmuse::ui::holding_remote::Remote::open(
-                        std::sync::Arc::clone(&client),
-                    ));
                     state.engine = Some(client);
                 }
             }
@@ -2519,7 +2551,12 @@ fn run_tui(
                     saved
                         .current
                         .as_ref()
-                        .and_then(|p| library_view.library.row_of(p.recording, p.copy))
+                        .and_then(|p| {
+                            gmuse::model::rows::Listing::row(
+                                reading(&reader, &library_view),
+                                p.recording,
+                            )
+                        })
                         .map(|row| {
                             format!(
                                 "at {:.1}s in {} — {}",
@@ -2558,7 +2595,7 @@ fn run_tui(
     let result = loop {
         let stop = {
             let ctx = gmuse::ui::Context {
-                library: &library_view.library,
+                library: reading(&reader, &library_view),
                 player: Some(app.player.transport()),
                 gapless: app.player.gapless(),
             };
@@ -2640,7 +2677,7 @@ fn run_tui(
         // the same door a `:view` change uses, or refiltering would file
         // things a second way (#84).
         let ctx = gmuse::ui::Context {
-            library: &library_view.library,
+            library: reading(&reader, &library_view),
             player: Some(app.player.transport()),
             gapless: app.player.gapless(),
         };
@@ -2651,7 +2688,7 @@ fn run_tui(
     // A fresh borrow of whatever the last refold produced, not the one the
     // setup above took: that one is long gone, and it named an older fold.
     let ctx = gmuse::ui::Context {
-        library: &library_view.library,
+        library: reading(&reader, &library_view),
         player: Some(app.player.transport()),
         gapless: app.player.gapless(),
     };
