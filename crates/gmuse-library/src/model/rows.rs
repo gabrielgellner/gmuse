@@ -515,6 +515,25 @@ pub trait Listing {
     /// forgotten, a locator is used immediately and never written down.
     fn playable(&self, id: CopyId) -> Option<Playable>;
 
+    /// **Say which rows are about to be read, so a remote can fetch them in one trip** — #261.
+    ///
+    /// A no-op by default, and that is the honest answer for every implementation that
+    /// already holds the rows: there is nothing to fetch and nothing to warm.
+    ///
+    /// It exists because a pane draws forty rows and the seam answers one at a time.
+    /// Held locally that costs a map lookup each; held over a socket it was **forty round
+    /// trips per frame asking for two thousand rows** — the read-ahead walks library order,
+    /// which is the wrong order for a queue, so each of the forty missed on its own and
+    /// pulled in fifty neighbours nobody would draw. Measured at 198 ms per keystroke in
+    /// view 4 against 2.3 ms in the tree, which reads no rows at all.
+    ///
+    /// **A hint and not a read.** It returns nothing and promises nothing; a caller still
+    /// asks [`Listing::listed`] for each row and must still cope with `None`. So an
+    /// implementation is free to ignore it, and no correctness rests on it having run.
+    fn ahead(&self, ids: &[CopyId]) {
+        let _ = ids;
+    }
+
     /// How many distinct albums and artists a slice covers.
     ///
     /// Here rather than at the call site because it is the same fold every

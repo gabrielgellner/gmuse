@@ -517,7 +517,59 @@ gutter, and checks the highlight through the buffer's styles rather than its sym
 Both traps from §7 recurred exactly: a cursor at the bottom of a list is where a selection index that was never made
 relative lands correctly anyway, and a highlight is a colour, so a text comparison cannot see it.
 
-## 15. What this does not decide
+## 15. A window is not one read, and that was the rest of the lag
+
+§14 made every pane draw a screenful, and the report came back _"much better, but I still notice a small lag when
+j/k/gg/G around — very noticeable versus the tree view."_
+
+**It was measured in the running binary, driven through a pty, because every cheaper instrument said there was no
+problem.** A counting `Listing` in a unit test reported six reads per draw. An example against the engine reported a
+draw of 270µs and a keystroke of 300ns. Both were true and both were about the wrong thing: the unit test's fixture
+holds seven rows, and the example's `TestBackend` is not a terminal.
+
+The instrument that worked was a `pty.fork()` with **`TIOCSWINSZ` actually set**. Without it the pty is 0×0, the buffer
+is empty, and the frame-to-frame cell diff is `0` for every sample — the §13 shape exactly, a harness silently doing
+less than it claims, and it is what made the first three runs agree that nothing was slow.
+
+At 140×45, per keystroke, against the live library:
+
+| view               | key→redraw p50 | p99   | `query.row` trips per frame | rows asked |
+| ------------------ | -------------- | ----- | --------------------------- | ---------- |
+| tree (view 1)      | 2.3ms          | 299ms | 0                           | 0          |
+| playlist (empty)   | 266µs          | 409µs | 0                           | 0          |
+| **queue (view 4)** | **198ms**      | 324ms | **40**                      | **2,000**  |
+
+Forty round trips to draw forty rows. Three things compounded, and only the first is obvious:
+
+1. **`Listing::listed` answers one row.** A map lookup locally; a round trip remotely.
+2. **`Remote`'s read-ahead follows library order**, which is right for a walk down the library and wrong for a queue.
+   Each of the forty missed on its own and dragged in fifty neighbours nobody would draw.
+3. **The cache clears rather than evicts.** 2,000 rows over a 500-row cap wiped it four times a frame, so the next frame
+   missed everything again — including the rows still on screen.
+
+`Listing::ahead` is the fix: a hint that says which rows are about to be read, a **no-op by default** because a local
+library has nothing to fetch, and one `query.row` for the whole window on `Remote`. `draw_track_list` names its window
+before `list::items` walks it, and names the whole list before `list::rows` groups it by album.
+
+**Queue: 198ms → 382µs**, and `wire x0` on a steady frame, because the window it named is still cached.
+
+It is a hint and not a read, deliberately: it returns nothing, promises nothing, and every caller still asks `listed`
+per row and still copes with `None`. Nothing is correct only because `ahead` ran — which is why the default can be empty
+and why `a_track_pane_names_its_window_before_it_reads_it` asserts the property that actually matters, that **nothing
+was read which had not been named**, rather than that `ahead` was called at all.
+
+### What this did not fix
+
+The tree's own read path, which `ahead` does not touch. Per key, in view 1: `j` 6 slow frames in 80 with a max of 305ms,
+`g` 3 in 12 with a max of 519ms — and `wire x0`, so these are `query.tree`/`query.page` calls, not rows. A jump across
+the library fetches a page and nothing batches or keeps it. The tree still reads far less than the queue did, which is
+why it was the fast one in the report, but a 500ms `gg` is the same shape of bug one layer over.
+
+`holdings_here` is the other one: `read_the_queue` calls it, it asks `recording_of` for all 7,273 rows, and that was
+**706–956ms** at startup. It is a map of the whole library rather than a screenful, so `ahead` is the wrong tool — it
+wants a method that answers the pairing in one reply.
+
+## 16. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.

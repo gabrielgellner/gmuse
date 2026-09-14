@@ -478,6 +478,14 @@ fn paths_of(value: &serde_json::Value) -> Option<Vec<Vec<SortKey>>> {
 /// the library moves, which is the same rule the tree's cache follows: a cache goes wrong by
 /// answering the wrong question, and "which fold was this" is half of every question here.
 impl crate::model::rows::Listing for Remote {
+    /// **One trip for the screenful** — #261.
+    ///
+    /// The default is a no-op because a local library has nothing to fetch. This one has,
+    /// and doing it a row at a time cost 198 ms a keystroke in view 4.
+    fn ahead(&self, ids: &[CopyId]) {
+        self.warm(ids);
+    }
+
     fn listed(&self, id: CopyId) -> Option<crate::model::rows::Slip> {
         self.row_of(id).0
     }
@@ -617,27 +625,73 @@ impl Remote {
             .call_typed("query.row", Some(serde_json::json!({ "ids": want })))
             .unwrap_or_default();
 
-        let mut mine = (None, None, None);
-        if let Ok(mut kept) = self.inner.rows_kept.lock() {
-            if kept.len() + got.rows.len() > KEEP {
-                kept.clear();
-            }
-            for line in got.rows {
-                let row = (
+        self.keep(got);
+        self.inner
+            .rows_kept
+            .lock()
+            .ok()
+            .and_then(|kept| kept.get(&id).cloned())
+            .unwrap_or((None, None, None))
+    }
+
+    /// Put a reply in the cache.
+    ///
+    /// **Clearing is what a full cache does, and it is why `ahead` exists.** Evicting the
+    /// oldest would need an order this map does not keep, and a cache that throws
+    /// everything away is only cheap while what it threw away is cheap to fetch again —
+    /// which was exactly the 198 ms measured in view 4, where forty library-order batches
+    /// per frame overran a 500-row cap four times over. `ahead` fetches the screenful
+    /// itself, so the cap is no longer reached by rows nobody asked for.
+    fn keep(&self, got: Rows) {
+        let Ok(mut kept) = self.inner.rows_kept.lock() else {
+            return;
+        };
+        if kept.len() + got.rows.len() > KEEP {
+            kept.clear();
+        }
+        for line in got.rows {
+            kept.insert(
+                line.id,
+                (
                     line.row,
                     line.locator.map(|locator| crate::model::rows::Playable {
                         locator,
                         gain: None,
                     }),
                     line.recording,
-                );
-                if line.id == id {
-                    mine = row.clone();
-                }
-                kept.insert(line.id, row);
-            }
+                ),
+            );
         }
-        mine
+    }
+
+    /// **The screenful in one trip** — `Listing::ahead` for a library over a socket.
+    ///
+    /// Asks only for what is not held, and asks in the *caller's* order rather than the
+    /// library's, because the caller's order is the one about to be drawn. That is the
+    /// whole difference from [`Remote::row_of`]'s read-ahead, which is right for a walk
+    /// down the library and wrong for a queue.
+    ///
+    /// Chunked, so a caller that names more rows than the cache holds still gets a reply
+    /// per chunk rather than one enormous one that clears the cache as it lands.
+    fn warm(&self, ids: &[CopyId]) {
+        let missing: Vec<CopyId> = {
+            let Ok(kept) = self.inner.rows_kept.lock() else {
+                return;
+            };
+            let mut seen = std::collections::HashSet::new();
+            ids.iter()
+                .filter(|id| !kept.contains_key(*id) && seen.insert(**id))
+                .copied()
+                .collect()
+        };
+        for chunk in missing.chunks(AHEAD.max(1) * 4) {
+            let got: Rows = self
+                .inner
+                .client
+                .call_typed("query.row", Some(serde_json::json!({ "ids": chunk })))
+                .unwrap_or_default();
+            self.keep(got);
+        }
     }
 
     /// What a recording draws as, and which file to play for it.

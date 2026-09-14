@@ -6785,6 +6785,9 @@ fn draw_tracks(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: 
 /// other caller counts tracks.
 fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: TrackList<'_>) {
     let mut rows = if spec.divide && ui.album_headers {
+        // Grouping by album reads every row, so the whole list is named before the first one
+        // is asked for — one trip rather than one per row (#261).
+        ctx.library.ahead(spec.ids);
         list::rows(ctx.library, spec.ids)
     } else {
         spec.ids.iter().copied().map(list::Row::Track).collect()
@@ -6814,10 +6817,25 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
     let at = list::row_of_track(&rows, spec.selected).unwrap_or(0);
     let height = view_height(area);
     let top = spec.scroll.window(at, rows.len(), height);
+    let shown = &rows[top.min(rows.len())..(top + height).min(rows.len())];
+    // **The window, named before it is drawn** — #261. `list::items` asks the seam for one row
+    // at a time, which is a map lookup when the library is here and a round trip when it is not:
+    // forty a frame, because the seam's own read-ahead follows library order and a queue is not
+    // in library order. 198ms a keystroke in view 4, against 2.3ms in the tree, which reads no
+    // rows at all.
+    ctx.library.ahead(
+        &shown
+            .iter()
+            .filter_map(|r| match r {
+                list::Row::Track(id) => Some(*id),
+                list::Row::Header(_) => None,
+            })
+            .collect::<Vec<_>>(),
+    );
     let items = list::items(
         &ui.theme,
         ctx.library,
-        &rows[top.min(rows.len())..(top + height).min(rows.len())],
+        shown,
         list::RowStyle {
             relative: ui.relative_numbers,
             // **Absolute**, both of them: the gutter counts tracks from the top of the list, and
@@ -15686,11 +15704,19 @@ mod a_pane_asks_for_a_screenful {
     struct Counted<'a> {
         inner: &'a crate::model::seam::Librarian,
         asked: Cell<usize>,
+        /// Every row the pane said it was about to read, in the order it said so.
+        named: std::cell::RefCell<Vec<CopyId>>,
+        /// Every row it was then actually asked for.
+        read: std::cell::RefCell<Vec<CopyId>>,
     }
 
     impl Listing for Counted<'_> {
+        fn ahead(&self, ids: &[CopyId]) {
+            self.named.borrow_mut().extend_from_slice(ids);
+        }
         fn listed(&self, id: CopyId) -> Option<Slip> {
             self.asked.set(self.asked.get() + 1);
+            self.read.borrow_mut().push(id);
             self.inner.listed(id)
         }
         fn playable(&self, id: CopyId) -> Option<Playable> {
@@ -15769,6 +15795,8 @@ mod a_pane_asks_for_a_screenful {
         let counted = Counted {
             inner: library,
             asked: Cell::new(0),
+            named: Default::default(),
+            read: Default::default(),
         };
         let ctx = Context {
             library: &counted,
@@ -15794,6 +15822,76 @@ mod a_pane_asks_for_a_screenful {
         assert!(
             asked < queued / 2,
             "asked about {asked} rows for a pane that can show about eight, out of {queued}"
+        );
+    }
+
+    /// **A pane names its window before it reads it** — #261.
+    ///
+    /// Reading a screenful rather than the list is only half of what makes a pane cheap. The
+    /// other half is asking for it *at once*: `Listing::listed` answers one row, which is a map
+    /// lookup when the library is in this process and a round trip when it is not. Measured
+    /// against the running engine, view 4 spent **198ms per keystroke** issuing forty
+    /// `query.row` calls for two thousand rows to draw forty — because `Remote`'s read-ahead
+    /// follows library order, and a queue is not in library order, so every row missed on its
+    /// own and dragged in fifty neighbours nobody would draw. With the window named first it is
+    /// **382µs**.
+    ///
+    /// **Asserted from the library's side, because the drawn pane looks identical either way.**
+    /// The claim is not that `ahead` was called — that is easy to satisfy and says nothing — but
+    /// that nothing was read which had not been named, which is what makes one trip enough.
+    #[test]
+    fn a_track_pane_names_its_window_before_it_reads_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let store = tests::fixture();
+        let library = tests::lib_of(&store);
+        let ids = Listing::rows(library);
+        assert!(!ids.is_empty(), "the fixture holds nothing to queue");
+
+        let watched = Counted {
+            inner: library,
+            asked: Cell::new(0),
+            named: Default::default(),
+            read: Default::default(),
+        };
+        let ctx = Context {
+            library: &watched,
+            player: None,
+            gapless: None,
+        };
+        let mut ui = tests::ui_of(&store, true);
+        ui.view = View::Queue;
+        for id in ids.iter().cycle().take(200) {
+            ui.queue.push_back(*id);
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("a backend");
+        terminal.draw(|f| draw(f, &ui, &ctx)).expect("a frame");
+
+        let named = watched.named.borrow();
+        let read = watched.read.borrow();
+        // **The instrument was attached.** Both halves would be vacuously true over empty
+        // vectors: nothing read is trivially a subset of nothing named.
+        assert!(!read.is_empty(), "the pane drew without reading any row");
+        assert!(
+            !named.is_empty(),
+            "the pane read {} rows without naming one of them first",
+            read.len()
+        );
+
+        let named: std::collections::HashSet<CopyId> = named.iter().copied().collect();
+        let unnamed: Vec<CopyId> = read
+            .iter()
+            .filter(|id| !named.contains(id))
+            .copied()
+            .collect();
+        assert!(
+            unnamed.is_empty(),
+            "{} of {} rows were read without being named, so a remote library pays a round trip \
+             for each of them",
+            unnamed.len(),
+            read.len()
         );
     }
 }
