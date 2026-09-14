@@ -58,9 +58,14 @@ pub mod query;
 pub mod shelf;
 pub mod text;
 
-/// **What the fold costs in bytes** — #255. Test-only; see the module docs for why an
-/// allocator rather than a profiler.
-#[cfg(test)]
+/// **What the fold costs in bytes** — #255. See the module docs for why an allocator rather
+/// than a profiler.
+///
+/// **Behind `testing` as well as `cfg(test)`** — the same reason `row_of_test` is: a
+/// measurement of the *engine's* startup cannot run in this crate's test binary, and an
+/// `examples/` target is a separate crate that cannot reach `cfg(test)` items. A release build
+/// still pays nothing, because nothing enables the feature.
+#[cfg(any(test, feature = "testing"))]
 pub mod accounting;
 
 /// **Installed for the test binary only**, so a release build pays nothing for it.

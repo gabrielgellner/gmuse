@@ -7,6 +7,35 @@
 //! Verification target from DESIGN §9: seek is sample-accurate and the
 //! position display does not jump on seek.
 
+/// **What this process is holding** — #255, and only when asked for.
+///
+/// `gmuse-library`'s `accounting` allocator, installed here so the number is the *engine's*
+/// rather than a library test's. #255 asked for exactly that, because a fold measured in
+/// isolation is 122 MB and the engine's resident set is 390 MB, and nothing said what the
+/// difference was.
+#[cfg(feature = "measure-memory")]
+#[global_allocator]
+static ACCOUNTING: gmuse_library::accounting::Accounting = gmuse_library::accounting::Accounting;
+
+/// Say what is held at a named point in startup — #255.
+///
+/// **The peak is the number that matters and it lands before the socket opens**, which is why
+/// the periodic reporter could not see it: by its first tick the engine had already been to
+/// 310.9 MB and come back to 120. A resident set tracks the peak, not the settled heap, so
+/// where the peak comes from is the whole question.
+#[cfg(feature = "measure-memory")]
+fn mark(what: &str) {
+    use gmuse_library::accounting::{live, mb, peak};
+    eprintln!(
+        "memory: {what:<28} {:>7.1} MB live  {:>7.1} MB peak",
+        mb(live()),
+        mb(peak())
+    );
+}
+
+#[cfg(not(feature = "measure-memory"))]
+fn mark(_what: &str) {}
+
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -3505,6 +3534,7 @@ fn run_engine(
     // and have no way to learn better.
     // **The engine reaches the librarian through channels, not a `Desk`** — #257. The relay
     // owns this side of them; the engine cannot name a librarian at all.
+    mark("Desk::open (the first fold)");
     let relay = gmuse::wiring::relay::Relay::start(Arc::clone(&desk));
     let control = Arc::new(
         gmuse::engine::control::Control::start(
@@ -3561,6 +3591,7 @@ fn run_engine(
     // re-query the moment it connected.
     // **One watcher, not two.** The announcer already compares the published answer to notice
     // a change; it bumps the counter the engine reads, so nothing else has to watch (#257).
+    mark("the player is up");
     let _announcer = gmuse::wiring::announcer::Announcer::start(
         Arc::clone(&desk),
         Arc::downgrade(&engine),
@@ -3576,7 +3607,28 @@ fn run_engine(
             .expect("the engine's desk appends")
             .scan(roots.clone(), None);
     }
+    mark("listening");
     eprintln!("gmuse engine: listening on {}", engine.path().display());
+
+    // **Say what is held, when asked for at build time** — #255.
+    //
+    // Every few seconds rather than once, because the interesting number is whether it
+    // settles: a fold that churns and a fold that grows look the same in a single reading.
+    #[cfg(feature = "measure-memory")]
+    std::thread::Builder::new()
+        .name("gmuse-memory".into())
+        .spawn(|| {
+            use gmuse_library::accounting::{live, mb, peak};
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                eprintln!(
+                    "memory: {:.1} MB live, {:.1} MB peak",
+                    mb(live()),
+                    mb(peak())
+                );
+            }
+        })
+        .expect("the memory reporter starts");
 
     // Nothing to do on this thread but wait to be told to stop; the listener
     // owns the work. Polling rather than a condvar because the only waker is a

@@ -244,6 +244,20 @@ bench-fold:
 bench-write:
     @just _bench one_rating_is_not_a_whole_rebuild
 
+# A feature rather than a flag: a counter on every allocation is two atomics a
+# release build should not pay to answer a question nobody asks at runtime.
+#
+# Where the engine's memory goes: live and peak at each startup step (#255)
+[group('test')]
+memory:
+    cargo run --release --features measure-memory -- engine --null-audio
+
+# What each part of a fold costs, attributed (#255). Needs the real library.
+[group('test')]
+memory-parts data="~/MusicLibrary/.gmuse" roots="~/MusicLibrary":
+    cargo run --release --features gmuse-library/testing \
+        --example where_the_memory_goes -- {{data}} {{roots}}
+
 # Show the resampler benchmark table (not part of `ci` — it takes ~30s)
 [group('test')]
 bench:

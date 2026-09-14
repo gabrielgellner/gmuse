@@ -85,6 +85,20 @@ default = ["opus"]
 # has to reach the crate that registers it, or it drops the flag and keeps the C
 # dependency.
 opus = ["gmuse-engine/opus"]
+# **Where the memory goes, from inside the process** — #255.
+#
+# Installs an accounting `GlobalAlloc` and has the engine say what it is holding.
+# Off by default and it must stay off: a counter on every allocation is two
+# atomics a release build should not pay to answer a question nobody is asking
+# at runtime, and `rt_guard` is explicit that the audio callback allocates
+# nothing — so the callback pays nothing either way, but the decoder thread
+# would.
+#
+# **A feature and not a flag**, because RSS cannot answer this. The measurement
+# that opened #255 reasoned from `ps`, and it turns out RSS runs a steady 1.4x
+# the live heap: a gigabyte in `btop` was 700 MB of program and 300 MB of pages
+# the allocator had not given back.
+measure-memory = ["gmuse-library/testing"]
 # **The Python door** — #197. Off by default, so an ordinary `cargo build`
 # neither needs a Python interpreter nor links against one; `maturin` turns it
 # on. The tools speak to the library through this rather than through files.

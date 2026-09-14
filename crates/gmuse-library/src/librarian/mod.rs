@@ -400,13 +400,13 @@ impl Desk {
                     // published is what this job did rather than what the log
                     // happens to hold. A scan that appends nothing is not a
                     // change, however many files it walked.
-                    let before = log.records().clone();
+                    let before = needs_a_before(&job).then(|| log.records().clone());
                     let mut moved = Changed::Nothing;
                     let mut scanned = None;
                     let settled = match job {
                         Job::Say(say) => {
                             say(&mut log);
-                            moved = Changed::of(log.records().difference(&before));
+                            moved = since(log.records(), before.as_ref());
                             if let Some((dir, appending)) = &writing {
                                 // A failed commit is not fatal: the in-memory
                                 // log is still right, and refusing the fact
@@ -616,7 +616,7 @@ impl Desk {
                                 // rating another client wrote is one `Touched`,
                                 // not a `Rebuild`, and #223's lattice is the
                                 // whole point of measuring it.
-                                moved = Changed::of(fresh.difference(&before));
+                                moved = since(&fresh, before.as_ref());
                                 log.merge(now, &fresh);
                             }
                             None
@@ -1005,6 +1005,52 @@ pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Proj
             crate::cache::save_projection(&at, &print, &folded);
             folded
         }
+    }
+}
+
+/// **Whether this job needs a before-picture of the log** — #255.
+///
+/// `Changed::of(difference)` is how a *narrow* `Changed` is computed, and it needs the record
+/// set as it was. That clone is **83.5 MB on the real library**, and it was taken before
+/// *every* job — including a `queue.get`, which #257's programme made frequent.
+///
+/// The cost was not the clone's 8ms. A resident set tracks the **peak**, not the live heap:
+/// the engine holds 118.5 MB and its RSS is 390 MB, because an 83.5 MB transient kept coming
+/// back and the allocator kept the pages. That is what "1.1 GB in btop" was.
+///
+/// **Exhaustive, so a new job has to say.** A `false` that should be `true` publishes a
+/// `Changed` too narrow to refresh a view, which is the failure that does not announce itself
+/// — so the default a catch-all would give is the wrong one.
+fn needs_a_before(job: &Job) -> bool {
+    match job {
+        // The two that compute what moved by comparing.
+        Job::Say(_) | Job::Reread => true,
+        // These say what moved without comparing — a scan is `Wide`, a compact names its own —
+        // or move nothing at all, which is every read.
+        Job::Holdings(_)
+        | Job::Scan { .. }
+        | Job::Walked(_)
+        | Job::Compact
+        | Job::Advance
+        | Job::Records(_)
+        | Job::History { .. }
+        | Job::Programme { .. }
+        | Job::Settled(_) => false,
+    }
+}
+
+/// What changed, against a before-picture.
+///
+/// **`None` reports `Wide`, not `Nothing`.** It cannot happen — only the two jobs that ask for
+/// a before-picture call this — but a change nobody measured is a change every view must
+/// re-read, and the other default silently leaves a stale screen.
+fn since(
+    now: &BTreeSet<crate::facts::Record>,
+    before: Option<&BTreeSet<crate::facts::Record>>,
+) -> Changed {
+    match before {
+        Some(before) => Changed::of(now.difference(before)),
+        None => Changed::Wide,
     }
 }
 
@@ -1690,6 +1736,82 @@ mod what_a_write_costs {
             }
         }
         scan
+    }
+
+    /// **An unmeasured change is `Wide`, not `Nothing`** — #255.
+    ///
+    /// `since` guards a case that cannot happen: only the two jobs asking for a before-picture
+    /// call it. But which way it fails is the load-bearing half — a change reported as
+    /// `Nothing` leaves every view showing what was true a moment ago, and nothing announces
+    /// that. `Wide` costs a re-query.
+    ///
+    /// Tested directly because no job reaches it, and a guard nothing tests is a guard that is
+    /// not there.
+    #[test]
+    fn a_change_nobody_measured_is_reported_wide() {
+        let mut log = Instance::new(crate::fixture::device());
+        log.rate(100, Id::derived(b"a recording"), Some(4));
+        assert!(!log.records().is_empty(), "nothing was appended to compare");
+
+        assert_eq!(
+            super::since(log.records(), None),
+            Changed::Wide,
+            "an unmeasured change was reported as narrow"
+        );
+        assert_eq!(
+            super::since(log.records(), Some(log.records())),
+            Changed::Nothing,
+            "a log compared against itself reported a change"
+        );
+    }
+
+    /// **A read does not copy the log** — #255.    /// **A read does not copy the log** — #255.
+    ///
+    /// The job loop cloned the record set before *every* job so the two that diff could compute
+    /// a narrow `Changed`. That is 83.5 MB on the real library, and #257's programme made reads
+    /// frequent — a `queue.get` paid for a rating's before-picture.
+    ///
+    /// It did not show up as a leak, which is why it took a peak measurement to find: the clone
+    /// is freed immediately, `live` stays flat, and only the **peak** moves. A resident set
+    /// tracks the peak, so the engine reported 390 MB while holding 118.5.
+    ///
+    /// Asserted on allocation rather than time, because a clone of 110,500 records takes 3.2ms
+    /// — real, but the sort of number that reads as acceptable.
+    #[test]
+    fn a_read_does_not_copy_the_record_set() {
+        let device = crate::fixture::device();
+        let mut log = Instance::new(device);
+        log.ingest(100, &scan_of(200, 650));
+        let records = log.records().len();
+        // **The instrument**: a peak bound over an empty log passes for nothing.
+        assert!(
+            records > 50_000,
+            "only {records} records, so no clone of them would be large enough to see"
+        );
+
+        let desk = Desk::open(log, Holdings::default(), device, 100, None);
+        desk.settled();
+
+        // One read, measured.
+        let (answered, _kept, peak) = crate::accounting::measure(|| {
+            desk.programme(crate::librarian::programme::Ask::Look {
+                from: None,
+                limit: 1,
+            })
+        });
+        assert!(
+            answered.is_some(),
+            "the desk did not answer, so nothing was measured"
+        );
+
+        // A `Record` is well over 100 bytes once its fact is counted, so a copy of the set is
+        // megabytes. A generous bound: anything near the set's size means it was copied.
+        let floor = records * 64;
+        assert!(
+            peak < floor,
+            "a read allocated {} MB at peak over {records} records — the log was copied",
+            crate::accounting::mb(peak)
+        );
     }
 
     #[test]
