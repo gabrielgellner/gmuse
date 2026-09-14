@@ -10,6 +10,18 @@ use gmuse_library::accounting::{self, mb};
 #[global_allocator]
 static ACCOUNTING: accounting::Accounting = accounting::Accounting;
 
+/// **The bytes a fact's `String`s own**, which `size_of` does not count.
+///
+/// Serialised and measured, rather than a match over every variant: `Fact` has dozens, the
+/// question is an order of magnitude, and a match that forgot a variant would answer low and
+/// look right. JSON is longer than the strings it quotes, so this is an over-estimate — which
+/// is the safe direction for deciding that interning is *not* the lever.
+fn weigh(fact: &gmuse::facts::Fact) -> usize {
+    serde_json::to_string(fact)
+        .map(|text| text.bytes().filter(|b| *b != b'"').count())
+        .unwrap_or(0)
+}
+
 /// This process's resident set, in MB.
 ///
 /// **Shelled out rather than an FFI call**, because `task_info` needs `unsafe` and the project
@@ -131,6 +143,67 @@ fn main() {
     );
     println!("{:<34} {:>9}", "records", records);
     println!("{:<34} {:>9}", "holdings", held.len());
+
+    // **Where a record's bytes are** — #256 proposes an incremental fold to stop holding them;
+    // that is a second implementation of a 672-line multi-pass fold. Worth knowing first
+    // whether the bytes are the *structure* or the *strings* in it, because interning is a much
+    // smaller change than refolding incrementally.
+    let mut strings = 0usize;
+    let mut count = 0usize;
+    for record in log.records() {
+        count += 1;
+        strings += weigh(&record.fact);
+    }
+    let structs = count * std::mem::size_of::<gmuse::facts::Record>();
+    println!();
+    println!(
+        "{:<34} {:>9}",
+        "a Record, by size_of",
+        std::mem::size_of::<gmuse::facts::Record>()
+    );
+    println!(
+        "{:<34} {:>9.1} MB",
+        "  x records (the structure)",
+        mb(structs)
+    );
+    println!("{:<34} {:>9.1} MB", "  strings inside them", mb(strings));
+    println!("{:<34} {:>9.1} MB", "  = accounted", mb(structs + strings));
+
+    // **Which variant sets the size**, because an enum is as big as its widest one and every
+    // record pays for it. Boxing a fat variant is a much smaller change than refolding
+    // incrementally, so it is worth knowing whether there is one.
+    println!();
+    println!(
+        "{:<34} {:>9}",
+        "Stamp",
+        std::mem::size_of::<gmuse::model::clock::Stamp>()
+    );
+    println!(
+        "{:<34} {:>9}",
+        "Fact",
+        std::mem::size_of::<gmuse::facts::Fact>()
+    );
+    // **How many of each kind**, which is what decides whether boxing the widest variant is a
+    // win at all: an enum is as wide as its widest variant, but boxing one that is also the
+    // *most common* trades 112 inline bytes for a pointer plus a heap allocation, which is
+    // worse.
+    let mut how_many: std::collections::BTreeMap<String, usize> = Default::default();
+    for record in log.records() {
+        let debug = format!("{:?}", record.fact);
+        let kind = debug
+            .split([' ', '(', '{'])
+            .next()
+            .unwrap_or("?")
+            .to_owned();
+        *how_many.entry(kind).or_default() += 1;
+    }
+    let mut ranked: Vec<(usize, String)> = how_many.into_iter().map(|(k, n)| (n, k)).collect();
+    ranked.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+    println!();
+    println!("{:<34} {:>9}", "the commonest facts", "count");
+    for (n, kind) in ranked.iter().take(8) {
+        println!("  {kind:<32} {n:>9}");
+    }
 
     // Held so nothing above is dropped before the total.
     let _ = (&log, &held, &answer, &library, &second, &published);
