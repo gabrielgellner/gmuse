@@ -58,14 +58,10 @@ pub struct Remote {
 impl Remote {
     /// Ask for the ordering once; everything else is asked as it is drawn.
     pub fn open(client: Arc<Client>) -> Self {
-        let sorted = client
-            .call(
-                "query.tree",
-                Some(serde_json::json!({ "levels": [], "limit": 1_000_000 })),
-            )
-            .ok()
-            .and_then(|r| ids_of(r.get("nodes")?))
-            .unwrap_or_default();
+        let sorted = walk(&client, serde_json::json!({ "levels": [] }))
+            .iter()
+            .filter_map(|n| serde_json::from_value(n.get("id")?.clone()).ok())
+            .collect();
         Remote {
             client,
             last: Mutex::new(Last::default()),
@@ -165,17 +161,22 @@ impl Remote {
 impl Browsing for Remote {
     /// **The whole tree**, which only the tests ask for — see [`Browsing::lines`].
     ///
-    /// A limit large enough to be the library, because "all of it" has no spelling on the wire:
-    /// the protocol pages everything on purpose, and a method meaning "send me everything" is
-    /// the one call that could not be answered from a window.
+    /// Walked page by page, because "all of it" has no spelling on the wire: the protocol pages
+    /// everything on purpose, and a method meaning "send me everything" is the one call that
+    /// could not be answered from a window.
     fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node> {
         let folds = if unfolded {
             Expansion::default()
         } else {
             folds.clone()
         };
-        self.fetch(&folds, 0, 1_000_000, serde_json::Value::Null)
-            .nodes
+        walk(
+            &self.client,
+            serde_json::json!({ "folds": parts_of(&folds) }),
+        )
+        .iter()
+        .filter_map(node_of)
+        .collect()
     }
 
     /// **The shape, asked with no page at all.** A motion reads four bits a line and no titles,
@@ -288,6 +289,39 @@ impl Holding for Remote {
     }
 }
 
+/// **Every line, followed page by page.**
+///
+/// `query.tree` caps a page at 5,000 and says so only by handing back a `next` — so asking for
+/// a million gets 5,000 and looks like the whole library until the library is bigger than that.
+/// This one has 7,273 rows, so the version that asked once was already wrong here and silently.
+///
+/// **The loop itself has no test.** Exercising it needs a library larger than one page, and the
+/// fixtures are four lines; what is checked instead is the mechanism it relies on — that a page
+/// says where the next one starts and following it reaches every line — in
+/// `a_client_that_follows_next_sees_the_whole_library`, with a page size of one.
+fn walk(client: &Client, base: serde_json::Value) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut cursor = Some(0u64);
+    while let Some(at) = cursor {
+        let mut params = base.clone();
+        let Some(map) = params.as_object_mut() else {
+            break;
+        };
+        map.insert("cursor".into(), at.into());
+        map.insert("limit".into(), 5_000.into());
+        let Ok(reply) = client.call("query.tree", Some(params)) else {
+            break;
+        };
+        match reply.get("nodes").and_then(|v| v.as_array()) {
+            Some(page) if !page.is_empty() => out.extend(page.iter().cloned()),
+            // No lines and a `next` would spin for ever; the page being empty is the end.
+            _ => break,
+        }
+        cursor = reply.get("next").and_then(|v| v.as_u64());
+    }
+    out
+}
+
 /// A fold state as the wire spells it.
 fn parts_of(folds: &Expansion<SortKey>) -> serde_json::Value {
     let parts = folds.parts();
@@ -306,17 +340,6 @@ fn keys(path: &[SortKey]) -> Vec<String> {
 
 fn node_of(value: &serde_json::Value) -> Option<Node> {
     serde_json::from_value(value.clone()).ok()
-}
-
-/// The ids of an array of **lines** — each is an object with an `id`, not a bare id.
-fn ids_of(value: &serde_json::Value) -> Option<Vec<CopyId>> {
-    Some(
-        value
-            .as_array()?
-            .iter()
-            .filter_map(|n| serde_json::from_value(n.get("id")?.clone()).ok())
-            .collect(),
-    )
 }
 
 fn paths_of(value: &serde_json::Value) -> Option<Vec<Vec<SortKey>>> {

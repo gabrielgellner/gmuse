@@ -2984,3 +2984,166 @@ fn a_remote_library_answers_what_a_local_one_does() {
         "the two disagree about what a reveal has to open"
     );
 }
+
+/// **An attached view draws the library it does not hold** — #261.
+///
+/// The seams are checked one at a time elsewhere; this is the whole path, once: a `Ui` whose
+/// `Holding` is the socket, rendered into a buffer, against the same `Ui` holding a shelf it
+/// folded itself. They must draw the same pane.
+///
+/// **This is the check a headless smoke test could not be.** Running the real TUI needs a
+/// terminal, and where there is none every pane draws empty — which is indistinguishable from
+/// a remote that answers nothing. A `TestBackend` has a size and no terminal.
+#[test]
+fn an_attached_view_draws_the_same_pane_as_a_detached_one() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (engine, _recording) = start_with_a_track("attached-draw");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let data = engine.dir.join("xdg").join("gmuse");
+    let device: gmuse::model::id::Id<gmuse::model::entity::Device> = std::fs::read_dir(&data)
+        .expect("a data dir")
+        .flatten()
+        .find_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.strip_prefix("log-")?
+                .strip_suffix(".jsonl")?
+                .parse()
+                .ok()
+        })
+        .expect("the engine wrote a log named for its device");
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    let answer = desk.current();
+
+    let drawn = |ui: &gmuse::ui::Ui| -> String {
+        let ctx = gmuse::ui::Context {
+            library: &answer.library,
+            player: None,
+            gapless: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).expect("a backend");
+        terminal
+            .draw(|f| gmuse::ui::draw(f, ui, &ctx))
+            .expect("a frame");
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let members: std::collections::HashSet<_> = {
+        use gmuse::model::rows::Listing;
+        answer.library.rows().into_iter().collect()
+    };
+    assert!(
+        members.len() > 1,
+        "only {} rows — an empty library draws the same either way",
+        members.len()
+    );
+    let levels = gmuse::shelf::Levels::default();
+
+    let mut here = gmuse::ui::Ui::new(gmuse::ui::holding::of(
+        Some(&answer.library),
+        None,
+        members.clone(),
+        levels,
+        true,
+    ));
+    here.tree.open_everything(&here.library);
+    let local = drawn(&here);
+
+    let mut there = gmuse::ui::Ui::new(gmuse::ui::holding::of(
+        None,
+        Some(std::sync::Arc::clone(&client)),
+        members,
+        levels,
+        true,
+    ));
+    there.tree.open_everything(&there.library);
+    let remote = drawn(&there);
+
+    // **The instrument.** A pane with nothing in it is what a terminal-less run produces, and
+    // two empty panes agree perfectly.
+    let lines = |s: &str| {
+        s.lines()
+            .filter(|l| l.contains('\u{2502}') && l.trim_matches(['\u{2502}', ' ']).len() > 1)
+            .count()
+    };
+    assert!(
+        lines(&local) > 2,
+        "the local pane drew {} lines, so agreeing about it proves nothing:\n{local}",
+        lines(&local)
+    );
+    assert_eq!(remote, local, "the two panes differ");
+}
+
+/// **A page says where the next one starts, and a client that ignores it sees a short library**
+/// — #261.
+///
+/// `query.tree` caps a page at 5,000 and says so only by handing back a `next`. A client asking
+/// for a million gets 5,000 and cannot tell — which is the whole library right up until the
+/// library is bigger than that, and this one has 7,273 rows. So the mechanism a client has to
+/// follow is checked here with a page size of one, where a fixture of four lines is enough.
+#[test]
+fn a_client_that_follows_next_sees_the_whole_library() {
+    let (engine, _recording) = start_with_a_track("paging");
+    let client = Client::connect(&engine.socket, "browser", "0").expect("connect");
+
+    let whole = client
+        .call("query.tree", Some(serde_json::json!({ "limit": 5_000 })))
+        .expect("the tree");
+    let total = whole["total"].as_u64().expect("a total");
+    assert!(
+        total > 2,
+        "{total} lines cannot show paging with a page of one"
+    );
+    assert!(
+        whole["next"].is_null(),
+        "a page of 5,000 did not reach the end of a {total}-line tree"
+    );
+
+    let mut seen = Vec::new();
+    let mut cursor = Some(0u64);
+    let mut asks = 0;
+    while let Some(at) = cursor {
+        asks += 1;
+        assert!(
+            asks <= total + 1,
+            "paging did not terminate after {asks} asks"
+        );
+        let page = client
+            .call(
+                "query.tree",
+                Some(serde_json::json!({ "limit": 1, "cursor": at })),
+            )
+            .expect("a page");
+        let nodes = page["nodes"].as_array().expect("nodes").clone();
+        if nodes.is_empty() {
+            break;
+        }
+        seen.extend(nodes);
+        cursor = page["next"].as_u64();
+    }
+
+    assert_eq!(
+        seen.len() as u64,
+        total,
+        "following `next` reached {} of {total} lines",
+        seen.len()
+    );
+    assert_eq!(
+        seen,
+        whole["nodes"].as_array().cloned().expect("nodes"),
+        "the walked lines are not the ones a single page gives"
+    );
+}

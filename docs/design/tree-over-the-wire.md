@@ -276,7 +276,30 @@ Which is why `Listed` stays borrowed rather than being replaced: `query::filter`
 on every keystroke of a picker, where 3.0 ms would cost more than the query. One row is read once and drawn; the other
 is read 7,273 times and thrown away.
 
-## 8. What this does not decide
+## 8. Where it stands, measured
+
+Against the real library (7,273 rows, 72 MB log), an engine and a view attached to it:
+
+|                                      |          |
+| ------------------------------------ | -------- |
+| engine                               | 163.3 MB |
+| attached view — at the start of #261 | 123.8 MB |
+| attached view — now                  | 74.9 MB  |
+
+**The view still folds the log.** `Desk::read_only` is called at startup and prints
+`librarian: 7271 recordings in 0.1s`, and `Context::library` points at what it produced — so every detail read still
+goes to a second copy of a library the engine already has. That is the 40.6 MB in §1 and it is all still there.
+
+What has gone is everything the _tree_ held: the shelf, the search's haystack, and the 8,932-line render. What is left
+is one thing — a **`Listing` over the socket**. `Slip` is the row it would answer with, and nothing in the view's types
+requires the fold any more; it is supplied because `main` still builds one, not because the view asks for it.
+
+**A headless smoke test cannot check this.** Running the real TUI needs a terminal, and without one every pane draws
+empty — which is indistinguishable from a remote that answers nothing. So the check is
+`an_attached_view_draws_the_same_pane_as_a_detached_one`, which renders both into a `TestBackend` and requires the same
+buffer.
+
+## 9. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.
