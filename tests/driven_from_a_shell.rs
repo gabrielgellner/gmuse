@@ -2815,7 +2815,8 @@ fn a_remote_library_answers_what_a_local_one_does() {
         members.len()
     );
     let local = gmuse::ui::holding::of(
-        &answer.library,
+        Some(&answer.library),
+        None,
         members,
         gmuse::shelf::Levels::default(),
         true,

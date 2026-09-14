@@ -245,8 +245,20 @@ It keeps the last reply, because a redraw asks four questions about one tree —
 `query.tree` carries all four. Keyed by the fold state and the window, for the same reason the engine's own cache is
 keyed by the question.
 
-What remains is the **detail reads** behind `ctx.library`, which §1 explains have to land with it: until those go, the
-view folds the log for them anyway, and the fold is most of the 40.6 MB.
+**And the detail reads went through the same door.** `Context::library` is a `dyn Listing`, not a `Librarian` — the
+trait was already what most of them used, and the two that were not are on it now: `row`, a read about one recording,
+and `chosen`, the owned half of `Librarian::open`, which handed back a borrow into the fold for a caller that wanted
+three owned things out of it.
+
+**One question needed asking rather than carrying.** Grouping a shelf needs seven of `Librarian`'s own methods — the one
+thing a view does that wants the library rather than a read of it, and the one thing an attached view should not do at
+all. Rather than a second trait nobody else implements, or a `Context` field every call site has to thread, the reader
+is asked: `Listing::whole` — _can you give me all of it?_ A fold says yes, a socket says no, and `ui::holding` picks on
+the answer. **An engine wins when there is one**, because §4.2 says an attached view's librarian is the engine and the
+engine has folded this library already.
+
+`a_follower_holds_no_projection_of_its_own` now refuses a `Shelf` **and** a `Librarian` anywhere in the view's
+production code.
 
 **The detail reads needed an owned row first, and now have one.** Most go through `Listing`, which is already a trait,
 but `Listing::listed` returns a `Listed<'a>` that _borrows the fold_ — and a socket implementation has no fold to borrow

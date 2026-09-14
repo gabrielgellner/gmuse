@@ -878,7 +878,7 @@ pub struct Context<'a> {
     /// The direction of travel (#77): a read asks this and gets back a `Row`
     /// with no path in it. `store` is what has not moved yet, and the two are
     /// built from one scan so they cannot disagree.
-    pub library: &'a crate::model::seam::Librarian,
+    pub library: &'a dyn crate::model::rows::Listing,
     /// `None` in tests, which have no audio device.
     ///
     /// **A seam, not the handle** — #219. The TUI is becoming a client and the
@@ -1955,8 +1955,8 @@ fn source_for(
     // discipline the tree follows, because a library is used while it is being
     // catalogued.
     let chosen = recording_of(ctx, id)
-        .and_then(|r| ctx.library.open(r, &[ui.desk.device()], &[]))
-        .map(|(e, locator)| (locator.to_string(), Some(e.id), e.levels));
+        .and_then(|r| ctx.library.chosen(r, &[ui.desk.device()], &[]))
+        .map(|(locator, id, levels)| (locator, Some(id), levels));
     // **How loud comes from the library too** (#109). It is per *copy* — two
     // rips of one recording are mastered differently and carry different
     // values — so it has to come from the copy that was chosen, not from
@@ -4388,7 +4388,13 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     let was = ui.tree.mark(&ui.library);
     let was_sorted = ui.library.sorted().get(ui.sorted).copied();
 
-    ui.library = holding::of(ctx.library, members, ui.levels, ui.smart_artist_sort);
+    ui.library = holding::of(
+        ctx.library.whole(),
+        ui.engine.clone(),
+        members,
+        ui.levels,
+        ui.smart_artist_sort,
+    );
 
     // **Put back rather than reset.** This set both to zero, which was right while the
     // only callers were a `:view` change and a filter change — those produce a genuinely

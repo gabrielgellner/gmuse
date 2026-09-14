@@ -1896,6 +1896,24 @@ impl crate::model::rows::Listing for Librarian {
         self.vocabulary.edges.iter().any(|e| on_axis(e.child.id()))
     }
 
+    fn whole(&self) -> Option<&Librarian> {
+        Some(self)
+    }
+
+    fn row(&self, recording: Id<Recording>) -> Option<Row> {
+        Librarian::row(self, recording)
+    }
+
+    fn chosen(
+        &self,
+        recording: Id<Recording>,
+        here: &[Id<Device>],
+        prefers: &[crate::model::encoding::Format],
+    ) -> Option<(String, Id<Encoding>, crate::model::encoding::Levels)> {
+        Librarian::open(self, recording, here, prefers)
+            .map(|(e, locator)| (locator.to_owned(), e.id, e.levels))
+    }
+
     fn listed(&self, id: crate::model::rows::CopyId) -> Option<crate::model::rows::Listed<'_>> {
         Some(self.rows.get(&id)?.listed())
     }

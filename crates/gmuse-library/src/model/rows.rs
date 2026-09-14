@@ -465,6 +465,46 @@ pub trait Listing {
     /// naming. The caller asks first and says so.
     fn places(&self, facet: crate::model::id::Id<crate::model::entity::Facet>) -> bool;
 
+    /// **The whole fold, if this reader is one** — #261.
+    ///
+    /// Grouping a shelf needs the library rather than a read of it: seven of `Librarian`'s own
+    /// methods, none of which a client on a socket could answer and none of which it would ever
+    /// ask, because it does not group anything — the engine did that before it replied.
+    ///
+    /// So rather than a second trait nobody else implements, or a `Context` field every call
+    /// site has to carry, the question is asked of the reader: **can you give me all of it?**
+    /// A fold says yes and a socket says no, and `ui::holding` picks an implementation on the
+    /// answer. `None` is the default because it is the honest answer for everything that is not
+    /// literally a fold.
+    fn whole(&self) -> Option<&crate::model::seam::Librarian> {
+        None
+    }
+
+    /// **The row for a recording**, as the library would draw it.
+    ///
+    /// Here rather than on `Librarian` alone (#261): it is a read about one thing, which is
+    /// what this trait is for, and a view that asks it must not have to hold a fold to.
+    fn row(
+        &self,
+        recording: Id<crate::model::entity::Recording>,
+    ) -> Option<crate::model::seam::Row>;
+
+    /// **Which file to play, and what it is** — the owned half of `Librarian::open`.
+    ///
+    /// `open` hands back `(&Encoding, &str)`, borrowed out of the fold, and a reader on the
+    /// other end of a socket has no fold to borrow from. The one caller wanted three owned
+    /// things out of it anyway: where the file is, which encoding it is, and how loud.
+    fn chosen(
+        &self,
+        recording: Id<crate::model::entity::Recording>,
+        here: &[Id<crate::model::entity::Device>],
+        prefers: &[crate::model::encoding::Format],
+    ) -> Option<(
+        String,
+        Id<crate::model::entity::Encoding>,
+        crate::model::encoding::Levels,
+    )>;
+
     /// Where to find it, and how loud the tags say it is.
     ///
     /// Separate from [`Listing::listed`] because they are asked at different

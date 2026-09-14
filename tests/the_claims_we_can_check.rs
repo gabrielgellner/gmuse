@@ -683,7 +683,7 @@ fn block<'a>(text: &'a str, header: &str) -> Option<&'a str> {
     None
 }
 
-/// **The view asks a seam, not a `Shelf`** — #261, `tree-over-the-wire.md`.
+/// **The view asks seams, not projections** — #261, `tree-over-the-wire.md`.
 ///
 /// `ui::tree` is the one place that browsed by holding the library's own projection, and while
 /// it did, an attached view had to fold the log to build one — which is the 40.6 MB the design
@@ -708,8 +708,13 @@ fn a_follower_holds_no_projection_of_its_own() {
         "only {takes} methods take a `Browsing`, so most of the view still asks something else"
     );
 
-    // `Shelf` may be named in the tests — they need a library to browse — and nowhere above
-    // them. `#[cfg(test)]` marks the boundary, and the first one is where production ends.
+    // Neither a `Shelf` nor a `Librarian` may be named in the view's production code. The
+    // first is the tree, the second is the fold behind it — `Context::library` is a
+    // `dyn Listing` and `Ui::library` a `dyn Holding`, and while that holds, an attached view
+    // is one implementation away from folding nothing at all.
+    //
+    // Both are fine in the tests, which need a library to browse. `#[cfg(test)]` marks the
+    // boundary, and the first one is where production ends.
     //
     // **And the same for the view as a whole** (#261). `ui::holding` is the one place an
     // implementation is chosen, and it is excluded by name rather than by lowering the bar:
@@ -738,12 +743,14 @@ fn a_follower_holds_no_projection_of_its_own() {
             if line.starts_with("//") {
                 continue;
             }
-            assert!(
-                !line.contains("Shelf"),
-                "{}:{} names a `Shelf`: {line}",
-                path.display(),
-                n + 1
-            );
+            for held in ["Shelf", "Librarian"] {
+                assert!(
+                    !line.contains(held),
+                    "{}:{} names a `{held}`: {line}",
+                    path.display(),
+                    n + 1
+                );
+            }
         }
     }
     assert!(
