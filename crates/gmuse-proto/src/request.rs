@@ -64,6 +64,22 @@ pub enum Request {
     QueryParse {
         text: String,
     },
+    /// **The browse tree, grouped** — §7.11, #261.
+    ///
+    /// The grouping is a library question and `Shelf::grouped` is the library's answer; the
+    /// TUI has been calling it with a `Librarian` of its own, which is why a view holds a fold.
+    /// Only the *folding* — which nodes a person has opened — is a view's, and that stays
+    /// there: this returns the whole shape and a client draws what it likes.
+    ///
+    /// `levels` names the two grouping fields, `["artist", "album"]` being the tree as it has
+    /// always been. An empty list is flat, which is what view 2 was.
+    QueryTree {
+        filter: Option<String>,
+        /// Two field names, or empty for no grouping. Omitted means artist and album.
+        levels: Option<Vec<String>>,
+        limit: Option<usize>,
+        cursor: Option<usize>,
+    },
     /// **Run a filter and get a page of rows** — §7.11, #261.
     ///
     /// Answered on the connection's own thread, from `Desk::current()` — one atomic load of a
@@ -297,6 +313,7 @@ pub mod method {
     pub const PLAYBACK_GET: &str = "playback.get";
     pub const QUERY_PARSE: &str = "query.parse";
     pub const QUERY_RUN: &str = "query.run";
+    pub const QUERY_TREE: &str = "query.tree";
     pub const QUEUE_GET: &str = "queue.get";
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
     pub const QUEUE_SET: &str = "queue.set";
@@ -332,6 +349,7 @@ pub mod method {
         PLAYBACK_GET,
         QUERY_PARSE,
         QUERY_RUN,
+        QUERY_TREE,
         QUEUE_GET,
         QUEUE_ENQUEUE,
         QUEUE_SET,
@@ -455,6 +473,34 @@ impl Request {
                     cursor: p.cursor,
                 })
             }
+            method::QUERY_TREE => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default)]
+                    filter: Option<String>,
+                    #[serde(default)]
+                    levels: Option<Vec<String>>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                    #[serde(default)]
+                    cursor: Option<usize>,
+                }
+                let p: P = match params {
+                    Some(_) => typed(method, params)?,
+                    None => P {
+                        filter: None,
+                        levels: None,
+                        limit: None,
+                        cursor: None,
+                    },
+                };
+                Ok(Self::QueryTree {
+                    filter: p.filter,
+                    levels: p.levels,
+                    limit: p.limit,
+                    cursor: p.cursor,
+                })
+            }
             method::QUEUE_GET => {
                 #[derive(Deserialize)]
                 struct P {
@@ -563,6 +609,7 @@ impl Request {
             Self::PlaybackGet { .. } => method::PLAYBACK_GET,
             Self::QueryParse { .. } => method::QUERY_PARSE,
             Self::QueryRun { .. } => method::QUERY_RUN,
+            Self::QueryTree { .. } => method::QUERY_TREE,
             Self::QueueGet { .. } => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
             Self::QueueSet { .. } => method::QUEUE_SET,
@@ -614,7 +661,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 25, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 26, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

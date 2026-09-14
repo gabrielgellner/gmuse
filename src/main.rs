@@ -3060,6 +3060,89 @@ fn run_engine(
             }))
         }
 
+        /// **A page of the browse tree** — §7.11, #261.
+        ///
+        /// Grouped here because grouping is a library question. The *folding* is not, so the
+        /// whole shape comes back and a client draws what it has open — which is also what
+        /// `tree-view-design.md` says a search reads.
+        fn tree(
+            &self,
+            filter: Option<String>,
+            levels: Option<Vec<String>>,
+            limit: Option<usize>,
+            cursor: Option<usize>,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse::model::rows::Listing;
+            use gmuse_proto::RpcError;
+
+            let filter = match filter.as_deref().map(gmuse::query::filter::Expr::parse) {
+                Some(Ok(expr)) => Some(expr),
+                Some(Err(e)) => return Err(RpcError::invalid_params("filter", e.to_string())),
+                None => None,
+            };
+
+            // **Named fields, not a hardcoded pair** — `[artist, album]` is the tree as it has
+            // always been, said out loud rather than assumed (`tree-view-design.md` §6).
+            let levels = match levels {
+                None => gmuse::shelf::Levels::default(),
+                Some(names) if names.is_empty() => gmuse::shelf::Levels::Flat,
+                Some(names) if names.len() == 2 => {
+                    let mut got = Vec::new();
+                    for name in &names {
+                        match gmuse::query::format::Field::parse(name) {
+                            Some(field) => got.push(gmuse::shelf::Level::of(field)),
+                            None => {
+                                return Err(RpcError::invalid_params(
+                                    "levels",
+                                    format!("{name:?} is not a field to group by"),
+                                ));
+                            }
+                        }
+                    }
+                    gmuse::shelf::Levels::By {
+                        outer: got[0],
+                        inner: got[1],
+                    }
+                }
+                Some(names) => {
+                    return Err(RpcError::invalid_params(
+                        "levels",
+                        format!("two fields or none, not {}", names.len()),
+                    ));
+                }
+            };
+
+            let answer = self.desk.current();
+            let version = self.moved.load(std::sync::atomic::Ordering::Acquire);
+
+            // **Which rows are in it**, which is the filter's job and not the tree's.
+            let members: std::collections::HashSet<_> = match &filter {
+                None => answer.library.rows().into_iter().collect(),
+                Some(_) => gmuse::query::found::found(
+                    &answer.library,
+                    gmuse::history::now_ms(),
+                    filter.as_ref(),
+                )
+                .into_iter()
+                .map(|f| f.row)
+                .collect(),
+            };
+
+            let all = gmuse::browse::tree(&answer.library, members, levels, true);
+            let at = cursor.unwrap_or(0).min(all.len());
+            let take = limit.unwrap_or(100).min(5_000);
+            let page: Vec<&gmuse::browse::Node> = all.iter().skip(at).take(take).collect();
+            let next = at + page.len();
+
+            Ok(serde_json::json!({
+                "nodes": page,
+                "at": at,
+                "total": all.len(),
+                "next": (next < all.len()).then_some(next),
+                "library_version": version,
+            }))
+        }
+
         /// **Which programme entry is sounding**, for a page anchored where playback is.
         ///
         /// `None` when nothing is playing or the engine did not answer, which pages from the
@@ -3398,6 +3481,14 @@ fn run_engine(
                     limit,
                     cursor,
                 } => self.found(filter, limit, cursor),
+
+                // **The browse tree, grouped by the librarian** — §7.11, #261.
+                Call::QueryTree {
+                    filter,
+                    levels,
+                    limit,
+                    cursor,
+                } => self.tree(filter, levels, limit, cursor),
 
                 // **A page, anchored where playback is** — #257.
                 //

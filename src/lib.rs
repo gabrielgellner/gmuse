@@ -16,8 +16,8 @@
 #[cfg(test)]
 pub use gmuse_library::fixture;
 pub use gmuse_library::{
-    audio_id, bridge, cache, events, facts, history, librarian, model, next, operations, playlist,
-    projection, query, shelf, text,
+    audio_id, bridge, browse, cache, events, facts, history, librarian, model, next, operations,
+    playlist, projection, query, shelf, text,
 };
 
 // **The audio path lives in `gmuse-engine` and is named here as it always was**

@@ -65,6 +65,29 @@ fn main() {
         drawn.len()
     );
 
+    // The browse tree, which `query.tree` answers with.
+    let members: std::collections::HashSet<_> = rows.iter().copied().collect();
+    let t = std::time::Instant::now();
+    let shelf = gmuse::shelf::Shelf::grouped(
+        &library,
+        members.clone(),
+        gmuse::shelf::Levels::default(),
+        true,
+    );
+    println!(
+        "Shelf::grouped:               {:>8.1?}  {} artists",
+        t.elapsed(),
+        shelf.artist_count()
+    );
+
+    let t = std::time::Instant::now();
+    let nodes = gmuse::browse::tree(&library, members, gmuse::shelf::Levels::default(), true);
+    println!(
+        "browse::tree (grouped+flat):  {:>8.1?}  {} nodes",
+        t.elapsed(),
+        nodes.len()
+    );
+
     // And the locator lookup alone, which the tool path does per recording.
     let t = std::time::Instant::now();
     let mut opened = 0usize;

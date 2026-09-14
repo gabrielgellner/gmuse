@@ -27,6 +27,8 @@
 
 pub mod audio_id;
 pub mod bridge;
+/// **The browse tree as a client reads it** — #261. Above `query` because it groups.
+pub mod browse;
 pub mod cache;
 pub mod events;
 pub mod facts;
