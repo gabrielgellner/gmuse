@@ -471,13 +471,26 @@ pub struct Drawn<'a> {
     #[serde(flatten)]
     pub node: &'a Node,
     pub seat: Vec<SortKey>,
+    /// **The record a track stands in for**, where its group is not drawn (#135).
+    ///
+    /// Derived here rather than by the client for the same reason the seat is: it is a rule
+    /// about when a name has nowhere else to go, and a second copy of that rule is how two
+    /// clients come to disagree about what a row says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stands_for: Option<String>,
 }
 
-impl<'a> From<&'a Node> for Drawn<'a> {
-    fn from(node: &'a Node) -> Self {
+impl<'a> Drawn<'a> {
+    /// One line as a client sees it, with the two things only the library can say.
+    pub fn of(lib: &Shelf, node: &'a Node) -> Self {
+        let title = match node {
+            Node::Track { title, .. } => title.as_str(),
+            _ => "",
+        };
         Drawn {
             node,
             seat: node.seat(),
+            stands_for: stands_for(lib, node, title),
         }
     }
 }
@@ -671,7 +684,11 @@ pub trait Holding: Browsing {
     fn standing_for(&self, row: &Node, title: &str) -> Option<String>;
 
     /// Which artist and record a copy is filed under.
-    fn locate(&self, id: CopyId) -> Option<(&SortKey, &SortKey)>;
+    ///
+    /// **Owned**, because an implementation that got this answer over a socket has nothing to
+    /// lend it from — the one place in this trait where `sorted`'s trick does not work, since a
+    /// lookup by id cannot be cached the way one ordering can.
+    fn locate(&self, id: CopyId) -> Option<(SortKey, SortKey)>;
     /// Every track filed under one artist.
     fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId>;
     /// Every track on one record.
@@ -739,7 +756,7 @@ impl Holding for Box<dyn Holding> {
     fn standing_for(&self, row: &Node, title: &str) -> Option<String> {
         (**self).standing_for(row, title)
     }
-    fn locate(&self, id: CopyId) -> Option<(&SortKey, &SortKey)> {
+    fn locate(&self, id: CopyId) -> Option<(SortKey, SortKey)> {
         (**self).locate(id)
     }
     fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId> {
@@ -769,8 +786,8 @@ impl Holding for Shelf {
     fn standing_for(&self, row: &Node, title: &str) -> Option<String> {
         stands_for(self, row, title)
     }
-    fn locate(&self, id: CopyId) -> Option<(&SortKey, &SortKey)> {
-        Shelf::locate(self, id)
+    fn locate(&self, id: CopyId) -> Option<(SortKey, SortKey)> {
+        Shelf::locate(self, id).map(|(a, b)| (a.clone(), b.clone()))
     }
     fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId> {
         Shelf::artist_tracks(self, artist)

@@ -120,6 +120,13 @@ pub enum Request {
         /// `cursor`. A toggle moves every row below it, so an index is stale the moment the
         /// folds change and a name is not.
         anchor: Option<Anchor>,
+        /// **Where the cursor goes when its line may not exist any more.**
+        ///
+        /// A level change can close the row out from under you; vim puts the cursor on the
+        /// start of the fold that swallowed it, which is the deepest visible line whose seat is
+        /// a prefix of this one. Beaten by `anchor`, which is the exact line rather than the
+        /// nearest surviving ancestor.
+        settle: Option<Vec<String>>,
     },
     /// **Open the way to a line, and say where it lands** — #261.
     ///
@@ -140,6 +147,26 @@ pub enum Request {
         from: Option<usize>,
         /// `N` rather than `n`.
         backwards: Option<bool>,
+    },
+    /// **What sits under one line of the tree** — #261.
+    ///
+    /// Two answers in one call because they are asked together and cost the same walk: the
+    /// tracks under a path — what `a`, `e` and `x` act on — and the paths still openable below
+    /// it, which is what `zR` needs to know when it has finished.
+    ///
+    /// An empty `path` is the whole library, which is what `x` on nothing selected means.
+    QueryUnder {
+        filter: Option<String>,
+        levels: Option<Vec<String>>,
+        /// The seat of the line, as a previous reply gave it.
+        path: Vec<String>,
+        /// **The track's id, when the line is a track** — the other half of its mark.
+        ///
+        /// A seat does not name a track: a track sits at its record's path, and so does the
+        /// record's own line. Without this, `x` on a track plays the whole record — which is
+        /// what it did until a mutation asked for one line rather than the whole library and
+        /// nothing noticed the difference.
+        id: Option<gmuse_ids::copy::CopyId>,
     },
     /// **Run a filter and get a page of rows** — §7.11, #261.
     ///
@@ -376,6 +403,7 @@ pub mod method {
     pub const QUERY_RUN: &str = "query.run";
     pub const QUERY_TREE: &str = "query.tree";
     pub const QUERY_REVEAL: &str = "query.reveal";
+    pub const QUERY_UNDER: &str = "query.under";
     pub const QUEUE_GET: &str = "queue.get";
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
     pub const QUEUE_SET: &str = "queue.set";
@@ -413,6 +441,7 @@ pub mod method {
         QUERY_RUN,
         QUERY_TREE,
         QUERY_REVEAL,
+        QUERY_UNDER,
         QUEUE_GET,
         QUEUE_ENQUEUE,
         QUEUE_SET,
@@ -551,6 +580,8 @@ impl Request {
                     folds: Option<Folds>,
                     #[serde(default)]
                     anchor: Option<Anchor>,
+                    #[serde(default)]
+                    settle: Option<Vec<String>>,
                 }
                 let p: P = match params {
                     Some(_) => typed(method, params)?,
@@ -561,6 +592,7 @@ impl Request {
                         cursor: None,
                         folds: None,
                         anchor: None,
+                        settle: None,
                     },
                 };
                 Ok(Self::QueryTree {
@@ -570,6 +602,7 @@ impl Request {
                     cursor: p.cursor,
                     folds: p.folds,
                     anchor: p.anchor,
+                    settle: p.settle,
                 })
             }
             method::QUERY_REVEAL => {
@@ -608,6 +641,26 @@ impl Request {
                     id: p.id,
                     from: p.from,
                     backwards: p.backwards,
+                })
+            }
+            method::QUERY_UNDER => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default)]
+                    filter: Option<String>,
+                    #[serde(default)]
+                    levels: Option<Vec<String>>,
+                    #[serde(default)]
+                    path: Vec<String>,
+                    #[serde(default)]
+                    id: Option<gmuse_ids::copy::CopyId>,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryUnder {
+                    filter: p.filter,
+                    levels: p.levels,
+                    path: p.path,
+                    id: p.id,
                 })
             }
             method::QUEUE_GET => {
@@ -720,6 +773,7 @@ impl Request {
             Self::QueryRun { .. } => method::QUERY_RUN,
             Self::QueryTree { .. } => method::QUERY_TREE,
             Self::QueryReveal { .. } => method::QUERY_REVEAL,
+            Self::QueryUnder { .. } => method::QUERY_UNDER,
             Self::QueueGet { .. } => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
             Self::QueueSet { .. } => method::QUEUE_SET,
@@ -771,7 +825,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 27, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 28, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

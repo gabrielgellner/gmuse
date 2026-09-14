@@ -2683,3 +2683,88 @@ fn a_reveal_opens_the_way_and_says_where_it_landed() {
         "a reveal with no target was accepted"
     );
 }
+
+/// **Everything a view asks a library, asked over the wire** — #261.
+///
+/// `Holding` is the seam a view browses through, and `ui::holding` picks an implementation.
+/// This checks the wire can answer the questions that implementation will have to: what sits
+/// under a line, where the cursor goes when its line was swallowed, and the counts a status
+/// line draws. A seam with no second implementation is a claim; these are what makes it one
+/// that can be met.
+#[test]
+fn the_wire_answers_what_a_view_holds_a_library_for() {
+    let (engine, _recording) = start_with_a_track("tree-holding");
+    let client = Client::connect(&engine.socket, "browser", "0").expect("connect");
+    let ask = |m: &str, p: serde_json::Value| client.call(m, Some(p)).expect(m);
+
+    // **The counts, off the same shelf that answered the page.** A status line redraws them
+    // every frame, and a round trip for three numbers would be the wrong trade.
+    let open = ask("query.tree", serde_json::json!({ "limit": 100 }));
+    let rows = open["rows"].as_u64().expect("a row count");
+    assert!(rows > 0, "no rows counted");
+    assert_eq!(
+        open["artists"].as_u64().map(|n| n > 0),
+        Some(true),
+        "no artists counted"
+    );
+    assert!(
+        open["albums"].as_u64().is_some_and(|n| n > 0),
+        "no albums counted"
+    );
+
+    // **What sits under a line.** The artist's seat is the first node's own.
+    let nodes = open["nodes"].as_array().expect("nodes");
+    let artist = nodes.first().expect("a first line");
+    assert_eq!(artist["kind"].as_str(), Some("artist"), "{artist}");
+    let under = ask("query.under", serde_json::json!({ "path": artist["seat"] }));
+    let tracks = under["tracks"].as_array().expect("tracks");
+    assert_eq!(
+        tracks.len() as u64,
+        rows,
+        "the artist holds the whole fixture, so `x` on it should reach every track"
+    );
+
+    // **And a track's line stands in for nothing here**, because its record has more than one.
+    let track = nodes
+        .iter()
+        .find(|n| n["kind"] == "track")
+        .expect("a track line");
+    assert!(
+        track.get("stands_for").is_none(),
+        "a track in a drawn record claimed to stand in for it: {track}"
+    );
+
+    // **And `x` on a track is that track, not its record.** A track sits at its record's path
+    // and so does the record's own line, so a lookup by seat alone hands back the record — and
+    // with a fixture whose artist holds everything, that reads the same as the whole library.
+    assert!(rows > 1, "one track cannot show `x` narrowing to one");
+    let one = ask(
+        "query.under",
+        serde_json::json!({ "path": track["seat"], "id": track["id"] }),
+    );
+    assert_eq!(
+        one["tracks"].as_array().map(Vec::len),
+        Some(1),
+        "`x` on a track reached the wrong number of tracks: {}",
+        one["tracks"]
+    );
+
+    // **Where the cursor goes when its line was swallowed.** Shut everything and settle on a
+    // track's seat: the answer is its record's line, not row zero and not an error.
+    let shut = serde_json::json!({ "level": 0, "opened": [], "closed": [] });
+    let settled = ask(
+        "query.tree",
+        serde_json::json!({ "limit": 100, "folds": shut, "settle": track["seat"], "cursor": 99 }),
+    );
+    let at = settled["at"].as_u64().expect("somewhere to land");
+    let total = settled["total"].as_u64().expect("a total");
+    assert!(
+        at < total,
+        "settled at {at} in a tree of {total} lines, which is off the end"
+    );
+    assert_ne!(
+        Some(at),
+        settled["nodes"].as_array().map(|_| 99),
+        "the cursor was used instead of the settle"
+    );
+}

@@ -3190,6 +3190,40 @@ fn run_engine(
             Ok((built, version))
         }
 
+        /// **What sits under one line** — #261.
+        fn under(
+            &self,
+            filter: Option<String>,
+            levels: Option<Vec<String>>,
+            path: Vec<String>,
+            id: Option<gmuse::model::rows::CopyId>,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse::browse::Browsing;
+            let (shelf, version) = self.shelf_for(filter, levels)?;
+            let path: Vec<_> = path
+                .iter()
+                .map(|t| gmuse::shelf::SortKey::already(t))
+                .collect();
+
+            // **Found by mark, not by seat.** A seat does not name a track: a track sits at its
+            // record's path and so does the record's own line, so matching on the seat alone
+            // hands back the record — which is `x` on a track playing the whole album. The id
+            // is the half that tells them apart, and a container has none.
+            let want = (path.clone(), id);
+            let everything =
+                gmuse::browse::flatten(&shelf, &gmuse::fold::Expansion::default(), true);
+            let tracks = match everything.iter().find(|n| n.mark() == want) {
+                Some(node) => shelf.tracks_under(node),
+                // An empty path, or a mark nothing sits at any more, is the whole library.
+                None => shelf.sorted().to_vec(),
+            };
+            Ok(serde_json::json!({
+                "tracks": tracks,
+                "openable": shelf.openable_under(&path),
+                "library_version": version,
+            }))
+        }
+
         /// **Open the way to a line and say where it lands** — #261.
         #[allow(clippy::too_many_arguments)]
         fn reveal(
@@ -3234,6 +3268,7 @@ fn run_engine(
             cursor: Option<usize>,
             folds: Option<gmuse_proto::request::Folds>,
             anchor: Option<gmuse_proto::request::Anchor>,
+            settle: Option<Vec<String>>,
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
             let folds = Self::folds_of(folds);
             let anchor = anchor.map(Self::anchor_of);
@@ -3253,14 +3288,33 @@ fn run_engine(
             // client says which line it was on and the page comes back around wherever that
             // line now is. Falls through to the cursor when the anchor is gone — a row whose
             // fold just closed is not on screen to be anchored to.
+            // **The anchor is the line, the settle is the nearest surviving ancestor.** A
+            // toggle knows exactly which line it was on; a level change may have closed it, and
+            // then the cursor goes where vim puts it — on the fold that swallowed it.
             let at = anchor
                 .as_ref()
                 .and_then(|want| all.iter().position(|n| &n.mark() == want))
+                .or_else(|| {
+                    let seat: Vec<_> = settle
+                        .as_ref()?
+                        .iter()
+                        .map(|t| gmuse::shelf::SortKey::already(t))
+                        .collect();
+                    Some(gmuse::browse::Browsing::settle(
+                        &*shelf,
+                        folds.as_ref().unwrap_or(&Default::default()),
+                        &seat,
+                    ))
+                })
                 .unwrap_or_else(|| cursor.unwrap_or(0))
                 .min(all.len());
             let take = limit.unwrap_or(100).min(5_000);
-            let page: Vec<gmuse::browse::Drawn> =
-                all.iter().skip(at).take(take).map(Into::into).collect();
+            let page: Vec<gmuse::browse::Drawn> = all
+                .iter()
+                .skip(at)
+                .take(take)
+                .map(|n| gmuse::browse::Drawn::of(&shelf, n))
+                .collect();
             let next = at + page.len();
 
             Ok(serde_json::json!({
@@ -3269,6 +3323,12 @@ fn run_engine(
                 "total": all.len(),
                 "next": (next < all.len()).then_some(next),
                 "spine": spine.to_hex(),
+                // **The counts a status line draws** — #261. Free here, because the shelf that
+                // answered the page knows them, and a round trip for three numbers a client
+                // redraws every frame would not be.
+                "rows": shelf.len(),
+                "artists": shelf.artist_count(),
+                "albums": shelf.album_count(),
                 "library_version": version,
             }))
         }
@@ -3620,7 +3680,8 @@ fn run_engine(
                     cursor,
                     folds,
                     anchor,
-                } => self.tree(filter, levels, limit, cursor, folds, anchor),
+                    settle,
+                } => self.tree(filter, levels, limit, cursor, folds, anchor, settle),
 
                 // **Where a search lands, and what had to open for it to** — #261.
                 Call::QueryReveal {
@@ -3632,6 +3693,14 @@ fn run_engine(
                     from,
                     backwards,
                 } => self.reveal(filter, levels, folds, pattern, id, from, backwards),
+
+                // **What `a`, `e`, `x` and `zR` act on** — #261.
+                Call::QueryUnder {
+                    filter,
+                    levels,
+                    path,
+                    id,
+                } => self.under(filter, levels, path, id),
 
                 // **A page, anchored where playback is** — #257.
                 //

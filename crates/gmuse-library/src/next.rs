@@ -281,8 +281,8 @@ pub(crate) fn scoped(
                 return shelf.sorted().to_vec();
             };
             match scope {
-                Scope::Outer => shelf.artist_tracks(artist),
-                _ => shelf.album_tracks(artist, album),
+                Scope::Outer => shelf.artist_tracks(&artist),
+                _ => shelf.album_tracks(&artist, &album),
             }
         }
     }

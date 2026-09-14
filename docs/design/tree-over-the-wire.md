@@ -79,8 +79,11 @@ times. Three scans of 8.9 KB is not a cost worth naming.
 Two methods, both stateless.
 
 ```
-query.tree   { levels, filter, folds, anchor?, limit, cursor }
-          -> { nodes, at, total, next, spine, library_version }
+query.tree   { levels, filter, folds, anchor?, settle?, limit, cursor }
+          -> { nodes, at, total, next, spine, rows, artists, albums, library_version }
+
+query.under  { levels, filter, path, id? }
+          -> { tracks, openable }
 
 query.reveal { levels, filter, folds, target, from?, backwards? }
           -> { open: [path], at }
@@ -97,6 +100,19 @@ seats on the artist (#135), a track under a drawn disc header seats on that disc
 its album. A client re-deriving those is a second copy of a rule.
 
 **Absent folds mean everything open**, which is what a client that keeps no fold state wants and what `/` searches.
+
+`settle` is the other half of `anchor`, and they are not the same question: an anchor is the exact line the cursor was
+on, a settle is the _seat_ it sat at. A toggle knows its line and uses the first; a level change may have closed that
+line entirely, and then the cursor goes where vim puts it — on the fold that swallowed it, which is the deepest visible
+line whose seat is a prefix of the old one.
+
+`query.under` answers what `a`, `e` and `x` act on and what `zR` has left to open, in one call because they cost the
+same walk. **It takes a mark, not a seat.** A seat does not name a track: a track sits at its record's path and so does
+the record's own line, so a lookup by seat hands back the record — which is `x` on a track playing the whole album. The
+`id` is the half that tells them apart, and a container has none.
+
+The counts come back with the page rather than having a method: a status line redraws them every frame, and the shelf
+that answered the page already knows them.
 
 `pattern` or `id`, exactly one — both, or neither, is a bad request rather than a guess, refused in the parser before a
 tree gets built to find out. **The reply gives the index after the reveal, not before**: opening folds inserts rows
