@@ -365,15 +365,45 @@ wasteful; through a socket it is 14,546 asks to answer "all of them", which is t
 
 What is left:
 
-- **the catalogue** — 11.8 MB of ratings, plays, collections and saved views, folded here because `Listened` has no
-  crossing;
+- **the catalogue** — folded here because `Listened` has no crossing. Measured below, because what it is for and what it
+  costs turned out to be different questions;
 - **a filter that does have terms**, which still walks every row at 574 ms. That is the shape `query.run` exists to
   replace, and it is a design step rather than more batching: a view stack is not a filter string, and what crosses has
   to carry the terms, the saved-view definitions and the ordering;
 - **`Remote::open`'s own walk**, which reads all 7,273 lines of a flat tree to keep their ids. Transient, but RSS
   follows the peak — that is a guess at where some of the 61 MB is, and it is unmeasured.
 
-## 10. What this does not decide
+## 10. What a `Listened` crossing would carry, measured
+
+The view keeps an `Arc<Catalogue>` — the whole fold — to answer seven `Listened` questions and read three maps. What
+those actually need, from `just memory-parts`:
+
+|                                                                            |            |
+| -------------------------------------------------------------------------- | ---------- |
+| plays, ratings, acquired, last played                                      | 0.3 MB     |
+| the assertion graph — assertions, concept labels, the four derivation sets | 1.7 MB     |
+| views, collections, entries                                                | 0.7 MB     |
+| **what `Listened` and the view's three reads need**                        | **2.7 MB** |
+| the rest of the catalogue's maps                                           | 2.7 MB     |
+| what `Projected::advance` keeps                                            | 11.8 MB    |
+
+**This changes the shape of the crossing, and it is not what I expected.** The plan had been to split `Listened` into a
+cheap half to ship and an expensive half to ask per recording — `claims` and the two derivation walks read a graph, and
+a filter asks them per row, which is the access pattern that made `Listing::listed` cost 226 µs a row.
+
+The graph is **1.7 MB**. All of it. There is no expensive half to ask about: the whole of what `Listened` needs is 2.7
+MB, which ships in one reply and refreshes on a `library` event, exactly as `Remote::open` already does for the flat
+ordering. **No per-recording round trips, no hot path, and no dependency on moving the filter first.**
+
+Two things that follow:
+
+- The question "how many filters use `genre[…]` brackets" does not need answering. It was the right question for a
+  per-row crossing and there is no reason to build one.
+- The saving is the fold, not the tables: 11.8 MB kept, 2.7 MB shipped instead. The other 9.1 MB is the projection's own
+  state and the catalogue maps nothing in the view reads — `recordings`, `encodings`, `bound`, `artist_names`,
+  `measurements`, `groups`.
+
+## 11. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.

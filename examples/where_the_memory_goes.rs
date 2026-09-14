@@ -205,6 +205,86 @@ fn main() {
         mb(kept)
     );
 
+    // **What a `Listened` crossing would have to carry** — #261.
+    //
+    // The view holds the whole `Catalogue` for seven questions and three maps. Four of the
+    // seven — plays, ratings, acquired, last played — are flat tables keyed by recording, and a
+    // client could hold the lot. The other three — claims, and the two derivation walks — read
+    // the assertion graph, which is a different size and a different shape.
+    {
+        let c = answer.catalogue();
+        let (tables, kept, peak) = accounting::measure(|| {
+            (
+                c.plays.clone(),
+                c.ratings.clone(),
+                c.acquired.clone(),
+                c.last_played.clone(),
+            )
+        });
+        say("listened: the four flat tables", kept, peak);
+        println!(
+            "{:<34} {:>9}",
+            "  plays / ratings / acquired",
+            format!(
+                "{} / {} / {}",
+                tables.0.len(),
+                tables.1.len(),
+                tables.2.len()
+            )
+        );
+        let (assertions, kept, peak) = accounting::measure(|| {
+            (
+                c.assertions.clone(),
+                c.assertions_retracted.clone(),
+                // `claims` turns a concept id into a label, and the two derivation walks read
+                // their own edge sets — so the graph is more than the assertions.
+                c.concepts.clone(),
+                c.derived.clone(),
+                c.derived_retracted.clone(),
+                c.work_derived.clone(),
+                c.work_derived_retracted.clone(),
+            )
+        });
+        say("listened: the assertion graph", kept, peak);
+        println!(
+            "{:<34} {:>9}",
+            "  assertions",
+            assertions.0.len() + assertions.1.len()
+        );
+        let (rest, kept, peak) = accounting::measure(|| {
+            (
+                c.views.clone(),
+                c.collections.clone(),
+                c.entries.clone(),
+                c.entries_retracted.clone(),
+            )
+        });
+        say("listened: views and collections", kept, peak);
+        println!(
+            "{:<34} {:>9}",
+            "  views / collections / entries",
+            format!("{} / {} / {}", rest.0.len(), rest.1.len(), rest.2.len())
+        );
+        // **And what it does not need**, so the split is accounted rather than inferred.
+        let (others, kept, peak) = accounting::measure(|| {
+            (
+                c.recordings.clone(),
+                c.encodings.clone(),
+                c.bound.clone(),
+                c.artist_names.clone(),
+                c.measurements.clone(),
+                c.groups.clone(),
+            )
+        });
+        say("the rest of the catalogue", kept, peak);
+        println!(
+            "{:<34} {:>9}",
+            "  recordings / encodings",
+            format!("{} / {}", others.0.len(), others.1.len())
+        );
+        drop((tables, assertions, rest, others));
+    }
+
     // **What the browse tree costs** — #261. `ui.library` is a `Shelf`, built from the fold by
     // `Shelf::grouped`. If it is cheap, a view can hold one and drop the fold; if it is not,
     // the tree has to be paged too.
