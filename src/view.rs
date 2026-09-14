@@ -377,6 +377,34 @@ impl Stack {
     ///
     /// An empty stack is the whole library, which is what "no catalog active
     /// and no filter" has always meant.
+    /// **Which rows a view holds** — and for the common view, without resolving anything.
+    ///
+    /// A view with no terms is *every row*, and saying so costs one call. Resolving it costs two
+    /// walks of the library: [`Stack::resolve`] turns every row into its recording and
+    /// [`Resolved::copies`] turns every recording back into its rows. In this process that was
+    /// merely wasteful; through a socket it is **14,546 asks to answer "all of them"**, which is
+    /// the one answer that needs no asking at all.
+    ///
+    /// Not folded into `resolve`, because `Resolved` carries `rows` for callers that want the
+    /// *recordings* — view 3's two. This is the question `rebuild_library` actually asks.
+    pub fn members(
+        &self,
+        librarian: &dyn Listing,
+        defs: &dyn Definitions,
+        env: crate::query::filter::Env<'_>,
+    ) -> (std::collections::HashSet<CopyId>, Vec<usize>, Vec<Problem>) {
+        if self.terms.is_empty() {
+            return (
+                Listing::rows(librarian).into_iter().collect(),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+        let resolved = self.resolve(librarian, defs, env);
+        let (demoted, problems) = (resolved.demoted_at.clone(), resolved.problems.clone());
+        (resolved.copies(librarian), demoted, problems)
+    }
+
     pub fn resolve(
         &self,
         librarian: &dyn Listing,

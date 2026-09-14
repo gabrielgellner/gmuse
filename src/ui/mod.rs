@@ -4373,13 +4373,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         // **One fold over one stack** (#94). This used to union the active
         // catalogs and then intersect the filter, with both operators baked
         // into their nouns — so `-` had nowhere to live.
-        let resolved = ui.composed.resolve(ctx.library, &*ui.listened, env);
-        // §2: `+` on a hand-made list has no defensible order, so it gives
-        // the order up — and says which term did it rather than leaving
-        // somebody to notice.
-        let lost = resolved.demoted_at.clone();
-        let problems = resolved.problems.clone();
-        (resolved.copies(ctx.library), lost, problems)
+        ui.composed.members(ctx.library, &*ui.listened, env)
     };
     // The same projection the startup path uses (#84), so refiltering cannot
     // quietly file things a second way.

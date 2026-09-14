@@ -356,9 +356,22 @@ been traded for a 43 MB pile of rows.
 So the saving is the cap, not the desk: `KEEP` bounds the cache at five hundred rows, which is what a screenful and the
 panes beside it need, and a walk blows through it rather than leaving itself behind.
 
-What is left is the catalogue — 11.8 MB of ratings, plays, collections and saved views, folded here because `Listened`
-has no crossing — and the walk itself. **A filter that reads 7,273 rows to keep forty is the wrong shape however it is
-fetched**, which is what §7.11's `query.run` is for, and it is the next thing rather than more batching.
+| after the commonest view stopped resolving | 61.3 MB |
+
+**The commonest view has no terms**, and resolving it cost two walks of the library: `Stack::resolve` turned every row
+into its recording, and `Resolved::copies` turned every recording back into its rows. In this process that was merely
+wasteful; through a socket it is 14,546 asks to answer "all of them", which is the one answer that needs no asking.
+`Stack::members` says it in one call.
+
+What is left:
+
+- **the catalogue** — 11.8 MB of ratings, plays, collections and saved views, folded here because `Listened` has no
+  crossing;
+- **a filter that does have terms**, which still walks every row at 574 ms. That is the shape `query.run` exists to
+  replace, and it is a design step rather than more batching: a view stack is not a filter string, and what crosses has
+  to carry the terms, the saved-view definitions and the ordering;
+- **`Remote::open`'s own walk**, which reads all 7,273 lines of a flat tree to keep their ids. Transient, but RSS
+  follows the peak — that is a guess at where some of the 61 MB is, and it is unmeasured.
 
 ## 10. What this does not decide
 

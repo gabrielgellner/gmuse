@@ -2349,17 +2349,15 @@ fn run_tui(
     // From the same fold the librarian published, so this and the view it is
     // resolved against cannot disagree about what the log says.
     let listened = &*library_view.listened;
-    let members = composed
-        .resolve(
-            reading(&reader, &library_view),
-            listened,
-            gmuse::query::filter::Env {
-                listened: Some(listened),
-                named: None,
-                now,
-            },
-        )
-        .copies(reading(&reader, &library_view));
+    let (members, _, _) = composed.members(
+        reading(&reader, &library_view),
+        listened,
+        gmuse::query::filter::Env {
+            listened: Some(listened),
+            named: None,
+            now,
+        },
+    );
 
     // **Grouped by what the model says, not by what the tags carry** (#84).
     // The librarian has to exist first, which is why this sits below rather
