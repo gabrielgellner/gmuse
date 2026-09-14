@@ -82,6 +82,11 @@ impl TreeState {
         lib.page(&self.folds, self.selected, 1).into_iter().next()
     }
 
+    /// The lines to draw: `limit` of them from `at`.
+    pub fn page(&self, lib: &dyn Browsing, at: usize, limit: usize) -> Vec<Row> {
+        lib.page(&self.folds, at, limit)
+    }
+
     /// How many lines are visible.
     pub fn total(&self, lib: &dyn Browsing) -> usize {
         lib.spine(&self.folds).len()

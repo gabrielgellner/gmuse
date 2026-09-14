@@ -612,9 +612,13 @@ pub struct Found {
 pub trait Browsing {
     /// The lines visible under `folds`, or every line when `unfolded`.
     ///
-    /// **The last whole-tree question**, and the two callers left are named in
-    /// `tree-over-the-wire.md` §7: the renderer, which builds a `ListItem` per line and should
-    /// build a screenful, and the search's haystack, which [`Browsing::find`] replaces.
+    /// **Nothing in the program calls this any more** — #261. The renderer draws a window and
+    /// the search asks [`Browsing::find`], which were its last two callers.
+    ///
+    /// It stays because it is the **oracle**: the tests check the rules a page and a search
+    /// have to obey — a closed fold still holds its lines, a reveal lands where the revealed
+    /// tree puts it — against a list they can see, and a claim about a page is only checkable
+    /// against the whole it came from.
     fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node>;
 
     /// **The shape of the whole tree under these folds** — four bits a line.

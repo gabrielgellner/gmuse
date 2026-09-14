@@ -6459,14 +6459,16 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         return;
     }
 
-    // **The last whole-tree ask in the program** — #261, `tree-over-the-wire.md` §7.
+    // **A screenful, not the library** — #261, `tree-over-the-wire.md` §7.
     //
-    // Every line becomes a `ListItem` and ratatui gets all 8,932 of them, forty of which are
-    // on screen. Windowing it is not a matter of slicing here: the scroll offset round-trips
-    // through ratatui, which adjusts it itself to bring the selection into view, so drawing a
-    // window means this taking ownership of the scrolling — `zt`/`zz`/`zb`, the `~` filler and
-    // `remember` all hang off it. Its own change.
-    let rows = ui.tree.rows(&ui.library);
+    // This built a `ListItem` for every one of 8,932 lines and handed ratatui the lot, forty of
+    // which are on screen — and called `ctx.library.listed` once per line per frame to do it.
+    // `Scroll::window` owns the scrolling now, because ratatui cannot adjust an offset over
+    // lines it is never shown.
+    let height = view_height(area);
+    let total = ui.tree.total(&ui.library);
+    let top = ui.tree_scroll.window(ui.tree.selected, total, height);
+    let rows = ui.tree.page(&ui.library, top, height);
     // Artists, albums and tracks in one list. A track row is rendered through
     // the format template rather than labelled, because it has to look
     // different from the artist row above it — which is what makes a single
@@ -6474,7 +6476,10 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
-        .map(|(i, row)| {
+        // **The absolute line number, not the window's.** The relative gutter counts from the
+        // cursor, which is an index into the whole tree.
+        .map(|(j, row)| {
+            let i = top + j;
             let mut spans: Vec<Span> = Vec::new();
             if ui.relative_numbers {
                 spans.push(Span::styled(
@@ -6537,10 +6542,13 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         .collect();
 
     let mut items = items;
-    let mut state =
-        ui.tree_scroll
-            .state_within(Some(ui.tree.selected), rows.len(), view_height(area));
-    pad_to_view(&mut items, &ui.theme, area, state.offset());
+    // **Offset zero, selection relative.** The widget is handed the window and nothing else, so
+    // its coordinates are the window's; `Scroll::window` above already recorded where that
+    // window starts, which is why `remember` is not called here.
+    let mut state = ListState::default()
+        .with_selected(ui.tree.selected.checked_sub(top))
+        .with_offset(0);
+    pad_to_view(&mut items, &ui.theme, area, 0);
     frame.render_stateful_widget(
         List::new(items)
             .block(pane_block(&ui.theme, "library", true))
@@ -6548,7 +6556,6 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
         area,
         &mut state,
     );
-    ui.tree_scroll.remember(&state);
 }
 
 /// What to draw a track list as.
@@ -6587,6 +6594,34 @@ impl Scroll {
     /// Called after rendering, with the state ratatui just adjusted.
     fn remember(&self, state: &ListState) {
         self.top.set(state.offset());
+    }
+
+    /// **Where a windowed pane is scrolled to** — #261.
+    ///
+    /// The panes that hand ratatui every row let it do this: it adjusts the offset to bring the
+    /// selection into view and [`Scroll::remember`] reads the answer back. A pane that draws a
+    /// *window* cannot, because ratatui only ever sees lines that are already on screen — so
+    /// the rule moves here, and it is ratatui's own: scroll the least that puts the cursor in
+    /// view, and otherwise do not scroll at all.
+    ///
+    /// Returns the first visible line and remembers it, so this replaces `remember` rather than
+    /// preceding it — asking ratatui afterwards would read back the window's own offset, which
+    /// is always zero.
+    fn window(&self, selected: usize, len: usize, height: usize) -> usize {
+        self.row.set(selected);
+        self.height.set(height);
+        // Now that the row is this frame's, honour any deferred `zz`.
+        if self.centre_next.replace(false) {
+            self.place(crate::cmd::Place::Centre);
+        }
+        let mut top = self.top.get().min(len.saturating_sub(1));
+        if selected < top {
+            top = selected;
+        } else if height > 0 && selected >= top + height {
+            top = selected + 1 - height;
+        }
+        self.top.set(top);
+        top
     }
 
     /// The first visible row, as of the last frame.
@@ -6915,6 +6950,145 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Which screen row the selection highlight landed on.
+    ///
+    /// **Styles, not symbols.** `render` reads the buffer's characters, and a highlight is a
+    /// colour — so a selection pointing at the wrong line, or off the end of a window, draws
+    /// exactly the same text. It is the one thing about a windowed pane that a text comparison
+    /// cannot see.
+    fn highlighted(ui: &Ui, ctx: &Context<'_>, w: u16, h: u16) -> Option<u16> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, ui, ctx)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let want = highlight(&ui.theme, true).bg?;
+        // **Inside the pane, and one column in.** The tab bar carries the same background —
+        // it is the theme's selected colour and the bar uses it too — so a scan from row zero
+        // finds the tabs every time and reports row 0 whatever the list did. Content starts
+        // below the tab bar and the pane's top border; `x = 1` is inside its left edge.
+        (2..buf.area.height).find(|y| buf[(1, *y)].bg == want)
+    }
+
+    /// **The tree draws a window, and scrolls both ways** — #261.
+    ///
+    /// The pane used to hand ratatui every line and let it choose the offset. It gets a
+    /// screenful now, so the "scroll the least that puts the cursor in view" rule is
+    /// `Scroll::window`'s — and a rule that only ever scrolls *down* looks perfectly correct
+    /// until you press `k` at the top of the screen.
+    #[test]
+    fn the_tree_scrolls_both_ways_over_a_window() {
+        let store = fixture();
+        let ctx = Context {
+            library: lib_of(&store),
+            player: None,
+            gapless: None,
+        };
+        let mut ui = ui_of(&store, true);
+        ui.relative_numbers = true;
+        ui.tree.open_everything(&ui.library);
+
+        // A pane far shorter than the tree, or there is no window to speak of.
+        let (w, h) = (74u16, 8u16);
+        let height = view_height(Rect::new(0, 0, w, h));
+        let total = ui.tree.total(&ui.library);
+        assert!(
+            total > height * 2,
+            "{total} lines in a {height}-line pane cannot show scrolling"
+        );
+
+        let head = render(&ui, &ctx, w, h);
+        assert!(!head.is_empty(), "nothing drew");
+
+        // Down past the bottom: the pane must follow.
+        ui.tree.selected = total - 1;
+        let tail = render(&ui, &ctx, w, h);
+        assert_ne!(head, tail, "the pane did not scroll down to the last line");
+        assert!(
+            ui.tree_scroll.top.get() > 0,
+            "the last line was drawn without scrolling"
+        );
+
+        // **And back up.** This is the half that survived its mutation: everything above still
+        // passes when the rule only ever scrolls downwards.
+        ui.tree.selected = 0;
+        let again = render(&ui, &ctx, w, h);
+        assert_eq!(
+            ui.tree_scroll.top.get(),
+            0,
+            "the pane did not scroll back up to the first line"
+        );
+        assert_eq!(
+            again, head,
+            "scrolling back did not redraw the first screenful"
+        );
+    }
+
+    /// **The relative gutter and the highlight both follow the cursor through a scrolled
+    /// window** — #261.
+    ///
+    /// A window that numbered itself would be right on the first screenful and wrong by the
+    /// scroll offset on every one after. A selection index that stayed the tree's would point
+    /// past the end of a six-item list — which draws **identical text**, and highlights the
+    /// wrong line or none at all. That second one is why this reads styles as well as symbols.
+    #[test]
+    fn the_gutter_numbers_the_tree_not_the_window() {
+        let store = fixture();
+        let ctx = Context {
+            library: lib_of(&store),
+            player: None,
+            gapless: None,
+        };
+        let mut ui = ui_of(&store, true);
+        ui.relative_numbers = true;
+        ui.tree.open_everything(&ui.library);
+
+        let (w, h) = (74u16, 8u16);
+        let total = ui.tree.total(&ui.library);
+
+        // Scroll to the end, then put the cursor one line *inside* that window. Moving it up
+        // past the top would scroll again and land it on row 0, which is the one row where
+        // every way of numbering agrees.
+        ui.tree.selected = total - 1;
+        let _ = render(&ui, &ctx, w, h);
+        let top = ui.tree_scroll.top.get();
+        assert!(
+            top > 0,
+            "the pane did not scroll, so there is no window to get wrong"
+        );
+        ui.tree.selected = top + 1;
+        let out = render(&ui, &ctx, w, h);
+        assert_eq!(ui.tree_scroll.top.get(), top, "the pane scrolled again");
+
+        // **The pane's own height, counted from what it drew.** `view_height` measures the
+        // whole terminal rect, which is two rows more than this pane gets — and reasoning from
+        // it is how the first version of this test put the cursor on the window's last line
+        // while believing it was in the middle.
+        let drawn = out.lines().filter(|l| l.starts_with('\u{2502}')).count();
+        assert!(
+            drawn > 2,
+            "{drawn} lines drawn, so row 1 is on an edge and proves nothing:\n{out}"
+        );
+
+        let row = 1;
+        let gutter = |l: &str| {
+            l.trim_start_matches(['\u{2502}', ' '])
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned()
+        };
+        // The cursor's own line carries the absolute number; its neighbours their distance.
+        assert_eq!(
+            gutter(out.lines().nth(2 + row).unwrap_or_default()),
+            format!("{}", ui.tree.selected + 1),
+            "the cursor's line is not row {row} of the window:\n{out}"
+        );
+        assert_eq!(
+            highlighted(&ui, &ctx, w, h),
+            Some(2 + row as u16),
+            "the highlight is not on the cursor's line:\n{out}"
+        );
     }
 
     #[test]

@@ -202,14 +202,19 @@ between that list's coordinates and the cursor's — dropped by hand whenever th
 and answers in the cursor's own coordinates, so `run_search`, `search_cursor` and `place_search` each lost their tree
 branch entirely.
 
-**One caller of `lines` is left: the renderer.** It builds a `ListItem` per line and hands ratatui all 8,932, of which
-forty are on screen — and it is also where `ctx.library.listed` runs once per line per frame, which is where the two
-halves of §1 meet. Windowing it is not slicing: the scroll offset round-trips through ratatui, which adjusts it itself
-to bring the selection into view, so drawing a window means the view taking ownership of scrolling — `zt`/`zz`/`zb`, the
-`~` filler and `remember` all hang off that. Its own change.
+**The renderer draws a window.** It built a `ListItem` for every one of 8,932 lines and handed ratatui the lot, forty of
+which are on screen — and called `ctx.library.listed` once per line per frame to do it. Both are now a screenful.
 
-Until it goes and a socket implements the trait, an attached view still folds the log to build its own `Shelf` — the
-40.6 MB in §1, still there.
+Taking the window meant taking the scrolling: ratatui adjusts the offset itself to bring the selection into view, and it
+cannot do that over lines it is never shown. `Scroll::window` is that rule — scroll the least that puts the cursor in
+view, otherwise do not scroll — and the widget is handed offset zero with the selection made relative to the window.
+
+**`lines` has no caller left.** It stays as the tests' oracle: a claim about a page is only checkable against the whole
+it came from.
+
+So nothing in the view asks for the tree any more. What remains before the 40.6 MB comes off is a **second
+implementation** — `Browsing` over the socket — and the detail reads behind `ctx.library`, which §1 explains have to
+land together.
 
 ## 8. What this does not decide
 
