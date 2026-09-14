@@ -599,6 +599,94 @@ pub struct Found {
     pub at: usize,
 }
 
+/// **How a view asks for a tree** — #261, `tree-over-the-wire.md`.
+///
+/// Three questions, which is all `ui::tree` ever asked a `Shelf`: what lines are visible under
+/// these folds, what tracks sit under this line, and what is left to open under this path. A
+/// view that names this instead of a `Shelf` is one implementation away from not holding a
+/// library at all, which is the whole point — `Context::player`'s `dyn Transport` is the same
+/// move, made for the same reason (#219).
+///
+/// **`lines` returns all of them, and that is where this is not finished.** A page is what a
+/// view should hold; this is the seam, not yet the paging.
+pub trait Browsing {
+    /// The lines visible under `folds`, or every line when `unfolded`.
+    fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node>;
+
+    /// Every track under one line: one track, one disc, one record, or an artist's whole shelf.
+    fn tracks_under(&self, node: &Node) -> Vec<CopyId>;
+
+    /// Every openable path strictly under `path`.
+    fn openable_under(&self, path: &[SortKey]) -> Vec<Vec<SortKey>>;
+
+    /// Open the way to a line and say where it lands — see [`reveal`].
+    fn find(&self, folds: &Expansion<SortKey>, want: &Target, from: usize) -> Option<Found>;
+}
+
+impl Browsing for Shelf {
+    fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node> {
+        flatten(self, folds, unfolded)
+    }
+
+    /// What `a` and `e` add, and what `x` plays the first of.
+    fn tracks_under(&self, node: &Node) -> Vec<CopyId> {
+        match node {
+            Node::Artist { key, .. } => self
+                .artists()
+                .find(|(k, _)| *k == key)
+                .map(|(_, albums)| albums.values().flatten().copied().collect())
+                .unwrap_or_default(),
+            Node::Album { artist, key, .. } => self
+                .artists()
+                .find(|(k, _)| *k == artist)
+                .and_then(|(_, albums)| albums.get(key))
+                .cloned()
+                .unwrap_or_default(),
+            // A disc plays the disc, which is what `x` on one should mean.
+            Node::Disc {
+                artist, album, key, ..
+            } => self
+                .artists()
+                .find(|(k, _)| *k == artist)
+                .and_then(|(_, albums)| albums.get(album))
+                .map(|tracks| {
+                    tracks
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            self.disc_of(*id).is_some_and(|n| {
+                                crate::model::sortkey::sort_key(&format!("{n:03}"), false) == *key
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Node::Track { id, .. } => vec![*id],
+        }
+    }
+
+    fn find(&self, folds: &Expansion<SortKey>, want: &Target, from: usize) -> Option<Found> {
+        reveal(self, folds, want, from)
+    }
+
+    /// Only albums can be under anything, so this is one level deep by construction.
+    fn openable_under(&self, path: &[SortKey]) -> Vec<Vec<SortKey>> {
+        let [artist] = path else { return Vec::new() };
+        self.artists()
+            .find(|(k, _)| *k == artist)
+            .map(|(_, albums)| {
+                albums
+                    .iter()
+                    // **A group of one has no fold to open** (#135). Reporting one would make
+                    // `zR` believe there was something still shut, on a row that is not drawn.
+                    .filter(|(_, tracks)| tracks.len() > 1)
+                    .map(|(album, _)| vec![artist.clone(), album.clone()])
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 /// The shape of these lines, and nothing else about them — #261.
 pub fn spine_of(rows: &[Node]) -> Spine {
     let mut spine = Spine::default();

@@ -682,3 +682,52 @@ fn block<'a>(text: &'a str, header: &str) -> Option<&'a str> {
     }
     None
 }
+
+/// **The tree view asks a seam, not a `Shelf`** — #261, `tree-over-the-wire.md`.
+///
+/// `ui::tree` is the one place that browsed by holding the library's own projection, and while
+/// it did, an attached view had to fold the log to build one — which is the 40.6 MB the design
+/// is about. Every one of its twenty methods takes a `dyn Browsing` now, and the one
+/// implementation is `Shelf`. A second one is a socket.
+///
+/// **Checked as an absence in production code, not as a count of methods.** The seam is worth
+/// nothing the moment one path reaches past it, and reaching past it compiles perfectly well —
+/// it is `use crate::shelf::Shelf` that would have to come back.
+#[test]
+fn the_tree_view_holds_no_projection_of_its_own() {
+    let tree = std::fs::read_to_string("src/ui/tree.rs").expect("the tree view");
+
+    // The instrument: this proves nothing if the file stopped being the tree view.
+    assert!(
+        tree.contains("fn step_over(") && tree.contains("impl TreeState"),
+        "src/ui/tree.rs is not the navigator any more — this check needs rewriting"
+    );
+    let takes = tree.matches("lib: &dyn Browsing").count();
+    assert!(
+        takes >= 15,
+        "only {takes} methods take a `Browsing`, so most of the view still asks something else"
+    );
+
+    // `Shelf` may be named in the tests — they need a library to browse — and nowhere above
+    // them. `#[cfg(test)]` marks the boundary, and the first one is where production ends.
+    let production = match tree.find("#[cfg(test)]") {
+        Some(at) => &tree[..at],
+        None => panic!("no tests in the tree view at all, which cannot be right"),
+    };
+    assert!(
+        production.len() > 10_000,
+        "only {} bytes of production code found before the first `#[cfg(test)]`",
+        production.len()
+    );
+    for (n, line) in production.lines().enumerate() {
+        let line = line.trim();
+        if line.starts_with("//") {
+            continue;
+        }
+        assert!(
+            !line.contains("Shelf"),
+            "src/ui/tree.rs:{} names a `Shelf`: {line}",
+            n + 1
+        );
+    }
+}

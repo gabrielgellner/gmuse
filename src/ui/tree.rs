@@ -16,10 +16,13 @@
 /// `Row` was this module's own enum and is `browse::Node`, because the librarian is what
 /// builds a tree once the view stops holding one (`tree-over-the-wire.md`). Re-exported under
 /// the old name: every call site draws a *row*, and renaming 200 of them says nothing.
-pub use crate::browse::{Mark, Node as Row, Spine, spine_of, stands_for};
+pub use crate::browse::{Browsing, Mark, Node as Row, Spine, spine_of, stands_for};
 use crate::cmd::Motion;
 use crate::model::rows::CopyId;
-use crate::shelf::{Shelf, SortKey};
+// **No `Shelf` here any more** — #261. The view asks a `Browsing`, which a `Shelf` happens to
+// implement today and a socket will implement next. The tests below still build one, because a
+// test needs a library to browse.
+use crate::shelf::SortKey;
 use crate::ui::fold::Expansion;
 
 /// Which pane of view 1 has focus.
@@ -71,7 +74,7 @@ impl TreeState {
     ///
     /// Display names come from the first track under each node, since §4 keeps
     /// display strings on the `Track` and only sort keys in the tree.
-    pub fn rows(&self, lib: &Shelf) -> Vec<Row> {
+    pub fn rows(&self, lib: &dyn Browsing) -> Vec<Row> {
         self.flatten(lib, false)
     }
 
@@ -82,12 +85,12 @@ impl TreeState {
     /// shut found nothing at all, because the album row it wanted did not
     /// exist yet. The search looks here and the reveal opens the way to what
     /// it found.
-    pub fn all_rows(&self, lib: &Shelf) -> Vec<Row> {
+    pub fn all_rows(&self, lib: &dyn Browsing) -> Vec<Row> {
         self.flatten(lib, true)
     }
 
-    fn flatten(&self, lib: &Shelf, unfolded: bool) -> Vec<Row> {
-        crate::browse::flatten(lib, &self.folds, unfolded)
+    fn flatten(&self, lib: &dyn Browsing, unfolded: bool) -> Vec<Row> {
+        lib.lines(&self.folds, unfolded)
     }
 
     /// **Open the way to a row and put the cursor on it** — #131.
@@ -98,7 +101,7 @@ impl TreeState {
     ///
     /// The tree is three levels whatever `levels` groups by, so this is the
     /// same operation for `[artist, album]` and for `[genre, album]`.
-    pub fn reveal_row(&mut self, lib: &Shelf, row: &Row) {
+    pub fn reveal_row(&mut self, lib: &dyn Browsing, row: &Row) {
         match row {
             Row::Artist { .. } => {}
             Row::Album { artist, .. } => self.folds.open(std::slice::from_ref(artist)),
@@ -163,48 +166,15 @@ impl TreeState {
 
     /// Every track under the selected row: one track, one album, or everything
     /// by an artist. What `a` and `e` add, and what `x` plays the first of.
-    pub fn tracks_for(&self, lib: &Shelf) -> Vec<CopyId> {
-        let rows = self.rows(lib);
-        let Some(row) = rows.get(self.selected) else {
-            return Vec::new();
-        };
-        match row {
-            Row::Artist { key, .. } => lib
-                .artists()
-                .find(|(k, _)| *k == key)
-                .map(|(_, albums)| albums.values().flatten().copied().collect())
-                .unwrap_or_default(),
-            Row::Album { artist, key, .. } => lib
-                .artists()
-                .find(|(k, _)| *k == artist)
-                .and_then(|(_, albums)| albums.get(key))
-                .cloned()
-                .unwrap_or_default(),
-            // A disc plays the disc, which is what `x` on one should mean.
-            Row::Disc {
-                artist, album, key, ..
-            } => lib
-                .artists()
-                .find(|(k, _)| *k == artist)
-                .and_then(|(_, albums)| albums.get(album))
-                .map(|tracks| {
-                    tracks
-                        .iter()
-                        .copied()
-                        .filter(|id| {
-                            lib.disc_of(*id).is_some_and(|n| {
-                                crate::model::sortkey::sort_key(&format!("{n:03}"), false) == *key
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Row::Track { id, .. } => vec![*id],
-        }
+    pub fn tracks_for(&self, lib: &dyn Browsing) -> Vec<CopyId> {
+        self.rows(lib)
+            .get(self.selected)
+            .map(|row| lib.tracks_under(row))
+            .unwrap_or_default()
     }
 
     /// The track on the selected row, if it is one.
-    pub fn selected_track(&self, lib: &Shelf) -> Option<CopyId> {
+    pub fn selected_track(&self, lib: &dyn Browsing) -> Option<CopyId> {
         match self.rows(lib).get(self.selected) {
             Some(Row::Track { id, .. }) => Some(*id),
             _ => None,
@@ -216,7 +186,7 @@ impl TreeState {
     /// Deliberately **not** `close()` then `open()`: `close` walks up when the
     /// node is already shut, which is right for `h` and wrong here — toggling
     /// a closed album would close its artist instead of opening the album.
-    pub fn toggle(&mut self, lib: &Shelf) {
+    pub fn toggle(&mut self, lib: &dyn Browsing) {
         let Some(path) = self.path_under(lib) else {
             return;
         };
@@ -224,14 +194,14 @@ impl TreeState {
     }
 
     /// `zo` — open the node under the cursor, and only it.
-    pub fn open(&mut self, lib: &Shelf) {
+    pub fn open(&mut self, lib: &dyn Browsing) {
         if let Some(path) = self.path_under(lib) {
             self.folds.open(&path);
         }
     }
 
     /// `zO` — open the node under the cursor and everything beneath it.
-    pub fn open_deep(&mut self, lib: &Shelf) {
+    pub fn open_deep(&mut self, lib: &dyn Browsing) {
         let Some(path) = self.path_under(lib) else {
             return;
         };
@@ -242,7 +212,7 @@ impl TreeState {
 
     /// `zC` — close the node under the cursor and everything beneath it, so
     /// that reopening it does not spill the subtree you had expanded inside.
-    pub fn close_deep(&mut self, lib: &Shelf) {
+    pub fn close_deep(&mut self, lib: &dyn Browsing) {
         let Some(path) = self.path_under(lib) else {
             return;
         };
@@ -256,7 +226,7 @@ impl TreeState {
     /// Reads the node's own state rather than its subtree's, as vim does: the
     /// question `zA` answers is "is this one open", and what is underneath it
     /// follows rather than votes.
-    pub fn toggle_deep(&mut self, lib: &Shelf) {
+    pub fn toggle_deep(&mut self, lib: &dyn Browsing) {
         let Some(path) = self.path_under(lib) else {
             return;
         };
@@ -269,22 +239,22 @@ impl TreeState {
 
     /// `zR` — every fold open. Depth 2 is the whole tree: artists at 0,
     /// albums at 1.
-    pub fn open_everything(&mut self, lib: &Shelf) {
+    pub fn open_everything(&mut self, lib: &dyn Browsing) {
         self.keeping_cursor(lib, |t| t.folds.set_level(DEPTH));
     }
 
     /// `zM` — every fold closed.
-    pub fn close_everything(&mut self, lib: &Shelf) {
+    pub fn close_everything(&mut self, lib: &dyn Browsing) {
         self.keeping_cursor(lib, |t| t.folds.set_level(0));
     }
 
     /// `zr` — one level more. From nothing that is artists, then albums.
-    pub fn more(&mut self, lib: &Shelf) {
+    pub fn more(&mut self, lib: &dyn Browsing) {
         self.keeping_cursor(lib, |t| t.folds.more());
     }
 
     /// `zm` — one level fewer.
-    pub fn less(&mut self, lib: &Shelf) {
+    pub fn less(&mut self, lib: &dyn Browsing) {
         self.keeping_cursor(lib, |t| t.folds.less());
     }
 
@@ -298,7 +268,7 @@ impl TreeState {
     /// Stops at the ends rather than wrapping, as vim's `}` and `]]` do. A
     /// motion that finds nothing leaves the cursor alone, so a count that
     /// overshoots lands on the last match instead of nowhere.
-    pub fn go(&mut self, lib: &Shelf, motion: Motion, count: usize) {
+    pub fn go(&mut self, lib: &dyn Browsing, motion: Motion, count: usize) {
         for _ in 0..count.max(1) {
             let rows = self.rows(lib);
             let Some(at) = self.step(&rows, motion) else {
@@ -328,7 +298,7 @@ impl TreeState {
     /// sits on a row that `rows()` produced, so it is visible by construction.
     /// It is only meaningful *after* something has closed underneath it, which
     /// is exactly this.
-    pub fn only(&mut self, lib: &Shelf) {
+    pub fn only(&mut self, lib: &dyn Browsing) {
         let rows = self.rows(lib);
         let Some(row) = rows.get(self.selected) else {
             return;
@@ -352,28 +322,17 @@ impl TreeState {
     ///
     /// Nothing else is disturbed — the point is to find the playing track
     /// without losing the shape you had built up looking for it.
-    pub fn reveal(&mut self, lib: &Shelf, id: CopyId) -> bool {
-        let Some((artist, album)) = lib.artists().find_map(|(artist, albums)| {
-            albums
-                .iter()
-                .find(|(_, ids)| ids.contains(&id))
-                .map(|(album, _)| (artist.clone(), album.clone()))
-        }) else {
+    pub fn reveal(&mut self, lib: &dyn Browsing, id: CopyId) -> bool {
+        // **Through the same door a `/` goes through** — #261. This used to open the artist and
+        // the album by hand, which is right until a record spans discs: the track is under a
+        // disc header too (#169), and opening two of its three ancestors leaves the cursor on
+        // the header rather than the track. `ancestors` knows all three.
+        let Some(found) = lib.find(&self.folds, &crate::browse::Target::Id(id), 0) else {
             return false;
         };
-        self.folds
-            .open_all(vec![vec![artist.clone()], vec![artist, album]]);
-        match self
-            .rows(lib)
-            .iter()
-            .position(|r| matches!(r, Row::Track { id: got, .. } if *got == id))
-        {
-            Some(at) => {
-                self.selected = at;
-                true
-            }
-            None => false,
-        }
+        self.folds.open_all(found.open);
+        self.selected = found.at;
+        true
     }
 
     /// **What the cursor is on, in terms that survive the list being rebuilt.**
@@ -387,7 +346,7 @@ impl TreeState {
     /// It stopped being right when a librarian change started causing a rebuild. Rating
     /// a track, or a play being counted halfway through one, sent the cursor to the top
     /// of the tree — and the second happens with nobody touching the keyboard.
-    pub fn mark(&self, lib: &Shelf) -> Option<Mark> {
+    pub fn mark(&self, lib: &dyn Browsing) -> Option<Mark> {
         self.rows(lib).get(self.selected).map(Self::mark_of_inner)
     }
 
@@ -397,7 +356,7 @@ impl TreeState {
     /// was retired, the filter no longer admits it — the nearest thing to the truth is
     /// the position the cursor held, clamped to the list that exists now. Row 0 is a
     /// guess that happens to be wrong every time the list is longer than one.
-    pub fn point_at(&mut self, lib: &Shelf, mark: Option<Mark>) {
+    pub fn point_at(&mut self, lib: &dyn Browsing, mark: Option<Mark>) {
         let rows = self.rows(lib);
         self.selected =
             match mark.and_then(|want| rows.iter().position(|r| Self::mark_of_inner(r) == want)) {
@@ -414,27 +373,14 @@ impl TreeState {
     }
 
     /// The openable path under the cursor, if the cursor is on one.
-    fn path_under(&self, lib: &Shelf) -> Option<Vec<SortKey>> {
+    fn path_under(&self, lib: &dyn Browsing) -> Option<Vec<SortKey>> {
         self.rows(lib).get(self.selected).and_then(Self::path_of)
     }
 
     /// Every openable path strictly under `path`. Only albums can be under
     /// anything, so this is one level deep by construction.
-    fn descendants(&self, lib: &Shelf, path: &[SortKey]) -> Vec<Vec<SortKey>> {
-        let [artist] = path else { return Vec::new() };
-        lib.artists()
-            .find(|(k, _)| *k == artist)
-            .map(|(_, albums)| {
-                albums
-                    .iter()
-                    // **A group of one has no fold to open** (#135). Reporting
-                    // one would make `zR` believe there was something still
-                    // shut, on a row that is not drawn.
-                    .filter(|(_, tracks)| tracks.len() > 1)
-                    .map(|(album, _)| vec![artist.clone(), album.clone()])
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn descendants(&self, lib: &dyn Browsing, path: &[SortKey]) -> Vec<Vec<SortKey>> {
+        lib.openable_under(path)
     }
 
     /// Run a fold change and land the cursor somewhere that still exists.
@@ -442,7 +388,7 @@ impl TreeState {
     /// A level change can close the row out from under you. vim puts the
     /// cursor on the start of the fold that swallowed it, which here means the
     /// deepest visible ancestor of where you were.
-    fn keeping_cursor(&mut self, lib: &Shelf, change: impl FnOnce(&mut Self)) {
+    fn keeping_cursor(&mut self, lib: &dyn Browsing, change: impl FnOnce(&mut Self)) {
         let seat = self.rows(lib).get(self.selected).map(Self::seat_of);
         change(self);
         let rows = self.rows(lib);
@@ -469,7 +415,7 @@ impl TreeState {
     /// rule, and it is what lets repeated `h` walk up and out without anything
     /// needing a concept of "level". `zc` is bound to it too, which is what
     /// vim's `zc` does on a line inside a fold.
-    pub fn close(&mut self, lib: &Shelf) -> bool {
+    pub fn close(&mut self, lib: &dyn Browsing) -> bool {
         let rows = self.rows(lib);
         let Some(row) = rows.get(self.selected) else {
             return false;
@@ -631,6 +577,7 @@ mod spine_agrees {
     use super::*;
     use crate::fixture::Tagged as Track;
     use crate::operations::scan::Holdings as Scan;
+    use crate::shelf::Shelf;
     use std::path::PathBuf;
 
     /// Every shape the flatten can emit, in one library.
@@ -812,6 +759,7 @@ mod spine_agrees {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shelf::Shelf;
 
     impl TreeState {
         /// The oracle's own depth, kept beside it: production reads [`Row::depth`] now.
@@ -1576,7 +1524,7 @@ mod tests {
 
     /// Rows as `depth:label`, so a test can say what the tree looks like
     /// without reproducing the render.
-    fn shape(state: &TreeState, lib: &Shelf) -> Vec<String> {
+    fn shape(state: &TreeState, lib: &dyn Browsing) -> Vec<String> {
         state
             .rows(lib)
             .iter()
@@ -1823,7 +1771,7 @@ mod tests {
     /// drawn** (#135) — their tracks sit where the album rows were. That is
     /// deliberate here: the motions have to walk a collapsed row like any
     /// other, and this fixture is where they meet one.
-    fn opened(lib: &Shelf) -> TreeState {
+    fn opened(lib: &dyn Browsing) -> TreeState {
         let mut state = TreeState::default();
         state.open_everything(lib);
         state

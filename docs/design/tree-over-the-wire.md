@@ -172,7 +172,26 @@ recover the string, which is how a projection that exists to answer questions en
 one"_. Tracks were the level that rule had not been applied to, and the renderer did exactly that. It costs **1.0 MB** —
 the shelf goes from 1.7 MB to 2.7 MB — and it is held once, librarian-side, rather than in every view.
 
-## 7. What this does not decide
+## 7. The seam, and what is still on the wrong side of it
+
+`ui::tree` asks a **`Browsing`**, not a `Shelf`. Four questions, which is all twenty of its methods ever asked one:
+
+|                             |                                  |
+| --------------------------- | -------------------------------- |
+| `lines(folds, unfolded)`    | what is visible, or everything   |
+| `tracks_under(node)`        | what `a`, `e` and `x` act on     |
+| `openable_under(path)`      | what `zR` still has left to open |
+| `find(folds, target, from)` | `/`, `n`, `N`, and reveal-by-id  |
+
+They are the wire's methods, deliberately: `Shelf` implements the trait today and a socket client implements it next,
+which makes the swap a line rather than a hunt. It is the move `Context::player` already made for playback (#219), for
+the same reason.
+
+**`lines` returns all of them, and that is what is left.** A view should hold a page; this is the seam, not yet the
+paging. Until a second implementation exists, an attached view still folds the log to build its own `Shelf` — which is
+the 40.6 MB in §1, still there.
+
+## 8. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.
