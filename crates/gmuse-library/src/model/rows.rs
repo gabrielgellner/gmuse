@@ -551,3 +551,262 @@ mod tests {
         assert_eq!(bare.listed().owned(), bare);
     }
 }
+
+/// **A row written out, for a reader that does not hold the fold** — #261.
+///
+/// [`Listed`] is a *view into the library*: every string in it borrows from the catalogue, which
+/// is what makes a filter over 7,273 rows cost nothing per row. A client on the other end of a
+/// socket has no catalogue to borrow from, so what crosses the wire has to own what it says.
+///
+/// **It lends a `Listed` back**, which is why nothing that reads one had to change. The format
+/// template, the list styling and every `Field` still take `&Listed<'_>`; this hands them one
+/// borrowing from itself. Two representations, one reader.
+///
+/// ## What it costs, measured
+///
+/// `just query-cost`, against the real library:
+///
+/// | | |
+/// | --- | --- |
+/// | a screenful, 40 rows | **25.8 µs** |
+/// | every row, 7,273 | 3.0 ms |
+///
+/// A screenful is nothing. The whole library is 3.0 ms, which is a fifth of a frame — so this
+/// is affordable because the tree pane draws a window now (`tree-over-the-wire.md` §7) and
+/// would have been a poor trade when it drew 8,932 lines.
+///
+/// **`Listed` stays borrowed, and that is not a legacy.** `query::filter` reads one per row of
+/// the whole library on every keystroke of a picker, where the 3.0 ms above would be the whole
+/// cost of the query several times over. Two representations because the two jobs are
+/// genuinely different: one is read once and drawn, the other is read 7,273 times and thrown
+/// away.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Slip {
+    pub file_under: String,
+    pub album: String,
+    pub disc: Option<u32>,
+    pub track: Option<u32>,
+    pub title: String,
+    pub duration_ms: u64,
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub title_if_named: Option<String>,
+    pub album_if_named: Option<String>,
+    pub concepts: std::collections::BTreeMap<Id<Facet>, Vec<String>>,
+    pub credited: Vec<Id<crate::model::entity::Artist>>,
+    pub label: Option<String>,
+    pub release_type: crate::model::spine::ReleaseType,
+    pub release_held: crate::model::seam::Held,
+    pub release_secondary: std::collections::BTreeSet<crate::model::spine::ReleaseSecondary>,
+    pub year: Option<i32>,
+    pub bitrate: Option<u32>,
+    pub cutoff_hz: Option<u32>,
+    pub cliff_db: Option<u16>,
+    pub verdict: Option<crate::model::encoding::Verdict>,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u8>,
+    pub held: bool,
+}
+
+impl Slip {
+    /// Write out what the library said about a row.
+    pub fn of(listed: &Listed<'_>) -> Self {
+        Slip {
+            file_under: listed.file_under.to_owned(),
+            album: listed.album.to_owned(),
+            disc: listed.disc,
+            track: listed.track,
+            title: listed.title.to_owned(),
+            // **Milliseconds, not a `Duration`.** A duration is two numbers with a unit
+            // convention, and the wire has neither — every other length in the protocol is
+            // `_ms` and this is not the place to be different.
+            duration_ms: listed.duration.as_millis() as u64,
+            artist: listed.artist.map(str::to_owned),
+            album_artist: listed.album_artist.map(str::to_owned),
+            title_if_named: listed.title_if_named.map(str::to_owned),
+            album_if_named: listed.album_if_named.map(str::to_owned),
+            concepts: listed.concepts.clone(),
+            credited: listed.credited.to_vec(),
+            label: listed.label.map(str::to_owned),
+            release_type: listed.release_type,
+            release_held: listed.release_held,
+            release_secondary: listed.release_secondary.clone(),
+            year: listed.year,
+            bitrate: listed.bitrate,
+            cutoff_hz: listed.cutoff_hz,
+            cliff_db: listed.cliff_db,
+            verdict: listed.verdict,
+            sample_rate: listed.sample_rate,
+            channels: listed.channels,
+            held: listed.held,
+        }
+    }
+
+    /// The same row, as every reader already expects it.
+    pub fn listed(&self) -> Listed<'_> {
+        Listed {
+            file_under: &self.file_under,
+            album: &self.album,
+            disc: self.disc,
+            track: self.track,
+            title: &self.title,
+            duration: std::time::Duration::from_millis(self.duration_ms),
+            artist: self.artist.as_deref(),
+            album_artist: self.album_artist.as_deref(),
+            title_if_named: self.title_if_named.as_deref(),
+            album_if_named: self.album_if_named.as_deref(),
+            concepts: &self.concepts,
+            credited: &self.credited,
+            label: self.label.as_deref(),
+            release_type: self.release_type,
+            release_held: self.release_held,
+            release_secondary: &self.release_secondary,
+            year: self.year,
+            bitrate: self.bitrate,
+            cutoff_hz: self.cutoff_hz,
+            cliff_db: self.cliff_db,
+            verdict: self.verdict,
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            held: self.held,
+        }
+    }
+}
+
+#[cfg(test)]
+mod slip_is_the_same_row {
+    use super::*;
+    use crate::fixture::Tagged as Track;
+    use crate::operations::scan::Holdings;
+    use crate::query::format::{Field, Template};
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    /// A library with the fields filled in, because a row of blanks compares equal to anything.
+    fn library() -> crate::model::seam::Librarian {
+        let mut held = Holdings::new();
+        for (n, title) in ["The Sea", "Bells of Every Chapel", "In Dreams"]
+            .iter()
+            .enumerate()
+        {
+            held.upsert(Track {
+                path: PathBuf::from(format!("/m/Sierra Ferrell/Long Time Coming/{n}.mp3")),
+                artist: Some("Sierra Ferrell".into()),
+                albumartist: Some("Sierra Ferrell".into()),
+                album: Some("Long Time Coming".into()),
+                title: Some((*title).into()),
+                tracknumber: Some(n as u32 + 1),
+                discnumber: Some(1),
+                date: Some(2021),
+                genres: vec!["folk".into(), "country".into()],
+                // **Not a whole second.** `{duration}` renders m:ss, so a slip that
+                // rounded milliseconds away would read identically through every
+                // template — which is why the round trip is also asserted directly.
+                duration: Duration::from_millis(221_450),
+                bitrate: Some(320),
+                ..Default::default()
+            });
+        }
+        crate::fixture::from_holdings(&held)
+    }
+
+    /// **A reader cannot tell a written-out row from a borrowed one** — #261.
+    ///
+    /// The whole design rests on it: `Slip` exists so a client with no catalogue can hold a
+    /// row, and it lends a [`Listed`] back so nothing which reads one had to change. If the two
+    /// ever answer differently, every template and every column that runs against a remote row
+    /// is quietly wrong — and wrong in the worst way, because it renders.
+    ///
+    /// Asked of **every field there is**, by name, rather than the handful a test would think
+    /// to list. A field added to `Listed` and forgotten in `Slip` is exactly the failure this
+    /// guards, and a hand-written list would not see it.
+    #[test]
+    fn every_field_reads_the_same_through_a_slip() {
+        let library = library();
+        let rows = library.rows();
+        assert!(
+            rows.len() >= 3,
+            "only {} rows in the fixture — this compares almost nothing",
+            rows.len()
+        );
+
+        let names = Field::names();
+        assert!(
+            names.len() > 15,
+            "only {} fields known, so 'every field' is not what is being asked",
+            names.len()
+        );
+        // Two fields a row must never carry are refused by `Template::parse` outright, so the
+        // ones that build a template are the ones a reader can actually ask for.
+        let asks: Vec<(String, Template)> = names
+            .iter()
+            .filter_map(|n| {
+                Template::parse(&format!("{{{n}}}"))
+                    .ok()
+                    .map(|t| ((*n).to_owned(), t))
+            })
+            .collect();
+        assert!(
+            asks.len() > 12,
+            "only {} of {} fields could be asked for",
+            asks.len(),
+            names.len()
+        );
+
+        let mut answered = 0;
+        for id in rows {
+            let Some(listed) = library.listed(id) else {
+                continue;
+            };
+            let slip = Slip::of(&listed);
+            let lent = slip.listed();
+            for (name, template) in &asks {
+                let borrowed = template.render(&listed);
+                let written = template.render(&lent);
+                answered += usize::from(!borrowed.is_empty());
+                assert_eq!(borrowed, written, "{name} reads differently through a slip");
+            }
+        }
+        // **Both rendering empty everywhere would pass the loop above** — the classic vacuous
+        // absence. A filled-in fixture answers a good many of its fields.
+        assert!(
+            answered > 20,
+            "only {answered} field renders were anything at all, so equality proves nothing"
+        );
+
+        // **And the fields a template rounds off, compared directly.** `{duration}` renders
+        // m:ss, so a slip that dropped the milliseconds would pass every render above; the
+        // wire carries `duration_ms` precisely so it does not have to.
+        let id = library.rows().into_iter().next().expect("a row");
+        let listed = library.listed(id).expect("listed");
+        let slip = Slip::of(&listed);
+        assert_ne!(
+            listed.duration.subsec_millis(),
+            0,
+            "the fixture's durations are whole seconds, so rounding is invisible"
+        );
+        assert_eq!(
+            slip.listed().duration,
+            listed.duration,
+            "a slip rounded the duration"
+        );
+    }
+
+    /// And it survives the wire, which is the only reason it owns anything.
+    #[test]
+    fn a_slip_survives_being_written_down() {
+        let library = library();
+        let id = library.rows().into_iter().next().expect("a row");
+        let listed = library.listed(id).expect("the library lists it");
+        let slip = Slip::of(&listed);
+
+        let json = serde_json::to_string(&slip).expect("a slip serialises");
+        assert!(
+            json.len() > 100,
+            "a slip of {} bytes is not a row",
+            json.len()
+        );
+        let back: Slip = serde_json::from_str(&json).expect("and comes back");
+        assert_eq!(back, slip, "a slip did not survive the wire");
+    }
+}

@@ -42,6 +42,38 @@ fn main() {
         found.len()
     );
 
+    // **What a row costs to own** — #261. A `Slip` is what crosses the wire, because a client
+    // with no catalogue cannot hold a `Listed`, which borrows one.
+    {
+        use gmuse::model::rows::{Listing, Slip};
+        let ids = library.rows();
+        let screenful: Vec<_> = ids.iter().take(40).copied().collect();
+        let t = std::time::Instant::now();
+        let slips: Vec<Slip> = screenful
+            .iter()
+            .filter_map(|id| library.listed(*id).map(|l| Slip::of(&l)))
+            .collect();
+        let forty = t.elapsed();
+        assert!(
+            !slips.is_empty(),
+            "no rows written out — this measures nothing"
+        );
+        let t = std::time::Instant::now();
+        let all = ids
+            .iter()
+            .filter_map(|id| library.listed(*id).map(|l| Slip::of(&l)))
+            .count();
+        println!(
+            "Slip::of, a screenful ({}):    {:>8.1?}",
+            slips.len(),
+            forty
+        );
+        println!(
+            "Slip::of, every row ({all}):  {:>8.1?}   what the tree pane used to ask for",
+            t.elapsed()
+        );
+    }
+
     // The picker path, which is what `query.run` answers with.
     let t = std::time::Instant::now();
     let picked = gmuse::query::found::found(&library, now, None);

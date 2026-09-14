@@ -1998,7 +1998,21 @@ pub struct Row {
 /// Three answers, and the third is the point. "I do not know how many there
 /// are" must not read as "I have them all": 12% of this library carries no
 /// total, and a release nothing identified never will.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+///
+/// **Serialisable because a `Slip` carries one** — #261. A row that crossed the wire has to say
+/// which of the three answers it is, and "I do not know" is the one that must survive the trip.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum Held {
     /// Every disc it is known to have, and every track on each of them.
     Complete,
