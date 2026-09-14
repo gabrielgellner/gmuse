@@ -131,3 +131,87 @@ fn track_of(library: &Librarian, shelf: &Shelf, id: CopyId) -> Option<Node> {
         disc: shelf.disc_of(id),
     })
 }
+
+/// **The shape of a tree, four bits a row** — #261, `tree-over-the-wire.md` §3.
+///
+/// Every structural motion — `}` `{` `]]` `[[` `][` `[]` `-` `]z` `zj` `zk` — is a scan for
+/// the first row matching a predicate, and read against the navigator those predicates consume
+/// exactly three fields: a row's depth, whether it is a leaf, and whether it is open. Not a
+/// title, not an id, not a sort key.
+///
+/// So this is what a view holds instead of the tree: **8.9 KB for the library that needs
+/// 1.7 MB of `Shelf`**, and `j`, `gg`, `G` and `3000j` do not read even that, being arithmetic
+/// on the cursor and the total.
+///
+/// ## Why two bits of depth is not a guess
+///
+/// `Shelf::tree` is `BTreeMap<SortKey, BTreeMap<SortKey, Vec<CopyId>>>` — exactly two grouping
+/// levels, in the type. With the disc row between an album and its tracks (#169) that is four
+/// depths, 0 through 3, and there is no arrangement of `Levels` that produces a fifth. A
+/// deeper tree would have to change `Shelf` first, and would fail the assertion here while
+/// doing it rather than silently drawing at the wrong indent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Spine(Vec<u8>);
+
+const DEPTH: u8 = 0b0000_0011;
+const LEAF: u8 = 0b0000_0100;
+const OPEN: u8 = 0b0000_1000;
+
+impl Spine {
+    /// Add a row.
+    ///
+    /// **Panics above depth 3**, which is unreachable through `Shelf` and is a bug in a
+    /// caller that built the tree some other way. Clamping instead would draw the row at the
+    /// wrong indent and move the cursor to the wrong place, quietly.
+    pub fn push(&mut self, depth: u8, leaf: bool, expanded: bool) {
+        assert!(depth <= 3, "depth {depth} cannot come from a Shelf");
+        self.0
+            .push(depth | if leaf { LEAF } else { 0 } | if expanded { OPEN } else { 0 });
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// How far this row is indented, or `None` past the end.
+    pub fn depth(&self, at: usize) -> Option<u8> {
+        self.0.get(at).map(|b| b & DEPTH)
+    }
+
+    /// Whether the row holds nothing — a track.
+    ///
+    /// **Its own bit, because depth does not imply it.** Depth 2 is both a disc header and a
+    /// track on a record with one disc, and `]z` on the first means its tracks where on the
+    /// second it means its siblings.
+    pub fn is_leaf(&self, at: usize) -> Option<bool> {
+        self.0.get(at).map(|b| b & LEAF != 0)
+    }
+
+    /// Whether this container is open. A leaf is neither open nor closed and answers `false`.
+    pub fn is_expanded(&self, at: usize) -> Option<bool> {
+        self.0.get(at).map(|b| b & OPEN != 0)
+    }
+
+    /// One hex digit a row.
+    ///
+    /// **Inspectable on purpose.** A spine is the thing a wrong cursor position is blamed on,
+    /// and `"012233"` can be read in a log line where base64 cannot.
+    pub fn to_hex(&self) -> String {
+        self.0
+            .iter()
+            .map(|b| char::from_digit(*b as u32, 16).expect("four bits"))
+            .collect()
+    }
+
+    /// Back from the wire, or `None` on anything that is not hex.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        text.chars()
+            .map(|c| c.to_digit(16).map(|d| d as u8))
+            .collect::<Option<Vec<_>>>()
+            .map(Spine)
+    }
+}

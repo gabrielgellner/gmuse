@@ -11,6 +11,7 @@
 //! be open at once and the whole thing reads as one buffer: `j`, `3j`, `gg`,
 //! `G` and the relative gutter all work over it uniformly, which is the point.
 
+use crate::browse::Spine;
 use crate::cmd::Motion;
 use crate::model::rows::CopyId;
 use crate::shelf::{Shelf, SortKey};
@@ -604,108 +605,7 @@ impl TreeState {
     }
 
     fn step(&self, rows: &[Row], motion: Motion) -> Option<usize> {
-        let here = rows.get(self.selected)?;
-        let depth = Self::depth_of(here);
-
-        let scan = |want: usize, forward: bool| -> Option<usize> {
-            if forward {
-                (self.selected + 1..rows.len()).find(|i| Self::depth_of(&rows[*i]) == want)
-            } else {
-                (0..self.selected)
-                    .rev()
-                    .find(|i| Self::depth_of(&rows[*i]) == want)
-            }
-        };
-
-        match motion {
-            Motion::NextSibling => scan(depth, true),
-            Motion::PrevSibling => scan(depth, false),
-            Motion::NextSection => scan(0, true),
-            Motion::PrevSection => scan(0, false),
-            // The nearest row above that is shallower — its container.
-            Motion::Parent => (0..self.selected)
-                .rev()
-                .find(|i| Self::depth_of(&rows[*i]) < depth),
-            // The group is this row if it is a container, otherwise the one
-            // holding it — so `]z` on an album goes to its last track, and on
-            // a track to the last track beside it.
-            //
-            // Asked as "is this row a container", not as "is its depth below
-            // 2". The depths happen to agree today because the tree is exactly
-            // artist/album/track, and would stop agreeing the moment it is not
-            // — which is a shape this file otherwise makes no assumption about.
-            Motion::GroupEnd => {
-                let start = if rows[self.selected].is_leaf() {
-                    (0..self.selected)
-                        .rev()
-                        .find(|i| Self::depth_of(&rows[*i]) < depth)?
-                } else {
-                    self.selected
-                };
-                Self::group_end(rows, start).filter(|e| *e != self.selected)
-            }
-            // `][` and `[]`. The end of the section the cursor is in, and once
-            // it is there, the end of the next one — which is what makes a
-            // repeated `][` walk section ends the way a repeated `]]` walks
-            // section starts.
-            Motion::NextSectionEnd => {
-                let here = Self::section_start(rows, self.selected)?;
-                match Self::group_end(rows, here) {
-                    Some(end) if end > self.selected => Some(end),
-                    _ => {
-                        let next = scan(0, true)?;
-                        Self::group_end(rows, next).or(Some(next))
-                    }
-                }
-            }
-            // The row before this section begins is the last row of the one
-            // before it, so this needs no second scan. Landing on it moves the
-            // cursor into that section, and the next press walks back again.
-            Motion::PrevSectionEnd => match Self::section_start(rows, self.selected)? {
-                0 => None,
-                start => Some(start - 1),
-            },
-            Motion::NextFold => (self.selected + 1..rows.len()).find(|i| !rows[*i].is_leaf()),
-            // vim's `zk` is the **end** of the previous fold, not its start —
-            // `:h zk`. Landing on the start instead made `zj` and `zk` a pair
-            // that did not undo each other, and left no key for the end at all.
-            //
-            // "A closed fold is counted as one fold", so a closed container is
-            // its own end; an open one ends where the depth drops back.
-            Motion::PrevFold => (0..self.selected)
-                .rev()
-                .find(|i| Self::is_fold_end(rows, *i)),
-        }
-    }
-
-    /// The last row belonging to the group that starts at `start`, or `None`
-    /// when it holds nothing.
-    fn group_end(rows: &[Row], start: usize) -> Option<usize> {
-        let floor = Self::depth_of(&rows[start]);
-        rows.iter()
-            .enumerate()
-            .skip(start + 1)
-            .take_while(|(_, row)| Self::depth_of(row) > floor)
-            .map(|(i, _)| i)
-            .last()
-    }
-
-    /// The depth-0 row at or above `at` — the section it belongs to.
-    fn section_start(rows: &[Row], at: usize) -> Option<usize> {
-        (0..=at).rev().find(|i| Self::depth_of(&rows[*i]) == 0)
-    }
-
-    /// Whether a fold ends on this row, in vim's sense: a closed fold counts
-    /// as one fold and ends at itself, and an open one ends on the last row
-    /// before the depth drops back.
-    fn is_fold_end(rows: &[Row], i: usize) -> bool {
-        if !rows[i].is_leaf() && !rows[i].is_expanded() {
-            return true;
-        }
-        match rows.get(i + 1) {
-            Some(next) => Self::depth_of(next) < Self::depth_of(&rows[i]),
-            None => Self::depth_of(&rows[i]) > 0,
-        }
+        step_over(&spine_of(rows), self.selected, motion)
     }
 
     /// Every fold that must be open for `row` to be on screen.
@@ -950,6 +850,119 @@ pub fn mark_of(row: &Row) -> (Vec<SortKey>, Option<CopyId>) {
     TreeState::mark_of_inner(row)
 }
 
+/// The shape of these rows, and nothing else about them — #261.
+///
+/// The transitional half of `tree-over-the-wire.md`: today the view flattens a `Shelf` and
+/// derives this, and the destination is the librarian sending it. Written as a function of
+/// `&[Row]` so both roads arrive at the same navigator.
+pub fn spine_of(rows: &[Row]) -> Spine {
+    let mut spine = Spine::default();
+    for row in rows {
+        spine.push(
+            TreeState::depth_of(row) as u8,
+            row.is_leaf(),
+            row.is_expanded(),
+        );
+    }
+    spine
+}
+
+/// Move by the shape of the tree — every motion, over four bits a row.
+///
+/// **A free function over a `Spine`, not a method on the state**, because the destination
+/// has no rows to be a method on: a view holds a page, a cursor and this. `TreeState::step`
+/// is a caller of it and will go when the rows do.
+pub fn step_over(spine: &Spine, at: usize, motion: Motion) -> Option<usize> {
+    let depth = spine.depth(at)?;
+
+    let scan = |want: u8, forward: bool| -> Option<usize> {
+        if forward {
+            (at + 1..spine.len()).find(|i| spine.depth(*i) == Some(want))
+        } else {
+            (0..at).rev().find(|i| spine.depth(*i) == Some(want))
+        }
+    };
+
+    match motion {
+        Motion::NextSibling => scan(depth, true),
+        Motion::PrevSibling => scan(depth, false),
+        Motion::NextSection => scan(0, true),
+        Motion::PrevSection => scan(0, false),
+        // The nearest row above that is shallower — its container.
+        Motion::Parent => (0..at).rev().find(|i| spine.depth(*i) < Some(depth)),
+        // The group is this row if it is a container, otherwise the one holding it — so
+        // `]z` on an album goes to its last track, and on a track to the last track beside
+        // it.
+        //
+        // Asked as "is this row a container", not as "is its depth below 2". The depths
+        // happen to agree today because the tree is exactly artist/album/track, and would
+        // stop agreeing the moment it is not — which is a shape this file otherwise makes
+        // no assumption about, and is why `is_leaf` gets a bit of its own.
+        Motion::GroupEnd => {
+            let start = if spine.is_leaf(at)? {
+                (0..at).rev().find(|i| spine.depth(*i) < Some(depth))?
+            } else {
+                at
+            };
+            group_end(spine, start).filter(|e| *e != at)
+        }
+        // `][` and `[]`. The end of the section the cursor is in, and once it is there, the
+        // end of the next one — which is what makes a repeated `][` walk section ends the
+        // way a repeated `]]` walks section starts.
+        Motion::NextSectionEnd => {
+            let here = section_start(spine, at)?;
+            match group_end(spine, here) {
+                Some(end) if end > at => Some(end),
+                _ => {
+                    let next = scan(0, true)?;
+                    group_end(spine, next).or(Some(next))
+                }
+            }
+        }
+        // The row before this section begins is the last row of the one before it, so this
+        // needs no second scan. Landing on it moves the cursor into that section, and the
+        // next press walks back again.
+        Motion::PrevSectionEnd => match section_start(spine, at)? {
+            0 => None,
+            start => Some(start - 1),
+        },
+        Motion::NextFold => (at + 1..spine.len()).find(|i| spine.is_leaf(*i) == Some(false)),
+        // vim's `zk` is the **end** of the previous fold, not its start — `:h zk`. Landing
+        // on the start instead made `zj` and `zk` a pair that did not undo each other, and
+        // left no key for the end at all.
+        //
+        // "A closed fold is counted as one fold", so a closed container is its own end; an
+        // open one ends where the depth drops back.
+        Motion::PrevFold => (0..at).rev().find(|i| is_fold_end(spine, *i)),
+    }
+}
+
+/// The last row belonging to the group that starts at `start`, or `None` when it holds
+/// nothing.
+fn group_end(spine: &Spine, start: usize) -> Option<usize> {
+    let floor = spine.depth(start)?;
+    (start + 1..spine.len())
+        .take_while(|i| spine.depth(*i) > Some(floor))
+        .last()
+}
+
+/// The depth-0 row at or above `at` — the section it belongs to.
+fn section_start(spine: &Spine, at: usize) -> Option<usize> {
+    (0..=at).rev().find(|i| spine.depth(*i) == Some(0))
+}
+
+/// Whether a fold ends on this row, in vim's sense: a closed fold counts as one fold and
+/// ends at itself, and an open one ends on the last row before the depth drops back.
+fn is_fold_end(spine: &Spine, i: usize) -> bool {
+    if spine.is_leaf(i) == Some(false) && spine.is_expanded(i) == Some(false) {
+        return true;
+    }
+    match spine.depth(i + 1) {
+        Some(next) => Some(next) < spine.depth(i),
+        None => spine.depth(i) > Some(0),
+    }
+}
+
 /// **The album name a collapsed row has to carry** — #135.
 ///
 /// A group of one is not drawn, so the album name that used to be on the row
@@ -988,8 +1001,299 @@ pub fn stands_for(lib: &Shelf, row: &Row, title: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+mod spine_agrees {
+    use super::*;
+    use crate::fixture::Tagged as Track;
+    use crate::operations::scan::Holdings as Scan;
+    use std::path::PathBuf;
+
+    /// Every shape the flatten can emit, in one library.
+    ///
+    /// **The awkward ones are the point.** A one-track album is drawn as a track *in place of*
+    /// its album row, so a leaf sits at depth 2 among depth-1 siblings; a record spanning discs
+    /// grows headers at depth 2 with its tracks at 3; and a copy nothing placed stays at depth
+    /// 2 among them. Those three are exactly where a navigator that reasons from depth alone
+    /// goes wrong, and why `is_leaf` has a bit of its own.
+    fn every_shape() -> Shelf {
+        let mut s = Scan::new();
+        let mut add = |path: &str, artist: &str, album: &str, title: &str, disc: Option<u32>| {
+            s.upsert(Track {
+                path: PathBuf::from(path),
+                artist: Some(artist.into()),
+                album: Some(album.into()),
+                title: Some(title.into()),
+                discnumber: disc,
+                disc_total: disc.map(|_| 2),
+                ..Default::default()
+            });
+        };
+        // An ordinary two-track record.
+        add("/m/a1.mp3", "Burial", "Untrue", "Archangel", None);
+        add("/m/a2.mp3", "Burial", "Untrue", "Shell of Light", None);
+        // A record held as one track, which is drawn without an album row.
+        add("/m/a3.mp3", "Burial", "Rival Dealer", "Hiders", None);
+        // A record over two discs, plus a copy nothing placed.
+        add(
+            "/m/b1.mp3",
+            "The Beatles",
+            "The Beatles",
+            "Back in the USSR",
+            Some(1),
+        );
+        add(
+            "/m/b2.mp3",
+            "The Beatles",
+            "The Beatles",
+            "Dear Prudence",
+            Some(1),
+        );
+        add(
+            "/m/b3.mp3",
+            "The Beatles",
+            "The Beatles",
+            "Birthday",
+            Some(2),
+        );
+        add(
+            "/m/b4.mp3",
+            "The Beatles",
+            "The Beatles",
+            "Yer Blues",
+            Some(2),
+        );
+        add("/m/b5.mp3", "The Beatles", "The Beatles", "Unplaced", None);
+        // A second artist, so the section motions have somewhere to go.
+        add("/m/c1.mp3", "Mr. Oizo", "The Church", "Ham", None);
+        add("/m/c2.mp3", "Mr. Oizo", "The Church", "Bear Biscuit", None);
+        Shelf::rebuild(&crate::fixture::from_holdings(&s), true)
+    }
+
+    const EVERY: [Motion; 10] = [
+        Motion::NextSibling,
+        Motion::PrevSibling,
+        Motion::NextSection,
+        Motion::PrevSection,
+        Motion::NextSectionEnd,
+        Motion::PrevSectionEnd,
+        Motion::Parent,
+        Motion::GroupEnd,
+        Motion::NextFold,
+        Motion::PrevFold,
+    ];
+
+    /// **Four bits a row is the navigator's whole input, checked rather than claimed** — #261.
+    ///
+    /// `tree-over-the-wire.md` rests on this: if a spine cannot drive every motion to the same
+    /// answer the rows do, a view cannot stop holding the tree. So the row-based `step` is kept
+    /// as an oracle and every (row, motion) pair is compared against it, over a library holding
+    /// each shape the flatten can emit, at four fold states.
+    #[test]
+    fn a_spine_moves_the_cursor_exactly_where_the_rows_did() {
+        let lib = every_shape();
+        let mut checked = 0;
+        let mut moved = 0;
+        let mut disagreed = Vec::new();
+
+        for opening in 0..4u16 {
+            let mut state = TreeState::default();
+            state.folds.set_level(opening);
+            let rows = state.rows(&lib);
+            let spine = spine_of(&rows);
+            assert_eq!(spine.len(), rows.len(), "the spine lost rows");
+
+            for at in 0..rows.len() {
+                state.selected = at;
+                for motion in EVERY {
+                    let want = state.step_over_rows(&rows, motion);
+                    let got = step_over(&spine, at, motion);
+                    checked += 1;
+                    moved += usize::from(got.is_some());
+                    if want != got {
+                        disagreed.push(format!(
+                            "level {opening}, row {at} ({:?}), {}: rows say {want:?}, spine says {got:?}",
+                            rows[at].label(),
+                            motion.name()
+                        ));
+                    }
+                }
+            }
+        }
+
+        // **The instrument, before the claim.** Two ways this passes over nothing: no rows to
+        // walk, and every motion answering `None` — which `assert!(disagreed.is_empty())` would
+        // report as agreement.
+        assert!(
+            checked > 400,
+            "only {checked} (row, motion) pairs compared — the fixture is not the tree this \
+             claims to have walked"
+        );
+        assert!(
+            moved * 2 > checked,
+            "only {moved} of {checked} motions went anywhere; two navigators that both refuse \
+             to move agree about nothing"
+        );
+        assert!(disagreed.is_empty(), "{}", disagreed.join("\n"));
+    }
+
+    /// **The fixture really holds the awkward shapes**, or the agreement above is about a tree
+    /// that is only ever artist/album/track.
+    #[test]
+    fn the_fixture_draws_every_depth() {
+        let lib = every_shape();
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+        let rows = state.rows(&lib);
+        let spine = spine_of(&rows);
+
+        for depth in 0..=3u8 {
+            assert!(
+                (0..spine.len()).any(|i| spine.depth(i) == Some(depth)),
+                "no row at depth {depth}; drawn: {:?}",
+                rows.iter().map(Row::label).collect::<Vec<_>>()
+            );
+        }
+        // The one that depth alone cannot tell apart: a leaf and a container sharing depth 2.
+        let at_two = |leaf: bool| {
+            (0..spine.len()).any(|i| spine.depth(i) == Some(2) && spine.is_leaf(i) == Some(leaf))
+        };
+        assert!(
+            at_two(true),
+            "no leaf at depth 2 — `is_leaf` is untested here"
+        );
+        assert!(
+            at_two(false),
+            "no container at depth 2 — the disc row is missing"
+        );
+    }
+
+    /// A spine survives the wire unchanged.
+    #[test]
+    fn hex_is_a_round_trip() {
+        let lib = every_shape();
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+        let spine = spine_of(&state.rows(&lib));
+        assert!(
+            spine.len() > 10,
+            "too small to be a round trip worth making"
+        );
+        assert_eq!(Spine::from_hex(&spine.to_hex()), Some(spine.clone()));
+        assert_eq!(spine.to_hex().len(), spine.len(), "one hex digit a row");
+        assert_eq!(Spine::from_hex("not hex"), None);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    impl TreeState {
+        pub(super) fn step_over_rows(&self, rows: &[Row], motion: Motion) -> Option<usize> {
+            let here = rows.get(self.selected)?;
+            let depth = Self::depth_of(here);
+
+            let scan = |want: usize, forward: bool| -> Option<usize> {
+                if forward {
+                    (self.selected + 1..rows.len()).find(|i| Self::depth_of(&rows[*i]) == want)
+                } else {
+                    (0..self.selected)
+                        .rev()
+                        .find(|i| Self::depth_of(&rows[*i]) == want)
+                }
+            };
+
+            match motion {
+                Motion::NextSibling => scan(depth, true),
+                Motion::PrevSibling => scan(depth, false),
+                Motion::NextSection => scan(0, true),
+                Motion::PrevSection => scan(0, false),
+                // The nearest row above that is shallower — its container.
+                Motion::Parent => (0..self.selected)
+                    .rev()
+                    .find(|i| Self::depth_of(&rows[*i]) < depth),
+                // The group is this row if it is a container, otherwise the one
+                // holding it — so `]z` on an album goes to its last track, and on
+                // a track to the last track beside it.
+                //
+                // Asked as "is this row a container", not as "is its depth below
+                // 2". The depths happen to agree today because the tree is exactly
+                // artist/album/track, and would stop agreeing the moment it is not
+                // — which is a shape this file otherwise makes no assumption about.
+                Motion::GroupEnd => {
+                    let start = if rows[self.selected].is_leaf() {
+                        (0..self.selected)
+                            .rev()
+                            .find(|i| Self::depth_of(&rows[*i]) < depth)?
+                    } else {
+                        self.selected
+                    };
+                    Self::group_end(rows, start).filter(|e| *e != self.selected)
+                }
+                // `][` and `[]`. The end of the section the cursor is in, and once
+                // it is there, the end of the next one — which is what makes a
+                // repeated `][` walk section ends the way a repeated `]]` walks
+                // section starts.
+                Motion::NextSectionEnd => {
+                    let here = Self::section_start(rows, self.selected)?;
+                    match Self::group_end(rows, here) {
+                        Some(end) if end > self.selected => Some(end),
+                        _ => {
+                            let next = scan(0, true)?;
+                            Self::group_end(rows, next).or(Some(next))
+                        }
+                    }
+                }
+                // The row before this section begins is the last row of the one
+                // before it, so this needs no second scan. Landing on it moves the
+                // cursor into that section, and the next press walks back again.
+                Motion::PrevSectionEnd => match Self::section_start(rows, self.selected)? {
+                    0 => None,
+                    start => Some(start - 1),
+                },
+                Motion::NextFold => (self.selected + 1..rows.len()).find(|i| !rows[*i].is_leaf()),
+                // vim's `zk` is the **end** of the previous fold, not its start —
+                // `:h zk`. Landing on the start instead made `zj` and `zk` a pair
+                // that did not undo each other, and left no key for the end at all.
+                //
+                // "A closed fold is counted as one fold", so a closed container is
+                // its own end; an open one ends where the depth drops back.
+                Motion::PrevFold => (0..self.selected)
+                    .rev()
+                    .find(|i| Self::is_fold_end(rows, *i)),
+            }
+        }
+
+        /// The last row belonging to the group that starts at `start`, or `None`
+        /// when it holds nothing.
+        fn group_end(rows: &[Row], start: usize) -> Option<usize> {
+            let floor = Self::depth_of(&rows[start]);
+            rows.iter()
+                .enumerate()
+                .skip(start + 1)
+                .take_while(|(_, row)| Self::depth_of(row) > floor)
+                .map(|(i, _)| i)
+                .last()
+        }
+
+        /// The depth-0 row at or above `at` — the section it belongs to.
+        fn section_start(rows: &[Row], at: usize) -> Option<usize> {
+            (0..=at).rev().find(|i| Self::depth_of(&rows[*i]) == 0)
+        }
+
+        /// Whether a fold ends on this row, in vim's sense: a closed fold counts
+        /// as one fold and ends at itself, and an open one ends on the last row
+        /// before the depth drops back.
+        fn is_fold_end(rows: &[Row], i: usize) -> bool {
+            if !rows[i].is_leaf() && !rows[i].is_expanded() {
+                return true;
+            }
+            match rows.get(i + 1) {
+                Some(next) => Self::depth_of(next) < Self::depth_of(&rows[i]),
+                None => Self::depth_of(&rows[i]) > 0,
+            }
+        }
+    }
+
     use crate::fixture::Tagged as Track;
     use crate::operations::scan::Holdings as Scan;
     use std::path::PathBuf;
