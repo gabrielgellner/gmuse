@@ -3512,7 +3512,7 @@ fn run_engine(
     // the startup fold is not news, and announcing it would tell every view to
     // re-query the moment it connected.
     let _announcer =
-        gmuse::engine::librarian::Announcer::start(Arc::clone(&desk), Arc::downgrade(&engine));
+        gmuse::wiring::announcer::Announcer::start(Arc::clone(&desk), Arc::downgrade(&engine));
 
     // **The scan at engine start** — §8.9, and the 2026-09-10 decision that a
     // stale cache is the worse failure. Not waited on: the library is already

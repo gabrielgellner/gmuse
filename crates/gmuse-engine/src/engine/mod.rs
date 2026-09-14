@@ -45,8 +45,6 @@
 // `gmuse::engine::attach`.
 pub mod client;
 pub mod control;
-pub mod librarian;
-pub mod library;
 pub mod outbox;
 pub mod queue;
 pub mod socket;

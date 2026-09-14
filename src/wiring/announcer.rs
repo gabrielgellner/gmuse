@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use gmuse_library::librarian::{Answer, Desk};
 
-use super::Engine;
+use gmuse_engine::engine::Engine;
 
 /// Watches the desk and turns each publish into a `library` event.
 pub struct Announcer {
@@ -62,7 +62,7 @@ impl Announcer {
                     let now = desk.current();
                     if !Arc::ptr_eq(&last, &now) {
                         let version = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Some(event) = super::library::change_for(&now.changed, version)
+                        if let Some(event) = super::change::change_for(&now.changed, version)
                             // **`None` means the engine is going**, which is not a
                             // change worth announcing to nobody — see `Engine`'s
                             // `Drop` on why this is a `Weak`.

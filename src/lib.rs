@@ -42,6 +42,7 @@ pub mod smart;
 pub mod ui;
 pub mod undo;
 pub mod view;
+pub mod wiring;
 
 /// **The Python door**, behind a feature so an ordinary build needs no
 /// interpreter — #197.

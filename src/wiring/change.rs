@@ -1,4 +1,8 @@
-//! **What an append tells the views** — #218, #222, §8.7.
+//! **What an append tells the views** — #218, #222, §8.7, moved here by #257.
+//!
+//! It lived in `gmuse-engine`, which is why that crate could name `Touched` and `Changed`.
+//! The translation needs a library type and a protocol type at once, and the root crate is
+//! the only place both are legitimately visible — see the module header.
 //!
 //! The librarian already classifies how far a change reaches: `Changed` is
 //! `Nothing`, `These`, `Wide` or `Rebuild`, folded by `Changed::of` from each

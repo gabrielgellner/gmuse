@@ -547,7 +547,7 @@ fn the_crates_that_cannot_touch_a_disk_do_not() {
 /// and `gmuse-programme`, for the reason that made each a crate rather than a shared module.
 #[test]
 fn the_engine_does_not_reach_further_into_the_library() {
-    const CEILING: usize = 7;
+    const CEILING: usize = 4;
 
     let engine = Path::new("crates").join("gmuse-engine").join("src");
     let mut found: BTreeMap<PathBuf, usize> = BTreeMap::new();
