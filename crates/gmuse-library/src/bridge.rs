@@ -70,6 +70,37 @@ use crate::model::seam::Librarian;
 /// together is what makes a row carry both, and doing it through the same
 /// `Instance` the model uses everywhere else means the ladder that chooses a
 /// recording's identity lives in exactly one place.
+/// **A librarian over a catalogue somebody already folded** — #256, #261.
+///
+/// [`librarian`] builds a scratch `Instance`, merges every record into it, and folds *that* —
+/// so a fold copied the whole log (83.5 MB on the real library) to compute a catalogue its
+/// caller was computing anyway. The copy is transient, so it never looked like a leak; it
+/// showed up only in the **peak**, which is what a resident set follows (#255).
+///
+/// The scratch exists for one thing: a log that has never asserted holdings needs the scan's
+/// map standing in, and that has to go through a fact and a refold. `Job::Scan` writes the
+/// assertion now (#237), so after a library's first scan the scratch is a copy for nothing.
+///
+/// **The bootstrap still goes the long way**, deliberately: poking the holdings straight into
+/// the catalogue would put "how this fact lands" in a second place, which is the hazard #261
+/// is about.
+pub fn librarian_from(
+    catalogue: &crate::projection::catalogue::Catalogue,
+    held: &crate::operations::scan::Holdings,
+    records: &BTreeSet<Record>,
+    device: Id<Device>,
+    now: i64,
+) -> Librarian {
+    if !catalogue.holdings.contains_key(&device) {
+        // No assertion in the log yet. The scan's map is the bootstrap, and it needs a scratch.
+        return librarian(held, records, device, now);
+    }
+    let mut l = Librarian::from_catalogue(catalogue);
+    l.record_count = records.len();
+    l.here(device);
+    l
+}
+
 pub fn librarian(
     held: &crate::operations::scan::Holdings,
     records: &BTreeSet<Record>,

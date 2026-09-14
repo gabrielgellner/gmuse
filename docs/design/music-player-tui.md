@@ -5949,6 +5949,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   partial line `read_from` returns early and never computes an offset, so the mutation that returns the file's end
   survived the obvious test — and that mutation loses a record permanently, for every reader that had already tailed.
 
+- **2026-09-14** **A fold copied the whole log to reach a catalogue it was folding anyway** (#256, #255, #261). `fold`
+  called `bridge::librarian`, which builds a scratch `Instance`, merges every record into it, and folds _that_ — then
+  folded the same records again for `listened`. On the real library that is an **83.5 MB copy and two 13 ms folds** per
+  publish, to reach one answer.
+
+  The scratch survives for one thing: a log that has never asserted holdings needs the scan's map standing in, and that
+  has to go through a fact and a refold rather than being poked into the catalogue. `Job::Scan` writes the assertion now
+  (#237), so after a library's first scan the copy was for nothing. `bridge::librarian_from` takes an already-folded
+  catalogue and falls back to the old path only for the bootstrap.
+
+  **Measured: the engine's peak 310.9 → 162.3 MB and its RSS 390.1 → 208.5 MB**, with live unchanged at 118.5. One write
+  on 110,500 records went 71.4 → 46.2 ms. The attached TUI does the same fold, which is what a person was seeing at 200
+  MB.
+
+  **It was invisible twice over.** The copy is transient, so `live` never moved and no leak appeared — only the _peak_,
+  and a resident set follows the peak. And `bench-write`'s own table named `bridge::librarian` as 76% of a write, which
+  was true and was also the **bootstrap** case: the fixture asserts no holdings, so the benchmark had been timing a
+  first launch for as long as it existed. It reports both now, and asserts the fixture is on the path it claims to
+  measure.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

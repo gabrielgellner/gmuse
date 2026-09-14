@@ -1105,9 +1105,13 @@ fn fold(
     changed: Changed,
     scanning: bool,
 ) -> Answer {
+    // **Folded once** — #256. It was folded twice: `bridge::librarian` built a scratch copy
+    // of every record and folded that, and `listened` folded the same records again. 34ms and
+    // 11.8 MB, twice, on top of an 83.5 MB copy that existed to reach the same answer.
+    let catalogue = log.catalogue();
     Answer {
-        library: crate::bridge::librarian(held, log.records(), device, now),
-        listened: Arc::new(log.catalogue()),
+        library: crate::bridge::librarian_from(&catalogue, held, log.records(), device, now),
+        listened: Arc::new(catalogue),
         changed,
         holdings: Arc::clone(held),
         scanning,
@@ -1673,16 +1677,28 @@ mod what_a_write_costs {
     //!
     //! ## What it found, and what it ruled out
     //!
-    //! On 110,500 records one rating costs **~70 ms**, of which the append is
-    //! 375 ns. Everything else is the publish:
+    //! On 110,500 records one rating costs **~46 ms**, of which the append is
+    //! under a microsecond. Everything else is the publish:
     //!
-    //! | step                | cost   | share |
-    //! | ------------------- | ------ | ----- |
-    //! | `bridge::librarian` | 53 ms  | 76%   |
-    //! | `log.catalogue()`   | 12 ms  | 17%   |
-    //! | `records().clone()` | 3.7 ms | 5%    |
-    //! | `Changed::of(diff)` | 1.2 ms | 2%    |
-    //! | `rate()`            | 375 ns | ~0    |
+    //! | step                | cost    | share |
+    //! | ------------------- | ------- | ----- |
+    //! | `librarian_from`    | 27.5 ms | 60%   |
+    //! | `log.catalogue()`   | 13.1 ms | 28%   |
+    //! | `records().clone()` | 3.9 ms  | 8%    |
+    //! | `Changed::of(diff)` | 1.7 ms  | 4%    |
+    //! | `rate()`            | ~700 ns | ~0    |
+    //!
+    //! **It was ~70 ms and the table said `bridge::librarian` was 76% of it** — which was
+    //! true, and also measuring a path production no longer takes. That function builds a
+    //! scratch copy of every record and folds *that*, to reach the catalogue its caller was
+    //! folding anyway; `fold` folds once and hands it over (#256). On the real library the
+    //! copy was 83.5 MB, and because it was transient it showed up only in the peak — which
+    //! is what a resident set follows: the engine went from **390 MB to 208 MB**.
+    //!
+    //! **The old number was also the wrong case.** The scratch survives for one thing — a log
+    //! that has never asserted holdings needs the scan's map standing in — and this fixture
+    //! asserts none, so it had always been timing a *first launch*. Both are reported now, and
+    //! the bootstrap is still 58 ms.
     //!
     //! **It ruled out the cheap fix.** §8.5's position-driven `advance()` short
     //! circuits a *caught-up* log to a `Position` comparison, and I expected
@@ -1846,15 +1862,39 @@ mod what_a_write_costs {
         let moved = Changed::of(log.records().difference(&before));
         let diff = t.elapsed();
 
-        // 4. The publish, which is a full fold of everything — broken into the
-        //    two halves it is made of, because they are different work and only
-        //    one of them turned out to be the cost.
-        let t = Instant::now();
-        let library = crate::bridge::librarian(&held, log.records(), device, 200);
-        let drawn = t.elapsed();
+        // 4. The publish, in the order `fold` actually does it — #256.
+        //
+        // **It used to measure `bridge::librarian`, which `fold` no longer calls.** That
+        // function builds a scratch copy of every record and folds *that*; `fold` now folds
+        // once and hands the catalogue over. A benchmark of a path production abandoned is
+        // worse than none: it reported 55.9ms of work that had stopped happening, and the
+        // number looked like the thing to optimise.
         let t = Instant::now();
         let catalogue = log.catalogue();
         let catalogued = t.elapsed();
+        let t = Instant::now();
+        let library = crate::bridge::librarian_from(&catalogue, &held, log.records(), device, 200);
+        let bootstrap = t.elapsed();
+        let _ = library;
+
+        // **And the path a real library takes**, which this fixture was not on.
+        //
+        // `librarian_from` falls back to the scratch copy when the log has never asserted
+        // holdings — a first launch, before `Job::Scan` has written one (#237). This fixture
+        // asserts none, so the number above is the *bootstrap*, and this benchmark had been
+        // reporting it as the cost of an ordinary write for as long as it has existed.
+        let mut asserted = Instance::new(device);
+        asserted.merge(200, log.records());
+        asserted.assert_holdings(200, Default::default());
+        let settled = asserted.catalogue();
+        assert!(
+            settled.holdings.contains_key(&device),
+            "the fixture still asserts no holdings, so both numbers are the bootstrap"
+        );
+        let t = Instant::now();
+        let library =
+            crate::bridge::librarian_from(&settled, &held, asserted.records(), device, 200);
+        let drawn = t.elapsed();
         let publish = drawn + catalogued;
         let _ = (library, catalogue);
 
@@ -1872,8 +1912,11 @@ mod what_a_write_costs {
              rate()              {append:>9.1?}\n  \
              Changed::of(diff)   {diff:>9.1?}\n  \
              fold(), of which:   {publish:>9.1?}\n    \
-               bridge::librarian {drawn:>9.1?}\n    \
-               log.catalogue()   {catalogued:>9.1?}\n  \
+               log.catalogue()   {catalogued:>9.1?}\n    \
+               librarian_from    {drawn:>9.1?}\n  \
+             ---\n  \
+             a first launch, where the scan's map is the bootstrap:\n    \
+               librarian_from    {bootstrap:>9.1?}\n  \
              ---\n  \
              one write           {total:>9.1?}\n\n  \
              Position::of        {positioned:>9.1?}   (what §8.5 wants a caught-up advance to cost)\n"
