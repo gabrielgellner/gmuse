@@ -14,7 +14,12 @@
 /// The marks are flattened for **ordering**, not only for looks: `ö` is U+00F6,
 /// so a raw comparison files Löffler after every artist beginning `lz`, which
 /// is to say off the end of the L section entirely.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// **Serialisable because a fold path is one** — #261. A `query.tree` request carries which
+/// nodes a person has open, and a node is named by its path of sort keys.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct SortKey(String);
 
 impl SortKey {

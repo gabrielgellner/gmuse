@@ -25,6 +25,15 @@ use crate::model::seam::Librarian;
 /// question rather than a player one (#84).
 pub use crate::model::sortkey::SortKey;
 
+/// What one track's line shows, held beside the ordering so a page can be drawn from it alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Line {
+    pub title: String,
+    /// The track's own credit, which is not always who it files under.
+    pub credit: Option<String>,
+    pub length_ms: u64,
+}
+
 /// Views 1 and 2. Same membership, two shapes.
 #[derive(Debug, Default)]
 pub struct Shelf {
@@ -59,6 +68,15 @@ pub struct Shelf {
     ///
     /// Absent for a copy nothing placed, which is an ordinary row.
     discs: BTreeMap<CopyId, u16>,
+    /// **What a track's own line shows** — #261.
+    ///
+    /// The same reason `artist_names` and `album_names` are here, applied one level down.
+    /// That field's note says it plainly: without it "every renderer has to reach back into
+    /// the `Scan` for a track under the node just to recover the string, which is how a
+    /// projection that exists to answer questions ends up unable to answer the simplest one".
+    /// Tracks were the level left out, and the renderer did exactly that — which is what kept
+    /// a view needing a `Librarian` to draw a row it already had.
+    lines: BTreeMap<CopyId, Line>,
     /// The discs an album's *held* copies span, which is not how many the
     /// record has. A two-disc set you own half of spans one, and drawing a
     /// disc header over the only disc present would be a level that opens onto
@@ -277,6 +295,16 @@ impl Shelf {
                     // `place_of` is what the tree already sorts by, so the
                     // header and the order cannot disagree about where a disc
                     // starts.
+                    if let Some(listed) = librarian.listed(here) {
+                        lib.lines.insert(
+                            here,
+                            Line {
+                                title: listed.title.to_owned(),
+                                credit: listed.artist.map(str::to_owned),
+                                length_ms: listed.duration.as_millis() as u64,
+                            },
+                        );
+                    }
                     let (disc, _) = librarian.place_of(here.slot());
                     if disc != u16::MAX {
                         lib.discs.insert(here, disc);
@@ -381,6 +409,11 @@ impl Shelf {
     }
 
     /// Which disc a row sits on, where anything placed it — #169.
+    /// What this track's line shows, or `None` for a copy the library cannot draw.
+    pub fn line(&self, id: CopyId) -> Option<&Line> {
+        self.lines.get(&id)
+    }
+
     pub fn disc_of(&self, id: CopyId) -> Option<u16> {
         self.discs.get(&id).copied()
     }

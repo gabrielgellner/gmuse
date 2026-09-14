@@ -144,8 +144,9 @@ fn main() {
     let (shelf, kept, peak) =
         accounting::measure(|| gmuse::shelf::Shelf::grouped(&library, members, levels, true));
     say("Shelf::grouped (view 1 holds one)", kept, peak);
-    let (nodes, kept, peak) =
-        accounting::measure(|| gmuse::browse::flatten(&library, &shelf, levels));
+    let (nodes, kept, peak) = accounting::measure(|| {
+        gmuse::browse::flatten(&shelf, &gmuse::fold::Expansion::default(), true)
+    });
     let drawn = nodes.len();
     assert!(
         drawn > 1_000,

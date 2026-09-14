@@ -3,7 +3,12 @@
 //! M4 scope: views 1–5, navigation, `Tab`, `Space`. Read-only; nothing here
 //! starts playback, which is M5's job.
 
-pub mod fold;
+/// **Fold state lives in the library now** — #261.
+///
+/// It travels with a `query.tree` request (`tree-over-the-wire.md` §2), so the librarian has
+/// to be able to read it. Re-exported here because it was `ui::fold` for its whole life and a
+/// path is not worth churning.
+pub use gmuse_library::fold;
 pub mod list;
 pub mod picker;
 pub mod remote_transport;

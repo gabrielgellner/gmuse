@@ -11,161 +11,16 @@
 //! be open at once and the whole thing reads as one buffer: `j`, `3j`, `gg`,
 //! `G` and the relative gutter all work over it uniformly, which is the point.
 
-use crate::browse::Spine;
+/// **The tree's lines live in the library now** — #261.
+///
+/// `Row` was this module's own enum and is `browse::Node`, because the librarian is what
+/// builds a tree once the view stops holding one (`tree-over-the-wire.md`). Re-exported under
+/// the old name: every call site draws a *row*, and renaming 200 of them says nothing.
+pub use crate::browse::{Mark, Node as Row, Spine, spine_of};
 use crate::cmd::Motion;
 use crate::model::rows::CopyId;
 use crate::shelf::{Shelf, SortKey};
 use crate::ui::fold::Expansion;
-
-/// One visible line.
-/// **What identifies a row across a rebuild** — a container by its path, a track by
-/// its id. Named because two methods and a search all pass it around (#131).
-pub type Mark = (Vec<SortKey>, Option<CopyId>);
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Row {
-    Artist {
-        key: SortKey,
-        display: String,
-        albums: usize,
-        expanded: bool,
-    },
-    Album {
-        artist: SortKey,
-        key: SortKey,
-        display: String,
-        tracks: usize,
-        expanded: bool,
-        /// **How long the record is, when this is short of it** — #137.
-        ///
-        /// `None` when the album is whole, when nothing counted it, or when
-        /// the group's copies come off more than one pressing. Absent is the
-        /// common case by a long way: 5,577 of 6,485 files here sit on records
-        /// held complete, and a row reading `12 of 12` would be noise on all
-        /// of them.
-        of: Option<u16>,
-    },
-    /// **One disc of a record that is more than one** — #169.
-    ///
-    /// Drawn only where the album's held copies span several. A five-disc
-    /// *Let It Be* has five track 1s, and without this they sit adjacent under
-    /// identical numbering — which reads as the library holding one song five
-    /// times, and is exactly what #168's shadow rows looked like from a
-    /// completely different cause.
-    ///
-    /// The ordering was never wrong: `place_of` returns `(disc, track)` and
-    /// the tree has always sorted by it. What was missing is a row saying
-    /// where one disc ends.
-    Disc {
-        artist: SortKey,
-        album: SortKey,
-        key: SortKey,
-        number: u16,
-        format: Option<String>,
-        tracks: usize,
-        expanded: bool,
-    },
-    Track {
-        artist: SortKey,
-        album: SortKey,
-        /// The disc this track's row sits under, where one is drawn — #169.
-        /// `None` on a single-disc record, which is nearly all of them.
-        disc: Option<SortKey>,
-        id: CopyId,
-        /// **This track is the whole of its group, so the group is not drawn**
-        /// — #135. It sits where its album row would have been.
-        ///
-        /// The album still exists in the model; what it does not get is a row
-        /// of its own, because a row that opens to reveal exactly one thing
-        /// costs a keystroke and tells you nothing. In a well-formed library
-        /// this is rare — 3 of 495 albums here. In a library of singles it is
-        /// nearly all of them: 466 of 490.
-        alone: bool,
-    },
-}
-
-impl Row {
-    /// The marker and indent. A track's *text* comes from the format template,
-    /// so it is rendered rather than labelled — a row beside an artist row
-    /// needs to look different, and the template is how that is said.
-    pub fn label(&self) -> String {
-        match self {
-            Row::Artist {
-                display, expanded, ..
-            } => format!("{} {display}", if *expanded { "▾" } else { "▸" }),
-            Row::Album {
-                display,
-                expanded,
-                tracks,
-                of,
-                ..
-            } => {
-                let mark = if *expanded { "▾" } else { "▸" };
-                match of {
-                    Some(total) => format!("  {mark} {display}  {tracks} of {total}"),
-                    None => format!("  {mark} {display}"),
-                }
-            }
-            // **At the album's indent when it stands in for one**, so the
-            // artist's children stay in one column whether they are albums or
-            // the tracks that replaced them.
-            //
-            // **And the caret column always says something.** A track standing
-            // in for its group sits exactly where an album row would, so
-            // nothing distinguished "opens to reveal its tracks" from "is a
-            // track" — and `l` on one looks inviting and does nothing. In a
-            // library of singles that is not an edge case: 466 of 490 albums.
-            //
-            // `▸` closed, `▾` open, `·` nothing to open. One column, three
-            // states, and the widths are unchanged so no row shifts.
-            Row::Disc {
-                number,
-                format,
-                expanded,
-                ..
-            } => {
-                let mark = if *expanded { "▾" } else { "▸" };
-                // `Disc 2 · CD` where the authority said what it was, and
-                // `Disc 2` where nobody did — carried because MusicBrainz has
-                // it and a bare number tells you less than the sleeve does.
-                //
-                // **No count**, matching the album row above it: a bare `1`
-                // beside a header reads as a track number, and the row it sits
-                // under does not print one either.
-                let what = format
-                    .as_deref()
-                    .map_or_else(String::new, |f| format!(" · {f}"));
-                format!("    {mark} Disc {number}{what}")
-            }
-            // Three depths now: standing in for an album (#135), under an
-            // album, and under a disc. The caret column still says the same
-            // three things — `▸` closed, `▾` open, `·` nothing to open — and
-            // only the indent moves.
-            Row::Track { alone, disc, .. } => match (alone, disc) {
-                (true, _) => "  · ",
-                (false, None) => "    · ",
-                (false, Some(_)) => "      · ",
-            }
-            .to_string(),
-        }
-    }
-
-    /// Whether this row can be opened or closed at all.
-    pub fn is_leaf(&self) -> bool {
-        matches!(self, Row::Track { .. })
-    }
-
-    /// Whether this row is a container that is currently open. A leaf is
-    /// neither open nor closed, and answers `false`.
-    pub fn is_expanded(&self) -> bool {
-        match self {
-            Row::Artist { expanded, .. }
-            | Row::Album { expanded, .. }
-            | Row::Disc { expanded, .. } => *expanded,
-            Row::Track { .. } => false,
-        }
-    }
-}
 
 /// Which pane of view 1 has focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -232,124 +87,7 @@ impl TreeState {
     }
 
     fn flatten(&self, lib: &Shelf, unfolded: bool) -> Vec<Row> {
-        let mut rows = Vec::new();
-        for (artist_key, albums) in lib.artists() {
-            let display = lib.artist_name(artist_key).to_string();
-            let expanded = unfolded || self.folds.is_open(std::slice::from_ref(artist_key));
-            rows.push(Row::Artist {
-                key: artist_key.clone(),
-                display,
-                albums: albums.len(),
-                expanded,
-            });
-            if !expanded {
-                continue;
-            }
-            for (album_key, tracks) in albums {
-                // **A group of one is not a level** (#135). The album row
-                // would open onto exactly this track, so the track takes its
-                // place — and there is no fold, because there is nothing left
-                // to open.
-                //
-                // Applied in both listings, unfolded included: a level that is
-                // not drawn does not exist to be revealed, and a search that
-                // found one could not put the cursor anywhere.
-                if let [only] = tracks[..] {
-                    rows.push(Row::Track {
-                        artist: artist_key.clone(),
-                        album: album_key.clone(),
-                        disc: None,
-                        id: only,
-                        alone: true,
-                    });
-                    continue;
-                }
-                let display = lib.album_name(artist_key, album_key).to_string();
-                let open = unfolded || self.folds.is_open(&[artist_key.clone(), album_key.clone()]);
-                rows.push(Row::Album {
-                    artist: artist_key.clone(),
-                    key: album_key.clone(),
-                    display,
-                    tracks: tracks.len(),
-                    expanded: open,
-                    of: lib.album_total(artist_key, album_key),
-                });
-                if !open {
-                    continue;
-                }
-                // **A disc is a level only when there is more than one** —
-                // #169, and #135's rule one level up: a header that opens onto
-                // everything beneath it costs a keystroke and says nothing.
-                // Measured, 1,003 of this library's 1,029 albums hold their
-                // copies on one disc and grow no row at all.
-                if lib.album_discs(artist_key, album_key) < 2 {
-                    for id in tracks {
-                        rows.push(Row::Track {
-                            artist: artist_key.clone(),
-                            album: album_key.clone(),
-                            disc: None,
-                            id: *id,
-                            alone: false,
-                        });
-                    }
-                    continue;
-                }
-                // The tracks arrive sorted by `(disc, track)` already, so
-                // grouping is a run over them rather than a re-sort — and the
-                // header cannot disagree with the order for the same reason.
-                let mut at = 0;
-                while at < tracks.len() {
-                    let number = lib.disc_of(tracks[at]);
-                    let end = tracks[at..]
-                        .iter()
-                        .position(|id| lib.disc_of(*id) != number)
-                        .map_or(tracks.len(), |n| at + n);
-                    let run = &tracks[at..end];
-                    at = end;
-                    let Some(number) = number else {
-                        // A copy nothing placed has no disc to sit under, so
-                        // it stays where an ordinary track would.
-                        for id in run {
-                            rows.push(Row::Track {
-                                artist: artist_key.clone(),
-                                album: album_key.clone(),
-                                disc: None,
-                                id: *id,
-                                alone: false,
-                            });
-                        }
-                        continue;
-                    };
-                    // Zero-padded, because a `SortKey` orders as text and
-                    // `disc 10` would otherwise sit between 1 and 2.
-                    let key = crate::model::sortkey::sort_key(&format!("{number:03}"), false);
-                    let path = [artist_key.clone(), album_key.clone(), key.clone()];
-                    let disc_open = unfolded || self.folds.is_open(&path);
-                    rows.push(Row::Disc {
-                        artist: artist_key.clone(),
-                        album: album_key.clone(),
-                        key: key.clone(),
-                        number,
-                        format: lib.disc_format(artist_key, album_key, number),
-                        tracks: run.len(),
-                        expanded: disc_open,
-                    });
-                    if !disc_open {
-                        continue;
-                    }
-                    for id in run {
-                        rows.push(Row::Track {
-                            artist: artist_key.clone(),
-                            album: album_key.clone(),
-                            disc: Some(key.clone()),
-                            id: *id,
-                            alone: false,
-                        });
-                    }
-                }
-            }
-        }
-        rows
+        crate::browse::flatten(lib, &self.folds, unfolded)
     }
 
     /// **Open the way to a row and put the cursor on it** — #131.
@@ -571,17 +309,6 @@ impl TreeState {
     /// `zm` — one level fewer.
     pub fn less(&mut self, lib: &Shelf) {
         self.keeping_cursor(lib, |t| t.folds.less());
-    }
-
-    /// How deep a row sits: artists 0, albums 1, tracks 2.
-    fn depth_of(row: &Row) -> usize {
-        match row {
-            Row::Artist { .. } => 0,
-            Row::Album { .. } => 1,
-            Row::Disc { .. } => 2,
-            Row::Track { disc: Some(_), .. } => 3,
-            Row::Track { .. } => 2,
-        }
     }
 
     /// Move by the shape of the tree rather than by counting rows — #31.
@@ -848,23 +575,6 @@ impl TreeState {
 /// list with one from the folded list does not need a `TreeState` in hand.
 pub fn mark_of(row: &Row) -> (Vec<SortKey>, Option<CopyId>) {
     TreeState::mark_of_inner(row)
-}
-
-/// The shape of these rows, and nothing else about them — #261.
-///
-/// The transitional half of `tree-over-the-wire.md`: today the view flattens a `Shelf` and
-/// derives this, and the destination is the librarian sending it. Written as a function of
-/// `&[Row]` so both roads arrive at the same navigator.
-pub fn spine_of(rows: &[Row]) -> Spine {
-    let mut spine = Spine::default();
-    for row in rows {
-        spine.push(
-            TreeState::depth_of(row) as u8,
-            row.is_leaf(),
-            row.is_expanded(),
-        );
-    }
-    spine
 }
 
 /// Move by the shape of the tree — every motion, over four bits a row.
@@ -1188,6 +898,11 @@ mod tests {
     use super::*;
 
     impl TreeState {
+        /// The oracle's own depth, kept beside it: production reads [`Row::depth`] now.
+        fn depth_of(row: &Row) -> usize {
+            row.depth()
+        }
+
         pub(super) fn step_over_rows(&self, rows: &[Row], motion: Motion) -> Option<usize> {
             let here = rows.get(self.selected)?;
             let depth = Self::depth_of(here);

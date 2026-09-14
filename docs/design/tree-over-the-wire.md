@@ -143,6 +143,17 @@ second client wants it for the same reason the first did. Keeping `Node` "genera
 client re-deriving a row the library already knows about, or view 1 needing a reply shape of its own — which is two
 answers to one question, the thing #257 exists to prevent.
 
+The kinds on the wire are therefore `artist`, `album`, `disc`, `track`, and a node carries **both its identity and its
+row**: the path of sort keys a toggle and an anchor name it by, and the title, credit and length a client draws. A node
+that carried only identity would send the view back to the library for every visible line, which is the thing this
+document exists to stop.
+
+**The track's line moved into `Shelf`** to make that possible, and the field beside it had already said why. The note on
+`artist_names` reads: without it _"every renderer has to reach back into the `Scan` for a track under the node just to
+recover the string, which is how a projection that exists to answer questions ends up unable to answer the simplest
+one"_. Tracks were the level that rule had not been applied to, and the renderer did exactly that. It costs **1.0 MB** —
+the shelf goes from 1.7 MB to 2.7 MB — and it is held once, librarian-side, rather than in every view.
+
 ## 7. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is

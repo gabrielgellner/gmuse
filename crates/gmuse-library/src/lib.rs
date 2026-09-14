@@ -34,6 +34,7 @@ pub mod events;
 pub mod facts;
 #[cfg(any(test, feature = "testing"))]
 pub mod fixture;
+pub mod fold;
 pub mod history;
 pub mod librarian;
 /// **The pidfile lock** — #218.

@@ -35,7 +35,8 @@ fn main() {
 
     // The flatten, over a shelf already built — what a fold change would have to redo.
     let t = std::time::Instant::now();
-    let nodes = gmuse::browse::flatten(&library, &shelf, levels);
+    let folds = gmuse::fold::Expansion::default();
+    let nodes = gmuse::browse::flatten(&shelf, &folds, true);
     let flatten = t.elapsed();
     assert!(
         nodes.len() > 1_000,
