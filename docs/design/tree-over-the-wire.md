@@ -492,7 +492,32 @@ It also caught a race the first attempt would have shipped: a `library` event sa
 and republishes on its own thread, so a fetch can beat the publish it was told about. Asking once passed four times and
 failed the fifth.
 
-## 14. What this does not decide
+## 14. The panes the tree's change did not reach
+
+Reported, not measured into existence: _"if I am in the queue view it is very laggy feeling, and also lags when I go
+back to view 1."_
+
+§7 windowed the **tree** pane. Views 2, 3 and 4 draw through `draw_track_list`, which still built a `ListItem` for every
+row and read each one from the library — a map lookup while the library was local, and a socket round trip each once it
+was not.
+
+The queue is where it showed, because "up next" is the whole projection rather than a playlist: four thousand reads a
+frame. And it explains the second half of the report — the row cache holds five hundred, so walking past four thousand
+empties it, and the tree then refetched everything it had.
+
+They draw a window now, by the same rule and with the same two mistakes available: the gutter counts **tracks from the
+top of the list**, so `RowStyle::from` says how many are above the window; and the widget is handed the window, so its
+selection index is the window's.
+
+**Two tests, because one of them cannot see the other's bug.** `a_track_pane_reads_a_screenful_ not_the_list` counts
+what the pane asks the library for — a window that never moves satisfies it just as well as one that works.
+`a_track_pane_follows_its_cursor_and_numbers_the_list` asks _which_ rows, by scrolling a long queue and reading the
+gutter, and checks the highlight through the buffer's styles rather than its symbols.
+
+Both traps from §7 recurred exactly: a cursor at the bottom of a list is where a selection index that was never made
+relative lands correctly anyway, and a highlight is a colour, so a text comparison cannot see it.
+
+## 15. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.

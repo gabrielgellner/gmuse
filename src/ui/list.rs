@@ -143,6 +143,12 @@ pub struct RowStyle<'a> {
     /// Which **track** the cursor is on. Distances are measured in tracks, not
     /// screen rows, so a divider between two tracks never makes `3j` wrong.
     pub selected: usize,
+    /// **How many tracks are above this window** — #261.
+    ///
+    /// The gutter counts tracks from the top of the *list*, and a pane draws a window of it. A
+    /// window numbering from its own first row is right on the first screenful and wrong by the
+    /// scroll offset on every one after.
+    pub from: usize,
     /// The track currently playing, marked wherever it appears — which may be
     /// several lists at once, since a track can be in the library, a playlist
     /// and the queue.
@@ -200,7 +206,7 @@ pub fn items<'a>(
     rows: &[Row],
     style: RowStyle,
 ) -> Vec<ListItem<'a>> {
-    let mut track_index = 0usize;
+    let mut track_index = style.from;
     rows.iter()
         .map(|row| {
             // The gutter counts tracks; a divider gets blank space so the

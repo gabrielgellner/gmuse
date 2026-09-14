@@ -6805,24 +6805,40 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
             .unwrap_or(rows.len());
         rows.insert(screen_row, list::Row::Header(text.clone()));
     }
+    // **A screenful, not the list** — #261, and the same change the tree pane got. This built a
+    // `ListItem` for every row and called `ctx.library.listed` once for each: fine while that
+    // was a map lookup, and *four thousand socket round trips a frame* once the library moved
+    // to the engine. The queue is where it showed, because "up next" is the whole projection
+    // rather than a playlist — reported as the view being very laggy, and the tree being laggy
+    // afterwards, which was this thrashing the row cache on the way past.
+    let at = list::row_of_track(&rows, spec.selected).unwrap_or(0);
+    let height = view_height(area);
+    let top = spec.scroll.window(at, rows.len(), height);
     let items = list::items(
         &ui.theme,
         ctx.library,
-        &rows,
+        &rows[top.min(rows.len())..(top + height).min(rows.len())],
         list::RowStyle {
             relative: ui.relative_numbers,
+            // **Absolute**, both of them: the gutter counts tracks from the top of the list, and
+            // `from` says how many are above this window.
             selected: spec.selected,
+            from: rows[..top.min(rows.len())]
+                .iter()
+                .filter(|r| matches!(r, list::Row::Track(_)))
+                .count(),
             playing: ui.playback.current,
             needle: ui.highlight.as_ref(),
         },
     );
     let mut items = items;
-    let mut state = spec.scroll.state_within(
-        list::row_of_track(&rows, spec.selected).or(Some(0)),
-        rows.len(),
-        view_height(area),
-    );
-    pad_to_view(&mut items, &ui.theme, area, state.offset());
+    // Offset zero and the selection made relative: the widget is handed the window and nothing
+    // else, so its coordinates are the window's. `Scroll::window` above recorded where it
+    // starts, which is why `remember` is not called below.
+    let mut state = ListState::default()
+        .with_selected(at.checked_sub(top))
+        .with_offset(0);
+    pad_to_view(&mut items, &ui.theme, area, 0);
     // A selection landing on the playing track keeps the playing colour, or
     // the cursor hides the one thing you are watching for. Only while focused:
     // an unfocused pane should still read as unfocused.
@@ -6841,7 +6857,6 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
         area,
         &mut state,
     );
-    spec.scroll.remember(&state);
 }
 
 fn empty_hint(theme: &theme::Theme, title: &str) -> Vec<Line<'static>> {
@@ -6927,7 +6942,7 @@ mod tests {
         store
     }
 
-    fn fixture() -> Scan {
+    pub(super) fn fixture() -> Scan {
         let mut store = Scan::new();
 
         // A normal album, with a guest credit on one track — the case that
@@ -6992,7 +7007,7 @@ mod tests {
         store
     }
 
-    fn render(ui: &Ui, ctx: &Context<'_>, w: u16, h: u16) -> String {
+    pub(super) fn render(ui: &Ui, ctx: &Context<'_>, w: u16, h: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| draw(f, ui, ctx)).unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -7014,7 +7029,7 @@ mod tests {
     /// colour — so a selection pointing at the wrong line, or off the end of a window, draws
     /// exactly the same text. It is the one thing about a windowed pane that a text comparison
     /// cannot see.
-    fn highlighted(ui: &Ui, ctx: &Context<'_>, w: u16, h: u16) -> Option<u16> {
+    pub(super) fn highlighted(ui: &Ui, ctx: &Context<'_>, w: u16, h: u16) -> Option<u16> {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| draw(f, ui, ctx)).unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -7330,7 +7345,7 @@ mod tests {
     /// Leaking is the cheap way to give a test borrow a `'static` life. The
     /// process is about to end, and the alternative is threading a second
     /// local through every call site in a ten-thousand-line file.
-    fn lib_of(store: &Scan) -> &'static crate::model::seam::Librarian {
+    pub(super) fn lib_of(store: &Scan) -> &'static crate::model::seam::Librarian {
         Box::leak(Box::new(crate::bridge::imported(
             store,
             &std::collections::BTreeSet::new(),
@@ -7382,7 +7397,7 @@ mod tests {
     }
 
     /// A `Ui` over the whole fixture library.
-    fn ui_of(store: &Scan, smart: bool) -> Ui {
+    pub(super) fn ui_of(store: &Scan, smart: bool) -> Ui {
         Ui::new(Box::new(Shelf::rebuild(lib_of(store), smart)))
     }
 
@@ -10849,9 +10864,14 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         let ids: Vec<CopyId> = Listing::rows(lib_of(&store)).into_iter().take(3).collect();
-        for id in &ids {
+        // **A list far longer than the pane**, which is the shape the queue has in practice:
+        // "up next" is the whole projection, not a playlist. The fixture holds seven rows, so
+        // they go round until there are enough of them.
+        for id in ids.iter().cycle().take(200) {
             ui.queue.push_back(*id);
         }
+        let queued = ui.queue.entries().count();
+        assert!(queued > 100, "only {queued} queued");
         ui.playback.current = Some(ids[0]);
         ui.playback.shuffle = true;
         ui.playback.rng_state = 99;
@@ -15649,5 +15669,205 @@ mod tests {
         ui.sorted = 4; // Bruno
         press(&mut ui, &ctx, "[ [");
         assert_eq!(ui.sorted, 0, "and from Bruno's only track, back to Anna");
+    }
+}
+
+#[cfg(test)]
+mod a_pane_asks_for_a_screenful {
+    use super::*;
+    use crate::model::rows::{CopyId, Listing, Playable, Slip};
+    use std::cell::Cell;
+
+    /// A `Listing` that counts the rows it is asked about.
+    ///
+    /// **The point of a window, instrumented.** Whether a pane read forty rows or four thousand
+    /// is not visible in what it draws — the forty on screen look the same either way. It is
+    /// only visible from the library's side, which is why this has to be the library.
+    struct Counted<'a> {
+        inner: &'a crate::model::seam::Librarian,
+        asked: Cell<usize>,
+    }
+
+    impl Listing for Counted<'_> {
+        fn listed(&self, id: CopyId) -> Option<Slip> {
+            self.asked.set(self.asked.get() + 1);
+            self.inner.listed(id)
+        }
+        fn playable(&self, id: CopyId) -> Option<Playable> {
+            self.inner.playable(id)
+        }
+        fn rows(&self) -> Vec<CopyId> {
+            self.inner.rows()
+        }
+        fn entries_of(
+            &self,
+            c: crate::model::id::Id<crate::model::entity::Collection>,
+        ) -> Vec<crate::model::id::Id<crate::model::entity::Recording>> {
+            self.inner.entries_of(c)
+        }
+        fn recording_of(
+            &self,
+            id: CopyId,
+        ) -> Option<crate::model::id::Id<crate::model::entity::Recording>> {
+            self.inner.recording_of(id)
+        }
+        fn find(&self, of: crate::model::about::Kind, name: &str) -> crate::model::about::Found {
+            self.inner.find(of, name)
+        }
+        fn label_of(&self, focus: crate::model::focus::Focus) -> String {
+            self.inner.label_of(focus)
+        }
+        fn about(
+            &self,
+            focus: crate::model::focus::Focus,
+            happened: &[crate::model::seam::Happened],
+        ) -> crate::model::about::About {
+            self.inner.about(focus, happened)
+        }
+        fn places(&self, facet: crate::model::id::Id<crate::model::entity::Facet>) -> bool {
+            self.inner.places(facet)
+        }
+        fn row(
+            &self,
+            recording: crate::model::id::Id<crate::model::entity::Recording>,
+        ) -> Option<crate::model::seam::Row> {
+            self.inner.row(recording)
+        }
+        fn chosen(
+            &self,
+            recording: crate::model::id::Id<crate::model::entity::Recording>,
+            here: &[crate::model::id::Id<crate::model::entity::Device>],
+            prefers: &[crate::model::encoding::Format],
+        ) -> Option<(
+            String,
+            crate::model::id::Id<crate::model::entity::Encoding>,
+            crate::model::encoding::Levels,
+        )> {
+            self.inner.chosen(recording, here, prefers)
+        }
+    }
+
+    /// **A track pane draws a screenful and asks about a screenful** — #261.
+    ///
+    /// It built a `ListItem` for every row and read every one of them from the library. That was
+    /// a map lookup until the library moved to the engine, and then it was a socket round trip
+    /// each — reported as the queue view being *very* laggy, and the tree being laggy after it,
+    /// which was this thrashing the row cache on its way past.
+    ///
+    /// The queue is where it showed because "up next" is the whole projection rather than a
+    /// playlist, so this asks about a list far longer than the pane.
+    #[test]
+    fn a_track_pane_reads_a_screenful_not_the_list() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let store = tests::fixture();
+        let library = tests::lib_of(&store);
+        let ids = Listing::rows(library);
+        assert!(!ids.is_empty(), "the fixture holds nothing to queue");
+
+        let counted = Counted {
+            inner: library,
+            asked: Cell::new(0),
+        };
+        let ctx = Context {
+            library: &counted,
+            player: None,
+            gapless: None,
+        };
+        let mut ui = tests::ui_of(&store, true);
+        ui.view = View::Queue;
+        // **A list far longer than the pane**, which is the shape the queue has in practice:
+        // "up next" is the whole projection, not a playlist. The fixture holds seven rows, so
+        // they go round until there are enough of them.
+        for id in ids.iter().cycle().take(200) {
+            ui.queue.push_back(*id);
+        }
+        let queued = ui.queue.entries().count();
+        assert!(queued > 100, "only {queued} queued");
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("a backend");
+        terminal.draw(|f| draw(f, &ui, &ctx)).expect("a frame");
+
+        let asked = counted.asked.get();
+        assert!(asked > 0, "the pane drew without reading any row at all");
+        assert!(
+            asked < queued / 2,
+            "asked about {asked} rows for a pane that can show about eight, out of {queued}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod a_pane_draws_where_the_cursor_is {
+    use super::*;
+    use crate::model::rows::Listing;
+
+    /// **The window follows the cursor, and the gutter counts the list** — #261.
+    ///
+    /// The counting test next door sees *how many* rows a pane reads, which a window that never
+    /// moves satisfies just as well as one that works. This one asks *which*: the cursor goes a
+    /// long way down a queue, and the line it is on has to be drawn, carrying its own number
+    /// rather than the window's.
+    #[test]
+    fn a_track_pane_follows_its_cursor_and_numbers_the_list() {
+        let store = tests::fixture();
+        let library = tests::lib_of(&store);
+        let ids = Listing::rows(library);
+        assert!(!ids.is_empty(), "the fixture holds nothing to queue");
+
+        let ctx = Context {
+            library,
+            player: None,
+            gapless: None,
+        };
+        let mut ui = tests::ui_of(&store, true);
+        ui.view = View::Queue;
+        ui.relative_numbers = true;
+        for id in ids.iter().cycle().take(200) {
+            ui.queue.push_back(*id);
+        }
+
+        // Far enough down that a pane which never scrolled could not be showing it — and then
+        // **back up into the window it just scrolled to**, because a cursor at the very bottom
+        // is the one place where a selection index that was never made relative lands correctly
+        // anyway: ratatui clamps it to the last item, which is where the cursor is.
+        ui.queue_sel = 150;
+        let _ = tests::render(&ui, &ctx, 80, 12);
+        let at = 150 - 2;
+        ui.queue_sel = at;
+        let out = tests::render(&ui, &ctx, 80, 12);
+
+        let gutter = |l: &str| {
+            l.trim_start_matches(['\u{2502}', ' '])
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned()
+        };
+        let want = format!("{}", at + 1);
+        assert!(
+            out.lines().any(|l| gutter(l) == want),
+            "no line numbered {want} for the cursor at {at}:\n{out}"
+        );
+        // And the distances around it are the list's, not a window's: the line above the cursor
+        // is one away wherever the window happens to start.
+        assert!(
+            out.lines().any(|l| gutter(l) == "1"),
+            "nothing one row from the cursor:\n{out}"
+        );
+
+        // **And the highlight is on that line.** The widget is handed the window, so its
+        // selection index is the window's; passing the list's would point past the end of a
+        // ten-item slice — which draws identical text and highlights the wrong line or none.
+        let cursor_row = out
+            .lines()
+            .position(|l| gutter(l) == want)
+            .expect("the line numbered above");
+        assert_eq!(
+            tests::highlighted(&ui, &ctx, 80, 12),
+            Some(cursor_row as u16),
+            "the highlight is not on the cursor's line:\n{out}"
+        );
     }
 }
