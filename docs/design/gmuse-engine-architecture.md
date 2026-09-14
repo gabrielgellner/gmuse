@@ -232,6 +232,13 @@ sharper than two writers racing: `durable::log_path` is one file per **device**,
 `Stamp.device` exists so that "two devices cannot produce an equal stamp". Two processes on one machine would be two
 appenders claiming to be one device.
 
+**And it cannot decide** (#261). A view does not hold the `Desk` itself but an `Enquiries` — the public side of the
+counter, carrying `current`, `reread`, `settled`, `history` and `appender`, and not `programme` or `compact`. Those two
+are what §7 gives a single owner, and a view holding a whole `Desk` was a second decider one call site away. Nothing in
+`src/ui/` ever called either, which is exactly the problem: a rule that holds because nobody has broken it yet is a
+habit. `Appender` gets the same shape right for writing, with one difference worth naming — `Desk::appender()` returns
+`None`, a branch a caller can forget to take, where a method that is not on the type is a compile error.
+
 **It still writes, through the engine** (#236). `ui::record` asks `Desk::appender()` first and the socket second: the
 facts a `record` closure would have appended are harvested by running the closure against a throwaway `Instance`, and
 sent as `library.edit { facts: [...] }` in the log's own encoding. `Fact::is_an_edit` is the gate — a client may propose

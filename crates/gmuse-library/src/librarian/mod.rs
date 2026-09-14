@@ -232,6 +232,25 @@ impl Appender<'_> {
     pub fn scan(&self, roots: Vec<PathBuf>, cache: Option<PathBuf>) {
         let _ = self.jobs.send(Job::Scan { roots, cache });
     }
+
+    /// **Rewrite the log with the dead weight dropped.**
+    ///
+    /// Here because it rewrites the log, which is strictly more than appending to it:
+    /// only the process holding the append lock may, and a `shelf compact` beside a
+    /// running engine has to ask rather than do.
+    ///
+    /// **It said this before it was true** — #261. The doc has always named `Appender`
+    /// as the gate while the method sat on `Desk`, where what actually stopped a
+    /// reading desk was that it has no file to rewrite: `writing: None`, so it
+    /// compacted its in-memory log and quietly did nothing. That is §4.2's shape, a
+    /// gate naming a thing that exists rather than a capability that does not, and the
+    /// fix is to put the method where the sentence says it is.
+    ///
+    /// Returns immediately. What it dropped shows up as the next published fold having
+    /// fewer records, and the librarian thread commits the result.
+    pub fn compact(&self) {
+        let _ = self.jobs.send(Job::Compact);
+    }
 }
 
 impl Desk {
@@ -823,16 +842,6 @@ impl Desk {
 
     /// **Drop the superseded records nothing reads** — #218, #201.
     ///
-    /// Behind [`Appender`] because it rewrites the log, which is strictly more than
-    /// appending to it: only the process holding the append lock may, and a
-    /// `shelf compact` beside a running engine has to ask rather than do.
-    ///
-    /// Returns immediately. What it dropped shows up as the next published fold
-    /// having fewer records, and the librarian thread commits the result.
-    pub fn compact(&self) {
-        let _ = self.jobs.send(Job::Compact);
-    }
-
     /// **Read the log again** — for a view following an engine (#236, #219).
     ///
     /// Returns immediately; the parse and the fold happen on the librarian
@@ -855,6 +864,14 @@ impl Desk {
     /// absent in the type.
     pub fn appender(&self) -> Option<Appender<'_>> {
         self.appends.then_some(Appender { jobs: &self.jobs })
+    }
+
+    /// **Hand this desk to a follower**, keeping only the questions.
+    ///
+    /// Consuming rather than borrowing: there is no second handle left over that could
+    /// still reach `programme`, which is the whole point of the narrowing.
+    pub fn into_enquiries(self) -> Enquiries {
+        Enquiries(self)
     }
 
     /// A desk over an empty log that writes nothing to disk, for tests.
@@ -892,6 +909,89 @@ impl Desk {
         if self.jobs.send(Job::Settled(tx)).is_ok() {
             let _ = rx.recv();
         }
+    }
+}
+
+/// **The public side of the counter** — what a view may ask, and nothing else.
+///
+/// A `Desk` is where the rest of the program asks; this is what a *follower* holds.
+/// The three-actor model (#257) gives every question a single owner, and two of the
+/// answers on `Desk` belong to the librarian alone:
+///
+/// - **`programme(ask)`** — what plays next. That is the one thing #257 exists to give
+///   a single owner, and a view holding a `Desk` was one call site away from being a
+///   second decider. Nothing in `src/ui/` ever called it, which made it **latent
+///   rather than actual** — and a rule that holds because nobody has broken it yet is
+///   not a rule, it is a habit.
+/// - **`compact()`** — rewriting the log, which is now behind [`Appender`] where its
+///   doc always claimed it was.
+///
+/// `say`, `holdings` and `scan` are absent for the same reason they are on `Appender`:
+/// a view that only reads is entitled to fold the log (I15) and not to add to it.
+///
+/// **Absence is the mechanism.** `Desk::appender` returns `None` on a reading desk,
+/// which is a capability refused at a call site; this is one that cannot be named. The
+/// difference matters because a refusal is a runtime branch somebody can forget to
+/// take, and a missing method is a compile error.
+///
+/// ## What it is not
+///
+/// It is **not** read-only, and calling it that would be the same mistake #261 found in
+/// `compact`'s doc. An attached view still appends its own plays and ratings through
+/// [`Enquiries::appender`], and whether it may is `Desk`'s `appends` bool, unchanged.
+/// What this narrows is *deciding*, not *writing*.
+///
+/// It owns the desk, so the librarian thread lives exactly as long as it did — the
+/// drain-and-join on drop is `Desk`'s and is not bypassed.
+pub struct Enquiries(Desk);
+
+impl Enquiries {
+    /// The latest published answer. One atomic load.
+    pub fn current(&self) -> Arc<Answer> {
+        self.0.current()
+    }
+
+    /// Which device this is.
+    pub fn device(&self) -> Id<Device> {
+        self.0.device()
+    }
+
+    /// Read the log again — for a view following an engine (#236, #219).
+    pub fn reread(&self) {
+        self.0.reread()
+    }
+
+    /// Publish again without changing anything.
+    pub fn advance(&self) {
+        self.0.advance()
+    }
+
+    /// Block until everything queued so far has been published.
+    pub fn settled(&self) {
+        self.0.settled()
+    }
+
+    /// What the library says happened to one thing, and who said it.
+    pub fn history(&self, focus: crate::model::focus::Focus) -> Vec<crate::model::seam::Happened> {
+        self.0.history(focus)
+    }
+
+    /// Every record the log holds — a clone, and an expensive one.
+    pub fn records(&self) -> Option<std::collections::BTreeSet<crate::facts::Record>> {
+        self.0.records()
+    }
+
+    /// The half that may add to the log, or `None` on a reading desk.
+    pub fn appender(&self) -> Option<Appender<'_>> {
+        self.0.appender()
+    }
+
+    /// What finished scans had to say.
+    ///
+    /// A borrow rather than the public field `Desk` exposes, because handing out the
+    /// receiver would let a caller keep it past the desk it belongs to.
+    pub fn scans(&self) -> &crossbeam_channel::Receiver<crate::operations::scan::ScanReport> {
+        &self.0.scans
     }
 }
 

@@ -626,7 +626,8 @@ fn record_sends_a_fact_to_the_engine_when_this_view_cannot_append() {
 
     let mut ui = gmuse::ui::Ui::new(Default::default());
     ui.data_dir = Some(data.clone());
-    ui.desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    ui.desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone())
+        .into_enquiries();
     ui.engine = Some(client);
     assert!(
         ui.desk.appender().is_none(),

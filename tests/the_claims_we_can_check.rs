@@ -576,3 +576,109 @@ mod proving_the_scanner {
         );
     }
 }
+
+/// **A view cannot decide what plays next, and cannot rewrite the log** — #261, §7 of #257.
+///
+/// The three-actor model gives every question a single owner, and `Desk::programme` is the
+/// one it exists for. A view held a whole `Desk`, so it was a second decider *one call site
+/// away* — and #261 called that latent rather than actual, because nothing in `src/ui/` had
+/// ever called it. A rule that holds because nobody has broken it yet is a habit.
+///
+/// So the view holds [`Enquiries`], where the method is absent rather than refused. The
+/// difference is the one `Desk::appender` gets right for appending: `None` is a branch a
+/// caller can forget to take, and a missing method is a compile error.
+///
+/// **This checks the mechanism, not the habit.** Grepping `src/ui/` for `.programme(` would
+/// pass just as well on the day somebody added the call — it is the field's *type* that makes
+/// it impossible, so that is what is asserted.
+#[test]
+fn a_follower_cannot_name_the_decisions_that_have_one_owner() {
+    let librarian = std::fs::read_to_string("crates/gmuse-library/src/librarian/mod.rs")
+        .expect("the librarian");
+
+    // The instrument, before the claim: this check is worthless if it cannot see the
+    // methods it is asserting the absence of, and `impl Desk` is where they must be.
+    let desk = block(&librarian, "impl Desk {").expect("`impl Desk` moved or was renamed");
+    for owned in ["fn programme(", "fn programme_later("] {
+        assert!(
+            desk.contains(owned),
+            "`Desk::{}` is gone — either it moved and this check needs rewriting, or the \
+             thing a follower must not reach no longer exists",
+            owned.trim_start_matches("fn ")
+        );
+    }
+
+    let enquiries =
+        block(&librarian, "impl Enquiries {").expect("`impl Enquiries` moved or was renamed");
+    assert!(
+        enquiries.matches("pub fn ").count() >= 5,
+        "`impl Enquiries` parsed to almost nothing, so finding no `programme` in it proves \
+         nothing"
+    );
+    // Paren-anchored: `fn scans` is a read a follower keeps, and `fn scan` is not.
+    for hidden in [
+        "fn programme(",
+        "fn compact(",
+        "fn say(",
+        "fn scan(",
+        "fn holdings(",
+    ] {
+        assert!(
+            !enquiries.contains(hidden),
+            "`Enquiries::{}` exists — a follower can reach it again",
+            hidden.trim_start_matches("fn ")
+        );
+    }
+
+    // And the view holds that type rather than the wide one. Naming `Desk` in `src/ui/`
+    // is fine — the tests build one and narrow it — but *storing* one hands the whole
+    // surface back. A field declaration is `name: Type,` with no call in it, which is what
+    // separates it from the `desk: Desk::detached(..)` a test's struct literal writes.
+    let mut fields = 0;
+    for file in ["src/ui/mod.rs", "src/view.rs", "src/ui/statusline.rs"] {
+        let text = std::fs::read_to_string(file).expect(file);
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.starts_with("//") || line.contains('(') || !line.ends_with(',') {
+                continue;
+            }
+            let Some((name, ty)) = line.trim_start_matches("pub ").split_once(": ") else {
+                continue;
+            };
+            if !name.chars().all(|c| c.is_ascii_lowercase() || c == '_') || name.is_empty() {
+                continue;
+            }
+            fields += 1;
+            assert!(
+                !ty.contains("Desk"),
+                "{file}:{} stores a `Desk`: {line}",
+                n + 1
+            );
+        }
+    }
+    // The instrument again: a parse that found no fields would pass this silently.
+    assert!(
+        fields > 50,
+        "only {fields} field declarations parsed out of the view — the scan is not reading \
+         what it claims to"
+    );
+}
+
+/// The body of one `impl` block, by brace counting from its header.
+fn block<'a>(text: &'a str, header: &str) -> Option<&'a str> {
+    let start = text.find(header)? + header.len();
+    let mut depth = 1usize;
+    for (i, c) in text[start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[start..start + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}

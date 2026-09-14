@@ -2479,7 +2479,7 @@ fn run_tui(
         let records = held.library.record_count;
         let known = held.listened.ratings.len() + held.listened.plays.len();
         drop(held);
-        state.desk = desk;
+        state.desk = desk.into_enquiries();
         state.listened = std::sync::Arc::clone(&state.desk.current().listened);
         state.data_dir = Some(loaded.data_dir.clone());
         state.audit.line(
@@ -2874,7 +2874,7 @@ fn run_engine(
                 // Dropping superseded holdings assertions is not an append at all, so
                 // no other process can do it while the engine holds the lock (#218).
                 LibraryOp::Compact => {
-                    self.desk.compact();
+                    self.appender().compact();
                     Ok(serde_json::json!({ "accepted": true }))
                 }
 

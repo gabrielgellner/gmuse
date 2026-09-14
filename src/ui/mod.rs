@@ -371,7 +371,12 @@ pub struct Ui {
     ///
     /// Ratings and plays are facts about a **recording**, not a file, so a
     /// renumber cannot strand them (#81).
-    pub desk: crate::librarian::Desk,
+    /// **The public side of the counter** — #261.
+    ///
+    /// `Enquiries`, not `Desk`: a view cannot name `programme` or `compact`, so the
+    /// single owner #257 gives each question stays single by the type rather than by
+    /// nobody having called it yet.
+    pub desk: crate::librarian::Enquiries,
     /// The fold, refreshed after every fact. Held so the UI answers a rating
     /// immediately; what makes it durable is the record appended beside it.
     pub listened: std::sync::Arc<crate::projection::catalogue::Catalogue>,
@@ -659,7 +664,8 @@ impl Ui {
             relative_numbers: false,
             pending_next: None,
             session_path: None,
-            desk: crate::librarian::Desk::detached(crate::model::id::Id::derived(b"unconfigured")),
+            desk: crate::librarian::Desk::detached(crate::model::id::Id::derived(b"unconfigured"))
+                .into_enquiries(),
             listened: std::sync::Arc::default(),
             data_dir: None,
             counted_current: false,
@@ -1477,7 +1483,7 @@ fn propose(ui: &mut Ui, say: impl FnOnce(&mut crate::model::instance::Instance))
 /// happens on another thread and this is the one that can say so. Nothing
 /// here blocks — an empty channel is the ordinary case.
 fn note_finished_scans(ui: &mut Ui) {
-    while let Ok(report) = ui.desk.scans.try_recv() {
+    while let Ok(report) = ui.desk.scans().try_recv() {
         ui.audit.line("rescan", &report.to_string());
         ui.notify(format!("rescan: {report}"));
         // The scan replaced the holdings, so every locator may have moved.
@@ -7765,7 +7771,8 @@ mod tests {
             None,
         );
         ui.data_dir = Some(scratch("smart-playlists"));
-        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"));
+        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"))
+            .into_enquiries();
         ui
     }
 
@@ -7897,7 +7904,8 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = with_playlists(&store);
         ui.data_dir = Some(scratch("freeze-rule"));
-        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"));
+        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"))
+            .into_enquiries();
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist open electronic");
@@ -7967,7 +7975,8 @@ mod tests {
         // Freezing renames what is open rather than closing it: the answer
         // has somewhere to live now, which is the name it takes (#95).
         ui.data_dir = Some(scratch("freeze-title"));
-        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"));
+        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"))
+            .into_enquiries();
         execute(&mut ui, &ctx, Command::Freeze("kept".into()));
         let out = render(&ui, &ctx, 90, 10);
         assert!(out.contains("kept"), "{out}");
@@ -8002,7 +8011,8 @@ mod tests {
         fresh.data_dir = ui.data_dir.clone();
         // A relaunch folds the same log off disk — a playlist is facts now
         // (#118) — so the fixture merges the records rather than sharing state.
-        fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
+        fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"))
+            .into_enquiries();
         let carried = ui.desk.records().expect("a live desk answers");
         fresh
             .desk
@@ -8041,7 +8051,8 @@ mod tests {
         fresh.data_dir = ui.data_dir.clone();
         // A relaunch folds the same log off disk — a playlist is facts now
         // (#118) — so the fixture merges the records rather than sharing state.
-        fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
+        fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"))
+            .into_enquiries();
         let carried = ui.desk.records().expect("a live desk answers");
         fresh
             .desk
@@ -8090,7 +8101,8 @@ mod tests {
         fresh.data_dir = ui.data_dir.clone();
         // A relaunch folds the same log off disk — a playlist is facts now
         // (#118) — so the fixture merges the records rather than sharing state.
-        fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"));
+        fresh.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test2"))
+            .into_enquiries();
         let carried = ui.desk.records().expect("a live desk answers");
         fresh
             .desk
@@ -8123,7 +8135,8 @@ mod tests {
         let dir = scratch(name);
         let mut ui = with_playlists(store);
         ui.data_dir = Some(dir.clone());
-        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"));
+        ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"))
+            .into_enquiries();
         (ui, dir)
     }
 
@@ -10842,7 +10855,8 @@ mod tests {
             device,
             0,
             std::env::temp_dir().join("gmuse-attached-no-append"),
-        );
+        )
+        .into_enquiries();
         assert!(
             ui.desk.appender().is_none(),
             "a reading desk is the thing being tested"
@@ -11359,7 +11373,8 @@ mod tests {
             device,
             0,
             Some(dir.clone()),
-        );
+        )
+        .into_enquiries();
         ui.data_dir = Some(dir);
         ui
     }
