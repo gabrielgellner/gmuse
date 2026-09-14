@@ -611,7 +611,31 @@ pub struct Found {
 /// view should hold; this is the seam, not yet the paging.
 pub trait Browsing {
     /// The lines visible under `folds`, or every line when `unfolded`.
+    ///
+    /// **The last whole-tree question**, and the two callers left are named in
+    /// `tree-over-the-wire.md` §7: the renderer, which builds a `ListItem` per line and should
+    /// build a screenful, and the search's haystack, which [`Browsing::find`] replaces.
     fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node>;
+
+    /// **The shape of the whole tree under these folds** — four bits a line.
+    ///
+    /// What every structural motion reads, and all it reads. 8.9 KB for a library whose shelf
+    /// is 2.7 MB, so a client can hold it and move the cursor without asking anyone.
+    fn spine(&self, folds: &Expansion<SortKey>) -> Spine;
+
+    /// `limit` lines from `at`. Fewer at the end, none past it.
+    fn page(&self, folds: &Expansion<SortKey>, at: usize, limit: usize) -> Vec<Node>;
+
+    /// Where this line is now — the question a fold change asks.
+    fn at(&self, folds: &Expansion<SortKey>, mark: &Mark) -> Option<usize>;
+
+    /// **Where the cursor goes when its line may no longer exist.**
+    ///
+    /// A level change can close the row out from under you. vim puts the cursor on the start of
+    /// the fold that swallowed it, which here means the deepest visible line whose seat is a
+    /// prefix of where you were — asked by seat rather than by index, because the indices are
+    /// exactly what the change invalidated.
+    fn settle(&self, folds: &Expansion<SortKey>, seat: &[SortKey]) -> usize;
 
     /// Every track under one line: one track, one disc, one record, or an artist's whole shelf.
     fn tracks_under(&self, node: &Node) -> Vec<CopyId>;
@@ -626,6 +650,38 @@ pub trait Browsing {
 impl Browsing for Shelf {
     fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node> {
         flatten(self, folds, unfolded)
+    }
+
+    fn spine(&self, folds: &Expansion<SortKey>) -> Spine {
+        spine_of(&flatten(self, folds, false))
+    }
+
+    fn page(&self, folds: &Expansion<SortKey>, at: usize, limit: usize) -> Vec<Node> {
+        flatten(self, folds, false)
+            .into_iter()
+            .skip(at)
+            .take(limit)
+            .collect()
+    }
+
+    fn at(&self, folds: &Expansion<SortKey>, mark: &Mark) -> Option<usize> {
+        flatten(self, folds, false)
+            .iter()
+            .position(|n| &n.mark() == mark)
+    }
+
+    fn settle(&self, folds: &Expansion<SortKey>, seat: &[SortKey]) -> usize {
+        let lines = flatten(self, folds, false);
+        let mut best = 0;
+        let mut deepest = 0;
+        for (i, line) in lines.iter().enumerate() {
+            let at = line.seat();
+            if at.len() <= seat.len() && seat.starts_with(&at) && at.len() >= deepest {
+                deepest = at.len();
+                best = i;
+            }
+        }
+        best.min(lines.len().saturating_sub(1))
     }
 
     /// What `a` and `e` add, and what `x` plays the first of.

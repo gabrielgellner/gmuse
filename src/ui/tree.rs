@@ -74,6 +74,19 @@ impl TreeState {
     ///
     /// Display names come from the first track under each node, since §4 keeps
     /// display strings on the `Track` and only sort keys in the tree.
+    /// The line under the cursor, and nothing else.
+    ///
+    /// **One line, not the list it is in** — #261. Every method below wanted exactly this and
+    /// flattened 8,932 of them to get it.
+    fn here(&self, lib: &dyn Browsing) -> Option<Row> {
+        lib.page(&self.folds, self.selected, 1).into_iter().next()
+    }
+
+    /// How many lines are visible.
+    pub fn total(&self, lib: &dyn Browsing) -> usize {
+        lib.spine(&self.folds).len()
+    }
+
     pub fn rows(&self, lib: &dyn Browsing) -> Vec<Row> {
         self.flatten(lib, false)
     }
@@ -122,12 +135,7 @@ impl TreeState {
         }
         // **Found again by mark, not by equality**: a `Row` carries whether it
         // is expanded, and that is exactly what has just changed.
-        let want = Self::mark_of_inner(row);
-        if let Some(at) = self
-            .rows(lib)
-            .iter()
-            .position(|r| Self::mark_of_inner(r) == want)
-        {
+        if let Some(at) = lib.at(&self.folds, &row.mark()) {
             self.selected = at;
         }
     }
@@ -157,26 +165,18 @@ impl TreeState {
         }
     }
 
-    /// Where a row *sits*, leaves included: a track's is its album's, because
-    /// that is the row the cursor should fall back to when the track's fold
-    /// closes under it.
-    fn seat_of(row: &Row) -> Vec<SortKey> {
-        row.seat()
-    }
-
     /// Every track under the selected row: one track, one album, or everything
     /// by an artist. What `a` and `e` add, and what `x` plays the first of.
     pub fn tracks_for(&self, lib: &dyn Browsing) -> Vec<CopyId> {
-        self.rows(lib)
-            .get(self.selected)
-            .map(|row| lib.tracks_under(row))
+        self.here(lib)
+            .map(|row| lib.tracks_under(&row))
             .unwrap_or_default()
     }
 
     /// The track on the selected row, if it is one.
     pub fn selected_track(&self, lib: &dyn Browsing) -> Option<CopyId> {
-        match self.rows(lib).get(self.selected) {
-            Some(Row::Track { id, .. }) => Some(*id),
+        match self.here(lib) {
+            Some(Row::Track { id, .. }) => Some(id),
             _ => None,
         }
     }
@@ -269,17 +269,16 @@ impl TreeState {
     /// motion that finds nothing leaves the cursor alone, so a count that
     /// overshoots lands on the last match instead of nowhere.
     pub fn go(&mut self, lib: &dyn Browsing, motion: Motion, count: usize) {
+        // **The shape once, not once per count** — #261. This asked for every line on every
+        // iteration, so `3}` flattened 8,932 of them three times to read two bits from each.
+        // Nothing a motion does changes the shape, only where the cursor is in it.
+        let spine = lib.spine(&self.folds);
         for _ in 0..count.max(1) {
-            let rows = self.rows(lib);
-            let Some(at) = self.step(&rows, motion) else {
+            let Some(at) = step_over(&spine, self.selected, motion) else {
                 return;
             };
             self.selected = at;
         }
-    }
-
-    fn step(&self, rows: &[Row], motion: Motion) -> Option<usize> {
-        step_over(&spine_of(rows), self.selected, motion)
     }
 
     /// Every fold that must be open for `row` to be on screen.
@@ -299,21 +298,16 @@ impl TreeState {
     /// It is only meaningful *after* something has closed underneath it, which
     /// is exactly this.
     pub fn only(&mut self, lib: &dyn Browsing) {
-        let rows = self.rows(lib);
-        let Some(row) = rows.get(self.selected) else {
+        let Some(row) = self.here(lib) else {
             return;
         };
-        let opens = Self::ancestors_of(row);
-        let want = Self::mark_of_inner(row);
+        let opens = Self::ancestors_of(&row);
+        let want = Self::mark_of_inner(&row);
 
         self.folds.set_level(0);
         self.folds.open_all(opens);
 
-        if let Some(at) = self
-            .rows(lib)
-            .iter()
-            .position(|r| Self::mark_of_inner(r) == want)
-        {
+        if let Some(at) = lib.at(&self.folds, &want) {
             self.selected = at;
         }
     }
@@ -347,7 +341,7 @@ impl TreeState {
     /// a track, or a play being counted halfway through one, sent the cursor to the top
     /// of the tree — and the second happens with nobody touching the keyboard.
     pub fn mark(&self, lib: &dyn Browsing) -> Option<Mark> {
-        self.rows(lib).get(self.selected).map(Self::mark_of_inner)
+        self.here(lib).map(|row| row.mark())
     }
 
     /// Put the cursor back on what [`Self::mark`] remembered.
@@ -357,12 +351,10 @@ impl TreeState {
     /// the position the cursor held, clamped to the list that exists now. Row 0 is a
     /// guess that happens to be wrong every time the list is longer than one.
     pub fn point_at(&mut self, lib: &dyn Browsing, mark: Option<Mark>) {
-        let rows = self.rows(lib);
-        self.selected =
-            match mark.and_then(|want| rows.iter().position(|r| Self::mark_of_inner(r) == want)) {
-                Some(at) => at,
-                None => self.selected.min(rows.len().saturating_sub(1)),
-            };
+        self.selected = match mark.and_then(|want| lib.at(&self.folds, &want)) {
+            Some(at) => at,
+            None => self.selected.min(self.total(lib).saturating_sub(1)),
+        };
     }
 
     /// What identifies a row across a fold change: a track by its id, a
@@ -374,7 +366,7 @@ impl TreeState {
 
     /// The openable path under the cursor, if the cursor is on one.
     fn path_under(&self, lib: &dyn Browsing) -> Option<Vec<SortKey>> {
-        self.rows(lib).get(self.selected).and_then(Self::path_of)
+        self.here(lib).as_ref().and_then(Self::path_of)
     }
 
     /// Every openable path strictly under `path`. Only albums can be under
@@ -389,23 +381,13 @@ impl TreeState {
     /// cursor on the start of the fold that swallowed it, which here means the
     /// deepest visible ancestor of where you were.
     fn keeping_cursor(&mut self, lib: &dyn Browsing, change: impl FnOnce(&mut Self)) {
-        let seat = self.rows(lib).get(self.selected).map(Self::seat_of);
+        let seat = self.here(lib).map(|row| row.seat());
         change(self);
-        let rows = self.rows(lib);
         let Some(seat) = seat else {
-            self.selected = self.selected.min(rows.len().saturating_sub(1));
+            self.selected = self.selected.min(self.total(lib).saturating_sub(1));
             return;
         };
-        let mut best = 0;
-        let mut deepest = 0;
-        for (i, row) in rows.iter().enumerate() {
-            let at = Self::seat_of(row);
-            if at.len() <= seat.len() && seat.starts_with(&at) && at.len() >= deepest {
-                deepest = at.len();
-                best = i;
-            }
-        }
-        self.selected = best.min(rows.len().saturating_sub(1));
+        self.selected = lib.settle(&self.folds, &seat);
     }
 
     /// Close the node under the cursor.
@@ -416,10 +398,10 @@ impl TreeState {
     /// needing a concept of "level". `zc` is bound to it too, which is what
     /// vim's `zc` does on a line inside a fold.
     pub fn close(&mut self, lib: &dyn Browsing) -> bool {
-        let rows = self.rows(lib);
-        let Some(row) = rows.get(self.selected) else {
+        let Some(row) = self.here(lib) else {
             return false;
         };
+        let row = &row;
         let path = Self::path_of(row).filter(|p| self.folds.is_open(p));
         let target = match path {
             Some(p) => p,
@@ -891,7 +873,7 @@ mod tests {
         s
     }
 
-    fn fixture() -> (Scan, Shelf) {
+    pub(super) fn fixture() -> (Scan, Shelf) {
         let store = store_with(&[
             ("/m/b1.mp3", "Burial", "Untrue", "Archangel"),
             ("/m/b2.mp3", "Burial", "Untrue", "Shell of Light"),
@@ -1866,5 +1848,114 @@ mod tests {
             "`zj` should reach the album \"Second\": {:?}",
             shape(&state, &lib)
         );
+    }
+}
+
+#[cfg(test)]
+mod asks_for_what_it_needs {
+    use super::*;
+    use crate::browse::{Found, Target};
+    use crate::shelf::Shelf;
+    use std::cell::Cell;
+
+    /// A `Browsing` that counts what it was asked for.
+    ///
+    /// **The point of the seam, instrumented.** Whether a method flattens the whole tree to read
+    /// one line is not visible in its result, only in what it asked — so the only way to check
+    /// it is to be the thing it asks.
+    struct Counted {
+        inner: Shelf,
+        lines: Cell<usize>,
+        pages: Cell<usize>,
+        spines: Cell<usize>,
+    }
+
+    impl Counted {
+        fn of(inner: Shelf) -> Self {
+            Self {
+                inner,
+                lines: Cell::new(0),
+                pages: Cell::new(0),
+                spines: Cell::new(0),
+            }
+        }
+    }
+
+    impl Browsing for Counted {
+        fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Row> {
+            self.lines.set(self.lines.get() + 1);
+            self.inner.lines(folds, unfolded)
+        }
+        fn spine(&self, folds: &Expansion<SortKey>) -> Spine {
+            self.spines.set(self.spines.get() + 1);
+            self.inner.spine(folds)
+        }
+        fn page(&self, folds: &Expansion<SortKey>, at: usize, limit: usize) -> Vec<Row> {
+            self.pages.set(self.pages.get() + 1);
+            self.inner.page(folds, at, limit)
+        }
+        fn at(&self, folds: &Expansion<SortKey>, mark: &Mark) -> Option<usize> {
+            self.inner.at(folds, mark)
+        }
+        fn settle(&self, folds: &Expansion<SortKey>, seat: &[SortKey]) -> usize {
+            self.inner.settle(folds, seat)
+        }
+        fn tracks_under(&self, node: &Row) -> Vec<CopyId> {
+            self.inner.tracks_under(node)
+        }
+        fn openable_under(&self, path: &[SortKey]) -> Vec<Vec<SortKey>> {
+            self.inner.openable_under(path)
+        }
+        fn find(&self, folds: &Expansion<SortKey>, want: &Target, from: usize) -> Option<Found> {
+            self.inner.find(folds, want, from)
+        }
+    }
+
+    fn open_tree() -> (TreeState, Counted) {
+        let lib = super::tests::fixture().1;
+        let mut state = TreeState::default();
+        state.open_everything(&lib);
+        (state, Counted::of(lib))
+    }
+
+    /// **A count moves the cursor `n` times and asks for the shape once** — #261.
+    ///
+    /// `go` asked for every line on every iteration, so `3}` flattened the whole tree three
+    /// times to read two bits from each. Nothing a motion does changes the shape.
+    #[test]
+    fn a_counted_motion_asks_for_the_shape_once() {
+        let (mut state, lib) = open_tree();
+        let before = state.selected;
+        state.go(&lib, Motion::NextSibling, 3);
+
+        assert_ne!(
+            state.selected, before,
+            "the motion went nowhere to be counted"
+        );
+        assert_eq!(lib.spines.get(), 1, "asked for the shape more than once");
+        assert_eq!(lib.lines.get(), 0, "a motion flattened the whole tree");
+    }
+
+    /// **Acting on the cursor's line asks for that line**, not for the list holding it.
+    #[test]
+    fn the_cursor_costs_one_line() {
+        let (mut state, lib) = open_tree();
+        state.go(&lib, Motion::NextFold, 1);
+        let asked = lib.pages.get();
+
+        let tracks = state.tracks_for(&lib);
+        assert!(
+            !tracks.is_empty(),
+            "nothing under the cursor, so nothing was asked for"
+        );
+        assert_eq!(
+            lib.pages.get(),
+            asked + 1,
+            "one line took more than one ask"
+        );
+        assert_eq!(lib.lines.get(), 0, "reading one line flattened the tree");
+
+        state.toggle(&lib);
+        assert_eq!(lib.lines.get(), 0, "a toggle flattened the tree");
     }
 }

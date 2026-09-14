@@ -174,22 +174,37 @@ the shelf goes from 1.7 MB to 2.7 MB — and it is held once, librarian-side, ra
 
 ## 7. The seam, and what is still on the wrong side of it
 
-`ui::tree` asks a **`Browsing`**, not a `Shelf`. Four questions, which is all twenty of its methods ever asked one:
+`ui::tree` asks a **`Browsing`**, not a `Shelf`. Seven questions, which is all twenty of its methods ever asked one, and
+an eighth that is leaving:
 
-|                             |                                  |
-| --------------------------- | -------------------------------- |
-| `lines(folds, unfolded)`    | what is visible, or everything   |
-| `tracks_under(node)`        | what `a`, `e` and `x` act on     |
-| `openable_under(path)`      | what `zR` still has left to open |
-| `find(folds, target, from)` | `/`, `n`, `N`, and reveal-by-id  |
+|                             |                                                   |
+| --------------------------- | ------------------------------------------------- |
+| `spine(folds)`              | the shape of the whole tree, four bits a line     |
+| `page(folds, at, limit)`    | the lines to draw                                 |
+| `at(folds, mark)`           | where a line went when the folds changed          |
+| `settle(folds, seat)`       | where the cursor goes when its line was swallowed |
+| `tracks_under(node)`        | what `a`, `e` and `x` act on                      |
+| `openable_under(path)`      | what `zR` still has left to open                  |
+| `find(folds, target, from)` | `/`, `n`, `N`, and reveal-by-id                   |
+| `lines(folds, unfolded)`    | **the one that is still leaving**                 |
 
 They are the wire's methods, deliberately: `Shelf` implements the trait today and a socket client implements it next,
 which makes the swap a line rather than a hunt. It is the move `Context::player` already made for playback (#219), for
 the same reason.
 
-**`lines` returns all of them, and that is what is left.** A view should hold a page; this is the seam, not yet the
-paging. Until a second implementation exists, an attached view still folds the log to build its own `Shelf` — which is
-the 40.6 MB in §1, still there.
+Nothing in `TreeState` asks for a list any more. Acting on the cursor costs **one line**, and a motion costs **one
+spine** — `go` asked for every line on every iteration of its count, so `3}` flattened 8,932 of them three times to read
+two bits from each. `asks_for_what_it_needs` instruments a `Browsing` that counts what it was asked for, because whether
+a method flattened the tree to read one line is not visible in its result.
+
+**`lines` has two callers left, and both are in `src/ui/mod.rs`:**
+
+- the **renderer**, which builds a `ListItem` per line and hands ratatui all 8,932 — it should build a screenful, and it
+  is also where `ctx.library.listed` is called once per line per frame;
+- the **search haystack**, which `find` replaces outright.
+
+Until those go and a socket implements the trait, an attached view still folds the log to build its own `Shelf` — the
+40.6 MB in §1, still there.
 
 ## 8. What this does not decide
 
