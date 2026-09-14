@@ -2788,6 +2788,12 @@ fn run_engine(
         desk: Arc<gmuse::librarian::Desk>,
         /// What to reconcile on a scan.
         roots: Vec<std::path::PathBuf>,
+        /// **The last few trees built, so paging does not rebuild one** — #261.
+        ///
+        /// Paging the real library's tree cost **0.40 s a page** before this, because every
+        /// page rebuilt every node. It is now about a millisecond — `wiring::kept` has the
+        /// measurement and the reasoning, including why the key is the whole question.
+        trees: gmuse::wiring::kept::Trees,
         /// **Which fold a query's page came from** — §7.11's `library_version`, #261.
         ///
         /// The same counter the announcer bumps and the audio engine watches, so a client
@@ -3084,6 +3090,7 @@ fn run_engine(
             use gmuse::model::rows::Listing;
             use gmuse_proto::RpcError;
 
+            let raw = filter.clone();
             let filter = match filter.as_deref().map(gmuse::query::filter::Expr::parse) {
                 Some(Ok(expr)) => Some(expr),
                 Some(Err(e)) => return Err(RpcError::invalid_params("filter", e.to_string())),
@@ -3123,21 +3130,37 @@ fn run_engine(
 
             let answer = self.desk.current();
             let version = self.moved.load(std::sync::atomic::Ordering::Acquire);
-
-            // **Which rows are in it**, which is the filter's job and not the tree's.
-            let members: std::collections::HashSet<_> = match &filter {
-                None => answer.library.rows().into_iter().collect(),
-                Some(_) => gmuse::query::found::found(
-                    &answer.library,
-                    gmuse::history::now_ms(),
-                    filter.as_ref(),
-                )
-                .into_iter()
-                .map(|f| f.row)
-                .collect(),
+            let want = gmuse::wiring::kept::Asked {
+                version,
+                levels,
+                filter: filter.as_ref().map(|_| raw.clone().unwrap_or_default()),
             };
 
-            let all = gmuse::browse::tree(&answer.library, members, levels, true);
+            let all = match self.trees.get(&want) {
+                Some(ready) => ready,
+                None => {
+                    // **Which rows are in it**, which is the filter's job and not the tree's.
+                    let members: std::collections::HashSet<_> = match &filter {
+                        None => answer.library.rows().into_iter().collect(),
+                        Some(_) => gmuse::query::found::found(
+                            &answer.library,
+                            gmuse::history::now_ms(),
+                            filter.as_ref(),
+                        )
+                        .into_iter()
+                        .map(|f| f.row)
+                        .collect(),
+                    };
+                    let built = std::sync::Arc::new(gmuse::browse::tree(
+                        &answer.library,
+                        members,
+                        levels,
+                        true,
+                    ));
+                    self.trees.keep(want, std::sync::Arc::clone(&built));
+                    built
+                }
+            };
             let at = cursor.unwrap_or(0).min(all.len());
             let take = limit.unwrap_or(100).min(5_000);
             let page: Vec<&gmuse::browse::Node> = all.iter().skip(at).take(take).collect();
@@ -3781,6 +3804,8 @@ fn run_engine(
             control: Arc::clone(&control),
             roots: roots.clone(),
             moved: Arc::clone(&relay.moved),
+            // Four: a picker alternates between a couple of shapes.
+            trees: gmuse::wiring::kept::Trees::new(4),
         }),
         lock,
     )

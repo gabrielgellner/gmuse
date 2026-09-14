@@ -1820,6 +1820,64 @@ fn playback_events_do_not_arrive_between_discontinuities() {
 ///
 /// The decoder's `NeedNext` arrives while the current track is still playing and
 /// needs an answer before it ends. Nothing is asked of a client here: this test
+/// **A cached tree is not served to a different question** — #261.
+///
+/// `query.tree` keeps the last few trees so paging does not rebuild one: on the real library
+/// every page cost **0.40 s** before the cache and about a millisecond after.
+///
+/// The way a cache goes wrong is answering the wrong question, so this asks three that must
+/// differ — everything, a filter, and no grouping — and checks each gets its own answer over
+/// a real socket.
+///
+/// **The fold's version is the fourth part of that key**, and it is what makes a library
+/// change invalidate a tree. Proving it needs a library change that alters the tree's *shape*
+/// rather than a rating, which this harness cannot drive — so it is asserted one layer down,
+/// in `wiring::kept`'s `a_newer_fold_is_not_the_same_question`, where the key type is.
+#[test]
+fn a_cached_tree_is_keyed_by_the_question_it_answers() {
+    let (engine, _recording) = start_with_a_track("tree-cache");
+    let client = Client::connect(&engine.socket, "browser", "0").expect("connect");
+
+    let total = |params: serde_json::Value| -> u64 {
+        client
+            .call("query.tree", Some(params))
+            .expect("the tree")
+            .get("total")
+            .and_then(|t| t.as_u64())
+            .expect("a total")
+    };
+
+    // Two tracks were imported, so the grouped tree is artist + album + two tracks and the
+    // flat one is just the tracks. **The instrument**: if the fixture had one track the
+    // grouped and flat totals could coincide and this would prove nothing.
+    let grouped = total(serde_json::json!({ "limit": 1 }));
+    assert!(
+        grouped > 2,
+        "only {grouped} nodes, so the shapes cannot differ"
+    );
+
+    let flat = total(serde_json::json!({ "limit": 1, "levels": [] }));
+    assert!(
+        flat < grouped,
+        "flat has {flat} nodes and grouped {grouped} — the cache answered the wrong grouping"
+    );
+
+    // A filter nothing matches is a different question again, and asked *after* the two above
+    // so a stale entry would be the thing returned.
+    let none = total(serde_json::json!({ "limit": 1, "filter": "artist=\"nobody at all\"" }));
+    assert_eq!(
+        none, 0,
+        "a filter matching nothing was answered with {none} nodes from another question"
+    );
+
+    // And back to the first, which must still be right rather than evicted into something else.
+    assert_eq!(
+        total(serde_json::json!({ "limit": 1 })),
+        grouped,
+        "asking the first question again gave a different answer"
+    );
+}
+
 /// **A headless engine counts a play** — #257, and nothing checked this before.
 ///
 /// `record_play_if_earned` lived in the TUI and polled a position a *view* could see, so an
