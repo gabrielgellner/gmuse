@@ -174,7 +174,12 @@ pub enum Request {
     /// one lookup: the row written out, where its file is, and which recording it is about.
     /// `model::rows::Listing` is the seam these cross for; `Slip` is what makes it possible.
     QueryRow {
-        id: gmuse_ids::copy::CopyId,
+        /// **A list, because a caller walking rows is walking all of them.**
+        ///
+        /// One row at a time is 226 µs over a unix socket and 1.5 s for a library of 7,273 —
+        /// which is what a filter costs, and a filter runs on every `:view`. Measured with
+        /// `just read-cost`.
+        ids: Vec<gmuse_ids::copy::CopyId>,
     },
     /// **What the library says about one recording** — #261. The row it would draw, and which
     /// file to play for it on the devices given.
@@ -710,10 +715,10 @@ impl Request {
             method::QUERY_ROW => {
                 #[derive(Deserialize)]
                 struct P {
-                    id: gmuse_ids::copy::CopyId,
+                    ids: Vec<gmuse_ids::copy::CopyId>,
                 }
                 let p: P = typed(method, params)?;
-                Ok(Self::QueryRow { id: p.id })
+                Ok(Self::QueryRow { ids: p.ids })
             }
             method::QUERY_RECORDING => {
                 #[derive(Deserialize)]

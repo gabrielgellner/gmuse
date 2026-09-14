@@ -3257,10 +3257,18 @@ fn run_engine(
             let bad = |what: &'static str| RpcError::invalid_params(what, "not an id");
 
             Ok(match request {
-                Request::QueryRow { id } => serde_json::json!({
-                    "row": lib.listed(id),
-                    "locator": lib.playable(id).map(|p| p.locator),
-                    "recording": lib.recording_of(id),
+                Request::QueryRow { ids } => serde_json::json!({
+                    "rows": ids
+                        .iter()
+                        .map(|id| {
+                            serde_json::json!({
+                                "id": id,
+                                "row": lib.listed(*id),
+                                "locator": lib.playable(*id).map(|p| p.locator),
+                                "recording": lib.recording_of(*id),
+                            })
+                        })
+                        .collect::<Vec<_>>(),
                 }),
                 Request::QueryRecording { recording, here } => {
                     let recording = recording.parse().map_err(|_| bad("recording"))?;

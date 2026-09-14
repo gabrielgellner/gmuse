@@ -338,16 +338,27 @@ caller that reads it gets an empty library rather than a wrong one.
 | `Projected::advance`, the catalogue      | 11.8 MB |
 | `Librarian::from_catalogue` on top of it | 26.5 MB |
 
-And the whole thing, against the real library with an engine running:
+And the whole thing, against the real library with an engine running — **two runs each, sampled at 12 s and 47 s, stable
+across both**:
 
-|                                     |             |
-| ----------------------------------- | ----------- |
-| attached view, at the start of #261 | 123.8 MB    |
-| after the tree moved over the wire  | 74.9 MB     |
-| **now**                             | **28.3 MB** |
+|                                             |          |
+| ------------------------------------------- | -------- |
+| attached view, at the start of #261         | 123.8 MB |
+| after the tree moved over the wire          | 74.9 MB  |
+| after the `Librarian` stopped being derived | 74.9 MB  |
+| after the rows stopped being hoarded        | 63.1 MB  |
 
-What is left in those 28 MB is the catalogue: 11.8 MB of ratings, plays, collections and saved views, folded here
-because `Listened` has no crossing. That is the next thing, and it is smaller than everything before it.
+**The third row is a correction.** Not deriving the `Librarian` was published as 28.3 MB and that figure does not
+reproduce: a single sample of a process whose row cache was still filling. Repeated, it is 74.9 MB — the same as before
+— because `Remote` kept every row a caller touched, and the startup filter touches all 7,273. A 26.5 MB `Librarian` had
+been traded for a 43 MB pile of rows.
+
+So the saving is the cap, not the desk: `KEEP` bounds the cache at five hundred rows, which is what a screenful and the
+panes beside it need, and a walk blows through it rather than leaving itself behind.
+
+What is left is the catalogue — 11.8 MB of ratings, plays, collections and saved views, folded here because `Listened`
+has no crossing — and the walk itself. **A filter that reads 7,273 rows to keep forty is the wrong shape however it is
+fetched**, which is what §7.11's `query.run` is for, and it is the next thing rather than more batching.
 
 ## 10. What this does not decide
 

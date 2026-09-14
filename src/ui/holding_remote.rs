@@ -25,6 +25,43 @@
 
 use std::sync::{Arc, Mutex};
 
+/// **How many rows a miss reads ahead** — #261.
+///
+/// Fifty, and the table says why — `just read-cost` against the real library:
+///
+/// | ahead | a screenful | every row |
+/// | --- | --- | --- |
+/// | 1 | 9.0 ms | 1.5 s |
+/// | 50 | **6.4 ms** | 574 ms |
+/// | 100 | 9.2 ms | 565 ms |
+/// | 250 | 25.7 ms | 610 ms |
+/// | 500 | 46.6 ms | 590 ms |
+///
+/// **The walk is flat from 50 upwards**, which says the round trips stopped being the cost
+/// somewhere below there and the rows themselves — written out at one end and read at the other
+/// — are what is left. So a bigger block buys nothing on the walk and makes the first draw wait
+/// for rows nobody is looking at.
+///
+/// It also says where the next saving is not: batching harder. A filter that walks 7,273 rows
+/// to keep forty is the wrong shape however it is fetched, and §7.11's `query.run` is the
+/// shape that is not.
+const AHEAD: usize = 50;
+
+/// **How many rows are kept**, and it is a cap rather than a policy — #261.
+///
+/// Without one this grew to hold every row a walk touched: the startup filter reads all 7,273
+/// and the view went from 28.3 MB to 71.8 MB, which is trading a 26.5 MB `Librarian` for a
+/// 43 MB pile of rows. Worse, and measured before it was believed.
+///
+/// What the cache is *for* is redrawing the same forty lines, and the panes beside them. Five
+/// hundred covers that with room to scroll. A walk blows straight through it, which is the
+/// right outcome: a caller reading every row once should not leave every row behind.
+///
+/// **Cleared rather than evicted one at a time.** An LRU would need an order to maintain on
+/// every hit, for a map that is either serving a screenful — where nothing is evicted — or
+/// being walked past, where nothing is worth keeping.
+const KEEP: usize = 500;
+
 use gmuse_client::Client;
 
 use crate::browse::{Browsing, Found, Holding, Mark, Node, Spine, Target};
@@ -484,7 +521,17 @@ impl Remote {
         self.inner.client.call(method, Some(params)).ok()
     }
 
-    /// The three things a row is asked for, in one call and kept.
+    /// The three things a row is asked for, kept — and read ahead.
+    ///
+    /// **A block, not a row.** One row over a unix socket is 226 µs and a filter reads one per
+    /// row of the whole library: 1.5 s for 7,273, on every `:view`. Measured with
+    /// `just read-cost`, and it is the cost of *asking*, not of answering — the engine has the
+    /// row in hand.
+    ///
+    /// So a miss fetches this row and the [`AHEAD`] after it **in the library's own order**,
+    /// which is the order both callers walk in: a filter goes through `rows()` from the top,
+    /// and a pane draws a run of adjacent lines. Reading ahead in any other order would be a
+    /// guess; this one is what the caller already told us it was doing.
     fn row_of(
         &self,
         id: CopyId,
@@ -498,11 +545,37 @@ impl Remote {
         {
             return held.clone();
         }
+
+        // The row asked for leads, so a caller that walks in some other order still gets what
+        // it asked for in one trip rather than none.
+        let from = self.inner.sorted.iter().position(|r| *r == id);
+        let mut want = vec![id];
+        if let Some(at) = from {
+            want.extend(
+                self.inner
+                    .sorted
+                    .iter()
+                    .skip(at + 1)
+                    .take(AHEAD - 1)
+                    .copied(),
+            );
+        }
+
         let got = self
-            .read("query.row", serde_json::json!({ "id": id }))
-            .map(|r| {
-                let at = |key: &str| r.get(key).cloned().unwrap_or(serde_json::Value::Null);
-                (
+            .read("query.row", serde_json::json!({ "ids": want }))
+            .and_then(|r| r.get("rows")?.as_array().cloned())
+            .unwrap_or_default();
+        let mut mine = (None, None, None);
+        if let Ok(mut kept) = self.inner.rows_kept.lock() {
+            if kept.len() + got.len() > KEEP {
+                kept.clear();
+            }
+            for line in &got {
+                let at = |key: &str| line.get(key).cloned().unwrap_or(serde_json::Value::Null);
+                let Some(this): Option<CopyId> = serde_json::from_value(at("id")).ok() else {
+                    continue;
+                };
+                let row = (
                     serde_json::from_value(at("row")).ok().flatten(),
                     at("locator")
                         .as_str()
@@ -511,13 +584,14 @@ impl Remote {
                             gain: None,
                         }),
                     serde_json::from_value(at("recording")).ok().flatten(),
-                )
-            })
-            .unwrap_or((None, None, None));
-        if let Ok(mut kept) = self.inner.rows_kept.lock() {
-            kept.insert(id, got.clone());
+                );
+                if this == id {
+                    mine = row.clone();
+                }
+                kept.insert(this, row);
+            }
         }
-        got
+        mine
     }
 
     /// What a recording draws as, and which file to play for it.

@@ -257,6 +257,11 @@ memory:
 query-cost data="~/MusicLibrary/.gmuse":
     cargo run --release --example where_a_query_goes -- {{data}}
 
+# What a row costs read over the socket (#261). Needs a running engine.
+[group('test')]
+read-cost:
+    cargo run --release --example what_a_read_costs
+
 # Which half of a tree costs the 0.4s: the grouping or the flatten (#261). Needs the real library.
 [group('test')]
 tree-cost data="~/MusicLibrary/.gmuse":
