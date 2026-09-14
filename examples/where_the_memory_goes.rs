@@ -163,6 +163,17 @@ fn main() {
         mb(kept)
     );
 
+    // **What the browse tree costs** — #261. `ui.library` is a `Shelf`, built from the fold by
+    // `Shelf::grouped`. If it is cheap, a view can hold one and drop the fold; if it is not,
+    // the tree has to be paged too.
+    let (shelf, kept, peak) = accounting::measure(|| {
+        use gmuse::model::rows::Listing;
+        let members: std::collections::HashSet<_> = library.rows().into_iter().collect();
+        gmuse::shelf::Shelf::from_members(&library, members, true)
+    });
+    say("the browse tree (a Shelf)", kept, peak);
+    assert!(shelf.sorted().len() > 1_000, "the shelf is empty");
+
     // **Where a record's bytes are** — #256 proposes an incremental fold to stop holding them;
     // that is a second implementation of a 672-line multi-pass fold. Worth knowing first
     // whether the bytes are the *structure* or the *strings* in it, because interning is a much
