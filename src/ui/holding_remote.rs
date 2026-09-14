@@ -119,8 +119,11 @@ impl Remote {
     /// Ask for the ordering once; everything else is asked as it is drawn.
     pub fn open(client: Arc<Client>) -> Self {
         let sorted = walk(&client, serde_json::json!({ "levels": [] }))
-            .iter()
-            .filter_map(|n| serde_json::from_value(n.get("id")?.clone()).ok())
+            .into_iter()
+            .filter_map(|n| match n {
+                Node::Track { id, .. } => Some(id),
+                _ => None,
+            })
             .collect();
         Remote {
             inner: Arc::new(Inner {
@@ -237,9 +240,6 @@ impl Browsing for Remote {
             &self.inner.client,
             serde_json::json!({ "folds": parts_of(&folds) }),
         )
-        .iter()
-        .filter_map(node_of)
-        .collect()
     }
 
     /// **The shape, asked with no page at all.** A motion reads four bits a line and no titles,
@@ -352,6 +352,20 @@ impl Holding for Remote {
     }
 }
 
+/// What `query.row` answers: a block of lines, each with the three things a row is asked for.
+#[derive(Default, serde::Deserialize)]
+struct Rows {
+    rows: Vec<Line>,
+}
+
+#[derive(serde::Deserialize)]
+struct Line {
+    id: CopyId,
+    row: Option<crate::model::rows::Slip>,
+    locator: Option<String>,
+    recording: Option<Id<crate::model::entity::Recording>>,
+}
+
 /// **Every line, followed page by page.**
 ///
 /// `query.tree` caps a page at 5,000 and says so only by handing back a `next` — so asking for
@@ -362,7 +376,14 @@ impl Holding for Remote {
 /// fixtures are four lines; what is checked instead is the mechanism it relies on — that a page
 /// says where the next one starts and following it reaches every line — in
 /// `a_client_that_follows_next_sees_the_whole_library`, with a page size of one.
-fn walk(client: &Client, base: serde_json::Value) -> Vec<serde_json::Value> {
+fn walk(client: &Client, base: serde_json::Value) -> Vec<Node> {
+    /// Just the two fields a walk reads. The rest of a page's reply is left on the wire.
+    #[derive(serde::Deserialize)]
+    struct Page {
+        nodes: Vec<Node>,
+        next: Option<u64>,
+    }
+
     let mut out = Vec::new();
     let mut cursor = Some(0u64);
     while let Some(at) = cursor {
@@ -372,15 +393,18 @@ fn walk(client: &Client, base: serde_json::Value) -> Vec<serde_json::Value> {
         };
         map.insert("cursor".into(), at.into());
         map.insert("limit".into(), 5_000.into());
-        let Ok(reply) = client.call("query.tree", Some(params)) else {
+        // **Typed, because this is the largest reply the process ever asks for** — #261. Every
+        // line of the library, and through a `serde_json::Value` that is a tree several times
+        // the size of the text before any of it is a `Node`.
+        let Ok(page) = client.call_typed::<Page>("query.tree", Some(params)) else {
             break;
         };
-        match reply.get("nodes").and_then(|v| v.as_array()) {
-            Some(page) if !page.is_empty() => out.extend(page.iter().cloned()),
+        if page.nodes.is_empty() {
             // No lines and a `next` would spin for ever; the page being empty is the end.
-            _ => break,
+            break;
         }
-        cursor = reply.get("next").and_then(|v| v.as_u64());
+        out.extend(page.nodes);
+        cursor = page.next;
     }
     out
 }
@@ -561,34 +585,33 @@ impl Remote {
             );
         }
 
-        let got = self
-            .read("query.row", serde_json::json!({ "ids": want }))
-            .and_then(|r| r.get("rows")?.as_array().cloned())
+        // **Straight from the wire into what it is** — #261. A block of fifty rows is the
+        // reply this asks for most often, and going through a `serde_json::Value` first builds
+        // a tree several times the size of the text only to pull the same fields back out.
+        let got: Rows = self
+            .inner
+            .client
+            .call_typed("query.row", Some(serde_json::json!({ "ids": want })))
             .unwrap_or_default();
+
         let mut mine = (None, None, None);
         if let Ok(mut kept) = self.inner.rows_kept.lock() {
-            if kept.len() + got.len() > KEEP {
+            if kept.len() + got.rows.len() > KEEP {
                 kept.clear();
             }
-            for line in &got {
-                let at = |key: &str| line.get(key).cloned().unwrap_or(serde_json::Value::Null);
-                let Some(this): Option<CopyId> = serde_json::from_value(at("id")).ok() else {
-                    continue;
-                };
+            for line in got.rows {
                 let row = (
-                    serde_json::from_value(at("row")).ok().flatten(),
-                    at("locator")
-                        .as_str()
-                        .map(|l| crate::model::rows::Playable {
-                            locator: l.to_owned(),
-                            gain: None,
-                        }),
-                    serde_json::from_value(at("recording")).ok().flatten(),
+                    line.row,
+                    line.locator.map(|locator| crate::model::rows::Playable {
+                        locator,
+                        gain: None,
+                    }),
+                    line.recording,
                 );
-                if this == id {
+                if line.id == id {
                     mine = row.clone();
                 }
-                kept.insert(this, row);
+                kept.insert(line.id, row);
             }
         }
         mine

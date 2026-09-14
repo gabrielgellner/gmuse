@@ -436,7 +436,32 @@ Three smaller things the attempt is worth remembering for:
   regardless. The same shape as §9: a crossing is worth nothing until the thing it replaces goes with it, in the same
   commit.
 
-## 12. What this does not decide
+## 12. The typed reply path
+
+§11 found the cost and named the fix: a client that deserialises from the wire without building a `serde_json::Value` on
+the way. It is `Client::call_typed`, and the demultiplexer carries a `serde_json::value::RawValue` — the bytes with
+their span remembered — instead of parsing every reply and cloning `result` out of the tree.
+
+Two of `Remote`'s asks were converted, the two that fetch most: the block of fifty rows a miss reads ahead, and the walk
+of every line that `Remote::open` does to keep the flat ordering.
+
+|                            |         |
+| -------------------------- | ------- |
+| main                       | 61.3 MB |
+| with the row block typed   | 54.9 MB |
+| and the walk typed as well | 39.2 MB |
+
+Startup went with it: 1.0 s to 0.6 s.
+
+**The remaining asks were left alone deliberately.** `about`, `find`, `places`, `entries`, `under`, `reveal` and the
+anchored `tree` all answer in kilobytes, and a `Value` costs nothing at that size. The rule this suggests is worth
+stating: a reply that can be as large as the library goes through `call_typed`; one that answers about a thing does not
+have to.
+
+And `listened` — the 4.5 MB reply that started this — has a path that would carry it now. That is §10 and §11's work, to
+be redone on top of this.
+
+## 13. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.

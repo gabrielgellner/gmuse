@@ -28,6 +28,7 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use gmuse_proto::hello::{HelloParams, HelloResult};
 use gmuse_proto::{Event, Id, RpcError, Topic};
+use serde_json::value::RawValue;
 
 /// What went wrong between here and the engine.
 #[derive(Debug, thiserror::Error)]
@@ -61,7 +62,17 @@ impl ClientError {
     }
 }
 
-type Pending = Arc<Mutex<HashMap<Id, Sender<Result<serde_json::Value, RpcError>>>>>;
+/// **A reply is carried unparsed** — #261.
+///
+/// The demultiplexer correlates by id and has no idea what the caller expects, so it used to
+/// parse every reply into a `serde_json::Value` and clone the `result` out of it. For a
+/// 4.5 MB reply that is a `Value` tree several times the size of the text, built to be thrown
+/// away — and an attached view's memory follows the peak, so `listened` over the wire made the
+/// process *larger* than folding the log had.
+///
+/// A [`RawValue`] is the bytes with their span remembered. The caller deserialises it into
+/// whatever it wanted, once.
+type Pending = Arc<Mutex<HashMap<Id, Sender<Result<Box<RawValue>, RpcError>>>>>;
 
 /// A connection to a running engine.
 pub struct Client {
@@ -129,7 +140,21 @@ impl Client {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ClientError> {
-        self.ask(method, params, None)
+        self.typed(method, params, None)
+    }
+
+    /// **The same call, deserialised into what the caller wanted** — #261.
+    ///
+    /// [`Client::call`] builds a `serde_json::Value` on the way, which for a large reply is a
+    /// tree several times the size of the text and is then thrown away. This one goes from the
+    /// wire to `T`: `query.listened` is 4.5 MB, and the difference between these two is whether
+    /// the process keeps a high-water mark to match.
+    pub fn call_typed<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<T, ClientError> {
+        self.typed(method, params, None)
     }
 
     /// The same, giving up after `within`.
@@ -145,7 +170,22 @@ impl Client {
         params: Option<serde_json::Value>,
         within: Duration,
     ) -> Result<serde_json::Value, ClientError> {
-        self.ask(method, params, Some(within))
+        self.typed(method, params, Some(within))
+    }
+
+    fn typed<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        within: Option<Duration>,
+    ) -> Result<T, ClientError> {
+        let raw = self.ask(method, params, within)?;
+        serde_json::from_str(raw.get()).map_err(|e| {
+            ClientError::Refused(RpcError::new(
+                gmuse_proto::error::code::INTERNAL,
+                format!("the reply is not what was expected: {e}"),
+            ))
+        })
     }
 
     fn ask(
@@ -153,7 +193,7 @@ impl Client {
         method: &str,
         params: Option<serde_json::Value>,
         within: Option<Duration>,
-    ) -> Result<serde_json::Value, ClientError> {
+    ) -> Result<Box<RawValue>, ClientError> {
         let id = Id::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = bounded(1);
         self.pending.lock().expect("pending").insert(id.clone(), tx);
@@ -246,14 +286,34 @@ impl From<serde_json::Error> for ClientError {
 /// **The only reader.** Everything about correlation lives here, so a caller
 /// cannot accidentally read a line that was not its own.
 fn demultiplex(stream: UnixStream, pending: &Pending, events: &Sender<Event>) {
+    // **The envelope, and the payload left alone** — #261. This used to parse every line into a
+    // `serde_json::Value` and clone the `result` out of it; for a 4.5 MB reply that is a tree
+    // several times the size of the text, built here to be discarded by the caller. What it
+    // needs is the id and which arm it is, and `RawValue` gives it those without reading the
+    // rest.
+    #[derive(serde::Deserialize)]
+    struct Line<'a> {
+        #[serde(default, borrow)]
+        method: Option<&'a str>,
+        #[serde(default, borrow)]
+        params: Option<&'a RawValue>,
+        #[serde(default)]
+        id: Option<Id>,
+        #[serde(default, borrow)]
+        result: Option<&'a RawValue>,
+        #[serde(default)]
+        error: Option<RpcError>,
+    }
+
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { break };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+        let Ok(parsed) = serde_json::from_str::<Line>(&line) else {
             continue;
         };
 
-        if value.get("method").and_then(|m| m.as_str()) == Some(gmuse_proto::event::EVENT_METHOD) {
-            if let Ok(event) = serde_json::from_value::<Event>(value["params"].clone())
+        if parsed.method == Some(gmuse_proto::event::EVENT_METHOD) {
+            if let Some(params) = parsed.params
+                && let Ok(event) = serde_json::from_str::<Event>(params.get())
                 && events.send(event).is_err()
             {
                 break; // nobody is listening for events any more
@@ -261,7 +321,7 @@ fn demultiplex(stream: UnixStream, pending: &Pending, events: &Sender<Event>) {
             continue;
         }
 
-        let Ok(id) = serde_json::from_value::<Id>(value["id"].clone()) else {
+        let Some(id) = parsed.id else {
             // A response with no usable id answers nothing anyone asked — a
             // parse error against a line the engine could not read that far
             // into. Nothing to correlate it with, so it is dropped rather than
@@ -271,17 +331,14 @@ fn demultiplex(stream: UnixStream, pending: &Pending, events: &Sender<Event>) {
         let Some(waiter) = pending.lock().expect("pending").remove(&id) else {
             continue;
         };
-        let outcome = if let Some(error) = value.get("error") {
-            Err(
-                serde_json::from_value::<RpcError>(error.clone()).unwrap_or_else(|e| {
-                    RpcError::new(gmuse_proto::error::code::INTERNAL, e.to_string())
-                }),
-            )
-        } else {
-            Ok(value
-                .get("result")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null))
+        let outcome = match parsed.error {
+            Some(error) => Err(error),
+            // A reply with no `result` at all is `null`, which is what a method that answers
+            // nothing sends and what `()` deserialises from.
+            None => Ok(parsed
+                .result
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| RawValue::from_string("null".into()).expect("null is json"))),
         };
         let _ = waiter.send(outcome);
     }
