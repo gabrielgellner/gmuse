@@ -46,6 +46,20 @@ pub enum Wanted {
     },
     /// Reconcile these roots against the disk.
     Rescan { roots: Vec<std::path::PathBuf> },
+    /// **Enough of this sounded to be a play** — #257.
+    ///
+    /// Sent once per track, by the one actor that knows how far the playhead got. Before
+    /// this, `record_play_if_earned` lived in the TUI and polled a position the *view* could
+    /// see — so a headless engine counted nothing and all 911 of the library's
+    /// `RecordingPlayed` facts were written by something drawing a screen.
+    ///
+    /// **The encoding, not just the recording**, because a play is evidence about what was
+    /// heard: the two agree until a pin or a device's reach makes them differ, and answering
+    /// "which copy" is the whole reason a play names one.
+    Played {
+        recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
+        encoding: gmuse_ids::id::Id<gmuse_ids::entity::Encoding>,
+    },
 }
 
 /// **How the engine reaches the librarian: three channels and no `Desk`.**

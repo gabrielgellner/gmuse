@@ -537,6 +537,8 @@ fn cue_of(cued: Cued) -> Cue {
     Cue {
         token: cued.token,
         recording: cued.recording,
+        encoding: cued.encoding,
+        length: cued.length,
         path: cued.path,
         track_db: cued.track_db,
         track_peak: cued.track_peak,
@@ -686,6 +688,8 @@ mod tests {
         gmuse_programme::Cued {
             token,
             recording: gmuse_ids::id::Id::derived(&token.to_le_bytes()),
+            encoding: gmuse_ids::id::Id::derived(&token.to_be_bytes()),
+            length: std::time::Duration::from_secs(200),
             path: std::path::PathBuf::from("/nowhere.flac"),
             track_db: None,
             track_peak: None,
@@ -698,6 +702,8 @@ mod tests {
         Cue {
             token,
             recording: gmuse_ids::id::Id::derived(&token.to_le_bytes()),
+            encoding: gmuse_ids::id::Id::derived(&token.to_be_bytes()),
+            length: std::time::Duration::from_secs(200),
             path: std::path::PathBuf::from("/nowhere.flac"),
             track_db: None,
             track_peak: None,

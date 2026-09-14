@@ -41,6 +41,12 @@ pub struct Cue {
     /// is the only actor that knows what is playing. Not the row: two rows can hold one
     /// recording, and what a listener hears is the recording.
     pub recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
+    /// **Which copy is sounding**, so a play can say which one was heard. Chosen by the
+    /// librarian; this side could not work it out without hashing the file.
+    pub encoding: gmuse_ids::id::Id<gmuse_ids::entity::Encoding>,
+    /// **How long the library says it is**, which is what "did I hear enough of it" is asked
+    /// against — not how long this device's copy happens to be (#77).
+    pub length: std::time::Duration,
     pub path: PathBuf,
     /// What the tags say, in dB, with nothing done to them.
     ///

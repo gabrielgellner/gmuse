@@ -1825,6 +1825,66 @@ fn playback_events_do_not_arrive_between_discontinuities() {
 ///
 /// The decoder's `NeedNext` arrives while the current track is still playing and
 /// needs an answer before it ends. Nothing is asked of a client here: this test
+/// **A headless engine counts a play** — #257, and nothing checked this before.
+///
+/// `record_play_if_earned` lived in the TUI and polled a position a *view* could see, so an
+/// engine with nobody attached counted nothing: all 911 of the real library's
+/// `RecordingPlayed` facts were written by something drawing a screen.
+///
+/// Asserted against the log rather than a count in memory, because the point is that it
+/// **reached the log** — through `Wanted::Played` and the relay, neither of which the engine
+/// can do for itself any more.
+///
+/// No client subscribes and nothing but `player.load` is sent: if a view were still required,
+/// there is none here to be it.
+#[test]
+fn an_engine_with_no_view_counts_a_play() {
+    let (engine, recording) = start_with_a_track("counts-a-play");
+    let client = Client::connect(&engine.socket, "loader", "0").expect("connect");
+    client
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+
+    // The first track is a second long at wall speed, so half of it is half a second. Polled
+    // on a named condition rather than slept through, so a slow machine waits and a fast one
+    // does not.
+    let log = engine.dir.join("xdg").join("gmuse");
+    let mut played = false;
+    for _ in 0..200 {
+        if let Some(text) = read_the_log(&log)
+            && text.contains("RecordingPlayed")
+            && text.contains(&recording)
+        {
+            played = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert!(
+        played,
+        "nothing counted a play in ten seconds, with a track a second long — the log holds:\n{}",
+        read_the_log(&log).unwrap_or_default()
+    );
+}
+
+/// Every `log-*.jsonl` under a data directory, concatenated.
+fn read_the_log(data: &std::path::Path) -> Option<String> {
+    let mut out = String::new();
+    for entry in std::fs::read_dir(data).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|x| x == "jsonl")
+            && let Ok(text) = std::fs::read_to_string(&path)
+        {
+            out.push_str(&text);
+        }
+    }
+    Some(out)
+}
+
 /// connects only to *watch*, and could disconnect without changing the outcome.
 #[test]
 fn playback_continues_to_a_second_track_with_no_view_answering() {

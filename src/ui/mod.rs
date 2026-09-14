@@ -401,6 +401,20 @@ pub struct Ui {
     /// steal each other's events. Transport and library are two subscriptions, so
     /// they get two sockets, which the engine is built to serve.
     pub engine: Option<std::sync::Arc<gmuse_client::Client>>,
+    /// **Whether playback is in this process, and therefore whether this counts plays.**
+    ///
+    /// The engine counts its own now (#257), so an attached view doing it too would count
+    /// every track twice. `--no-attach` has no engine to do it and this is still the only
+    /// thing watching the playhead.
+    ///
+    /// **Defaults to `false`, and the direction is the point.** A forgotten wiring
+    /// under-counts, which is a missing play; the other default double-counts, which is a
+    /// wrong one — and a play count is the thing in this library that cannot be rebuilt.
+    ///
+    /// Not derived from `ctx.gapless`, which is `Some` only with a real audio device: that
+    /// would put the once-only guard back out of reach of a test, which is the hole
+    /// `record_play_if_earned` was split in two to close.
+    pub plays_here: bool,
     /// **The queue as the engine last confirmed it** — #233, §7.7.
     ///
     /// `ui.queue` is the working copy a person edits; this is what the engine
@@ -649,6 +663,7 @@ impl Ui {
             listened: std::sync::Arc::default(),
             data_dir: None,
             counted_current: false,
+            plays_here: false,
             followed: None,
             engine: None,
             queue_mirror: Vec::new(),
@@ -1243,8 +1258,15 @@ fn note_play_progress(ui: &mut Ui, ctx: &Context<'_>) {
 /// The decision, separated from where the position comes from — otherwise the
 /// once-only guard is only reachable with a real audio device, which is to say
 /// untestable. An earlier version had exactly that hole.
+///
+/// **Only when playback is in this process** — see [`Ui::plays_here`]. The engine counts its
+/// own plays now (#257), so an attached view doing it too would count every track twice.
+///
+/// It is the same rule either way — `counts_as_played` is one function in `gmuse-programme` —
+/// and only the plumbing differs, because the two contexts genuinely have different state:
+/// here the length comes from a fold this process holds, there from the cue.
 fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
-    if ui.counted_current || ui.data_dir.is_none() {
+    if !ui.plays_here || ui.counted_current || ui.data_dir.is_none() {
         return;
     }
     let Some(id) = ui.playback.current else {
@@ -11124,6 +11146,9 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         ui.data_dir = Some(scratch("history-ui"));
+        // **The device is ours in this test.** Attached, the engine counts and this must not
+        // — which the test below asserts.
+        ui.plays_here = true;
 
         let l = lib_of(&store);
         let id = Listing::rows(l)[0];
@@ -11165,12 +11190,71 @@ mod tests {
     }
 
     /// A change is durable because a record was appended, and reading the log
+    /// **A fresh view counts nothing until it is told the device is ours.**
+    ///
+    /// The direction of the default is the claim: a forgotten wiring loses a play, which is a
+    /// missing number; the other default invents one, and a play count is the thing in this
+    /// library that cannot be rebuilt.
+    #[test]
+    fn a_view_does_not_count_plays_until_it_is_told_to() {
+        let store = fixture();
+        let ui = ui_of(&store, true);
+        assert!(
+            !ui.plays_here,
+            "a fresh view counts plays, so an attached one double-counts every track"
+        );
+    }
+
+    /// **An attached view counts no plays** — #257, and the direction of the default is the
+    /// point.
+    ///
+    /// The engine counts its own now, so a view doing it too would count every track twice —
+    /// and a play count is the one thing in this library that cannot be rebuilt. `plays_here`
+    /// defaults to `false` so a forgotten wiring loses a play rather than inventing one.
+    ///
+    /// Asserted against the *same* position that counts one in the test above, so this cannot
+    /// pass because nothing was earned.
+    #[test]
+    fn an_attached_view_leaves_the_counting_to_the_engine() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.data_dir = Some(scratch("history-attached"));
+
+        let l = lib_of(&store);
+        let id = Listing::rows(l)[0];
+        let row = Listing::listed(l, id).expect("a row");
+        ui.playback.current = Some(id);
+
+        // The instrument: this position *does* earn a play when the device is ours.
+        ui.plays_here = true;
+        record_play_if_earned(&mut ui, &ctx, row.duration);
+        assert_eq!(
+            play_count(&ui, Listing::recording_of(lib_of(&store), id)),
+            1,
+            "the position does not earn a play at all, so the check below proves nothing"
+        );
+
+        // Attached, and starting over: the same position must count nothing.
+        let mut ui = ui_of(&store, true);
+        ui.data_dir = Some(scratch("history-attached-2"));
+        ui.playback.current = Some(id);
+        ui.plays_here = false;
+        record_play_if_earned(&mut ui, &ctx, row.duration);
+        assert_eq!(
+            play_count(&ui, Listing::recording_of(lib_of(&store), id)),
+            0,
+            "an attached view counted a play the engine is also counting"
+        );
+    }
+
     /// back must reproduce it.
     #[test]
     fn a_change_is_appended_and_folds_back() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "history-append");
+        ui.plays_here = true;
         let dir = ui.data_dir.clone().unwrap();
         let l = lib_of(&store);
         let id = Listing::rows(l)[0];

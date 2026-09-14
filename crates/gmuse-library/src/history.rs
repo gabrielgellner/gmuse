@@ -28,7 +28,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -38,9 +37,6 @@ use crate::model::entity::Recording;
 use crate::model::id::Id;
 
 const VERSION: u32 = 1;
-
-/// Four minutes, or half the track — last.fm's rule, and the usual one.
-const LONG_ENOUGH: Duration = Duration::from_secs(240);
 
 /// The identity history hangs off, computable from a file alone.
 ///
@@ -240,19 +236,13 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Whether a track was played rather than skipped past.
+/// **Did enough of it sound to be a play** — `gmuse-programme` owns the rule now (#257).
 ///
-/// Half of it, or four minutes, whichever comes first. A track of unknown
-/// length has no half to take, so it has to earn the full four minutes —
-/// otherwise a zero duration would count a play the instant it started.
-pub fn counts_as_played(position: Duration, duration: Duration) -> bool {
-    let threshold = if duration.is_zero() {
-        LONG_ENOUGH
-    } else {
-        (duration / 2).min(LONG_ENOUGH)
-    };
-    position >= threshold
-}
+/// Re-exported because `history::counts_as_played` is what the callers say, and because a
+/// play is a history fact however it is decided. What moved is only where it is *defined*:
+/// the audio engine has to answer it about the track it is playing, and may not reach the
+/// log to do so.
+pub use gmuse_programme::counts_as_played;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {

@@ -109,5 +109,15 @@ fn apply(desk: &Arc<Desk>, wanted: Wanted) {
             appender.say(move |log| log.rate(now, recording, stars));
         }
         Wanted::Rescan { roots } => appender.scan(roots, None),
+        Wanted::Played {
+            recording,
+            encoding,
+        } => {
+            // **`play_maybe`, which is what the TUI called**, so the fact and its
+            // supersession rules are unchanged — only who decides has moved. Stamped here for
+            // the same reason a rating is.
+            let now = gmuse_library::history::now_ms();
+            appender.say(move |log| log.play_maybe(now, recording, Some(encoding)));
+        }
     }
 }

@@ -189,6 +189,8 @@ impl Control {
                         queue: super::queue::Playing::new(),
                         playing: None,
                         pending: None,
+                        next_cue: None,
+                        sounding: None,
                         announced: 0,
                         folded: desk.moved(),
                         generation: player.stream_generation(),
@@ -325,6 +327,18 @@ struct Held {
     pending: Option<String>,
     /// The queue version last published, so an unchanged one publishes nothing.
     announced: u64,
+    /// **What was spliced and has not started yet**, beside `pending`.
+    ///
+    /// A splice becomes current at `Loaded`, not when it is handed over — the same reason
+    /// `pending` exists. Without it a play would be counted against the track that was still
+    /// playing when the next one was cued.
+    next_cue: Option<super::window::Cue>,
+    /// **What is sounding, and whether it has been counted** — #257.
+    ///
+    /// A play is earned partway through, which is not an event the player has, so it is
+    /// polled — the same reason the underrun count is. Cleared on every load, so a track
+    /// played twice counts twice.
+    sounding: Option<(super::window::Cue, bool)>,
     /// **The library's last-seen version**, to notice a change by a number.
     ///
     /// It was an `Arc<Answer>` compared by pointer — the librarian's own fold, held here so
@@ -383,15 +397,7 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
         // generation change are both discontinuities nobody sent it a command
         // about.
         let mut moved = match asks.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ask::Do(instruction)) => apply(
-                player,
-                instruction,
-                &mut held.queue,
-                desk,
-                roots,
-                &mut held.pending,
-                &mut held.playing,
-            ),
+            Ok(Ask::Do(instruction)) => apply(player, instruction, desk, roots, held),
             // **Queued rather than waited for** — #259. The librarian may be reconciling
             // 7,267 files, and a play gesture that timed out answered `accepted: true` while
             // doing nothing. It is loaded on the tick its answer arrives, so the `playback`
@@ -438,11 +444,24 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
             held.folded = now;
         }
 
+        // **A play is earned by sound** — #257. Polled rather than triggered, because the
+        // interesting moment is halfway through and the player has no event for it.
+        if let Some((cue, counted)) = held.sounding.as_mut()
+            && !*counted
+            && gmuse_programme::counts_as_played(player.position(), cue.length)
+        {
+            *counted = true;
+            desk.want(Wanted::Played {
+                recording: cue.recording,
+                encoding: cue.encoding,
+            });
+        }
+
         // **One tick of the programme pipeline, and nothing waits** — #259. Absorbs a reply
         // if one arrived, sends the next ask if the line is free, tops the window up if it is
         // short. A gesture whose answer is here gets loaded now.
         if let Some(cue) = held.queue.tick(desk) {
-            moved |= load_picked(player, &mut held.pending, &mut held.playing, Some(cue));
+            moved |= load_picked(player, held, Some(cue));
         }
 
         // What the player has to say for itself. Draining rather than taking
@@ -464,6 +483,7 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                         Some(cue) => {
                             held.pending = Some(cue.recording.to_string());
                             player.set_next(Some(source_of(&cue, player.volume())));
+                            held.spliced(cue);
                         }
                         // The programme ran out. Letting playback stop is the answer, and
                         // it has to be *an* answer or the decoder waits.
@@ -488,6 +508,7 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 PlayerEvent::Loaded { .. } => {
                     if let Some(next) = held.pending.take() {
                         held.playing = Some(next);
+                        held.joined();
                     }
                     moved = true;
                 }
@@ -620,6 +641,31 @@ fn wait_for_a_device(
     None
 }
 
+impl Held {
+    /// **Spliced, and not heard yet.** `set_next` hands the decoder a track to join onto the
+    /// end of the current one; nothing has played it.
+    fn spliced(&mut self, cue: super::window::Cue) {
+        self.next_cue = Some(cue);
+    }
+
+    /// **The join reached the output, so what was next is now sounding.**
+    ///
+    /// The counting starts here rather than at [`spliced`], and the difference is real: a
+    /// splice handed over two minutes ago has not been heard, and counting it there would
+    /// credit the play to whichever track was still playing when the next one was cued.
+    ///
+    /// [`spliced`]: Held::spliced
+    fn joined(&mut self) {
+        self.sounding = self.next_cue.take().map(|cue| (cue, false));
+    }
+
+    /// **A load sounds now**, unlike a splice — and it abandons anything spliced behind it.
+    fn loaded(&mut self, cue: super::window::Cue) {
+        self.next_cue = None;
+        self.sounding = Some((cue, false));
+    }
+}
+
 /// **A cue, as a thing to decode — and the gain applied here** (#257).
 ///
 /// `source_for` played everything at unity and said why: the ReplayGain tags are the
@@ -656,16 +702,18 @@ fn source_of(cue: &super::window::Cue, _fader: f32) -> crate::audio::TrackSource
 fn apply(
     player: &PlayerHandle,
     instruction: Instruction,
-    queue: &mut super::queue::Playing,
     desk: &Librarian,
     // Where `Rescan` reconciles, which only the engine knows.
     roots: &[std::path::PathBuf],
-    pending: &mut Option<String>,
-    // **What the `playback` event names.** A load starts immediately, unlike a
-    // splice, so this is set here rather than promoted on `Finished` — and
-    // forgetting it is why the first version of `next` skipped the audio while
-    // telling every view the old track was still playing.
-    playing: &mut Option<String>,
+    // **Everything it may change, as one borrow.** The queue, what the `playback` event
+    // names, what was spliced, and what is being counted. Separate out-parameters said
+    // nothing about how they relate, and adding what is sounding pushed the signature past
+    // clippy's limit — they are all one thing, which is what `Held` is.
+    //
+    // `playing` is set on a load rather than promoted on `Finished`, and forgetting that is
+    // why the first version of `next` skipped the audio while telling every view the old
+    // track was still playing.
+    held: &mut Held,
 ) -> bool {
     // **Exhaustive, with no catch-all** — #213. Every `Instruction` is something
     // the engine can do, because that is the only way one can be constructed: the
@@ -694,8 +742,8 @@ fn apply(
         Instruction::Next => {
             // **Instant when the window holds it**, which is the common case: a `next` that
             // had to ask would feel like a key that sometimes works.
-            let picked = queue.skip_next();
-            load_picked(player, pending, playing, picked)
+            let picked = held.queue.skip_next();
+            load_picked(player, held, picked)
         }
         // **`prev` is the pool's previous, and always was.** An earlier note here
         // refused it, on the grounds that going back is not the inverse of
@@ -708,7 +756,7 @@ fn apply(
         Instruction::Prev => {
             // **Always asked**, because what precedes the position is never in the window —
             // a window looks forwards. Loaded on the tick the answer arrives.
-            queue.skip_prev();
+            held.queue.skip_prev();
             false
         }
 
@@ -728,7 +776,8 @@ fn apply(
         // has without a view. The view's fallback — rate whatever is under the
         // cursor — is a view's, and an `Instruction` carries no cursor by I9.
         Instruction::Rate(stars) => {
-            let Some(recording) = playing
+            let Some(recording) = held
+                .playing
                 .as_deref()
                 .and_then(|r| r.parse::<uuid::Uuid>().ok())
                 .map(gmuse_ids::id::Id::from_uuid)
@@ -744,15 +793,15 @@ fn apply(
 
         // **What plays next** — §6 assigns these to the control thread.
         Instruction::Mode(which, to) => {
-            queue.set_mode(which, to);
+            held.queue.set_mode(which, to);
             false
         }
         Instruction::Scope(to) => {
             let mode = match to {
                 ScopeTo::Set(mode) => mode,
-                ScopeTo::Cycle => queue.scope().cycle(),
+                ScopeTo::Cycle => held.queue.scope().cycle(),
             };
-            queue.set_scope(mode);
+            held.queue.set_scope(mode);
             false
         }
 
@@ -773,12 +822,7 @@ fn apply(
 /// Shared by `Next` and `Prev`, which differ only in how the pick is made — and
 /// having them differ in anything else is how the first version of `next` came to
 /// tell every view the old track was still playing.
-fn load_picked(
-    player: &PlayerHandle,
-    pending: &mut Option<String>,
-    playing: &mut Option<String>,
-    picked: Option<super::window::Cue>,
-) -> bool {
+fn load_picked(player: &PlayerHandle, held: &mut Held, picked: Option<super::window::Cue>) -> bool {
     // **Resolves nothing** — #257. The cue arrived with a path the librarian chose and a
     // recording to name, so there is no library question left to ask here. That this
     // function used to take a `Desk` is the whole of what moved.
@@ -786,9 +830,10 @@ fn load_picked(
         // The programme ran out, or its next row is not held on this device.
         return false;
     };
-    *pending = None;
-    *playing = Some(cue.recording.to_string());
+    held.pending = None;
+    held.playing = Some(cue.recording.to_string());
     player.load(source_of(&cue, player.volume()));
+    held.loaded(cue);
     true
 }
 
@@ -883,6 +928,99 @@ fn playback_event(
 
 #[cfg(test)]
 mod tests {
+    /// **A splice is counted when it joins, not when it is handed over** — #257.
+    ///
+    /// `set_next` gives the decoder a track to join onto the end of the current one, which can
+    /// be two minutes before anybody hears it. Counting there would credit the play to
+    /// whichever track was still playing — the same confusion that made the `playback` event
+    /// name the wrong recording until `pending` was added.
+    #[test]
+    fn a_spliced_track_is_not_counted_until_it_joins() {
+        let mut held = Held {
+            queue: super::super::queue::Playing::new(),
+            playing: None,
+            pending: None,
+            next_cue: None,
+            sounding: None,
+            announced: 0,
+            folded: 0,
+            generation: 0,
+        };
+
+        let first = a_cue(1);
+        held.loaded(first.clone());
+        assert_eq!(
+            held.sounding.as_ref().map(|(c, _)| c.token),
+            Some(1),
+            "a load did not start sounding"
+        );
+
+        // Spliced while the first is still playing.
+        held.spliced(a_cue(2));
+        assert_eq!(
+            held.sounding.as_ref().map(|(c, _)| c.token),
+            Some(1),
+            "the splice was counted against the track still playing"
+        );
+
+        // The join reaches the output.
+        held.joined();
+        assert_eq!(
+            held.sounding.as_ref().map(|(c, _)| c.token),
+            Some(2),
+            "the join did not promote what was spliced"
+        );
+        assert!(
+            !held.sounding.as_ref().unwrap().1,
+            "it started already counted"
+        );
+        assert!(held.next_cue.is_none(), "the splice was promoted and kept");
+    }
+
+    /// **A load abandons what was spliced behind it.** Pressing next mid-track means the
+    /// track that was queued to join never sounds, so it must not be promoted later.
+    #[test]
+    fn a_load_discards_a_splice_that_will_never_sound() {
+        let mut held = Held {
+            queue: super::super::queue::Playing::new(),
+            playing: None,
+            pending: None,
+            next_cue: None,
+            sounding: None,
+            announced: 0,
+            folded: 0,
+            generation: 0,
+        };
+        held.loaded(a_cue(1));
+        held.spliced(a_cue(2));
+        held.loaded(a_cue(3));
+
+        assert!(
+            held.next_cue.is_none(),
+            "an abandoned splice survived a load"
+        );
+        held.joined();
+        assert_eq!(
+            held.sounding.as_ref().map(|(c, _)| c.token),
+            None,
+            "a join after a load promoted nothing, so it cleared what was sounding"
+        );
+    }
+
+    fn a_cue(token: u64) -> super::super::window::Cue {
+        super::super::window::Cue {
+            token,
+            recording: gmuse_ids::id::Id::derived(&token.to_le_bytes()),
+            encoding: gmuse_ids::id::Id::derived(&token.to_be_bytes()),
+            length: std::time::Duration::from_secs(200),
+            path: std::path::PathBuf::from("/nowhere.flac"),
+            track_db: None,
+            track_peak: None,
+            album_db: None,
+            album_peak: None,
+        }
+    }
+
     use super::*;
 
     /// **The retry honours the config that opened the first stream, and gives up only

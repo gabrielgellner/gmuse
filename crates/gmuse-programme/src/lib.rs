@@ -992,6 +992,19 @@ pub struct Cued {
     /// engine is the only actor that knows what is sounding. Not the row: two rows can hold
     /// one recording, and what a listener is hearing is the recording.
     pub recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
+    /// **Which copy this is**, because a play is evidence about what was heard.
+    ///
+    /// The librarian chose it — a pin, or which device holds what — so the librarian is what
+    /// can say which. The engine could not work it out from a path without hashing the file,
+    /// which §4.4 forbids on that thread.
+    pub encoding: gmuse_ids::id::Id<gmuse_ids::entity::Encoding>,
+    /// **How long the library says it is**, which is not the same question as how long this
+    /// file is (#77).
+    ///
+    /// It is the same number today and stops being one the moment another machine holds a
+    /// longer copy of a rip that was cut short here — at which point "did I hear enough of
+    /// it" should be asked of the song rather than of this device's copy.
+    pub length: std::time::Duration,
     /// The ReplayGain tags, in dB, and nothing done with them.
     ///
     /// **How loud to play is the engine's question**, because it is the half that holds
@@ -1049,4 +1062,26 @@ pub enum Reply {
     },
     /// A mutation landed.
     Settled { standing: Standing },
+}
+
+// ── Whether what sounded was a play ─────────────────────────────────────────
+
+/// Past this, a track counts however long it is.
+///
+/// **Four minutes, so a 70-minute mix is not un-playable.** Half of one is 35 minutes, which
+/// nobody sits through before it counts as heard.
+const LONG_ENOUGH: std::time::Duration = std::time::Duration::from_secs(240);
+
+/// Whether a track was played rather than skipped past.
+///
+/// Half of it, or four minutes, whichever comes first. A track of unknown
+/// length has no half to take, so it has to earn the full four minutes —
+/// otherwise a zero duration would count a play the instant it started.
+pub fn counts_as_played(position: std::time::Duration, duration: std::time::Duration) -> bool {
+    let threshold = if duration.is_zero() {
+        LONG_ENOUGH
+    } else {
+        (duration / 2).min(LONG_ENOUGH)
+    };
+    position >= threshold
 }

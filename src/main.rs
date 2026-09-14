@@ -2310,6 +2310,9 @@ fn run_tui(
         gapless: app.player.gapless(),
     };
     let mut state = gmuse::ui::Ui::new(library);
+    // **This counts plays only when the device is ours** — #257. Attached, the engine does it,
+    // and both doing it would count every track twice.
+    state.plays_here = !app.player.attached();
     // **The library connection, separate from the transport's** — #236.
     //
     // A `Client` has one `Receiver<Event>`, so two readers of one connection

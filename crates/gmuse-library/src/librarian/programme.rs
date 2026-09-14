@@ -340,11 +340,19 @@ fn cues_for(
         .into_iter()
         .filter_map(|entry| {
             let recording = library.recording_of(entry.row)?;
-            let (_encoding, locator) = library.open(recording, &[device], &[])?;
+            let (encoding, locator) = library.open(recording, &[device], &[])?;
             let loudness = library.playable(entry.row).and_then(|p| p.gain);
             Some(Cued {
                 token: entry.token.as_u64(),
                 recording,
+                encoding: encoding.id,
+                // **The library's length, not the file's.** `Listed::duration` is what the
+                // fold says; a row with no length yields zero, which `counts_as_played`
+                // already treats as "use the four-minute floor".
+                length: library
+                    .listed(entry.row)
+                    .map(|l| l.duration)
+                    .unwrap_or_default(),
                 path: PathBuf::from(locator),
                 track_db: loudness.and_then(|l| l.track_db),
                 track_peak: loudness.and_then(|l| l.track_peak),
