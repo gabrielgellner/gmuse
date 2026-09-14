@@ -205,6 +205,18 @@ pub enum Request {
     QueryEntries {
         collection: String,
     },
+    /// **What the library has heard** — #261.
+    ///
+    /// The whole of it in one reply: plays, ratings, when things were acquired and last played,
+    /// the assertion graph with its concept labels and derivation edges, and the saved views and
+    /// collections. 2.7 MB against the 11.8 MB fold it is taken from, and it ships whole rather
+    /// than being asked per recording — there is no expensive half, which is a measurement
+    /// rather than a hope (`tree-over-the-wire.md` §10).
+    ///
+    /// **A client reads this with `call_typed`.** It is 4.5 MB of JSON, and building a
+    /// `serde_json::Value` of that on the way is what made the first attempt cost more than it
+    /// saved (§11).
+    QueryListened,
     /// **Run a filter and get a page of rows** — §7.11, #261.
     ///
     /// Answered on the connection's own thread, from `Desk::current()` — one atomic load of a
@@ -447,6 +459,7 @@ pub mod method {
     pub const QUERY_NAME: &str = "query.name";
     pub const QUERY_PLACES: &str = "query.places";
     pub const QUERY_ENTRIES: &str = "query.entries";
+    pub const QUERY_LISTENED: &str = "query.listened";
     pub const QUEUE_GET: &str = "queue.get";
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
     pub const QUEUE_SET: &str = "queue.set";
@@ -491,6 +504,7 @@ pub mod method {
         QUERY_NAME,
         QUERY_PLACES,
         QUERY_ENTRIES,
+        QUERY_LISTENED,
         QUEUE_GET,
         QUEUE_ENQUEUE,
         QUEUE_SET,
@@ -771,6 +785,7 @@ impl Request {
                     collection: p.collection,
                 })
             }
+            method::QUERY_LISTENED => Ok(Self::QueryListened),
             method::QUEUE_GET => {
                 #[derive(Deserialize)]
                 struct P {
@@ -888,6 +903,7 @@ impl Request {
             Self::QueryName { .. } => method::QUERY_NAME,
             Self::QueryPlaces { .. } => method::QUERY_PLACES,
             Self::QueryEntries { .. } => method::QUERY_ENTRIES,
+            Self::QueryListened => method::QUERY_LISTENED,
             Self::QueueGet { .. } => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
             Self::QueueSet { .. } => method::QUEUE_SET,
@@ -939,7 +955,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 34, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 35, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

@@ -352,6 +352,29 @@ impl Holding for Remote {
     }
 }
 
+impl Remote {
+    /// **What the library has heard**, fetched whole.
+    ///
+    /// One reply of 4.5 MB against the 11.8 MB fold a view used to keep to answer the same nine
+    /// questions. Through `call_typed`, which is the whole reason it is affordable: sending it
+    /// was tried once over `call` and made the view *larger* than folding the log had
+    /// (`tree-over-the-wire.md` §11).
+    ///
+    /// Not cached here — the caller holds it in `Ui::listened` and asks again when a `library`
+    /// event says there is more log, which is the moment a detached view refolds.
+    pub fn heard(&self) -> Option<crate::projection::heard::Heard> {
+        #[derive(serde::Deserialize)]
+        struct Reply {
+            heard: crate::projection::heard::Heard,
+        }
+        self.inner
+            .client
+            .call_typed::<Reply>("query.listened", Some(serde_json::json!({})))
+            .ok()
+            .map(|r| r.heard)
+    }
+}
+
 /// What `query.row` answers: a block of lines, each with the three things a row is asked for.
 #[derive(Default, serde::Deserialize)]
 struct Rows {

@@ -461,7 +461,38 @@ have to.
 And `listened` — the 4.5 MB reply that started this — has a path that would carry it now. That is §10 and §11's work, to
 be redone on top of this.
 
-## 13. What this does not decide
+## 13. `listened` crosses, on the second attempt
+
+§12's typed path is what made it affordable. `Heard` carries the seventeen catalogue fields `Listened` reads, the
+`Listened` and `Definitions` impls live on it so there is one copy, and `query.listened` sends the lot — read with
+`call_typed`, which is the whole difference from §11.
+
+An attached view now holds **no fold at all**: `Desk::elsewhere` has no data directory, so nothing to read, derives no
+`Librarian`, and appends nothing — `ui::record` finds no door and goes to the engine, which is §4.4's rule.
+
+|                                     |             |
+| ----------------------------------- | ----------- |
+| attached view, at the start of #261 | 123.8 MB    |
+| before `listened` crossed           | 39.2 MB     |
+| **now**                             | **31.4 MB** |
+
+Startup is 0.7 s, from 1.0 s.
+
+Two things the second attempt did that the first did not, and they are the whole difference:
+
+- **A round-trip test written before anything sent one.** Two of `Heard`'s maps are keyed by tuples and JSON objects
+  take string keys only; the first attempt found that out as a nine-minute hang, because `json!` unwraps and the
+  engine's handler panicked without replying.
+- **An oracle that names its fields.** `what_the_library_has_heard_crosses_whole` rates a track and gives it a genre
+  through the engine, then compares what crossed with the same fold taken locally — and asserts on `ratings`,
+  `assertions` and `concepts` _by name_ first. Both sides go through `Heard::of`, so a field it forgets agrees with
+  itself and the comparison sees nothing.
+
+It also caught a race the first attempt would have shipped: a `library` event says the log grew, and the engine folds
+and republishes on its own thread, so a fetch can beat the publish it was told about. Asking once passed four times and
+failed the fifth.
+
+## 14. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.

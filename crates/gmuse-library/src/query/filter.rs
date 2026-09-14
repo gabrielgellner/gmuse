@@ -2906,7 +2906,7 @@ mod perf {
         for pair in chain.windows(2) {
             i.narrows(0, h, crate::model::facet::GENRE, &pair[0], &pair[1]);
         }
-        let cat = i.catalogue();
+        let cat = crate::projection::heard::Heard::of(&i.catalogue());
         let env = Env {
             listened: Some(&cat),
             named: None,

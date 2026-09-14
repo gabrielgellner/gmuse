@@ -384,7 +384,13 @@ pub struct Ui {
     pub desk: crate::librarian::Enquiries,
     /// The fold, refreshed after every fact. Held so the UI answers a rating
     /// immediately; what makes it durable is the record appended beside it.
-    pub listened: std::sync::Arc<crate::projection::catalogue::Catalogue>,
+    /// **What the library has heard** — #261.
+    ///
+    /// A [`Heard`](crate::projection::heard::Heard), not the whole `Catalogue`: the nine
+    /// `Listened` questions and the three maps this view reads directly, and none of the
+    /// recordings, encodings, bindings, artist names, measurements or release groups that made
+    /// up the rest of a fold the engine already has.
+    pub listened: std::sync::Arc<crate::projection::heard::Heard>,
     /// Where the log lives. `None` disables recording entirely.
     pub data_dir: Option<PathBuf>,
     /// The current track has already been counted, so a long listen does not
@@ -1067,7 +1073,7 @@ fn follow_the_engine_topics(ui: &mut Ui, ctx: &Context<'_>) {
     // be. The cost is the re-read, on the librarian thread, and this is the only
     // place a view pays it.
     ui.desk.settled();
-    ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
+    refresh_listened(ui);
     ui.stop = Some(Stop::Refold);
 }
 
@@ -1424,7 +1430,7 @@ pub fn record(
     // gap, which `projection/mod.rs` explains is a second implementation of
     // the fold's semantics rather than a slice of it.
     ui.desk.settled();
-    ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
+    refresh_listened(ui);
 }
 
 /// **Ask the engine to append what this view would have** — #236, I15.
@@ -4348,6 +4354,24 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
 /// Through the same door a `:view` change uses, so a refold cannot file things
 /// a second way (#84). The playlist rows go too: what a playlist holds is a
 /// fold of the log, and the whole point of a refold is that the fold changed.
+/// **Where what the library has heard comes from** — #261.
+///
+/// The engine's, when there is one: an attached view folds nothing, so there is no local answer
+/// to take. A detached view *is* the librarian (§4.2) and takes its own.
+///
+/// **A failed ask keeps what it had.** Ratings and plays a frame stale are a smaller wrong than
+/// every rating vanishing because a socket hiccuped.
+pub fn refresh_listened(ui: &mut Ui) {
+    match &ui.reader {
+        Some(r) => {
+            if let Some(heard) = r.heard() {
+                ui.listened = std::sync::Arc::new(heard);
+            }
+        }
+        None => ui.listened = std::sync::Arc::clone(&ui.desk.current().listened),
+    }
+}
+
 pub fn refresh_library(ui: &mut Ui, ctx: &Context<'_>) {
     // **The page is a projection of the librarian too** (#128), and this is
     // the door every projection goes through after a refold — so the cache is
@@ -11615,7 +11639,7 @@ mod tests {
                 );
             });
         ui.desk.settled();
-        ui.listened = std::sync::Arc::clone(&ui.desk.current().listened);
+        refresh_listened(&mut ui);
         // The librarian is what a facet comparison reads, so the seed has to
         // go through a refold — which is what `main` does on `Stop::Refold`.
         let ctx = refolded(&store, &ui);

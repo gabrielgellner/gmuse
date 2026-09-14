@@ -115,7 +115,9 @@ impl Definitions for NoDefinitions {
     }
 }
 
-impl Definitions for crate::projection::catalogue::Catalogue {
+/// **On `Heard`, not on the `Catalogue`** — #261. A saved view is one of the things a view reads
+/// without holding a fold, so it travels with the rest of what it does read.
+impl Definitions for crate::projection::heard::Heard {
     fn source_of(&self, name: &str) -> Option<String> {
         self.views
             .get(&Id::<crate::model::entity::View>::of_name(name))

@@ -359,7 +359,6 @@ mod tests {
     use super::*;
     use crate::fixture::Tagged as Track;
     use crate::operations::scan::Holdings as Scan;
-    use crate::projection::catalogue::Catalogue;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -420,21 +419,36 @@ mod tests {
         Listing::recording_of(l, id).expect("with an identity")
     }
 
-    fn acquired(cat: &mut Catalogue, s: &crate::model::seam::Librarian, path: &str, at: i64) {
+    fn acquired(
+        cat: &mut crate::projection::heard::Heard,
+        s: &crate::model::seam::Librarian,
+        path: &str,
+        at: i64,
+    ) {
         cat.acquired.insert(rec_of(s, path), at);
     }
 
-    fn played(cat: &mut Catalogue, s: &crate::model::seam::Librarian, path: &str, at: i64) {
+    fn played(
+        cat: &mut crate::projection::heard::Heard,
+        s: &crate::model::seam::Librarian,
+        path: &str,
+        at: i64,
+    ) {
         let r = rec_of(s, path);
         *cat.plays.entry(r).or_insert(0) += 1;
         cat.last_played.insert(r, at);
     }
 
-    fn rated(cat: &mut Catalogue, s: &crate::model::seam::Librarian, path: &str, stars: u8) {
+    fn rated(
+        cat: &mut crate::projection::heard::Heard,
+        s: &crate::model::seam::Librarian,
+        path: &str,
+        stars: u8,
+    ) {
         cat.ratings.insert(rec_of(s, path), stars);
     }
 
-    fn env(listened: &Catalogue) -> SortEnv<'_> {
+    fn env(listened: &crate::projection::heard::Heard) -> SortEnv<'_> {
         SortEnv {
             env: Env {
                 listened: Some(listened),
@@ -544,7 +558,7 @@ mod tests {
 
     #[test]
     fn text_sorts_case_folded() {
-        let (s, h) = (store(), Catalogue::default());
+        let (s, h) = (store(), crate::projection::heard::Heard::default());
         // "abba" before "The Beatles" before "Zappa" — and lower-case `abba`
         // must not sort after every capital, which a byte comparison would do.
         assert_eq!(
@@ -567,7 +581,7 @@ mod tests {
             });
         }
         let s = crate::fixture::from_holdings(&s);
-        let h = Catalogue::default();
+        let h = crate::projection::heard::Heard::default();
 
         let mut e = env(&h);
         e.smart_artist_sort = true;
@@ -590,7 +604,7 @@ mod tests {
             });
         }
         let s = crate::fixture::from_holdings(&s);
-        let h = Catalogue::default();
+        let h = crate::projection::heard::Heard::default();
         let mut e = env(&h);
         e.smart_artist_sort = true;
         // Under T, so before Ummagumma. Stripping the article would put
@@ -602,7 +616,7 @@ mod tests {
     /// model without `$num()` — would put track 10 before track 2.
     #[test]
     fn numbers_do_not_sort_lexically() {
-        let (s, h) = (store(), Catalogue::default());
+        let (s, h) = (store(), crate::projection::heard::Heard::default());
         assert_eq!(
             order("track", &s, env(&h))[..3],
             ["c.mp3", "a.mp3", "b.mp3"]
@@ -612,7 +626,7 @@ mod tests {
     /// Missing last in *both* directions, so a list never opens with blanks.
     #[test]
     fn a_missing_value_sorts_last_whichever_way_the_key_points() {
-        let (s, h) = (store(), Catalogue::default());
+        let (s, h) = (store(), crate::projection::heard::Heard::default());
         assert_eq!(order("track", &s, env(&h))[3], "z_orphan.mp3");
         assert_eq!(order("-track", &s, env(&h))[3], "z_orphan.mp3");
         assert_eq!(order("artist", &s, env(&h))[3], "z_orphan.mp3");
@@ -621,7 +635,7 @@ mod tests {
 
     #[test]
     fn descending_reverses_the_present_values() {
-        let (s, h) = (store(), Catalogue::default());
+        let (s, h) = (store(), crate::projection::heard::Heard::default());
         assert_eq!(
             order("-track", &s, env(&h))[..3],
             ["b.mp3", "a.mp3", "c.mp3"]
@@ -644,7 +658,7 @@ mod tests {
             });
         }
         let s = crate::fixture::from_holdings(&s);
-        let h = Catalogue::default();
+        let h = crate::projection::heard::Heard::default();
         assert_eq!(
             order("album, track", &s, env(&h)),
             ["2.mp3", "3.mp3", "1.mp3"]
@@ -664,13 +678,13 @@ mod tests {
             });
         }
         let s = crate::fixture::from_holdings(&s);
-        let h = Catalogue::default();
+        let h = crate::projection::heard::Heard::default();
         assert_eq!(order("album", &s, env(&h)), ["a.mp3", "b.mp3", "c.mp3"]);
     }
 
     #[test]
     fn random_is_a_permutation_that_follows_the_seed() {
-        let (s, h) = (store(), Catalogue::default());
+        let (s, h) = (store(), crate::projection::heard::Heard::default());
         let a = order("random", &s, env(&h));
         let b = order("random", &s, env(&h));
         assert_eq!(a, b, "the same seed must give the same order");
@@ -691,7 +705,7 @@ mod tests {
     #[test]
     fn history_keys_read_the_history() {
         let s = store();
-        let mut h = Catalogue::default();
+        let mut h = crate::projection::heard::Heard::default();
         acquired(&mut h, &s, "/m/a.mp3", 100);
         acquired(&mut h, &s, "/m/b.mp3", 200);
         played(&mut h, &s, "/m/b.mp3", 500);
@@ -713,7 +727,7 @@ mod tests {
     #[test]
     fn play_count_is_zero_rather_than_missing() {
         let s = store();
-        let mut h = Catalogue::default();
+        let mut h = crate::projection::heard::Heard::default();
         acquired(&mut h, &s, "/m/a.mp3", 100);
         played(&mut h, &s, "/m/a.mp3", 500);
         // The unplayed ones sort first ascending, which they could not do if

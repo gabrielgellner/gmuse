@@ -44,6 +44,7 @@
 )]
 
 pub mod catalogue;
+pub mod heard;
 
 use std::collections::{BTreeMap, BTreeSet};
 

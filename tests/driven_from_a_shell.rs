@@ -3254,3 +3254,96 @@ fn a_remote_read_answers_what_a_local_one_does() {
         "the panels have different numbers of sections"
     );
 }
+
+/// **What the library has heard crosses whole, and matches** — #261.
+///
+/// The nine `Listened` questions and the three maps a view reads directly, in one reply. Checked
+/// against the same fold taken locally, because the failure that matters is not a crash: a
+/// rating that quietly does not arrive looks exactly like a rating nobody gave.
+///
+/// **This is the second attempt.** The first shipped it over `Client::call`, which built a
+/// `serde_json::Value` of the whole 4.5 MB reply and made an attached view larger than one that
+/// folded the log; and before that it did not serialise at all, because two of these maps are
+/// keyed by tuples and a JSON object takes string keys only — a failure that arrived as a hang.
+/// Both are why this test exists and why `Heard` has a round-trip test of its own.
+#[test]
+fn what_the_library_has_heard_crosses_whole() {
+    let (engine, recording) = start_with_a_track("heard-oracle");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let data = engine.dir.join("xdg").join("gmuse");
+    let device: gmuse::model::id::Id<gmuse::model::entity::Device> = std::fs::read_dir(&data)
+        .expect("a data dir")
+        .flatten()
+        .find_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.strip_prefix("log-")?
+                .strip_suffix(".jsonl")?
+                .parse()
+                .ok()
+        })
+        .expect("the engine wrote a log named for its device");
+    // **Give it something to have heard**, because two empty `Heard`s agree perfectly. Rated
+    // through the engine, which is how an attached view writes (§4.4).
+    client
+        .subscribe(&[gmuse_proto::Topic::Library])
+        .expect("subscribed");
+    let song: gmuse::model::id::Id<gmuse::model::entity::Recording> =
+        recording.parse().expect("a recording id");
+    let mut scratch = gmuse::model::instance::Instance::new(device);
+    scratch.rate(1_000, song, Some(5));
+    // **And a genre**, so the assertion graph is carried rather than merely declared to be.
+    // It is the half with the tuple-keyed maps, which is the half that did not serialise at all
+    // the first time this was built.
+    scratch.assert_concept(
+        1_000,
+        gmuse::model::facet::Described::Recording(song),
+        gmuse::model::facet::GENRE,
+        "Techno",
+        gmuse::model::reference::Source::Manual,
+        gmuse::model::ingest::Confidence::Confirmed,
+    );
+    let facts: Vec<_> = scratch.records().iter().map(|r| &r.fact).collect();
+    client
+        .call("library.edit", Some(serde_json::json!({ "facts": facts })))
+        .expect("the engine takes it");
+    let event = client
+        .next_event(Duration::from_secs(10))
+        .expect("a library event");
+    assert_eq!(event.topic, gmuse_proto::Topic::Library);
+
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    let answer = desk.current();
+    let mine = &answer.listened;
+    assert_eq!(
+        mine.ratings.get(&song).copied(),
+        Some(5),
+        "the rating did not reach the log, so there is nothing to cross"
+    );
+    // **Both sides go through `Heard::of`**, so a field it forgets agrees with itself and the
+    // comparison below sees nothing. These are what notice: each names a field and insists the
+    // fixture put something in it.
+    assert!(
+        !mine.assertions.is_empty(),
+        "no assertion reached the log, so the graph half crosses nothing"
+    );
+    assert!(
+        !mine.concepts.is_empty(),
+        "no concept label reached the log, and `claims` turns ids into labels with them"
+    );
+
+    // **Waited for, not assumed.** The event says the log grew; the engine folds and republishes
+    // on its own thread, so a fetch can beat the publish it was told about. Asking once passed
+    // four times and failed the fifth.
+    let remote = gmuse::ui::holding_remote::Remote::open(client);
+    let mut theirs = remote.heard().expect("the engine answered");
+    for _ in 0..100 {
+        if theirs.ratings.get(&song).copied() == Some(5) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        theirs = remote.heard().expect("the engine answered");
+    }
+    assert_eq!(theirs, **mine, "what crossed is not what was folded");
+}

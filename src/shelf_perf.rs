@@ -86,7 +86,7 @@ mod perf {
     fn drawing_a_view_scales_with_what_it_drew() {
         let l = library(200, 650);
         let rows = Listing::rows(&l).len();
-        let listened = crate::projection::catalogue::Catalogue::default();
+        let listened = crate::projection::heard::Heard::default();
         let env = crate::query::filter::Env {
             listened: Some(&listened),
             named: None,

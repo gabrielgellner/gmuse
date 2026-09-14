@@ -56,7 +56,13 @@ pub struct Answer {
     /// Its own `Arc` inside the published one, so a holder that only wants
     /// this — the UI's rating and play lookups — can keep it without pinning
     /// the whole fold.
-    pub listened: Arc<Catalogue>,
+    pub listened: Arc<crate::projection::heard::Heard>,
+    /// **Which devices have said what they hold** — one bit per device, from the fold.
+    ///
+    /// Small and load-bearing: `bridge::librarian_from` keys its scan bootstrap on exactly this
+    /// question, and it is the one thing a reader wanted from `Catalogue::holdings` that is not
+    /// about listening — so it comes out here rather than riding along in `listened` (#261).
+    pub asserted: std::collections::BTreeSet<Id<Device>>,
     /// What moved to produce this answer, relative to the one before it.
     ///
     /// A reader that keeps its own derived state — a rendered list, a filtered
@@ -821,31 +827,7 @@ impl Desk {
     /// cannot queue — so the absent `Appender` is the whole mechanism, and an
     /// earlier version of this passed `None` as belt and braces before there was
     /// anything to read back.
-    /// **A desk for a view whose librarian is somewhere else** — #261.
-    ///
-    /// It folds the log's catalogue, because `listened` — the ratings and the plays — comes
-    /// out of it and there is no crossing for that yet. It does **not** derive a `Librarian`
-    /// from it: that is 26.5 MB on the real library, built on top of the catalogue's 11.8 MB,
-    /// and an attached view reads none of it — its rows come over the socket
-    /// (`ui::holding_remote`), which §4.2 says is where its librarian is.
-    ///
-    /// `Answer::library` is therefore empty from one of these, and a caller that reads it gets
-    /// an empty library rather than a wrong one. `tree-over-the-wire.md` §9 has the numbers.
-    pub fn following(held: Holdings, device: Id<Device>, now: i64, data_dir: PathBuf) -> Desk {
-        Self::reading(held, device, now, data_dir, false)
-    }
-
     pub fn read_only(held: Holdings, device: Id<Device>, now: i64, data_dir: PathBuf) -> Desk {
-        Self::reading(held, device, now, data_dir, true)
-    }
-
-    fn reading(
-        held: Holdings,
-        device: Id<Device>,
-        now: i64,
-        data_dir: PathBuf,
-        derives: bool,
-    ) -> Desk {
         // **The snapshot, not the log** — #261. The engine refreshes it on every commit
         // (`refresh_snapshot`, #258), so a follower reads 5.7 MB of postcard where it used to
         // parse 87 MB of JSONL into **83.5 MB of records it has no use for**: production asks a
@@ -866,7 +848,7 @@ impl Desk {
             now,
             Some(data_dir),
             false,
-            derives,
+            true,
         );
         desk.appends = false;
         desk
@@ -904,6 +886,31 @@ impl Desk {
     /// still reach `programme`, which is the whole point of the narrowing.
     pub fn into_enquiries(self) -> Enquiries {
         Enquiries(self)
+    }
+
+    /// **A desk for a view whose library is entirely somewhere else** — #261.
+    ///
+    /// It folds nothing: no data directory, so no log to read, and no `Librarian` derived from
+    /// the nothing it folds. It appends nothing either — `appends` is false, so `ui::record`
+    /// finds no door here and goes to the engine, which is §4.4's rule.
+    ///
+    /// What it is still *for* is the shape of the rest of the view: `device`, the scan channel,
+    /// and a `settled` that returns at once. An attached view keeps asking a desk those, and
+    /// giving it one that answers emptily is smaller than teaching every caller it might not
+    /// have one.
+    pub fn elsewhere(device: Id<Device>) -> Desk {
+        let mut desk = Desk::spawn(
+            Instance::new(device),
+            Arc::default(),
+            Holdings::default(),
+            device,
+            0,
+            None,
+            false,
+            false,
+        );
+        desk.appends = false;
+        desk
     }
 
     /// A desk over an empty log that writes nothing to disk, for tests.
@@ -1399,7 +1406,12 @@ fn fold(
         } else {
             Librarian::default()
         },
-        listened: Arc::clone(catalogue),
+        // **The part of the fold that answers about listening**, not the fold — #261. The
+        // field's own note has always said a holder that wants only this should be able to keep
+        // it "without pinning the whole fold", and while it was an `Arc<Catalogue>` that was
+        // simply untrue: it pinned all of it. 2.7 MB against 11.8.
+        listened: Arc::new(crate::projection::heard::Heard::of(catalogue)),
+        asserted: catalogue.holdings.keys().copied().collect(),
         changed,
         holdings: Arc::clone(held),
         scanning,
@@ -1771,10 +1783,10 @@ mod tests {
         let after = desk.current();
 
         assert!(
-            before.listened.recordings.is_empty(),
+            before.library.recordings().next().is_none(),
             "the answer taken first was rewritten underneath its holder"
         );
-        assert_eq!(after.listened.recordings.len(), 1, "the new one has it");
+        assert_eq!(after.library.recordings().count(), 1, "the new one has it");
         assert!(
             !Arc::ptr_eq(&before, &after),
             "the same allocation was mutated rather than replaced"
@@ -1805,11 +1817,7 @@ mod tests {
         desk.settled();
 
         assert_eq!(
-            desk.current()
-                .listened
-                .recordings
-                .get(&rec)
-                .map(|r| &*r.title),
+            desk.current().library.row(rec).map(|r| r.title).as_deref(),
             Some("third"),
             "last writer did not win, so the queue reordered"
         );
@@ -1877,7 +1885,7 @@ mod tests {
             Some(dir.clone()),
         );
         assert!(
-            !desk.current().listened.holdings.contains_key(&device()),
+            !desk.current().asserted.contains(&device()),
             "the desk already asserts holdings, so this proves nothing"
         );
 
@@ -1890,7 +1898,7 @@ mod tests {
         desk.settled();
 
         assert!(
-            desk.current().listened.holdings.contains_key(&device()),
+            desk.current().asserted.contains(&device()),
             "the scan asserted holdings and the published catalogue does not show them"
         );
     }

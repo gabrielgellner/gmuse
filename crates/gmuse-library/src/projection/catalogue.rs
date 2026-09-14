@@ -1273,170 +1273,6 @@ impl Catalogue {
     }
 }
 
-/// Drop the holdings assertions nothing reads any more.
-///
-/// **The one event type that may be compacted.** A superseded assertion
-/// carries nothing — the later one says everything it said and more — where a
-/// superseded play still carries a listen and a superseded rating still carries
-/// what someone once thought.
-///
-/// Without this the log grows by a full file listing every time a device scans.
-/// Measured on the live library, scan observations were 6227 of 6572 events
-/// after three days of use: 95% of the log, and none of it worth keeping.
-///
-/// Folding a compacted set gives exactly what folding the original gives, which
-/// is the property that makes this safe to run whenever, and the one the tests
-/// assert directly.
-/// Breadth-first, so `depth` is the shortest way back to each ancestor, and
-/// `seen` is what stops a cycle rather than the bound. **The bound is the
-/// backstop**: edges are rows and rows union, so two devices can author a
-/// cycle neither of them meant, and a render must answer rather than hang.
-///
-/// Returns `(kind, depth)` per edge taken, which is what makes the bracket
-/// correlated: the kind and the depth come from the same hop.
-fn climb<T: Ord + Copy, F>(start: T, parents: F) -> Vec<(String, i64)>
-where
-    F: Fn(T) -> Vec<(T, String)>,
-{
-    /// Sixteen, as everywhere else here: deeper than any real chain of
-    /// remixes, shallower than a loop can hide in.
-    const MAX_DEPTH: i64 = 16;
-
-    let mut seen = std::collections::BTreeSet::from([start]);
-    let mut here = vec![start];
-    let mut out = Vec::new();
-    for depth in 1..=MAX_DEPTH {
-        let mut next = Vec::new();
-        for node in here.drain(..) {
-            for (parent, kind) in parents(node) {
-                if seen.insert(parent) {
-                    out.push((kind, depth));
-                    next.push(parent);
-                }
-            }
-        }
-        if next.is_empty() {
-            break;
-        }
-        here = next;
-    }
-    out
-}
-
-impl crate::query::filter::Listened for Catalogue {
-    fn plays(&self, recording: Id<Recording>) -> u32 {
-        self.plays.get(&recording).copied().unwrap_or(0)
-    }
-
-    fn last_played(&self, recording: Id<Recording>) -> Option<i64> {
-        self.last_played.get(&recording).copied()
-    }
-
-    fn acquired(&self, recording: Id<Recording>) -> Option<i64> {
-        self.acquired.get(&recording).copied()
-    }
-
-    fn rating(&self, recording: Id<Recording>) -> Option<u8> {
-        self.ratings.get(&recording).copied()
-    }
-
-    fn derived_from(&self, recording: Id<Recording>) -> Vec<(String, i64)> {
-        climb(recording, |here| {
-            self.derived
-                .iter()
-                .filter(move |e| e.1 == here && !self.derived_retracted.contains(e))
-                .map(|(from, _, kind)| (*from, format!("{kind:?}").to_lowercase()))
-                .collect()
-        })
-    }
-
-    fn work_derived_from(&self, recording: Id<Recording>) -> Vec<(String, i64)> {
-        // **Through the work the recording performs.** A row is a recording,
-        // and the other traversal is one level up — so it is reached rather
-        // than merged into the recording graph.
-        let mut out = Vec::new();
-        for work in self
-            .performances
-            .iter()
-            .filter(|(r, _)| *r == recording)
-            .map(|(_, w)| *w)
-        {
-            out.extend(climb(work, |here| {
-                self.work_derived
-                    .iter()
-                    .filter(move |e| e.1 == here && !self.work_derived_retracted.contains(e))
-                    .map(|(from, _, kind)| (*from, format!("{kind:?}").to_lowercase()))
-                    .collect()
-            }));
-        }
-        out
-    }
-
-    fn claims(&self, recording: Id<Recording>, facet_key: &str) -> Vec<(String, String, String)> {
-        let facet = Id::<crate::model::entity::Facet>::of_key(facet_key);
-        self.asserted(crate::model::facet::Described::Recording(recording), facet)
-            .into_iter()
-            .filter_map(|(concept, basis, confidence)| {
-                let label = self.concepts.get(&concept)?.label.clone();
-                Some((
-                    label,
-                    basis.written().to_string(),
-                    confidence.written().to_string(),
-                ))
-            })
-            .collect()
-    }
-
-    fn broader(&self, facet_key: &str, label: &str) -> Vec<String> {
-        use crate::model::entity::Concept;
-        use std::collections::BTreeSet;
-
-        // How far a walk may climb before the data is called cyclic. Sixteen
-        // is `vocabulary::MAX_DEPTH`, for the same reason: deeper than any
-        // real music taxonomy, shallower than a loop can hide in.
-        const MAX_DEPTH: usize = 16;
-
-        let mut seen: BTreeSet<Id<Concept>> = BTreeSet::new();
-        let mut here = vec![Id::<Concept>::in_facet(facet_key, label)];
-        let mut out = Vec::new();
-        for _ in 0..MAX_DEPTH {
-            let mut next = Vec::new();
-            for child in here.drain(..) {
-                for (_, parent, _) in self.narrows.iter().filter(|(h, p, c)| {
-                    *c == child && !self.narrows_retracted.contains(&(*h, *p, *c))
-                }) {
-                    // `seen` is what stops a cycle rather than the bound: the
-                    // bound is the backstop for a chain long enough that
-                    // walking it was a mistake either way.
-                    if seen.insert(*parent) {
-                        if let Some(record) = self.concepts.get(parent) {
-                            out.push(record.label.clone());
-                        }
-                        next.push(*parent);
-                    }
-                }
-            }
-            if next.is_empty() {
-                break;
-            }
-            here = next;
-        }
-        out
-    }
-
-    /// **Distinct collections, not entries** — a playlist holding one track
-    /// twice is one collection that holds it, and counting entries would make
-    /// `collected>1` mean "repeated somewhere" instead of "in two crates".
-    fn collected(&self, recording: Id<Recording>) -> u32 {
-        self.entries
-            .iter()
-            .filter(|(_, _, r)| *r == recording)
-            .map(|(c, _, _)| *c)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len() as u32
-    }
-}
-
 #[cfg(test)]
 mod closure_tests {
     use super::*;
@@ -1444,7 +1280,9 @@ mod closure_tests {
     use crate::model::instance::Instance;
     use crate::query::filter::Listened;
 
-    fn built(edges: &[(&str, &str)]) -> Catalogue {
+    /// **Answers as a `Heard`**, because the `Listened` impl these tests exercise moved there
+    /// in #261 — a reader with no fold has to be able to answer them.
+    fn built(edges: &[(&str, &str)]) -> crate::projection::heard::Heard {
         let mut i = Instance::new(Id::<Device>::derived(b"test"));
         let h = Id::<Hierarchy>::derived(b"browse");
         for (parent, child) in edges {
@@ -1460,7 +1298,7 @@ mod closure_tests {
             }
             i.narrows(100, h, crate::model::facet::GENRE, parent, child);
         }
-        i.catalogue()
+        crate::projection::heard::Heard::of(&i.catalogue())
     }
 
     /// **The derivation walk is bounded and cycle-safe** — #79, and the one
@@ -1481,7 +1319,8 @@ mod closure_tests {
         i.derives(100, song(2), song(3), Remix);
         i.derives(100, song(3), song(1), Remix);
 
-        let cat = i.catalogue();
+        // The impl under test is `Heard`'s since #261; this is the part of a fold it holds.
+        let cat = crate::projection::heard::Heard::of(&i.catalogue());
         let up = cat.derived_from(song(3));
         assert_eq!(
             up.len(),
@@ -1504,14 +1343,14 @@ mod closure_tests {
         i.derives(100, song(1), song(2), Remix);
         i.derives(100, song(2), song(3), Edit);
 
-        let cat = i.catalogue();
+        let cat = crate::projection::heard::Heard::of(&i.catalogue());
         let mut up = cat.derived_from(song(3));
         up.sort();
         assert_eq!(up, [("edit".to_string(), 1), ("remix".to_string(), 2)]);
 
         i.retract_derivation(200, song(1), song(2), Remix);
         assert_eq!(
-            i.catalogue().derived_from(song(3)),
+            crate::projection::heard::Heard::of(&i.catalogue()).derived_from(song(3)),
             [("edit".to_string(), 1)],
             "a retracted edge was still walked"
         );
@@ -1566,13 +1405,14 @@ mod closure_tests {
         }
         i.narrows(100, h, crate::model::facet::GENRE, "Rock", "Techno");
         assert_eq!(
-            i.catalogue().broader(crate::model::facet::GENRE, "Techno"),
+            crate::projection::heard::Heard::of(&i.catalogue())
+                .broader(crate::model::facet::GENRE, "Techno"),
             ["Rock"]
         );
 
         i.retract_narrowing(200, h, crate::model::facet::GENRE, "Rock", "Techno");
         assert!(
-            i.catalogue()
+            crate::projection::heard::Heard::of(&i.catalogue())
                 .broader(crate::model::facet::GENRE, "Techno")
                 .is_empty(),
             "a withdrawn edge was still climbed"

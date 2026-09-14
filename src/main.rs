@@ -2263,13 +2263,9 @@ fn run_tui(
         })
         .flatten();
     let desk = if attached && reader.is_some() {
-        // Folds the catalogue for `listened`, derives nothing.
-        gmuse::librarian::Desk::following(
-            app.store.clone(),
-            device,
-            now_ms,
-            loaded.data_dir.clone(),
-        )
+        // **Folds nothing at all.** Rows come over the socket and so does `listened`, so there
+        // is nothing left in the log for this process to read — §4.2's rule followed through.
+        gmuse::librarian::Desk::elsewhere(device)
     } else if attached {
         gmuse::librarian::Desk::read_only(
             app.store.clone(),
@@ -2522,7 +2518,7 @@ fn run_tui(
         let known = held.listened.ratings.len() + held.listened.plays.len();
         drop(held);
         state.desk = desk.into_enquiries();
-        state.listened = std::sync::Arc::clone(&state.desk.current().listened);
+        gmuse::ui::refresh_listened(&mut state);
         state.data_dir = Some(loaded.data_dir.clone());
         state.audit.line(
             "history",
@@ -3297,6 +3293,7 @@ fn run_engine(
                     let facet = facet.parse().map_err(|_| bad("facet"))?;
                     serde_json::json!({ "places": lib.places(facet) })
                 }
+                Request::QueryListened => serde_json::json!({ "heard": &*answer.listened }),
                 Request::QueryEntries { collection } => {
                     let collection = collection.parse().map_err(|_| bad("collection"))?;
                     serde_json::json!({ "entries": lib.entries_of(collection) })
@@ -3829,7 +3826,8 @@ fn run_engine(
                 | Call::QueryAbout { .. }
                 | Call::QueryName { .. }
                 | Call::QueryPlaces { .. }
-                | Call::QueryEntries { .. }) => self.reading(read),
+                | Call::QueryEntries { .. }
+                | Call::QueryListened) => self.reading(read),
 
                 // **A page, anchored where playback is** — #257.
                 //
