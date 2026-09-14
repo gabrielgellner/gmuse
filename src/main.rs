@@ -3080,15 +3080,31 @@ fn run_engine(
         /// Grouped here because grouping is a library question. The *folding* is not, so the
         /// whole shape comes back and a client draws what it has open — which is also what
         /// `tree-view-design.md` says a search reads.
+        #[allow(clippy::too_many_arguments)]
         fn tree(
             &self,
             filter: Option<String>,
             levels: Option<Vec<String>>,
             limit: Option<usize>,
             cursor: Option<usize>,
+            folds: Option<gmuse_proto::request::Folds>,
+            anchor: Option<gmuse_proto::request::Anchor>,
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
             use gmuse::model::rows::Listing;
             use gmuse_proto::RpcError;
+
+            // **Typed here, because this is the edge** (§12). The wire says strings; a sort
+            // key is already normalised, so what comes back from a reply goes straight back in.
+            let key = |text: &String| gmuse::shelf::SortKey::already(text);
+            let folds = folds.map(|f| {
+                gmuse::fold::Expansion::from_parts(
+                    f.level,
+                    f.eager,
+                    f.opened.iter().map(|p| p.iter().map(key).collect()),
+                    f.closed.iter().map(|p| p.iter().map(key).collect()),
+                )
+            });
+            let anchor = anchor.map(|a| (a.path.iter().map(key).collect::<Vec<_>>(), a.id));
 
             let raw = filter.clone();
             let filter = match filter.as_deref().map(gmuse::query::filter::Expr::parse) {
@@ -3136,7 +3152,7 @@ fn run_engine(
                 filter: filter.as_ref().map(|_| raw.clone().unwrap_or_default()),
             };
 
-            let all = match self.trees.get(&want) {
+            let shelf = match self.trees.get(&want) {
                 Some(ready) => ready,
                 None => {
                     // **Which rows are in it**, which is the filter's job and not the tree's.
@@ -3151,7 +3167,7 @@ fn run_engine(
                         .map(|f| f.row)
                         .collect(),
                     };
-                    let built = std::sync::Arc::new(gmuse::browse::tree(
+                    let built = std::sync::Arc::new(gmuse::shelf::Shelf::grouped(
                         &answer.library,
                         members,
                         levels,
@@ -3161,9 +3177,29 @@ fn run_engine(
                     built
                 }
             };
-            let at = cursor.unwrap_or(0).min(all.len());
+
+            // **The flatten is the cheap half and it is the half the folds decide** — 1.8ms
+            // against the shelf's 370ms, so it runs every time and the cache never has to know
+            // which nodes are open. No folds means everything open, which is what a client
+            // that keeps no fold state wants.
+            let all = match &folds {
+                Some(folds) => gmuse::browse::flatten(&shelf, folds, false),
+                None => gmuse::browse::flatten(&shelf, &gmuse::fold::Expansion::default(), true),
+            };
+            let spine = gmuse::browse::spine_of(&all);
+
+            // **An anchor beats a cursor**, because a toggle moves every row below it: the
+            // client says which line it was on and the page comes back around wherever that
+            // line now is. Falls through to the cursor when the anchor is gone — a row whose
+            // fold just closed is not on screen to be anchored to.
+            let at = anchor
+                .as_ref()
+                .and_then(|want| all.iter().position(|n| &n.mark() == want))
+                .unwrap_or_else(|| cursor.unwrap_or(0))
+                .min(all.len());
             let take = limit.unwrap_or(100).min(5_000);
-            let page: Vec<&gmuse::browse::Node> = all.iter().skip(at).take(take).collect();
+            let page: Vec<gmuse::browse::Drawn> =
+                all.iter().skip(at).take(take).map(Into::into).collect();
             let next = at + page.len();
 
             Ok(serde_json::json!({
@@ -3171,6 +3207,7 @@ fn run_engine(
                 "at": at,
                 "total": all.len(),
                 "next": (next < all.len()).then_some(next),
+                "spine": spine.to_hex(),
                 "library_version": version,
             }))
         }
@@ -3520,7 +3557,9 @@ fn run_engine(
                     levels,
                     limit,
                     cursor,
-                } => self.tree(filter, levels, limit, cursor),
+                    folds,
+                    anchor,
+                } => self.tree(filter, levels, limit, cursor, folds, anchor),
 
                 // **A page, anchored where playback is** — #257.
                 //

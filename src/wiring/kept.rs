@@ -28,18 +28,21 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::browse::Node;
-use crate::shelf::Levels;
+use crate::shelf::{Levels, Shelf};
 
 /// **The whole question a built tree answers** — the cache key for `query.tree`.
 ///
 /// Three parts, and each is here because leaving it out serves a wrong answer:
 ///
 /// - `version` — the fold it was built from. **This is the invalidation.** Without it a
-///   rename or an import would keep being answered from the tree built before it, for as
+///   rename or an import would keep being answered from the shelf built before it, for as
 ///   long as the entry survived the cap.
 /// - `levels` — a flat tree and a grouped one are different trees with the same contents.
 /// - `filter` — a filtered tree is a different tree.
+///
+/// **And not the folds**, which is the whole reason this keys a shelf rather than a page of
+/// nodes: which rows are visible is 1.8 ms of flattening, so it is recomputed rather than
+/// remembered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asked {
     /// §7.11's `library_version` — the same counter the announcer bumps.
@@ -48,8 +51,13 @@ pub struct Asked {
     pub filter: Option<String>,
 }
 
-/// The built trees a socket keeps between pages.
-pub type Trees = Kept<Asked, Vec<Node>>;
+/// The grouped shelves a socket keeps between pages.
+///
+/// **The shelf and not the nodes** — `tree-over-the-wire.md` §2. Grouping is 370 ms and
+/// flattening one is 1.8 ms, and only the flatten depends on which folds are open. Keying the
+/// *nodes* would mean every `zo` paid the grouping again; keying the shelf means a fold change
+/// costs about two milliseconds and the key has no folds in it at all.
+pub type Trees = Kept<Asked, Shelf>;
 
 /// A few answers, newest last.
 pub struct Kept<K, V> {

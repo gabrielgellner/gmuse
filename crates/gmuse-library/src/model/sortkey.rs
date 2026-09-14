@@ -23,6 +23,15 @@
 pub struct SortKey(String);
 
 impl SortKey {
+    /// **A key that is already one** — from a client handing back what a reply gave it.
+    ///
+    /// Not `sort_key`, which normalises: this text has been through that once and doing it
+    /// again would be wrong the moment normalisation changes, because the two halves of a fold
+    /// path would then disagree about which node they name.
+    pub fn already(text: &str) -> Self {
+        SortKey(text.to_owned())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

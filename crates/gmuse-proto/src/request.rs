@@ -30,6 +30,40 @@ use serde::{Deserialize, Serialize};
 use crate::error::RpcError;
 use crate::hello::HelloParams;
 
+/// **Which nodes a person has open** — a view's state, sent with the request.
+///
+/// The librarian holds none of this (`tree-over-the-wire.md` §2): folding is a view's business
+/// and grouping is the library's. It is small because the two lists are *exceptions* to
+/// `level` rather than members — twenty artists opened by hand is about 600 bytes, and it does
+/// not grow with the library.
+///
+/// Paths are the sort keys a previous reply gave back, as strings: this crate cannot name a
+/// `SortKey` and has no business normalising one. The server turns them into typed keys, which
+/// is §12's rule about parsing at the boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Folds {
+    /// Everything shallower than this is open. `0` closes everything.
+    #[serde(default)]
+    pub level: u16,
+    /// The depth from which folds open by themselves — the disc level (#169).
+    #[serde(default)]
+    pub eager: Option<u16>,
+    /// Opened by hand at or beyond `level`.
+    #[serde(default)]
+    pub opened: Vec<Vec<String>>,
+    /// Closed by hand shallower than `level`, or at a depth that opens by itself.
+    #[serde(default)]
+    pub closed: Vec<Vec<String>>,
+}
+
+/// **What names a line across a rebuild** — its container's path, and its id if it is a track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Anchor {
+    pub path: Vec<String>,
+    #[serde(default)]
+    pub id: Option<gmuse_ids::copy::CopyId>,
+}
+
 /// What a client asked for, once it is a type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
@@ -79,6 +113,13 @@ pub enum Request {
         levels: Option<Vec<String>>,
         limit: Option<usize>,
         cursor: Option<usize>,
+        /// Which nodes the client has open. **Omitted means all of them**, which is what a
+        /// client that keeps no fold state wants and what `/` searches.
+        folds: Option<Folds>,
+        /// The line the cursor was on, if the client would rather resume there than at
+        /// `cursor`. A toggle moves every row below it, so an index is stale the moment the
+        /// folds change and a name is not.
+        anchor: Option<Anchor>,
     },
     /// **Run a filter and get a page of rows** — §7.11, #261.
     ///
@@ -484,6 +525,10 @@ impl Request {
                     limit: Option<usize>,
                     #[serde(default)]
                     cursor: Option<usize>,
+                    #[serde(default)]
+                    folds: Option<Folds>,
+                    #[serde(default)]
+                    anchor: Option<Anchor>,
                 }
                 let p: P = match params {
                     Some(_) => typed(method, params)?,
@@ -492,6 +537,8 @@ impl Request {
                         levels: None,
                         limit: None,
                         cursor: None,
+                        folds: None,
+                        anchor: None,
                     },
                 };
                 Ok(Self::QueryTree {
@@ -499,6 +546,8 @@ impl Request {
                     levels: p.levels,
                     limit: p.limit,
                     cursor: p.cursor,
+                    folds: p.folds,
+                    anchor: p.anchor,
                 })
             }
             method::QUEUE_GET => {

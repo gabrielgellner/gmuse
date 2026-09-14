@@ -2519,3 +2519,94 @@ fn next_over_the_wire_skips_without_a_view_resolving_it() {
         "the engine skipped to something else on its own: {names:?}"
     );
 }
+
+/// **Folds decide which lines come back, and the shelf behind them is not rebuilt** — #261.
+///
+/// `tree-over-the-wire.md` §2: the grouping is 370 ms and the flatten 1.8 ms, and only the
+/// flatten depends on what is open. So the folds are deliberately *not* in the cache key, and
+/// what this checks is the consequence — that asking the same library with different folds
+/// gives different lines, rather than the first answer again.
+#[test]
+fn folds_travel_with_the_request_and_the_spine_comes_back() {
+    let (engine, _recording) = start_with_a_track("tree-folds");
+    let client = Client::connect(&engine.socket, "browser", "0").expect("connect");
+
+    let ask = |params: serde_json::Value| -> serde_json::Value {
+        client.call("query.tree", Some(params)).expect("the tree")
+    };
+    let total = |reply: &serde_json::Value| reply["total"].as_u64().expect("a total");
+    let spine = |reply: &serde_json::Value| {
+        reply["spine"]
+            .as_str()
+            .expect("a spine on every reply")
+            .to_owned()
+    };
+
+    // Everything open — no folds is what a client with no fold state sends.
+    let open = ask(serde_json::json!({ "limit": 100 }));
+    assert!(
+        total(&open) > 2,
+        "only {} lines with everything open, so folding cannot show less",
+        total(&open)
+    );
+
+    // Everything shut: `level: 0` opens nothing, so only the top level is drawn.
+    let shut = ask(serde_json::json!({
+        "limit": 100,
+        "folds": { "level": 0, "opened": [], "closed": [] },
+    }));
+    assert!(
+        total(&shut) < total(&open),
+        "{} lines shut against {} open — the folds were ignored",
+        total(&shut),
+        total(&open)
+    );
+    assert!(
+        total(&shut) > 0,
+        "shut to nothing at all, which is not a fold"
+    );
+
+    // **The spine is the shape, one hex digit a line.**
+    assert_eq!(
+        spine(&open).len() as u64,
+        total(&open),
+        "the spine does not have one digit per line"
+    );
+    assert!(
+        spine(&open).chars().all(|c| c.is_ascii_hexdigit()),
+        "the spine is not hex: {:?}",
+        spine(&open)
+    );
+    assert_ne!(
+        spine(&open),
+        spine(&shut),
+        "two different trees have the same shape"
+    );
+
+    // **An anchor beats a cursor**, which is what makes a toggle keep the cursor where it was.
+    // Anchoring on the last line of the open tree must page from *there*, not from `cursor`.
+    let nodes = open["nodes"].as_array().expect("nodes");
+    let last = nodes.last().expect("a line to anchor on");
+    assert_eq!(
+        last["kind"].as_str(),
+        Some("track"),
+        "expected the last line of an open tree to be a track: {last}"
+    );
+    // **The seat comes with the line**, so a client anchors without re-deriving `Node::seat`'s
+    // three exceptions — which is the whole reason it is on the wire.
+    let seat = last["seat"].clone();
+    assert!(
+        seat.as_array().is_some_and(|p| !p.is_empty()),
+        "no seat on the line, so nothing can be anchored: {last}"
+    );
+    let anchored = ask(serde_json::json!({
+        "limit": 1,
+        "cursor": 0,
+        "anchor": { "path": seat, "id": last["id"] },
+    }));
+    assert_eq!(
+        anchored["at"].as_u64(),
+        Some(total(&open) - 1),
+        "the anchor did not win over the cursor"
+    );
+}

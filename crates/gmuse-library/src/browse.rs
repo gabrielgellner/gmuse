@@ -197,6 +197,46 @@ impl Node {
         }
     }
 
+    /// **Where this line sits in the fold tree** — the path a toggle opens or closes.
+    ///
+    /// Not the same as its identity: a track's seat is its *container*, because a track has no
+    /// fold of its own. Two of them are exceptions worth reading twice — a track that replaced
+    /// its album row (#135) seats on the artist, since that album's fold is not a place any
+    /// more, and a track under a drawn disc header seats on the disc, so `h` from disc 2 shuts
+    /// disc 2 rather than the whole record.
+    pub fn seat(&self) -> Vec<SortKey> {
+        match self {
+            Node::Artist { key, .. } => vec![key.clone()],
+            Node::Album { artist, key, .. } => vec![artist.clone(), key.clone()],
+            Node::Disc {
+                artist, album, key, ..
+            } => vec![artist.clone(), album.clone(), key.clone()],
+            Node::Track {
+                artist,
+                alone: true,
+                ..
+            } => vec![artist.clone()],
+            Node::Track {
+                artist,
+                album,
+                disc: Some(disc),
+                ..
+            } => vec![artist.clone(), album.clone(), disc.clone()],
+            Node::Track { artist, album, .. } => vec![artist.clone(), album.clone()],
+        }
+    }
+
+    /// **What names this line across a rebuild** — its seat, plus its id if it is a track.
+    ///
+    /// What a paged reply anchors on: the folds changed, so the rows moved; find this again
+    /// and the cursor is where the person left it.
+    pub fn mark(&self) -> Mark {
+        match self {
+            Node::Track { id, .. } => (self.seat(), Some(*id)),
+            _ => (self.seat(), None),
+        }
+    }
+
     pub fn is_leaf(&self) -> bool {
         matches!(self, Node::Track { .. })
     }
@@ -230,21 +270,6 @@ pub fn tree(
     smart_artist_sort: bool,
 ) -> Vec<Node> {
     let shelf = Shelf::grouped(library, members, levels, smart_artist_sort);
-    if levels.is_flat() {
-        // **No grouping, so every line is a track** — which is what view 2 is. It has no folds
-        // by construction, so it does not go through [`flatten`]: a flat list of tracks is not
-        // a tree with everything open, it is a tree with no levels to open.
-        return shelf
-            .sorted()
-            .iter()
-            .map(|id| {
-                // **No path, because there is no tree to have one in.** `alone` is true for
-                // the same reason: nothing groups it, so nothing could be opened to reveal it.
-                let nowhere = crate::model::sortkey::sort_key("", false);
-                track(&shelf, &nowhere, &nowhere, None, *id, true)
-            })
-            .collect();
-    }
     flatten(&shelf, &Expansion::default(), true)
 }
 
@@ -257,6 +282,27 @@ pub fn tree(
 /// Display names come from the shelf and the tracks, since §4 keeps display strings on the
 /// track and only sort keys in the tree.
 pub fn flatten(lib: &Shelf, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node> {
+    if lib.levels().is_flat() {
+        // **No grouping, so every line is a track** — which is what view 2 is. A flat list is
+        // not a tree with everything open; it is a tree with no levels to open, so the folds
+        // have nothing to say about it.
+        //
+        // **The shelf is asked rather than the caller told** — #261. This was a parameter and
+        // was dropped twice in one afternoon, because the code holding a shelf is not always
+        // the code that chose its levels, and a grouped tree answered to a flat question looks
+        // exactly like a correct one until you count the rows. `Shelf` has known its own levels
+        // since #97 and nothing had asked it.
+        return lib
+            .sorted()
+            .iter()
+            .map(|id| {
+                // **No path, because there is no tree to have one in.** `alone` is true for
+                // the same reason: nothing groups it, so nothing could be opened to reveal it.
+                let nowhere = crate::model::sortkey::sort_key("", false);
+                track(lib, &nowhere, &nowhere, None, *id, true)
+            })
+            .collect();
+    }
     let mut rows = Vec::new();
     for (artist_key, albums) in lib.artists() {
         let display = lib.artist_name(artist_key).to_string();
@@ -382,6 +428,29 @@ fn track(
         credit: line.and_then(|l| l.credit.clone()),
         length_ms: line.map_or(0, |l| l.length_ms),
         number: lib.disc_of(id),
+    }
+}
+
+/// One line as it goes over the wire: the node, plus the seat a client anchors and toggles by.
+///
+/// **The seat is sent rather than derived**, because [`Node::seat`] has three exceptions a
+/// client would otherwise have to know — a track that replaced its album row seats on the
+/// artist (#135), a track under a drawn disc header seats on the disc (#169), and every other
+/// track seats on its album. A client re-deriving those is a second copy of a rule, which is
+/// how two answers to one question start.
+#[derive(Debug, serde::Serialize)]
+pub struct Drawn<'a> {
+    #[serde(flatten)]
+    pub node: &'a Node,
+    pub seat: Vec<SortKey>,
+}
+
+impl<'a> From<&'a Node> for Drawn<'a> {
+    fn from(node: &'a Node) -> Self {
+        Drawn {
+            node,
+            seat: node.seat(),
+        }
     }
 }
 

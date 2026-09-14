@@ -158,30 +158,7 @@ impl TreeState {
     /// that is the row the cursor should fall back to when the track's fold
     /// closes under it.
     fn seat_of(row: &Row) -> Vec<SortKey> {
-        match row {
-            Row::Artist { key, .. } => vec![key.clone()],
-            Row::Album { artist, key, .. } => vec![artist.clone(), key.clone()],
-            Row::Disc {
-                artist, album, key, ..
-            } => vec![artist.clone(), album.clone(), key.clone()],
-            // **Where the cursor falls back to** — the artist, for a track
-            // that replaced its album row, because that album's fold is not a
-            // place any more (#135).
-            Row::Track {
-                artist,
-                alone: true,
-                ..
-            } => vec![artist.clone()],
-            // **Under its disc where there is one**, so `h` from a track on
-            // disc 2 closes that disc rather than the whole record.
-            Row::Track {
-                artist,
-                album,
-                disc: Some(disc),
-                ..
-            } => vec![artist.clone(), album.clone(), disc.clone()],
-            Row::Track { artist, album, .. } => vec![artist.clone(), album.clone()],
-        }
+        row.seat()
     }
 
     /// Every track under the selected row: one track, one album, or everything
@@ -453,11 +430,8 @@ impl TreeState {
     /// What identifies a row across a fold change: a track by its id, a
     /// container by its path. Not the `Row` itself — that carries whether it is
     /// expanded, which is precisely what a fold change alters.
-    fn mark_of_inner(row: &Row) -> (Vec<SortKey>, Option<CopyId>) {
-        match row {
-            Row::Track { id, .. } => (Self::seat_of(row), Some(*id)),
-            _ => (Self::seat_of(row), None),
-        }
+    fn mark_of_inner(row: &Row) -> Mark {
+        row.mark()
     }
 
     /// The openable path under the cursor, if the cursor is on one.

@@ -79,15 +79,24 @@ times. Three scans of 8.9 KB is not a cost worth naming.
 Two methods, both stateless.
 
 ```
-query.tree   { levels, filter, folds, anchor?, page: { limit, cursor } }
-          -> { nodes, at, total, spine, library_version }
+query.tree   { levels, filter, folds, anchor?, limit, cursor }
+          -> { nodes, at, total, next, spine, library_version }
 
 query.reveal { levels, filter, folds, target, from?, backwards? }
           -> { open: [path], at }
 ```
 
 `anchor` is a `Mark` — a container's path, or a track's id. It answers "the rows moved; where did my cursor go?", which
-is the question a toggle asks and the one `mark`/`point_at` already exist to answer view-side.
+is the question a toggle asks and the one `mark`/`point_at` already exist to answer view-side. It beats `cursor` when
+both are given, and falls through to it when the anchored line is gone — a row whose fold just closed is not on screen
+to be anchored to.
+
+**Each line comes back with its seat**, the path a toggle opens and an anchor names. Sent rather than derived, because
+`Node::seat` has three exceptions a client would otherwise have to reimplement: a track that replaced its album row
+seats on the artist (#135), a track under a drawn disc header seats on that disc (#169), and every other track seats on
+its album. A client re-deriving those is a second copy of a rule.
+
+**Absent folds mean everything open**, which is what a client that keeps no fold state wants and what `/` searches.
 
 `target` is either a pattern or an id. **The reply gives the index after the reveal, not before**: opening folds inserts
 rows above the match, so an index measured against the unfolded list is wrong by the time the view can use it. `/`

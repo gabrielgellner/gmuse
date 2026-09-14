@@ -22,7 +22,24 @@ use std::collections::HashSet;
 /// One step in a node's identity, from the root down.
 pub type Path<K> = Vec<K>;
 
-#[derive(Debug, Clone)]
+/// An expansion taken apart, for sending — see [`Expansion::parts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parts<K> {
+    pub level: u16,
+    pub eager: Option<u16>,
+    pub opened: Vec<Path<K>>,
+    pub closed: Vec<Path<K>>,
+}
+
+/// **Serialisable because it travels with a request** — #261. A view keeps its own fold state
+/// and sends it; the librarian holds none. It is small for the reason the sets are exceptions
+/// rather than members: twenty artists open by hand is about 600 bytes, and it does not grow
+/// with the library.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "K: serde::Serialize",
+    deserialize = "K: serde::Deserialize<'de> + std::hash::Hash + Eq"
+))]
 pub struct Expansion<K> {
     /// Everything **shallower** than this is open. `0` closes everything;
     /// `1` opens the top level; and so on.
@@ -71,6 +88,47 @@ impl<K: std::hash::Hash + Eq + Clone> Expansion<K> {
     /// nothing at all.
     fn depth(path: &[K]) -> u16 {
         path.len().saturating_sub(1) as u16
+    }
+
+    /// **Rebuild one from a client's own account of it** — #261.
+    ///
+    /// The wire carries paths as plain strings because `gmuse-proto` cannot name a `SortKey`,
+    /// so the caller maps them to keys and hands them over here. §12's rule: a string becomes a
+    /// typed value at the edge and nothing downstream sees a raw one.
+    pub fn from_parts(
+        level: u16,
+        eager: Option<u16>,
+        opened: impl IntoIterator<Item = Path<K>>,
+        closed: impl IntoIterator<Item = Path<K>>,
+    ) -> Self {
+        Self {
+            level,
+            eager,
+            opened: opened.into_iter().collect(),
+            closed: closed.into_iter().collect(),
+        }
+    }
+
+    /// What a client would have to send to get this state back.
+    ///
+    /// **Sorted**, so two equal fold states serialise alike — a `HashSet` iterates in whatever
+    /// order it feels like, and a request that differs only by that would miss a cache and read
+    /// as a different question in a log.
+    pub fn parts(&self) -> Parts<K>
+    where
+        K: Ord,
+    {
+        let sorted = |set: &HashSet<Path<K>>| {
+            let mut out: Vec<Path<K>> = set.iter().cloned().collect();
+            out.sort();
+            out
+        };
+        Parts {
+            level: self.level,
+            eager: self.eager,
+            opened: sorted(&self.opened),
+            closed: sorted(&self.closed),
+        }
     }
 
     pub fn is_open(&self, path: &[K]) -> bool {
