@@ -1363,8 +1363,10 @@ fn run_library(
                     .flatten()
                     .filter(|r| playable.contains_key(r))
                     .collect();
+                let library = gmuse::model::seam::Librarian::from_catalogue(projection.catalogue());
                 for row in gmuse::query::rows(
-                    &projection,
+                    projection.catalogue(),
+                    &library,
                     device,
                     gmuse::history::now_ms(),
                     gmuse::query::Only::Everything,
@@ -2039,8 +2041,10 @@ fn run_library(
                 .map_err(|e| format!("--filter: {e}"))?;
             let projection =
                 gmuse::librarian::reading(&loaded.data_dir, device, gmuse::history::now_ms());
+            let library = gmuse::model::seam::Librarian::from_catalogue(projection.catalogue());
             for row in gmuse::query::rows(
-                &projection,
+                projection.catalogue(),
+                &library,
                 device,
                 gmuse::history::now_ms(),
                 only,
@@ -2775,6 +2779,12 @@ fn run_engine(
         desk: Arc<gmuse::librarian::Desk>,
         /// What to reconcile on a scan.
         roots: Vec<std::path::PathBuf>,
+        /// **Which fold a query's page came from** — §7.11's `library_version`, #261.
+        ///
+        /// The same counter the announcer bumps and the audio engine watches, so a client
+        /// paging through a query and a client following the `library` topic are talking about
+        /// the same numbers.
+        moved: Arc<std::sync::atomic::AtomicU64>,
         /// **The player, behind a channel** — #230. `PlayerHandle` is `!Send`
         /// and `Answers` is `Send + Sync`, so the player cannot live here; what
         /// lives here is the way to ask it for something.
@@ -2983,6 +2993,73 @@ fn run_engine(
         /// decision unchanged: this library's `now_playing` puts the title **last**,
         /// so a bar truncating a pre-rendered line throws away the field it wanted.
         /// A caller that wants fields ignores `format` and gets them.
+        /// **A page of rows matching a filter** — §7.11, #261.
+        ///
+        /// Answered here rather than by the librarian thread, and that is the point: a read
+        /// needs an atomic load, not a turn in a queue. Appends are what have to be ordered.
+        ///
+        /// `library_version` says which fold the page came from, so a client paging through can
+        /// tell that the library moved under it. The page itself is internally consistent —
+        /// one `Arc<Answer>` for the whole of it — and a change *during* one page is invisible,
+        /// which is the honest limit of a cursor that is an index.
+        fn found(
+            &self,
+            filter: Option<String>,
+            limit: Option<usize>,
+            cursor: Option<usize>,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse_proto::RpcError;
+
+            let filter = match filter.as_deref().map(gmuse::query::filter::Expr::parse) {
+                Some(Ok(expr)) => Some(expr),
+                Some(Err(e)) => return Err(RpcError::invalid_params("filter", e.to_string())),
+                None => None,
+            };
+
+            // **One atomic load of a shared fold**, and the version beside it so a client can
+            // see the library move.
+            let answer = self.desk.current();
+            let version = self.moved.load(std::sync::atomic::Ordering::Acquire);
+
+            // **The picker path, not the tool path** — #261. `query::rows` produces a locator
+            // per recording, which is 208 ms of a 298 ms query on the real library and is not
+            // in the reply. `found` resolves one only when the filter reads it.
+            let all = gmuse::query::found::found(
+                &answer.library,
+                gmuse::history::now_ms(),
+                filter.as_ref(),
+            );
+
+            // **A screenful, not a library.** A picker draws about forty rows; the cursor is an
+            // index into *this* version's result, which the reply names.
+            let at = cursor.unwrap_or(0).min(all.len());
+            let take = limit.unwrap_or(50).min(1_000);
+            let page: Vec<serde_json::Value> = all
+                .iter()
+                .skip(at)
+                .take(take)
+                .map(|row| {
+                    serde_json::json!({
+                        "recording": row.recording.map(|r| r.to_string()),
+                        "title": row.title,
+                        "artist": row.artist,
+                        "file_under": row.file_under,
+                        "album": row.album,
+                        "length_ms": row.length_ms,
+                    })
+                })
+                .collect();
+            let next = at + page.len();
+
+            Ok(serde_json::json!({
+                "rows": page,
+                "at": at,
+                "total": all.len(),
+                "next": (next < all.len()).then_some(next),
+                "library_version": version,
+            }))
+        }
+
         /// **Which programme entry is sounding**, for a page anchored where playback is.
         ///
         /// `None` when nothing is playing or the engine did not answer, which pages from the
@@ -3297,6 +3374,31 @@ fn run_engine(
                 // complaint against `--repl`, and routing here is what stops a
                 // second one being written.
                 Call::PlaybackGet { format } => self.playing(format),
+                // **Is this filter valid** — §7.11. One parser, and this is how a client
+                // reaches it without having one.
+                Call::QueryParse { text } => match gmuse::query::filter::Expr::parse(&text) {
+                    Ok(_) => Ok(serde_json::json!({ "ok": true })),
+                    // **The message and no span**, because the parser does not track
+                    // positions. §7.11 asks for one; adding it is a change to the parser
+                    // rather than to this, and the message is what the `:` line shows today.
+                    Err(e) => Err(RpcError::invalid_params("filter", e.to_string())),
+                },
+
+                // **Run a filter and hand back a page** — §7.11, #261.
+                //
+                // On *this* thread, which is the connection's own, from one atomic load of the
+                // published fold. §7.11 says a query "runs on a query worker"; a connection
+                // worker is one, and the effect is that a query queues behind neither the
+                // appender nor another query.
+                //
+                // **Nothing here is a copy of the library.** `Desk::current()` clones an `Arc`;
+                // what crosses the wire is the page.
+                Call::QueryRun {
+                    filter,
+                    limit,
+                    cursor,
+                } => self.found(filter, limit, cursor),
+
                 // **A page, anchored where playback is** — #257.
                 //
                 // The anchor comes from the engine and the page from the librarian, which is
@@ -3578,6 +3680,7 @@ fn run_engine(
             desk: Arc::clone(&desk),
             control: Arc::clone(&control),
             roots: roots.clone(),
+            moved: Arc::clone(&relay.moved),
         }),
         lock,
     )

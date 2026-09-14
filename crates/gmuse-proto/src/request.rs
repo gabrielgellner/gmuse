@@ -51,6 +51,33 @@ pub enum Request {
     EngineShutdown,
     /// The engine's clock, for offset estimation (§7.9).
     TimeNow,
+    /// **Is this filter valid, and if not why** — §7.11.
+    ///
+    /// `query-language.md` has one language for the `:` line, the config, saved rules and the
+    /// socket, and that only holds if one thing parses it: "clients MUST NOT reimplement the
+    /// parser". This is how a client checks one without having a parser of its own.
+    ///
+    /// **The AST half of §7.11 is not here.** The spec says it returns "either the core AST or
+    /// `QueryParse { message, span }`", and returning an AST means committing to a wire shape
+    /// for it — which §7.11 itself says the surface/core round-tripping issues block. A client
+    /// sends text to `query.run`; the AST would only save re-parsing it.
+    QueryParse {
+        text: String,
+    },
+    /// **Run a filter and get a page of rows** — §7.11, #261.
+    ///
+    /// Answered on the connection's own thread, from `Desk::current()` — one atomic load of a
+    /// shared fold. So a query never queues behind the appender and never behind another
+    /// query, and **a client holds only the rows it is drawing.**
+    ///
+    /// An absent `filter` is everything, which is what a picker opens with.
+    QueryRun {
+        filter: Option<String>,
+        /// How many rows. Omitted means a screenful.
+        limit: Option<usize>,
+        /// Where to resume, from a previous reply's `next`.
+        cursor: Option<usize>,
+    },
     /// **Read a page of the programme** — §7.4, #257.
     ///
     /// A page rather than the whole thing, because the whole thing *is* the play order: after
@@ -268,6 +295,8 @@ pub mod method {
     pub const TIME_NOW: &str = "time.now";
     pub const PLAYER_LOAD: &str = "player.load";
     pub const PLAYBACK_GET: &str = "playback.get";
+    pub const QUERY_PARSE: &str = "query.parse";
+    pub const QUERY_RUN: &str = "query.run";
     pub const QUEUE_GET: &str = "queue.get";
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
     pub const QUEUE_SET: &str = "queue.set";
@@ -301,6 +330,8 @@ pub mod method {
         TIME_NOW,
         PLAYER_LOAD,
         PLAYBACK_GET,
+        QUERY_PARSE,
+        QUERY_RUN,
         QUEUE_GET,
         QUEUE_ENQUEUE,
         QUEUE_SET,
@@ -389,6 +420,40 @@ impl Request {
                 }
                 let p: P = typed(method, params)?;
                 Ok(Self::PlaybackGet { format: p.format })
+            }
+            method::QUERY_PARSE => {
+                #[derive(Deserialize)]
+                struct P {
+                    text: String,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryParse { text: p.text })
+            }
+            method::QUERY_RUN => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default)]
+                    filter: Option<String>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                    #[serde(default)]
+                    cursor: Option<usize>,
+                }
+                // **All three optional**, so a bare `query.run` is "the first screenful of
+                // everything" — which is what a picker opens with.
+                let p: P = match params {
+                    Some(_) => typed(method, params)?,
+                    None => P {
+                        filter: None,
+                        limit: None,
+                        cursor: None,
+                    },
+                };
+                Ok(Self::QueryRun {
+                    filter: p.filter,
+                    limit: p.limit,
+                    cursor: p.cursor,
+                })
             }
             method::QUEUE_GET => {
                 #[derive(Deserialize)]
@@ -496,6 +561,8 @@ impl Request {
             Self::TimeNow => method::TIME_NOW,
             Self::PlayerLoad { .. } => method::PLAYER_LOAD,
             Self::PlaybackGet { .. } => method::PLAYBACK_GET,
+            Self::QueryParse { .. } => method::QUERY_PARSE,
+            Self::QueryRun { .. } => method::QUERY_RUN,
             Self::QueueGet { .. } => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
             Self::QueueSet { .. } => method::QUEUE_SET,
@@ -547,7 +614,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 23, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 25, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

@@ -252,6 +252,11 @@ bench-write:
 memory:
     cargo run --release --features measure-memory -- engine --null-audio
 
+# What a query costs, and what the locator costs it (#261). Needs the real library.
+[group('test')]
+query-cost data="~/MusicLibrary/.gmuse":
+    cargo run --release --example where_a_query_goes -- {{data}}
+
 # What each part of a fold costs, attributed (#255). Needs the real library.
 [group('test')]
 memory-parts data="~/MusicLibrary/.gmuse" roots="~/MusicLibrary":

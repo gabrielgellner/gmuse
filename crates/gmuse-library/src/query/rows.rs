@@ -68,10 +68,21 @@ pub enum Copies {
 /// library sits on disk (#195), and losing that argument is the clearest sign
 /// the cut landed.
 pub fn rows(
-    // **The projection, handed in, and first** — #195. A read is a function of
-    // it: whoever owns the snapshot supplies it, and this stops knowing where
-    // the library is kept or what it is folded from.
-    projection: &crate::projection::Projected,
+    // **The catalogue and the librarian, handed in** — #195, #261. A read is a function of
+    // them: whoever owns the fold supplies it, and this stops knowing where the library is
+    // kept or what it is folded from.
+    //
+    // A `Catalogue` rather than a `Projected` since #261, and the difference is who can call
+    // it: a `Projected` is what a reader that *folded* holds, and a catalogue is what a
+    // published `Answer` carries — so `query.run` can be answered from `Desk::current()`, one
+    // atomic load, on whichever thread asked.
+    //
+    // **And the librarian is handed in rather than built.** This called
+    // `Librarian::from_catalogue` itself — **26.5 MB and 27.5 ms** on the real library — so
+    // every query allocated a second librarian and dropped it. Over the socket that is per
+    // request, which is a second library per search.
+    catalogue: &crate::projection::catalogue::Catalogue,
+    library: &Librarian,
     device: Id<Device>,
     now: i64,
     only: Only,
@@ -94,8 +105,6 @@ pub fn rows(
     // holdings and reads no tags, which is what `library-api.md` always said a
     // scan was; a file that moved is the same encoding at a new locator and
     // the scan carries that into the log. A read no longer does it uninvited.
-    let catalogue = projection.catalogue();
-    let library = Librarian::from_catalogue(catalogue);
 
     // **Compiled once, not per row.** `Expr::compile` says so in as many
     // words, and this list runs over the whole library.
@@ -104,7 +113,7 @@ pub fn rows(
         // **The names come from the library, not from the rows** (#193).
         // A row holds artist ids; this is what turns them into the strings a
         // filter matches, including the hidden ones a view must never print.
-        named: Some(&library),
+        named: Some(library),
         now: now / 1000,
     };
     let keep = filter.map(|f| f.compile(env));
@@ -172,7 +181,7 @@ pub fn rows(
                 else {
                     continue;
                 };
-                let Some(mut listed) = crate::model::rows::Listing::listed(&library, id) else {
+                let Some(mut listed) = crate::model::rows::Listing::listed(library, id) else {
                     continue;
                 };
                 if let Some(e) = encoding.and_then(|e| library.encodings.encodings.get(&e)) {
@@ -308,6 +317,31 @@ pub fn rows(
 
 #[cfg(test)]
 mod tests {
+    /// `rows` from a projection, building the fold it wants.
+    ///
+    /// **A shim, so a test reads as it did.** `rows` takes the catalogue and the librarian
+    /// separately since #261 — because over the socket, building a librarian per query is a
+    /// second library per search. A test has one projection and does not care.
+    fn rows_from(
+        projection: &Projected,
+        device: Id<Device>,
+        now: i64,
+        only: Only,
+        copies: Copies,
+        filter: Option<&crate::query::filter::Expr>,
+    ) -> Vec<Queried> {
+        let library = Librarian::from_catalogue(projection.catalogue());
+        rows(
+            projection.catalogue(),
+            &library,
+            device,
+            now,
+            only,
+            copies,
+            filter,
+        )
+    }
+
     use super::*;
     use crate::facts::Record;
     use std::collections::BTreeSet;
@@ -435,7 +469,7 @@ mod tests {
         wav(&root.join("b.wav"), 1200);
 
         let scanned = scanned_in(&root);
-        let apart = rows(
+        let apart = rows_from(
             &Projected::rebuild(&scanned),
             device(),
             100,
@@ -461,7 +495,7 @@ mod tests {
         ));
 
         let ask = |copies| {
-            rows(
+            rows_from(
                 &Projected::rebuild(&scanned_plus(&root, &log)),
                 device(),
                 300,
@@ -514,7 +548,7 @@ mod tests {
         wav(&root.join("b.wav"), 1200);
 
         let scanned = scanned_in(&root);
-        let apart = rows(
+        let apart = rows_from(
             &Projected::rebuild(&scanned),
             device(),
             100,
@@ -556,7 +590,7 @@ mod tests {
 
         let ask = |src: &str| -> Vec<Queried> {
             let expr = crate::query::filter::Expr::parse(src).expect("it parses");
-            rows(
+            rows_from(
                 &Projected::rebuild(&scanned_plus(&root, &log)),
                 device(),
                 300,
@@ -610,7 +644,7 @@ mod tests {
         let root = dir("both");
         wav(&root.join("a.wav"), 1000);
 
-        let rows = rows(
+        let rows = rows_from(
             &Projected::rebuild(&scanned_in(&root)),
             device(),
             100,
@@ -636,7 +670,7 @@ mod tests {
         wav(&root.join("a.wav"), 1000);
         wav(&root.join("b.wav"), 2000);
 
-        let all = rows(
+        let all = rows_from(
             &Projected::rebuild(&scanned_in(&root)),
             device(),
             100,
@@ -646,7 +680,7 @@ mod tests {
         );
         assert_eq!(all.len(), 2);
         assert_eq!(
-            rows(
+            rows_from(
                 &Projected::rebuild(&scanned_in(&root)),
                 device(),
                 100,
@@ -676,7 +710,7 @@ mod tests {
             ],
         );
 
-        let after = rows(
+        let after = rows_from(
             &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             300,
@@ -711,7 +745,7 @@ mod tests {
         let root = dir("rung");
         wav(&root.join("a.wav"), 1000);
 
-        let bare = rows(
+        let bare = rows_from(
             &Projected::rebuild(&scanned_in(&root)),
             device(),
             100,
@@ -741,7 +775,7 @@ mod tests {
                 },
             ],
         );
-        let after = rows(
+        let after = rows_from(
             &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             300,
@@ -797,7 +831,7 @@ mod tests {
         wav(&path, 1000);
 
         // Nothing placed, so nothing to name.
-        let loose = rows(
+        let loose = rows_from(
             &Projected::rebuild(&scanned_in(&root)),
             device(),
             100,
@@ -874,7 +908,7 @@ mod tests {
             ],
         );
 
-        let placed = rows(
+        let placed = rows_from(
             &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             300,
@@ -940,7 +974,7 @@ mod tests {
             &mut crate::model::ingest::Reads::default(),
         );
 
-        let work = rows(
+        let work = rows_from(
             &Projected::rebuild(i.records()),
             device(),
             200,
@@ -979,7 +1013,7 @@ mod tests {
                 },
             ],
         ));
-        let after = rows(
+        let after = rows_from(
             &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             400,
@@ -1092,7 +1126,7 @@ mod tests {
             }],
         );
 
-        let rows = rows(
+        let rows = rows_from(
             &Projected::rebuild(&scanned_plus(&root, &log)),
             device(),
             200,

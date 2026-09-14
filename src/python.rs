@@ -90,8 +90,13 @@ impl Library {
             .transpose()
             .map_err(|e| PyValueError::new_err(format!("filter: {e}")))?;
 
+        // **The librarian, built once here** — `rows` takes it rather than building one per
+        // call (#261). A Python pass makes one query per process, so this is the same work in
+        // a place that says so.
+        let library = crate::model::seam::Librarian::from_catalogue(self.projection.catalogue());
         let rows = crate::query::rows(
-            &self.projection,
+            self.projection.catalogue(),
+            &library,
             self.device,
             crate::history::now_ms(),
             if unidentified {

@@ -144,6 +144,25 @@ fn main() {
     println!("{:<34} {:>9}", "records", records);
     println!("{:<34} {:>9}", "holdings", held.len());
 
+    // **What a view would hold if it kept only what it draws** — the question behind #261's
+    // Goal 1: a view needs *rows*, not records and not a catalogue.
+    let (drawn, kept, peak) = accounting::measure(|| {
+        use gmuse::model::rows::Listing;
+        library
+            .rows()
+            .into_iter()
+            .filter_map(|id| library.listed(id).map(|l| l.owned()))
+            .collect::<Vec<_>>()
+    });
+    say("every row a view can draw", kept, peak);
+    assert!(drawn.len() > 1_000, "only {} rows drawn", drawn.len());
+    println!(
+        "{:<34} {:>9} rows, {:>6.1} MB",
+        "  = what a view actually needs",
+        drawn.len(),
+        mb(kept)
+    );
+
     // **Where a record's bytes are** — #256 proposes an incremental fold to stop holding them;
     // that is a second implementation of a 672-line multi-pass fold. Worth knowing first
     // whether the bytes are the *structure* or the *strings* in it, because interning is a much

@@ -540,6 +540,33 @@ pub enum Expr {
     Present(Selector),
 }
 
+impl Expr {
+    /// **Whether matching this needs to know where a file is** — #261.
+    ///
+    /// `path` and `filename` are the only two fields that read `Subject::locator`, and
+    /// producing one costs a `Librarian::open` per recording — **208 ms of a 298 ms query** on
+    /// the real library, for something most filters never look at.
+    ///
+    /// So a caller asks first and skips the lookup when the answer is no. `any` counts as yes:
+    /// it is "every field", and quietly excluding two of them would make `any=flac` mean
+    /// something different from what a person typed.
+    pub fn needs_a_locator(&self) -> bool {
+        match self {
+            Expr::And(a, b) | Expr::Or(a, b) => a.needs_a_locator() || b.needs_a_locator(),
+            Expr::Not(inner) => inner.needs_a_locator(),
+            Expr::Cmp { selector, .. } | Expr::Present(selector) => match selector {
+                Selector::Field(_, _, Field::Path | Field::FileName) => true,
+                Selector::Any => true,
+                Selector::Field(..) | Selector::History(_) => false,
+            },
+            // A claim is about a concept and a derivation about a hierarchy; neither reaches
+            // the filesystem. **Exhaustive, so a new variant has to say** — answering "no" for
+            // one that does look would drop rows silently, which is the worse direction.
+            Expr::Claims { .. } | Expr::Derivation { .. } => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FilterError {
     #[error("{name:?} is not an axis — `genre[…]` asks about a genre's claims")]

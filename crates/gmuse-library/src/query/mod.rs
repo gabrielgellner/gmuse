@@ -29,6 +29,7 @@
 
 pub mod filter;
 pub mod format;
+pub mod found;
 pub mod sort;
 
 mod rows;
