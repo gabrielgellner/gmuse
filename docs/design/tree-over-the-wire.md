@@ -235,8 +235,18 @@ ordering and four counts — and `Ui::library` is one. `ui::holding` is the sing
 `a_follower_holds_no_projection_of_its_own` walks every file under `src/ui/` and refuses a `Shelf` outside it. Found by
 walking rather than listed, because a hardcoded pair passes just as well with one of them deleted from it.
 
-So what remains before the 40.6 MB comes off is a **second implementation in that one file** — `Holding` over the socket
-— and the detail reads behind `ctx.library`, which §1 explains have to land together.
+**The second implementation exists.** `ui::holding_remote::Remote` answers every one of `Holding`'s questions over the
+socket, and `a_remote_library_answers_what_a_local_one_does` puts the same questions to it and to a locally folded
+`Shelf` over the same library and requires the same answers — the oracle trick the spine got, one layer up. The failure
+that catches is not a crash but a tree that draws _nearly_ right, which reads as the library being odd rather than as a
+bug.
+
+It keeps the last reply, because a redraw asks four questions about one tree — shape, page, counts, cursor — and one
+`query.tree` carries all four. Keyed by the fold state and the window, for the same reason the engine's own cache is
+keyed by the question.
+
+What remains is the **detail reads** behind `ctx.library`, which §1 explains have to land with it: until those go, the
+view folds the log for them anyway, and the fold is most of the 40.6 MB.
 
 **The detail reads needed an owned row first, and now have one.** Most go through `Listing`, which is already a trait,
 but `Listing::listed` returns a `Listed<'a>` that _borrows the fold_ — and a socket implementation has no fold to borrow
