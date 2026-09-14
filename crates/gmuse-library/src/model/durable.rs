@@ -124,6 +124,89 @@ pub fn read(path: &Path) -> (BTreeSet<Record>, Vec<Damage>) {
     (records, damage)
 }
 
+/// **How far each log has been read, so the next read can start there** — #258.
+///
+/// A byte offset per file. The log is append-only, so everything before it is already held
+/// and everything after it is new — which is what makes a reread cost the size of a rating
+/// rather than the size of the library.
+pub type Ends = Vec<(PathBuf, u64)>;
+
+/// Where every log in `data_dir` currently ends.
+pub fn ends_in(data_dir: &Path) -> Ends {
+    logs_in(data_dir)
+        .into_iter()
+        .map(|path| {
+            let at = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            (path, at)
+        })
+        .collect()
+}
+
+/// **Only what was appended since `from`** — #258.
+///
+/// Returns the records, anything that would not parse, and where to start next time.
+///
+/// **The offset stops at the last complete line**, which is not tidiness: a torn write leaves
+/// a partial record at the end, and an offset past it would skip the rest of that line when
+/// the writer finishes it. `read` treats a partial line as damage and moves on; a *tail* read
+/// has to leave it to be read again.
+///
+/// `None` means this file cannot be tailed and must be read whole — it shrank, which means it
+/// was rewritten (a compact is the only thing that does that) and an offset into it now names
+/// the middle of something else.
+pub fn read_from(path: &Path, from: u64) -> Option<(BTreeSet<Record>, Vec<Damage>, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        // Gone. A caller that held records from it keeps them; `read_all` is what notices a
+        // log has vanished, and that is a rebuild rather than a tail.
+        return None;
+    };
+    if meta.len() < from {
+        return None;
+    }
+    let mut records = BTreeSet::new();
+    let mut damage = Vec::new();
+    if meta.len() == from {
+        return Some((records, damage, from));
+    }
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return None;
+    };
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return None;
+    }
+    let mut tail = String::new();
+    if file.read_to_string(&mut tail).is_err() {
+        // Not UTF-8 from this offset, which means the offset is not a line boundary. Read the
+        // file whole rather than guessing where one is.
+        return None;
+    }
+
+    let complete = match tail.rfind('\n') {
+        Some(last) => last + 1,
+        // Not one whole line yet: leave the offset where it was and take nothing.
+        None => return Some((records, damage, from)),
+    };
+    for (index, text) in tail[..complete].lines().enumerate() {
+        if text.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Record>(text) {
+            Ok(record) => {
+                records.insert(record);
+            }
+            Err(_) => damage.push(Damage {
+                path: path.to_path_buf(),
+                line: index + 1,
+                text: text.to_owned(),
+            }),
+        }
+    }
+    Some((records, damage, from + complete as u64))
+}
+
 /// Every record in `data_dir`, from every device.
 pub fn read_all(data_dir: &Path) -> (BTreeSet<Record>, Vec<Damage>) {
     let mut records = BTreeSet::new();
@@ -556,5 +639,161 @@ mod tests {
             }
             other => panic!("wrong fact came back: {other:?}"),
         }
+    }
+
+    /// **A tail read returns only what arrived after the offset** — #258.
+    #[test]
+    fn reading_from_an_offset_takes_only_what_is_new() {
+        let at = dir("tail").join("log.jsonl");
+        let first = authored(device(1), 3);
+        append(&at, &first).expect("write");
+        let after_first = std::fs::metadata(&at).unwrap().len();
+
+        let mut clock = HybridClock::new(device(1));
+        let second: BTreeSet<Record> = (0..2)
+            .map(|i| Record {
+                stamp: clock.stamp(2_000 + i),
+                fact: some_fact(100 + i as u128),
+            })
+            .collect();
+        append(&at, &second).expect("write");
+
+        let (got, damage, to) = read_from(&at, after_first).expect("a tail is readable");
+        assert!(damage.is_empty(), "a clean log reported damage: {damage:?}");
+        assert_eq!(got.len(), 2, "it did not take exactly what was appended");
+        assert_eq!(
+            to,
+            std::fs::metadata(&at).unwrap().len(),
+            "the offset did not reach the end"
+        );
+        // The instrument: the first three really were written, so "only two" means something.
+        let (all, _) = read(&at);
+        assert_eq!(all.len(), 5, "the fixture did not write five records");
+    }
+
+    /// **A partial last line is left for next time**, not skipped.
+    ///
+    /// A torn write leaves half a record at the end. `read` calls that damage and moves on,
+    /// which is right for a whole-file read — but a *tail* read that advanced past it would
+    /// never see the rest when the writer finished the line, and the record would be lost
+    /// from every reader that had already tailed.
+    #[test]
+    fn a_half_written_line_is_read_again_when_it_is_finished() {
+        let at = dir("tail-torn").join("log.jsonl");
+        let whole = authored(device(1), 2);
+        append(&at, &whole).expect("write");
+        let clean = std::fs::metadata(&at).unwrap().len();
+
+        // Half of a third record, with no newline.
+        let mut clock = HybridClock::new(device(1));
+        let third = Record {
+            stamp: clock.stamp(3_000),
+            fact: some_fact(9),
+        };
+        let line = serde_json::to_string(&third).unwrap();
+        let half = &line[..line.len() / 2];
+        std::fs::write(
+            &at,
+            format!("{}{half}", std::fs::read_to_string(&at).unwrap()),
+        )
+        .unwrap();
+
+        let (got, damage, to) = read_from(&at, clean).expect("readable");
+        assert!(got.is_empty(), "half a record parsed as a whole one");
+        assert!(damage.is_empty(), "a partial line was called damage");
+        assert_eq!(
+            to, clean,
+            "the offset moved past a line that is not finished"
+        );
+
+        // The writer finishes it. The record must now be readable from the same offset.
+        std::fs::write(
+            &at,
+            format!("{}{line}\n", {
+                let text = std::fs::read_to_string(&at).unwrap();
+                text[..text.len() - half.len()].to_owned()
+            }),
+        )
+        .unwrap();
+        let (got, _, to) = read_from(&at, clean).expect("readable");
+        assert_eq!(got.len(), 1, "the finished line was never read");
+        assert_eq!(to, std::fs::metadata(&at).unwrap().len());
+    }
+
+    /// **A whole line followed by half of one stops at the whole one.**
+    ///
+    /// The case the test above cannot reach: with *only* a partial line, `read_from` returns
+    /// early and never computes an offset. With a complete line before it, the offset has to
+    /// land between them — and returning the file's end instead would skip the half-written
+    /// record for ever once the writer finished it.
+    #[test]
+    fn an_offset_stops_between_a_finished_line_and_an_unfinished_one() {
+        let at = dir("tail-mixed").join("log.jsonl");
+        append(&at, &authored(device(1), 1)).expect("write");
+        let start = std::fs::metadata(&at).unwrap().len();
+
+        let mut clock = HybridClock::new(device(1));
+        let whole = Record {
+            stamp: clock.stamp(4_000),
+            fact: some_fact(20),
+        };
+        let torn = Record {
+            stamp: clock.stamp(5_000),
+            fact: some_fact(21),
+        };
+        let whole_line = serde_json::to_string(&whole).unwrap();
+        let torn_line = serde_json::to_string(&torn).unwrap();
+        let half = &torn_line[..torn_line.len() / 2];
+        let existing = std::fs::read_to_string(&at).unwrap();
+        std::fs::write(&at, format!("{existing}{whole_line}\n{half}")).unwrap();
+
+        let (got, _, to) = read_from(&at, start).expect("readable");
+        assert_eq!(got.len(), 1, "it did not read the finished line");
+        assert_eq!(
+            to,
+            start + whole_line.len() as u64 + 1,
+            "the offset ran past the finished line, so the torn one is lost"
+        );
+        assert!(
+            to < std::fs::metadata(&at).unwrap().len(),
+            "the offset reached the end of a file whose last line is incomplete"
+        );
+    }
+
+    /// **A log that shrank cannot be tailed**, because an offset into it now names the middle
+    /// of something else. `shelf compact` is the only thing that rewrites one.
+    #[test]
+    fn a_rewritten_log_refuses_to_be_tailed() {
+        let at = dir("tail-compact").join("log.jsonl");
+        append(&at, &authored(device(1), 6)).expect("write");
+        let before = std::fs::metadata(&at).unwrap().len();
+
+        // Compacted: the same log, shorter.
+        let kept: BTreeSet<Record> = authored(device(1), 6).into_iter().take(2).collect();
+        let text: String = kept
+            .iter()
+            .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+            .collect();
+        std::fs::write(&at, text).unwrap();
+        assert!(
+            std::fs::metadata(&at).unwrap().len() < before,
+            "the fixture did not shrink the log, so this proves nothing"
+        );
+
+        assert!(
+            read_from(&at, before).is_none(),
+            "a rewritten log was tailed, so records were read from the middle of a line"
+        );
+    }
+
+    /// **Nothing new is not an error**, and does not move the offset.
+    #[test]
+    fn a_log_with_nothing_new_reads_nothing() {
+        let at = dir("tail-quiet").join("log.jsonl");
+        append(&at, &authored(device(1), 2)).expect("write");
+        let end = std::fs::metadata(&at).unwrap().len();
+        let (got, damage, to) = read_from(&at, end).expect("readable");
+        assert!(got.is_empty() && damage.is_empty());
+        assert_eq!(to, end);
     }
 }

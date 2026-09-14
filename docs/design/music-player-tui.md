@@ -5931,6 +5931,24 @@ Append here as decisions are made. Format: date, decision, rationale.
   Both new crates claim in a comment that they cannot touch a disk, and `the_crates_that_cannot_touch_a_disk_do_not` is
   now the instrument. `gmuse-ids` had made that claim since it was created with nothing checking it.
 
+- **2026-09-13** **A reread parses the tail, because the log is append-only** (#258, #236). `Job::Reread` called
+  `Instance::open` — the whole log, on **every `library` event**. Measured on the real one: **321.9ms and 279,989
+  records**, for a rating another client wrote. A tail read of the same log with nothing new costs **34.5µs**.
+
+  The mechanism is a byte offset per file, taken when the desk starts from the ends of the files its log was just parsed
+  from — so the _first_ library event costs a rating rather than the library. `durable::read_from` returns the offset of
+  the last **complete** line, which is not tidiness: a torn write leaves half a record at the end, and an offset past it
+  would skip the rest when the writer finished it. `read` calls a partial line damage and moves on, which is right for a
+  whole-file read and wrong for a tail.
+
+  **A file that shrank is read whole**, because `shelf compact` is the only thing that rewrites one and an offset into a
+  rewritten log names the middle of something else. That is the only guard this needs: a compact removes records, so it
+  cannot grow the file past the old offset, and the process that compacts is the one holding the append lock.
+
+  The test that nearly did not exist is `an_offset_stops_between_a_finished_line_and_an_unfinished_one`. With _only_ a
+  partial line `read_from` returns early and never computes an offset, so the mutation that returns the file's end
+  survived the obvious test — and that mutation loses a record permanently, for every reader that had already tailed.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

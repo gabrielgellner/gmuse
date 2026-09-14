@@ -374,6 +374,13 @@ impl Desk {
                 // twice and race its own result; declining is what `scanning` already tells a
                 // view is happening.
                 let mut walking = false;
+                // **Where each log was last read to** — #258. `log` was just parsed from these
+                // files, so a reread starts at their ends rather than at nothing: the first
+                // library event costs a rating, not the library.
+                let mut ends: crate::model::durable::Ends = read_from
+                    .as_ref()
+                    .map(|dir| crate::model::durable::ends_in(dir))
+                    .unwrap_or_default();
 
                 loop {
                     let job = crossbeam_channel::select! {
@@ -594,15 +601,23 @@ impl Desk {
                         // here rather than behind `Appender`: parsing the file
                         // again is a fold's work, and `access-layers.md` §3a puts
                         // a derivation inside a read's reach.
+                        // **Only what was appended** — #258. This parsed the whole log every
+                        // time: 87 MB and 279,986 records on the real library, for a rating
+                        // another client wrote, on every `library` event.
+                        //
+                        // The log is append-only, so a byte offset per file says what is new.
+                        // A file that *shrank* was rewritten — `shelf compact` is the only
+                        // thing that does that — and an offset into it now names the middle of
+                        // something else, so that one is read whole.
                         Job::Reread => {
                             if let Some(dir) = &read_from {
-                                let (fresh, _damage) = Instance::open(dir, device, now);
+                                let fresh = reread(dir, device, now, &mut ends);
                                 // The difference, so `Changed` stays narrow: a
                                 // rating another client wrote is one `Touched`,
                                 // not a `Rebuild`, and #223's lattice is the
                                 // whole point of measuring it.
-                                moved = Changed::of(fresh.records().difference(&before));
-                                log.merge(now, fresh.records());
+                                moved = Changed::of(fresh.difference(&before));
+                                log.merge(now, &fresh);
                             }
                             None
                         }
@@ -991,6 +1006,48 @@ pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Proj
             folded
         }
     }
+}
+
+/// **What has been appended to a data directory since it was last read** — #258.
+///
+/// Tails every log it can and reads whole any it cannot. `ends` is updated in place, so the
+/// next call starts where this one stopped.
+///
+/// **A file that shrank is read whole, and one that is new is read whole.** The first is a
+/// compact, which rewrites; the second is another device's log appearing, which has no
+/// history here. Both are rare and both are correct at full price.
+fn reread(
+    dir: &std::path::Path,
+    device: Id<Device>,
+    now: i64,
+    ends: &mut crate::model::durable::Ends,
+) -> BTreeSet<crate::facts::Record> {
+    let mut fresh = BTreeSet::new();
+    let mut whole = false;
+
+    for path in crate::model::durable::logs_in(dir) {
+        let from = ends.iter().find(|(at, _)| *at == path).map(|(_, n)| *n);
+        match from.and_then(|from| crate::model::durable::read_from(&path, from)) {
+            Some((records, _damage, to)) => {
+                fresh.extend(records);
+                match ends.iter_mut().find(|(at, _)| *at == path) {
+                    Some((_, n)) => *n = to,
+                    None => ends.push((path, to)),
+                }
+            }
+            // Unknown file, or one that was rewritten.
+            None => whole = true,
+        }
+    }
+
+    if whole {
+        // **Everything, and the offsets taken again from the result.** Reading the file
+        // whole and then trusting an old offset would skip whatever arrived in between.
+        let (all, _) = Instance::open(dir, device, now);
+        fresh.extend(all.records().iter().cloned());
+        *ends = crate::model::durable::ends_in(dir);
+    }
+    fresh
 }
 
 /// The one fold, and the only place it happens.
