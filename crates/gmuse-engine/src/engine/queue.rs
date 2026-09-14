@@ -38,10 +38,9 @@
 //! refill under repeat-current simply returns the same entry again and nothing here can
 //! tell. There is no mode to set — which is the decision working rather than a gap.
 
-use std::sync::Arc;
-
-use gmuse_library::librarian::Desk;
 use gmuse_programme::{Ask, Cued, Mode as Rule, Reply, Scope, Standing};
+
+use super::librarian::Librarian;
 
 use crate::instruction::{Mode, Switch};
 
@@ -142,7 +141,7 @@ impl Playing {
     ///
     /// Returns the cue to load, if the answer that arrived was a gesture's. The caller loads
     /// it, because loading is the player's business and this file's is the programme.
-    pub fn tick(&mut self, desk: &Arc<Desk>) -> Option<Cue> {
+    pub fn tick(&mut self, desk: &Librarian) -> Option<Cue> {
         let loaded = self.absorb();
         self.send_next(desk);
         self.top_up();
@@ -175,7 +174,7 @@ impl Playing {
             // The position is gone — a view replaced the programme. Take the top of it
             // rather than playing on from a token that no longer exists.
             Reply::Stale { .. } => {
-                self.window.answered();
+                self.supersede();
                 self.push(Ask::Head { n: KEEP }, Awaiting::Resync);
                 return None;
             }
@@ -201,10 +200,15 @@ impl Playing {
                 None
             }
             Awaiting::LoadFirst => {
+                // **A resync queued before this load is older intent.** It asks for the head,
+                // so landing it afterwards restarts the programme over a track somebody just
+                // chose — which is half of the Truncate walk described on `supersede`.
+                self.supersede();
                 self.window.replace(version, cues);
                 self.window.take()
             }
             Awaiting::LoadBack => {
+                self.supersede();
                 let back = cues.first().cloned();
                 self.window.replace(version, cues);
                 // **The position moves backwards too**, or the next refill carries on from
@@ -229,7 +233,7 @@ impl Playing {
     }
 
     /// Send the oldest queued ask, if the line is free.
-    fn send_next(&mut self, desk: &Arc<Desk>) {
+    fn send_next(&mut self, desk: &Librarian) {
         if self.flight.is_some() {
             return;
         }
@@ -248,7 +252,20 @@ impl Playing {
         if !self.window.wants_more() {
             return;
         }
-        if self.pending(Awaiting::Refill) {
+        // **Only when the line is clear**, and this is the invariant rather than an
+        // optimisation. A refill is addressed from the window as it stands; if anything that
+        // *replaces* the window is outstanding, the answer to this one describes a window that
+        // will not exist by the time it arrives — and `extend` would splice the old position
+        // back in.
+        //
+        // That was audible. Eight skips from a track by Truncate walked **&ME → &ME →
+        // 16 Horsepower → Tujamo**: a resync replaced the window with the head, and the refill
+        // queued behind it — asked for before the replace and answered after — extended it with
+        // what had followed Truncate.
+        //
+        // Guarding only the in-flight ask was not enough, because this one is *sent after* the
+        // replace is queued. A refill is never urgent: the window holds three.
+        if self.flight.is_some() || !self.queued.is_empty() {
             return;
         }
         // **From the end of what is held**, not from the playing position — see
@@ -260,11 +277,6 @@ impl Playing {
         let n = self.window.short_by();
         self.window.asked();
         self.push(Ask::After { token: from, n }, Awaiting::Refill);
-    }
-
-    fn pending(&self, what: Awaiting) -> bool {
-        self.flight.as_ref().is_some_and(|(_, w)| *w == what)
-            || self.queued.iter().any(|(_, w)| *w == what)
     }
 
     /// Put an ask on the line.
@@ -293,7 +305,7 @@ impl Playing {
     /// Everything else goes through the pipeline, because on the control thread a wait is a
     /// transport stall — see the module header and #259.
     pub fn cue_for_recovery(
-        desk: &Arc<Desk>,
+        desk: &Librarian,
         recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
     ) -> Option<Cue> {
         let rx = desk.programme_later(Ask::Start {
@@ -308,6 +320,7 @@ impl Playing {
 
     /// **Play this recording, opening a programme around it.** Acts on a later tick.
     pub fn start(&mut self, recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>) {
+        self.supersede();
         self.push(
             Ask::Start {
                 recording,
@@ -350,6 +363,7 @@ impl Playing {
     /// **Go back.** With nothing playing that is the *last* entry, which is what
     /// `next::step` did with no current track: start at whichever end we walk from.
     pub fn skip_prev(&mut self) {
+        self.supersede();
         if let Some(from) = self.window.from() {
             self.push(Ask::Before { token: from, n: 1 }, Awaiting::LoadBack);
             return;
@@ -386,6 +400,7 @@ impl Playing {
                 Rule::OnceThrough
             }),
         };
+        self.supersede();
         self.push(ask, Awaiting::ThenResync);
         self.standing.version
     }
@@ -396,6 +411,7 @@ impl Playing {
     /// keeps playing and only what follows it changes.
     pub fn set_scope(&mut self, scope: Scope) -> u64 {
         let at = self.window.from();
+        self.supersede();
         self.push(
             Ask::Rescope {
                 at,
@@ -412,13 +428,66 @@ impl Playing {
         self.standing.version
     }
 
-    /// **A view changed the programme; take a fresh window.**
+    /// **A view replaced the programme; start it from the top.**
     ///
     /// `Ask::Head` rather than `Ask::Open`, and the difference is the whole meaning of a
     /// resync: the programme is right and this side's copy of it is not, so nothing may be
     /// rebuilt.
+    ///
+    /// **Only for a replacement.** [`resync_here`] is the other case, and confusing the two is
+    /// audible — see there.
+    ///
+    /// [`resync_here`]: Playing::resync_here
     pub fn resync(&mut self) {
+        self.supersede();
         self.push(Ask::Head { n: KEEP }, Awaiting::Resync);
+    }
+
+    /// **The fold moved; take fresh cues from where we are.**
+    ///
+    /// A relink or a rescan changes where a row's audio is, and the window holds paths — so
+    /// the cues are stale. **The programme is not, and neither is the position**, so asking for
+    /// the head would throw away a place that is perfectly good.
+    ///
+    /// That was the bug, and it was audible rather than theoretical: a launch scan publishes
+    /// folds, every one of them resynced to the top, and eight skips from a track by Truncate
+    /// walked **&ME → &ME → 16 Horsepower → Tujamo** — restarted at the head, then continuing
+    /// from wherever a later refill happened to be addressed.
+    pub fn resync_here(&mut self) {
+        self.supersede();
+        match self.window.from() {
+            Some(at) => self.push(Ask::After { token: at, n: KEEP }, Awaiting::ResyncAt(at)),
+            // Nothing is playing, so there is no place to keep.
+            None => self.push(Ask::Head { n: KEEP }, Awaiting::Resync),
+        }
+    }
+
+    /// **Stop caring about an answer that describes a window we are about to replace.**
+    ///
+    /// Two shapes, one rule: *a newer intent supersedes an older queued one.*
+    ///
+    /// - A **refill** answers "what follows the token I held", and after a replace that token
+    ///   is not where we are — its answer would `extend` the fresh window with the old
+    ///   position.
+    /// - A **queued resync** is older intent than the gesture that is superseding it, and a
+    ///   resync asks for the *head*: if it lands after a load, it restarts the programme.
+    ///
+    /// Both were audible on the real library and neither was visible in a test. Eight skips
+    /// from a track by Truncate walked **&ME → &ME → 16 Horsepower → Tujamo** — the head, then
+    /// Truncate's followers arriving late — and it took three attempts to see that the two
+    /// halves had different causes.
+    ///
+    /// Retagged rather than dropped where one is in flight, because the reply still has to come
+    /// off the channel to free the line — and `Noted` still refreshes `standing`, which is
+    /// never stale.
+    fn supersede(&mut self) {
+        if let Some((_, what)) = self.flight.as_mut()
+            && superseded(*what)
+        {
+            *what = Awaiting::Noted;
+        }
+        self.queued.retain(|(_, what)| !superseded(*what));
+        self.window.answered();
     }
 
     fn next_seed(&mut self) -> u64 {
@@ -433,6 +502,20 @@ impl Playing {
 impl Default for Playing {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// **Whether a window replace invalidates this answer.**
+///
+/// Exhaustive so a new `Awaiting` does not compile until somebody has decided — the default a
+/// catch-all would give is "keep it", which is the wrong way round: an answer about a window
+/// that no longer exists is worse than one asked for again.
+fn superseded(what: Awaiting) -> bool {
+    match what {
+        // Answers about the window as it was.
+        Awaiting::Refill | Awaiting::Resync | Awaiting::ResyncAt(_) => true,
+        // Newer intent, or nothing to invalidate.
+        Awaiting::LoadFirst | Awaiting::LoadBack | Awaiting::ThenResync | Awaiting::Noted => false,
     }
 }
 
@@ -459,5 +542,167 @@ fn cue_of(cued: Cued) -> Cue {
         track_peak: cued.track_peak,
         album_db: cued.album_db,
         album_peak: cued.album_peak,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A handle whose other end nothing services, so asks pile up where they can be counted.
+    fn unserviced() -> (
+        Librarian,
+        crossbeam_channel::Receiver<(Ask, crossbeam_channel::Sender<Reply>)>,
+    ) {
+        let (ask_tx, ask_rx) = crossbeam_channel::unbounded();
+        let (want_tx, _want_rx) = crossbeam_channel::unbounded();
+        let moved = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        std::mem::forget(_want_rx);
+        (Librarian::new(ask_tx, want_tx, moved), ask_rx)
+    }
+
+    /// **A load supersedes a resync queued before it** — the second half of the Truncate walk.
+    ///
+    /// A resync asks for the *head*. Queued before a play gesture and answered after it, it
+    /// restarts the programme over the track somebody just chose. Found against the real
+    /// library after two wrong fixes, which is why it is a test and not a comment.
+    #[test]
+    fn a_play_gesture_drops_a_resync_queued_before_it() {
+        let (desk, _rx) = unserviced();
+        let mut playing = Playing::new();
+
+        playing.resync();
+        assert_eq!(playing.queued.len(), 1, "the resync was not queued");
+
+        playing.start(gmuse_ids::id::Id::derived(b"a recording"));
+
+        assert!(
+            !playing.queued.iter().any(|(_, w)| *w == Awaiting::Resync),
+            "a resync survived a newer play gesture: {:?}",
+            playing.queued.iter().map(|(_, w)| *w).collect::<Vec<_>>()
+        );
+        assert!(
+            playing
+                .queued
+                .iter()
+                .any(|(_, w)| *w == Awaiting::LoadFirst),
+            "the play gesture did not queue"
+        );
+        let _ = desk;
+    }
+
+    /// **A refill is never asked for while a replace is outstanding** — the first half.
+    ///
+    /// A refill is addressed from the window as it stands. Sent while a replace is outstanding,
+    /// its answer describes a window that no longer exists, and `extend` splices the old
+    /// position back in.
+    ///
+    /// **Asserted as an absence of a `Refill` rather than a queue length**, because the first
+    /// version measured the length *after* the tick that would have queued one — so the count
+    /// had already grown and then stopped growing, and the mutation that removes the guard
+    /// passed.
+    #[test]
+    fn a_refill_is_not_asked_for_while_a_replace_is_outstanding() {
+        let (desk, _rx) = unserviced();
+        let mut playing = Playing::new();
+
+        playing.window.replace(1, [cue(7)]);
+        playing.window.take();
+        assert!(playing.window.wants_more(), "the window does not want more");
+
+        playing.resync();
+        // One tick sends the resync; the same tick must not also queue a refill.
+        playing.tick(&desk);
+        assert!(playing.flight.is_some(), "the resync was not sent");
+
+        for _ in 0..3 {
+            playing.tick(&desk);
+            let waiting: Vec<Awaiting> = playing
+                .queued
+                .iter()
+                .map(|(_, w)| *w)
+                .chain(playing.flight.as_ref().map(|(_, w)| *w))
+                .collect();
+            assert!(
+                !waiting.contains(&Awaiting::Refill),
+                "a refill was asked for while a replace was outstanding: {waiting:?}"
+            );
+        }
+    }
+
+    /// **Absorbing a load also drops a resync queued before it** — the same rule, the other
+    /// path.
+    ///
+    /// `start` supersedes when the gesture is *queued*; this is when its answer *lands*, and a
+    /// resync can be queued in between — which is exactly what happened: the control loop
+    /// checks the fold before it ticks the pipeline, so one iteration queued a resync and the
+    /// next absorbed the load.
+    #[test]
+    fn absorbing_a_load_drops_a_resync_queued_since() {
+        let (desk, _rx) = unserviced();
+        let mut playing = Playing::new();
+
+        // A load in flight whose answer is already waiting.
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.send(Reply::Window {
+            standing: Standing {
+                version: 2,
+                total: 9,
+                ..Standing::default()
+            },
+            cues: vec![cued(11)],
+        })
+        .expect("the reply is queued");
+        playing.flight = Some((rx, Awaiting::LoadFirst));
+
+        // A resync queued after the load was sent, before its answer arrived.
+        playing.resync();
+        assert!(
+            playing.queued.iter().any(|(_, w)| *w == Awaiting::Resync),
+            "the resync was not queued"
+        );
+
+        let loaded = playing.tick(&desk);
+        assert!(loaded.is_some(), "the load did not produce a cue");
+
+        // **Queued *and* in flight.** The first version checked `queued` alone, and the same
+        // `tick` sends the front of the queue — so the resync simply moved and the assertion
+        // passed either way. Two tests in this module made that mistake; it is the shape §13
+        // calls a harness that does less than it claims.
+        let waiting: Vec<Awaiting> = playing
+            .queued
+            .iter()
+            .map(|(_, w)| *w)
+            .chain(playing.flight.as_ref().map(|(_, w)| *w))
+            .collect();
+        assert!(
+            !waiting.contains(&Awaiting::Resync),
+            "a resync survived the load it was queued behind, so the next tick restarts the \
+             programme at the head: {waiting:?}"
+        );
+    }
+
+    fn cued(token: u64) -> gmuse_programme::Cued {
+        gmuse_programme::Cued {
+            token,
+            recording: gmuse_ids::id::Id::derived(&token.to_le_bytes()),
+            path: std::path::PathBuf::from("/nowhere.flac"),
+            track_db: None,
+            track_peak: None,
+            album_db: None,
+            album_peak: None,
+        }
+    }
+
+    fn cue(token: u64) -> Cue {
+        Cue {
+            token,
+            recording: gmuse_ids::id::Id::derived(&token.to_le_bytes()),
+            path: std::path::PathBuf::from("/nowhere.flac"),
+            track_db: None,
+            track_peak: None,
+            album_db: None,
+            album_peak: None,
+        }
     }
 }

@@ -19,7 +19,6 @@ description = "gmuse's audio path and engine"
 gmuse-ids = { path = "../gmuse-ids" }
 gmuse-lock = { path = "../gmuse-lock" }
 gmuse-programme = { path = "../gmuse-programme" }
-gmuse-library = { path = "../gmuse-library" }
 gmuse-proto = { path = "../gmuse-proto" }
 cpal = "0.18.2"
 crossbeam-channel = "0.5.16"
@@ -34,7 +33,6 @@ thiserror = "2.0.20"
 uuid = { version = "1.26.0", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
-gmuse-library = { path = "../gmuse-library", features = ["testing"] }
 
 [features]
 default = []

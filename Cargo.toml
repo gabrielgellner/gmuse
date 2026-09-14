@@ -33,6 +33,7 @@ crate-type = ["rlib", "cdylib"]
 arc-swap = "1.7.1"
 gmuse-ids = { path = "crates/gmuse-ids" }
 gmuse-library = { path = "crates/gmuse-library" }
+gmuse-programme = { path = "crates/gmuse-programme" }
 gmuse-proto = { path = "crates/gmuse-proto" }
 gmuse-client = { path = "crates/gmuse-client" }
 gmuse-engine = { path = "crates/gmuse-engine" }

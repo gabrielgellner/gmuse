@@ -48,7 +48,10 @@ impl Announcer {
     /// the engine starts is not news — a client that connects later asks for
     /// what it needs, and announcing the startup fold would tell every view to
     /// re-query the moment it arrived.
-    pub fn start(desk: Arc<Desk>, engine: std::sync::Weak<Engine>) -> Self {
+    /// `moved` is the counter the audio engine reads to notice a library change (#257). Bumped
+    /// here because this is already the one thing watching for a new answer, and two watchers
+    /// of one pointer is two chances to disagree about when it moved.
+    pub fn start(desk: Arc<Desk>, engine: std::sync::Weak<Engine>, moved: Arc<AtomicU64>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let version = Arc::new(AtomicU64::new(0));
 
@@ -70,6 +73,9 @@ impl Announcer {
                         {
                             engine.publish(&event);
                         }
+                        // **After the event**, so a view told the library changed can already
+                        // see the engine agreeing that it did.
+                        moved.fetch_add(1, Ordering::Release);
                         last = now;
                     }
                     // **Polled, and the interval is a display latency not a

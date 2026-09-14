@@ -393,16 +393,16 @@ fn every_crate_depends_only_on_what_it_is_meant_to() {
             "gmuse-library",
             &["gmuse-ids", "gmuse-lock", "gmuse-programme"],
         ),
-        // **`gmuse-library` is the line #257 removes.** Everything else here is settled.
+        // **The audio engine, with no `gmuse-library`** — #257, and this line is the whole
+        // of it. It named the librarian, the log, the fold and every fact type; now it holds
+        // a window of cues, three channels, and no way to learn what a library is.
+        //
+        // A reach-counting ratchet held this ground while the work was in progress, and it is
+        // deleted because this is strictly better: an import spelled differently still needs
+        // the manifest edge, and a `pub use` cannot launder one.
         (
             "gmuse-engine",
-            &[
-                "gmuse-ids",
-                "gmuse-lock",
-                "gmuse-programme",
-                "gmuse-proto",
-                "gmuse-library",
-            ],
+            &["gmuse-ids", "gmuse-lock", "gmuse-programme", "gmuse-proto"],
         ),
     ];
 
@@ -518,70 +518,6 @@ fn the_crates_that_cannot_touch_a_disk_do_not() {
         found.is_empty(),
         "a crate that claims it cannot touch a disk does:\n  {}",
         found.join("\n  ")
-    );
-}
-
-/// **The audio engine's reaches into the library may only go down** — #257.
-///
-/// The decision is that `gmuse-engine` does not depend on `gmuse-library` at all, and the
-/// finished check is a one-liner: `crates/gmuse-engine/Cargo.toml` has no `gmuse-library`
-/// line. That cannot be written yet because the line is still there — so this holds the
-/// ground in between.
-///
-/// **A ratchet and not a target**, deliberately. It says nothing about how far the work
-/// has got; it says a reach cannot be *added* while the work is in progress. Lower the
-/// number as each stage lands, and delete the test when the Cargo line goes — a cargo
-/// dependency check replaces it and is strictly better, because it cannot be satisfied by
-/// spelling an import differently.
-///
-/// **31 → 18 → 12**, and the character changed more than the count. The first 14 were never
-/// library concepts: `model::id` and `model::entity` are `pub use gmuse_ids::{…}` in
-/// `model/mod.rs`, so those call sites named gmuse-ids types through a library path. The next
-/// six were the *resolution* — `Shelf`, `playlist`, `next::prev`, `next::next_with_source`
-/// and the materialised pool — which is what #257 is actually about.
-///
-/// What is left is almost entirely `use` lines and the `Desk`: the librarian's identity, the
-/// `Ask`/`Reply` vocabulary that becomes a channel, `Scope`, `Touched`/`Changed`, and two
-/// straggler with a reason of its own: `history::now_ms`, which stamps a rate fact the engine
-/// should not be appending at all. `lock` and the programme vocabulary are gone — `gmuse-lock`
-/// and `gmuse-programme`, for the reason that made each a crate rather than a shared module.
-#[test]
-fn the_engine_does_not_reach_further_into_the_library() {
-    const CEILING: usize = 4;
-
-    let engine = Path::new("crates").join("gmuse-engine").join("src");
-    let mut found: BTreeMap<PathBuf, usize> = BTreeMap::new();
-    for (path, text) in sources() {
-        if !path.starts_with(&engine) {
-            continue;
-        }
-        let hits = text.matches("gmuse_library").count();
-        if hits > 0 {
-            found.insert(path, hits);
-        }
-    }
-
-    // **The instrument is attached.** If `sources()` stopped matching the engine's files
-    // — a moved crate, a renamed directory — every count would be zero and the ceiling
-    // below would pass for exactly the wrong reason. That is four of the five vacuous
-    // tests in §13's entry of 2026-09-12, and one line rules it out.
-    assert!(
-        !found.is_empty(),
-        "no file under {} mentions gmuse_library — either #257 is finished, in which case \
-         delete this test and assert on Cargo.toml, or the walk found nothing",
-        engine.display()
-    );
-
-    let total: usize = found.values().sum();
-    assert!(
-        total <= CEILING,
-        "the engine reaches into gmuse-library {total} times, up from {CEILING}. #257 is \
-         moving these out, so a new one is a step backwards:\n{}",
-        found
-            .iter()
-            .map(|(f, n)| format!("  {n:2}  {}", f.display()))
-            .collect::<Vec<_>>()
-            .join("\n")
     );
 }
 

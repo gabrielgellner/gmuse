@@ -3458,11 +3458,14 @@ fn run_engine(
     // until the device is open so that `hello` never reports a placeholder
     // rate: a client connecting during startup would otherwise be told 0 Hz
     // and have no way to learn better.
+    // **The engine reaches the librarian through channels, not a `Desk`** — #257. The relay
+    // owns this side of them; the engine cannot name a librarian at all.
+    let relay = gmuse::wiring::relay::Relay::start(Arc::clone(&desk));
     let control = Arc::new(
         gmuse::engine::control::Control::start(
             null_audio,
             cfg,
-            Arc::clone(&desk),
+            relay.librarian.clone(),
             roots.clone(),
             Arc::clone(&engine_slot),
         )
@@ -3511,8 +3514,13 @@ fn run_engine(
     // announcer starts from the answer standing now, not from the first fold:
     // the startup fold is not news, and announcing it would tell every view to
     // re-query the moment it connected.
-    let _announcer =
-        gmuse::wiring::announcer::Announcer::start(Arc::clone(&desk), Arc::downgrade(&engine));
+    // **One watcher, not two.** The announcer already compares the published answer to notice
+    // a change; it bumps the counter the engine reads, so nothing else has to watch (#257).
+    let _announcer = gmuse::wiring::announcer::Announcer::start(
+        Arc::clone(&desk),
+        Arc::downgrade(&engine),
+        Arc::clone(&relay.moved),
+    );
 
     // **The scan at engine start** — §8.9, and the 2026-09-10 decision that a
     // stale cache is the worse failure. Not waited on: the library is already

@@ -32,11 +32,11 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use gmuse_proto::{Event, Topic};
 
+use super::librarian::{Librarian, Wanted};
 use crate::audio::{PlayerConfig, PlayerEvent, PlayerHandle, Shared, State, null};
 use crate::instruction::{Fader, Instruction, ScopeTo};
 use gmuse_ids::entity::Recording;
 use gmuse_ids::id::Id;
-use gmuse_library::librarian::Desk;
 
 /// What the connection workers can ask the player for.
 pub enum Ask {
@@ -121,7 +121,7 @@ impl Control {
         // `preferred_config` matches `--device` by substring, so holding the whole
         // config is what lets a retry honour the intent rather than guess at it.
         cfg: PlayerConfig,
-        desk: Arc<Desk>,
+        desk: Librarian,
         // **What `rescan` reconciles.** Held here rather than asked for per
         // command: the roots are the engine's configuration and a command carries
         // no context (I9).
@@ -190,7 +190,7 @@ impl Control {
                         playing: None,
                         pending: None,
                         announced: 0,
-                        folded: desk.current(),
+                        folded: desk.moved(),
                         generation: player.stream_generation(),
                     };
 
@@ -325,8 +325,12 @@ struct Held {
     pending: Option<String>,
     /// The queue version last published, so an unchanged one publishes nothing.
     announced: u64,
-    /// The librarian's last published fold, to notice a new one by pointer.
-    folded: std::sync::Arc<gmuse_library::librarian::Answer>,
+    /// **The library's last-seen version**, to notice a change by a number.
+    ///
+    /// It was an `Arc<Answer>` compared by pointer — the librarian's own fold, held here so
+    /// the engine could tell when it moved. A counter says the same thing and names nothing
+    /// (#257).
+    folded: u64,
     /// **The engine's own count of streams**, monotonic across rebuilds.
     ///
     /// Not the handle's: a rebuilt `PlayerHandle` has a fresh `Shared` whose generation
@@ -354,7 +358,7 @@ enum Ran {
 struct Wiring<'a> {
     asks: &'a Receiver<Ask>,
     facts: &'a Arc<Facts>,
-    desk: &'a Arc<Desk>,
+    desk: &'a Librarian,
     roots: &'a [std::path::PathBuf],
     engine: &'a Arc<std::sync::OnceLock<std::sync::Weak<super::Engine>>>,
     stop: &'a Arc<AtomicBool>,
@@ -425,9 +429,12 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
         // rebuilt itself when the fold did. What can go stale here is a *locator*: a relink
         // or a rescan changes where a row's audio is, and the window holds paths. Taking a
         // fresh window is cheap and is the only thing that could be wrong.
-        let now = desk.current();
-        if !Arc::ptr_eq(&held.folded, &now) {
-            held.queue.resync();
+        let now = desk.moved();
+        if held.folded != now {
+            // **From where we are, not from the top.** The programme did not change — a
+            // locator did — so the position is still good and asking for the head would
+            // discard it. `resync` is for a view replacing the programme.
+            held.queue.resync_here();
             held.folded = now;
         }
 
@@ -650,7 +657,7 @@ fn apply(
     player: &PlayerHandle,
     instruction: Instruction,
     queue: &mut super::queue::Playing,
-    desk: &Arc<Desk>,
+    desk: &Librarian,
     // Where `Rescan` reconciles, which only the engine knows.
     roots: &[std::path::PathBuf],
     pending: &mut Option<String>,
@@ -728,10 +735,10 @@ fn apply(
             else {
                 return false;
             };
-            let now = gmuse_library::history::now_ms();
-            if let Some(appender) = desk.appender() {
-                appender.say(move |log| log.rate(now, recording, stars));
-            }
+            // **Named, not written** — #257. `history::now_ms` was read here for a fact the
+            // audio crate had no business appending; whoever appends decides when, because a
+            // stamp is part of the write.
+            desk.want(Wanted::Rate { recording, stars });
             false
         }
 
@@ -753,9 +760,9 @@ fn apply(
         // lives on the engine and the appender is the only thing that may start one
         // (#237).
         Instruction::Rescan => {
-            if let Some(appender) = desk.appender() {
-                appender.scan(roots.to_vec(), None);
-            }
+            desk.want(Wanted::Rescan {
+                roots: roots.to_vec(),
+            });
             false
         }
     }
