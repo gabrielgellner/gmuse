@@ -3313,7 +3313,7 @@ fn run_engine(
                 .iter()
                 .skip(at)
                 .take(take)
-                .map(|n| gmuse::browse::Drawn::of(&shelf, n))
+                .map(gmuse::browse::Drawn::of)
                 .collect();
             let next = at + page.len();
 

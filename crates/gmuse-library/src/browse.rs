@@ -40,7 +40,7 @@ pub type Mark = (Vec<SortKey>, Option<CopyId>);
 /// its tracks (#169), and a record held as a single track is drawn *in place of* its album row
 /// (#135). Leaving those to the client would mean every client re-deriving rows the library
 /// already knows about — two answers to one question, which is what #257 exists to prevent.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Node {
     Artist {
@@ -102,6 +102,13 @@ pub enum Node {
         /// Which disc of its record, for the row's own numbering — the `disc` key above is the
         /// fold path, and a track can carry a number without a header being drawn.
         number: Option<u16>,
+        /// **The record this line stands in for**, where its group is not drawn (#135).
+        ///
+        /// Here rather than on the reply wrapper, because it is display like the title beside
+        /// it: a record held as a single track has no album line, so the name has nowhere to be
+        /// written except here — and a client re-deriving that rule is a second copy of it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stands_for: Option<String>,
         /// **This track is the whole of its group, so the group is not drawn**
         /// — #135. It sits where its album row would have been.
         ///
@@ -446,13 +453,15 @@ fn track(
     alone: bool,
 ) -> Node {
     let line = lib.line(id);
+    let title = line.map(|l| l.title.clone()).unwrap_or_default();
     Node::Track {
+        stands_for: alone.then(|| named(lib, artist, album, &title)).flatten(),
         artist: artist.clone(),
         album: album.clone(),
         disc,
         id,
         alone,
-        title: line.map(|l| l.title.clone()).unwrap_or_default(),
+        title,
         credit: line.and_then(|l| l.credit.clone()),
         length_ms: line.map_or(0, |l| l.length_ms),
         number: lib.disc_of(id),
@@ -471,26 +480,14 @@ pub struct Drawn<'a> {
     #[serde(flatten)]
     pub node: &'a Node,
     pub seat: Vec<SortKey>,
-    /// **The record a track stands in for**, where its group is not drawn (#135).
-    ///
-    /// Derived here rather than by the client for the same reason the seat is: it is a rule
-    /// about when a name has nowhere else to go, and a second copy of that rule is how two
-    /// clients come to disagree about what a row says.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stands_for: Option<String>,
 }
 
 impl<'a> Drawn<'a> {
     /// One line as a client sees it, with the two things only the library can say.
-    pub fn of(lib: &Shelf, node: &'a Node) -> Self {
-        let title = match node {
-            Node::Track { title, .. } => title.as_str(),
-            _ => "",
-        };
+    pub fn of(node: &'a Node) -> Self {
         Drawn {
             node,
             seat: node.seat(),
-            stands_for: stands_for(lib, node, title),
         }
     }
 }
@@ -982,6 +979,11 @@ pub fn stands_for(lib: &Shelf, row: &Node, title: &str) -> Option<String> {
     else {
         return None;
     };
+    named(lib, artist, album, title)
+}
+
+/// The rule itself, so the flatten and [`stands_for`] cannot come to disagree about it.
+fn named(lib: &Shelf, artist: &SortKey, album: &SortKey, title: &str) -> Option<String> {
     let name = lib.album_name(artist, album);
     // **The count comes even when the name does not** (#137). One track of twelve is exactly
     // the row somebody wants flagged, and it is the row #135 took the album header away from.

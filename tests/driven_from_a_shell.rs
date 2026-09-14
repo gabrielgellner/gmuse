@@ -2768,3 +2768,218 @@ fn the_wire_answers_what_a_view_holds_a_library_for() {
         "the cursor was used instead of the settle"
     );
 }
+
+/// **The remote library answers what the local one does** — #261.
+///
+/// `Holding` has two implementations now: a `Shelf` a view folded for itself, and a socket. The
+/// whole design rests on a view not being able to tell them apart, so the only honest test is to
+/// ask both and compare — the same oracle trick the spine got, one layer up.
+///
+/// The failure this catches is not a crash. It is a tree that draws *nearly* right: a line in
+/// the wrong place, a count off by one, a fold that opens and shows something else. Those look
+/// like the library being odd rather than like a bug.
+#[test]
+fn a_remote_library_answers_what_a_local_one_does() {
+    use gmuse::browse::{Browsing, Holding};
+
+    let (engine, _recording) = start_with_a_track("holding-oracle");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    // The same library, folded here — which is exactly what an attached view should stop doing.
+    let data = engine.dir.join("xdg").join("gmuse");
+    // **The engine's own device**, read off the log's name — `durable::log_path` is one file
+    // per device and holdings are keyed by it, so a made-up device folds the same log and finds
+    // no files in it. That is an empty library rather than an error, and would have made every
+    // comparison below vacuously true.
+    let device: gmuse::model::id::Id<gmuse::model::entity::Device> = std::fs::read_dir(&data)
+        .expect("a data dir")
+        .flatten()
+        .find_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.strip_prefix("log-")?
+                .strip_suffix(".jsonl")?
+                .parse()
+                .ok()
+        })
+        .expect("the engine wrote a log named for its device");
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    let answer = desk.current();
+    let members: std::collections::HashSet<_> = {
+        use gmuse::model::rows::Listing;
+        answer.library.rows().into_iter().collect()
+    };
+    assert!(
+        members.len() > 1,
+        "only {} rows — two implementations of an empty library agree about nothing",
+        members.len()
+    );
+    let local = gmuse::ui::holding::of(
+        &answer.library,
+        members,
+        gmuse::shelf::Levels::default(),
+        true,
+    );
+    let remote = gmuse::ui::holding_remote::Remote::open(client);
+
+    // The flat ordering, fetched once by the remote and lent thereafter.
+    assert_eq!(
+        remote.sorted().len(),
+        local.sorted().len(),
+        "the two orderings are different lengths"
+    );
+    assert_eq!(remote.sorted(), local.sorted(), "the orderings differ");
+
+    // The tree, at several fold states — because a cache keyed on the folds is exactly the
+    // thing that answers the second question with the first one's reply.
+    for level in 0..3u16 {
+        let mut folds = gmuse::fold::Expansion::default();
+        folds.set_level(level);
+
+        let want = local.spine(&folds);
+        assert_eq!(
+            remote.spine(&folds).to_hex(),
+            want.to_hex(),
+            "the shapes differ at level {level}"
+        );
+        assert!(!want.is_empty(), "no lines at level {level}");
+
+        let here = local.page(&folds, 0, 50);
+        assert_eq!(
+            remote.page(&folds, 0, 50),
+            here,
+            "the pages differ at level {level}"
+        );
+
+        // And where a line is, which is what a toggle asks.
+        let mark = here.first().expect("a line").mark();
+        assert_eq!(
+            remote.at(&folds, &mark),
+            local.at(&folds, &mark),
+            "the two disagree about where a line is at level {level}"
+        );
+    }
+
+    // **Two shapes back to back**, which is what a cache keyed on the folds has to get right.
+    // The loop above alternates `spine` and `page`, and those ask different windows — so each
+    // call missed anyway, and a cache that ignored the folds entirely would have passed it.
+    let mut shut = gmuse::fold::Expansion::default();
+    shut.set_level(0);
+    let mut wide = gmuse::fold::Expansion::default();
+    wide.set_level(2);
+    let narrow = remote.spine(&shut).to_hex();
+    let broad = remote.spine(&wide).to_hex();
+    assert_ne!(
+        narrow, broad,
+        "the same shape came back for two fold states"
+    );
+    assert_eq!(
+        narrow,
+        local.spine(&shut).to_hex(),
+        "the shut shape differs"
+    );
+    assert_eq!(broad, local.spine(&wide).to_hex(), "the open shape differs");
+
+    // **A line that is not there.** `query.tree` falls back to the cursor when an anchor is
+    // gone, so an unchecked answer would be a confident zero.
+    let nowhere = (vec![gmuse::shelf::SortKey::already("no such artist")], None);
+    assert_eq!(
+        remote.at(&wide, &nowhere),
+        local.at(&wide, &nowhere),
+        "the two disagree about a line that does not exist"
+    );
+    assert_eq!(
+        local.at(&wide, &nowhere),
+        None,
+        "the fixture holds a line it should not, so this proves nothing"
+    );
+
+    // What `x` acts on, and what `zR` has left.
+    //
+    // **`Expansion::default()` is level 0, which is everything shut** — only the top line is
+    // drawn. Named for what it is, because calling it `open` cost a test that then looked for a
+    // track among artist lines and found none.
+    let plain = gmuse::fold::Expansion::default();
+    let artist = local.page(&plain, 0, 1).into_iter().next().expect("a line");
+    assert_eq!(
+        remote.tracks_under(&artist),
+        local.tracks_under(&artist),
+        "the two disagree about what sits under a line"
+    );
+    assert!(
+        !local.tracks_under(&artist).is_empty(),
+        "nothing under the first line, so agreeing about it proves nothing"
+    );
+    assert_eq!(
+        remote.openable_under(&artist.seat()),
+        local.openable_under(&artist.seat()),
+        "the two disagree about what is left to open"
+    );
+
+    // **And on a track, where the id is the half that names it.** A track sits at its record's
+    // path and so does the record's own line, so a request that dropped the id would come back
+    // with the whole record — and asking only about an artist, which has no id, cannot see it.
+    let line = local
+        .page(&wide, 0, 200)
+        .into_iter()
+        .find(|n| matches!(n, gmuse::browse::Node::Track { .. }))
+        .expect("a track line");
+    assert_eq!(
+        local.tracks_under(&line).len(),
+        1,
+        "a track should be one track"
+    );
+    assert_eq!(
+        remote.tracks_under(&line),
+        local.tracks_under(&line),
+        "the two disagree about what `x` on a track plays"
+    );
+
+    // And a search.
+    // The fixture's tracks are generated tones and carry no titles, so the artist's own name
+    // is what there is to search for — which still exercises the whole path.
+    let title = local
+        .page(&wide, 0, 200)
+        .into_iter()
+        .find_map(|n| match n {
+            gmuse::browse::Node::Artist { display, .. } if !display.is_empty() => Some(display),
+            _ => None,
+        })
+        .expect("a line with a name on it");
+    let want = gmuse::browse::Target::Pattern {
+        needle: title.clone(),
+        backwards: false,
+    };
+    let mine = local.find(&wide, &want, 0).expect("the local one finds it");
+    assert_eq!(
+        remote.find(&wide, &want, 0).map(|f| (f.open, f.at)),
+        Some((mine.open.clone(), mine.at)),
+        "the two disagree about where {title:?} is"
+    );
+
+    // **And a search through a shut fold**, which is the half that has anything to open. With
+    // everything already open `open` is empty on both sides, and a reply that dropped it
+    // entirely would read as agreement.
+    let track = local
+        .page(&wide, 0, 200)
+        .into_iter()
+        .find_map(|n| match n {
+            gmuse::browse::Node::Track { id, .. } => Some(id),
+            _ => None,
+        })
+        .expect("a track");
+    let buried = gmuse::browse::Target::Id(track);
+    let theirs = remote.find(&shut, &buried, 0).expect("the remote finds it");
+    let ours = local
+        .find(&shut, &buried, 0)
+        .expect("and so does the local one");
+    assert!(
+        !ours.open.is_empty(),
+        "nothing had to open, so the fixture cannot show a reveal"
+    );
+    assert_eq!(
+        (theirs.open, theirs.at),
+        (ours.open, ours.at),
+        "the two disagree about what a reveal has to open"
+    );
+}

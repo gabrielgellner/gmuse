@@ -1,0 +1,337 @@
+//! **A library the view does not have** — #261, `tree-over-the-wire.md` §7.
+//!
+//! The second implementation of [`Holding`]. A detached view *is* the librarian (§4.4) and folds
+//! the log itself; an attached one asks the engine, which has already done it. That is the whole
+//! of the 40.6 MB — a fold, a `Librarian` and a `Shelf`, held a second time in a process whose
+//! librarian is somewhere else.
+//!
+//! ## One ask a frame, not four
+//!
+//! A redraw asks four questions about the same tree — its shape, its page, its counts, and where
+//! the cursor is — and one `query.tree` reply carries all four. So the last reply is kept and
+//! answered from whenever the question has not changed.
+//!
+//! **Keyed by the question**, which is the fold state and the window. A different fold state is a
+//! different tree, and answering the new one from the old reply is the single way a cache like
+//! this goes wrong. `remote_transport` caches for a different reason — §7.8 forbids asking at
+//! all — and this one caches because asking four times for one answer would be silly.
+//!
+//! ## What a failed ask means
+//!
+//! **An empty tree, not a panic and not a stale page.** The engine going away mid-draw is an
+//! ordinary thing (`gmuse ctl engine.shutdown`), and a view that unwound on it would take the
+//! terminal with it. An empty pane is visibly wrong in the right way: the next event reconnects
+//! and it fills again.
+
+use std::sync::{Arc, Mutex};
+
+use gmuse_client::Client;
+
+use crate::browse::{Browsing, Found, Holding, Mark, Node, Spine, Target};
+use crate::fold::Expansion;
+use crate::model::rows::CopyId;
+use crate::shelf::SortKey;
+
+/// What one reply said, and what it was asked.
+#[derive(Default)]
+struct Last {
+    /// The fold state and the window, which is the whole of a plain `query.tree`.
+    asked: Option<(crate::fold::Parts<SortKey>, usize, usize)>,
+    nodes: Vec<Node>,
+    spine: Spine,
+    at: usize,
+    artists: usize,
+    albums: usize,
+}
+
+pub struct Remote {
+    client: Arc<Client>,
+    last: Mutex<Last>,
+    /// The flat ordering, fetched once and lent thereafter.
+    ///
+    /// [`Holding::sorted`] lends, so this has to own it — which is the whole reason that
+    /// signature is worth keeping: view 2 scrolls through all 7,273 and must not ask per frame.
+    /// 116 KB against the 40.6 MB it replaces.
+    sorted: Vec<CopyId>,
+}
+
+impl Remote {
+    /// Ask for the ordering once; everything else is asked as it is drawn.
+    pub fn open(client: Arc<Client>) -> Self {
+        let sorted = client
+            .call(
+                "query.tree",
+                Some(serde_json::json!({ "levels": [], "limit": 1_000_000 })),
+            )
+            .ok()
+            .and_then(|r| ids_of(r.get("nodes")?))
+            .unwrap_or_default();
+        Remote {
+            client,
+            last: Mutex::new(Last::default()),
+            sorted,
+        }
+    }
+
+    /// Reuse the last reply when the question has not changed.
+    fn cached<R>(
+        &self,
+        folds: &Expansion<SortKey>,
+        at: usize,
+        limit: usize,
+        read: impl FnOnce(&Last) -> R,
+    ) -> R {
+        let want = (folds.parts(), at, limit);
+        let Ok(mut last) = self.last.lock() else {
+            return read(&Last::default());
+        };
+        if last.asked.as_ref() != Some(&want) {
+            *last = self.fetch(folds, at, limit, serde_json::Value::Null);
+            last.asked = Some(want);
+        }
+        read(&last)
+    }
+
+    /// A question the cache cannot hold — one carrying an anchor or a settle, which asks about a
+    /// window it does not name. Fetched and thrown away.
+    fn one_off(&self, folds: &Expansion<SortKey>, extra: serde_json::Value) -> Last {
+        self.fetch(folds, 0, 1, extra)
+    }
+
+    fn fetch(
+        &self,
+        folds: &Expansion<SortKey>,
+        at: usize,
+        limit: usize,
+        extra: serde_json::Value,
+    ) -> Last {
+        let mut params = serde_json::json!({
+            "folds": parts_of(folds),
+            "cursor": at,
+            "limit": limit,
+        });
+        if let (Some(map), Some(more)) = (params.as_object_mut(), extra.as_object()) {
+            for (k, v) in more {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        let Ok(reply) = self.client.call("query.tree", Some(params)) else {
+            return Last::default();
+        };
+        let n = |key: &str| reply.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        Last {
+            asked: None,
+            nodes: reply
+                .get("nodes")
+                .and_then(|v| v.as_array())
+                // A line that will not parse is dropped rather than drawn wrong.
+                .map(|a| a.iter().filter_map(node_of).collect())
+                .unwrap_or_default(),
+            spine: reply
+                .get("spine")
+                .and_then(|v| v.as_str())
+                .and_then(Spine::from_hex)
+                .unwrap_or_default(),
+            at: n("at"),
+            artists: n("artists"),
+            albums: n("albums"),
+        }
+    }
+
+    /// One `query.under`: the tracks below a line, and what is left to open under it.
+    fn under(&self, path: &[SortKey], id: Option<CopyId>) -> (Vec<CopyId>, Vec<Vec<SortKey>>) {
+        let mut params = serde_json::json!({ "path": keys(path) });
+        if let (Some(map), Some(v)) = (
+            params.as_object_mut(),
+            id.and_then(|i| serde_json::to_value(i).ok()),
+        ) {
+            map.insert("id".into(), v);
+        }
+        let Ok(reply) = self.client.call("query.under", Some(params)) else {
+            return (Vec::new(), Vec::new());
+        };
+        // **A bare array of ids, not lines.** `query.under` answers what to play, and a
+        // track's id is the whole of that — the node parser next door reads an `id` field out
+        // of each *line*, which over this reply finds nothing at all.
+        let tracks = reply
+            .get("tracks")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let openable = reply.get("openable").and_then(paths_of).unwrap_or_default();
+        (tracks, openable)
+    }
+}
+
+impl Browsing for Remote {
+    /// **The whole tree**, which only the tests ask for — see [`Browsing::lines`].
+    ///
+    /// A limit large enough to be the library, because "all of it" has no spelling on the wire:
+    /// the protocol pages everything on purpose, and a method meaning "send me everything" is
+    /// the one call that could not be answered from a window.
+    fn lines(&self, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node> {
+        let folds = if unfolded {
+            Expansion::default()
+        } else {
+            folds.clone()
+        };
+        self.fetch(&folds, 0, 1_000_000, serde_json::Value::Null)
+            .nodes
+    }
+
+    /// **The shape, asked with no page at all.** A motion reads four bits a line and no titles,
+    /// so `limit: 0` is the honest request — and it is the same question every frame, so the
+    /// cache answers it.
+    fn spine(&self, folds: &Expansion<SortKey>) -> Spine {
+        self.cached(folds, 0, 0, |last| last.spine.clone())
+    }
+
+    fn page(&self, folds: &Expansion<SortKey>, at: usize, limit: usize) -> Vec<Node> {
+        self.cached(folds, at, limit, |last| last.nodes.clone())
+    }
+
+    /// Where a line is now.
+    ///
+    /// **Checked rather than trusted**: `query.tree` falls back to the cursor when the anchor is
+    /// gone, so an answer is only an answer if the line it came back with is the one asked for.
+    fn at(&self, folds: &Expansion<SortKey>, mark: &Mark) -> Option<usize> {
+        let (path, id) = mark;
+        let asked = self.one_off(
+            folds,
+            serde_json::json!({ "anchor": { "path": keys(path), "id": id } }),
+        );
+        let found = asked.nodes.first()?;
+        (found.mark() == *mark).then_some(asked.at)
+    }
+
+    fn settle(&self, folds: &Expansion<SortKey>, seat: &[SortKey]) -> usize {
+        self.one_off(folds, serde_json::json!({ "settle": keys(seat) }))
+            .at
+    }
+
+    fn tracks_under(&self, node: &Node) -> Vec<CopyId> {
+        let (path, id) = node.mark();
+        self.under(&path, id).0
+    }
+
+    fn openable_under(&self, path: &[SortKey]) -> Vec<Vec<SortKey>> {
+        self.under(path, None).1
+    }
+
+    fn find(&self, folds: &Expansion<SortKey>, want: &Target, from: usize) -> Option<Found> {
+        let mut params = serde_json::json!({ "folds": parts_of(folds), "from": from });
+        let map = params.as_object_mut()?;
+        match want {
+            Target::Id(id) => {
+                map.insert("id".into(), serde_json::to_value(id).ok()?);
+            }
+            Target::Pattern { needle, backwards } => {
+                map.insert("pattern".into(), needle.clone().into());
+                map.insert("backwards".into(), (*backwards).into());
+            }
+        }
+        let reply = self.client.call("query.reveal", Some(params)).ok()?;
+        Some(Found {
+            open: paths_of(reply.get("open")?)?,
+            at: reply.get("at")?.as_u64()? as usize,
+        })
+    }
+}
+
+impl Holding for Remote {
+    fn sorted(&self) -> &[CopyId] {
+        &self.sorted
+    }
+
+    fn len(&self) -> usize {
+        self.sorted.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.sorted.is_empty()
+    }
+
+    fn artist_count(&self) -> usize {
+        self.last.lock().map(|l| l.artists).unwrap_or(0)
+    }
+
+    fn album_count(&self) -> usize {
+        self.last.lock().map(|l| l.albums).unwrap_or(0)
+    }
+
+    /// **Already on the line**, because the library worked it out when it drew the page — the
+    /// rule about when a record's name has nowhere else to go lives in one place (#135), and a
+    /// client re-deriving it is a second copy of it.
+    fn standing_for(&self, row: &Node, _title: &str) -> Option<String> {
+        match row {
+            Node::Track { stands_for, .. } => stands_for.clone(),
+            _ => None,
+        }
+    }
+
+    fn locate(&self, id: CopyId) -> Option<(SortKey, SortKey)> {
+        let asked = self.one_off(
+            &Expansion::default(),
+            serde_json::json!({ "anchor": { "path": [], "id": id } }),
+        );
+        match asked.nodes.first()? {
+            Node::Track { artist, album, .. } => Some((artist.clone(), album.clone())),
+            _ => None,
+        }
+    }
+
+    fn artist_tracks(&self, artist: &SortKey) -> Vec<CopyId> {
+        self.under(std::slice::from_ref(artist), None).0
+    }
+
+    fn album_tracks(&self, artist: &SortKey, album: &SortKey) -> Vec<CopyId> {
+        self.under(&[artist.clone(), album.clone()], None).0
+    }
+}
+
+/// A fold state as the wire spells it.
+fn parts_of(folds: &Expansion<SortKey>) -> serde_json::Value {
+    let parts = folds.parts();
+    serde_json::json!({
+        "level": parts.level,
+        "eager": parts.eager,
+        "opened": parts.opened.iter().map(|p| keys(p)).collect::<Vec<_>>(),
+        "closed": parts.closed.iter().map(|p| keys(p)).collect::<Vec<_>>(),
+    })
+}
+
+/// Sort keys as the wire spells them.
+fn keys(path: &[SortKey]) -> Vec<String> {
+    path.iter().map(|k| k.as_str().to_owned()).collect()
+}
+
+fn node_of(value: &serde_json::Value) -> Option<Node> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+/// The ids of an array of **lines** — each is an object with an `id`, not a bare id.
+fn ids_of(value: &serde_json::Value) -> Option<Vec<CopyId>> {
+    Some(
+        value
+            .as_array()?
+            .iter()
+            .filter_map(|n| serde_json::from_value(n.get("id")?.clone()).ok())
+            .collect(),
+    )
+}
+
+fn paths_of(value: &serde_json::Value) -> Option<Vec<Vec<SortKey>>> {
+    Some(
+        value
+            .as_array()?
+            .iter()
+            .filter_map(|p| {
+                Some(
+                    p.as_array()?
+                        .iter()
+                        .filter_map(|k| Some(SortKey::already(k.as_str()?)))
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}

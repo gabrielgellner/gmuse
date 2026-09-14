@@ -10,6 +10,7 @@
 /// path is not worth churning.
 pub use gmuse_library::fold;
 pub mod holding;
+pub mod holding_remote;
 pub mod list;
 pub mod picker;
 pub mod remote_transport;
