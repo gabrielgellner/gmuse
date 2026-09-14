@@ -403,7 +403,40 @@ Two things that follow:
   state and the catalogue maps nothing in the view reads — `recordings`, `encodings`, `bound`, `artist_names`,
   `measurements`, `groups`.
 
-## 11. What this does not decide
+## 11. Shipping the tables was built, measured, and thrown away
+
+§10 said the crossing was a straight matter of sending 2.7 MB. It was built — a `Heard` holding the seventeen catalogue
+fields `Listened` reads, the `Listened` and `Definitions` impls moved onto it so there was one copy, a `query.listened`
+method, and an attached view given a desk that folds nothing at all. It worked, the gate was green, and it made the view
+**worse**:
+
+|                               |          |
+| ----------------------------- | -------- |
+| main                          | 61.3 MB  |
+| with `listened` over the wire | 116.2 MB |
+
+**The data is 2.7 MB and the JSON is 4.5 MB, so neither is the cost.** The cost is the path: `gmuse-client`'s `call`
+returns a `serde_json::Value`, so a 4.5 MB document becomes a `Value` tree before it becomes a `Heard` — and an RSS that
+follows the peak keeps the high-water mark. Every `Remote` method pays this; `listened` is only the first one large
+enough to notice.
+
+So the next thing is not `listened` at all. It is a **typed reply path in the client** — a `call_typed::<T>` that
+deserialises from the wire without building a `Value` — and `listened` after it, unchanged.
+
+Three smaller things the attempt is worth remembering for:
+
+- **A serialisation bug presented as a hang.** Two of `Heard`'s maps are keyed by `(subject, concept, source)`, and a
+  JSON object takes string keys only. serde_json refuses with `key must be a string` — inside `json!`, which unwraps, in
+  the engine's handler, which panicked and dropped the connection without a reply. The client waited. `Slip` had a
+  round-trip test from the day it was written and `Heard` did not; that is the whole difference.
+- **A measurement taken while it was broken read 37.6 MB**, because the hung fetch left `listened` empty. Stable over
+  two runs and at two sample times, and still wrong — "repeat it" is not enough when the thing being measured is not
+  running.
+- **`Answer::listened` as a `Heard` costs 2.7 MB and saves nothing on its own**, because the desk holds the catalogue
+  regardless. The same shape as §9: a crossing is worth nothing until the thing it replaces goes with it, in the same
+  commit.
+
+## 12. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.
