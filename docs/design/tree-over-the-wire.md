@@ -291,8 +291,20 @@ Against the real library (7,273 rows, 72 MB log), an engine and a view attached 
 goes to a second copy of a library the engine already has. That is the 40.6 MB in §1 and it is all still there.
 
 What has gone is everything the _tree_ held: the shelf, the search's haystack, and the 8,932-line render. What is left
-is one thing — a **`Listing` over the socket**. `Slip` is the row it would answer with, and nothing in the view's types
-requires the fold any more; it is supplied because `main` still builds one, not because the view asks for it.
+is one thing — a **`Listing` over the socket**. Everything it would have to answer is now answerable without a fold: the
+seam lends nothing, checked by `the_read_seam_answers_without_lending`.
+
+Three methods had to change for that, and each needed a different answer:
+
+- **`listed`** hands back a `Slip`, the row written out. `Librarian::describe` is the borrowed one, and the hot paths
+  call it by name — `query::found` reads a row per row of the library on every keystroke of a picker, and
+  `Shelf::grouped` one per track.
+- **`playable`** owns its locator. One `String`, and every caller took a copy or compared it anyway.
+- **`subject`** left the trait. It is a _view onto_ a row rather than an answer about one, and the filter — the hot path
+  — builds its own from a concrete library. A caller holding only the seam builds one over a slip it owns.
+
+`whole` is the deliberate exception, and says so by returning an `Option`: it asks "are you the fold?", and a reader
+that is not answers `None`.
 
 **A headless smoke test cannot check this.** Running the real TUI needs a terminal, and without one every pane draws
 empty — which is indistinguishable from a remote that answers nothing. So the check is

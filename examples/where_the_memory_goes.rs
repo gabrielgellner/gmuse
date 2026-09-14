@@ -193,7 +193,7 @@ fn main() {
         library
             .rows()
             .into_iter()
-            .filter_map(|id| library.listed(id).map(|l| l.owned()))
+            .filter_map(|id| library.describe(id).map(|l| l.owned()))
             .collect::<Vec<_>>()
     });
     say("every row a view can draw", kept, peak);

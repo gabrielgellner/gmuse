@@ -76,7 +76,7 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
             theme.get(Role::StatusPlaying),
         ));
         spans.push(Span::styled(
-            ui.now_playing.render(&track),
+            ui.now_playing.render(&track.listed()),
             theme.get(Role::StatusText),
         ));
         let position = ctx.player.map(|p| p.position()).unwrap_or(Duration::ZERO);
@@ -84,7 +84,7 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
             format!(
                 "  {} / {}",
                 fmt_duration(position),
-                fmt_duration(track.duration)
+                fmt_duration(std::time::Duration::from_millis(track.duration_ms))
             ),
             theme.get(Role::StatusDim),
         ));

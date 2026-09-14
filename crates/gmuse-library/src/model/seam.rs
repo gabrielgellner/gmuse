@@ -369,6 +369,21 @@ impl Librarian {
     /// Assembled **by the library** out of five entities the player never has
     /// to know are separate — and carrying no path, because there is no path
     /// that is true of the library rather than of one machine.
+    /// **What the library says about one row, borrowed from the fold** — #261.
+    ///
+    /// The hot half. `query::found` reads one per row of the whole library on every keystroke
+    /// of a picker (0.65 ms over 7,273) and `Shelf::grouped` reads one per track; owning those
+    /// would cost 3.0 ms apiece for a row that is read once and dropped.
+    ///
+    /// `Listing::listed` is the other half, and answers a [`crate::model::rows::Slip`] — the
+    /// same row written out, for a reader with no fold to borrow from.
+    pub fn describe(
+        &self,
+        id: crate::model::rows::CopyId,
+    ) -> Option<crate::model::rows::Listed<'_>> {
+        Some(self.rows.get(&id)?.listed())
+    }
+
     pub fn row(&self, recording: Id<Recording>) -> Option<Row> {
         let canonical = self.encodings.canonical(recording).map(|e| e.id);
         self.row_of(recording, canonical)
@@ -1914,8 +1929,14 @@ impl crate::model::rows::Listing for Librarian {
             .map(|(e, locator)| (locator.to_owned(), e.id, e.levels))
     }
 
-    fn listed(&self, id: crate::model::rows::CopyId) -> Option<crate::model::rows::Listed<'_>> {
-        Some(self.rows.get(&id)?.listed())
+    /// **Where a subject comes from now** — `Listing::subject` is gone (#261).
+    ///
+    /// It handed back a `Subject<'_>`, which holds a `Listed` borrowed from the fold, and this
+    /// seam cannot promise a borrow into something a remote reader does not have. The filter
+    /// builds its own from a concrete library, which is the hot path; a caller holding only the
+    /// seam builds one from a [`crate::model::rows::Slip`] it owns.
+    fn listed(&self, id: crate::model::rows::CopyId) -> Option<crate::model::rows::Slip> {
+        self.describe(id).as_ref().map(crate::model::rows::Slip::of)
     }
 
     fn rows(&self) -> Vec<crate::model::rows::CopyId> {
@@ -1937,7 +1958,7 @@ impl crate::model::rows::Listing for Librarian {
         }
     }
 
-    fn playable(&self, id: crate::model::rows::CopyId) -> Option<crate::model::rows::Playable<'_>> {
+    fn playable(&self, id: crate::model::rows::CopyId) -> Option<crate::model::rows::Playable> {
         // **Which copy would open.** A row is an appearance and an appearance
         // has no locator; playing one is a question about a file, asked here
         // rather than at listing time.
@@ -1947,7 +1968,7 @@ impl crate::model::rows::Listing for Librarian {
             // Only a holding on *this* device. A row the library knows about
             // and this machine does not hold is an ordinary row and an
             // unplayable one, which is a different answer from "no such row".
-            locator: self.locators.get(&copy)?,
+            locator: self.locators.get(&copy)?.clone(),
             gain: (!levels.is_empty()).then(|| crate::model::rows::Loudness {
                 track_db: levels.track_db(),
                 track_peak: levels.track_peak(),
@@ -3502,7 +3523,6 @@ mod tests {
     fn a_rows_genres_are_ordered_broadest_first() {
         use crate::model::entity::Hierarchy;
         use crate::model::instance::{Instance, Scanned};
-        use crate::model::rows::Listing;
 
         let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
         i.ingest(
@@ -3538,7 +3558,7 @@ mod tests {
 
         let l = Librarian::from_catalogue(&i.catalogue());
         let row = *l.rows.keys().next().expect("a row");
-        let shown = l.listed(row).expect("a row").genre().to_vec();
+        let shown = l.describe(row).expect("a row").genre().to_vec();
 
         assert_eq!(
             shown,
@@ -3564,7 +3584,6 @@ mod tests {
     fn a_row_carries_the_other_names_its_artists_answer_to() {
         use crate::model::instance::{Instance, Scanned};
         use crate::model::reference::{AliasKind, ArtistRelationKind};
-        use crate::model::rows::Listing;
 
         let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
         i.ingest(
@@ -3585,7 +3604,7 @@ mod tests {
             .expect("the ingest named one");
         let row_id = *before.rows.keys().next().expect("one row");
         assert_eq!(
-            before.listed(row_id).expect("a row").credited,
+            before.describe(row_id).expect("a row").credited,
             [artist],
             "the row should credit the artist the ingest named, and only them"
         );
@@ -3618,7 +3637,7 @@ mod tests {
         }
 
         let l = Librarian::from_catalogue(&i.catalogue());
-        let row = l.listed(row_id).expect("a row");
+        let row = l.describe(row_id).expect("a row");
 
         // **The row did not change, and that is the point** (#193). Four facts
         // arrived, two of them about what this artist is called, and the row
@@ -3672,7 +3691,6 @@ mod tests {
     #[test]
     fn a_file_with_no_album_has_no_track_number_or_year() {
         use crate::model::instance::{Instance, Scanned};
-        use crate::model::rows::Listing;
 
         let loose = Scanned {
             audio: crate::audio_id::AudioId { scheme: 1, hash: 5 },
@@ -3689,7 +3707,7 @@ mod tests {
         let l = Librarian::from_catalogue(&i.catalogue());
 
         let row_id = *l.rows.keys().next().expect("one row");
-        let row = l.listed(row_id).expect("a row");
+        let row = l.describe(row_id).expect("a row");
         assert_eq!(row.title, "A Loose Single", "it is still a row");
         assert_eq!(row.track, None, "a position needs something to be on");
         assert_eq!(row.disc, None);
@@ -3707,7 +3725,6 @@ mod tests {
     fn the_genres_a_tag_names_reach_the_row() {
         use crate::model::entity::Device;
         use crate::model::instance::Instance;
-        use crate::model::rows::Listing;
 
         let dir = std::env::temp_dir().join("gmuse-seam-genres");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3725,7 +3742,7 @@ mod tests {
         let l = Librarian::from_catalogue(&m.catalogue());
 
         let row_id = *l.rows.keys().next().unwrap();
-        let row = l.listed(row_id).expect("a row");
+        let row = l.describe(row_id).expect("a row");
         let mut shown: Vec<&str> = row.genre().iter().map(String::as_str).collect();
         shown.sort_unstable();
         assert_eq!(

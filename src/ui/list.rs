@@ -40,16 +40,16 @@ pub fn artist_starts(lib: &dyn Listing, ids: &[CopyId]) -> Vec<usize> {
 
 fn boundaries(lib: &dyn Listing, ids: &[CopyId], artist_only: bool) -> Vec<usize> {
     let mut out = Vec::new();
-    let mut last: Option<(&str, &str, Option<u32>)> = None;
+    let mut last: Option<(String, String, Option<u32>)> = None;
     for (at, id) in ids.iter().enumerate() {
         let Some(listed) = lib.listed(*id) else {
             continue;
         };
-        let key = (listed.file_under, listed.album, listed.disc);
+        let key = (listed.file_under.clone(), listed.album.clone(), listed.disc);
         let changed = match last {
-            Some((artist, _, _)) if artist_only => artist != key.0,
-            Some((artist, album, disc)) => {
-                artist != key.0 || album != key.1 || disc.unwrap_or(1) != key.2.unwrap_or(1)
+            Some((ref artist, _, _)) if artist_only => *artist != key.0,
+            Some((ref artist, ref album, disc)) => {
+                *artist != key.0 || *album != key.1 || disc.unwrap_or(1) != key.2.unwrap_or(1)
             }
             None => true,
         };
@@ -78,26 +78,26 @@ pub fn rows(lib: &dyn Listing, ids: &[CopyId]) -> Vec<Row> {
     let multi_artist = artists > 1;
 
     let mut out = Vec::with_capacity(ids.len() + albums);
-    let mut last: Option<(&str, &str, Option<u32>)> = None;
+    let mut last: Option<(String, String, Option<u32>)> = None;
 
     for id in ids {
         let Some(listed) = lib.listed(*id) else {
             out.push(Row::Track(*id));
             continue;
         };
-        let key = (listed.file_under, listed.album, listed.disc);
-        let changed = match last {
+        let key = (listed.file_under.clone(), listed.album.clone(), listed.disc);
+        let changed = match &last {
             // A new disc of the same album is also a boundary worth seeing —
             // it is exactly where a multi-disc album wants dividing.
             Some((artist, album, disc)) => {
-                artist != key.0 || album != key.1 || disc.unwrap_or(1) != key.2.unwrap_or(1)
+                *artist != key.0 || *album != key.1 || disc.unwrap_or(1) != key.2.unwrap_or(1)
             }
             None => true,
         };
         if changed {
-            let artist_changed = last.map(|(a, _, _)| a != key.0).unwrap_or(true);
+            let artist_changed = last.as_ref().map(|(a, _, _)| *a != key.0).unwrap_or(true);
             out.push(Row::Header(header_text(
-                listed,
+                &listed.listed(),
                 multi_artist && artist_changed,
             )));
         }
@@ -109,7 +109,7 @@ pub fn rows(lib: &dyn Listing, ids: &[CopyId]) -> Vec<Row> {
 
 /// The artist is only worth repeating when it changes — in a tree's track pane
 /// it is fixed, and printing it on every divider is noise.
-fn header_text(listed: crate::model::rows::Listed<'_>, include_artist: bool) -> String {
+fn header_text(listed: &crate::model::rows::Listed<'_>, include_artist: bool) -> String {
     let mut text = if include_artist {
         format!("{} — {}", listed.file_under, listed.album)
     } else {
@@ -229,12 +229,12 @@ pub fn items<'a>(
                     .track
                     .map(|n| format!("{n:>2}"))
                     .unwrap_or_else(|| "  ".into());
-                let body = body_style(theme, &listed, style.playing == Some(*id));
+                let body = body_style(theme, &listed.listed(), style.playing == Some(*id));
                 let mut spans = vec![
                     Span::styled(lead, theme.get(Role::Gutter)),
                     Span::styled(format!("{num}  "), body),
                 ];
-                spans.extend(highlighted(listed.title, body, style.needle, theme));
+                spans.extend(highlighted(&listed.title, body, style.needle, theme));
                 spans.push(Span::styled("  ", body));
                 // **A slot has no duration, and `0:00` claims one** (#155).
                 // The library knows this track is on the record; it knows
@@ -243,7 +243,7 @@ pub fn items<'a>(
                 // twelve-second rip rather than as an absence.
                 spans.push(Span::styled(
                     if listed.held {
-                        fmt_duration(listed.duration)
+                        fmt_duration(std::time::Duration::from_millis(listed.duration_ms))
                     } else {
                         NO_DURATION.to_string()
                     },
@@ -506,10 +506,11 @@ mod tests {
         let (l, ids, _) = store_and_scan(&[("A", "One", None, "t1")]);
         let theme = Theme::default();
         let held = ids[0];
-        let listed = {
+        let slip = {
             use crate::model::rows::Listing as _;
             l.listed(held).expect("the fixture row")
         };
+        let listed = slip.listed();
 
         assert_eq!(
             body_style(&theme, &listed, false),

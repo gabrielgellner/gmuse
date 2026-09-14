@@ -222,8 +222,6 @@ impl Tagged {
         h.upsert(self.clone());
         let l = from_holdings(&h);
         let id = row_of(&l, Id::<Encoding>::of_audio(&self.held().audio)).expect("a copy's row");
-        crate::model::rows::Listing::listed(&l, id)
-            .expect("a fixture file draws a row")
-            .owned()
+        l.describe(id).expect("a fixture file draws a row").owned()
     }
 }

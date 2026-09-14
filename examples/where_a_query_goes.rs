@@ -51,7 +51,7 @@ fn main() {
         let t = std::time::Instant::now();
         let slips: Vec<Slip> = screenful
             .iter()
-            .filter_map(|id| library.listed(*id).map(|l| Slip::of(&l)))
+            .filter_map(|id| library.describe(*id).map(|l| Slip::of(&l)))
             .collect();
         let forty = t.elapsed();
         assert!(
@@ -61,7 +61,7 @@ fn main() {
         let t = std::time::Instant::now();
         let all = ids
             .iter()
-            .filter_map(|id| library.listed(*id).map(|l| Slip::of(&l)))
+            .filter_map(|id| library.describe(*id).map(|l| Slip::of(&l)))
             .count();
         println!(
             "Slip::of, a screenful ({}):    {:>8.1?}",

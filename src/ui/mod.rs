@@ -2354,7 +2354,17 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
                     let compiled = f.compile(env);
                     Listing::rows(rows)
                         .into_iter()
-                        .filter(|id| Listing::subject(rows, *id).is_some_and(|s| compiled(&s)))
+                        // `Listing::subject` is gone (#261): a slip is owned and the subject
+                        // borrows it, which is what lets a filter run over a remote library.
+                        .filter(|id| {
+                            Listing::listed(rows, *id).is_some_and(|slip| {
+                                compiled(&crate::model::rows::Subject {
+                                    row: slip.listed(),
+                                    locator: None,
+                                    recording: Listing::recording_of(rows, *id),
+                                })
+                            })
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_else(|| Listing::rows(rows));
@@ -2365,7 +2375,7 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
                     // **The rendered row, not the raw fields** — what you see
                     // is what you match, the rule the completion menu follows.
                     Some(Candidate {
-                        label: ui.track_line.render(&row),
+                        label: ui.track_line.render(&row.listed()),
                         detail: String::new(),
                         chosen: Chosen::Track(id),
                     })
@@ -3981,10 +3991,10 @@ fn export(ui: &mut Ui, ctx: &Context<'_>, path: &str) {
     let tracks: Vec<crate::m3u::Entry<'_>> = listed
         .iter()
         .map(|(row, at)| crate::m3u::Entry {
-            locator: std::path::Path::new(at.locator),
-            who: row.artist.unwrap_or(row.file_under),
-            title: row.title,
-            duration: row.duration,
+            locator: std::path::Path::new(&at.locator),
+            who: row.artist.as_deref().unwrap_or(&row.file_under),
+            title: &row.title,
+            duration: std::time::Duration::from_millis(row.duration_ms),
         })
         .collect();
     let missing = ui.playlist.len() - tracks.len();
@@ -6235,10 +6245,14 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
                     },
                     theme.get(theme::Role::StatusPlaying),
                 ),
-                Span::styled(ui.transport_line.render(&track), text),
+                Span::styled(ui.transport_line.render(&track.listed()), text),
             ]));
             lines.push(Line::from(Span::styled(
-                progress_bar(position, track.duration, area.width.saturating_sub(2)),
+                progress_bar(
+                    position,
+                    std::time::Duration::from_millis(track.duration_ms),
+                    area.width.saturating_sub(2),
+                ),
                 theme.get(theme::Role::StatusPlaying),
             )));
             lines.push(Line::from(vec![
@@ -6246,7 +6260,7 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
                     format!(
                         "{} / {}",
                         list::fmt_duration(position),
-                        list::fmt_duration(track.duration)
+                        list::fmt_duration(std::time::Duration::from_millis(track.duration_ms))
                     ),
                     dim,
                 ),
@@ -6273,7 +6287,7 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
     // unguessable, and `next()` is pure so asking costs nothing.
     let next = crate::next::next_with_source(next_input(ui))
         .and_then(|(id, _)| files.listed(id))
-        .map(|row| format!("next  {}", ui.now_playing.render(&row)))
+        .map(|row| format!("next  {}", ui.now_playing.render(&row.listed())))
         .unwrap_or_else(|| "next  —".to_string());
     lines.push(Line::from(Span::styled(next, dim)));
 
@@ -6518,19 +6532,23 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
                     let style = files
                         .listed(*id)
                         .map(|listed| {
-                            list::body_style(&ui.theme, &listed, ui.playback.current == Some(*id))
+                            list::body_style(
+                                &ui.theme,
+                                &listed.listed(),
+                                ui.playback.current == Some(*id),
+                            )
                         })
                         .unwrap_or_default();
                     spans.push(Span::styled(row.label(), style));
                     let text = files
                         .listed(*id)
                         .map(|listed| {
-                            let line = ui.track_line.render(&listed);
+                            let line = ui.track_line.render(&listed.listed());
                             // **The album it stands in for, drawn here because
                             // it has nowhere else to be** (#135). A collapsed
                             // group has no row above to carry its name, and a
                             // name nobody drew is a name nobody can search.
-                            match ui.library.standing_for(row, listed.title) {
+                            match ui.library.standing_for(row, &listed.title) {
                                 Some(album) => format!("{album} — {line}"),
                                 None => line,
                             }
@@ -7929,7 +7947,7 @@ mod tests {
 
         assert_eq!(ui.view, View::Playlist);
         assert_eq!(ui.open.as_ref().map(Open::name), Some("electronic"));
-        let titles: Vec<&str> = ui
+        let titles: Vec<String> = ui
             .playlist
             .entries()
             .iter()
@@ -11287,8 +11305,9 @@ mod tests {
         let l = lib_of(&store);
         let id = Listing::rows(l)[0];
         let row = Listing::listed(l, id).expect("a row");
-        let half = row.duration / 2;
-        let full = row.duration;
+        let length = std::time::Duration::from_millis(row.duration_ms);
+        let half = length / 2;
+        let full = length;
         ui.playback.current = Some(id);
 
         // Too early: a skip is not a play.
@@ -11358,11 +11377,12 @@ mod tests {
         let l = lib_of(&store);
         let id = Listing::rows(l)[0];
         let row = Listing::listed(l, id).expect("a row");
+        let length = std::time::Duration::from_millis(row.duration_ms);
         ui.playback.current = Some(id);
 
         // The instrument: this position *does* earn a play when the device is ours.
         ui.plays_here = true;
-        record_play_if_earned(&mut ui, &ctx, row.duration);
+        record_play_if_earned(&mut ui, &ctx, length);
         assert_eq!(
             play_count(&ui, Listing::recording_of(lib_of(&store), id)),
             1,
@@ -11374,7 +11394,7 @@ mod tests {
         ui.data_dir = Some(scratch("history-attached-2"));
         ui.playback.current = Some(id);
         ui.plays_here = false;
-        record_play_if_earned(&mut ui, &ctx, row.duration);
+        record_play_if_earned(&mut ui, &ctx, length);
         assert_eq!(
             play_count(&ui, Listing::recording_of(lib_of(&store), id)),
             0,
@@ -11393,8 +11413,9 @@ mod tests {
         let l = lib_of(&store);
         let id = Listing::rows(l)[0];
         let row = Listing::listed(l, id).expect("a row");
+        let length = std::time::Duration::from_millis(row.duration_ms);
         ui.playback.current = Some(id);
-        record_play_if_earned(&mut ui, &ctx, row.duration);
+        record_play_if_earned(&mut ui, &ctx, length);
 
         // The old base is never written. Nothing rewrites a whole file, which
         // is what lets two machines share a directory.
@@ -14070,7 +14091,7 @@ mod tests {
         let landed = ui.library.sorted()[ui.sorted];
         assert_eq!(
             Listing::listed(lib_of(&store), landed).and_then(|r| r.album_if_named),
-            Some("A Life ⧸ Young Alaska")
+            Some("A Life ⧸ Young Alaska".to_owned())
         );
     }
 

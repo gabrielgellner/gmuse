@@ -181,7 +181,7 @@ pub fn rows(
                 else {
                     continue;
                 };
-                let Some(mut listed) = crate::model::rows::Listing::listed(library, id) else {
+                let Some(mut listed) = library.describe(id) else {
                     continue;
                 };
                 if let Some(e) = encoding.and_then(|e| library.encodings.encodings.get(&e)) {

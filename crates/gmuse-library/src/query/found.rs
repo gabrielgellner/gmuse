@@ -55,17 +55,18 @@ pub fn found(
 
     let mut out = Vec::new();
     for id in library.rows() {
-        let Some(listed) = library.listed(id) else {
+        let Some(listed) = library.describe(id) else {
             continue;
         };
         if let Some(keep) = &keep {
+            // **`None` unless the filter reads it.** A `path=` filter against `None`
+            // matches nothing, which is why this is asked rather than always skipped.
+            let at = locators
+                .then(|| library.playable(id).map(|p| p.locator))
+                .flatten();
             let subject = crate::model::rows::Subject {
                 row: listed,
-                // **`None` unless the filter reads it.** A `path=` filter against `None`
-                // matches nothing, which is why this is asked rather than always skipped.
-                locator: locators
-                    .then(|| library.playable(id).map(|p| p.locator))
-                    .flatten(),
+                locator: at.as_deref(),
                 recording: library.recording_of(id),
             };
             if !keep(&subject) {

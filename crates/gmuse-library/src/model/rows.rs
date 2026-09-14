@@ -331,11 +331,13 @@ impl Drawn {
 /// discipline: a player that cannot hold a locator cannot key anything by one,
 /// and keying by path is what stranded three history entries and a four-star
 /// rating on a file that still existed.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Playable<'a> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Playable {
     /// Where this device can find it. A path today; a device's kind will say
     /// how to read it when a holding may be remote (#38).
-    pub locator: &'a str,
+    /// **Owned** — #261. It is one `String` and the seam may be a socket, which has no fold
+    /// for a `&str` to point into. Every caller took a copy or compared it anyway.
+    pub locator: String,
     /// The ReplayGain tags, if any. Turned into a number by the caller,
     /// because how loud to play is a player question and what the tags say is
     /// a library one.
@@ -380,7 +382,17 @@ pub struct Subject<'a> {
 }
 
 pub trait Listing {
-    fn listed(&self, id: CopyId) -> Option<Listed<'_>>;
+    /// **What the library says about one row, written out** — #261.
+    ///
+    /// A [`Slip`], not a [`Listed`]: this trait is the *seam*, and a reader on the other end of
+    /// a socket has no catalogue to borrow from. It lends a `Listed` back, so everything that
+    /// reads a row — the template, the list styling, every `Field` — is unchanged.
+    ///
+    /// **`Librarian::describe` is the borrowed one**, and the hot paths use it by name.
+    /// `query::found` reads a row per row of the whole library on every keystroke of a picker
+    /// and `Shelf::grouped` reads one per track: both hold a concrete library and neither goes
+    /// through here. The two exist because the two jobs are different, not because one is old.
+    fn listed(&self, id: CopyId) -> Option<Slip>;
 
     /// Every row there is.
     ///
@@ -416,15 +428,6 @@ pub trait Listing {
         &self,
         id: CopyId,
     ) -> Option<crate::model::id::Id<crate::model::entity::Recording>>;
-
-    /// The three answers together, for a filter or a sort.
-    fn subject(&self, id: CopyId) -> Option<Subject<'_>> {
-        Some(Subject {
-            row: self.listed(id)?,
-            locator: self.playable(id).map(|p| p.locator),
-            recording: self.recording_of(id),
-        })
-    }
 
     /// What the library says about one thing — #125, `info-panel.md`.
     ///
@@ -510,7 +513,7 @@ pub trait Listing {
     /// Separate from [`Listing::listed`] because they are asked at different
     /// moments and one of them must not be kept: a row is drawn now and
     /// forgotten, a locator is used immediately and never written down.
-    fn playable(&self, id: CopyId) -> Option<Playable<'_>>;
+    fn playable(&self, id: CopyId) -> Option<Playable>;
 
     /// How many distinct albums and artists a slice covers.
     ///
@@ -518,11 +521,11 @@ pub trait Listing {
     /// caller writes, and because an implementation that already knows may
     /// answer without walking.
     fn spread(&self, ids: &[CopyId]) -> (usize, usize) {
-        let mut albums: Vec<(&str, &str)> = Vec::new();
-        let mut artists: Vec<&str> = Vec::new();
+        let mut albums: Vec<(String, String)> = Vec::new();
+        let mut artists: Vec<String> = Vec::new();
         for id in ids {
             if let Some(l) = self.listed(*id) {
-                let album = (l.file_under, l.album);
+                let album = (l.file_under.clone(), l.album);
                 if !albums.contains(&album) {
                     albums.push(album);
                 }
@@ -795,7 +798,7 @@ mod slip_is_the_same_row {
 
         let mut answered = 0;
         for id in rows {
-            let Some(listed) = library.listed(id) else {
+            let Some(listed) = library.describe(id) else {
                 continue;
             };
             let slip = Slip::of(&listed);
@@ -818,7 +821,7 @@ mod slip_is_the_same_row {
         // m:ss, so a slip that dropped the milliseconds would pass every render above; the
         // wire carries `duration_ms` precisely so it does not have to.
         let id = library.rows().into_iter().next().expect("a row");
-        let listed = library.listed(id).expect("listed");
+        let listed = library.describe(id).expect("listed");
         let slip = Slip::of(&listed);
         assert_ne!(
             listed.duration.subsec_millis(),
@@ -837,7 +840,7 @@ mod slip_is_the_same_row {
     fn a_slip_survives_being_written_down() {
         let library = library();
         let id = library.rows().into_iter().next().expect("a row");
-        let listed = library.listed(id).expect("the library lists it");
+        let listed = library.describe(id).expect("the library lists it");
         let slip = Slip::of(&listed);
 
         let json = serde_json::to_string(&slip).expect("a slip serialises");

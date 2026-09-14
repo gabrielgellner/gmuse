@@ -48,7 +48,18 @@ impl SmartPlaylist {
         let mut ids: Vec<CopyId> = all
             .iter()
             .copied()
-            .filter(|id| rows.subject(*id).is_some_and(|s| matches(&s)))
+            // **The row is owned and the subject borrows it** — #261. `Listing::subject` used
+            // to hand back a borrow into the fold, which a reader on a socket has none of; a
+            // slip is the same row written out, and a `Subject` over it reads identically.
+            .filter(|id| {
+                rows.listed(*id).is_some_and(|slip| {
+                    matches(&crate::model::rows::Subject {
+                        row: slip.listed(),
+                        locator: None,
+                        recording: rows.recording_of(*id),
+                    })
+                })
+            })
             .collect();
         self.sort.apply(&mut ids, rows, env);
         ids

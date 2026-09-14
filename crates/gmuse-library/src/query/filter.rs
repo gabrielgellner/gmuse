@@ -1618,9 +1618,7 @@ mod tests {
         );
         let l = crate::fixture::from_holdings_and(&s, log.records());
         let id = crate::model::rows::Listing::rows(&l)[0];
-        let drawn = crate::model::rows::Listing::listed(&l, id)
-            .expect("draws")
-            .owned();
+        let drawn = l.describe(id).expect("draws").owned();
         let subject = Subject {
             row: drawn.listed(),
             locator: None,
@@ -1645,9 +1643,7 @@ mod tests {
         let drawn_of = |s: &crate::operations::scan::Holdings| {
             let l = crate::fixture::from_holdings(s);
             let id = crate::model::rows::Listing::rows(&l)[0];
-            crate::model::rows::Listing::listed(&l, id)
-                .expect("a fixture row draws")
-                .owned()
+            l.describe(id).expect("a fixture row draws").owned()
         };
 
         // Two tracks of a record the tags say has three.
@@ -1841,11 +1837,9 @@ mod tests {
             crate::model::ingest::Confidence::Confirmed,
         );
         let l = crate::fixture::from_holdings_and(&held, i.records());
-        let row = crate::model::rows::Listing::listed(
-            &l,
-            crate::fixture::row_of(&l, copy).expect("a row id"),
-        )
-        .expect("a row");
+        let row = l
+            .describe(crate::fixture::row_of(&l, copy).expect("a row id"))
+            .expect("a row");
         let subject = Subject {
             row,
             locator: instrumental.path.to_str(),

@@ -295,7 +295,7 @@ impl Shelf {
                     // `place_of` is what the tree already sorts by, so the
                     // header and the order cannot disagree about where a disc
                     // starts.
-                    if let Some(listed) = librarian.listed(here) {
+                    if let Some(listed) = librarian.describe(here) {
                         lib.lines.insert(
                             here,
                             Line {
@@ -693,7 +693,7 @@ mod tests {
         assert_eq!(artists, ["aardvarks", "zebra"]);
         // Same order in the flat view.
         let first = Listing::listed(&l, lib.sorted()[0]).expect("a row");
-        assert_eq!(first.artist, Some("The Aardvarks"));
+        assert_eq!(first.artist.as_deref(), Some("The Aardvarks"));
         assert_eq!(lib.sorted().len(), 2);
     }
 

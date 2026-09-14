@@ -758,3 +758,53 @@ fn a_follower_holds_no_projection_of_its_own() {
         "{scanned} files and {lines} lines of the view scanned — the walk is not reading it"
     );
 }
+
+/// **Nothing on the seam lends out of the fold** — #261, `tree-over-the-wire.md` §7.
+///
+/// `Listing` is what a view reads the library through, and it must be answerable by something
+/// that has no library: a client on the other end of a socket. A method returning a borrow
+/// cannot be — there is nothing on that side for the reference to point into.
+///
+/// Three of them were, and each needed a different answer. `listed` hands back a [`Slip`], the
+/// row written out. `playable`'s one borrowed field is a `String` now. `subject` left the trait
+/// entirely, because it is a *view* onto a row rather than an answer about one — the filter
+/// builds its own from a concrete library, which is the hot path.
+///
+/// **`whole` is the exception and says so by returning `Option`.** It asks "are you the fold?",
+/// and a reader that is not answers `None` — which is the whole point of it.
+#[test]
+fn the_read_seam_answers_without_lending() {
+    let rows = std::fs::read_to_string("crates/gmuse-library/src/model/rows.rs").expect("rows.rs");
+    let start = rows.find("pub trait Listing").expect("the trait");
+    let body = &rows[start..];
+    let end = body.find("\n}\n").expect("the trait ends");
+    let body = &body[..end];
+
+    // The instrument: a trait that parsed to nothing lends nothing either.
+    let signatures: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("fn "))
+        .collect();
+    assert!(
+        signatures.len() >= 8,
+        "only {} methods found on `Listing` — the parse is not reading the trait",
+        signatures.len()
+    );
+
+    for line in signatures {
+        let Some((_, returns)) = line.split_once("->") else {
+            continue;
+        };
+        // `whole` is the one that may: it exists to be answered `None`.
+        if line.starts_with("fn whole(") {
+            continue;
+        }
+        assert!(
+            !returns.contains('&') && !returns.contains('\''),
+            "`Listing::{}` lends out of the fold, so a reader without one cannot answer it: \
+             ->{returns}",
+            line.split('(').next().unwrap_or(line)
+        );
+    }
+}

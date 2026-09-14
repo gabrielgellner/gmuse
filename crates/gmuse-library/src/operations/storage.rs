@@ -61,7 +61,6 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::model::entity::Encoding;
 use crate::model::id::Id;
-use crate::model::rows::Listing;
 use crate::model::seam::Librarian;
 
 /// The longest a single path component may be, in bytes.
@@ -256,7 +255,7 @@ pub fn proposed(l: &Librarian, copy: Id<Encoding>) -> Option<Result<PathBuf, Ref
     // **A row is an appearance** (#155) and this renders a *file*, so the file
     // names its row rather than being one.
     let format = l.encoding(copy)?.format;
-    let row = Listing::listed(l, l.row_of_copy(copy)?)?;
+    let row = l.describe(l.row_of_copy(copy)?)?;
 
     let under = fit(&component(row.file_under), COMPONENT_LIMIT);
     // **`album_if_named`, not `album`.** The latter stands in `No Album` so a

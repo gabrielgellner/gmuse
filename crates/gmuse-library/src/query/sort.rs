@@ -194,7 +194,18 @@ impl Sort {
         let mut decorated: Vec<(Vec<Cell>, String, CopyId)> = ids
             .iter()
             .map(|id| {
-                let subject = rows.subject(*id);
+                // `Listing::subject` is gone (#261): it lent a `Listed` out of the fold,
+                // and this seam may be a socket. The slip is owned and the subject borrows it,
+                // so both live as long as the row's cells are being built.
+                let slip = rows.listed(*id);
+                // **The locator comes too**, because a total tie is broken by it: two rows
+                // agreeing on every term still have to come out in the same order twice.
+                let at = rows.playable(*id).map(|p| p.locator);
+                let subject = slip.as_ref().map(|s| crate::model::rows::Subject {
+                    row: s.listed(),
+                    locator: at.as_deref(),
+                    recording: rows.recording_of(*id),
+                });
                 let cells = self
                     .terms
                     .iter()
@@ -442,7 +453,7 @@ mod tests {
         Sort::parse(sort).expect("parses").apply(&mut v, s, e);
         v.iter()
             .map(|id| {
-                std::path::Path::new(Listing::playable(s, *id).expect("held here").locator)
+                std::path::PathBuf::from(Listing::playable(s, *id).expect("held here").locator)
                     .file_name()
                     .unwrap()
                     .to_string_lossy()

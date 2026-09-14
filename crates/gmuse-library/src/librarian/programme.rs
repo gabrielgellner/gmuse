@@ -367,7 +367,7 @@ fn cues_for(
                 // fold says; a row with no length yields zero, which `counts_as_played`
                 // already treats as "use the four-minute floor".
                 length: library
-                    .listed(entry.row)
+                    .describe(entry.row)
                     .map(|l| l.duration)
                     .unwrap_or_default(),
                 path: PathBuf::from(locator),

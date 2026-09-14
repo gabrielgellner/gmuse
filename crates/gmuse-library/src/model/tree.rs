@@ -225,7 +225,14 @@ impl Tree {
                 let slot = row.slot();
                 let group = l.group_of(slot);
                 // Asked of the **row**, which is the appearance.
-                let Some(subject) = crate::model::rows::Listing::subject(l, *row) else {
+                // `Listing::subject` is gone (#261) — it handed back a borrow into the fold.
+                // This side holds one, so it builds the subject itself.
+                let at = crate::model::rows::Listing::playable(l, *row).map(|p| p.locator);
+                let Some(subject) = l.describe(*row).map(|listed| crate::model::rows::Subject {
+                    row: listed,
+                    locator: at.as_deref(),
+                    recording: crate::model::rows::Listing::recording_of(l, *row),
+                }) else {
                     continue;
                 };
                 let inner_values = values_of(l, levels.1, &subject, slot);
@@ -502,7 +509,7 @@ mod tests {
             2,
             "a recording on two albums is two appearances"
         );
-        let mut albums: Vec<&str> = hells
+        let mut albums: Vec<String> = hells
             .iter()
             .filter_map(|r| Rows::listed(&l, *r).map(|row| row.album))
             .collect();
@@ -546,7 +553,7 @@ mod tests {
         assert!(matches!(missing, CopyId::On(_)), "it is an appearance");
         assert_eq!(
             Rows::listed(&l, missing).map(|r| r.album),
-            Some("Back in Black"),
+            Some("Back in Black".to_owned()),
             "and it knows which album to be greyed under"
         );
         assert!(

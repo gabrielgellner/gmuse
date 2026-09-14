@@ -441,7 +441,17 @@ impl Stack {
                 let held: Vec<CopyId> = all
                     .iter()
                     .copied()
-                    .filter(|id| Listing::subject(librarian, *id).is_some_and(|s| matches(&s)))
+                    // `Listing::subject` is gone (#261): the slip is owned and the subject
+                    // borrows it, so a rule can run over a library this side does not hold.
+                    .filter(|id| {
+                        Listing::listed(librarian, *id).is_some_and(|slip| {
+                            matches(&crate::model::rows::Subject {
+                                row: slip.listed(),
+                                locator: None,
+                                recording: Listing::recording_of(librarian, *id),
+                            })
+                        })
+                    })
                     .collect();
                 Rows::of_query(recordings(librarian, &held))
             }
