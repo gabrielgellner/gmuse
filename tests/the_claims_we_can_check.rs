@@ -808,3 +808,76 @@ fn the_read_seam_answers_without_lending() {
         );
     }
 }
+
+/// The body of `fn <name>(`, by counting braces from its opening one.
+///
+/// Crude, and it does not need to be more: it is looking for the presence of a call, not
+/// parsing Rust. A `{` inside a string literal would confuse it, and the bodies below have
+/// none — which the "was found and is substantial" assertions are there to keep true.
+fn body_of<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let at = text.find(&format!("fn {name}("))?;
+    let open = at + text[at..].find('{')?;
+    let mut depth = 0usize;
+    for (i, b) in text[open..].bytes().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[open..=open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// **A read reaches the fold by loading it, never by waiting for it** — #261, §7.11.
+///
+/// The engine answers every non-session call on its own worker thread, and a read gets its
+/// library from `Desk::current()` — one `ArcSwap` load returning an `Arc<Answer>`, which is a
+/// pointer rather than a copy. That is what "a query runs on a worker" means here, and it is
+/// why a picker's keystroke does not queue behind an import.
+///
+/// **The way to lose it is one line.** `Desk::settled()` blocks until everything queued has
+/// been published, and it is entirely reasonable-looking in a handler that wants to answer
+/// about the write that just happened — `Stop::Refold` calls it for exactly that reason, one
+/// screen away in the same file. A read that called it would put the fold back on the caller's
+/// thread by another route, and nothing would fail: the answer would be *right*, just late,
+/// and only under a concurrent write.
+///
+/// So the absence is asserted, with the instrument beside it: an empty body contains no
+/// `settled()` either.
+#[test]
+fn a_read_never_waits_for_the_appender() {
+    let text = std::fs::read_to_string("src/main.rs").expect("src/main.rs");
+
+    // The six that serve a read. `tree`, `reveal` and `under` reach the fold through
+    // `shelf_for`; `found` and `reading` load it themselves.
+    let readers = ["found", "shelf_for", "reading", "tree", "reveal", "under"];
+    let mut loads = 0;
+    for name in readers {
+        let body = body_of(&text, name).unwrap_or_else(|| panic!("no fn {name} in src/main.rs"));
+        // The instrument: a body this scan failed to delimit would be a few characters long
+        // and would pass every absence below without looking at anything.
+        assert!(
+            body.len() > 200,
+            "fn {name} came out {} characters long, so the scan lost its body",
+            body.len()
+        );
+        for waiting in ["settled()", "advance()"] {
+            assert!(
+                !body.contains(waiting),
+                "fn {name} calls {waiting}, which waits on the appender — a read loads the \
+                 fold with `Desk::current()` instead"
+            );
+        }
+        loads += usize::from(body.contains("desk.current()"));
+    }
+    assert!(
+        loads >= 2,
+        "only {loads} of the read handlers load the fold at all, so the absences above are \
+         about functions that no longer read one"
+    );
+}

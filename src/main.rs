@@ -3084,6 +3084,7 @@ fn run_engine(
             // in the reply. `found` resolves one only when the filter reads it.
             let all = gmuse::query::found::found(
                 &answer.library,
+                &*answer.listened,
                 gmuse::history::now_ms(),
                 filter.as_ref(),
             );

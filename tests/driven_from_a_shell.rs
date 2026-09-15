@@ -3174,6 +3174,98 @@ fn an_attached_view_draws_the_same_pane_as_a_detached_one() {
     );
 }
 
+/// **The picker asks the same library the browse tree does** — #261.
+///
+/// `query.run` built its filter environment with `listened: None`, so every field backed by
+/// history answered as though nothing had ever been played: `rating>=4` found **0 rows against
+/// the tree's 35** on the real library, and so did `plays`, `last_played` and `days_since_*`.
+///
+/// **Silently, which is the whole problem.** A filter over a field nothing can satisfy matches
+/// nothing, and an empty picker is what a filter that is merely too narrow looks like as well.
+/// Nothing errored and nothing was logged; the two paths simply disagreed.
+///
+/// So it is asserted as an oracle rather than against a number: two ways of asking the library
+/// which rows have four stars must give the same rows.
+#[test]
+fn a_picker_and_a_tree_agree_about_a_rating() {
+    let (engine, recording) = start_with_a_track("picker-history");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    // Nothing is rated yet, so both must agree on *nothing* first — the instrument, because two
+    // paths that both answer zero for the wrong reason agree perfectly.
+    let picked = |filter: &str| -> u64 {
+        client
+            .call(
+                "query.run",
+                Some(serde_json::json!({ "filter": filter, "limit": 1 })),
+            )
+            .expect("query.run")["total"]
+            .as_u64()
+            .expect("a total")
+    };
+    let browsed = |view: &str| -> u64 {
+        client
+            .call(
+                "query.tree",
+                Some(serde_json::json!({ "view": view, "levels": [], "limit": 1 })),
+            )
+            .expect("query.tree")["total"]
+            .as_u64()
+            .expect("a total")
+    };
+
+    assert_eq!(
+        picked("rating>=4"),
+        0,
+        "something was rated before the test"
+    );
+    assert_eq!(
+        browsed("rating>=4"),
+        0,
+        "something was rated before the test"
+    );
+
+    client
+        .call(
+            "library.edit",
+            Some(serde_json::json!({
+                "facts": [{ "RecordingRated": { "recording": recording, "stars": 4 } }]
+            })),
+        )
+        .expect("the rating is accepted");
+
+    // The fold is published on the librarian's own thread, so the rating arrives when it
+    // arrives — polled rather than asked once, which is how this suite's other library-event
+    // tests stopped being flaky.
+    let mut browsed_now = 0;
+    for _ in 0..100 {
+        browsed_now = browsed("rating>=4");
+        if browsed_now > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        browsed_now > 0,
+        "the tree never saw the rating, so the comparison below proves nothing"
+    );
+    assert_eq!(
+        picked("rating>=4"),
+        browsed_now,
+        "the picker and the tree disagree about which rows have four stars"
+    );
+
+    // And a rating nothing has is still nothing, in both — so the agreement above is about the
+    // filter rather than about both paths having stopped filtering.
+    assert_eq!(
+        picked("rating>=5"),
+        0,
+        "the picker invented a five-star row"
+    );
+    assert_eq!(browsed("rating>=5"), 0, "the tree invented a five-star row");
+}
+
 /// **A view that names nothing still says so, once the librarian is what resolves it** — #261,
 /// #119.
 ///

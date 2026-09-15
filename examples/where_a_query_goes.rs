@@ -10,6 +10,8 @@ fn main() {
 
     let projection = gmuse::librarian::reading(&data, device, now);
     let catalogue = projection.catalogue();
+    // The history a filter reads — `rating>=4` and the `days_since_*` fields (#261).
+    let listened = gmuse::projection::heard::Heard::of(catalogue);
     let library = gmuse::model::seam::Librarian::from_catalogue(catalogue);
     let rows = {
         use gmuse::model::rows::Listing;
@@ -76,7 +78,7 @@ fn main() {
 
     // The picker path, which is what `query.run` answers with.
     let t = std::time::Instant::now();
-    let picked = gmuse::query::found::found(&library, now, None);
+    let picked = gmuse::query::found::found(&library, &listened, now, None);
     println!(
         "query::found (the picker path):{:>8.1?}  {} rows",
         t.elapsed(),

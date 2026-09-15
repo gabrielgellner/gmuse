@@ -693,7 +693,46 @@ the first time anybody asks; the tree never does, and a narrowed view's is tiny.
 **A rebuild still asks**, to put view 2's cursor back by index, which is why returning to the whole library costs about
 what it did before. Restoring that cursor by mark rather than by index would remove it, and is not done.
 
-## 19. What this does not decide
+## 19. The picker asked a library that had never been played
+
+`query.run` builds its filter environment in `query::found`, and it passed `listened: None`. So every field backed by
+history answered as though nothing had ever been played — `rating`, `plays`, `last_played`, `days_since_*`.
+
+On the real library, `rating>=4`:
+
+| asked through | rows  |
+| ------------- | ----- |
+| `query.tree`  | 35    |
+| `query.run`   | **0** |
+
+**Silently, which is the whole of it.** A filter over a field nothing can satisfy matches nothing, and an empty picker
+is exactly what a filter that is merely too narrow looks like. Nothing errored, nothing was logged, and the two paths
+simply disagreed about the same library.
+
+It is an oracle now rather than a number: `a_picker_and_a_tree_agree_about_a_rating` rates a track over the wire and
+asks both ways, having first asserted that both say nothing before the rating lands — because two paths that answer zero
+for different wrong reasons agree perfectly.
+
+`answer.listened` was always there; §16's tree fix had already started passing it, and this is the same omission one
+call along.
+
+## 20. A read loads the fold, it does not wait for it
+
+§7.11 asks for `query.run` "answered by a worker over an `Arc<Answer>` — so it does not queue behind the appender", and
+that turned out to be **already true and unchecked**. The engine spawns a thread per non-session line, and
+`Desk::current()` is one `ArcSwap` load returning a pointer to the published fold. Nothing had to move.
+
+What was missing is anything that would notice it stopping being true, and losing it is one line. `Desk::settled()`
+blocks until everything queued has been published, and it looks entirely reasonable in a handler that wants to answer
+about the write that just happened — `Stop::Refold` calls it for that reason, one screen away in the same file. A read
+that called it would put the fold back on the caller's thread by another route and **nothing would fail**: the answer
+would be right, merely late, and only under a concurrent write.
+
+`a_read_never_waits_for_the_appender` reads the six handlers' bodies out of `main.rs` and asserts the absence, with the
+instrument beside it — a body the brace-scan failed to delimit contains no `settled()` either, and neither does one that
+no longer loads a fold at all. Both of those were mutated and seen to fail, along with the absence itself.
+
+## 21. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.

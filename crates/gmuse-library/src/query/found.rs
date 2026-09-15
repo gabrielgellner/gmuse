@@ -40,12 +40,19 @@ pub struct Found {
 /// caller pages into it; two calls with the same filter and the same fold give the same page.
 pub fn found(
     library: &Librarian,
+    listened: &dyn crate::query::filter::Listened,
     now: i64,
     filter: Option<&crate::query::filter::Expr>,
 ) -> Vec<Found> {
-    // **Compiled once, not per row** — the same reason `rows` does it.
+    // **The history, because a picker asks about it** — #261.
+    //
+    // This passed `None`, and the whole class of fields that reads it answered as though the
+    // library had never been played: `rating>=4` found **0 rows where the browse tree found
+    // 35**, and so did `plays`, `last_played` and `days_since_*`. Silently — a filter over a
+    // field nothing can satisfy is a filter that matches nothing, which is what an empty
+    // picker looks like anyway.
     let env = crate::query::filter::Env {
-        listened: None,
+        listened: Some(listened),
         named: Some(library),
         now: now / 1000,
     };
