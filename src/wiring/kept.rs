@@ -38,7 +38,7 @@ use crate::shelf::{Levels, Shelf};
 ///   rename or an import would keep being answered from the shelf built before it, for as
 ///   long as the entry survived the cap.
 /// - `levels` — a flat tree and a grouped one are different trees with the same contents.
-/// - `filter` — a filtered tree is a different tree.
+/// - `view` — a narrowed tree is a different tree.
 ///
 /// **And not the folds**, which is the whole reason this keys a shelf rather than a page of
 /// nodes: which rows are visible is 1.8 ms of flattening, so it is recomputed rather than
@@ -48,7 +48,12 @@ pub struct Asked {
     /// §7.11's `library_version` — the same counter the announcer bumps.
     pub version: u64,
     pub levels: Levels,
-    pub filter: Option<String>,
+    /// **The composed view's own source** — #261, not a filter expression.
+    ///
+    /// Keyed by the text rather than the resolved membership, because the text is what the
+    /// client sent and a set of 7,273 ids is not a cache key. Two clients asking the same
+    /// view get the same shelf, which is the point of keying it here at all.
+    pub view: Option<String>,
 }
 
 /// The grouped shelves a socket keeps between pages.
@@ -57,7 +62,32 @@ pub struct Asked {
 /// flattening one is 1.8 ms, and only the flatten depends on which folds are open. Keying the
 /// *nodes* would mean every `zo` paid the grouping again; keying the shelf means a fold change
 /// costs about two milliseconds and the key has no folds in it at all.
-pub type Trees = Kept<Asked, Shelf>;
+pub type Trees = Kept<Asked, Grouped>;
+
+/// A grouped shelf **and what resolving the view had to say about it** — #261.
+///
+/// They are kept together because they are one answer to one question, and because the cache
+/// would otherwise hand back a shelf with no complaints attached: resolving is what produces
+/// both, and a cache hit does not resolve again.
+///
+/// **A view that names nothing is not the same as one that matched nothing** (#119). A saved
+/// view whose definition has gone, or one that reaches itself, selects no rows — and so does a
+/// filter that is simply too narrow. Telling those apart by looking at an empty pane is the
+/// failure this project keeps paying for, so the complaint travels with the answer.
+pub struct Grouped {
+    pub shelf: Shelf,
+    /// What went wrong resolving the view, already said in words.
+    ///
+    /// Strings rather than `view::Problem`, because they cross a socket and the client's job
+    /// is to show them, not to switch on them.
+    pub problems: Vec<String>,
+    /// Terms after which the view got **wider**, by index.
+    ///
+    /// `:view a | b` loses `a`'s ordering, and the person who wrote it should hear so. It is
+    /// computed from the row sets the terms combine, so it is the librarian's to report — a
+    /// client that has not resolved the view cannot know.
+    pub widened: Vec<usize>,
+}
 
 /// A few answers, newest last.
 pub struct Kept<K, V> {
@@ -116,7 +146,7 @@ mod tests {
         let asked = |version| Asked {
             version,
             levels: Levels::default(),
-            filter: None,
+            view: None,
         };
         assert_ne!(
             asked(7),

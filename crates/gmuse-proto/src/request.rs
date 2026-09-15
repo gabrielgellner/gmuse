@@ -108,7 +108,16 @@ pub enum Request {
     /// `levels` names the two grouping fields, `["artist", "album"]` being the tree as it has
     /// always been. An empty list is flat, which is what view 2 was.
     QueryTree {
-        filter: Option<String>,
+        /// **The composed view, as its own source** — #261.
+        ///
+        /// Not a filter expression: a view is a left fold over terms, and a term may name a
+        /// collection or another saved view as well as a filter. A bare filter is a view of
+        /// one term, so this is strictly wider than the `filter` it replaces.
+        ///
+        /// It crosses as text because that is what a view *is* — `:edit` round-trips this
+        /// exact document — and because resolving it needs the rows, which are here. A client
+        /// that resolved it itself would read every row to keep forty.
+        view: Option<String>,
         /// Two field names, or empty for no grouping. Omitted means artist and album.
         levels: Option<Vec<String>>,
         limit: Option<usize>,
@@ -136,7 +145,8 @@ pub enum Request {
     ///
     /// Searched with everything open, because a closed fold still holds its lines.
     QueryReveal {
-        filter: Option<String>,
+        /// The composed view, as its own source — see [`Request::QueryTree`].
+        view: Option<String>,
         levels: Option<Vec<String>>,
         folds: Option<Folds>,
         /// Text to match. Exactly one of this and `id`.
@@ -156,7 +166,8 @@ pub enum Request {
     ///
     /// An empty `path` is the whole library, which is what `x` on nothing selected means.
     QueryUnder {
-        filter: Option<String>,
+        /// The composed view, as its own source — see [`Request::QueryTree`].
+        view: Option<String>,
         levels: Option<Vec<String>>,
         /// The seat of the line, as a previous reply gave it.
         path: Vec<String>,
@@ -652,7 +663,7 @@ impl Request {
                 #[derive(Deserialize)]
                 struct P {
                     #[serde(default)]
-                    filter: Option<String>,
+                    view: Option<String>,
                     #[serde(default)]
                     levels: Option<Vec<String>>,
                     #[serde(default)]
@@ -669,7 +680,7 @@ impl Request {
                 let p: P = match params {
                     Some(_) => typed(method, params)?,
                     None => P {
-                        filter: None,
+                        view: None,
                         levels: None,
                         limit: None,
                         cursor: None,
@@ -679,7 +690,7 @@ impl Request {
                     },
                 };
                 Ok(Self::QueryTree {
-                    filter: p.filter,
+                    view: p.view,
                     levels: p.levels,
                     limit: p.limit,
                     cursor: p.cursor,
@@ -692,7 +703,7 @@ impl Request {
                 #[derive(Deserialize)]
                 struct P {
                     #[serde(default)]
-                    filter: Option<String>,
+                    view: Option<String>,
                     #[serde(default)]
                     levels: Option<Vec<String>>,
                     #[serde(default)]
@@ -717,7 +728,7 @@ impl Request {
                     ));
                 }
                 Ok(Self::QueryReveal {
-                    filter: p.filter,
+                    view: p.view,
                     levels: p.levels,
                     folds: p.folds,
                     pattern: p.pattern,
@@ -730,7 +741,7 @@ impl Request {
                 #[derive(Deserialize)]
                 struct P {
                     #[serde(default)]
-                    filter: Option<String>,
+                    view: Option<String>,
                     #[serde(default)]
                     levels: Option<Vec<String>>,
                     #[serde(default)]
@@ -740,7 +751,7 @@ impl Request {
                 }
                 let p: P = typed(method, params)?;
                 Ok(Self::QueryUnder {
-                    filter: p.filter,
+                    view: p.view,
                     levels: p.levels,
                     path: p.path,
                     id: p.id,

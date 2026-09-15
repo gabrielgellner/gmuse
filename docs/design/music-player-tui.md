@@ -5969,6 +5969,33 @@ Append here as decisions are made. Format: date, decision, rationale.
   first launch for as long as it existed. It reports both now, and asserts the fixture is on the path it claims to
   measure.
 
+- **2026-09-14** **The librarian resolves the view, and says what is wrong with it.** An attached view sends its
+  composed view as source on `query.tree`, `query.reveal` and `query.under`; the engine parses it, resolves it against
+  the fold it already holds, and answers with the tree it selects — plus the problems and the widening that resolving
+  found. The `filter` parameter those three carried is replaced by `view`, which is strictly wider: a bare filter is a
+  view of one term.
+
+  **Why it needed deciding rather than measuring.** The walk that prompted it was 732–824 ms of reading 7,273 rows to
+  keep one, which is a plain performance bug. What it uncovered was not: `holding::of` discarded the membership whenever
+  there was an engine, and `Remote` sent no filter, so **an attached gmuse drew the whole library whatever `:view`
+  said** — and paid most of a second not to. Moving the resolution to the librarian is the only fix that does not
+  involve sending 7,273 ids per frame, and it moves something else with it. §7.11's direction was already "the librarian
+  owns the view"; this is that, for the browse tree.
+
+  **What moved with it is the complaint.** #119 is explicit that a saved view which has gone must say so rather than
+  show an empty library, and a client that no longer resolves its own terms can no longer discover that. `demoted_at` is
+  worse: it comes from combining the row sets the terms select, so it cannot be computed without the walk at all. Both
+  now travel back in the `query.tree` reply, and the tree cache holds them beside the shelf they explain — a cache hit
+  does not resolve again, so a shelf returned without its complaint would be silently uncomplaining.
+
+  Measured: `artist="…"` 733 ms → 12 ms and **1 row instead of 7,273**; `rating>=4` 823 ms → 14 ms and 35 rows;
+  `saved="no such view"` 0 rows in 0.9 ms, saying so. `just view-cost`.
+
+  **One cost moved rather than vanished.** A reader is built per view, because `Holding::sorted` lends and the flat
+  ordering is the view's. Paging the unnarrowed flat list is ~0.8 s, so it is a `OnceLock` filled when something asks —
+  the tree never does. A rebuild still asks, to put view 2's cursor back, which is why returning to the whole library
+  costs about what it did. Restoring that cursor by mark rather than by index would remove it, and is not done.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

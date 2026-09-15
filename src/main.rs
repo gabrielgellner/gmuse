@@ -3156,16 +3156,19 @@ fn run_engine(
         /// this would be two caches, which is two answers to one question.
         fn shelf_for(
             &self,
-            filter: Option<String>,
+            view: Option<String>,
             levels: Option<Vec<String>>,
-        ) -> Result<(std::sync::Arc<gmuse::shelf::Shelf>, u64), gmuse_proto::RpcError> {
-            use gmuse::model::rows::Listing;
+        ) -> Result<(std::sync::Arc<gmuse::wiring::kept::Grouped>, u64), gmuse_proto::RpcError>
+        {
             use gmuse_proto::RpcError;
 
-            let raw = filter.clone();
-            let filter = match filter.as_deref().map(gmuse::query::filter::Expr::parse) {
-                Some(Ok(expr)) => Some(expr),
-                Some(Err(e)) => return Err(RpcError::invalid_params("filter", e.to_string())),
+            let raw = view.clone();
+            // **A view, not a filter** — #261. A term may name a collection or another saved
+            // view, and both are resolved from the log, which is here. A bare filter parses as
+            // a view of one term, so this accepts everything the `filter` it replaced did.
+            let view = match view.as_deref().map(gmuse::view::Stack::parse) {
+                Some(Ok(stack)) => Some(stack),
+                Some(Err(e)) => return Err(RpcError::invalid_params("view", e.to_string())),
                 None => None,
             };
 
@@ -3204,31 +3207,42 @@ fn run_engine(
             let want = gmuse::wiring::kept::Asked {
                 version,
                 levels,
-                filter: filter.as_ref().map(|_| raw.clone().unwrap_or_default()),
+                view: view.as_ref().map(|_| raw.clone().unwrap_or_default()),
             };
             if let Some(ready) = self.trees.get(&want) {
                 return Ok((ready, version));
             }
 
             let answer = self.desk.current();
-            // **Which rows are in it**, which is the filter's job and not the tree's.
-            let members: std::collections::HashSet<_> = match &filter {
-                None => answer.library.rows().into_iter().collect(),
-                Some(_) => gmuse::query::found::found(
-                    &answer.library,
-                    gmuse::history::now_ms(),
-                    filter.as_ref(),
-                )
-                .into_iter()
-                .map(|f| f.row)
-                .collect(),
+            // **Which rows are in it**, which is the view's job and not the tree's.
+            //
+            // **Resolved with the history, which the engine has and the old filter path did
+            // not.** `query::found` passed `listened: None`, so `rating>=4` and
+            // `days_since_played` evaluated against nothing. `answer.listened` is both the
+            // `Listened` a filter reads and the `Definitions` a `saved=` term names.
+            let (members, widened, problems) = match &view {
+                None => {
+                    use gmuse::model::rows::Listing;
+                    (
+                        answer.library.rows().into_iter().collect(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                }
+                Some(stack) => {
+                    let env = gmuse::query::filter::Env {
+                        listened: Some(&*answer.listened),
+                        named: None,
+                        now: gmuse::history::now(),
+                    };
+                    stack.members(&answer.library, &*answer.listened, env)
+                }
             };
-            let built = std::sync::Arc::new(gmuse::shelf::Shelf::grouped(
-                &answer.library,
-                members,
-                levels,
-                true,
-            ));
+            let built = std::sync::Arc::new(gmuse::wiring::kept::Grouped {
+                shelf: gmuse::shelf::Shelf::grouped(&answer.library, members, levels, true),
+                problems: problems.iter().map(ToString::to_string).collect(),
+                widened,
+            });
             self.trees.keep(want, std::sync::Arc::clone(&built));
             Ok((built, version))
         }
@@ -3333,7 +3347,8 @@ fn run_engine(
             id: Option<gmuse::model::rows::CopyId>,
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
             use gmuse::browse::Browsing;
-            let (shelf, version) = self.shelf_for(filter, levels)?;
+            let (grouped, version) = self.shelf_for(filter, levels)?;
+            let shelf = &grouped.shelf;
             let path: Vec<_> = path
                 .iter()
                 .map(|t| gmuse::shelf::SortKey::already(t))
@@ -3345,7 +3360,7 @@ fn run_engine(
             // is the half that tells them apart, and a container has none.
             let want = (path.clone(), id);
             let everything =
-                gmuse::browse::flatten(&shelf, &gmuse::fold::Expansion::default(), true);
+                gmuse::browse::flatten(shelf, &gmuse::fold::Expansion::default(), true);
             let tracks = match everything.iter().find(|n| n.mark() == want) {
                 Some(node) => shelf.tracks_under(node),
                 // An empty path, or a mark nothing sits at any more, is the whole library.
@@ -3371,7 +3386,8 @@ fn run_engine(
             backwards: Option<bool>,
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
             let folds = Self::folds_of(folds).unwrap_or_default();
-            let (shelf, version) = self.shelf_for(filter, levels)?;
+            let (grouped, version) = self.shelf_for(filter, levels)?;
+            let shelf = &grouped.shelf;
             let want = match (pattern, id) {
                 (Some(needle), None) => gmuse::browse::Target::Pattern {
                     needle,
@@ -3385,7 +3401,7 @@ fn run_engine(
 
             // **`null` rather than an error when nothing matches.** A search that found nothing
             // is an ordinary answer, and `/` says so on the status line rather than failing.
-            let found = gmuse::browse::reveal(&shelf, &folds, &want, from.unwrap_or(0));
+            let found = gmuse::browse::reveal(shelf, &folds, &want, from.unwrap_or(0));
             Ok(serde_json::json!({
                 "open": found.as_ref().map(|f| f.open.clone()),
                 "at": found.as_ref().map(|f| f.at),
@@ -3406,15 +3422,16 @@ fn run_engine(
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
             let folds = Self::folds_of(folds);
             let anchor = anchor.map(Self::anchor_of);
-            let (shelf, version) = self.shelf_for(filter, levels)?;
+            let (grouped, version) = self.shelf_for(filter, levels)?;
+            let shelf = &grouped.shelf;
 
             // **The flatten is the cheap half and it is the half the folds decide** — 1.8ms
             // against the shelf's 370ms, so it runs every time and the cache never has to know
             // which nodes are open. No folds means everything open, which is what a client
             // that keeps no fold state wants.
             let all = match &folds {
-                Some(folds) => gmuse::browse::flatten(&shelf, folds, false),
-                None => gmuse::browse::flatten(&shelf, &gmuse::fold::Expansion::default(), true),
+                Some(folds) => gmuse::browse::flatten(shelf, folds, false),
+                None => gmuse::browse::flatten(shelf, &gmuse::fold::Expansion::default(), true),
             };
             let spine = gmuse::browse::spine_of(&all);
 
@@ -3457,6 +3474,12 @@ fn run_engine(
                 "total": all.len(),
                 "next": (next < all.len()).then_some(next),
                 "spine": spine.to_hex(),
+                // **What resolving the view had to say** — #261, #119. A saved view that has
+                // gone selects no rows, and so does a filter that is merely too narrow; a pane
+                // that cannot tell them apart shows an empty library either way. The librarian
+                // resolves the view, so the librarian is what knows.
+                "problems": grouped.problems,
+                "widened": grouped.widened,
                 // **The counts a status line draws** — #261. Free here, because the shelf that
                 // answered the page knows them, and a round trip for three numbers a client
                 // redraws every frame would not be.
@@ -3808,33 +3831,33 @@ fn run_engine(
 
                 // **The browse tree, grouped by the librarian** — §7.11, #261.
                 Call::QueryTree {
-                    filter,
+                    view,
                     levels,
                     limit,
                     cursor,
                     folds,
                     anchor,
                     settle,
-                } => self.tree(filter, levels, limit, cursor, folds, anchor, settle),
+                } => self.tree(view, levels, limit, cursor, folds, anchor, settle),
 
                 // **Where a search lands, and what had to open for it to** — #261.
                 Call::QueryReveal {
-                    filter,
+                    view,
                     levels,
                     folds,
                     pattern,
                     id,
                     from,
                     backwards,
-                } => self.reveal(filter, levels, folds, pattern, id, from, backwards),
+                } => self.reveal(view, levels, folds, pattern, id, from, backwards),
 
                 // **What `a`, `e`, `x` and `zR` act on** — #261.
                 Call::QueryUnder {
-                    filter,
+                    view,
                     levels,
                     path,
                     id,
-                } => self.under(filter, levels, path, id),
+                } => self.under(view, levels, path, id),
 
                 // **The read seam** — #261. One arm, because they differ only in what they ask
                 // about and every one of them is answered off the same published fold.

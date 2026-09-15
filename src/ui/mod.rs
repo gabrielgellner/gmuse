@@ -4402,19 +4402,53 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // §7's rule: active catalogs union, the transient filter intersects.
     // "Which bodies of music am I in" is a selection; "what am I looking for"
     // is a restriction.
-    let (members, order_lost, problems) = {
-        // Scoped so the borrows of `history` and `filter` end before the
-        // library is replaced below.
-        let env = crate::query::filter::Env {
-            listened: Some(&*ui.listened),
-            named: None,
-            now: crate::history::now(),
-        };
-        // **One fold over one stack** (#94). This used to union the active
-        // catalogs and then intersect the filter, with both operators baked
-        // into their nouns — so `-` had nowhere to live.
-        ui.composed.members(ctx.library, &*ui.listened, env)
+    // **Who resolves the view** — #261. The librarian does when there is one: an attached view
+    // sends its terms and the engine answers with the tree they select, having already folded
+    // the library they select from. Resolving it here as well was 732-824ms of reading 7,273
+    // rows to keep one, and `holding::of` then dropped the result because the engine's tree had
+    // already been built from everything.
+    let reader = ui.engine.clone().map(|client| {
+        crate::ui::holding::reader(
+            client,
+            ui.reader.as_ref(),
+            crate::ui::holding_remote::Showing {
+                view: (!ui.composed.is_empty()).then(|| ui.composed.label()),
+                levels: Some(match ui.levels.pair() {
+                    None => Vec::new(),
+                    Some((outer, inner)) => vec![outer.written(), inner.written()],
+                }),
+            },
+        )
+    });
+    let (members, order_lost, problems) = match &reader {
+        Some(remote) => {
+            let said = remote.said();
+            (
+                std::collections::HashSet::new(),
+                said.widened,
+                said.problems,
+            )
+        }
+        None => {
+            // Scoped so the borrows of `history` and `filter` end before the
+            // library is replaced below.
+            let env = crate::query::filter::Env {
+                listened: Some(&*ui.listened),
+                named: None,
+                now: crate::history::now(),
+            };
+            // **One fold over one stack** (#94). This used to union the active
+            // catalogs and then intersect the filter, with both operators baked
+            // into their nouns — so `-` had nowhere to live.
+            let (members, lost, problems) = ui.composed.members(ctx.library, &*ui.listened, env);
+            (
+                members,
+                lost,
+                problems.iter().map(ToString::to_string).collect(),
+            )
+        }
     };
+    ui.reader = reader;
     // The same projection the startup path uses (#84), so refiltering cannot
     // quietly file things a second way.
     if let Some(at) = order_lost.first() {
@@ -4428,7 +4462,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // itself, looks exactly like a query that matched nothing — and telling
     // those apart by staring at the screen is the failure this project keeps
     // paying for.
-    ui.view_problem = problems.first().map(ToString::to_string);
+    ui.view_problem = problems.first().cloned();
     if let Some(p) = ui.view_problem.clone() {
         ui.audit.line("view", &p);
         ui.notify(p);

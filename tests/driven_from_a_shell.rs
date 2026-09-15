@@ -1863,12 +1863,13 @@ fn a_cached_tree_is_keyed_by_the_question_it_answers() {
         "flat has {flat} nodes and grouped {grouped} — the cache answered the wrong grouping"
     );
 
-    // A filter nothing matches is a different question again, and asked *after* the two above
-    // so a stale entry would be the thing returned.
-    let none = total(serde_json::json!({ "limit": 1, "filter": "artist=\"nobody at all\"" }));
+    // A view nothing matches is a different question again, and asked *after* the two above so
+    // a stale entry would be the thing returned. A bare filter is a view of one term (#261),
+    // which is what makes `view` strictly wider than the `filter` it replaced.
+    let none = total(serde_json::json!({ "limit": 1, "view": "artist=\"nobody at all\"" }));
     assert_eq!(
         none, 0,
-        "a filter matching nothing was answered with {none} nodes from another question"
+        "a view matching nothing was answered with {none} nodes from another question"
     );
 
     // And back to the first, which must still be right rather than evicted into something else.
@@ -3067,7 +3068,7 @@ fn an_attached_view_draws_the_same_pane_as_a_detached_one() {
         Some(gmuse::ui::holding_remote::Remote::open(
             std::sync::Arc::clone(&client),
         )),
-        members,
+        members.clone(),
         levels,
         true,
     ));
@@ -3087,6 +3088,140 @@ fn an_attached_view_draws_the_same_pane_as_a_detached_one() {
         lines(&local)
     );
     assert_eq!(remote, local, "the two panes differ");
+
+    // **And a narrowed view narrows both** — #261. The two above agree over the whole library,
+    // which is the one view an implementation can match by ignoring the question — and ignoring
+    // it is exactly what the attached one used to do.
+    // **A title no other row's contains.** A filter matches on substring, so `title="tone"`
+    // also selects `tone2` and narrows nothing — which the assertion below catches rather than
+    // letting the two panes agree about the whole library a second time.
+    let title = {
+        use gmuse::model::rows::Listing;
+        let titles: Vec<String> = answer
+            .library
+            .rows()
+            .into_iter()
+            .filter_map(|id| answer.library.listed(id))
+            .map(|slip| slip.listed().title.to_string())
+            .collect();
+        titles
+            .iter()
+            .find(|t| {
+                !titles
+                    .iter()
+                    .any(|other| other != *t && other.contains(&**t))
+            })
+            .expect("a title that is not a prefix of another")
+            .clone()
+    };
+    let source = format!("title={title:?}");
+    let stack = gmuse::view::Stack::parse(&source).expect("the view parses");
+    assert_eq!(
+        stack.label(),
+        source,
+        "the view does not survive the round trip it crosses the wire as"
+    );
+
+    let narrowed = {
+        let env = gmuse::query::filter::Env {
+            listened: Some(&*answer.listened),
+            named: None,
+            now: gmuse::history::now(),
+        };
+        stack.members(&answer.library, &*answer.listened, env).0
+    };
+    assert!(
+        !narrowed.is_empty() && narrowed.len() < members.len(),
+        "{source} selected {} of {} — it narrows nothing",
+        narrowed.len(),
+        members.len()
+    );
+
+    let mut here = gmuse::ui::Ui::new(gmuse::ui::holding::of(
+        Some(&answer.library),
+        None,
+        narrowed,
+        levels,
+        true,
+    ));
+    here.tree.open_everything(&here.library);
+    let local = drawn(&here);
+
+    let mut there = gmuse::ui::Ui::new(gmuse::ui::holding::of(
+        None,
+        Some(gmuse::ui::holding_remote::Remote::showing(
+            std::sync::Arc::clone(&client),
+            gmuse::ui::holding_remote::Showing {
+                view: Some(source.clone()),
+                levels: None,
+            },
+        )),
+        Default::default(),
+        levels,
+        true,
+    ));
+    there.tree.open_everything(&there.library);
+    let remote = drawn(&there);
+
+    assert!(
+        lines(&local) > 1,
+        "the narrowed local pane drew {} lines:\n{local}",
+        lines(&local)
+    );
+    assert_eq!(
+        remote, local,
+        "the two panes differ once the view is narrowed"
+    );
+}
+
+/// **A view that names nothing still says so, once the librarian is what resolves it** — #261,
+/// #119.
+///
+/// This is the half of the change that needed deciding rather than measuring. An attached view
+/// no longer resolves its own terms, so it no longer discovers that `saved="gone"` names
+/// nothing — and a view that selects no rows draws exactly like a filter that is merely too
+/// narrow. Telling those apart by staring at an empty pane is the failure §13 keeps recording,
+/// so the complaint travels back with the tree it explains.
+#[test]
+fn a_view_naming_a_saved_one_that_is_gone_says_so_over_the_wire() {
+    let (engine, _recording) = start_with_a_track("view-problem");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let remote = gmuse::ui::holding_remote::Remote::showing(
+        std::sync::Arc::clone(&client),
+        gmuse::ui::holding_remote::Showing {
+            view: Some("saved=\"no such view\"".to_string()),
+            levels: None,
+        },
+    );
+    let said = remote.said();
+    assert_eq!(
+        said.problems.len(),
+        1,
+        "the librarian reported {:?} about a view naming nothing",
+        said.problems
+    );
+    assert!(
+        said.problems[0].contains("no such view"),
+        "the complaint does not name what is missing: {:?}",
+        said.problems[0]
+    );
+
+    // **The instrument.** A `Remote` that reported a complaint about every view would satisfy
+    // the above and be useless — a view that names something real must come back quiet.
+    let fine = gmuse::ui::holding_remote::Remote::showing(
+        std::sync::Arc::clone(&client),
+        gmuse::ui::holding_remote::Showing {
+            view: None,
+            levels: None,
+        },
+    );
+    assert!(
+        fine.said().problems.is_empty(),
+        "the whole library is not a problem: {:?}",
+        fine.said().problems
+    );
 }
 
 /// **A page says where the next one starts, and a client that ignores it sees a short library**

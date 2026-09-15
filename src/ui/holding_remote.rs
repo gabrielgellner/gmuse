@@ -70,6 +70,25 @@ use crate::model::id::Id;
 use crate::model::rows::CopyId;
 use crate::shelf::SortKey;
 
+/// The view a `Remote` is showing, as the wire spells it.
+///
+/// **Set once, when the view changes.** A `Remote` is rebuilt rather than retuned, because its
+/// flat ordering is the view's too — see [`Remote::showing`].
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct Showing {
+    /// The composed view's own source, or `None` for the whole library.
+    pub view: Option<String>,
+    /// Two field names, or `Some(vec![])` for no grouping at all.
+    pub levels: Option<Vec<String>>,
+}
+
+/// What the librarian said about the view it was asked for.
+#[derive(Default, Clone)]
+pub struct Said {
+    pub problems: Vec<String>,
+    pub widened: Vec<usize>,
+}
+
 /// What one reply said, and what it was asked.
 #[derive(Default)]
 struct Last {
@@ -139,13 +158,30 @@ pub struct Remote {
 
 struct Inner {
     client: Arc<Client>,
+    /// **The composed view and the grouping, sent with every tree question** — #261.
+    ///
+    /// Held here rather than passed through `Browsing`, because a view is not a property of
+    /// any one question: every tree question is asked *of a view*, and threading it through
+    /// eight methods would let two of them disagree.
+    showing: Showing,
+    /// What the librarian said about the view, from the last reply that carried it.
+    ///
+    /// **Kept because the complaint and the question arrive together but are wanted apart**:
+    /// the tree is redrawn every frame and the complaint is reported once, when the view
+    /// changes. #119 is why it is reported at all.
+    said: Mutex<Said>,
     last: Mutex<Last>,
-    /// The flat ordering, fetched once and lent thereafter.
+    /// The flat ordering of this view, fetched **when something asks** and lent thereafter.
     ///
     /// [`Holding::sorted`] lends, so this has to own it — which is the whole reason that
     /// signature is worth keeping: view 2 scrolls through all 7,273 and must not ask per frame.
     /// 116 KB against the 40.6 MB it replaces.
-    sorted: Vec<CopyId>,
+    ///
+    /// **Lazy, because a reader is built per view and the tree never asks** — #261. Paging the
+    /// flat list of the whole library is 1.2 s, and paying it on every `:view` would have made
+    /// returning to the unnarrowed library slower than the walk this change removed. `OnceLock`
+    /// is what allows both: filled through `&self`, and lent as a slice afterwards.
+    sorted: std::sync::OnceLock<Vec<CopyId>>,
     /// Rows already asked for, so a redraw asks about the same forty once.
     #[allow(clippy::type_complexity)]
     rows_kept: Mutex<
@@ -163,21 +199,81 @@ struct Inner {
 impl Remote {
     /// Ask for the ordering once; everything else is asked as it is drawn.
     pub fn open(client: Arc<Client>) -> Self {
-        let sorted = walk(&client, serde_json::json!({ "levels": [] }))
-            .into_iter()
-            .filter_map(|n| match n {
-                Node::Track { id, .. } => Some(id),
-                _ => None,
-            })
-            .collect();
-        Remote {
+        Remote::showing(client, Showing::default())
+    }
+
+    /// **A reader of one view** — #261.
+    ///
+    /// A new `Remote` per view rather than a setter, and the flat ordering is why: `sorted`
+    /// lends, so it cannot be swapped behind a `&self`, and it is the view's ordering — a
+    /// narrowed view scrolls through fewer rows in view 2. Rebuilding is one paged walk and
+    /// happens when the view changes, which is exactly when the ordering really did.
+    ///
+    /// The client is shared, so this is not a reconnection.
+    pub fn showing(client: Arc<Client>, showing: Showing) -> Self {
+        let me = Remote {
             inner: Arc::new(Inner {
                 client,
+                showing,
+                said: Mutex::new(Said::default()),
                 last: Mutex::new(Last::default()),
-                sorted,
+                sorted: std::sync::OnceLock::new(),
                 rows_kept: Mutex::new(std::collections::HashMap::new()),
             }),
+        };
+        // **Ask once so the complaint is here before anybody looks.** A view is reported when
+        // it changes, which is now; the spine is the cheapest question that carries the
+        // answer, and the reply it caches is the one the first frame wants anyway.
+        let _ = me.fetch(&Expansion::default(), 0, 0, serde_json::Value::Null);
+        me
+    }
+
+    /// The flat ordering of this view, paged in the first time anybody asks.
+    fn ordering(&self) -> &[CopyId] {
+        self.inner.sorted.get_or_init(|| {
+            let mut base = serde_json::json!({ "levels": [] });
+            if let (Some(map), Some(view)) = (base.as_object_mut(), self.inner.showing.view.clone())
+            {
+                map.insert("view".into(), view.into());
+            }
+            walk(&self.inner.client, base)
+                .into_iter()
+                .filter_map(|n| match n {
+                    Node::Track { id, .. } => Some(id),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    /// Which view this reader is showing, so a caller can tell whether to build another.
+    pub fn shows(&self) -> &Showing {
+        &self.inner.showing
+    }
+
+    /// What the librarian said about the view, as of the last tree question.
+    pub fn said(&self) -> Said {
+        self.inner
+            .said
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    /// Put the view and the grouping into a tree question.
+    ///
+    /// Every `query.tree`, `query.reveal` and `query.under` goes through here, because a view
+    /// that reached two of the three would give a pane whose rows and whose `x` disagree.
+    fn asking(&self, mut params: serde_json::Value) -> serde_json::Value {
+        if let Some(map) = params.as_object_mut() {
+            if let Some(view) = self.inner.showing.view.clone() {
+                map.insert("view".into(), view.into());
+            }
+            if let Some(levels) = self.inner.showing.levels.clone() {
+                map.insert("levels".into(), levels.into());
+            }
         }
+        params
     }
 
     /// Reuse the last reply when the question has not changed.
@@ -231,9 +327,25 @@ impl Remote {
                 map.insert(k.clone(), v.clone());
             }
         }
-        let Ok(reply) = self.inner.client.call("query.tree", Some(params)) else {
+        let Ok(reply) = self
+            .inner
+            .client
+            .call("query.tree", Some(self.asking(params)))
+        else {
             return Last::default();
         };
+        // **The complaint arrives with the answer and is kept until it is asked for.** A tree
+        // is redrawn every frame; a broken saved view is reported once, when the view changes.
+        if let Ok(mut said) = self.inner.said.lock() {
+            said.problems = reply
+                .get("problems")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            said.widened = reply
+                .get("widened")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+        }
         let n = |key: &str| reply.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         Last {
             asked: None,
@@ -265,7 +377,11 @@ impl Remote {
         ) {
             map.insert("id".into(), v);
         }
-        let Ok(reply) = self.inner.client.call("query.under", Some(params)) else {
+        let Ok(reply) = self
+            .inner
+            .client
+            .call("query.under", Some(self.asking(params)))
+        else {
             return (Vec::new(), Vec::new());
         };
         // **A bare array of ids, not lines.** `query.under` answers what to play, and a
@@ -294,7 +410,7 @@ impl Browsing for Remote {
         };
         walk(
             &self.inner.client,
-            serde_json::json!({ "folds": parts_of(&folds) }),
+            self.asking(serde_json::json!({ "folds": parts_of(&folds) })),
         )
     }
 
@@ -349,7 +465,11 @@ impl Browsing for Remote {
                 map.insert("backwards".into(), (*backwards).into());
             }
         }
-        let reply = self.inner.client.call("query.reveal", Some(params)).ok()?;
+        let reply = self
+            .inner
+            .client
+            .call("query.reveal", Some(self.asking(params)))
+            .ok()?;
         Some(Found {
             open: paths_of(reply.get("open")?)?,
             at: reply.get("at")?.as_u64()? as usize,
@@ -359,15 +479,15 @@ impl Browsing for Remote {
 
 impl Holding for Remote {
     fn sorted(&self) -> &[CopyId] {
-        &self.inner.sorted
+        self.ordering()
     }
 
     fn len(&self) -> usize {
-        self.inner.sorted.len()
+        self.ordering().len()
     }
 
     fn is_empty(&self) -> bool {
-        self.inner.sorted.is_empty()
+        self.ordering().is_empty()
     }
 
     fn artist_count(&self) -> usize {
@@ -583,7 +703,7 @@ impl crate::model::rows::Listing for Remote {
     }
 
     fn rows(&self) -> Vec<CopyId> {
-        self.inner.sorted.clone()
+        self.ordering().to_vec()
     }
 
     fn row(
@@ -687,17 +807,17 @@ impl Remote {
 
         // The row asked for leads, so a caller that walks in some other order still gets what
         // it asked for in one trip rather than none.
-        let from = self.inner.sorted.iter().position(|r| *r == id);
+        // **Read ahead only if the ordering is already here.** Filling it is a walk of the
+        // whole view, which is far more than one row is worth — and `Listing::ahead` is how a
+        // caller that wants a block says so.
+        let from = self
+            .inner
+            .sorted
+            .get()
+            .and_then(|sorted| sorted.iter().position(|r| *r == id));
         let mut want = vec![id];
-        if let Some(at) = from {
-            want.extend(
-                self.inner
-                    .sorted
-                    .iter()
-                    .skip(at + 1)
-                    .take(AHEAD - 1)
-                    .copied(),
-            );
+        if let (Some(at), Some(sorted)) = (from, self.inner.sorted.get()) {
+            want.extend(sorted.iter().skip(at + 1).take(AHEAD - 1).copied());
         }
 
         // **Straight from the wire into what it is** — #261. A block of fifty rows is the

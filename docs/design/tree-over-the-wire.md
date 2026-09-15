@@ -641,10 +641,64 @@ a guard was raised rather than that nothing blew up: the old code could not have
 contains everything by construction. **Narrowing what you ask for makes "what else did this depend on?" a live
 question**, and a map built from everything answers it silently.
 
-## 18. What this does not decide
+## 18. The view never crossed, so an attached one drew the whole library
+
+The last item #261 listed: _"the filter-with-terms walk that still reads 7,273 rows to keep forty."_ It was a
+performance bug on top of a correctness one, and the correctness one was load-bearing.
+
+`holding::of` reads: **"the engine wins when there is one"** — and it does, by discarding the `members` set the caller
+just spent 732–824 ms computing. `Remote` then sent no filter with `query.tree`, so the engine grouped the whole
+library. **An attached gmuse could not narrow its tree at all**, and paid most of a second per `:view` not to.
+
+Proven rather than inferred. `an_attached_view_draws_the_same_pane_as_a_detached_one` passed throughout, because it
+handed both views the whole library — the one view an implementation can match by ignoring the question, which is
+exactly what the attached one did. Given a narrowed view it fails.
+
+### What crosses now
+
+The composed view, as its own source. `Stack::label()` is the text `:view` accepts and `Stack::parse` reads back, and a
+bare filter is a view of one term — so `view` replaces the `filter` those three methods carried and is strictly wider.
+The engine parses it, resolves it against the fold it already holds, and groups the shelf for the rows it selects.
+
+Two things the librarian now knows and the client cannot:
+
+- **`problems`.** A `saved=` term naming a definition that has gone, or one that reaches itself. #119 is explicit that
+  this must be said rather than shown as an empty library, and a client that no longer resolves its terms cannot
+  discover it.
+- **`widened`.** Which terms made the view wider, and so lost the list order. It comes from combining the row sets the
+  terms select, so unlike `problems` it cannot be recovered cheaply — there is no names-only shortcut.
+
+Both ride in the `query.tree` reply and are kept in the tree cache **beside the shelf they explain**. A cache hit does
+not resolve again, so a shelf handed back without its complaint would be a view that silently stopped complaining.
+
+Resolving server-side also fixed something nobody asked about: `query::found` passed `listened: None`, so `rating>=4`
+and `days_since_played` evaluated against nothing. `answer.listened` is both the `Listened` a filter reads and the
+`Definitions` a `saved=` term names, and it was always there.
+
+| `:view …`                   | before                   | after                  |
+| --------------------------- | ------------------------ | ---------------------- |
+| `artist="Boards of Canada"` | 733ms, **7,273 rows**    | 12ms, **1 row**        |
+| `rating>=4`                 | 823ms, **7,273 rows**    | 14ms, **35 rows**      |
+| `saved="no such view"`      | 7,273 rows, no complaint | 0.9ms, 0 rows, says so |
+
+`just view-cost`. Confirmed end to end in the real binary: `:view artist="Autechre"` draws 46 tracks and 1 artist,
+`:view all` returns to 7,273 and 614, and `:view saved="no such view"` draws nothing and says `no saved view`.
+
+### One cost moved rather than vanished
+
+A reader is built per view rather than retuned, because `Holding::sorted` lends and the flat ordering is the view's — a
+narrowed view scrolls fewer rows in view 2. Paging the unnarrowed flat list is ~0.8 s, so it became a `OnceLock` filled
+the first time anybody asks; the tree never does, and a narrowed view's is tiny.
+
+**A rebuild still asks**, to put view 2's cursor back by index, which is why returning to the whole library costs about
+what it did before. Restoring that cursor by mark rather than by index would remove it, and is not done.
+
+## 19. What this does not decide
 
 - **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
   served on the socket thread today. That is #261's first done-when and it is independent of everything here.
 - **The 41 detail reads behind `ctx.library`** — `row`, `listed`, `open`, `label_of`, `about`, `history`. They are the
   info panel's territory and `info-panel.md` has the rule for them. §1 is why they have to land in the same milestone.
 - **The picker.** `query.found` already exists and is ~1 ms; match positions on its rows are a separate done-when.
+- **Where view 2's cursor comes back from.** It is restored by index, which forces the flat ordering on every rebuild —
+  see §18. A mark would not, and marks are what the tree already uses.

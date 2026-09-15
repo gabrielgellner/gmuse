@@ -18,6 +18,27 @@ use crate::model::rows::CopyId;
 use crate::model::seam::Librarian;
 use crate::shelf::{Levels, Shelf};
 
+/// Build the reader for a view — #261.
+///
+/// **The view crosses the wire, not the membership.** An attached view used to resolve its own
+/// terms and hand the result here, where it was dropped on the floor: the engine was never told
+/// which rows were in the view, so an attached gmuse drew the whole library whatever `:view`
+/// said. It also cost 732-824ms a change to compute the set that was then discarded.
+///
+/// A reader is built per view rather than retuned, because `Holding::sorted` lends and the flat
+/// ordering is the view's — see [`crate::ui::holding_remote::Remote::showing`].
+pub fn reader(
+    client: std::sync::Arc<gmuse_client::Client>,
+    was: Option<&crate::ui::holding_remote::Remote>,
+    showing: crate::ui::holding_remote::Showing,
+) -> crate::ui::holding_remote::Remote {
+    match was {
+        // The same view asks the same questions, and rebuilding would re-walk the ordering.
+        Some(remote) if *remote.shows() == showing => remote.clone(),
+        _ => crate::ui::holding_remote::Remote::showing(client, showing),
+    }
+}
+
 /// Group `members` into what a view browses, or ask whoever already has.
 ///
 /// **The engine wins when there is one.** §4.2 says an attached view's librarian is the engine,
@@ -37,6 +58,8 @@ pub fn of(
     if let Some(remote) = engine {
         return Box::new(remote);
     }
+    // A detached view resolved the members itself, which is the walk an attached one no
+    // longer does: its view crossed the wire and the librarian resolved it (#261).
     match fold {
         Some(library) => Box::new(Shelf::grouped(library, members, levels, smart_artist_sort)),
         None => Box::new(Shelf::default()),

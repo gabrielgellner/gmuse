@@ -262,6 +262,11 @@ query-cost data="~/MusicLibrary/.gmuse":
 read-cost:
     cargo run --release --example what_a_read_costs
 
+# What changing the view costs over the socket (#261). Needs a running engine.
+[group('test')]
+view-cost:
+    cargo run --release --example what_a_view_costs
+
 # What pairing recordings to copies costs over the socket (#261). Needs a running engine.
 [group('test')]
 pairing-cost:
