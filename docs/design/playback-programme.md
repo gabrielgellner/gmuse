@@ -248,6 +248,21 @@ Nothing in this document is implemented. Today "the librarian" is a thread stand
 playing — `src/main.rs:2212` for a view, `src/main.rs:3393` for a server — and the audio engine resolves what plays next
 itself, through `gmuse-library`'s `Shelf` and `next::`.
 
+**The programme is not durable, and the session file is standing in for it.** §1 says the librarian owns an ordered,
+editable, versioned list of what will play — and today nothing writes it down: a `gmuse engine` restart loses the queue
+entirely, measured at 108 entries to 0. What survives is `session.toml`'s `queue`, which is a _view's_ record of where
+it was, restored into `ui.queue` on launch.
+
+That inversion has already cost one bug. §8.8's rule is out before in, so a read never discards an unseen edit — but the
+first `read_the_queue` is the one iteration that cannot honour it, because `push_the_queue` has no version to compute
+against until that reply arrives. So the read won by default and cleared the queue the session had just restored:
+written correctly, read correctly, dropped one line later. A restored queue is now kept when the engine has none, and
+offered on the next pass.
+
+**That is a patch over the ownership, not a settlement of it.** If the librarian owns the programme it should be what
+persists it, and a view's session file should hold no queue at all. Until then the two disagree about who remembers, and
+the tie-break is "whoever is not empty".
+
 **The check is a cargo one, not a convention:** `crates/gmuse-engine/Cargo.toml` has no `gmuse-library` line. The same
 idiom that turned `layers.md`'s direction rule from a source-scraping ratchet into a compile error. An audio engine that
 cannot name a `Recording` cannot quietly acquire an opinion about what follows one.

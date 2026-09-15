@@ -1484,6 +1484,95 @@ fn walk(at: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// plays from. So the mirror has to carry an edit *out* and another client's edit
 /// *in*, and refuse an edit computed against a version that has moved.
 ///
+/// **A restored queue is an edit nobody has seen, so an empty engine does not erase it.**
+///
+/// The programme does not survive an engine restart, and the session file is the only place
+/// it was written down. Restoring it put the rows back in `ui.queue` — and the first
+/// `read_the_queue` then cleared them, because the engine had none.
+///
+/// §8.8's rule is out before in, so that a read never discards an unseen edit. The first read
+/// is the one iteration that cannot honour it: `push_the_queue` has no version to compute
+/// against until that reply arrives, so it returns early and the read wins by default.
+///
+/// **Both halves are asserted, because the fix could go too far the other way.** A session
+/// restoring over a queue another view is already using would be worse than losing one.
+#[test]
+fn a_restored_queue_reaches_an_engine_that_has_none() {
+    let (engine, recording) = start_with_a_track("restored-queue");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    let held = desk.current();
+    let ctx = gmuse::ui::Context {
+        library: &held.library,
+        player: None,
+        gapless: None,
+    };
+    let row = |r: &str| {
+        gmuse::model::rows::Listing::rows(&held.library)
+            .into_iter()
+            .find(|id| {
+                gmuse::model::rows::Listing::recording_of(&held.library, *id).map(|x| x.to_string())
+                    == Some(r.to_string())
+            })
+            .expect("the imported row")
+    };
+
+    // The instrument: the engine must actually have nothing, or "it kept the restored one"
+    // is a claim about a queue that was never at risk.
+    let empty = client.call("queue.get", None).expect("queue.get");
+    assert_eq!(
+        empty["entries"].as_array().map(|e| e.len()),
+        Some(0),
+        "the engine already had a queue: {empty}"
+    );
+
+    // What `restore_session` leaves behind: rows in the queue, and no version yet.
+    let mut ui = gmuse::ui::Ui::new(Default::default());
+    ui.engine = Some(std::sync::Arc::clone(&client));
+    ui.queue.push_back(row(&recording));
+    assert_eq!(ui.queue_version(), 0, "a fresh view has read no version");
+
+    gmuse::ui::read_the_queue(&mut ui, &ctx);
+    assert_eq!(
+        ui.queue.entries().count(),
+        1,
+        "an engine with no queue erased the one the session restored"
+    );
+    assert!(ui.queue_version() > 0, "the version was never read");
+
+    // And the next iteration offers it, which is what makes it the engine's rather than
+    // this view's — another client has to be able to see it.
+    gmuse::ui::push_the_queue(&mut ui, &ctx);
+    let other = Client::connect(&engine.socket, "other", "0").expect("connect");
+    let seen = other.call("queue.get", None).expect("queue.get");
+    assert_eq!(
+        seen["entries"].as_array().map(|e| e.len()),
+        Some(1),
+        "the restored queue never reached the engine: {seen}"
+    );
+    assert_eq!(seen["entries"][0].as_str(), Some(recording.as_str()));
+
+    // **And the other way: an engine that has a queue wins.** A second view launching with a
+    // stale session must not push its own over one somebody is listening to.
+    let mut late = gmuse::ui::Ui::new(Default::default());
+    late.engine = Some(std::sync::Arc::clone(&client));
+    late.queue.push_back(row(&recording));
+    late.queue.push_back(row(&recording));
+    assert_eq!(late.queue.entries().count(), 2, "the stale session has two");
+
+    gmuse::ui::read_the_queue(&mut late, &ctx);
+    assert_eq!(
+        late.queue.entries().count(),
+        1,
+        "a stale session overwrote a queue the engine already had"
+    );
+}
+
 /// Driven through `ui::push_the_queue` and `ui::read_the_queue` rather than raw
 /// calls, because what is being tested is the view's half.
 #[test]

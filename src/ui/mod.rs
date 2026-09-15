@@ -1136,13 +1136,33 @@ pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
         );
     }
 
-    ui.queue.clear();
-    for id in &entries {
-        ui.queue.push_back(*id);
+    // **A restored queue is an edit nobody has seen.**
+    //
+    // §8.8's rule is out before in, so that this never discards one — and the very first
+    // read is the one iteration that cannot honour it. `push_the_queue` has no version to
+    // compute against until this reply arrives, so it returns early, and this would then
+    // clear what `restore_session` had just put back. The session's queue was written
+    // correctly, read correctly, and dropped one line later.
+    //
+    // **The engine having none is what makes offering it safe.** A second view with a queue
+    // of its own is not overwritten, because then `entries` is not empty and this does not
+    // apply. What it covers is the case the engine cannot: the programme does not survive an
+    // engine restart, and the session is the only place it was written down.
+    //
+    // The mirror is emptied rather than set, so the next `push_the_queue` sees a difference
+    // and offers it. Nothing is sent from here — reading is not writing (§8.8).
+    let restored = entries.is_empty() && ui.queue_version == 0 && !ui.queue.is_empty();
+    if restored {
+        ui.queue_mirror = Vec::new();
+    } else {
+        ui.queue.clear();
+        for id in &entries {
+            ui.queue.push_back(*id);
+        }
+        ui.queue_mirror = entries;
+        ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
     }
-    ui.queue_mirror = entries;
     ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
-    ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
 
     if let Some(label) = answer["scope"].as_str()
         && let Some(mode) = crate::next::Scope::parse(label)
