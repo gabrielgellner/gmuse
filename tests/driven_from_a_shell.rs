@@ -1573,6 +1573,60 @@ fn a_restored_queue_reaches_an_engine_that_has_none() {
     );
 }
 
+/// **Emptying the queue reaches the engine, because the engine is whose queue it is** — #233.
+///
+/// `:clear-queue` is a local edit like any other, and travels by the one path that keeps the
+/// mirror and the version in step: an empty `queue.set`, which is already what `dd`-ing the
+/// last row sends. No new method, and no second way for a queue to be emptied.
+#[test]
+fn clearing_the_queue_empties_the_engines_too() {
+    let (engine, recording) = start_with_a_track("clear-queue-wire");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    let held = desk.current();
+    let ctx = gmuse::ui::Context {
+        library: &held.library,
+        player: None,
+        gapless: None,
+    };
+    let row = gmuse::model::rows::Listing::rows(&held.library)
+        .into_iter()
+        .find(|id| {
+            gmuse::model::rows::Listing::recording_of(&held.library, *id).map(|x| x.to_string())
+                == Some(recording.clone())
+        })
+        .expect("the imported row");
+
+    let mut ui = gmuse::ui::Ui::new(Default::default());
+    ui.engine = Some(std::sync::Arc::clone(&client));
+    gmuse::ui::read_the_queue(&mut ui, &ctx);
+    ui.queue.push_back(row);
+    gmuse::ui::push_the_queue(&mut ui, &ctx);
+
+    // The instrument: clearing a queue the engine never had proves nothing.
+    let other = Client::connect(&engine.socket, "other", "0").expect("connect");
+    let before = other.call("queue.get", None).expect("queue.get");
+    assert_eq!(
+        before["entries"].as_array().map(|e| e.len()),
+        Some(1),
+        "the queue never reached the engine: {before}"
+    );
+
+    ui.queue.clear();
+    gmuse::ui::push_the_queue(&mut ui, &ctx);
+    let after = other.call("queue.get", None).expect("queue.get");
+    assert_eq!(
+        after["entries"].as_array().map(|e| e.len()),
+        Some(0),
+        "the engine kept a queue the view emptied: {after}"
+    );
+}
+
 /// Driven through `ui::push_the_queue` and `ui::read_the_queue` rather than raw
 /// calls, because what is being tested is the view's half.
 #[test]

@@ -2891,6 +2891,19 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // `dd` takes a count, as in vim: `3dd` removes three. It cuts —
         // the rows go to the register, so `dd` … `p` moves them, here or in
         // another playlist.
+        // **The whole queue, from any view.** `dd` empties it a row at a time and only from
+        // view 4; a queue is saved and restored, so it accumulates across sessions and the
+        // thing you want is usually "not these hundred". Undoable like every other queue edit.
+        Command::ClearQueue => {
+            let had = ui.queue.entries().count();
+            ui.queue.clear();
+            ui.queue_sel = 0;
+            ui.notify(match had {
+                0 => "the queue was already empty".to_string(),
+                1 => "cleared 1 from the queue".to_string(),
+                n => format!("cleared {n} from the queue"),
+            });
+        }
         Command::Remove => remove_rows(ui, ctx, n),
         Command::Yank => yank_rows(ui, ctx, n),
         Command::Undo => step_history(ui, ctx, true),
@@ -3559,6 +3572,9 @@ fn edited_key(ui: &Ui, cmd: &Command) -> Option<crate::undo::Key> {
             target: AddTarget::Queue,
             ..
         } => Some(crate::undo::Key::Queue),
+        // Emptying is the largest edit the queue has, so it is the one that most needs `u`.
+        Command::ClearQueue => Some(crate::undo::Key::Queue),
+
         Command::Remove | Command::RemoveToEnd | Command::Put { .. } => undo_key(ui),
         _ => None,
     }
@@ -9221,6 +9237,98 @@ mod tests {
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "u");
         assert!(ui.playlist.is_empty(), "the add was not undone");
+    }
+
+    /// **A queue is saved and restored, so it needs a way out** — the one thing `dd` per row
+    /// is not.
+    ///
+    /// A hundred entries nobody remembers choosing is the ordinary case: every `e` appends,
+    /// the queue is written at quit and read back at launch, and nothing drains it but playing
+    /// through. Reported as "lots of songs the user didn't select to hear before what they
+    /// want", which was the queue working exactly as designed and having no undo for a year's
+    /// worth of it.
+    #[test]
+    fn clearing_the_queue_empties_it_and_can_be_taken_back() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "clear-queue");
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "e");
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "e");
+        let before = ui.queue.entries().count();
+        // The instrument: clearing an empty queue empties it just as well.
+        assert!(
+            before > 1,
+            "only {before} queued, so clearing proves little"
+        );
+
+        type_line(&mut ui, &ctx, ":clear-queue");
+        assert_eq!(ui.queue.entries().count(), 0, "the queue was not emptied");
+        assert!(
+            ui.status.contains(&before.to_string()),
+            "it cleared {before} and said {:?}",
+            ui.status
+        );
+
+        // **Undoable, which is what makes it safe to reach for** — and undone *in the queue*,
+        // because `undo_key` is the list on screen while `edited_key` is the list the command
+        // changed. The same split that lets `a` in the library be undone in view 3.
+        ui.view = View::Queue;
+        press(&mut ui, &ctx, "u");
+        assert_eq!(
+            ui.queue.entries().count(),
+            before,
+            "undo did not put the queue back"
+        );
+    }
+
+    /// **Undone where the queue is, which is where its history lives.**
+    ///
+    /// Asserted rather than left implicit, because "nothing happened" is what both a missing
+    /// snapshot and a wrong-view undo look like — and only one of them is a bug.
+    #[test]
+    fn clearing_the_queue_is_undone_in_the_queue() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "clear-queue-view");
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "e");
+        let before = ui.queue.entries().count();
+        assert!(before > 0, "nothing queued");
+
+        type_line(&mut ui, &ctx, ":clear-queue");
+        press(&mut ui, &ctx, "u");
+        assert_eq!(
+            ui.queue.entries().count(),
+            0,
+            "the library view undid the queue's edit"
+        );
+        assert!(
+            ui.status.contains("undo"),
+            "it should say why nothing happened, and said {:?}",
+            ui.status
+        );
+    }
+
+    /// Clearing an already-empty queue says so rather than reporting an edit it did not make.
+    #[test]
+    fn clearing_an_empty_queue_says_it_was_empty() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "clear-empty");
+        assert_eq!(
+            ui.queue.entries().count(),
+            0,
+            "the fixture queued something"
+        );
+
+        type_line(&mut ui, &ctx, ":clear-queue");
+        assert!(
+            ui.status.contains("already empty"),
+            "it said {:?}",
+            ui.status
+        );
     }
 
     /// The queue is edited by hand too, so it gets the same protection.

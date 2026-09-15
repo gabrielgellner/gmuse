@@ -47,6 +47,7 @@ pub const VERBS: &[&str] = &[
     "add-queue",
     "bind",
     "bottom",
+    "clear-queue",
     "collect",
     "down",
     "edit",
@@ -183,6 +184,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             Command::Place(Place::parse(word).ok_or_else(|| ParseError::Bad(word.into(), "place"))?)
         }
         "playing" => Command::Playing,
+        "clear-queue" => Command::ClearQueue,
         "remove" => Command::Remove,
         "remove-to-end" => Command::RemoveToEnd,
         "yank" => Command::Yank,
@@ -847,6 +849,7 @@ pub fn format(cmd: &Command) -> String {
         Command::Place(p) => format!("place {}", p.name()),
         Command::Go(m) => format!("go {}", m.name()),
         Command::Playing => "playing".into(),
+        Command::ClearQueue => "clear-queue".into(),
         Command::Remove => "remove".into(),
         Command::RemoveToEnd => "remove-to-end".into(),
         Command::Yank => "yank".into(),

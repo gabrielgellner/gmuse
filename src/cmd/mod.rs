@@ -690,6 +690,16 @@ pub enum Command {
     /// it. Answers "where is the thing I am listening to?", which is a question
     /// neither selection nor search asks.
     Playing,
+    /// **Empty the queue.**
+    ///
+    /// A queue is appended to and drained by playing, so without this the only way to shorten
+    /// one is `dd` per row — and a queue accumulates across sessions, because it is saved and
+    /// restored. A hundred entries nobody remembers choosing is the ordinary case, not the
+    /// pathological one.
+    ///
+    /// **Undoable like every other queue edit**, which is what makes it safe to reach for: it
+    /// takes the same `undo::Key::Queue` snapshot `dd` and `e` do, so `u` puts it back.
+    ClearQueue,
     /// Remove the item under the cursor. Takes a count: `3dd`.
     Remove,
     /// Copy rows into the register without removing them. Takes a count.
