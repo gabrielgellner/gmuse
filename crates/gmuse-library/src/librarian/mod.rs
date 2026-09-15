@@ -434,7 +434,18 @@ impl Desk {
                 // **Playback state, not a fact.** It is not folded, not published
                 // and never written to the log — the programme says what will play,
                 // and what was played is a `RecordingPlayed` fact like any other.
-                let mut plan = crate::programme::Programme::new();
+                //
+                // **Written down beside the log all the same** — #257,
+                // `playback-programme.md` §9. "Not a fact" says which file it does not go
+                // in, not that it may be forgotten: stopping the engine lost the whole
+                // queue, and what survived was a *view's* copy of it, which is the wrong
+                // actor remembering and no help to an engine nobody is attached to.
+                let mut plan = programme::durable::recall(
+                    &published.load().library,
+                    read_from.as_deref(),
+                    device,
+                )
+                .unwrap_or_default();
 
                 // **The walker's own channel, and not a clone of `rx`'s sender** — #260. A
                 // thread holding a sender to the channel it reads from is a channel that never
@@ -536,12 +547,21 @@ impl Desk {
                         // row to a path.
                         Job::Programme { ask, reply } => {
                             let answer = published.load();
-                            let _ = reply.send(programme::answer(
-                                &mut plan,
-                                &answer.library,
-                                device,
-                                ask,
-                            ));
+                            // Asked before the ask is consumed, and acted on after — a
+                            // reorder writes the same list in a different order, so what
+                            // is worth writing down is decided by the ask rather than by
+                            // comparing lists.
+                            let mutating = ask.mutating();
+                            let out = programme::answer(&mut plan, &answer.library, device, ask);
+                            if mutating {
+                                programme::durable::remember(
+                                    &plan,
+                                    &answer.library,
+                                    read_from.as_deref(),
+                                    device,
+                                );
+                            }
+                            let _ = reply.send(out);
                             None
                         }
                         // **The scan runs here, and nothing waits on it.** It

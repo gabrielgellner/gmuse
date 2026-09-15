@@ -1291,3 +1291,108 @@ mod tests {
         assert_eq!(entries.len(), 2, "it answered with nothing");
     }
 }
+
+/// **The programme, written down so it outlives the engine** — #257, `playback-programme.md` §9.
+///
+/// §1 says the librarian owns an ordered, editable, versioned list of what will play, and until
+/// this nothing wrote it down: stopping the engine lost it whole, measured at 108 entries to 0.
+/// What survived a restart was `session.toml`'s copy — a *view's* record of a librarian's state,
+/// which is the wrong actor remembering and is no help at all to an engine nobody is attached
+/// to.
+///
+/// **Beside the log and named for the device, not in it.** The programme is playback state: not
+/// folded, not published, and not a fact — what was *played* is a `RecordingPlayed` fact like
+/// any other, and what *will* play is not a claim about music at all. The data directory
+/// already holds derived per-device state next to the log (the fold's snapshot), and the name
+/// follows the log's own `-<device>` convention so a synced directory never carries one
+/// machine's queue onto another.
+pub mod durable {
+    use super::*;
+    use crate::model::entity::Recording;
+    use crate::model::id::Id;
+
+    /// What is written down, and what deliberately is not.
+    ///
+    /// **Recordings, never `CopyId`s.** A `CopyId` is an arena index, meaningful only while the
+    /// cache that minted it lives — `session.rs` records the same trap from the other side: a
+    /// queue keyed by one does not fail to restore, it silently restores *other tracks*. A
+    /// recording id survives a rename, a move, and being carried to another machine.
+    ///
+    /// **No tokens.** A token names an entry in *a* programme and the engine holds a window of
+    /// them; across a restart that engine is gone and every token with it. Minting fresh on
+    /// load is what makes a stale token fail to match rather than match the wrong entry, which
+    /// is the property [`crate::programme::Programme`] keeps its minting counter for.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct Written {
+        entries: Vec<Id<Recording>>,
+        mode: crate::programme::Mode,
+        scope: crate::programme::Scope,
+        shuffled: bool,
+    }
+
+    /// Where one device's programme is kept.
+    fn path(data_dir: &std::path::Path, device: Id<crate::model::entity::Device>) -> PathBuf {
+        data_dir.join(format!("programme-{device}.json"))
+    }
+
+    /// Write the programme down, as recordings.
+    ///
+    /// **Best effort, and silent.** A programme that cannot be written is a queue lost on the
+    /// next restart, which is a smaller harm than a librarian thread that stops answering —
+    /// and this runs on that thread, after every edit.
+    pub fn remember(
+        plan: &crate::programme::Programme,
+        library: &dyn Listing,
+        data_dir: Option<&std::path::Path>,
+        device: Id<crate::model::entity::Device>,
+    ) {
+        let Some(dir) = data_dir else { return };
+        let written = Written {
+            // A row whose recording the fold cannot name is dropped rather than written as
+            // something else: it would not survive the pairing on the way back in either.
+            entries: plan
+                .entries()
+                .iter()
+                .filter_map(|e| library.recording_of(e.row))
+                .collect(),
+            mode: plan.mode(),
+            scope: plan.scope(),
+            shuffled: plan.shuffled(),
+        };
+        if let Ok(text) = serde_json::to_string(&written) {
+            let _ = std::fs::write(path(dir, device), text);
+        }
+    }
+
+    /// Read it back, pairing recordings to the copies this device holds.
+    ///
+    /// `None` when there is nothing written, nothing readable, or nothing left of it — a
+    /// programme of no entries is what `Programme::new` already gives, and returning it here
+    /// would only claim a restore that restored nothing.
+    pub fn recall(
+        library: &dyn Listing,
+        data_dir: Option<&std::path::Path>,
+        device: Id<crate::model::entity::Device>,
+    ) -> Option<crate::programme::Programme> {
+        let dir = data_dir?;
+        let text = std::fs::read_to_string(path(dir, device)).ok()?;
+        let written: Written = serde_json::from_str(&text).ok()?;
+
+        // **One ask for the pairing, not one per entry.** `copies_of` is batched for exactly
+        // this shape, and a programme can be the whole library.
+        let here = library.copies_of(&written.entries);
+        let rows: Vec<_> = written
+            .entries
+            .iter()
+            .filter_map(|r| here.get(r).copied())
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+
+        let mut plan = crate::programme::Programme::of(rows);
+        plan.made_by(written.scope, written.shuffled);
+        plan.set_mode(written.mode);
+        Some(plan)
+    }
+}

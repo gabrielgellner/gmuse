@@ -1772,6 +1772,97 @@ fn quit_all_without_an_engine_is_just_quit() {
     );
 }
 
+/// **The programme outlives the engine that held it** — #257, `playback-programme.md` §9.
+///
+/// §1 says the librarian owns the list of what will play, and nothing wrote it down: stopping
+/// the engine lost it whole. What survived was `session.toml`'s copy, which is a *view's* record
+/// of a librarian's state — the wrong actor remembering, and no help at all to an engine nobody
+/// is attached to.
+///
+/// **Restarted on the same data directory**, because that is the whole claim: a second engine
+/// reading what the first wrote down, with no view involved at any point.
+#[test]
+fn a_programme_outlives_the_engine_that_held_it() {
+    let (engine, recording) = start_with_a_track("programme-durable");
+    let data = engine.dir.join("xdg").join("gmuse");
+
+    let version = |c: &Client| -> u64 {
+        c.call("queue.get", None).expect("queue.get")["version"]
+            .as_u64()
+            .expect("a version")
+    };
+    let entries = |c: &Client| -> Vec<String> {
+        c.call("queue.get", None).expect("queue.get")["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|e| e.as_str().expect("a recording").to_string())
+            .collect()
+    };
+
+    {
+        let client = Client::connect(&engine.socket, "view", "0").expect("connect");
+        // The instrument: an engine that started with a queue would prove nothing below.
+        assert!(
+            entries(&client).is_empty(),
+            "the engine started with a programme"
+        );
+        client
+            .call(
+                "queue.set",
+                Some(serde_json::json!({
+                    "recordings": [recording.clone()],
+                    "base_version": version(&client),
+                })),
+            )
+            .expect("queue.set");
+        assert_eq!(
+            entries(&client),
+            vec![recording.clone()],
+            "the set did not take"
+        );
+    }
+
+    // **A different engine, on the same data.** Dropping the fixture would delete the
+    // directory, so the child is stopped by hand and a second one started over it.
+    let mut first = engine;
+    let _ = first.child.kill();
+    let _ = first.child.wait();
+
+    let socket = first.dir.join("engine.sock");
+    let _ = std::fs::remove_file(&socket);
+    let child = Command::new(binary())
+        .args(["engine", "--foreground", "--null-audio"])
+        .env("GMUSE_SOCKET", &socket)
+        .env("GMUSE_DATA_DIR", &data)
+        .env("GMUSE_ROOTS", &first.dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn a second gmuse engine");
+    let second = Engine {
+        child,
+        dir: first.dir.clone(),
+        socket: socket.clone(),
+    };
+    // The fixture's `Drop` would remove the directory out from under the second engine.
+    std::mem::forget(first);
+
+    for _ in 0..400 {
+        if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let client = Client::connect(&second.socket, "view", "0").expect("connect to the second");
+    assert_eq!(
+        entries(&client),
+        vec![recording],
+        "the second engine did not read the first's programme"
+    );
+}
+
 /// Driven through `ui::push_the_queue` and `ui::read_the_queue` rather than raw
 /// calls, because what is being tested is the view's half.
 #[test]

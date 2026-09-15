@@ -248,20 +248,35 @@ Nothing in this document is implemented. Today "the librarian" is a thread stand
 playing — `src/main.rs:2212` for a view, `src/main.rs:3393` for a server — and the audio engine resolves what plays next
 itself, through `gmuse-library`'s `Shelf` and `next::`.
 
-**The programme is not durable, and the session file is standing in for it.** §1 says the librarian owns an ordered,
-editable, versioned list of what will play — and today nothing writes it down: a `gmuse engine` restart loses the queue
-entirely, measured at 108 entries to 0. What survives is `session.toml`'s `queue`, which is a _view's_ record of where
-it was, restored into `ui.queue` on launch.
+**The librarian writes the programme down, because the librarian is what owns it.** §1 says it owns an ordered,
+editable, versioned list of what will play, and for a while nothing wrote it down: a `gmuse engine` restart lost the
+queue entirely, measured at 108 entries to 0. What survived was `session.toml`'s `queue` — a _view's_ record of a
+librarian's state, which is the wrong actor remembering and no help at all to an engine nobody is attached to.
 
-That inversion has already cost one bug. §8.8's rule is out before in, so a read never discards an unseen edit — but the
-first `read_the_queue` is the one iteration that cannot honour it, because `push_the_queue` has no version to compute
-against until that reply arrives. So the read won by default and cleared the queue the session had just restored:
-written correctly, read correctly, dropped one line later. A restored queue is now kept when the engine has none, and
-offered on the next pass.
+It is written beside the log as `programme-<device>.json`, after every mutating ask, and read back when the librarian
+starts. Measured: four entries, an engine stopped and started, four entries.
 
-**That is a patch over the ownership, not a settlement of it.** If the librarian owns the programme it should be what
-persists it, and a view's session file should hold no queue at all. Until then the two disagree about who remembers, and
-the tie-break is "whoever is not empty".
+**"Not a fact" says which file it does not go in, not that it may be forgotten.** The programme is not folded, not
+published and not written to the log — what was _played_ is a `RecordingPlayed` fact like any other, and what _will_
+play is not a claim about music at all. The data directory already holds derived per-device state beside the log (the
+fold's snapshot), and the name follows the log's own `-<device>` convention, so a synced directory never carries one
+machine's queue onto another.
+
+**Recordings, never `CopyId`s.** A `CopyId` is an arena index, meaningful only while the cache that minted it lives;
+`session.rs` records the same trap from the other side, and the failure is not that the queue fails to come back but
+that it comes back naming _other tracks_. Reading it in pairs recordings to the copies this device holds, in one batched
+ask. **No tokens either**: a token names an entry in _a_ programme, the engine holds a window of them, and across a
+restart that engine is gone. Minting fresh is what keeps a stale token failing to match rather than matching the wrong
+entry.
+
+**A view's session file still carries a queue, and that is the detached case rather than a second opinion.** A detached
+view _is_ the librarian (§4.4), so it persists its own programme the only way it can. Attached, the engine's copy is the
+one that wins, and it is durable.
+
+That inversion had already cost one bug, which this does not undo: §8.8's rule is out before in, so a read never
+discards an unseen edit — but the first `read_the_queue` is the one iteration that cannot honour it, because
+`push_the_queue` has no version to compute against until that reply arrives. So the read won by default and cleared the
+queue the session had just restored. A restored queue is kept when the engine has none, and offered on the next pass.
 
 **The check is a cargo one, not a convention:** `crates/gmuse-engine/Cargo.toml` has no `gmuse-library` line. The same
 idiom that turned `layers.md`'s direction rule from a source-scraping ratchet into a compile error. An audio engine that
