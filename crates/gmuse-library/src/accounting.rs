@@ -126,10 +126,20 @@ mod tests {
             // Returned, so it is still live when `measure` reads the total.
             v
         });
+        // **A window, not an equality, because the counter is global** — it is a
+        // `GlobalAlloc`, so every other test thread in this binary is adding to and
+        // subtracting from the same two atomics while this one runs. `measure` reads `live()`
+        // before and after, and a neighbouring thread freeing in between makes the difference
+        // *smaller*: seen failing at 1,048,552, which is twenty-four bytes short of the
+        // megabyte and is a `Vec` somewhere else being dropped.
+        //
+        // The window is still three orders of magnitude tighter than "more than nothing",
+        // which is the claim that would be worthless — an allocator that counted only the
+        // `Vec`'s header would fail this, and so would one that counted nothing.
+        let slack = 64 * 1024;
         assert!(
-            kept >= 1024 * 1024,
-            "a megabyte allocated and {} bytes counted",
-            kept
+            kept >= 1024 * 1024 - slack,
+            "a megabyte allocated and {kept} bytes counted"
         );
         assert!(high >= kept, "the peak cannot be below what was kept");
 
@@ -140,8 +150,10 @@ mod tests {
             let v: Vec<u8> = vec![7; 1024 * 1024];
             v.len()
         });
+        // The same noise, in the other direction: a neighbouring thread allocating between the
+        // two reads makes this larger. The megabyte is the signal either way.
         assert!(
-            kept < 1024 * 1024,
+            kept < 1024 * 1024 - slack,
             "a megabyte was dropped and {kept} bytes stayed accounted for"
         );
     }
