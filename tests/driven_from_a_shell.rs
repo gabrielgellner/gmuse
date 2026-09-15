@@ -3174,6 +3174,142 @@ fn an_attached_view_draws_the_same_pane_as_a_detached_one() {
     );
 }
 
+/// **A picker underlines what matched, because the rows carry where** — #261's last done-when.
+///
+/// The alternative is the one the issue names and rejects: if the rows cross without their
+/// spans, the view needs `nucleo-matcher` to work out what to underline — and a matcher needs
+/// the rows to match against, which is holding a library again by the back door.
+///
+/// **Asserted by slicing, not by counting.** A span that merely exists proves nothing; the
+/// claim is that it selects the characters that matched, so the test cuts the returned title
+/// with the returned range and checks what comes out. That is also the only thing that catches
+/// the mapping this rests on — the match runs over folded, lower-cased text whose characters do
+/// not line up with the string the reply carries.
+#[test]
+fn a_picker_is_told_which_characters_matched() {
+    let (engine, _recording) = start_with_a_track("picker-spans");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let reply = client
+        .call(
+            "query.run",
+            Some(serde_json::json!({ "filter": "any=\"*one*\"", "limit": 10 })),
+        )
+        .expect("query.run");
+    let rows = reply["rows"].as_array().expect("rows");
+    assert!(
+        !rows.is_empty(),
+        "nothing matched, so there is nothing to underline and nothing is proven"
+    );
+
+    let mut checked = 0;
+    for row in rows {
+        let title = row["title"].as_str().expect("a title");
+        let chars: Vec<char> = title.chars().collect();
+        for mark in row["matched"].as_array().into_iter().flatten() {
+            let field = mark["field"].as_str().expect("a field name");
+            if field != "title" {
+                continue;
+            }
+            let at = mark["at"].as_u64().expect("at") as usize;
+            let to = mark["to"].as_u64().expect("to") as usize;
+            assert!(
+                to <= chars.len(),
+                "{field} span {at}..{to} runs past {title:?}, which is {} characters",
+                chars.len()
+            );
+            let cut: String = chars[at..to].iter().collect();
+            assert_eq!(
+                cut.to_lowercase(),
+                "one",
+                "the span picked {cut:?} out of {title:?} rather than what was searched for"
+            );
+            checked += 1;
+        }
+    }
+    // The instrument: every row could have come back with an empty `matched` and the loop above
+    // would have asserted nothing at all.
+    assert!(
+        checked > 0,
+        "{} rows matched and not one said where",
+        rows.len()
+    );
+
+    // **A field-scoped pattern marks that field and no other.** `any=` above looks everywhere,
+    // so it cannot tell a matcher that respects the selector from one that marks whatever it
+    // finds — and the fixture files under a name its titles do not contain, which is what makes
+    // this able to fail.
+    let scoped = client
+        .call(
+            "query.run",
+            // **A letter the other fields have too**, or scoping is unobservable: a pattern
+            // that occurs in one field only is marked in one field whether or not the selector
+            // is read.
+            Some(serde_json::json!({ "filter": "file_under=\"*n*\"", "limit": 10 })),
+        )
+        .expect("query.run");
+    let scoped = scoped["rows"].as_array().expect("rows");
+    assert!(!scoped.is_empty(), "no row files under that name");
+    let mut fields: Vec<String> = scoped
+        .iter()
+        .flat_map(|r| r["matched"].as_array().into_iter().flatten())
+        .map(|m| m["field"].as_str().expect("a field name").to_string())
+        .collect();
+    fields.sort();
+    fields.dedup();
+    assert_eq!(
+        fields,
+        vec!["file_under".to_string()],
+        "a `file_under=` pattern marked {fields:?}"
+    );
+
+    // **Two patterns finding the same run is one underline.** `any=` and `title=` both mark
+    // the title here, and a client drawing both would style those characters twice.
+    let twice = client
+        .call(
+            "query.run",
+            Some(serde_json::json!({
+                "filter": "any=\"*one*\" & title=\"*one*\"",
+                "limit": 10
+            })),
+        )
+        .expect("query.run");
+    let twice = twice["rows"].as_array().expect("rows");
+    assert!(!twice.is_empty(), "nothing matched both terms");
+    for row in twice {
+        let marks: Vec<_> = row["matched"].as_array().into_iter().flatten().collect();
+        let mut seen: Vec<String> = marks.iter().map(|m| m.to_string()).collect();
+        let before = seen.len();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            before,
+            "the same run came back twice for {:?}",
+            row["title"]
+        );
+    }
+
+    // And a filter that asks about no text says so, rather than marking something.
+    let quiet = client
+        .call(
+            "query.run",
+            Some(serde_json::json!({ "filter": "year>=0", "limit": 10 })),
+        )
+        .expect("query.run");
+    let marked: usize = quiet["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| r["matched"].as_array().map_or(0, |m| m.len()))
+        .sum();
+    assert_eq!(
+        marked, 0,
+        "a filter with no text in it marked {marked} runs"
+    );
+}
+
 /// **The picker asks the same library the browse tree does** — #261.
 ///
 /// `query.run` built its filter environment with `listened: None`, so every field backed by

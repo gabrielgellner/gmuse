@@ -732,12 +732,59 @@ would be right, merely late, and only under a concurrent write.
 instrument beside it — a body the brace-scan failed to delimit contains no `settled()` either, and neither does one that
 no longer loads a fold at all. Both of those were mutated and seen to fail, along with the absence itself.
 
-## 21. What this does not decide
+## 21. A picker underlines what matched, so the rows carry where
 
-- **Where the query worker lives.** §7.11 says a query runs off the job queue over an `Arc<Answer>`; `query.tree` is
-  served on the socket thread today. That is #261's first done-when and it is independent of everything here.
+#261's last done-when, and it is phrased as an either-or: _"`rows` carries match positions, or the picker cannot
+underline and the view needs the matcher"_ — and a matcher needs rows to match against, which is holding a library again
+by the back door.
+
+So `Found` gained `matched`, and `Glob` gained `spans`.
+
+### Why it is not `str::find`
+
+The match does not run over the string the reply carries. It runs over text that has been **folded and lower-cased**:
+`ö` becomes `o`, and on the second pass `oe`; `ß` becomes `ss`. An offset into that haystack is not an offset into the
+title, and underlining by it marks the wrong characters on every name with a diacritic — one off for `Löffler`, two for
+`Straße`.
+
+`text::folded_with_origins` therefore returns the folded text **and which original character each folded one came
+from**, out of the one walk `flatten` already does. Positions are **character** indices for the same reason the map is:
+`ö` is two bytes and `o` is one, so byte arithmetic is wrong even where character arithmetic is right.
+
+Mutating the mapping away is the clearest statement of what it buys: `loeffler` against `Löffler` reports `5..13`
+instead of `5..12`, and the underline slides one character off the end of the word.
+
+### What gets marked
+
+`Expr::patterns` walks the tree for every `Value::Text` comparison and hands back each with its selector.
+`Selector::Any` looks at all four drawn fields; `title=` looks at the title. Nothing re-runs the boolean logic — **a row
+reached the reply by matching, and a pattern that did not match finds nothing to point at**, so `a | b` marks whichever
+is present and `!a` marks nothing, without this having to stay in step with `compile`.
+
+Only the four fields a picker draws. A filter may look at a path, a year or a claim's basis; a span pointing at text the
+reply does not carry is one a client can neither draw nor check.
+
+### What the tests had to be changed to catch
+
+Two mutations survived the first version, and both were the test's fault rather than the code's:
+
+- **Ignoring the selector** passed, because `file_under="*nknown*"` marks one field whether or not the selector is read
+  — that substring is in no other field. It needs a pattern the other fields _also_ contain: `file_under="*n*"`, which
+  an unscoped matcher marks in `album` and `title` too.
+- **Dropping the dedup** passed, because one pattern cannot produce a duplicate. It needs two that find the same run:
+  `any="*one*" & title="*one*"`.
+
+The end-to-end assertion is by **slicing, not counting** — the test cuts the returned title with the returned range and
+checks what comes out is what was searched for. A span that merely exists proves nothing, and it is the only assertion
+that can see the mapping above being wrong.
+
+## 22. What this does not decide
+
+- ~~**Where the query worker lives.**~~ Answered in §20, and the answer was that it already did: the engine spawns a
+  thread per non-session line and `Desk::current()` is one atomic load. What was missing was a check, not a change.
 - **The 41 detail reads behind `ctx.library`** — `row`, `listed`, `open`, `label_of`, `about`, `history`. They are the
   info panel's territory and `info-panel.md` has the rule for them. §1 is why they have to land in the same milestone.
-- **The picker.** `query.found` already exists and is ~1 ms; match positions on its rows are a separate done-when.
+- **What a picker does with the spans.** The rows carry them (§21); no pane draws an underline yet, because #261's
+  remaining goals are where a `Context` stops carrying a `Librarian` at all.
 - **Where view 2's cursor comes back from.** It is restored by index, which forces the flat ordering on every rebuild —
   see §18. A mark would not, and marks are what the tree already uses.

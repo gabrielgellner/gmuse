@@ -222,6 +222,88 @@ impl Glob {
         crate::text::expanded(text).is_some_and(|s| self.matches_folded(&s))
     }
 
+    /// **Where this matched, as character ranges of `text` itself** — #261.
+    ///
+    /// Empty when it did not match, and empty when there is nothing to point at: `*` matches
+    /// everything and marks none of it, because underlining a whole library is not an answer.
+    ///
+    /// One range per literal segment, in the order they matched — `bo*canada` gives two — which
+    /// is what a picker draws. The ranges are **character** indices into the original string,
+    /// mapped back through the folding that the match itself ran over, so `loffler` typed
+    /// against `Löffler` marks the `ö` rather than sliding off the end.
+    pub fn spans(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        for spell in [false, true] {
+            let (hay, from) = crate::text::folded_with_origins(text, spell, !self.case_sensitive);
+            if let Some(found) = self.spans_folded(&hay) {
+                // A folded character stands for the original it came from, and a range ends one
+                // past its last — so the end is the origin of the last character, plus one.
+                return found
+                    .into_iter()
+                    .filter_map(|r| {
+                        let start = *from.get(r.start)?;
+                        let last = *from.get(r.end.checked_sub(1)?)?;
+                        (start <= last).then_some(start..last + 1)
+                    })
+                    .collect();
+            }
+            // The spelled-out pass is only tried when it differs, exactly as `matches` does.
+            if crate::text::expanded(text).is_none() {
+                break;
+            }
+        }
+        Vec::new()
+    }
+
+    /// The same walk as [`Glob::matches_folded`], keeping where each segment landed.
+    ///
+    /// **Deliberately a second function rather than a generalised first one.** The boolean is
+    /// on the hot path — one per row of the library per keystroke — and threading an optional
+    /// output through it would make every non-picker filter pay for a `Vec` it never reads.
+    fn spans_folded(&self, hay: &str) -> Option<Vec<std::ops::Range<usize>>> {
+        // Character indices throughout, because that is what a caller draws with; `find`
+        // answers in bytes, so each is converted where it is taken.
+        let chars = hay.chars().count();
+        let mut out = Vec::new();
+        let mut rest = hay;
+        let mut base = 0usize;
+        let mut segments = self.segments.as_slice();
+        if segments.is_empty() {
+            return (self.anchored_start == self.anchored_end || !self.anchored_start)
+                .then(Vec::new);
+        }
+
+        if self.anchored_start {
+            let first = &segments[0];
+            rest = rest.strip_prefix(first.as_str())?;
+            let n = first.chars().count();
+            out.push(0..n);
+            base = n;
+            segments = &segments[1..];
+        }
+        // **Taken off the end before the middle ones are searched for**, and its range is
+        // computed from the whole haystack rather than from `rest` — which is what the
+        // `matches_folded` it mirrors gets away with not doing, because it returns a bool.
+        let mut tail = None;
+        if self.anchored_end
+            && let Some((last, head)) = segments.split_last()
+        {
+            rest = rest.strip_suffix(last.as_str())?;
+            let n = last.chars().count();
+            tail = Some(chars - n..chars);
+            segments = head;
+        }
+        for seg in segments {
+            let at = rest.find(seg.as_str())?;
+            let before = rest[..at].chars().count();
+            let n = seg.chars().count();
+            out.push(base + before..base + before + n);
+            base += before + n;
+            rest = &rest[at + seg.len()..];
+        }
+        out.extend(tail);
+        Some(out)
+    }
+
     fn matches_folded(&self, text: &str) -> bool {
         // Lowering allocates. Measured elsewhere at well under a millisecond
         // for a whole-library pass, and this is not on the audio path.
@@ -538,6 +620,44 @@ pub enum Expr {
     /// and text and numbers needed different spellings. foobar2000 spells it
     /// `MISSING`/`PRESENT`; this is the same idea in this language's register.
     Present(Selector),
+}
+
+impl Expr {
+    /// **The text patterns in this expression, and where each may look** — #261.
+    ///
+    /// A picker underlines what matched, and what it draws is a handful of text fields. This
+    /// walks the tree for the comparisons that could have marked one, so a caller can ask each
+    /// of them where it landed.
+    ///
+    /// **Everything with a glob in it, without regard to how the tree combines them.** A row
+    /// reached here by matching, and a pattern that did not match its text simply finds nothing
+    /// to point at — so `a | b` marks whichever of the two is actually present, and a `!a`
+    /// marks nothing, without this having to re-run the boolean logic it would otherwise have
+    /// to keep in step with `compile`.
+    pub fn patterns(&self) -> Vec<(&Selector, &Glob)> {
+        let mut out = Vec::new();
+        self.collect_patterns(&mut out);
+        out
+    }
+
+    fn collect_patterns<'a>(&'a self, out: &mut Vec<(&'a Selector, &'a Glob)>) {
+        match self {
+            Expr::And(a, b) | Expr::Or(a, b) => {
+                a.collect_patterns(out);
+                b.collect_patterns(out);
+            }
+            Expr::Not(inner) => inner.collect_patterns(out),
+            Expr::Cmp {
+                selector,
+                value: Value::Text(glob),
+                ..
+            } => out.push((selector, glob)),
+            // A claim's or a derivation's bracket is about a fact's provenance rather than
+            // about the row's own text, and none of it is drawn in a picker line.
+            Expr::Cmp { .. } | Expr::Present(_) | Expr::Claims { .. } | Expr::Derivation { .. } => {
+            }
+        }
+    }
 }
 
 impl Expr {
@@ -1893,6 +2013,46 @@ mod tests {
         // Not an `any` field: `any` covers what you would search for by name,
         // and a label is a fact about the release rather than its title.
         assert!(!matches(r#"any="*trip*""#, &labelled));
+    }
+
+    /// **A picker underlines what matched, so the matcher says where** — #261.
+    ///
+    /// Character ranges of the original string, which is the whole difficulty: the match runs
+    /// over folded, lower-cased text, and folding changes both the characters and how many
+    /// there are. An offset into the haystack would mark the wrong thing on every title with a
+    /// diacritic.
+    #[test]
+    fn a_glob_says_where_it_matched() {
+        let spans = |pattern: &str, text: &str| Glob::new(pattern).spans(text);
+
+        // The plain cases, and the three anchorings.
+        assert_eq!(spans("*Ferrell*", "Sierra Ferrell Sings"), vec![7..14]);
+        assert_eq!(spans("Ferrell*", "Ferrell Sings"), vec![0..7]);
+        assert_eq!(spans("*Ferrell", "Sierra Ferrell"), vec![7..14]);
+        assert_eq!(spans("Ferrell", "Ferrell"), vec![0..7]);
+
+        // One range per literal segment, in the order they matched.
+        // Both ends anchored, because there is no star at either — so the text must start and
+        // end with them, which is what `globs_anchor_where_the_stars_are` next door pins down.
+        assert_eq!(spans("a*c", "abc"), vec![0..1, 2..3]);
+        assert_eq!(spans("*a*c*", "xaybcz"), vec![1..2, 4..5]);
+        assert_eq!(spans("a*b*c", "axxbyyc"), vec![0..1, 3..4, 6..7]);
+
+        // No match is no ranges, and neither is a pattern with nothing to point at: `*`
+        // matches everything and underlining a whole library is not an answer.
+        assert!(spans("*Ferrell*", "Sierra Hull").is_empty());
+        assert!(spans("*", "anything at all").is_empty());
+
+        // **The folding, which is why this is not `find`.** `ö` is one character that folds to
+        // one, and to two when spelled out; `ß` folds to two. Each has to land back on the
+        // character the reply actually carries.
+        assert_eq!(spans("*loffler*", "Anke Löffler"), vec![5..12]);
+        assert_eq!(spans("*loeffler*", "Anke Löffler"), vec![5..12]);
+        assert_eq!(spans("*strasse*", "Die Straße"), vec![4..10]);
+
+        // And the smart-case rule the glob already has: a capital makes it precise, and a
+        // pattern that no longer matches points at nothing rather than at the wrong place.
+        assert_eq!(spans("*Ferrell*", "sierra ferrell"), vec![]);
     }
 
     #[test]

@@ -163,6 +163,41 @@ impl Haystack {
     }
 }
 
+/// The folded text, and **which original character each folded one came from** — #261.
+///
+/// A picker underlines what matched, and the matching runs over folded, lower-cased text: `ö`
+/// becomes `o` and, spelled out, `oe`. So an offset into the haystack is not an offset into the
+/// string the reply carries, and underlining by it would mark the wrong characters on every
+/// title with a diacritic — one character off for `Löffler`, two for `Straße`.
+///
+/// The map is per *character*, not per byte, for the same reason: `ö` is two bytes and `o` is
+/// one, so byte arithmetic is wrong even where character arithmetic is right.
+///
+/// Both halves come from the one walk [`flatten`] already does, so a caller that needs
+/// positions pays for the mapping and one that does not pays nothing.
+pub fn folded_with_origins(s: &str, spell: bool, lower: bool) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(s.len());
+    let mut from = Vec::with_capacity(s.len());
+    for (at, c) in s.chars().enumerate() {
+        let replaced: Cow<'_, str> = match folding(c) {
+            Some((flat, spelled)) => Cow::Borrowed(if spell { spelled } else { flat }),
+            None => Cow::Owned(c.to_string()),
+        };
+        // **Lowered per character, and the count can still change.** `to_lowercase` is not one
+        // character in and one out for every input, so it is counted rather than assumed.
+        let piece: Cow<'_, str> = if lower {
+            Cow::Owned(replaced.to_lowercase())
+        } else {
+            replaced
+        };
+        for c in piece.chars() {
+            out.push(c);
+            from.push(at);
+        }
+    }
+    (out, from)
+}
+
 fn rewrite(s: &str, spell: bool) -> Cow<'_, str> {
     if !s.chars().any(|c| folding(c).is_some()) {
         return Cow::Borrowed(s);

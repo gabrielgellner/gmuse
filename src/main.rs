@@ -3105,6 +3105,9 @@ fn run_engine(
                         "file_under": row.file_under,
                         "album": row.album,
                         "length_ms": row.length_ms,
+                        // **Where the filter matched** — #261's last done-when. Without this a
+                        // picker needs the matcher to underline, and then it needs the rows.
+                        "matched": row.matched,
                     })
                 })
                 .collect();
