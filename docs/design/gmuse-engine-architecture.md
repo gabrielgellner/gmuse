@@ -515,9 +515,26 @@ The first message on a connection MUST be `hello`:
   "jsonrpc": "2.0",
   "id": 1,
   "method": "hello",
-  "params": { "protocol": "gmuse/0", "client": "nvim", "client_version": "0.1.0" }
+  "params": {
+    "protocol": "gmuse/0",
+    "client": "nvim",
+    "client_version": "0.1.0",
+    "session": "4812"
+  }
 }
 ```
+
+**`session` says which client this socket belongs to, and a client is usually a process.** A view opens _three_
+connections and is one client — the transport, the library reader and the event subscription — because a `Client` has
+one `Receiver<Event>` and two readers of one socket would steal each other's events. So `engine.status` reports both
+`clients` and `connections`, and they differ: one TUI on its own is `clients: 1, connections: 3`.
+
+The distinction is what `:qa` asks about before stopping the engine, since that ends playback for everyone rather than
+for the view that typed it. Counting sockets answered "two strangers are here" to a view sitting alone.
+
+Nothing derives anything from the value and it is **not authentication**: two connections carrying the same one are the
+same client, and that is all it says. Omitted or empty, each connection counts for itself — the behaviour before the
+field existed, which over-counts an older client rather than merging it with a stranger.
 
 ```json
 {

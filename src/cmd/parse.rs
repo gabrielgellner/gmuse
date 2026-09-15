@@ -82,6 +82,14 @@ pub const VERBS: &[&str] = &[
     "playlist",
     "prev",
     "q",
+    // **`qa` and not `quit-all`.** A long alias would make `quit` a prefix of another verb,
+    // which is the `search`/`search-next` case: `:qui<Tab>` would stop on `quit` without a
+    // space rather than finishing. That is a real everyday cost for an alias nobody asked for.
+    //
+    // **`qa!` is deliberately not listed.** It is a modifier somebody types on purpose, vim
+    // does not complete `:q!` either, and the scan below cannot see a verb with a `!` in it —
+    // so listing it would be a claim this guard cannot check.
+    "qa",
     "put",
     "put-before",
     "quit",
@@ -357,6 +365,12 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         }),
         "help" => Command::Help,
         "quit" | "q" => Command::Quit,
+        // **Four spellings and no `!` parser.** vim's bang is exactly the right convention for
+        // "do it anyway", and there is no general one here — so these are verbs in their own
+        // right, the way `q` and `quit` already are. A general `!` is a syntax decision worth
+        // making on purpose rather than as a side effect of one command wanting it.
+        "qa" => Command::QuitAll { force: false },
+        "qa!" => Command::QuitAll { force: true },
         "info" => Command::Info(info_spec(rest)?),
         "back" => Command::Back,
 
@@ -965,6 +979,8 @@ pub fn format(cmd: &Command) -> String {
         Command::SearchPrev => "search-prev".into(),
         Command::Help => "help".into(),
         Command::Quit => "quit".into(),
+        Command::QuitAll { force: false } => "qa".into(),
+        Command::QuitAll { force: true } => "qa!".into(),
     }
 }
 

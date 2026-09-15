@@ -54,6 +54,12 @@ pub struct Client {
     ///
     /// `None` in tests that need no socket, which is most of them.
     hangup: Mutex<Option<std::os::unix::net::UnixStream>>,
+    /// **Which client this socket belongs to**, from `hello` — see `HelloParams::session`.
+    ///
+    /// Empty until the handshake, and empty thereafter for a client too old to say. Both are
+    /// treated the same way by [`Subscribers::clients`]: a connection that names no session
+    /// counts for itself, which is what it did before there was a session to name.
+    session: Mutex<String>,
 }
 
 impl Client {
@@ -66,6 +72,8 @@ impl Client {
             topics: Mutex::new(Vec::new()),
             gone: AtomicBool::new(false),
             hangup: Mutex::new(None),
+            // Filled by the handshake; a socket that never greets never counts as a client.
+            session: Mutex::new(String::new()),
         }
     }
 
@@ -190,6 +198,15 @@ impl Client {
     pub fn is_gone(&self) -> bool {
         self.gone.load(Ordering::Acquire)
     }
+
+    /// Remember which client greeted over this socket.
+    pub fn greeted_as(&self, session: &str) {
+        *self.session.lock().expect("session") = session.to_string();
+    }
+
+    fn session(&self) -> String {
+        self.session.lock().expect("session").clone()
+    }
 }
 
 /// Everyone currently connected.
@@ -218,6 +235,42 @@ impl Subscribers {
         self.clients.lock().expect("clients").len()
     }
 
+    /// **How many are still there**, which is not the same as how many were added.
+    ///
+    /// A connection is forgotten on the way past a `publish`, so between publishes the vector
+    /// holds clients that have hung up. That is harmless for publishing and wrong for counting:
+    /// "is anybody else attached?" is a question `:qa` asks to decide whether stopping the
+    /// engine would surprise somebody, and a client that left an hour ago is not somebody.
+    pub fn live(&self) -> usize {
+        let mut clients = self.clients.lock().expect("clients");
+        clients.retain(|c| !c.is_gone());
+        clients.len()
+    }
+
+    /// **How many distinct clients are attached, which is not how many sockets are open.**
+    ///
+    /// A view opens three connections and is one client. Counting sockets answers "two
+    /// strangers are here" to a view sitting on its own, which is the wrong answer to the only
+    /// question anybody asks this — whether stopping the engine would surprise somebody.
+    ///
+    /// A connection that named no session counts for itself, under a key nothing else can
+    /// collide with, so an older client is over-counted rather than merged with a stranger.
+    pub fn clients(&self) -> usize {
+        let mut clients = self.clients.lock().expect("clients");
+        clients.retain(|c| !c.is_gone());
+        let mut seen = std::collections::HashSet::new();
+        let mut anonymous = 0usize;
+        for c in clients.iter() {
+            let session = c.session();
+            if session.is_empty() {
+                anonymous += 1;
+            } else {
+                seen.insert(session);
+            }
+        }
+        seen.len() + anonymous
+    }
+
     /// How much is still waiting to be written, across every client.
     pub fn pending(&self) -> usize {
         self.clients
@@ -235,6 +288,60 @@ impl Subscribers {
 
 #[cfg(test)]
 mod tests {
+    /// **A view is three sockets and one client** — #233, `HelloParams::session`.
+    ///
+    /// The count exists so `:qa` can ask whether stopping the engine would surprise somebody.
+    /// Counting sockets answers "two strangers are here" to a view sitting on its own, which
+    /// is the wrong answer to the only question anybody asks this.
+    #[test]
+    fn connections_sharing_a_session_are_one_client() {
+        let subs = Subscribers::default();
+        let view: Vec<Arc<Client>> = (0..3)
+            .map(|_| {
+                let c = Arc::new(Client::new(8));
+                c.greeted_as("pid-1");
+                subs.add(Arc::clone(&c));
+                c
+            })
+            .collect();
+
+        assert_eq!(subs.live(), 3, "three sockets were added");
+        assert_eq!(subs.clients(), 1, "one view is one client");
+
+        // A different session is a different client.
+        let stranger = Arc::new(Client::new(8));
+        stranger.greeted_as("pid-2");
+        subs.add(Arc::clone(&stranger));
+        assert_eq!(subs.clients(), 2, "a second session is a second client");
+
+        // **A connection that named none counts for itself**, rather than merging with a
+        // stranger — an older client is over-counted, which is the safe direction for a
+        // question asked before stopping the engine.
+        // **Two of them**, because one unnamed connection counting for itself and one merged
+        // under the empty key give the same total — which is how a mutation that merged them
+        // survived the first version of this test.
+        let anonymous: Vec<Arc<Client>> = (0..2)
+            .map(|_| {
+                let c = Arc::new(Client::new(8));
+                subs.add(Arc::clone(&c));
+                c
+            })
+            .collect();
+        assert_eq!(
+            subs.clients(),
+            4,
+            "two unnamed connections were merged into one client"
+        );
+        let _ = &anonymous;
+
+        // And hanging up removes them, which is what makes the count about now.
+        for c in &view {
+            c.close();
+        }
+        assert_eq!(subs.clients(), 3, "the view is gone and still counted");
+        assert_eq!(subs.live(), 3, "its sockets are gone and still counted");
+    }
+
     use super::*;
 
     fn event(topic: Topic) -> Event {

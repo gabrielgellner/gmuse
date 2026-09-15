@@ -3784,6 +3784,28 @@ fn run_engine(
                     "protocol": gmuse_proto::PROTOCOL,
                     "methods": gmuse_proto::method::ALL,
                     "pid": std::process::id(),
+                    // **Two numbers, because they answer different questions** — #233.
+                    //
+                    // `clients` counts who is attached; `connections` counts sockets, and a
+                    // view is three of them. `:qa` asks whether stopping the engine would
+                    // surprise somebody, which is the first — the second reported alone said
+                    // "two strangers are here" to a view sitting on its own.
+                    //
+                    // **Both include the one asking.** A caller subtracts itself; reporting
+                    // "others" would need the engine to know which connection asked, which it
+                    // has no reason to.
+                    "clients": self
+                        .engine
+                        .get()
+                        .and_then(|weak| weak.upgrade())
+                        .map(|e| e.clients())
+                        .unwrap_or(0),
+                    "connections": self
+                        .engine
+                        .get()
+                        .and_then(|weak| weak.upgrade())
+                        .map(|e| e.connections())
+                        .unwrap_or(0),
                 })),
 
                 Call::EngineShutdown => {

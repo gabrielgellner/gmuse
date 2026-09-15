@@ -807,6 +807,14 @@ impl Ui {
     /// A reader rather than a public field: the version and the mirror move
     /// together, and a caller that could set one without the other would have a
     /// view that thinks it is up to date and is not.
+    /// Whether the loop has been asked to stop — for a test driving `:q` or `:qa`.
+    ///
+    /// A reader rather than a public field: the flag is the loop's, and a caller that could
+    /// set it could stop the program from anywhere.
+    pub fn quitting(&self) -> bool {
+        self.quit
+    }
+
     pub fn queue_version(&self) -> u64 {
         self.queue_version
     }
@@ -3272,6 +3280,66 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         }
         Command::Help => show_help(ui),
         Command::Quit => ui.quit = true,
+        // **`:q` detaches, `:qa` stops the engine.** Attaching is the default (#233) and the
+        // engine outlives any one view, so the ordinary quit leaves music playing — which is
+        // right, and is also why there has to be a second one.
+        Command::QuitAll { force } => quit_all(ui, force),
+    }
+}
+
+/// Quit, and stop the engine — `:qa`.
+///
+/// **Refused while somebody else is attached**, because stopping the engine ends playback for
+/// every client rather than only this one. `engine.status` counts *clients*, including this
+/// one, so anything above one is somebody else: another view, a status bar, a `gmuse ctl`
+/// mid-call.
+///
+/// **Clients and not connections**, which is the whole of `HelloParams::session`: this view is
+/// three sockets — transport, reads, events — and counting those reported two strangers to a
+/// view sitting on its own, so `:qa` refused every time and `:qa!` was the only one that
+/// worked. Measured before and after: one TUI is `clients=1, connections=3`.
+///
+/// `:qa!` goes ahead anyway, which is vim's bang and is what a polling status bar makes
+/// necessary — it is attached about as often as not.
+///
+/// **Detached, this is just `:q`**, and says so rather than reporting a shutdown that no engine
+/// received.
+fn quit_all(ui: &mut Ui, force: bool) {
+    let Some(client) = ui.engine.clone() else {
+        ui.quit = true;
+        ui.notify("no engine to stop — quitting");
+        return;
+    };
+
+    if !force {
+        let others = client
+            .call_within(
+                gmuse_proto::request::method::ENGINE_STATUS,
+                None,
+                std::time::Duration::from_secs(2),
+            )
+            .ok()
+            .and_then(|status| status["clients"].as_u64())
+            .unwrap_or(1)
+            .saturating_sub(1);
+        if others > 0 {
+            ui.notify(format!(
+                "{others} other client(s) attached — `:qa!` stops the engine anyway"
+            ));
+            return;
+        }
+    }
+
+    match client.call_within(
+        gmuse_proto::request::method::ENGINE_SHUTDOWN,
+        None,
+        std::time::Duration::from_secs(2),
+    ) {
+        Ok(_) => ui.quit = true,
+        // **Said rather than quit through.** A `:qa` that closed the view and left the engine
+        // playing would look exactly like `:q`, and the next launch would attach to the thing
+        // it thought it had stopped.
+        Err(e) => ui.notify(format!("the engine did not stop: {e}")),
     }
 }
 

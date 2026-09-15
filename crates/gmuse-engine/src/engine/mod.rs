@@ -167,9 +167,14 @@ impl Engine {
         self.subscribers.publish(event)
     }
 
-    /// How many views are connected.
+    /// How many **sockets** are open right now, the hung-up ones pruned.
+    pub fn connections(&self) -> usize {
+        self.subscribers.live()
+    }
+
+    /// How many **clients** are attached right now — a view is three sockets and one client.
     pub fn clients(&self) -> usize {
-        self.subscribers.len()
+        self.subscribers.clients()
     }
 
     /// Wait, briefly, for what is queued to reach the sockets.
@@ -560,6 +565,12 @@ fn serve_line(
         match hello(params, identity, answers) {
             Ok(result) => {
                 *greeted = true;
+                // **Which client this socket belongs to.** A view opens three and is one, so
+                // the engine has to be told rather than counting sockets — see
+                // `HelloParams::session`.
+                if let Some(client) = client {
+                    client.greeted_as(&params.session);
+                }
                 Ok(result)
             }
             Err(e) => {

@@ -1627,6 +1627,151 @@ fn clearing_the_queue_empties_the_engines_too() {
     );
 }
 
+/// **`:qa` stops the engine, and refuses while somebody else is attached** — #233.
+///
+/// `:q` leaves the engine playing, which is a detach in tmux's sense and is what attaching by
+/// default makes the ordinary case. `:qa` is the other one, and it ends playback for every
+/// client rather than only this one — so it asks first, the way vim's `:qa` refuses over an
+/// unsaved buffer and takes `!` the same way.
+#[test]
+fn quit_all_stops_the_engine_unless_somebody_else_is_attached() {
+    let (engine, _recording) = start_with_a_track("quit-all");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let mut ui = gmuse::ui::Ui::new(Default::default());
+    ui.engine = Some(std::sync::Arc::clone(&client));
+    let held = gmuse::librarian::Desk::read_only(
+        Default::default(),
+        gmuse::model::id::Id::derived(b"quit-all"),
+        0,
+        engine.dir.join("xdg").join("gmuse"),
+    )
+    .current();
+    let ctx = gmuse::ui::Context {
+        library: &held.library,
+        player: None,
+        gapless: None,
+    };
+
+    // **Somebody else is here**, which is the case worth refusing — and "somebody else" is a
+    // different *session*, not a second socket. Two `Client::connect` calls from this process
+    // are one client, correctly, because `HelloParams::session` is the process id. So the
+    // stranger greets by hand with a session of its own, which is what another program's
+    // connection looks like from the engine's side.
+    let other = {
+        use std::io::{BufRead, Write};
+        let mut sock = std::os::unix::net::UnixStream::connect(&engine.socket).expect("connect");
+        let greeting = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "hello",
+            "params": {
+                "protocol": "gmuse/0",
+                "client": "stranger",
+                "session": "not-this-process",
+            },
+        });
+        writeln!(sock, "{greeting}").expect("hello");
+        sock.flush().expect("flush");
+        // Read the reply, so the greeting has certainly been processed before the count below.
+        let mut reply = String::new();
+        std::io::BufReader::new(sock.try_clone().expect("clone"))
+            .read_line(&mut reply)
+            .expect("a hello reply");
+        assert!(reply.contains("engine_generation"), "not a hello: {reply}");
+        sock
+    };
+
+    // **A second connection of this view's own**, so the count below is about grouping rather
+    // than about there happening to be one socket each. Without it an engine that recorded no
+    // session at all would answer two as well — every connection its own client — and this
+    // would pass while the session did nothing.
+    let mine_too = Client::connect(&engine.socket, "view-again", "0").expect("connect");
+
+    // The instrument: the engine must actually see two, or the refusal below is about nothing.
+    let status = client.call("engine.status", None).expect("engine.status");
+    let seen = status["clients"].as_u64().expect("a client count");
+    assert_eq!(seen, 2, "the engine counts {seen} clients, not two");
+    // **And there are more sockets than clients**, which is the whole point of the session:
+    // this view is one client, and a count of sockets would have agreed only by accident.
+    assert!(
+        status["connections"].as_u64().expect("a connection count") > seen,
+        "this view holds two sockets and is one client, so there are more: {status}"
+    );
+    drop(mine_too);
+
+    gmuse::ui::execute(
+        &mut ui,
+        &ctx,
+        gmuse::cmd::parse::line("qa")
+            .expect("parses")
+            .expect("a command"),
+    );
+    assert!(!ui.quitting(), "it quit while another client was attached");
+    assert!(
+        ui.status.contains("other client"),
+        "it refused without saying why: {:?}",
+        ui.status
+    );
+    assert!(
+        client.call("engine.status", None).is_ok(),
+        "the engine stopped despite refusing to"
+    );
+
+    // **`:qa!` goes anyway**, which is what a polling status bar makes necessary.
+    gmuse::ui::execute(
+        &mut ui,
+        &ctx,
+        gmuse::cmd::parse::line("qa!")
+            .expect("parses")
+            .expect("a command"),
+    );
+    assert!(ui.quitting(), "`:qa!` did not quit");
+
+    // And the engine really stopped, which is the half a quitting view cannot show.
+    let mut stopped = false;
+    for _ in 0..100 {
+        if Client::connect(&engine.socket, "probe", "0").is_err() {
+            stopped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(stopped, "the engine is still accepting connections");
+    drop(other);
+}
+
+/// Detached there is nothing to stop, and `:qa` says so rather than reporting a shutdown
+/// no engine received.
+#[test]
+fn quit_all_without_an_engine_is_just_quit() {
+    let store = gmuse::operations::scan::Holdings::default();
+    let _ = &store;
+    let mut ui = gmuse::ui::Ui::new(Default::default());
+    assert!(ui.engine.is_none(), "this view has an engine");
+    let held = gmuse::model::seam::Librarian::default();
+    let ctx = gmuse::ui::Context {
+        library: &held,
+        player: None,
+        gapless: None,
+    };
+
+    gmuse::ui::execute(
+        &mut ui,
+        &ctx,
+        gmuse::cmd::parse::line("qa")
+            .expect("parses")
+            .expect("a command"),
+    );
+    assert!(ui.quitting(), "`:qa` did not quit a detached view");
+    assert!(
+        ui.status.contains("no engine"),
+        "it did not say there was nothing to stop: {:?}",
+        ui.status
+    );
+}
+
 /// Driven through `ui::push_the_queue` and `ui::read_the_queue` rather than raw
 /// calls, because what is being tested is the view's half.
 #[test]

@@ -12,6 +12,21 @@ pub struct HelloParams {
     pub client: String,
     #[serde(default)]
     pub client_version: String,
+    /// **Which client this connection belongs to** — one session, several sockets.
+    ///
+    /// A view is *three* connections and one client: the transport, the library reader and the
+    /// event subscription, because a `Client` has one `Receiver<Event>` and two readers of one
+    /// socket would steal each other's events. So counting sockets cannot answer "is anybody
+    /// else attached", which is the question `:qa` asks before stopping the engine — it reads
+    /// two strangers where there is one view and nobody else.
+    ///
+    /// **A session is a process**, and [`HelloParams::new`] fills this with the process id.
+    /// Nothing derives anything from the number and it is not authentication: two connections
+    /// carrying the same one are the same client, and that is all it says. Empty from a client
+    /// that predates the field, and each such connection then counts for itself — the old
+    /// behaviour, for a client that cannot say better.
+    #[serde(default)]
+    pub session: String,
 }
 
 /// What the engine answers with.
@@ -45,6 +60,9 @@ impl HelloParams {
             protocol: crate::version::PROTOCOL.into(),
             client: client.into(),
             client_version: client_version.into(),
+            // **The process, because that is what a client is.** Every connection this program
+            // opens carries the same one without anybody having to pass it around.
+            session: std::process::id().to_string(),
         }
     }
 }

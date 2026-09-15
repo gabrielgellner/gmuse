@@ -866,4 +866,17 @@ pub enum Command {
     /// context answers a different question.
     Help,
     Quit,
+    /// **Quit, and stop the engine** — `:qa`, which is vim's "quit all" and spelled its way.
+    ///
+    /// `:q` leaves the engine playing, which is a detach in tmux's sense and is usually what
+    /// is wanted: attaching is the default (#233) and the engine outlives any one view. This
+    /// is the other one.
+    ///
+    /// **Refused while somebody else is attached**, because stopping the engine ends playback
+    /// for every client rather than only this one — vim's `:qa` refuses over an unsaved buffer
+    /// for the same reason, and takes `!` the same way.
+    QuitAll {
+        /// `:qa!` — stop the engine even though another client is attached.
+        force: bool,
+    },
 }
