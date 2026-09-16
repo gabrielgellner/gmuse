@@ -5996,6 +5996,34 @@ Append here as decisions are made. Format: date, decision, rationale.
   the tree never does. A rebuild still asks, to put view 2's cursor back, which is why returning to the whole library
   costs about what it did. Restoring that cursor by mark rather than by index would remove it, and is not done.
 
+- **2026-09-16** **Slip is a binding's default, not a flag the deck holds** (#226, O-3 of `transport-keymap-spec.md`).
+  `Persist` travels **in the jump**, so it is on the wire, and a deck holds no slip state that every jump silently
+  consults.
+
+  **The D-8 argument settles it, and it is the same argument twice.** #225 established that a verb whose meaning is
+  resolved from a snapshot of remote state races itself: two presses inside one refresh interval read the same state and
+  send the same thing. A deck-level slip flag has exactly that shape — a view reads "slip is on", sends a jump, and the
+  flag may have changed between the read and the arrival, so the jump means something the person who pressed the key did
+  not ask for. Carrying `persist` in the command makes the intent atomic with the act.
+
+  **It also costs no new mechanism.** D-13 already says quantize is a mode-level default with a per-command override:
+  the mode decides _what the binding sends_, and the wire always carries the resolved value. Slip is that shape exactly,
+  so Serato's and Traktor's deck flag survives as a **keymap** default rather than as protocol. O-3's own worry — that
+  per-command "may surprise" someone who expects a held slip mode to colour every jump — is answered where it belongs,
+  in the binding, and not by putting a mode in the engine that `playback-programme.md` would then have to exempt.
+
+  **The asymmetry is what makes it safe to decide now.** If per-command surprises, a keymap default restores the
+  deck-flag feel with no wire change at all. If the flag were deck state and per-command were wanted later, every jump
+  method changes and the method names are public API (§7.4).
+
+  **What this does not unblock.** #226's other two criteria are not decidable this way, because the types they name have
+  no producer and no consumer: `When`, `Marker`, `BeatOffset` and `Persist` appear nowhere in the tree, there are no
+  decks, and there is no beat grid for a `NextBeat` to resolve against. All three of the jump's axes have exactly one
+  reachable value today — `Now`, a position, `Permanent` — which makes `Jump { when, target, persist }` a struct with
+  nothing to parameterise. `gmuse-proto`'s own header already forbids the move: declaring the variants now "would mean
+  inventing those types to hold nothing, and **a method name is public API**". So #226 stays open on criterion 6, and it
+  is waiting on cue points (#229) and a beat grid, not on anyone's time.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

@@ -8,6 +8,13 @@ idempotence is a property test rather than a claim. No `DeckSel` yet: #224 settl
 parameter with one reachable value would be a wire commitment bought with nothing. Acceptance criteria 3 and 4 hold; 5
 is deferred by #224's decision that `audio::State` gains `Armed` when something can produce one.
 
+**§4's parameterised jump is decided but not built** (#226). O-3 is settled below, which is what fixes whether `Persist`
+crosses the wire at all. Criterion 6 is not met and cannot be yet: `When`, `Marker`, `BeatOffset` and `Persist` appear
+nowhere in the tree, there are no decks, and there is no beat grid, so all three axes have exactly one reachable value —
+`Now`, a position, `Permanent`. A `Jump` declared today would be a struct with nothing to parameterise, and
+`gmuse-proto`'s header already rules that out: inventing the types to hold nothing makes a method name public API before
+its payload is designed. It waits on cue points (#229) and a grid, not on anyone's time.
+
 **Where this sits.** It is the missing design for the `deck.*` and `param.*` method families that
 [`gmuse-engine-architecture.md`](gmuse-engine-architecture.md) §7.4 names and #215 deliberately did not implement,
 because their payloads — `DeckId`, `When`, `Lane`, `BindingTarget` — had no design. This is that design.
@@ -337,9 +344,15 @@ Splitting the number row in half for cue points is the one near-universal conven
   it does not matter?
 - **O-2.** Should `Quantize` resolution live on the RT thread or on the decoder thread? D-12 says "not the view"; it
   does not decide between the other two.
-- **O-3.** Is `SnapBack` a property of the jump, or a separate slip-mode flag on the deck that modifies all jumps?
-  Serato and Traktor model it as deck state; the axis decomposition models it per command. Per-command is more
-  composable but may surprise.
+- **O-3. Decided (#226, Decision Log 2026-09-16): per command, so `Persist` is on the wire.** Serato and Traktor model
+  slip as deck state; the axis decomposition models it per command, and per command wins for the reason D-8 gives about
+  toggle — a jump whose meaning is read from a flag the sender does not own races that flag, and means something the
+  key-press did not ask for. Carrying `persist` in the command makes the intent atomic with the act. The deck-flag feel
+  survives as a **keymap** default under D-13's existing mechanism (the mode chooses what the binding sends; the wire
+  carries the resolved value), so "per-command may surprise" is answered in the binding rather than by putting a mode in
+  the engine. The choice is also cheap to revisit in one direction only: a keymap default can restore deck-flag
+  behaviour with no wire change, while moving a deck flag to per-command later would change every jump method, and
+  method names are public API (§7.4).
 - **O-4. Decided (#224, Decision Log 2026-09-12): the player is a deck plus a queue.** The deck-level transport is
   shared; the queue sits above it. "Stopped" is a queue-level condition — the queue not advancing — which a deck has no
   concept of, and §7.8 already models the two separately as "the main player _and each deck_".
