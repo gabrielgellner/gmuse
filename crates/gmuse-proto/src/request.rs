@@ -389,6 +389,15 @@ pub enum Transport {
     Pause,
     /// Pause if running, resume if not — the cmus verb, resolved by the engine.
     Toggle,
+    /// Return to the reference point, or set it there — **the engine decides which**
+    /// from the run state (#229, D-14). Running means go back and wait; paused means
+    /// the playhead *is* the new reference. A sender that resolved it would race the
+    /// state it read, which is D-8 with another verb's name on it.
+    ///
+    /// The reference starts at the top of the track, which is what makes one verb
+    /// cover both readings: on a player that has marked nothing, cue is "back to the
+    /// start and wait" — cmus's stop, without stopping.
+    Cue,
 }
 
 /// §8.4's write surface, and there is no other one.

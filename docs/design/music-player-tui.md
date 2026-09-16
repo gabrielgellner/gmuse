@@ -6024,6 +6024,38 @@ Append here as decisions are made. Format: date, decision, rationale.
   inventing those types to hold nothing, and **a method name is public API**". So #226 stays open on criterion 6, and it
   is waiting on cue points (#229) and a beat grid, not on anyone's time.
 
+- **2026-09-16** **Cue is one verb with two readings, and it is what absorbed stop** (#229, §5 and D-14 of
+  `transport-keymap-spec.md`). Paused, a press marks the reference at the playhead; running, it returns there and waits.
+  The reference starts at the top of the track, which is the whole of D-14: on a player that has marked nothing, cue
+  _is_ cmus's "back to the start", without the stopping.
+
+  **Resolved at the engine, for D-8's reason.** Which of the two meanings happens is a question about the run state, so
+  a sender that answered it would be reading a snapshot that may already be stale — the same argument that made #225
+  send three verbs instead of one computed toggle. `audio::cued` is the rule as a function of state alone, so it is a
+  table rather than a claim.
+
+  **The mark is ephemeral, deliberately.** A cue point that outlived the session would be a fact about a recording, and
+  nothing yet produces or reads one — the same reason #226 declined to declare `Marker`. It resets on load, because a
+  frame count into the track that just left would drop the next track's playhead at a position chosen inside the
+  previous one, silently, since both are just numbers.
+
+  **The verb went; the engine's stop stayed, and conflating them would have been the mistake.** D-10 argues stop is
+  pause plus a return to the reference. `PlayerCmd::Stop` is more than that — it clears the outbox, drops the answer to
+  `NeedNext`, cancels draining — which is the _queue-level_ condition O-4 named, and a deck has no concept of it. So
+  `Command::Stop`, `Instruction::Stop` and `Transport::stop` are gone and `PlayerHandle::stop` is kept with its reason
+  written down. `State::Stopped` is untouched and still reached on its own: end of stream in three places, and a lost
+  device.
+
+  **The bottom row cost a keypress, and that was the point of deciding it first.** `z x c v` — prev, play/pause, cue,
+  next — bare in transport mode and under `<leader>` in every other. `v` was stop. A cmus hand reaching for it now gets
+  next-track, which is affordable only because stop is absent entirely, so the mistake cannot reach anything
+  destructive. `b` is left unbound and reserved. Nothing is bound to `play` any more: the row is transport, and starting
+  what the cursor is on is Enter's job.
+
+  **Nine tests failed at once, and they were right to.** They pressed `<leader> x` to start the selection — a binding,
+  standing in for a behaviour. They ask for the command now. Two more were quietly worse: the keymap test comparing
+  `<leader> b` to `b` became `assert_eq!(None, None)` the moment `b` was reserved, and would have gone on passing.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

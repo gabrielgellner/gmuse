@@ -759,7 +759,15 @@ pub enum Command {
     // playback
     Play,
     Pause,
-    Stop,
+    /// **Return to the reference point, or set it** — #229, D-14.
+    ///
+    /// The verb that absorbed `stop`. D-10's argument is that stop was never its
+    /// own thing: it is pause plus a return to the reference, and with the
+    /// reference defaulting to the top of the track that is exactly cue. So the
+    /// player reading ("back to the start and wait") and the DJ reading ("mark
+    /// here, or drop back to the mark") are one command, and which one happens
+    /// is the engine's to decide from the run state.
+    Cue,
     Next,
     Prev,
     Seek(SeekSpec),

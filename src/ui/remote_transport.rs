@@ -311,8 +311,8 @@ impl Transport for Remote {
         self.transport(gmuse_proto::request::Transport::Toggle);
     }
 
-    fn stop(&self) {
-        self.line("stop");
+    fn cue(&self) {
+        self.transport(gmuse_proto::request::Transport::Cue);
     }
 
     /// **The recording crosses and the path does not** — I17.

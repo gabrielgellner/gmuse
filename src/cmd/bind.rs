@@ -146,11 +146,30 @@ pub const DEFAULTS: &[&str] = &[
     //
     // It frees `z` for vim's fold vocabulary and `-` for the parent motion,
     // which is the immediate reason to do it now.
-    "bind common \"<leader> x\" play",
-    "bind common \"<leader> c\" pause",
-    "bind common \"<leader> v\" stop",
-    "bind common \"<leader> b\" next",
+    // **The bottom row reads as four directions, not four verbs** — #229, §7.
+    //
+    // `z x c v` under the left hand, and each key means the same *kind* of thing
+    // in both modes: backward, run, reference, forward. `b` is left unbound and
+    // reserved — eject is the candidate if anything claims it.
+    //
+    // **`v` was stop and is now next, and that is the one keypress a person
+    // feels.** The spec calls it taste rather than derivation and names the cost
+    // itself: a cmus hand reaching for `v` gets next-track. What makes it
+    // affordable is that stop is *gone* — the mistake cannot reach a destructive
+    // action, because there is no longer one on the row. `c` absorbs what stop
+    // was for (back to the top, wait there) under D-14.
+    // **Play what the cursor is on, which is not a transport verb** — #229.
+    //
+    // The row below is transport: it acts on what is already loaded. This acts
+    // on the *cursor*, which is the `a`/`e`/`E` family's job, and it is the only
+    // key that starts an album or an artist — `Enter` on those opens them, and
+    // only reaches for sound on a track, where there is nothing left to open.
+    // It lived on `<leader> x` until the row claimed that letter.
+    "bind common \"<leader> p\" play",
     "bind common \"<leader> z\" prev",
+    "bind common \"<leader> x\" pause",
+    "bind common \"<leader> c\" cue",
+    "bind common \"<leader> v\" next",
     "bind common \"<leader> >\" seek +60",
     "bind common \"<leader> <\" seek -60",
     "bind common \"<leader> +\" vol +5%",
@@ -168,11 +187,10 @@ pub const DEFAULTS: &[&str] = &[
     "bind transport escape mode normal",
     // The letters are the same alphabet as `<leader>x` and friends, bare. One
     // alphabet learned once; only the prefix changes with the mode.
-    "bind transport x play",
-    "bind transport c pause",
-    "bind transport v stop",
-    "bind transport b next",
     "bind transport z prev",
+    "bind transport x pause",
+    "bind transport c cue",
+    "bind transport v next",
     // `space` is the leader in normal mode and cannot be play/pause there.
     // Here it can, and it is the key every player in the world uses.
     "bind transport space pause",

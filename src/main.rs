@@ -4237,6 +4237,7 @@ fn run_engine(
                         Transport::Play => gmuse_engine::instruction::Instruction::Play,
                         Transport::Pause => gmuse_engine::instruction::Instruction::Pause,
                         Transport::Toggle => gmuse_engine::instruction::Instruction::Toggle,
+                        Transport::Cue => gmuse_engine::instruction::Instruction::Cue,
                     };
                     if !self.control.ask(gmuse::engine::control::Ask::Do(what)) {
                         return Err(RpcError::new(code::INTERNAL, "the player is not running"));

@@ -752,8 +752,8 @@ fn apply(
             player.pause();
             true
         }
-        Instruction::Stop => {
-            player.stop();
+        Instruction::Cue => {
+            player.cue();
             true
         }
         Instruction::Seek(to) => {

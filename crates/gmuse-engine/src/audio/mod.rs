@@ -47,6 +47,38 @@ pub enum Verb {
     Toggle,
 }
 
+/// **What one press of cue does**, given where the transport is — #229, D-14.
+///
+/// Cue is two meanings in one key and **the state chooses between them**, which is
+/// why this is resolved here rather than by whoever pressed it: a sender deciding
+/// "am I playing? then return" reads a snapshot that may already be wrong, and that
+/// is D-8's race with a different verb's name on it.
+///
+/// D-14 is what makes the player and the DJ readings the same verb: **the reference
+/// point starts at the top of the track**, so on a player that has never marked
+/// anything, cue is "back to the start and wait" — cmus's stop, minus the stopping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cueing {
+    /// Paused, so the playhead is where the reference should be.
+    MarkHere,
+    /// Running, so go back to the reference and wait there.
+    ReturnAndPause,
+    /// Nothing loaded: no playhead to mark, nowhere to return to.
+    Nothing,
+}
+
+/// The rule, as a function of state alone. See [`Cueing`].
+pub fn cued(state: State, loaded: bool) -> Cueing {
+    match (loaded, state) {
+        (false, _) => Cueing::Nothing,
+        (true, State::Playing) => Cueing::ReturnAndPause,
+        // Stopped counts as not running. Its playhead is the top of the track,
+        // so marking there is the default it already had — harmless, and one
+        // case fewer than treating it as its own thing.
+        (true, State::Paused | State::Stopped) => Cueing::MarkHere,
+    }
+}
+
 /// **What a transport verb does to the run state** — #225, D-7 and D-8.
 ///
 /// A pure function of the three things that decide it, so idempotence is testable without a
@@ -151,6 +183,8 @@ pub enum PlayerCmd {
     Pause,
     Toggle,
     Stop,
+    /// Return to the reference point, or set it — [`cued`] decides which.
+    Cue,
     Seek(SeekTo),
     /// The answer to [`PlayerEvent::NeedNext`]: what follows the current
     /// track, or `None` if nothing does.
@@ -604,8 +638,22 @@ impl PlayerHandle {
     pub fn toggle(&self) {
         self.send(PlayerCmd::Toggle);
     }
+    /// **Not reachable from a view, and kept on purpose** — #229.
+    ///
+    /// `stop` is gone as a *verb*: D-10 argues it is pause plus a return to the
+    /// reference, which is cue, and the bottom row now spends `v` on next. What
+    /// stays is this, because stop is not only that. It tears the pipeline down
+    /// — clears the outbox, drops the answer to `NeedNext`, cancels draining —
+    /// which is the **queue-level** condition #224's O-4 named: the queue not
+    /// advancing, which a deck has no concept of. The engine reaches it on its
+    /// own at the end of a programme and when a device is lost; this is the door
+    /// for when the queue itself is what stops.
     pub fn stop(&self) {
         self.send(PlayerCmd::Stop);
+    }
+
+    pub fn cue(&self) {
+        self.send(PlayerCmd::Cue);
     }
     pub fn seek(&self, to: SeekTo) {
         self.send(PlayerCmd::Seek(to));
@@ -737,6 +785,52 @@ impl Drop for PlayerHandle {
             let _ = handle.join();
         }
     }
+}
+/// **Cue means two things and the state picks** — #229, D-14.
+///
+/// Running returns to the reference; not running marks one. The point of
+/// asserting it as a table is that the two are exhaustive over the states
+/// that can reach it, so a fourth behaviour cannot appear without this
+/// changing.
+#[test]
+fn cue_returns_while_running_and_marks_while_not() {
+    assert_eq!(cued(State::Playing, true), Cueing::ReturnAndPause);
+    assert_eq!(cued(State::Paused, true), Cueing::MarkHere);
+    assert_eq!(cued(State::Stopped, true), Cueing::MarkHere);
+}
+
+/// **With nothing loaded, cue does nothing at all** — #229.
+///
+/// There is no playhead to mark and nowhere to return to. Checked over
+/// every state rather than one, because "not loaded" has to win against all
+/// of them — a `cued` that read the state first would still pass a single
+/// case.
+///
+/// The count is the instrument: an empty `State::ALL` would satisfy a
+/// for-loop of assertions without executing one.
+#[test]
+fn cue_does_nothing_with_nothing_loaded() {
+    let states = [State::Stopped, State::Playing, State::Paused];
+    assert!(states.len() >= 3, "not every state was tried");
+    for state in states {
+        assert_eq!(
+            cued(state, false),
+            Cueing::Nothing,
+            "cue acted from {state:?} with nothing loaded"
+        );
+    }
+}
+
+/// **Marking is idempotent where it matters** — #229.
+///
+/// Cue twice from paused and the second press marks the same frame, because
+/// the playhead has not moved. That is what makes "return, then press again"
+/// safe on a CDJ, and it falls out of the rule rather than needing a guard —
+/// so this is the assertion that the rule *keeps* falling out that way.
+#[test]
+fn cue_from_paused_is_the_same_answer_twice() {
+    assert_eq!(cued(State::Paused, true), cued(State::Paused, true));
+    assert_eq!(cued(State::Paused, true), Cueing::MarkHere);
 }
 
 #[cfg(test)]

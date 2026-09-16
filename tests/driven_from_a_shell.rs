@@ -4527,3 +4527,196 @@ fn the_status_line_says_when_the_engine_has_gone() {
         "the engine died and the status line said nothing:\n{dead}"
     );
 }
+
+/// **Cue returns to the mark, and the mark is where you set it** — #229, D-14.
+///
+/// The rule is unit-tested in `audio`; this is the wiring it cannot reach —
+/// that `player.transport {"verb":"cue"}` arrives, that the decoder remembers a
+/// frame when it is paused and seeks to *that* frame when it is running, and
+/// that it lands paused rather than stopped.
+///
+/// **The mark is deliberately not the start.** Cue with the default reference
+/// is a seek to frame zero, which is also exactly what a decoder ignoring
+/// `cue_frame` would do — so cueing only from the top would pass against a
+/// hard-coded rewind. Setting the mark mid-track separates the two, and the
+/// last assertion is the one that catches it.
+///
+/// **Every step waits for the state it needs, and none of them sleeps for it.**
+/// The first version slept 150 ms after `player.load` and then paused. `load`
+/// travels the longer road — librarian, programme, then the decoder — so the
+/// decoder took the pause *first* and the load set `Playing` after it. Cue then
+/// read a running deck, returned to an unset mark, and landed at zero; the
+/// failure looked like the mark being ignored when the pause was.
+#[test]
+fn cue_returns_to_the_mark_that_was_set_not_to_the_start() {
+    let (engine, recording) = start_with_a_track("cue-mark");
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+
+    let ask = |verb: &str| {
+        client
+            .call(
+                gmuse_proto::method::PLAYER_TRANSPORT,
+                Some(serde_json::json!({ "verb": verb })),
+            )
+            .unwrap_or_else(|e| panic!("{verb} refused: {e}"));
+    };
+    let line = |text: &str| {
+        client
+            .call(
+                gmuse_proto::method::EXEC_LINE,
+                Some(serde_json::json!({ "line": text })),
+            )
+            .unwrap_or_else(|e| panic!("{text:?} refused: {e}"));
+    };
+    let now = || -> (String, u64) {
+        let got = client
+            .call(gmuse_proto::method::PLAYBACK_GET, None)
+            .expect("playback.get");
+        (
+            got["state"].as_str().unwrap_or("?").to_string(),
+            got["pos_frames"].as_u64().unwrap_or(0),
+        )
+    };
+    let settle = |want: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if now().0 == want {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("the engine never reached {want}, it is {}", now().0);
+    };
+
+    client
+        .call(
+            gmuse_proto::method::PLAYER_LOAD,
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+    settle("playing");
+    ask("pause");
+    settle("paused");
+
+    // Paused, a quarter second in, so this press marks rather than returns.
+    line("seek 0.25");
+    std::thread::sleep(Duration::from_millis(150));
+    let (_, marked_at) = now();
+    assert!(
+        marked_at > 5_000,
+        "the seek did not move the playhead, so there is no mark to set: {marked_at} frames"
+    );
+    ask("cue");
+    std::thread::sleep(Duration::from_millis(150));
+    let (state, after_marking) = now();
+    assert_eq!(state, "paused", "marking should not start anything");
+    assert!(
+        after_marking.abs_diff(marked_at) < 3_000,
+        "marking moved the playhead from {marked_at} to {after_marking}; it should \
+         only remember it"
+    );
+
+    // Somewhere else, and running, so this press returns.
+    line("seek 0.6");
+    std::thread::sleep(Duration::from_millis(100));
+    ask("play");
+    settle("playing");
+    ask("cue");
+    settle("paused");
+    std::thread::sleep(Duration::from_millis(150));
+
+    let landed = now().1;
+    assert!(
+        landed.abs_diff(marked_at) < 4_000,
+        "cue landed at {landed} frames, not near the mark at {marked_at}"
+    );
+    assert!(
+        landed > 5_000,
+        "cue rewound to the start, which is what ignoring the mark looks like"
+    );
+}
+
+/// **A load forgets the mark** — #229.
+///
+/// The reference is a frame count into *a* track, so carrying it across a load
+/// would drop the next track's playhead at a position chosen inside the last
+/// one — and silently, since both are just numbers.
+///
+/// **Written because a mutation survived.** Deleting the `cue_frame = 0` beside
+/// the load broke nothing in 62 integration tests: the reset was a sentence in
+/// a comment, §13's fourth way to be green and wrong. The main cue test cannot
+/// catch it, because it never loads twice.
+#[test]
+fn loading_again_forgets_where_the_mark_was() {
+    let (engine, recording) = start_with_a_track("cue-reload");
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+
+    let ask = |verb: &str| {
+        client
+            .call(
+                gmuse_proto::method::PLAYER_TRANSPORT,
+                Some(serde_json::json!({ "verb": verb })),
+            )
+            .unwrap_or_else(|e| panic!("{verb} refused: {e}"));
+    };
+    let load = || {
+        client
+            .call(
+                gmuse_proto::method::PLAYER_LOAD,
+                Some(serde_json::json!({ "recording": recording })),
+            )
+            .expect("load");
+    };
+    let now = || -> (String, u64) {
+        let got = client
+            .call(gmuse_proto::method::PLAYBACK_GET, None)
+            .expect("playback.get");
+        (
+            got["state"].as_str().unwrap_or("?").to_string(),
+            got["pos_frames"].as_u64().unwrap_or(0),
+        )
+    };
+    let settle = |want: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if now().0 == want {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("the engine never reached {want}, it is {}", now().0);
+    };
+
+    load();
+    settle("playing");
+    ask("pause");
+    settle("paused");
+    client
+        .call(
+            gmuse_proto::method::EXEC_LINE,
+            Some(serde_json::json!({ "line": "seek 0.25" })),
+        )
+        .expect("seek");
+    std::thread::sleep(Duration::from_millis(150));
+    let marked_at = now().1;
+    assert!(
+        marked_at > 5_000,
+        "nothing was marked, so forgetting it proves nothing: {marked_at} frames"
+    );
+    ask("cue");
+    std::thread::sleep(Duration::from_millis(150));
+
+    // A fresh load. The mark belonged to the track that just left.
+    load();
+    settle("playing");
+    ask("cue");
+    settle("paused");
+    std::thread::sleep(Duration::from_millis(150));
+
+    let landed = now().1;
+    assert!(
+        landed < 5_000,
+        "cue landed at {landed} frames — it kept the mark at {marked_at} from \
+         before the load"
+    );
+}

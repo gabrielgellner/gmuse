@@ -3043,9 +3043,9 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 p.toggle();
             }
         }
-        Command::Stop => {
+        Command::Cue => {
             if let Some(p) = ctx.player {
-                p.stop();
+                p.cue();
             }
         }
         Command::Next => {
@@ -7729,8 +7729,8 @@ mod tests {
             fn toggle(&self) {
                 self.note("toggle");
             }
-            fn stop(&self) {
-                self.note("stop");
+            fn cue(&self) {
+                self.note("cue");
             }
             fn load(&self, _what: transport::Loading) -> transport::Accepted {
                 self.note("load");
@@ -7814,7 +7814,7 @@ mod tests {
         fn play(&self) {}
         fn pause(&self) {}
         fn toggle(&self) {}
-        fn stop(&self) {}
+        fn cue(&self) {}
         fn load(&self, _what: transport::Loading) -> transport::Accepted {
             transport::Accepted::Yes
         }
@@ -7908,7 +7908,7 @@ mod tests {
             fn play(&self) {}
             fn pause(&self) {}
             fn toggle(&self) {}
-            fn stop(&self) {}
+            fn cue(&self) {}
             fn load(&self, _what: transport::Loading) -> transport::Accepted {
                 transport::Accepted::Yes
             }
@@ -7943,7 +7943,7 @@ mod tests {
     }
 
     #[test]
-    fn x_plays_the_track_row_under_the_cursor() {
+    fn play_starts_the_track_row_under_the_cursor() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
@@ -7953,7 +7953,7 @@ mod tests {
         press(&mut ui, &ctx, "j");
         press(&mut ui, &ctx, "j");
         let expected = ui.tree.tracks_for(&ui.library)[0];
-        press(&mut ui, &ctx, "<leader> x");
+        start(&mut ui, &ctx);
 
         let played = ui.playback.current.expect("nothing started playing");
         assert_eq!(played, expected);
@@ -7978,7 +7978,8 @@ mod tests {
         press(&mut ui, &ctx, "j");
 
         // At a track there is nothing left to open, so Enter plays it —
-        // snacks' rule, and the reason `Enter` and `x` are not redundant.
+        // snacks' rule, and since #229 left the bottom row to transport, Enter
+        // is the only key that starts the row under the cursor.
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
         let rows = ui.tree.rows(&ui.library);
         assert!(
@@ -7989,14 +7990,14 @@ mod tests {
     }
 
     #[test]
-    fn leader_b_and_leader_z_walk_forwards_and_backwards() {
+    fn leader_v_and_leader_z_walk_forwards_and_backwards() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        press(&mut ui, &ctx, "<leader> x");
+        start(&mut ui, &ctx);
         let first = ui.playback.current.unwrap();
 
-        press(&mut ui, &ctx, "<leader> b");
+        press(&mut ui, &ctx, "<leader> v");
         let second = ui.playback.current.unwrap();
         assert_ne!(first, second);
 
@@ -8209,7 +8210,7 @@ mod tests {
 
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
-        press(&mut ui, &ctx, "<leader> x");
+        start(&mut ui, &ctx);
         assert_eq!(ui.playback.active, ActiveSource::Playlist);
         assert_eq!(ui.playback.current, Some(sorted[3]));
 
@@ -8260,23 +8261,25 @@ mod tests {
         assert!(!out.contains("error"), "{out}");
         assert!(!out.contains("device lost"), "{out}");
     }
-    /// `v` then `c` must not lose the title: the decoder keeps the track
-    /// loaded across a stop, so the UI has to as well or the two desync.
+    /// `c` must not lose the title: cue returns to the reference and waits
+    /// there, so the track stays loaded and the UI has to keep it too, or the
+    /// two desync. This was the same claim about `stop` before #229 spent that
+    /// key on `next` and D-14 absorbed what stop was for.
     #[test]
-    fn stop_keeps_the_current_track() {
+    fn cue_keeps_the_current_track() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        press(&mut ui, &ctx, "<leader> x");
+        start(&mut ui, &ctx);
         let playing = ui.playback.current.expect("nothing started");
         assert!(render(&ui, &ctx, 90, 8).contains("Anderson .Paak"));
 
-        press(&mut ui, &ctx, "<leader> v");
+        press(&mut ui, &ctx, "<leader> c");
         assert_eq!(
             ui.playback.current,
             Some(playing),
-            "stop must leave the track current, or resuming loses the title"
+            "cue must leave the track current, or resuming loses the title"
         );
 
         // Still named in the status line while stopped.
@@ -8284,7 +8287,7 @@ mod tests {
         assert!(out.contains("Anderson .Paak"), "{out}");
 
         // And next still steps from where we stopped, rather than restarting.
-        press(&mut ui, &ctx, "<leader> b");
+        press(&mut ui, &ctx, "<leader> v");
         assert_ne!(ui.playback.current, Some(playing));
     }
     // ---- the command layer (M6) ------------------------------------------
@@ -8303,6 +8306,20 @@ mod tests {
         ui.pending_since = ui
             .pending_since
             .map(|t| t - ui.which_key_delay - Duration::from_millis(1));
+    }
+
+    /// Start whatever the cursor is on.
+    ///
+    /// **The command, not the key that reaches it** — #229. These tests pressed
+    /// `<leader> x`, and when the bottom row claimed that letter nine of them
+    /// failed at once — every one of them about what playback does *afterwards*,
+    /// none about the binding. Asking for the command is what stops the next
+    /// keymap decision from looking like nine regressions.
+    ///
+    /// The key itself is `<leader> p` now, and
+    /// `the_leader_plays_what_the_cursor_is_on` is where that is asserted.
+    fn start(ui: &mut Ui, ctx: &Context<'_>) {
+        execute(ui, ctx, Command::Play);
     }
 
     fn press(ui: &mut Ui, ctx: &Context<'_>, keys_text: &str) {
@@ -9792,27 +9809,27 @@ mod tests {
     /// `x` used to mean "resume if playing, else play the selection" — two
     /// behaviours, the first of which is what `c` already does.
     #[test]
-    fn x_plays_the_selection_even_while_something_is_playing() {
+    fn play_starts_the_selection_even_while_something_is_playing() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, "tab");
 
-        press(&mut ui, &ctx, "<leader> x");
+        start(&mut ui, &ctx);
         let first = ui.playback.current.expect("nothing started");
         press(&mut ui, &ctx, "j");
-        press(&mut ui, &ctx, "<leader> x");
+        start(&mut ui, &ctx);
 
         assert_ne!(
             ui.playback.current,
             Some(first),
-            "`x` resumed instead of playing what the cursor was on"
+            "`play` resumed instead of starting what the cursor was on"
         );
     }
 
     /// The queue is consumed as it plays, so playing from it takes the entry.
     #[test]
-    fn x_in_the_queue_consumes_the_entry() {
+    fn playing_from_the_queue_consumes_the_entry() {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
@@ -9822,7 +9839,7 @@ mod tests {
         assert!(queued > 0);
 
         ui.view = View::Queue;
-        press(&mut ui, &ctx, "<leader> x");
+        start(&mut ui, &ctx);
         assert_eq!(ui.queue.len(), queued - 1, "the entry was not consumed");
     }
 
@@ -10586,7 +10603,7 @@ mod tests {
         assert_eq!(ui.playlist.len(), 1, "the playlist was filtered");
         ui.view = View::Playlist;
         ui.playlist_pane = Pane::Tracks;
-        press(&mut ui, &ctx, "<leader> x");
+        start(&mut ui, &ctx);
         assert_eq!(
             ui.playback.current,
             Some(va),
@@ -15056,7 +15073,8 @@ mod tests {
         press(&mut ui, &ctx, "<leader>");
         waited(&mut ui);
         let out = render(&ui, &ctx, 100, 20);
-        assert!(out.contains("c  pause"), "{out}");
+        assert!(out.contains("c  cue"), "{out}");
+        assert!(out.contains("x  pause"), "{out}");
         assert!(out.contains("?  help"), "{out}");
     }
 
@@ -15674,22 +15692,75 @@ mod tests {
     }
 
     /// The same letters, bare — one alphabet reached from two postures.
+    ///
+    /// **Every letter here must be bound, and that is asserted** — #229. The
+    /// list used to carry `b`, which the bottom row now leaves deliberately
+    /// unbound, and `assert_eq!(None, None)` is the §13 shape exactly: it would
+    /// have gone on passing while proving nothing about the pair.
     #[test]
     fn the_transport_letters_are_bare_in_the_mode() {
         for (normal, in_mode) in [
-            ("<leader> c", "c"),
-            ("<leader> b", "b"),
+            ("<leader> z", "z"),
             ("<leader> x", "x"),
+            ("<leader> c", "c"),
+            ("<leader> v", "v"),
         ] {
             let bindings = bind::defaults();
             let normal_key = crate::cmd::keys::parse_seq(normal).expect("test keys");
             let mode_key = crate::cmd::keys::parse_seq(in_mode).expect("test keys");
+            let common = bind::lookup(&bindings, crate::cmd::Context::Common, &normal_key);
+            assert!(
+                common.is_some(),
+                "{normal} is not bound, so the comparison below is vacuous"
+            );
             assert_eq!(
-                bind::lookup(&bindings, crate::cmd::Context::Common, &normal_key),
+                common,
                 bind::lookup(&bindings, crate::cmd::Context::Transport, &mode_key),
                 "{normal} and {in_mode} should be the same command"
             );
         }
+    }
+
+    /// **The leader still plays what the cursor is on** — #229.
+    ///
+    /// `Enter` opens an album and an artist; it only reaches for sound on a
+    /// track, where there is nothing left to open. So this is the one key that
+    /// starts an album row, and losing it to the transport row was the part of
+    /// #229 that the guides caught rather than the tests — every test that used
+    /// it had been rewritten to ask for the command instead.
+    #[test]
+    fn the_leader_plays_what_the_cursor_is_on() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "<leader> p");
+        assert!(
+            ui.playback.current.is_some(),
+            "<leader>p did not start anything"
+        );
+    }
+
+    /// **`b` is reserved, and nothing crept onto it** — #229, §7.
+    ///
+    /// The row leaves one key free on purpose; eject is the candidate if
+    /// anything claims it. Asserted because "unbound" is otherwise indis-
+    /// tinguishable from "nobody looked".
+    #[test]
+    fn b_is_left_unbound_on_the_transport_row() {
+        let bindings = bind::defaults();
+        let b = crate::cmd::keys::parse_seq("b").expect("test keys");
+        assert!(
+            bind::lookup(&bindings, crate::cmd::Context::Transport, &b).is_none(),
+            "something claimed the reserved key"
+        );
+        // The instrument: its neighbour on the same row is bound, so the lookup
+        // is reaching the table at all.
+        let v = crate::cmd::keys::parse_seq("v").expect("test keys");
+        assert!(
+            bind::lookup(&bindings, crate::cmd::Context::Transport, &v).is_some(),
+            "no transport binding resolved, so the check above proves nothing"
+        );
     }
 
     /// A closed keymap has to carry its own way out, or the mode is a trap.
@@ -15987,7 +16058,7 @@ mod tests {
         // Play something three levels down, then close everything over it.
         press(&mut ui, &ctx, "z R");
         press(&mut ui, &ctx, "j j j");
-        press(&mut ui, &ctx, "<leader> x");
+        start(&mut ui, &ctx);
         let playing = ui.playback.current.expect("nothing started");
         press(&mut ui, &ctx, "z M");
         assert_eq!(ui.tree.rows(&ui.library).len(), 8, "all closed");

@@ -45,6 +45,9 @@ pub enum Instruction {
     /// cursor. This is the wire's, and it exists because `Toggle` alone is not enough:
     /// without the kitty keyboard protocol a held key arrives as repeated presses, and
     /// a toggle bound to one flutters where this is a no-op.
+    /// Return to the reference point, or set it — **resolved by the engine**
+    /// (#229, D-14), for the same reason `Toggle` is.
+    Cue,
     Play,
     /// Halt, leaving the playhead where it is — **idempotent** (#225, D-7).
     ///
@@ -53,7 +56,6 @@ pub enum Instruction {
     /// — #224 settled that decks come later — but the verb is what makes it
     /// expressible without a loop over toggles.
     Pause,
-    Stop,
     /// **Already an audio type.** `SeekSpec` is text-shaped — "+10", "50%" — and
     /// resolving it is the boundary's job, so what arrives here is frames.
     Seek(crate::audio::SeekTo),

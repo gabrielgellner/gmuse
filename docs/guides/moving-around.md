@@ -117,11 +117,11 @@ Bind your own in the config, where `<leader>` stands for whatever `leader` says:
 
 ## Transport lives behind the leader
 
-    <leader>x    play what the cursor is on
-    <leader>c    pause
-    <leader>v    stop
-    <leader>b    next
+    <leader>p    play what the cursor is on
     <leader>z    previous
+    <leader>x    play/pause
+    <leader>c    cue — back to the reference, and wait there
+    <leader>v    next
     <leader>+    louder, 3 dB a step
     <leader>-    quieter
     <leader>>    seek a minute on
@@ -132,8 +132,15 @@ Bind your own in the config, where `<leader>` stands for whatever `leader` says:
 The prefix is deliberate. Navigating is what your hands are doing in these views, and reaching for the transport is
 stepping outside that — so it costs a key, and the bare letters go to the folds and motions that browsing wants.
 
-The letters are Winamp's row, unchanged. That matters: there is one alphabet to learn rather than two — in transport
-mode the same letters are bare, so `c` and `<leader>c` are one pause reached from two postures.
+The letters read as four directions rather than four verbs: backward, run, reference, forward. That matters twice over —
+there is one alphabet to learn rather than two, because in transport mode the same letters are bare, so `x` and
+`<leader>x` are one play/pause reached from two postures; and each letter means the same _kind_ of thing whatever the
+mode is, which is what lets the row grow later without moving. `b` is deliberately unbound.
+
+`c` is cue, and it is the one letter that is not Winamp's. Pressed while something is playing it returns to the
+reference point and waits there; pressed while paused it _sets_ the reference where the playhead is. On a track you have
+never marked, the reference is the top — so cue is "back to the start", which is what stop used to be for. There is no
+stop: `v` is next.
 
 ## Transport mode
 
@@ -174,7 +181,7 @@ bottom edge reads as one more helper rather than as a mode you are in.
 "down", because a mode that leaked navigation would not have bought anything. That is why the way out is bound inside
 it, and why `?` lists only what actually works.
 
-The trade is deliberate: pausing costs `<leader>c` while you are browsing, and one key once you are listening. Normal
+The trade is deliberate: pausing costs `<leader>x` while you are browsing, and one key once you are listening. Normal
 mode is home because the common _interaction_ is looking for something to play, even though playing is the common
 _state_.
 

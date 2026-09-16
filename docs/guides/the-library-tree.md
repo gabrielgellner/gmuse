@@ -131,10 +131,10 @@ whatever depth you are at.
 `Enter` and `l` **confirm**. On an artist or album that means open or close; on a track there is nothing left to open,
 so it plays.
 
-`<leader>x` plays whatever is under the cursor from anywhere, including from inside a closed album, where it starts at
+`<leader>p` plays whatever is under the cursor from anywhere, including from inside a closed album, where it starts at
 the top.
 
-So `Enter` acts on structure until structure runs out, and `<leader>x` always means sound. The leader is there because
+So `Enter` acts on structure until structure runs out, and `<leader>p` always means sound. The leader is there because
 in this view your hands are looking for something, not driving the transport — reaching past it is the point.
 
 ## What the cursor covers
@@ -149,7 +149,7 @@ All three act on everything _under_ the row, not just the row:
     on an album    its tracks, in order
     on an artist   everything by them
 
-So gathering an album is one keypress on the album row — you do not have to open it first. `<leader>x` reaches the same
+So gathering an album is one keypress on the album row — you do not have to open it first. `<leader>p` reaches the same
 way, which is why playing an album is one key on its row too.
 
 `e` appends and `E` goes to the front, the way `y` and `Y` differ. Appending is the ordinary case, and it is what cmus

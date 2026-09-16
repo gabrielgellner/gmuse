@@ -101,13 +101,15 @@ pub trait Transport {
     /// and a repeating key bound to one flutters.
     fn toggle(&self);
 
-    /// Halt and return to the start.
+    /// **Return to the reference point, or set it there** — #229, D-14.
     ///
-    /// `transport-keymap-spec.md` D-10 argues this is not a verb at all — it is
-    /// pause plus a seek to the reference point, which is cue. It is here
-    /// because it is what the player does today; #229 is where it stops being
-    /// its own thing.
-    fn stop(&self);
+    /// This used to be `stop`, with a note saying D-10 argues stop is not a verb
+    /// at all: it is pause plus a seek to the reference, which is cue. This is
+    /// that change. With the reference defaulting to the top of the track, the
+    /// player reading of the key — back to the start and wait — is the same
+    /// command as the DJ one, and **which of the two happens is the engine's to
+    /// decide** from the run state, for D-8's reason.
+    fn cue(&self);
 
     /// Play this.
     ///
@@ -216,8 +218,8 @@ impl Transport for crate::audio::PlayerHandle {
     fn toggle(&self) {
         crate::audio::PlayerHandle::toggle(self);
     }
-    fn stop(&self) {
-        crate::audio::PlayerHandle::stop(self);
+    fn cue(&self) {
+        crate::audio::PlayerHandle::cue(self);
     }
     /// **The recording is unused here, and deliberately not asserted on.** A
     /// local decoder opens the file; whether the library also has a row for it
@@ -301,8 +303,8 @@ mod tests {
         fn toggle(&self) {
             self.note("toggle");
         }
-        fn stop(&self) {
-            self.note("stop");
+        fn cue(&self) {
+            self.note("cue");
         }
         fn load(&self, what: Loading) -> Accepted {
             self.note(format!("load {}", what.source.path.display()));
@@ -369,11 +371,11 @@ mod tests {
         transport.toggle();
         transport.seek(SeekTo::Relative(-5.0));
         transport.set_volume(0.5);
-        transport.stop();
+        transport.cue();
 
         assert_eq!(
             fake.asked(),
-            vec!["play", "toggle", "seek -5.0s", "volume 0.50", "stop"],
+            vec!["play", "toggle", "seek -5.0s", "volume 0.50", "cue"],
             "the seam carried every verb through"
         );
         assert_eq!(transport.volume(), 0.5, "and a read sees the write");

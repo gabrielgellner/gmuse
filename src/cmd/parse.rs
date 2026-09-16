@@ -108,7 +108,7 @@ pub const VERBS: &[&str] = &[
     "search-prev",
     "seek",
     "set",
-    "stop",
+    "cue",
     "toggle",
     "top",
     "unbind",
@@ -222,7 +222,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         // Playback. The short aliases are what a person types.
         "play" => Command::Play,
         "pause" => Command::Pause,
-        "stop" => Command::Stop,
+        "cue" => Command::Cue,
         // `query-language.md` §11's third tier. No argument: what it edits is
         // what is composed, which is the only thing it could sensibly mean.
         "edit" => Command::Edit,
@@ -881,7 +881,7 @@ pub fn format(cmd: &Command) -> String {
         Command::In { pane, cmd } => format!("in {} {}", pane.name(), format(cmd)),
         Command::Play => "play".into(),
         Command::Pause => "pause".into(),
-        Command::Stop => "stop".into(),
+        Command::Cue => "cue".into(),
         Command::Next => "next".into(),
         Command::Prev => "prev".into(),
         Command::Seek(SeekSpec::Absolute(s)) => format!("seek {s}"),
@@ -1074,7 +1074,7 @@ mod tests {
         for (short, long) in [
             ("play", "play"),
             ("pause", "pause"),
-            ("stop", "stop"),
+            ("cue", "cue"),
             ("next", "next"),
             ("prev", "prev"),
             ("q", "quit"),
@@ -1275,7 +1275,7 @@ mod tests {
             },
             Command::Play,
             Command::Pause,
-            Command::Stop,
+            Command::Cue,
             Command::Next,
             Command::Prev,
             Command::Seek(SeekSpec::Absolute(90.0)),

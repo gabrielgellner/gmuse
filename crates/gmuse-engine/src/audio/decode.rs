@@ -100,6 +100,16 @@ pub(super) fn run(
 ) {
     let codecs = codec_registry();
     let mut track: Option<Track> = None;
+    // **The reference point, in frames from the top of the track** — #229, D-14.
+    //
+    // Zero is the default and that is the whole of D-14: a player that has never
+    // marked anything still has a cue, and it is the start of the track. Reset on
+    // load, because a reference into the previous track means nothing here.
+    //
+    // Ephemeral, and deliberately so. A cue point that outlived the session would
+    // be a fact about a recording, and nothing yet produces or reads one — the same
+    // reason #226 declined to declare `Marker`.
+    let mut cue_frame: u64 = 0;
     // Device-rate frames decoded but not yet written to the ring, because a
     // command interrupted the write. Must survive until they are written, or
     // the stream has a hole in it.
@@ -184,6 +194,8 @@ pub(super) fn run(
                                 gain: t.gain,
                             });
                             track = Some(t);
+                            // A reference into the track that just left means nothing.
+                            cue_frame = 0;
                             shared.state.store(State::Playing as u8, Ordering::Relaxed);
                         }
                         Err(e) => {
@@ -223,6 +235,38 @@ pub(super) fn run(
                         t.finishing = false;
                         // Rewind so a later Play starts from the top.
                         let _ = seek_to_frame(t, 0, device_rate);
+                    }
+                    continue;
+                }
+                // **The rule is `cued`** — #229, D-14. One key, two meanings, and
+                // the state picks: the sender must not, for D-8's reason.
+                PlayerCmd::Cue => {
+                    // Same reasoning as `Seek`: this acts on the spliced track, so
+                    // the caller is owed its `Loaded` first.
+                    publish_all(&mut boundaries, &events);
+                    let Some(t) = track.as_mut() else {
+                        continue;
+                    };
+                    match super::cued(state, true) {
+                        super::Cueing::Nothing => {}
+                        super::Cueing::MarkHere => {
+                            cue_frame = shared
+                                .position_frames
+                                .load(Ordering::Relaxed)
+                                .saturating_sub(shared.track_base.load(Ordering::Relaxed));
+                        }
+                        super::Cueing::ReturnAndPause => {
+                            if let Ok(landed) = seek_to_frame(t, cue_frame, device_rate) {
+                                outbox.clear();
+                                shared.draining.store(false, Ordering::Release);
+                                flush(&shared, landed);
+                                t.base_frames = landed;
+                                t.pushed_frames = 0;
+                                t.drained = false;
+                                t.finishing = false;
+                            }
+                            shared.state.store(State::Paused as u8, Ordering::Relaxed);
+                        }
                     }
                     continue;
                 }

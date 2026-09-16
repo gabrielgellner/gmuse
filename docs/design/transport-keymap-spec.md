@@ -23,6 +23,23 @@ two ways was not detected at all — the binding table is a map, so the loser va
 names both spellings, the first offender is named on a notice that does not expire, and every problem is written to the
 audit. It still launches: a typo disables one key, and refusing to start would cost the player.
 
+**§5's cue is built, and `stop` is gone as a verb** (#229). Cue carries both readings — paused marks the reference,
+running returns to it and waits — with the reference starting at the top of the track, which is D-14 and is what lets
+one verb cover cmus's "back to the start" and a CDJ's cue. The rule is `audio::cued`, resolved at the engine for D-8's
+reason: a sender that decided "am I playing? then return" reads a snapshot that may already be wrong. Hold-to-preview is
+#228's third of it.
+
+The bottom row is now `z x c v` — prev, play/pause, cue, next — in transport mode and under `<leader>` alike, with `b`
+left unbound and reserved. **`v` was stop and is now next**, which the spec calls taste rather than derivation and is
+the one keypress a person feels; what makes it affordable is that stop is gone, so the mistake reaches nothing
+destructive. Nothing is bound to `play` any more: the row is transport, and starting the row under the cursor is Enter's
+job.
+
+**The verb went and the engine's stop stayed**, because they are not the same thing. D-10 says stop is pause plus a
+return to the reference, and `PlayerCmd::Stop` is more: it clears the outbox, drops the answer to `NeedNext` and cancels
+draining — the **queue-level** condition #224's O-4 named, which a deck has no concept of. The engine still reaches
+`Stopped` on its own at the end of a programme and when a device is lost.
+
 D-17 has a test now — browsing asks the transport for nothing. D-19 (load behind a modifier) is deferred on #226's
 grounds: its argument is about clobbering a live deck during a mix, and with one player "play the selection" on a bare
 key is what cmus does and what is wanted.
