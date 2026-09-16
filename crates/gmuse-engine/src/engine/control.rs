@@ -740,6 +740,18 @@ fn apply(
             player.toggle();
             true
         }
+        // **One command each, and the decoder already resolves them.** `Play` stores
+        // `Playing` only where a track is loaded and `Pause` stores `Paused` only from
+        // `Playing`, so each is a single atomic store and neither is a read-modify-write
+        // the render callback could observe mid-flight (#225).
+        Instruction::Play => {
+            player.play();
+            true
+        }
+        Instruction::Pause => {
+            player.pause();
+            true
+        }
         Instruction::Stop => {
             player.stop();
             true

@@ -33,11 +33,26 @@
 pub enum Instruction {
     /// Pause if running, resume if not — the cmus toggle.
     ///
-    /// Named for what it does rather than for the `pause` that spells it. There is
-    /// no `Play`: that starts the *selected* track, which needs a cursor. #225 is
-    /// the argument for the protocol carrying three distinct verbs so a sender does
-    /// not have to resolve one against the run state.
+    /// Named for what it does rather than for the `pause` that spells it. **It is
+    /// resolved here rather than by the sender** (#225, D-8): a view computing
+    /// `if playing { Pause } else { Play }` races itself, because two presses
+    /// arriving faster than the snapshot refresh both read `paused` and both send
+    /// `Play`.
     Toggle,
+    /// Start, or keep going — **idempotent** (#225, D-7).
+    ///
+    /// Not the text language's `play`, which starts the *selected* track and needs a
+    /// cursor. This is the wire's, and it exists because `Toggle` alone is not enough:
+    /// without the kitty keyboard protocol a held key arrives as repeated presses, and
+    /// a toggle bound to one flutters where this is a no-op.
+    Play,
+    /// Halt, leaving the playhead where it is — **idempotent** (#225, D-7).
+    ///
+    /// The verb a broadcast needs: "pause everything" must leave everything paused,
+    /// where "toggle everything" starts whatever was stopped. Nothing broadcasts yet
+    /// — #224 settled that decks come later — but the verb is what makes it
+    /// expressible without a loop over toggles.
+    Pause,
     Stop,
     /// **Already an audio type.** `SeekSpec` is text-shaped — "+10", "50%" — and
     /// resolving it is the boundary's job, so what arrives here is frames.

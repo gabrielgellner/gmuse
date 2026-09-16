@@ -4205,6 +4205,25 @@ fn run_engine(
                     Ok(serde_json::json!({ "accepted": true }))
                 }
 
+                // **Three verbs, resolved where the state lives** — #225, D-8.
+                //
+                // The text language cannot carry these: its `play` starts the selection and
+                // needs a cursor, its `pause` is the cmus toggle, and `toggle` names a
+                // setting. #224's O-6 settled two enums rather than three, and this is the
+                // wire's half.
+                Call::PlayerTransport { verb } => {
+                    use gmuse_proto::request::Transport;
+                    let what = match verb {
+                        Transport::Play => gmuse_engine::instruction::Instruction::Play,
+                        Transport::Pause => gmuse_engine::instruction::Instruction::Pause,
+                        Transport::Toggle => gmuse_engine::instruction::Instruction::Toggle,
+                    };
+                    if !self.control.ask(gmuse::engine::control::Ask::Do(what)) {
+                        return Err(RpcError::new(code::INTERNAL, "the player is not running"));
+                    }
+                    Ok(serde_json::json!({ "accepted": true }))
+                }
+
                 Call::PlayerLoad { recording } => {
                     let Ok(uuid) = recording.parse::<uuid::Uuid>() else {
                         return Err(RpcError::invalid_params(

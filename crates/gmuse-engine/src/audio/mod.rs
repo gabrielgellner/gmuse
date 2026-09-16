@@ -35,6 +35,49 @@ pub struct PlayerConfig {
     pub volume: f32,
 }
 
+/// **Which transport verb** — #225, `transport-keymap-spec.md` D-6 to D-8.
+///
+/// The audio layer's own spelling. `Instruction` is a layer above this one and
+/// `gmuse_proto::request::Transport` is the wire's; all three say the same three words,
+/// because the distinction has to survive every hop or the sender ends up resolving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verb {
+    Play,
+    Pause,
+    Toggle,
+}
+
+/// **What a transport verb does to the run state** — #225, D-7 and D-8.
+///
+/// A pure function of the three things that decide it, so idempotence is testable without a
+/// decoder thread, a device or a sound card — the shape `which_key_due` takes, for the same
+/// reason.
+///
+/// **One store, never a read-modify-write.** The caller stores what this returns, and the
+/// render callback reads `State::from_u8` every buffer: a transition applied as read-then-write
+/// is one the callback can observe mid-flight, and D-8's whole argument is about who is allowed
+/// to resolve a state question.
+///
+/// `loaded` is whether a track is open. Nothing starts without one, which is what makes `Play`
+/// safe to send at anything.
+pub fn transported(state: State, verb: Verb, loaded: bool) -> State {
+    match verb {
+        // **Idempotent**: already playing stays playing, and a held key without the kitty
+        // protocol arrives as repeats.
+        Verb::Play if loaded => State::Playing,
+        Verb::Play => state,
+        // **Idempotent**, and the verb a broadcast needs: pausing what is already paused must
+        // leave it paused, where toggling it would start it.
+        Verb::Pause if state == State::Playing => State::Paused,
+        Verb::Pause => state,
+        Verb::Toggle => match state {
+            State::Playing => State::Paused,
+            _ if loaded => State::Playing,
+            _ => State::Stopped,
+        },
+    }
+}
+
 /// What the player is doing. Stored as a `u8` so the RT callback can read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -698,6 +741,76 @@ impl Drop for PlayerHandle {
 
 #[cfg(test)]
 mod tests {
+    /// **Play and Pause are idempotent, from every state** — #225, acceptance criterion 3.
+    ///
+    /// Over every initial state and both load conditions, because the argument for carrying
+    /// three verbs rather than one is exactly that two of them are no-ops when the stream is
+    /// already where they would put it. A held key without the kitty keyboard protocol arrives
+    /// as repeated presses; `Play` twice must be one change, where a toggle would flutter.
+    #[test]
+    fn play_and_pause_are_idempotent_from_every_state() {
+        use super::{State, Verb, transported};
+
+        let states = [State::Stopped, State::Playing, State::Paused];
+        let mut moved = 0;
+        for loaded in [false, true] {
+            for start in states {
+                for verb in [Verb::Play, Verb::Pause] {
+                    let once = transported(start, verb, loaded);
+                    let twice = transported(once, verb, loaded);
+                    assert_eq!(
+                        once, twice,
+                        "{verb:?} from {start:?} (loaded {loaded}) moved again on the second"
+                    );
+                    moved += usize::from(once != start);
+                }
+            }
+        }
+        // **The instrument.** A `transported` that returned its input would satisfy every
+        // assertion above, and idempotence would be proven of a function that does nothing.
+        assert!(
+            moved >= 2,
+            "{moved} of the twelve cases changed anything, so this proves nothing"
+        );
+    }
+
+    /// **Toggle twice is one change** — #225, acceptance criterion 4, the D-8 regression.
+    ///
+    /// The race the sender-resolved toggle had: two presses arriving faster than the snapshot
+    /// refresh both read `paused`, both decide "so play", and the second undoes nothing. Here
+    /// the engine resolves it, so the second press sees the first one's result.
+    #[test]
+    fn toggle_twice_returns_to_where_it_started() {
+        use super::{State, Verb, transported};
+
+        for start in [State::Playing, State::Paused] {
+            let once = transported(start, Verb::Toggle, true);
+            assert_ne!(once, start, "toggle from {start:?} changed nothing");
+            assert_eq!(
+                transported(once, Verb::Toggle, true),
+                start,
+                "toggling twice from {start:?} did not come back"
+            );
+        }
+    }
+
+    /// **Nothing starts without a track**, which is what makes `Play` safe to send at anything.
+    #[test]
+    fn play_does_nothing_with_nothing_loaded() {
+        use super::{State, Verb, transported};
+
+        for start in [State::Stopped, State::Paused] {
+            assert_eq!(transported(start, Verb::Play, false), start);
+        }
+        // And with one, it starts — or the assertion above is about a function that never
+        // starts anything.
+        assert_eq!(
+            transported(State::Paused, Verb::Play, true),
+            State::Playing,
+            "a loaded track did not start"
+        );
+    }
+
     use super::*;
 
     /// A real WAV, so there is audio to decode rather than a stub to mock.

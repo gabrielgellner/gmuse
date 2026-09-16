@@ -194,22 +194,16 @@ pub(super) fn run(
                     }
                     continue;
                 }
-                PlayerCmd::Play => {
-                    if track.is_some() {
-                        shared.state.store(State::Playing as u8, Ordering::Relaxed);
-                    }
-                }
-                PlayerCmd::Pause => {
-                    if state == State::Playing {
-                        shared.state.store(State::Paused as u8, Ordering::Relaxed);
-                    }
-                }
-                PlayerCmd::Toggle => {
-                    let next = match state {
-                        State::Playing => State::Paused,
-                        _ if track.is_some() => State::Playing,
-                        _ => State::Stopped,
+                // **The rule is `transported`, and it is one store** — #225. Inline, the
+                // three cases drifted apart: `Pause` guarded on the state and `Play` on the
+                // track, which is right, but nothing said so and nothing could test it.
+                PlayerCmd::Play | PlayerCmd::Pause | PlayerCmd::Toggle => {
+                    let verb = match cmd {
+                        PlayerCmd::Play => super::Verb::Play,
+                        PlayerCmd::Pause => super::Verb::Pause,
+                        _ => super::Verb::Toggle,
                     };
+                    let next = super::transported(state, verb, track.is_some());
                     shared.state.store(next as u8, Ordering::Relaxed);
                 }
                 PlayerCmd::Stop => {

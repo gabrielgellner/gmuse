@@ -321,6 +321,20 @@ pub enum Request {
     PlayerLoad {
         recording: String,
     },
+    /// **Play, pause and toggle, as three distinct verbs** — #225,
+    /// `transport-keymap-spec.md` D-6 to D-8.
+    ///
+    /// The text language cannot carry these. `play` there means *play the selection*, which
+    /// needs a cursor; `pause` means the cmus toggle; and `toggle` names a setting
+    /// (`toggle shuffle`). All three are settled spellings with muscle memory behind them.
+    /// #224's O-6 settled two enums rather than three: `cmd::Command` is the text language,
+    /// and this is the wire.
+    ///
+    /// **No `DeckSel` yet.** #224 settled the selector's shape, and nothing has decks — a
+    /// parameter with one reachable value would be a wire commitment bought with nothing.
+    PlayerTransport {
+        verb: Transport,
+    },
     /// **What is playing, right now, asked rather than waited for** — #243, #248.
     ///
     /// The `playback` topic reports *discontinuities* and §7.8 forbids a steady
@@ -359,6 +373,22 @@ pub enum Request {
         operation: LibraryOp,
         params: serde_json::Value,
     },
+}
+
+/// **Which transport verb** — #225, `transport-keymap-spec.md` D-6 to D-8.
+///
+/// Serialised in lower case so the wire reads as the words people use: `{"verb": "toggle"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// Start, or keep going. **Idempotent**: sending it to a playing stream changes nothing,
+    /// which is what makes it safe under key repeat.
+    Play,
+    /// Halt, leaving the playhead where it is. **Idempotent**, and the one a broadcast wants:
+    /// "pause everything" must not start whatever was paused.
+    Pause,
+    /// Pause if running, resume if not — the cmus verb, resolved by the engine.
+    Toggle,
 }
 
 /// §8.4's write surface, and there is no other one.
@@ -476,6 +506,7 @@ pub mod method {
     pub const ENGINE_SHUTDOWN: &str = "engine.shutdown";
     pub const TIME_NOW: &str = "time.now";
     pub const PLAYER_LOAD: &str = "player.load";
+    pub const PLAYER_TRANSPORT: &str = "player.transport";
     pub const PLAYBACK_GET: &str = "playback.get";
     pub const QUERY_PARSE: &str = "query.parse";
     pub const QUERY_RUN: &str = "query.run";
@@ -528,6 +559,7 @@ pub mod method {
         QUERY_TREE,
         QUERY_REVEAL,
         QUERY_UNDER,
+        PLAYER_TRANSPORT,
         QUERY_ROW,
         QUERY_HOLDINGS,
         QUERY_RECORDING,
@@ -603,6 +635,14 @@ impl Request {
                 operation: LibraryOp::of_method(other).expect("just matched"),
                 params: params.unwrap_or(serde_json::Value::Null),
             }),
+            method::PLAYER_TRANSPORT => {
+                #[derive(Deserialize)]
+                struct P {
+                    verb: Transport,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::PlayerTransport { verb: p.verb })
+            }
             method::PLAYER_LOAD => {
                 #[derive(Deserialize)]
                 struct Load {
@@ -932,6 +972,7 @@ impl Request {
             Self::EngineShutdown => method::ENGINE_SHUTDOWN,
             Self::TimeNow => method::TIME_NOW,
             Self::PlayerLoad { .. } => method::PLAYER_LOAD,
+            Self::PlayerTransport { .. } => method::PLAYER_TRANSPORT,
             Self::PlaybackGet { .. } => method::PLAYBACK_GET,
             Self::QueryParse { .. } => method::QUERY_PARSE,
             Self::QueryRun { .. } => method::QUERY_RUN,
@@ -997,7 +1038,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 36, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 37, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

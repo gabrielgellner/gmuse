@@ -213,6 +213,18 @@ impl Remote {
     /// *accepted*, not *executed* — whether it sounded arrives as a `playback`
     /// event. So a view that waited here would be waiting for the wrong thing,
     /// and waiting at all would put a socket round trip inside a keypress.
+    /// Send one transport verb.
+    ///
+    /// **A notification, like `line`.** Transport is the one surface where a reply would be
+    /// worth less than the latency: what the stream is doing arrives on the `playback` topic
+    /// either way, and §7.8 is what a view draws from.
+    fn transport(&self, verb: gmuse_proto::request::Transport) {
+        let _ = self.client.notify(
+            gmuse_proto::request::method::PLAYER_TRANSPORT,
+            Some(serde_json::json!({ "verb": verb })),
+        );
+    }
+
     fn line(&self, line: &str) {
         let _ = self.client.notify(
             gmuse_proto::request::method::EXEC_LINE,
@@ -252,22 +264,25 @@ impl Transport for Remote {
     /// track, so it needs a cursor. Resuming is `pause`, which toggles — so this
     /// has to know the run state, and it does, from the event stream.
     ///
-    /// #225 is the argument for the protocol carrying three distinct verbs, and
-    /// this is exactly the case it names: a toggle resolved by the sender races
-    /// itself. The race is one keypress wide and `play` is not a repeating key, so
-    /// it is a small wrong rather than the fluttering one #225 is really about.
+    /// **Three verbs, none resolved here** — #225, D-8.
+    ///
+    /// All three used to send the text `pause`, which the engine reads as a toggle: so
+    /// `pause()` on a paused player *started* it, and `play()` compensated by reading the
+    /// snapshot and deciding — the race D-8 forbids, because two presses arriving faster
+    /// than the refresh both read `paused` and both send the same thing.
+    ///
+    /// `player.transport` carries the verb and the engine resolves it, where the run flag
+    /// lives.
     fn play(&self) {
-        if self.state() != State::Playing {
-            self.line("pause");
-        }
+        self.transport(gmuse_proto::request::Transport::Play);
     }
 
     fn pause(&self) {
-        self.line("pause");
+        self.transport(gmuse_proto::request::Transport::Pause);
     }
 
     fn toggle(&self) {
-        self.line("pause");
+        self.transport(gmuse_proto::request::Transport::Toggle);
     }
 
     fn stop(&self) {

@@ -1,6 +1,12 @@
 # Transport & Keymap Design Spec
 
-Status: design, pre-implementation. Ordered by impact, not by build order.
+Status: design, **and the transport verbs are built** (#225). Ordered by impact, not by build order.
+
+**What ships of it.** `player.transport` carries `play`, `pause` and `toggle` as three distinct verbs (D-6, D-7), and
+the engine resolves toggle where the run flag lives (D-8). `audio::transported` is the rule as a pure function, so D-7's
+idempotence is a property test rather than a claim. No `DeckSel` yet: #224 settled its shape and nothing has decks, so a
+parameter with one reachable value would be a wire commitment bought with nothing. Acceptance criteria 3 and 4 hold; 5
+is deferred by #224's decision that `audio::State` gains `Armed` when something can produce one.
 
 **Where this sits.** It is the missing design for the `deck.*` and `param.*` method families that
 [`gmuse-engine-architecture.md`](gmuse-engine-architecture.md) §7.4 names and #215 deliberately did not implement,
