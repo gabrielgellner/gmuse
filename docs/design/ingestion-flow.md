@@ -177,6 +177,52 @@ back to hand-work.
   unbrowsable.
 - **~~A row is a copy, not a performance.~~** Settled by #155: a row is an appearance on a medium, or a recording no
   release holds. An album held in two formats draws one row per track.
+- **Nothing owns unpacking.** A download arrives as a zip and the flow starts at a folder, so getting from one to the
+  other is hand work every time — and the shape varies by source. Two bought in September 2026 were nested
+  `Artist/Album/Artist - NN. Title.flac`; the ones the conventions note describes are flat
+  `Artist - Album - NN Title.mp3`. Neither is wrong and no rule covers both.
+
+- **Nothing owns tag _content_.** `tags` normalises the _format_ — one ID3v2.4, no ID3v1 — and `paths survey` reports a
+  filename disagreeing with a tag and has nowhere to apply it. Between them there is no stage for "this tag says
+  something wrong".
+
+  The worked case: a store had welded `Explicit` into all twelve titles of _Feed the Family_ —
+  `Four Men From the Row Explicit`, and so on for every track. `ingest` matched nothing. Stripping the suffix took the
+  same album to **100% on the first try**, and one regex was the whole difference between an album that could not enter
+  and one that entered exactly. The uniformity is what makes it safe to strip: twelve of twelve is a source artefact,
+  and a title that merely contains the word is a different thing.
+
+- **Nothing asks whether the library already holds the album.** §5's FLAC-beside-MP3 case is the hard one and the flow
+  has no step that raises it — `shelf import` says "joins a recording already held" _after_ you have decided to import.
+  Bringing in _Classics_ meant noticing by hand that a 13-track MP3 copy was already there, which decided both the
+  release to match against and what to do with the old copy.
+
+- **`shelf remove` takes the folder, artwork and all.** Retiring thirteen MP3s named explicitly moved the whole album
+  directory to `.departed`, including thirty-one images and sleeve notes, leaving the FLAC album with no cover while
+  every neighbouring album has one. Nothing is lost and it is reversible, which is §6 working; but a format swap wants
+  the art to stay, and copying it across is hand work.
+
+- **`rsgain` runs after import, and #140 means the library does not see it.** Step 6 is after step 5 for a good reason —
+  album gain is computed per folder and import is what makes the folder. But writing ReplayGain is a retag, and a retag
+  behind the library's back changes nothing: the loudness reaches the log only when the album is named to `shelf import`
+  again. §5 does exactly that for tags and the step list does not say to do it for gain.
+
+- **A refusal can be the network.** `ingest` reported "no MusicBrainz release matched that artist and album" for a
+  release MusicBrainz holds and returns at score 100 — the server was throttling, `bronze` returned "no answer was
+  obtained", and the caller turned that into a claim about what exists (#262). The refusal was right and the _reason_
+  was not, which is worse than it sounds: acting on it means reaching for `--unidentified`, which rests a recording on
+  its bytes — the one outcome §3 says this stage exists to prevent.
+
+- **Choosing a release means choosing a medium, and the tool shows the tracklist.** _Classics_ has twenty pressings in
+  its release group. `ingest`'s own search surfaced a 2×12" vinyl at 85%, and asserting it with `--release` wrote
+  `media=12" Vinyl` onto a 7digital download and split thirteen tracks across two discs. The **2008 Digital Media**
+  pressing in the same group matched at **100%**. The tracklist diff the tool prints does not mention the medium, and
+  the medium is what made the difference.
+
+  **And picking the better release made the genre worse.** `genre propose` reaches Discogs through the release id: the
+  vinyl had a Discogs link and proposed `Electronic; Techno; Hardcore; IDM`; the digital one has none, so the fallback
+  declared the store's own `Dance - Electro` already correct. Two stages, one input, opposite directions.
+
 - **`ingest tracklist` runs last and wants the album id in the tags.** It proposes against the release the _files_
   claim, because that is what `import` read to mint the pressing. A folder whose files carry no `musicbrainz_albumid` is
   skipped, and one whose files disagree about which pressing they are from is skipped too — two records got mixed, and
@@ -236,6 +282,45 @@ playback picks the FLAC because `for_playback` prefers the higher bitrate. Two a
 still MP3-only, which is the correct outcome — an unverified match is worse than no match.
 
 ---
+
+## 5.1 Worked example: two FLAC albums, September 2026
+
+The second run through, done to find out how much of this a person still has to do. Both albums ended up correct; what
+follows is where the flow stopped and waited.
+
+```sh
+# 1. unpack — no stage owns this, and the shape was not the documented one
+unzip -q "Aphex Twin - Classics.zip" -d staged/
+
+# 2. paths survey — named exactly the 7 truncated filenames, and needed nothing
+uv run gmuse-tools paths survey staged/            # 7 differs: title
+
+# 3. ingest — refused both, correctly, and for different reasons
+uv run gmuse-tools ingest apply "staged/Aphex Twin/Classics" --artist "Aphex Twin" --album Classics
+#    tracklist: close (85%)          -> refused; the search had surfaced a 2x12" vinyl
+uv run gmuse-tools ingest apply "staged/Possessed…/Feed the Family (Explicit)" …
+#    no MusicBrainz release matched  -> the server was throttling (#262)
+
+# 4. the two repairs nothing owns
+#    a) enumerate the release group, take the Digital Media pressing -> 100%
+#    b) strip the store's `Explicit` off twelve titles              -> 100%
+
+# 5. genre: Discogs was right for one and had nothing for the other
+# 6. import, into the collection the artist was already in
+# 7. rsgain, then import again — a retag changes nothing (#140)
+```
+
+**Six stages ran with no input**: `paths survey`, `tags survey`, `shelf import`, `shelf remove`, `shelf apply`,
+`rsgain`. Every refusal was correct and nothing wrong entered the library, which is the property worth having.
+
+**The interventions were not mostly judgement.** Two were — which collection, and a genre Discogs had nothing for, and
+both are the kind a person should make. The rest were the gaps above: unpacking, tag content, the already-held check,
+the artwork, the re-import after gain. Those are mechanical, and two of them were what actually blocked an album from
+entering at all.
+
+**One was a wrong call I made, and it is instructive.** `--release` is the documented door out of an 85% refusal, and
+the first release I put through it was the pressing `ingest`'s own search had surfaced — a vinyl, for a digital
+download. The refusal was protecting against something real, and the escape hatch does not ask what the 15% was.
 
 ## 6. Related
 
