@@ -60,6 +60,7 @@ pub fn instruction_of(cmd: &Command) -> Result<Instruction, &'static str> {
     match cmd {
         Command::Pause => Ok(Instruction::Toggle),
         Command::Cue => Ok(Instruction::Cue),
+        Command::CuePreview => Ok(Instruction::CuePreview),
         Command::Next => Ok(Instruction::Next),
         Command::Prev => Ok(Instruction::Prev),
         Command::Rescan => Ok(Instruction::Rescan),

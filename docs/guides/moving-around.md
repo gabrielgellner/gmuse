@@ -122,6 +122,7 @@ Bind your own in the config, where `<leader>` stands for whatever `leader` says:
     <leader>x    play/pause
     <leader>c    cue — back to the reference, and wait there
     <leader>v    next
+    <leader>P    preview from the reference while held
     <leader>+    louder, 3 dB a step
     <leader>-    quieter
     <leader>>    seek a minute on
@@ -141,6 +142,14 @@ mode is, which is what lets the row grow later without moving. `b` is deliberate
 reference point and waits there; pressed while paused it _sets_ the reference where the playhead is. On a track you have
 never marked, the reference is the top — so cue is "back to the start", which is what stop used to be for. There is no
 stop: `v` is next.
+
+`P` previews: it plays from the reference for as long as you hold it, and snaps back when you let go. Cue marks the
+spot, `P` listens to it, and nothing moves.
+
+**Whether holding works depends on your terminal.** Reporting a key _release_ needs the kitty keyboard protocol — kitty,
+WezTerm, Ghostty and foot have it; macOS Terminal.app does not. Where it is missing the same key latches instead: press
+to start the preview, press again to snap back. The status line says which you got, `[preview]` or `[preview latched]`,
+so a hold that does not behave like a hold explains itself rather than looking broken.
 
 ## Transport mode
 

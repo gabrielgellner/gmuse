@@ -166,6 +166,13 @@ pub const DEFAULTS: &[&str] = &[
     // only reaches for sound on a track, where there is nothing left to open.
     // It lived on `<leader> x` until the row claimed that letter.
     "bind common \"<leader> p\" play",
+    // **Preview is its own key, not a longer press of cue** — #228.
+    //
+    // Cue already means two things and the state picks between them; asking a
+    // duration to pick a third would make a tap and a hold of the same key
+    // ambiguous at exactly the moment a hand is least precise. `P` for preview,
+    // and `b` stays reserved.
+    "bind common \"<leader> P\" cue-preview",
     "bind common \"<leader> z\" prev",
     "bind common \"<leader> x\" pause",
     "bind common \"<leader> c\" cue",
@@ -190,6 +197,7 @@ pub const DEFAULTS: &[&str] = &[
     "bind transport z prev",
     "bind transport x pause",
     "bind transport c cue",
+    "bind transport P cue-preview",
     "bind transport v next",
     // `space` is the leader in normal mode and cannot be play/pause there.
     // Here it can, and it is the key every player in the world uses.

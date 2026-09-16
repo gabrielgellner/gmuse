@@ -164,6 +164,20 @@ fn modes(ui: &Ui) -> String {
     if ui.playback.repeat_current {
         out.push("[repeat-1]".into());
     }
+    // **Shown while it runs, and it says which kind** — #228. A preview that
+    // latched instead of being held is the behaviour change the spec asks to be
+    // visible: the terminal cannot report key release, so the key that started
+    // it is the key that ends it.
+    if ui.previewing {
+        out.push(
+            if ui.hold_capable {
+                "[preview]"
+            } else {
+                "[preview latched]"
+            }
+            .into(),
+        );
+    }
     if let Some(vol) = ui.volume_hint {
         out.push(format!("[vol {vol:.0}%]"));
     }

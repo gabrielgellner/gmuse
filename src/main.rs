@@ -2303,6 +2303,41 @@ fn run_library(
 ///
 /// The terminal is restored by the panic hook `ratatui::init` installs, so a
 /// panic mid-render leaves a usable terminal rather than a wedged one.
+/// Ask the terminal to report key release — #228, D-20.
+///
+/// **Only `REPORT_EVENT_TYPES`.** It is the one flag that turns a release into
+/// an event; the others change how keys are *encoded*, which would rewrite what
+/// every existing binding matches. A held key also starts arriving as
+/// `Repeat` rather than as repeated `Press`, which `is_press()` already drops —
+/// so D-7's "a toggle must not flutter under key repeat" is stronger here than
+/// it can be without the protocol, where a repeat is indistinguishable from a
+/// press.
+///
+/// Paired with [`hold_off`] around every `ratatui::restore`, because restoring
+/// the screen hands the flags back with it.
+fn hold_on(capable: bool) {
+    if !capable {
+        return;
+    }
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::PushKeyboardEnhancementFlags(
+            ratatui::crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        )
+    );
+}
+
+/// Give the enhancement flags back — #228. See [`hold_on`].
+fn hold_off(capable: bool) {
+    if !capable {
+        return;
+    }
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::PopKeyboardEnhancementFlags
+    );
+}
+
 fn run_tui(
     app: &mut App,
     smart_artist_sort: bool,
@@ -2801,7 +2836,21 @@ fn run_tui(
     // returns, the borrow ends, the fold is redone, and it runs again. The
     // state the UI holds is untouched: only what it *reads through* is
     // replaced.
+    // **Ask once, before the screen is taken** — #228, D-20.
+    //
+    // `Release` never arrives without the kitty keyboard protocol, so a
+    // momentary verb has to know which world it is in. kitty, WezTerm, Ghostty
+    // and foot answer yes; Terminal.app does not, and there a held key latches
+    // instead — which the status line says, so the difference is visible rather
+    // than mysterious.
+    //
+    // A probe that errors is a no: the fallback works everywhere, and guessing
+    // yes would leave a verb that silently does nothing.
+    state.hold_capable =
+        ratatui::crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+
     let mut terminal = ratatui::init();
+    hold_on(state.hold_capable);
     let result = loop {
         let stop = {
             let ctx = gmuse::ui::Context {
@@ -2862,6 +2911,7 @@ fn run_tui(
             // out here** (#99): the editor wants the terminal, so the screen
             // is given back before it runs and taken again after.
             gmuse::ui::Stop::Edit => {
+                hold_off(state.hold_capable);
                 ratatui::restore();
                 let said = match gmuse::edit::edit(&state.composed, state.data_dir.as_deref()) {
                     Ok(back) => {
@@ -2881,6 +2931,10 @@ fn run_tui(
                 state.audit.line("edit", &said);
                 state.notify(said);
                 terminal = ratatui::init();
+                // **And again**, because `restore` gave the flags back with the
+                // screen. A round trip through the editor that forgot this would
+                // leave hold-to-preview working until the first `:edit`.
+                hold_on(state.hold_capable);
             }
         }
         // The shelf is a projection of the librarian, so it goes too — through
@@ -2893,6 +2947,7 @@ fn run_tui(
         };
         gmuse::ui::refresh_library(&mut state, &ctx);
     };
+    hold_off(state.hold_capable);
     ratatui::restore();
     // Written after the terminal is restored, so a failure is visible.
     // A fresh borrow of whatever the last refold produced, not the one the
@@ -4238,6 +4293,7 @@ fn run_engine(
                         Transport::Pause => gmuse_engine::instruction::Instruction::Pause,
                         Transport::Toggle => gmuse_engine::instruction::Instruction::Toggle,
                         Transport::Cue => gmuse_engine::instruction::Instruction::Cue,
+                        Transport::CuePreview => gmuse_engine::instruction::Instruction::CuePreview,
                     };
                     if !self.control.ask(gmuse::engine::control::Ask::Do(what)) {
                         return Err(RpcError::new(code::INTERNAL, "the player is not running"));

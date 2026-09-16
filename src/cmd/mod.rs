@@ -768,6 +768,14 @@ pub enum Command {
     /// here, or drop back to the mark") are one command, and which one happens
     /// is the engine's to decide from the run state.
     Cue,
+    /// **Preview from the reference while a key is held** — #228, §5's third
+    /// case and the one `KeyPhase` exists for.
+    ///
+    /// Momentary, which is a property of the *command* rather than of the
+    /// binding: the view asks "is this what the key resolves to" and handles a
+    /// release only then, so every other binding keeps the press-only path it
+    /// has always had.
+    CuePreview,
     Next,
     Prev,
     Seek(SeekSpec),

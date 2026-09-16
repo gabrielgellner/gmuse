@@ -185,6 +185,13 @@ pub enum PlayerCmd {
     Stop,
     /// Return to the reference point, or set it — [`cued`] decides which.
     Cue,
+    /// **Play from the reference without moving it** — #228, §5's third case.
+    ///
+    /// The start of a preview. There is no matching `end`, and that is not an
+    /// omission: during a preview the deck is *running*, so [`cued`] already
+    /// answers `ReturnAndPause` — which is the snap back, exactly. One command
+    /// rather than a pair that could disagree about where the reference is.
+    CuePreview,
     Seek(SeekTo),
     /// The answer to [`PlayerEvent::NeedNext`]: what follows the current
     /// track, or `None` if nothing does.
@@ -654,6 +661,10 @@ impl PlayerHandle {
 
     pub fn cue(&self) {
         self.send(PlayerCmd::Cue);
+    }
+
+    pub fn cue_preview(&self) {
+        self.send(PlayerCmd::CuePreview);
     }
     pub fn seek(&self, to: SeekTo) {
         self.send(PlayerCmd::Seek(to));

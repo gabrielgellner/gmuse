@@ -48,6 +48,9 @@ pub enum Instruction {
     /// Return to the reference point, or set it — **resolved by the engine**
     /// (#229, D-14), for the same reason `Toggle` is.
     Cue,
+    /// Play from the reference without moving it — #228. The end of a preview
+    /// is `Cue`, not a second instruction.
+    CuePreview,
     Play,
     /// Halt, leaving the playhead where it is — **idempotent** (#225, D-7).
     ///

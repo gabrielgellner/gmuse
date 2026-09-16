@@ -40,6 +40,23 @@ return to the reference, and `PlayerCmd::Stop` is more: it clears the outbox, dr
 draining — the **queue-level** condition #224's O-4 named, which a deck has no concept of. The engine still reaches
 `Stopped` on its own at the end of a programme and when a device is lost.
 
+**§8's momentary fallback is built, and criterion 7 is no longer vacuous** (#228). It was: "every momentary verb remains
+reachable with `hold_capable == false`" was satisfiable by an empty set, because there were none — `bend`, `KeyPhase`
+and `while_pressed` existed nowhere, and `slip` in the tree is a row type. Cue preview is the first one, and building it
+is what gave the criterion a subject.
+
+`transport::momentary` is the rule, and **the fallback is not a second code path**: a press begins, a release ends, and
+on a terminal that cannot report release the release simply never arrives, so the _next press_ ends it. The latch falls
+out of the same three lines. `hold_capable` comes from `supports_keyboard_enhancement` at startup, and only
+`REPORT_EVENT_TYPES` is pushed — the other flags change how keys are _encoded_, which would rewrite what every existing
+binding matches.
+
+A release reaches **only a binding whose command is momentary**; `is_press()` stays the door for everything else, so no
+keymap written for presses sees an event that would fire it twice. That also settles where holding works: a chord cannot
+be held, because a release names one key and never a sequence, so `P` in transport mode is holdable and `<leader> P`
+outside it latches. Both are reachable, which is what the criterion asks. The status line says `[preview]` or
+`[preview latched]` so the difference is visible rather than mysterious.
+
 D-17 has a test now — browsing asks the transport for nothing. D-19 (load behind a modifier) is deferred on #226's
 grounds: its argument is about clobbering a live deck during a mix, and with one player "play the selection" on a bare
 key is what cmus does and what is wanted.

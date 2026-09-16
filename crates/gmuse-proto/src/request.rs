@@ -398,6 +398,18 @@ pub enum Transport {
     /// cover both readings: on a player that has marked nothing, cue is "back to the
     /// start and wait" — cmus's stop, without stopping.
     Cue,
+    /// **Play from the reference without moving it** — #228, §5's third case.
+    ///
+    /// The start of a preview; the end is a plain `Cue`, because a running deck
+    /// already returns to the reference and waits. `KeyPhase` stays in the view
+    /// (§8): the engine never learns whether a terminal can report key release,
+    /// only that a preview began.
+    ///
+    /// **Spelled out, because `rename_all = "lowercase"` would make it
+    /// `cuepreview`** — and a method name is public API (§7.4), so a wire word
+    /// nobody would choose on purpose is not one to inherit from a derive.
+    #[serde(rename = "cue_preview")]
+    CuePreview,
 }
 
 /// §8.4's write surface, and there is no other one.

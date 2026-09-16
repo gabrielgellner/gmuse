@@ -270,6 +270,26 @@ pub(super) fn run(
                     }
                     continue;
                 }
+                // **Preview: play from the reference, leaving it where it is** —
+                // #228. The release is a plain `Cue`, because a running deck
+                // already cues back to the reference and waits there.
+                PlayerCmd::CuePreview => {
+                    publish_all(&mut boundaries, &events);
+                    let Some(t) = track.as_mut() else {
+                        continue;
+                    };
+                    if let Ok(landed) = seek_to_frame(t, cue_frame, device_rate) {
+                        outbox.clear();
+                        shared.draining.store(false, Ordering::Release);
+                        flush(&shared, landed);
+                        t.base_frames = landed;
+                        t.pushed_frames = 0;
+                        t.drained = false;
+                        t.finishing = false;
+                    }
+                    shared.state.store(State::Playing as u8, Ordering::Relaxed);
+                    continue;
+                }
                 PlayerCmd::Seek(to) => {
                     // Same reasoning as `Stop`: seeking acts on the spliced
                     // track, so the caller must be told it is the one playing.

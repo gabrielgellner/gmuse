@@ -315,6 +315,10 @@ impl Transport for Remote {
         self.transport(gmuse_proto::request::Transport::Cue);
     }
 
+    fn cue_preview(&self) {
+        self.transport(gmuse_proto::request::Transport::CuePreview);
+    }
+
     /// **The recording crosses and the path does not** — I17.
     ///
     /// `what.source` is ignored on purpose: a locator is a property of one

@@ -109,6 +109,7 @@ pub const VERBS: &[&str] = &[
     "seek",
     "set",
     "cue",
+    "cue-preview",
     "toggle",
     "top",
     "unbind",
@@ -223,6 +224,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "play" => Command::Play,
         "pause" => Command::Pause,
         "cue" => Command::Cue,
+        "cue-preview" => Command::CuePreview,
         // `query-language.md` §11's third tier. No argument: what it edits is
         // what is composed, which is the only thing it could sensibly mean.
         "edit" => Command::Edit,
@@ -882,6 +884,7 @@ pub fn format(cmd: &Command) -> String {
         Command::Play => "play".into(),
         Command::Pause => "pause".into(),
         Command::Cue => "cue".into(),
+        Command::CuePreview => "cue-preview".into(),
         Command::Next => "next".into(),
         Command::Prev => "prev".into(),
         Command::Seek(SeekSpec::Absolute(s)) => format!("seek {s}"),

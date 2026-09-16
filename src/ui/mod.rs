@@ -288,6 +288,20 @@ pub struct Ui {
     /// Shown briefly after a volume change, so the level is visible without a
     /// permanent indicator taking up room.
     pub volume_hint: Option<f32>,
+    /// **Whether a cue preview is running** — #228.
+    ///
+    /// The view's, not the engine's: the engine is simply playing, and knows
+    /// nothing about why. Which is the point of §8 — `KeyPhase` never crosses
+    /// the wire, so the engine never learns what terminal anyone is using.
+    pub previewing: bool,
+    /// **Whether this terminal can report key release** — #228, D-20.
+    ///
+    /// Decided once, at startup, by `supports_keyboard_enhancement`. kitty,
+    /// WezTerm, Ghostty and foot can; Terminal.app cannot. When it cannot, a
+    /// momentary verb latches instead of being held, and the status line says
+    /// so — the spec asks for that so the change in behaviour is visible rather
+    /// than mysterious.
+    pub hold_capable: bool,
     pub bindings: Bindings,
     /// What `<leader>` stands for. Substituted when a binding is inserted, so
     /// the lookup path never has to know about it.
@@ -736,6 +750,12 @@ impl Ui {
             smart_artist_sort: true,
             replaygain: crate::cmd::ReplayGainMode::default(),
             status_until: None,
+            previewing: false,
+            // **Assumed absent until somebody proves otherwise.** `Ui::new` has
+            // no terminal to ask; `run_tui` probes and sets it. Defaulting to
+            // `false` means the worst case is a notice a capable terminal did
+            // not need, rather than a hold that silently does nothing.
+            hold_capable: false,
             quit: false,
         }
     }
@@ -1017,9 +1037,23 @@ where
         // 500ms, and visibly inconsistent between presses.
         if event::poll(ui.tick(Instant::now()))?
             && let Event::Key(key) = event::read()?
-            && key.is_press()
         {
-            handle_key(key, ui, ctx);
+            // **A release reaches only a momentary binding** — #228.
+            //
+            // `is_press()` stays the door every other key comes through, so no
+            // existing binding sees an event it did not see before — a release
+            // arriving at a keymap written for presses would fire everything
+            // twice, on exactly the path every keystroke crosses.
+            //
+            // Releases only arrive at all once the enhancement flags are pushed,
+            // which `run_tui` does when the terminal reports it can; on a
+            // terminal that cannot, this arm is simply never taken and the latch
+            // in `transport::momentary` carries the verb instead.
+            if key.is_press() {
+                handle_key(key, ui, ctx);
+            } else if key.kind == ratatui::crossterm::event::KeyEventKind::Release {
+                released(key, ui, ctx);
+            }
         }
         drain_player_events(ui, ctx);
         follow_the_engine(ui, ctx);
@@ -2719,6 +2753,55 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
 }
 
 /// The one place all state mutation happens (DESIGN §6).
+/// A key came up. Act only if it was holding a momentary verb — #228.
+///
+/// **Momentary is a property of the command, not of the binding.** There is no
+/// second table and no flag on a binding to keep in step: the release resolves
+/// through the same keymap the press did, and anything that is not a momentary
+/// verb is dropped here. A binding added later becomes holdable by being bound
+/// to a holdable command, which is the only place the question can be answered
+/// once.
+///
+/// **Single keys only, and that decides where holding works.** A chord cannot
+/// be held: the release names whichever key came up, not the sequence that was
+/// typed. So `P` in transport mode is holdable and `<leader> P` outside it is
+/// not — and the one outside *latches*, through the same rule, because the
+/// release it never gets is the release `momentary` already copes with. The
+/// verb stays reachable in both places, which is what criterion 7 asks.
+fn released(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
+    let seq = [Key::from_event(key)];
+    if let Some(Command::CuePreview) = bind::lookup(&ui.bindings, ui.context(), &seq) {
+        preview(ui, ctx, transport::KeyPhase::Release);
+    }
+}
+
+/// Begin or end a cue preview — #228.
+///
+/// **One place for both phases and both terminals.** `transport::momentary` is
+/// the whole rule; this is the part that has a `Ui` to change and a transport to
+/// ask. The end of a preview is `cue`, not a second engine command, because a
+/// running deck already returns to the reference and waits there.
+fn preview(ui: &mut Ui, ctx: &Context<'_>, phase: transport::KeyPhase) {
+    match transport::momentary(ui.previewing, phase) {
+        transport::Momentary::Begin => {
+            ui.previewing = true;
+            if let Some(p) = ctx.player {
+                p.cue_preview();
+            }
+            if !ui.hold_capable {
+                ui.notify("preview latched — this terminal cannot report key release");
+            }
+        }
+        transport::Momentary::End => {
+            ui.previewing = false;
+            if let Some(p) = ctx.player {
+                p.cue();
+            }
+        }
+        transport::Momentary::Ignore => {}
+    }
+}
+
 pub fn execute(ui: &mut Ui, ctx: &Context<'_>, cmd: Command) {
     execute_counted(ui, ctx, cmd, None);
 }
@@ -3048,6 +3131,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 p.cue();
             }
         }
+        // **A press, whichever terminal this is** — #228. `transport::momentary`
+        // is the rule; a release reaches `released` instead, and on a terminal
+        // that cannot report one this press is what ends the last preview.
+        Command::CuePreview => preview(ui, ctx, transport::KeyPhase::Press),
         Command::Next => {
             for _ in 0..n {
                 advance(ui, ctx, true);
@@ -7703,56 +7790,6 @@ mod tests {
     /// something when a command that *should* reach it runs.
     #[test]
     fn browsing_asks_the_transport_for_nothing() {
-        #[derive(Default)]
-        struct Noted(std::sync::Mutex<Vec<String>>);
-        impl Noted {
-            fn note(&self, what: &str) {
-                self.0.lock().expect("noted").push(what.into());
-            }
-            fn asked(&self) -> Vec<String> {
-                self.0.lock().expect("noted").clone()
-            }
-        }
-        impl transport::Transport for Noted {
-            fn state(&self) -> crate::audio::State {
-                crate::audio::State::Playing
-            }
-            fn position(&self) -> Duration {
-                Duration::ZERO
-            }
-            fn play(&self) {
-                self.note("play");
-            }
-            fn pause(&self) {
-                self.note("pause");
-            }
-            fn toggle(&self) {
-                self.note("toggle");
-            }
-            fn cue(&self) {
-                self.note("cue");
-            }
-            fn load(&self, _what: transport::Loading) -> transport::Accepted {
-                self.note("load");
-                transport::Accepted::Yes
-            }
-            fn seek(&self, _to: crate::audio::SeekTo) {
-                self.note("seek");
-            }
-            fn volume(&self) -> f32 {
-                1.0
-            }
-            fn set_volume(&self, _position: f32) {
-                self.note("set_volume");
-            }
-            fn underruns(&self) -> u32 {
-                0
-            }
-            fn last_short_frames(&self) -> u32 {
-                0
-            }
-        }
-
         let store = fixture();
         let noted = Noted::default();
         let ctx = Context {
@@ -7815,6 +7852,7 @@ mod tests {
         fn pause(&self) {}
         fn toggle(&self) {}
         fn cue(&self) {}
+        fn cue_preview(&self) {}
         fn load(&self, _what: transport::Loading) -> transport::Accepted {
             transport::Accepted::Yes
         }
@@ -7909,6 +7947,7 @@ mod tests {
             fn pause(&self) {}
             fn toggle(&self) {}
             fn cue(&self) {}
+            fn cue_preview(&self) {}
             fn load(&self, _what: transport::Loading) -> transport::Accepted {
                 transport::Accepted::Yes
             }
@@ -15719,6 +15758,129 @@ mod tests {
                 "{normal} and {in_mode} should be the same command"
             );
         }
+    }
+
+    /// A transport that writes down what it was asked for.
+    ///
+    /// **Module-level because two tests need the same witness** — #227's
+    /// "browsing asks for nothing" and #228's "a release reaches only a
+    /// momentary binding". Both assert an *absence*, and an absence is only
+    /// worth anything if the same object can be seen to record a presence.
+    #[derive(Default)]
+    struct Noted(std::sync::Mutex<Vec<String>>);
+
+    impl Noted {
+        fn note(&self, what: &str) {
+            self.0.lock().expect("noted").push(what.into());
+        }
+        fn asked(&self) -> Vec<String> {
+            self.0.lock().expect("noted").clone()
+        }
+    }
+
+    impl transport::Transport for Noted {
+        fn state(&self) -> crate::audio::State {
+            crate::audio::State::Playing
+        }
+        fn position(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn play(&self) {
+            self.note("play");
+        }
+        fn pause(&self) {
+            self.note("pause");
+        }
+        fn toggle(&self) {
+            self.note("toggle");
+        }
+        fn cue(&self) {
+            self.note("cue");
+        }
+        fn cue_preview(&self) {
+            self.note("cue-preview");
+        }
+        fn load(&self, _what: transport::Loading) -> transport::Accepted {
+            self.note("load");
+            transport::Accepted::Yes
+        }
+        fn seek(&self, _to: crate::audio::SeekTo) {
+            self.note("seek");
+        }
+        fn volume(&self) -> f32 {
+            1.0
+        }
+        fn set_volume(&self, _position: f32) {
+            self.note("set_volume");
+        }
+        fn underruns(&self) -> u32 {
+            0
+        }
+        fn last_short_frames(&self) -> u32 {
+            0
+        }
+    }
+
+    /// **A release reaches a momentary binding and nothing else** — #228.
+    ///
+    /// The narrow blast radius is the point: `is_press()` stays the door every
+    /// other key comes through, so a keymap written for presses never sees an
+    /// event that would fire it twice. This walks the release of a key bound to
+    /// something ordinary and asserts it did nothing at all.
+    ///
+    /// **The second half is the instrument.** "Nothing happened" is the same
+    /// observation as "the harness never ran", so the same call with the
+    /// momentary key must be seen to do something.
+    #[test]
+    fn a_key_coming_up_only_reaches_a_momentary_binding() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+
+        let store = fixture();
+        let noted = Noted::default();
+        let ctx = Context {
+            library: lib_of(&store),
+            player: Some(&noted),
+            gapless: None,
+        };
+        let mut ui = ui_of(&store, true);
+        ui.hold_capable = true;
+        // **Transport mode, because that is where the verb is a single key.**
+        // `<leader> P` cannot be held at all — a release names one key, never a
+        // sequence — so outside the mode it latches instead. Both are reachable;
+        // only the bare one is holdable, and this is the holdable path.
+        ui.mode = crate::cmd::Mode::Transport;
+
+        // **Started first, and that is the whole test.** A release of an
+        // ordinary key with nothing running proves nothing: the rule answers
+        // `Ignore` to that whether or not the key was checked. The claim only
+        // has teeth while a preview is up, where routing every release would
+        // end it.
+        execute(&mut ui, &ctx, Command::CuePreview);
+        assert!(ui.previewing, "the preview never began");
+
+        // `j` is bound here too, and to something that is not momentary.
+        let mut down = KeyEvent::from(KeyCode::Char('j'));
+        down.kind = KeyEventKind::Release;
+        released(down, &mut ui, &ctx);
+        assert!(
+            ui.previewing,
+            "a key that is not the preview key ended the preview by coming up"
+        );
+        assert_eq!(
+            noted.asked(),
+            vec!["cue-preview".to_string()],
+            "an ordinary release reached the transport: {:?}",
+            noted.asked()
+        );
+        let mut up = KeyEvent::from(KeyCode::Char('P'));
+        up.kind = KeyEventKind::Release;
+        released(up, &mut ui, &ctx);
+        assert!(!ui.previewing, "the release did not end the preview");
+        assert_eq!(
+            noted.asked(),
+            vec!["cue-preview".to_string(), "cue".to_string()],
+            "a held preview is one preview and one snap back"
+        );
     }
 
     /// **The leader still plays what the cursor is on** — #229.

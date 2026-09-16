@@ -4616,8 +4616,10 @@ fn cue_returns_to_the_mark_that_was_set_not_to_the_start() {
          only remember it"
     );
 
-    // Somewhere else, and running, so this press returns.
-    line("seek 0.6");
+    // Somewhere else, and running, so this press returns. **Inside the track**:
+    // it used to seek to 0.6s of a half-second fixture, which stopped the engine
+    // and only worked because `play` starts a stopped deck again.
+    line("seek 0.4");
     std::thread::sleep(Duration::from_millis(100));
     ask("play");
     settle("playing");
@@ -4718,5 +4720,114 @@ fn loading_again_forgets_where_the_mark_was() {
         landed < 5_000,
         "cue landed at {landed} frames — it kept the mark at {marked_at} from \
          before the load"
+    );
+}
+
+/// **A preview plays from the mark and leaves it there** — #228, §5's third case.
+///
+/// The view decides whether a key is held or latched; the engine only ever sees
+/// "preview began". What it has to get right is that the preview *starts at the
+/// reference*, and that ending one — a plain `cue`, because a running deck
+/// already returns there — puts the playhead back without having moved the mark.
+///
+/// **The mark is set away from the start**, for the same reason the cue test
+/// sets it there: previewing from frame zero is what a decoder that ignored
+/// `cue_frame` would do anyway.
+#[test]
+fn a_preview_starts_at_the_mark_and_does_not_move_it() {
+    let (engine, recording) = start_with_a_track("preview");
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+
+    let ask = |verb: &str| {
+        client
+            .call(
+                gmuse_proto::method::PLAYER_TRANSPORT,
+                Some(serde_json::json!({ "verb": verb })),
+            )
+            .unwrap_or_else(|e| panic!("{verb} refused: {e}"));
+    };
+    let now = || -> (String, u64) {
+        let got = client
+            .call(gmuse_proto::method::PLAYBACK_GET, None)
+            .expect("playback.get");
+        (
+            got["state"].as_str().unwrap_or("?").to_string(),
+            got["pos_frames"].as_u64().unwrap_or(0),
+        )
+    };
+    let settle = |want: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if now().0 == want {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("the engine never reached {want}, it is {}", now().0);
+    };
+
+    client
+        .call(
+            gmuse_proto::method::PLAYER_LOAD,
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+    settle("playing");
+    ask("pause");
+    settle("paused");
+
+    // **Both positions are inside the track, and that needed measuring.** The
+    // fixture is 24,000 frames at the device rate — about half a second — and a
+    // seek past the end leaves the engine `stopped`, where the next seek does
+    // nothing at all. The first version marked at 0.25s and moved to 0.75s,
+    // which is off the end: the playhead stayed put and the failure read as
+    // "the seek did not move" rather than "there was nowhere to move to".
+    client
+        .call(
+            gmuse_proto::method::EXEC_LINE,
+            Some(serde_json::json!({ "line": "seek 0.15" })),
+        )
+        .expect("seek");
+    std::thread::sleep(Duration::from_millis(150));
+    let mark = now().1;
+    assert!(mark > 5_000, "nothing was marked: {mark} frames");
+    ask("cue");
+    std::thread::sleep(Duration::from_millis(150));
+
+    // Somewhere else, so "the preview started at the mark" is falsifiable.
+    client
+        .call(
+            gmuse_proto::method::EXEC_LINE,
+            Some(serde_json::json!({ "line": "seek 0.4" })),
+        )
+        .expect("seek");
+    std::thread::sleep(Duration::from_millis(150));
+    let elsewhere = now().1;
+    assert!(
+        elsewhere > mark + 5_000,
+        "the second seek did not move far enough from the mark: {elsewhere} vs {mark}"
+    );
+
+    // Hold: it should be running, from the mark.
+    ask("cue_preview");
+    settle("playing");
+    let began = now().1;
+    assert!(
+        began < mark + 6_000,
+        "the preview started at {began} frames, not at the mark {mark}"
+    );
+
+    // Release: the snap back is a plain cue, and the mark survives it.
+    ask("cue");
+    settle("paused");
+    std::thread::sleep(Duration::from_millis(150));
+    let landed = now().1;
+    assert!(
+        landed.abs_diff(mark) < 4_000,
+        "the snap back landed at {landed}, not at the mark {mark}"
+    );
+    assert!(
+        landed > 5_000,
+        "it snapped to the start, which is what losing the mark looks like"
     );
 }

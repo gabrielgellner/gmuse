@@ -6056,6 +6056,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   standing in for a behaviour. They ask for the command now. Two more were quietly worse: the keymap test comparing
   `<leader> b` to `b` became `assert_eq!(None, None)` the moment `b` was reserved, and would have gone on passing.
 
+- **2026-09-16** **The hold fallback is the same rule with half its events missing** (#228, §8's D-20). A momentary verb
+  is `Begin` on a press when nothing is running and `End` when something is; a release ends it too. On a terminal that
+  cannot report release, the release never arrives and the next press ends it — so the latch is not a second code path,
+  it is what the first one already does. That is what makes acceptance criterion 7 answerable by asking one function
+  both ways.
+
+  **The criterion was vacuous until this had a subject.** "Every momentary verb remains reachable with
+  `hold_capable == false`" was true over an empty set: `bend`, `KeyPhase` and `while_pressed` were in no file, and the
+  `slip` in the tree is a row type. Cue preview — §5's third case, left here by #229 — is the first momentary verb, and
+  building it is what made the criterion checkable. The same shape as #226: the design was ahead of anything that could
+  use it, and the honest move was to supply the user rather than the type.
+
+  **A release reaches only a binding whose command is momentary.** `is_press()` stays the door everything else comes
+  through, because a release arriving at a keymap written for presses fires it twice, on the one path every keystroke
+  crosses. Momentary is a property of the _command_, so there is no second table to keep in step.
+
+  **Which decides where holding works, and it is worth saying out loud.** A chord cannot be held: a release names the
+  key that came up, never the sequence that was typed. So `P` in transport mode is holdable and `<leader> P` outside it
+  latches — both reachable, one holdable.
+
+  **No engine command for the end of a preview.** During one the deck is running, and a running deck already cues back
+  to the reference and waits there, so the release sends a plain `cue`. A pair of commands could disagree about where
+  the reference was; one cannot.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

@@ -71,6 +71,51 @@ pub enum Accepted {
     NotNamed,
 }
 
+/// **Which half of a momentary verb a key event is** — #228, §8's D-20.
+///
+/// `Latched` is not a third thing that happens; it is what `Press` *means* when
+/// no `Release` is ever coming. It stays a distinct name because the difference
+/// is worth showing a person, not because the rule branches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPhase {
+    Press,
+    Release,
+}
+
+/// What a press or release of a momentary key does, given whether one is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Momentary {
+    /// Start it.
+    Begin,
+    /// Stop it and snap back.
+    End,
+    /// A release with nothing running — the tail of a latched press.
+    Ignore,
+}
+
+/// **One rule for both terminals** — #228, acceptance criterion 7.
+///
+/// The fallback is not a second code path. On a terminal that reports release,
+/// a press begins and the release ends. On one that does not, the release
+/// simply never arrives, and the *next press* ends it — which is the latch,
+/// falling out of the same three lines rather than being written twice.
+///
+/// That is what makes criterion 7 checkable rather than a promise: the same
+/// function is asked both ways, and a momentary verb that became unreachable
+/// without release events would have to do it here.
+pub fn momentary(running: bool, phase: KeyPhase) -> Momentary {
+    match (running, phase) {
+        (false, KeyPhase::Press) => Momentary::Begin,
+        // The latch, and the tap-through on a capable terminal: both are "it is
+        // running and the key spoke again".
+        (true, KeyPhase::Press) => Momentary::End,
+        (true, KeyPhase::Release) => Momentary::End,
+        // Nothing to end. Reached when a latched press already ended it and the
+        // key is only now coming up.
+        (false, KeyPhase::Release) => Momentary::Ignore,
+    }
+}
+
 /// The playback a view can see and ask for.
 ///
 /// Every method is one a socket can answer: the reads come from a `playback`
@@ -110,6 +155,10 @@ pub trait Transport {
     /// command as the DJ one, and **which of the two happens is the engine's to
     /// decide** from the run state, for D-8's reason.
     fn cue(&self);
+
+    /// Play from the reference without moving it — #228. The end of a preview
+    /// is [`Transport::cue`], because a running deck already returns there.
+    fn cue_preview(&self);
 
     /// Play this.
     ///
@@ -221,6 +270,9 @@ impl Transport for crate::audio::PlayerHandle {
     fn cue(&self) {
         crate::audio::PlayerHandle::cue(self);
     }
+    fn cue_preview(&self) {
+        crate::audio::PlayerHandle::cue_preview(self);
+    }
     /// **The recording is unused here, and deliberately not asserted on.** A
     /// local decoder opens the file; whether the library also has a row for it
     /// is a question this side does not need to ask, which is exactly why the
@@ -306,6 +358,9 @@ mod tests {
         fn cue(&self) {
             self.note("cue");
         }
+        fn cue_preview(&self) {
+            self.note("cue-preview");
+        }
         fn load(&self, what: Loading) -> Accepted {
             self.note(format!("load {}", what.source.path.display()));
             Accepted::Yes
@@ -345,6 +400,79 @@ mod tests {
     ///
     /// `Recorded` is the right subject precisely because it does not override —
     /// it takes the same default `PlayerHandle` does.
+    /// **Criterion 7, as a question the code can answer** — #228.
+    ///
+    /// "Every momentary verb remains reachable with `hold_capable == false`" is
+    /// otherwise a promise about a thing that has not happened. Here it is the
+    /// same rule asked both ways: with releases, a press begins and the release
+    /// ends; without them, the release never comes and the *next press* ends
+    /// it. The verb is reachable either way because the fallback is not a second
+    /// path — it is what the first path already does when half its events are
+    /// missing.
+    #[test]
+    fn a_momentary_verb_is_reachable_with_and_without_key_release() {
+        // A terminal that reports release: press, release.
+        assert_eq!(momentary(false, KeyPhase::Press), Momentary::Begin);
+        assert_eq!(momentary(true, KeyPhase::Release), Momentary::End);
+
+        // A terminal that does not: press, press. No release ever arrives.
+        assert_eq!(momentary(false, KeyPhase::Press), Momentary::Begin);
+        assert_eq!(momentary(true, KeyPhase::Press), Momentary::End);
+    }
+
+    /// **A release with nothing running does nothing** — #228.
+    ///
+    /// Reached on a capable terminal when a latched press already ended the
+    /// preview and the key is only now coming up — and by any release that
+    /// arrives without its press, which is what happens the first time flags are
+    /// pushed while a key is already down.
+    #[test]
+    fn a_release_with_nothing_running_is_ignored() {
+        assert_eq!(momentary(false, KeyPhase::Release), Momentary::Ignore);
+    }
+
+    /// **The rule never leaves a preview it cannot end** — #228.
+    ///
+    /// Walked as a state machine over every phase, because the failure that
+    /// matters is not one wrong answer: it is a sequence that arrives at
+    /// "running" with nothing able to stop it, which is a deck stuck playing
+    /// from the reference.
+    ///
+    /// The count is the instrument — an empty phase list would satisfy every
+    /// assertion in the loop without running one.
+    #[test]
+    fn every_sequence_of_presses_and_releases_can_still_be_ended() {
+        let phases = [
+            KeyPhase::Press,
+            KeyPhase::Release,
+            KeyPhase::Press,
+            KeyPhase::Press,
+            KeyPhase::Release,
+            KeyPhase::Release,
+        ];
+        assert!(phases.len() >= 6, "not enough phases to reach a bad state");
+
+        let mut running = false;
+        for phase in phases {
+            running = match momentary(running, phase) {
+                Momentary::Begin => true,
+                Momentary::End => false,
+                Momentary::Ignore => running,
+            };
+            // Whatever we are in, a press can always get out of it.
+            let escape = momentary(running, KeyPhase::Press);
+            assert_eq!(
+                escape,
+                if running {
+                    Momentary::End
+                } else {
+                    Momentary::Begin
+                },
+                "no press could change a preview that was {running}"
+            );
+        }
+    }
+
     #[test]
     fn a_local_transport_never_says_the_engine_has_gone() {
         let local = Recorded::default();

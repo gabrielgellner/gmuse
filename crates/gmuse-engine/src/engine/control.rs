@@ -756,6 +756,10 @@ fn apply(
             player.cue();
             true
         }
+        Instruction::CuePreview => {
+            player.cue_preview();
+            true
+        }
         Instruction::Seek(to) => {
             player.seek(to);
             true
