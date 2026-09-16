@@ -121,8 +121,23 @@ impl Client {
             next_id: AtomicI64::new(1),
         };
 
+        // **Bounded, because accepting is not answering** — #263.
+        //
+        // `attach::is_live` asks only whether a connection is accepted, and an engine spinning
+        // at 100% of a core accepts and then says nothing (#264). Every caller then hung here,
+        // in the handshake, before it had asked for anything: a `gmuse ctl`, a view attaching,
+        // and a `shelf import` that sat for thirty minutes at 0% CPU with its files already
+        // moved.
+        //
+        // **Here and not at each call site**, because the handshake is the one exchange every
+        // client makes and the only one it makes before it can know anything is wrong.
+        //
+        // Five seconds is not a performance budget. A handshake is one line each way off a
+        // unix socket; anything that cannot manage it in five seconds is not going to.
+        const HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(5);
         let params = HelloParams::new(name, version);
-        let result = client.call("hello", Some(serde_json::to_value(&params)?))?;
+        let result =
+            client.call_within("hello", Some(serde_json::to_value(&params)?), HANDSHAKE)?;
         let hello: HelloResult = serde_json::from_value(result)
             .map_err(|e| ClientError::Malformed(format!("hello result: {e}")))?;
 

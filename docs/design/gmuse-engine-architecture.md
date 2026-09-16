@@ -508,6 +508,11 @@ The envelope is JSON-RPC 2.0.
 
 ### 7.3 Handshake
 
+The first message on a connection MUST be `hello`, and a client **must bound its wait for the reply** — #263.
+`gmuse-client` gives it five seconds. Accepting a connection is not answering one: an engine spinning at 100% of a core
+accepts and then says nothing, and every caller that treated the handshake as unbounded hung there before it had asked
+for anything. A `shelf import` sat in it for thirty minutes at 0% CPU with its files already moved.
+
 The first message on a connection MUST be `hello`:
 
 ```json

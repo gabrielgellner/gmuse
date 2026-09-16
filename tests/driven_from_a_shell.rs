@@ -450,7 +450,11 @@ fn start_with_library(name: &str) -> (Engine, PathBuf) {
     let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("gmuse-222-{}-{name}-{nth}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("data")).expect("scratch");
+    // **`XDG_DATA_HOME`, not `GMUSE_DATA_DIR`.** The latter steers the *engine* only
+    // (`main.rs`), so a `shelf` subcommand given it writes to the real library instead —
+    // which is how the first version of this test appended a record to
+    // `~/.local/share/gmuse` and then asserted against a code path it never entered.
+    std::fs::create_dir_all(dir.join("xdg").join("gmuse")).expect("scratch");
     let socket = dir.join("engine.sock");
     let data = dir.join("data");
 
@@ -1921,6 +1925,151 @@ fn rebuilding_the_library_does_not_page_in_the_flat_ordering() {
         "the ordering came back empty"
     );
     assert!(after.ordering_is_here(), "asking did not page it in");
+}
+
+/// **An engine that accepts and never answers is a bounded, explained failure** — #263.
+///
+/// `land` hands its facts to a running engine when that engine holds the append lock, and both
+/// halves of that used to wait as long as it took. That is right for `gmuse ctl`, where a
+/// person can interrupt it, and wrong here: this runs unattended after an operation that has
+/// already moved files. An import sat there for **thirty minutes** at 0% CPU against an engine
+/// spinning at 100% of a core (#264), saying nothing — diagnosed from `ps`, because a slow
+/// import looks exactly the same.
+///
+/// **The socket is the trap.** `attach::is_live` asks only whether a connection is accepted, so
+/// a listener that accepts and then ignores you passes it, which is what a wedged engine looks
+/// like from outside.
+///
+/// **Two waits, and they fail in different places.** A socket that never speaks fails in the
+/// handshake, before anything is asked for; one that shakes hands and then goes quiet fails in
+/// the apply. Both are asserted, because bounding only the second leaves every caller — a
+/// `ctl`, a view attaching — hanging in the first.
+#[test]
+fn an_engine_that_never_answers_fails_the_import_rather_than_hanging() {
+    use std::io::{BufRead, Write};
+
+    let scratch = |name: &str| {
+        let dir = std::env::temp_dir().join(format!("gmuse-263-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // **`XDG_DATA_HOME`, not `GMUSE_DATA_DIR`.** The latter steers the *engine* only, so a
+        // `shelf` subcommand given it writes to the real library instead — which is how the
+        // first version of this test appended a record to `~/.local/share/gmuse` and then
+        // asserted against a code path it had never entered.
+        std::fs::create_dir_all(dir.join("xdg").join("gmuse")).expect("scratch");
+        std::fs::create_dir_all(dir.join("lib")).expect("scratch");
+        write_wav(&dir.join("lib").join("tone.wav"), 44_100);
+        dir
+    };
+
+    let importing = |dir: &std::path::Path, socket: &std::path::Path| {
+        Command::new(binary())
+            .args(["--no-config", "shelf", "import", "--write"])
+            .arg(dir.join("lib").join("tone.wav"))
+            .env("GMUSE_SOCKET", socket)
+            .env("XDG_DATA_HOME", dir.join("xdg"))
+            .env("GMUSE_ROOTS", dir)
+            // Two seconds rather than the honest two minutes, or this is the slowest test here.
+            .env("GMUSE_APPLY_SECS", "2")
+            .current_dir(dir)
+            .output()
+            .expect("run gmuse shelf import")
+    };
+
+    // ===== a socket that never says anything =====
+    let dir = scratch("mute");
+    // Hold the append lock, so `land` takes the hand-it-over branch rather than appending.
+    let held =
+        gmuse::lock::acquire(&dir.join("xdg").join("gmuse").join("append.lock")).expect("the lock");
+    let socket = dir.join("engine.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+    std::thread::spawn(move || {
+        let mut open = Vec::new();
+        while let Ok((stream, _)) = listener.accept() {
+            // Held, never written to. Hanging up would be an answer of a kind, and the case
+            // under test is the one where there is none.
+            open.push(stream);
+        }
+    });
+
+    let out = importing(&dir, &socket);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The instrument: it has to have reached the hand-over, or the bound is about a path the
+    // test never entered.
+    assert!(
+        said.contains("handing") && said.contains("running engine"),
+        "it never announced the hand-over, so this is not the wait under test:\n{said}"
+    );
+    assert!(
+        !out.status.success(),
+        "a mute engine was a successful import:\n{said}"
+    );
+    assert!(
+        said.contains("would not shake hands"),
+        "a mute engine should fail in the handshake:\n{said}"
+    );
+    assert!(
+        said.contains("engine.shutdown"),
+        "the failure does not say how to finish the job:\n{said}"
+    );
+    drop(held);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // ===== a socket that shakes hands and then goes quiet =====
+    let dir = scratch("quiet");
+    let held =
+        gmuse::lock::acquire(&dir.join("xdg").join("gmuse").join("append.lock")).expect("the lock");
+    let socket = dir.join("engine.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+    std::thread::spawn(move || {
+        let mut open = Vec::new();
+        while let Ok((stream, _)) = listener.accept() {
+            let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_ok() {
+                let id = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id").cloned())
+                    .unwrap_or(serde_json::json!(1));
+                let mut w = stream.try_clone().expect("clone");
+                let _ = writeln!(
+                    w,
+                    "{}",
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "protocol": "gmuse/0", "engine_generation": "test",
+                            "stream_generation": 0, "engine_now_ns": 0,
+                            "sample_rate": 48000, "capabilities": [],
+                        },
+                    })
+                );
+                let _ = w.flush();
+            }
+            // …and nothing after the handshake.
+            open.push(stream);
+        }
+    });
+
+    let out = importing(&dir, &socket);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "a quiet engine was a successful import:\n{said}"
+    );
+    assert!(
+        said.contains("did not take the facts within 2s"),
+        "an engine that shook hands and then went quiet should fail in the apply:\n{said}"
+    );
+    drop(held);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Driven through `ui::push_the_queue` and `ui::read_the_queue` rather than raw

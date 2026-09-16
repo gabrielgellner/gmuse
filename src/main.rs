@@ -448,18 +448,66 @@ fn land(
                     .into());
             }
             let counted = facts.len();
+            // **Say who is about to answer, before waiting on them** — #263.
+            //
+            // Handing the facts over is the ordinary path and it is invisible: the operation
+            // has already printed its summary, and what follows is a socket call whose only
+            // sign of life is the process still existing. An import sat here for thirty
+            // minutes against a wedged engine, at 0% CPU, saying nothing — diagnosed from
+            // `ps`, because nothing else distinguished it from a slow import.
+            eprintln!("handing {counted} fact(s) to the running engine…");
             let client =
-                gmuse_client::Client::connect(&socket, "gmuse-shelf", env!("CARGO_PKG_VERSION"))?;
+                gmuse_client::Client::connect(&socket, "gmuse-shelf", env!("CARGO_PKG_VERSION"))
+                    .map_err(|e| {
+                        format!(
+                            "the running engine would not shake hands: {e}\n\
+                     The operation's own work is done and its files are moved; what is left \
+                     is landing {counted} fact(s). Stop the engine with `gmuse ctl \
+                     engine.shutdown` and run this again — with nothing holding the log, this \
+                     process appends them itself."
+                        )
+                    })?;
             // **An array of facts, like `library.edit`** — one shape for one thing.
             //
             // It could not be, until #240: an audio id serialised as a `u128` and a
             // `serde_json::Value` cannot hold one, so this sent NDJSON in a string to
             // get around the protocol's `Value`-shaped ingress. `AudioId` says
             // `"v1:8d2f…"` now, so the dodge is gone and so is the second shape.
-            client.call(
-                gmuse_proto::request::LibraryOp::Apply.method(),
-                Some(serde_json::json!({ "facts": facts })),
-            )?;
+            // **Bounded, because the engine may be alive and not answering** — #263.
+            //
+            // `Client::call` waits as long as it takes, which is right for `gmuse ctl` where
+            // a person can interrupt it and wrong here: this runs unattended, after an
+            // operation that has already moved files, and a wait with no end is
+            // indistinguishable from work.
+            //
+            // Generous rather than tight. Applying is not a long-running op (§8.4 names only
+            // scan and compact), but the engine stamps and appends every fact, and an import
+            // of a few hundred files hands over a few thousand — so the number has to be
+            // about the worst honest case rather than the common one.
+            // **Overridable, because the honest default is too long to test against.** The
+            // same `GMUSE_*` shape the socket and the data dir already use; a person with a
+            // genuinely slow engine has the same dial.
+            let applying = std::env::var("GMUSE_APPLY_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(std::time::Duration::from_secs(120));
+            client
+                .call_within(
+                    gmuse_proto::request::LibraryOp::Apply.method(),
+                    Some(serde_json::json!({ "facts": facts })),
+                    applying,
+                )
+                .map_err(|e| {
+                    format!(
+                        "the running engine did not take the facts within {}s: {e}\n\
+                         The operation's own work is done and its files are moved; what is \
+                         left is landing {counted} fact(s). Stop the engine with `gmuse ctl \
+                         engine.shutdown` and run this again — with nothing holding the log, \
+                         this process appends them itself.",
+                        applying.as_secs()
+                    )
+                })?;
             eprintln!("{counted} fact(s) handed to the running engine");
             Ok(counted)
         }
