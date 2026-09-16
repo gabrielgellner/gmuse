@@ -178,6 +178,21 @@ pub enum AddTarget {
     Library,
     Playlist,
     Queue,
+    /// **The front of the queue — "play this next"** rather than the end of it.
+    ///
+    /// `add-queue` appends, which is right and is what cmus does: a queue is a list you are
+    /// working through. But a queue is saved and restored, so it accumulates, and appending to
+    /// a hundred entries puts a track somewhere you will reach next week. "Next" is the other
+    /// thing a person means by queueing, and the two want different keys rather than a setting.
+    ///
+    /// **Index 0 is genuinely next**, because playing *consumes* the queue: `advance` pops the
+    /// front once it commits. So this does not have to know what is sounding, and cannot
+    /// insert ahead of it.
+    ///
+    /// **One list, not two.** `playback-programme.md` §"Reading it is a page" records the
+    /// two-tier queue being replaced by a single programme; this is a position in that list,
+    /// not a second tier being smuggled back.
+    QueueNext,
     /// **Into the view itself** — assert whatever makes it true (#96).
     ///
     /// The idea no comparable player has: an edit to a view is an edit to the

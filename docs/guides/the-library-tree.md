@@ -141,8 +141,9 @@ in this view your hands are looking for something, not driving the transport —
 
     a    add to the open playlist
     e    add to the queue
+    E    add to the *front* of the queue — play this next
 
-Both act on everything _under_ the row, not just the row:
+All three act on everything _under_ the row, not just the row:
 
     on a track     that track
     on an album    its tracks, in order
@@ -150,6 +151,12 @@ Both act on everything _under_ the row, not just the row:
 
 So gathering an album is one keypress on the album row — you do not have to open it first. `<leader>x` reaches the same
 way, which is why playing an album is one key on its row too.
+
+`e` appends and `E` goes to the front, the way `y` and `Y` differ. Appending is the ordinary case, and it is what cmus
+does: a queue is a list you are working through. But the queue is saved and restored, so it accumulates — append to a
+hundred entries and you have queued something for next week. `E` is for "after this one, play that".
+
+Playing _consumes_ the queue, so the front really is next: there is no way to insert ahead of what is sounding.
 
     A    add to the library
 

@@ -3637,7 +3637,7 @@ fn edited_key(ui: &Ui, cmd: &Command) -> Option<crate::undo::Key> {
             ..
         } => playlist_key(ui),
         Command::Add {
-            target: AddTarget::Queue,
+            target: AddTarget::Queue | AddTarget::QueueNext,
             ..
         } => Some(crate::undo::Key::Queue),
         // Emptying is the largest edit the queue has, so it is the one that most needs `u`.
@@ -4734,7 +4734,24 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
             for id in ids {
                 ui.queue.push_back(id);
             }
-            ui.notify(format!("queued {count}"));
+            // **Where it landed, not just that it did.** A queue is saved and restored, so
+            // appending to a hundred entries puts a track below the fold in a pane that draws
+            // from the top — reported as "I get the queue message and don't see it".
+            ui.notify(format!("queued {count} — {} up next", ui.queue.len()));
+        }
+        // **The front, which is next**, because playing pops it: `advance` consumes the queue
+        // once it commits, so index 0 cannot be ahead of what is sounding.
+        AddTarget::QueueNext => {
+            for (at, id) in ids.into_iter().enumerate() {
+                // Enumerated, so a multi-row `add-queue-next` keeps the order it was given
+                // rather than reversing it — each insert would otherwise land in front of the
+                // last.
+                ui.queue.insert(at, id);
+            }
+            ui.notify(match count {
+                1 => "queued next".to_string(),
+                n => format!("queued {n} next"),
+            });
         }
         AddTarget::Library => {
             ui.notify("the library is what you are looking at; use :add <path> to scan more")
@@ -9396,6 +9413,89 @@ mod tests {
             ui.status.contains("already empty"),
             "it said {:?}",
             ui.status
+        );
+    }
+
+    /// **`E` puts it at the front, and `e` at the back** — the two things a person means by
+    /// queueing.
+    ///
+    /// Appending is the ordinary case and keeps the unshifted key. But the queue is saved and
+    /// restored, so it accumulates: append to a hundred entries and the track is somewhere you
+    /// reach next week, which is what "I get the queue message and don't see it" was.
+    #[test]
+    fn queueing_next_goes_to_the_front_and_keeps_its_order() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "queue-next");
+        flat_view(&mut ui);
+
+        // Two appended, so "the front" is somewhere to be in front *of*.
+        press(&mut ui, &ctx, "e");
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "e");
+        let appended: Vec<_> = ui.queue.entries().copied().collect();
+        assert_eq!(appended.len(), 2, "the fixture queued {appended:?}");
+
+        // A third, in front.
+        press(&mut ui, &ctx, "j");
+        let cursor = ui.selected_track(&ctx).expect("a track under the cursor");
+        press(&mut ui, &ctx, "E");
+        let now: Vec<_> = ui.queue.entries().copied().collect();
+        assert_eq!(now.len(), 3, "nothing was queued");
+        assert_eq!(now[0], cursor, "`E` did not put it first");
+        assert_eq!(
+            &now[1..],
+            &appended[..],
+            "`E` disturbed what was already queued"
+        );
+        assert!(ui.status.contains("next"), "it said {:?}", ui.status);
+
+        // **And it is undoable**, like every other queue edit.
+        ui.view = View::Queue;
+        press(&mut ui, &ctx, "u");
+        assert_eq!(
+            ui.queue.entries().copied().collect::<Vec<_>>(),
+            appended,
+            "undo did not take the front one back off"
+        );
+    }
+
+    /// **Several rows keep the order they were given**, rather than arriving reversed.
+    ///
+    /// `E` on an album inserts each of its tracks at the front, and inserting each at index 0
+    /// would play the record backwards — which is the shape of bug that looks right on a single
+    /// track and is wrong on every real use.
+    #[test]
+    fn queueing_an_album_next_does_not_reverse_it() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "queue-next-album");
+
+        // An album row, so one press queues several tracks under it.
+        ui.view = View::Tree;
+        ui.tree.open_everything(&ui.library);
+        let album = ui
+            .library
+            .lines(&ui.tree.folds(), false)
+            .into_iter()
+            .position(|n| matches!(n, crate::browse::Node::Album { .. }))
+            .expect("an album row");
+        ui.tree.selected = album;
+        let folds = ui.tree.folds();
+        let under = ui.library.tracks_under(
+            &ui.library
+                .page(&folds, album, 1)
+                .into_iter()
+                .next()
+                .expect("the album"),
+        );
+        assert!(under.len() > 1, "the album holds {} tracks", under.len());
+
+        press(&mut ui, &ctx, "E");
+        let queued: Vec<_> = ui.queue.entries().copied().collect();
+        assert_eq!(
+            queued, under,
+            "the album was queued in some other order than its own"
         );
     }
 

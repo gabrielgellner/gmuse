@@ -216,6 +216,11 @@ pub const DEFAULTS: &[&str] = &[
     "bind common a add-playlist",
     "bind common A add",
     "bind common e add-queue",
+    // **`E` is `e`'s variant, the way `Y` is `y`'s and `P` is `p`'s.** Appending is the
+    // ordinary case and keeps the unshifted key; "play this next" is the other thing a person
+    // means by queueing, and the two want different keys rather than a setting to flip between
+    // them.
+    "bind common E add-queue-next",
     // vim's registers. `yy`/`Y` mirror `dd`/`D`, and the register lives on the
     // Ui rather than on a playlist, exactly as vim's are global — that is what
     // makes yank here, open another playlist, put there work.

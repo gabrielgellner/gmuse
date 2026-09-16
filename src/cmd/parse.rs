@@ -45,6 +45,7 @@ pub const VERBS: &[&str] = &[
     "add-view",
     "add-playlist",
     "add-queue",
+    "add-queue-next",
     "bind",
     "bottom",
     "clear-queue",
@@ -237,6 +238,10 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         },
         "add-playlist" => Command::Add {
             target: AddTarget::Playlist,
+            path: optional_path(rest),
+        },
+        "add-queue-next" => Command::Add {
+            target: AddTarget::QueueNext,
             path: optional_path(rest),
         },
         "add-queue" => Command::Add {
@@ -890,6 +895,7 @@ pub fn format(cmd: &Command) -> String {
                 AddTarget::Library => "add",
                 AddTarget::Playlist => "add-playlist",
                 AddTarget::Queue => "add-queue",
+                AddTarget::QueueNext => "add-queue-next",
                 AddTarget::View => "add-view",
             };
             match path {
