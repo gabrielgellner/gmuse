@@ -204,21 +204,6 @@ impl Remote {
         })
     }
 
-    /// Whether the thread that keeps this cache fresh has stopped.
-    ///
-    /// **Here to make #264 checkable.** The bug was a loop that never ended, and
-    /// "the loop ends" is not observable from outside a thread that owns nothing
-    /// the caller can see — so the fix would have been a claim in a comment, which
-    /// §13 calls the fourth way to be green and wrong. The test kills a real engine
-    /// and waits for this.
-    ///
-    /// It also answers the question a status line will want when there is one to
-    /// ask it: this view is still attached, but nothing is reporting any more, so
-    /// `heard` is a last known position rather than a current one.
-    pub fn detached(&self) -> bool {
-        self.gone.load(std::sync::atomic::Ordering::Acquire)
-    }
-
     /// The connection, for the calls that are not transport.
     ///
     /// `library.scan` is the one that needs it today: a rescan is a write, so
@@ -279,6 +264,18 @@ impl Remote {
 }
 
 impl Transport for Remote {
+    /// The reader sets this on its way out, and it only ever leaves for one
+    /// reason: `next_event` reported `Closed`.
+    ///
+    /// **Here to make #264 checkable** as much as to be displayed. The fix was a
+    /// loop that ends, and "the loop ends" is not observable from outside a
+    /// thread that owns nothing the caller can see — so the evidence would have
+    /// been a sentence in a comment, which §13 calls the fourth way to be green
+    /// and wrong. A test kills a real engine and waits for this.
+    fn engine_gone(&self) -> bool {
+        self.gone.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     fn state(&self) -> State {
         self.heard.lock().expect("heard").state
     }

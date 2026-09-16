@@ -4391,8 +4391,8 @@ fn a_timeout_and_a_dead_engine_do_not_report_the_same_thing() {
     );
 }
 
-/// **The reader stops when the engine goes** — #264, and the reason `detached`
-/// exists.
+/// **The reader stops when the engine goes** — #264, and the reason
+/// `engine_gone` exists.
 ///
 /// This is the bug as the machine felt it: `gmuse-tui-playback` retried on every
 /// error, a disconnected channel errored without waiting, and the thread burned
@@ -4400,11 +4400,12 @@ fn a_timeout_and_a_dead_engine_do_not_report_the_same_thing() {
 /// spent entirely inside the `Instant::now` of a 250 ms deadline it never waited
 /// on.
 ///
-/// A loop that spins never leaves, so **`detached` going true is the proof it no
-/// longer spins.** The assertion before the kill is what keeps that from being
-/// vacuous: a `detached` stuck at `true` would pass the second check alone.
+/// A loop that spins never leaves, so **`engine_gone` going true is the proof it
+/// no longer spins.** The assertion before the kill is what keeps that from being
+/// vacuous: an `engine_gone` stuck at `true` would pass the second check alone.
 #[test]
 fn the_playback_reader_leaves_when_the_engine_does() {
+    use gmuse::ui::transport::Transport;
     use std::sync::Arc;
 
     let (mut engine, _recording) = start_with_a_track("reader-leaves");
@@ -4412,7 +4413,7 @@ fn the_playback_reader_leaves_when_the_engine_does() {
     let remote = gmuse::ui::remote_transport::Remote::attach(Arc::clone(&client)).expect("attach");
 
     assert!(
-        !remote.detached(),
+        !remote.engine_gone(),
         "the reader was gone before the engine was"
     );
 
@@ -4420,7 +4421,7 @@ fn the_playback_reader_leaves_when_the_engine_does() {
     let _ = engine.child.wait();
 
     let left = (0..100).any(|_| {
-        if remote.detached() {
+        if remote.engine_gone() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -4429,5 +4430,100 @@ fn the_playback_reader_leaves_when_the_engine_does() {
     assert!(
         left,
         "the reader was still running 10s after the engine died — this is the spin"
+    );
+}
+
+/// **The status line says the engine went** — #264.
+///
+/// The span is the whole point of `engine_gone`, so it is checked where a user
+/// meets it: a real `Ui`, a real `Remote`, rendered into a buffer, before and
+/// after a real engine dies.
+///
+/// **The "before" assertion is the instrument.** A status line that always said
+/// it, or a `Ui` that drew no status line at all, would satisfy the "after"
+/// check on its own — and drawing nothing is exactly what a headless smoke test
+/// does, which is why #261 built this backend harness rather than running the
+/// binary.
+#[test]
+fn the_status_line_says_when_the_engine_has_gone() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut engine, _recording) = start_with_a_track("says-gone");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+    let remote = gmuse::ui::remote_transport::Remote::attach(std::sync::Arc::clone(&client))
+        .expect("attach");
+
+    let data = engine.dir.join("xdg").join("gmuse");
+    let device: gmuse::model::id::Id<gmuse::model::entity::Device> = std::fs::read_dir(&data)
+        .expect("a data dir")
+        .flatten()
+        .find_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.strip_prefix("log-")?
+                .strip_suffix(".jsonl")?
+                .parse()
+                .ok()
+        })
+        .expect("the engine wrote a log named for its device");
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    let answer = desk.current();
+    let members: std::collections::HashSet<_> = {
+        use gmuse::model::rows::Listing;
+        answer.library.rows().into_iter().collect()
+    };
+    let ui = gmuse::ui::Ui::new(gmuse::ui::holding::of(
+        Some(&answer.library),
+        None,
+        members,
+        gmuse::shelf::Levels::default(),
+        true,
+    ));
+
+    let screen = |ui: &gmuse::ui::Ui| -> String {
+        let ctx = gmuse::ui::Context {
+            library: &answer.library,
+            player: Some(&remote),
+            gapless: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("a backend");
+        terminal
+            .draw(|f| gmuse::ui::draw(f, ui, &ctx))
+            .expect("a frame");
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let alive = screen(&ui);
+    assert!(
+        !alive.contains("engine gone"),
+        "the status line cried engine-gone at a living engine:\n{alive}"
+    );
+
+    let _ = engine.child.kill();
+    let _ = engine.child.wait();
+
+    use gmuse::ui::transport::Transport;
+    let left = (0..100).any(|_| {
+        if remote.engine_gone() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        false
+    });
+    assert!(left, "the reader never noticed the engine had gone");
+
+    let dead = screen(&ui);
+    assert!(
+        dead.contains("engine gone"),
+        "the engine died and the status line said nothing:\n{dead}"
     );
 }

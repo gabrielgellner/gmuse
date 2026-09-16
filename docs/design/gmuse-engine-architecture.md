@@ -804,6 +804,9 @@ packets. A position that matched the handed-over count exactly would be the bug 
   disconnected channel answers instantly, so asking again is a spin. `gmuse-client` reports `Closed` for the second, and
   a reader that sees it stops rather than retrying. Measured before the fix: 100% of one core, 20 minutes of user time
   in a 37-minute session, spent entirely computing a timeout deadline that was never waited on.
+- **And a view must then say so.** Every consequence of a lost engine is silent and separate: rows the view had not
+  cached draw `<missing>`, `gp` finds no target, and a rating lands on whatever was playing when the connection dropped.
+  That is three bugs to the person looking at them and one to the person who knows, so the status line names the cause.
 
 ### 7.11 Queries
 

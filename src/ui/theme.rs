@@ -42,6 +42,8 @@ pub enum Role {
     SearchMatch,
     StatusModes,
     StatusUnderrun,
+    /// The engine this view was driving has gone.
+    StatusEngineGone,
     PromptSigil,
     SettingKey,
     BindingContext,
@@ -78,6 +80,7 @@ impl Role {
             Role::SearchMatch => "search_match",
             Role::StatusModes => "status_modes",
             Role::StatusUnderrun => "status_underrun",
+            Role::StatusEngineGone => "status_engine_gone",
             Role::PromptSigil => "prompt_sigil",
             Role::SettingKey => "setting_key",
             Role::BindingContext => "binding_context",
@@ -111,6 +114,7 @@ impl Role {
         Role::SearchMatch,
         Role::StatusModes,
         Role::StatusUnderrun,
+        Role::StatusEngineGone,
         Role::PromptSigil,
         Role::SettingKey,
         Role::BindingContext,
@@ -221,6 +225,11 @@ impl Default for Theme {
                 Role::SearchMatch => Style::default().fg(Color::Yellow).bold(),
                 Role::StatusModes => Style::default().fg(Color::Magenta),
                 Role::StatusUnderrun => Style::default().fg(Color::Red),
+                // Bolder than an underrun: an underrun is something that
+                // happened, this is everything on screen being stale.
+                Role::StatusEngineGone => {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                }
                 Role::PromptSigil => Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::BOLD),

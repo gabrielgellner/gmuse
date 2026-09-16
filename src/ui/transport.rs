@@ -159,6 +159,28 @@ pub trait Transport {
         false
     }
 
+    /// **Whether the engine this view was driving has gone.**
+    ///
+    /// `false` in process, and not as a convenience: the player *is* this
+    /// program, so there is no third party to lose.
+    ///
+    /// **Not the opposite of `outlives_this_view`** — #264, and the names are
+    /// close enough to be worth separating. A view whose playback outlives it is
+    /// the healthy attached case and the point of the whole milestone. This is
+    /// that case having failed: still attached, nobody on the other end.
+    ///
+    /// It has to be asked rather than inferred, because everything a lost engine
+    /// touches fails *quietly*. `holding_remote` resolves rows over the wire and
+    /// `unwrap_or_default()`s a failure, so a view whose engine died draws
+    /// `<missing>` for every row it had not already cached; `playing()` keeps
+    /// answering with the last recording the engine named, so `gp` has no target
+    /// and a rating lands on whatever was playing when the connection dropped.
+    /// Each of those reads as a bug in the thing it broke. One span naming the
+    /// cause is cheaper than three investigations.
+    fn engine_gone(&self) -> bool {
+        false
+    }
+
     fn seek(&self, to: SeekTo);
 
     /// The fader position, where 1.0 is unity.
@@ -310,6 +332,26 @@ mod tests {
     /// Every method is reachable through the trait object, which is the shape
     /// `Context` holds. If this compiles and records, a client can take the
     /// same place.
+    /// **In process there is no engine to lose** — #264.
+    ///
+    /// Thin on purpose, and it exists because the probe that should have found
+    /// it green found it *vacuous*: flipping the trait default to `true` broke
+    /// nothing in 61 integration tests, so "false in process" was a sentence in
+    /// a doc comment with no instrument on it. A local player reporting the
+    /// engine had gone would paint that warning across every unattached
+    /// session.
+    ///
+    /// `Recorded` is the right subject precisely because it does not override —
+    /// it takes the same default `PlayerHandle` does.
+    #[test]
+    fn a_local_transport_never_says_the_engine_has_gone() {
+        let local = Recorded::default();
+        assert!(
+            !local.engine_gone(),
+            "a transport that is this process reported losing an engine"
+        );
+    }
+
     #[test]
     fn a_transport_that_is_not_the_player_can_be_driven_through_the_seam() {
         let fake = Recorded {

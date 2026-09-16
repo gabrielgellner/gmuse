@@ -112,6 +112,19 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
         ));
     }
 
+    // **Before the underruns, because it explains the rest of the screen** —
+    // #264. Everything a lost engine touches fails quietly and separately: rows
+    // it has not cached draw as `<missing>`, `gp` has no target, and a rating
+    // lands on whatever was playing when the connection dropped. Each reads as
+    // its own bug. This is the one span that says they are all the same bug, and
+    // that nothing on screen is current.
+    if ctx.player.is_some_and(|p| p.engine_gone()) {
+        spans.push(Span::styled(
+            "  [engine gone — :q and restart]",
+            theme.get(Role::StatusEngineGone),
+        ));
+    }
+
     // Ring starvation is the difference between "the OS hiccuped" and "we did
     // not feed the device fast enough". It costs one span and it is the only
     // way to tell those apart after the fact.

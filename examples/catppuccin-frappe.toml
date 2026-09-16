@@ -54,6 +54,7 @@ status_playing      = { fg = "green" }
 status_notice       = { fg = "yellow" }
 status_modes        = { fg = "mauve" }
 status_underrun     = { fg = "red" }
+status_engine_gone  = { fg = "red", mods = ["bold"] }
 mode                = { fg = "mauve", mods = ["bold"] }
 search_match        = { fg = "yellow", mods = ["bold"] }
 prompt_sigil        = { fg = "blue", mods = ["bold"] }
