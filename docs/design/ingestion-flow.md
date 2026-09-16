@@ -218,11 +218,24 @@ back to hand-work.
   behind the library's back changes nothing: the loudness reaches the log only when the album is named to `shelf import`
   again. §5 does exactly that for tags and the step list does not say to do it for gain.
 
-- **A refusal can be the network.** `ingest` reported "no MusicBrainz release matched that artist and album" for a
+- **~~A refusal can be the network.~~** `ingest` reported "no MusicBrainz release matched that artist and album" for a
   release MusicBrainz holds and returns at score 100 — the server was throttling, `bronze` returned "no answer was
   obtained", and the caller turned that into a claim about what exists (#262). The refusal was right and the _reason_
   was not, which is worse than it sounds: acting on it means reaching for `--unidentified`, which rests a recording on
   its bytes — the one outcome §3 says this stage exists to prevent.
+
+  It says which happened now:
+
+  ```text
+  MusicBrainz did not answer (https://musicbrainz.org/ws/2/release)
+  Nothing was searched, so nothing is known about this album yet.
+  ```
+
+  `bronze` had always drawn the distinction — `UNANSWERED` is named and its docstring says a caller must not cache it —
+  and every caller in `ingest` folded it into "not a 200" anyway. So `asked` raises rather than returning a third value:
+  the bug was a caller ignoring a distinction it had been handed, and one that must be caught cannot be ignored by
+  accident. `ingest tracklist` tallies it in its own bucket for the same reason — a throttle part-way through a walk of
+  the whole library would otherwise report the rest of it as missing from an authority that simply stopped answering.
 
 - **Choosing a release means choosing a medium, and the tool shows the tracklist.** _Classics_ has twenty pressings in
   its release group. `ingest`'s own search surfaced a 2×12" vinyl at 85%, and asserting it with `--release` wrote

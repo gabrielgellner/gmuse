@@ -202,6 +202,46 @@ HTTP_OK: Final = 200
 ASKING: Final = {"User-Agent": "gmuse-ingest/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
 
 
+def identified(folder: Path, wanted: Wanted, ours: list[str]) -> Match | None:
+    """The release to go on with, having said why there is none.
+
+    **One place decides**, because there are three outcomes and only two are a `Match`: a
+    release, a search that found nothing good enough, and a search that never happened. The
+    third used to read as the second (#262).
+    """
+    try:
+        match = (
+            named_release(wanted.release, ours)
+            if wanted.release
+            else identify(wanted.artist, wanted.album or folder.name, ours)
+        )
+    except UnansweredError as why:
+        say_unanswered(why)
+        return None
+    return match if report(match, ours) else None
+
+
+def say_unanswered(why: Exception) -> None:
+    """**Say what happened, not what exists** — #262.
+
+    The refusal is right either way and the reason is the difference: "no release matched"
+    sends a person to `shelf import --unidentified`, which rests a recording on its bytes —
+    the wrong door entirely when the authority was merely busy.
+    """
+    print(f"  {why}")
+    print("  Nothing was searched, so nothing is known about this album yet.")
+    print("  Try again in a minute — `gmuse-tools cache stats` shows what is kept, and a")
+    print("  cached answer costs no request.")
+
+
+class UnansweredError(Exception):
+    """MusicBrainz did not answer — which is not the same as answering "nothing"."""
+
+    def __init__(self, url: str) -> None:
+        """Name what went unanswered, so the message says which ask it was."""
+        super().__init__(f"MusicBrainz did not answer ({url})")
+
+
 def asked(url: str, params: dict[str, str]) -> dict[str, Any] | None:
     """Ask MusicBrainz, or recall having asked — through `bronze`.
 
@@ -217,6 +257,18 @@ def asked(url: str, params: dict[str, str]) -> dict[str, Any] | None:
     a review file you can regenerate and one you dare not.
     """
     status, body = bronze.get(cache(), url, params, headers=ASKING)
+    # **"I do not know" is not "no"** — #262.
+    #
+    # `bronze` says so with `UNANSWERED`, and every caller here used to fold it into `not a
+    # 200`: a run of 503s became `no MusicBrainz release matched that artist and album`, for a
+    # release MusicBrainz returns at score 100 when asked again. Acting on that means reaching
+    # for `--unidentified`, which rests a recording on its bytes — the one outcome
+    # `ingestion-flow.md` §3 says this stage exists to prevent.
+    #
+    # **An exception rather than a third return value**, because the bug was a caller ignoring
+    # a distinction it had been handed. One that must be caught cannot be ignored by accident.
+    if status == bronze.UNANSWERED:
+        raise UnansweredError(url)
     if status != HTTP_OK or not isinstance(body, dict):
         return None
     return body
@@ -740,12 +792,8 @@ def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> No
     if not whole_album(folder):
         return
     ours = [t for _, t in pairs]
-    match = (
-        named_release(wanted.release, ours)
-        if wanted.release
-        else identify(wanted.artist, wanted.album or folder.name, ours)
-    )
-    if not report(match, ours) or match is None:
+    match = identified(folder, wanted, ours)
+    if match is None:
         return
     if not write:
         print("\n  dry run — pass --write to tag and move")
@@ -1206,7 +1254,14 @@ def tracklist(root: Path, out: Path) -> None:
         if mbid == tagged and not agrees(lib, held, folder, mbid):
             tally["the tag names a different release than the library holds"] += 1
             continue
-        release = asked(f"{MB}/release/{mbid}", {"inc": INC, "fmt": "json"})
+        try:
+            release = asked(f"{MB}/release/{mbid}", {"inc": INC, "fmt": "json"})
+        except UnansweredError:
+            # Its own bucket: "not found" is a claim about MusicBrainz, and this pass walks
+            # every album — a throttle part-way through would otherwise report the rest of the
+            # library as missing from an authority that simply stopped answering.
+            tally["MusicBrainz did not answer"] += 1
+            continue
         if not release:
             tally["release not found"] += 1
             continue

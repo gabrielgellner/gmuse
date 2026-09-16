@@ -221,6 +221,17 @@ def _ask(url: str, params: dict[str, str] | None, headers: dict[str, str]) -> tu
     return 0, ""
 
 
+#: What `get` reports when no answer was obtained at all — a run of 503s, a reset,
+#: a name that would not resolve.
+#:
+#: **Named, because the number is the whole distinction.** A caller that folds this
+#: into "not a 200" has turned a transport failure into a claim about what the
+#: authority holds: `ingest` reported "no MusicBrainz release matched that artist and
+#: album" for a release MusicBrainz returns at score 100, and acting on that means
+#: reaching for `--unidentified`, which rests a recording on its bytes (#262).
+UNANSWERED: Final = 0
+
+
 def stats(con: sqlite3.Connection) -> dict[str, int]:
     """What is in here, for a person deciding whether to keep it."""
     rows = con.execute("SELECT status, COUNT(*), SUM(LENGTH(body)) FROM response GROUP BY status").fetchall()

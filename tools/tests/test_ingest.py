@@ -13,9 +13,17 @@ So the check reads the tags, never the folder name — a rule about names is how
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+import pytest
+
+import gmuse_tools.ingest as ing
 from gmuse_tools.ingest import duration_share, missing_tracks, placeholders
+
+#: A 404 is MusicBrainz saying it does not hold this — an answer, unlike a 503.
+HTTP_NOT_FOUND = 404
+HTTP_OK = 200
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -432,3 +440,61 @@ def test_duration_is_a_second_opinion_and_not_a_gate() -> None:
     # Nothing to compare is not zero agreement.
     assert duration_share([60.0], {"media": []}) is None
     assert duration_share([], release) is None
+
+
+class TestASilentServerIsNotAnEmptyAnswer:
+    """**"I do not know" must not be reported as "no"** — #262.
+
+    `bronze.get` returns `UNANSWERED` when a run of 503s or a reset produced no answer at
+    all, and says in its own docstring that a caller must not cache it. Every caller in
+    `ingest` folded it into "not a 200" anyway, so a throttled MusicBrainz produced `no
+    MusicBrainz release matched that artist and album` — for a release MusicBrainz returns
+    at score 100 when asked again a minute later.
+
+    That is worse than a wrong message. It is the sentence that sends a person to `shelf
+    import --unidentified`, which rests a recording on its bytes: the one outcome
+    `ingestion-flow.md` §3 says the whole stage exists to prevent.
+    """
+
+    @staticmethod
+    def answering(status: int, body: object) -> Callable[..., tuple[int, object]]:
+        """A `bronze.get` that always says the same thing."""
+
+        def get(*_args: object, **_kwargs: object) -> tuple[int, object]:
+            return status, body
+
+        return get
+
+    def test_a_server_that_did_not_answer_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No answer is not an answer of nothing."""
+        monkeypatch.setattr(ing.bronze, "get", self.answering(ing.bronze.UNANSWERED, None))
+        monkeypatch.setattr(ing, "cache", lambda: None)
+        with pytest.raises(ing.UnansweredError):
+            ing.asked("https://example.invalid/release", {})
+
+    def test_an_answer_of_nothing_is_still_an_answer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The instrument.
+
+        If everything raised, the distinction would be lost the other way round and a
+        genuine absence would read as a throttle.
+        """
+        monkeypatch.setattr(ing, "cache", lambda: None)
+
+        # A 404 is an answer: MusicBrainz says it does not have this.
+        monkeypatch.setattr(ing.bronze, "get", self.answering(HTTP_NOT_FOUND, None))
+        assert ing.asked("https://example.invalid/release", {}) is None
+
+        # And a 200 carrying an empty result set is an answer too.
+        monkeypatch.setattr(ing.bronze, "get", self.answering(HTTP_OK, {"releases": []}))
+        assert ing.asked("https://example.invalid/release", {}) == {"releases": []}
+
+    def test_the_search_does_not_swallow_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A throttle must not look like the first query finding nothing.
+
+        `identify` runs two queries and takes the second where the first came back empty, so
+        a silence swallowed there spends another rate limit to reach the same wrong answer.
+        """
+        monkeypatch.setattr(ing.bronze, "get", self.answering(ing.bronze.UNANSWERED, None))
+        monkeypatch.setattr(ing, "cache", lambda: None)
+        with pytest.raises(ing.UnansweredError):
+            ing.identify("Possessed by Paul James", "Feed the Family", ["Texas Rose"])
