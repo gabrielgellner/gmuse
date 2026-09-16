@@ -514,6 +514,153 @@ fn land(
     }
 }
 
+/// **Say whether the library already holds this album, before the summary** — #261.
+///
+/// The gap the September 2026 ingestion found (`ingestion-flow.md` §4): nothing asks. The
+/// per-file "joins a recording already held" line is emitted *after* you have decided to
+/// import, one line per track, and it says nothing about the album. Bringing in a 13-track
+/// FLAC of *Classics* meant noticing by hand that the library already had it as MP3 — and that
+/// decides both which MusicBrainz release to match against and what to do with the old copy.
+///
+/// **Two signals, and the second is a hint on purpose.**
+///
+/// - **Recording ids**, from `report.joins`. Exact: these files carry ids the library already
+///   binds. It is the FLAC-beside-MP3 case stated at album scale.
+/// - **Artist, album and track count.** What ids miss, and they miss exactly the material most
+///   likely to be a duplicate: an untagged re-rip binds no id and joins nothing. Reported as a
+///   possibility rather than a fact, in `shelf copies`' spirit — an album of the same name by
+///   the same artist with the same number of tracks is worth a look and is not proof.
+///
+/// Reported, never decided (`CLAUDE.md`). Holding one record in two formats is a supported
+/// shape and often wanted; which to keep is not decidable from here.
+fn already_held(
+    report: &gmuse::operations::populate::Report,
+    data_dir: &std::path::Path,
+    device: gmuse::model::id::Id<gmuse::model::entity::Device>,
+) {
+    use gmuse::model::rows::Listing;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // **The files the import saw, not the paths it was given.** An argument is usually a
+    // folder — `shelf import ~/staged/Classics` — and grouping *those* by their parent puts
+    // one directory under `/staged` and asks the tag reader to read a directory.
+    let mut arriving: BTreeMap<std::path::PathBuf, Vec<&std::path::PathBuf>> = BTreeMap::new();
+    let considered = report
+        .identified
+        .keys()
+        .chain(report.joins.iter().map(|(p, _, _)| p))
+        .chain(report.unidentified.iter().map(|(p, _, _)| p))
+        .chain(report.contradicts.iter().map(|(p, _)| p));
+    for path in considered {
+        if let Some(dir) = path.parent() {
+            arriving.entry(dir.to_path_buf()).or_default().push(path);
+        }
+    }
+    let joined: BTreeSet<&std::path::PathBuf> = report.joins.iter().map(|(p, _, _)| p).collect();
+
+    // **Only read the library if there is a question to ask.** A fold is ~0.5s and an import
+    // of material the library has never seen has nothing to compare against.
+    let names: Vec<(std::path::PathBuf, String, String, usize)> = arriving
+        .iter()
+        .filter_map(|(dir, paths)| {
+            let scan = paths
+                .iter()
+                .find_map(|p| gmuse::model::ingest::read(p).ok())?;
+            let album = scan.album?;
+            let artist = scan.album_artist.unwrap_or(scan.artist);
+            Some((dir.clone(), artist, album, paths.len()))
+        })
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+
+    let projection = gmuse::librarian::reading(data_dir, device, gmuse::history::now_ms());
+    let library = gmuse::model::seam::Librarian::from_catalogue(projection.catalogue());
+    // One walk of the rows, not one lookup per album.
+    let mut held: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for id in library.rows() {
+        if let Some(row) = library.listed(id) {
+            let listed = row.listed();
+            *held
+                .entry((listed.file_under.to_string(), listed.album.to_string()))
+                .or_default() += 1;
+        }
+    }
+
+    for (dir, artist, album, count) in names {
+        let mine = arriving.get(&dir).map(Vec::as_slice).unwrap_or_default();
+        let joins = mine.iter().filter(|p| joined.contains(**p)).count();
+        let same = held
+            .get(&(artist.clone(), album.clone()))
+            .copied()
+            .unwrap_or(0);
+
+        match verdict(joins, count, same) {
+            Some(Held::Certain { joins }) => eprintln!(
+                "already held: {joins} of {count} track(s) in {album:?} join recordings this \
+                 library already has.\n    One recording in two formats is a supported shape — \
+                 `shelf copies` lists them, and `shelf remove` retires one."
+            ),
+            Some(Held::Possibly { same }) => eprintln!(
+                "possibly already held: {same} track(s) are filed under {artist:?} / \
+                 {album:?}, and this is {count}.\n    No MusicBrainz id connects them, so this \
+                 is a name agreeing with a name — `shelf copies` and `shelf duplicates` are \
+                 what settle it."
+            ),
+            None => {}
+        }
+    }
+}
+
+/// What the numbers say, without the disk or the library.
+#[derive(Debug, PartialEq, Eq)]
+enum Held {
+    /// Ids agree: these recordings are bound to encodings the library holds.
+    Certain { joins: usize },
+    /// A name agrees with a name and nothing else does.
+    Possibly { same: usize },
+}
+
+/// **A pure function of the things that decide it**, so the rule is testable without a library
+/// to read or an album to import — the shape `which_key_due` takes, for the same reason.
+///
+/// **An id beats a name.** An album whose recordings join also has a matching name, and saying
+/// both would read as two findings about one album.
+fn verdict(joins: usize, arriving: usize, same: usize) -> Option<Held> {
+    let _ = arriving;
+    if joins > 0 {
+        return Some(Held::Certain { joins });
+    }
+    (same > 0).then_some(Held::Possibly { same })
+}
+
+#[cfg(test)]
+mod already_held_says_which_kind_of_held {
+    use super::{Held, verdict};
+
+    /// **An id beats a name, and nothing is said about an album nothing matches** — #261.
+    ///
+    /// The two signals answer different questions and the weaker one is a hint on purpose:
+    /// recording ids are exact, and artist-plus-album is a name agreeing with a name.
+    #[test]
+    fn an_id_beats_a_name_and_silence_beats_both() {
+        assert_eq!(verdict(13, 13, 0), Some(Held::Certain { joins: 13 }));
+        // Even when the names agree too — one finding, not two.
+        assert_eq!(verdict(13, 13, 13), Some(Held::Certain { joins: 13 }));
+        // Part of an album joining is still certain about that part.
+        assert_eq!(verdict(2, 13, 0), Some(Held::Certain { joins: 2 }));
+
+        // No id, but a name agrees: a question rather than a statement.
+        assert_eq!(verdict(0, 9, 13), Some(Held::Possibly { same: 13 }));
+
+        // **Nothing to say.** An import of material the library has never seen must be quiet,
+        // or the line means nothing when it does appear.
+        assert_eq!(verdict(0, 12, 0), None);
+        assert_eq!(verdict(0, 0, 0), None);
+    }
+}
+
 fn run_library(
     op: &gmuse::cli::Shelf,
     loaded: &gmuse::config::Loaded,
@@ -1855,6 +2002,7 @@ fn run_library(
                     path.display()
                 );
             }
+            already_held(&report, &loaded.data_dir, device);
             // **Refused for want of an identity** — #160. Printed to stdout as
             // `artist \t title \t path`, because the refusal has to be
             // *answerable*: those are the two fields a recording search needs,

@@ -192,10 +192,21 @@ back to hand-work.
   and one that entered exactly. The uniformity is what makes it safe to strip: twelve of twelve is a source artefact,
   and a title that merely contains the word is a different thing.
 
-- **Nothing asks whether the library already holds the album.** §5's FLAC-beside-MP3 case is the hard one and the flow
-  has no step that raises it — `shelf import` says "joins a recording already held" _after_ you have decided to import.
-  Bringing in _Classics_ meant noticing by hand that a 13-track MP3 copy was already there, which decided both the
-  release to match against and what to do with the old copy.
+- **~~Nothing asks whether the library already holds the album.~~** `shelf import` says so now, before its summary and
+  on a dry run — which is where the question is worth answering, because it decides which MusicBrainz release to match
+  against and what to do with the copy already there. Two signals, and the second is a hint on purpose:
+
+  - **Recording ids**, exact: `already held: 13 of 13 track(s) in "Classics" join recordings this library already has`.
+  - **Artist, album and track count**, when no id connects them — which is the material most likely to be a duplicate,
+    because an untagged re-rip binds no id and joins nothing.
+    `possibly already held: 13 track(s) are filed under "Aphex Twin" / "Classics", and this is 9`.
+
+  An id beats a name, so an album whose recordings join is one finding rather than two. Reported, never decided: one
+  record in two formats is a supported shape and often wanted.
+
+  It was the hard one because §5's FLAC-beside-MP3 case had no step that raised it — `shelf import` says "joins a
+  recording already held" _after_ you have decided to import. Bringing in _Classics_ meant noticing by hand that a
+  13-track MP3 copy was already there, which decided both the release to match against and what to do with the old copy.
 
 - **`shelf remove` takes the folder, artwork and all.** Retiring thirteen MP3s named explicitly moved the whole album
   directory to `.departed`, including thirty-one images and sleeve notes, leaving the FLAC album with no cover while
