@@ -834,6 +834,19 @@ impl Ui {
         self.status_until = Some(Instant::now() + Duration::from_secs(4));
     }
 
+    /// A notice that stays until something replaces it.
+    ///
+    /// **For a condition rather than an event** — #227. `notify` expires after
+    /// four seconds, which is right for "queued 3 tracks" and wrong for "your
+    /// config has a broken binding": that is true for the whole session, and at
+    /// startup those four seconds are spent behind the other notices a launch
+    /// fires. `expire_status` already treats `status_until: None` as forever,
+    /// so this is the mechanism that was there, named.
+    pub fn warn(&mut self, message: impl Into<String>) {
+        self.status = message.into();
+        self.status_until = None;
+    }
+
     /// How long the loop may wait for a keystroke.
     ///
     /// The ordinary tick, unless a prefix is part-way through its delay — in
@@ -7627,6 +7640,160 @@ mod tests {
     /// A `Ui` over the whole fixture library.
     pub(super) fn ui_of(store: &Scan, smart: bool) -> Ui {
         Ui::new(Box::new(Shelf::rebuild(lib_of(store), smart)))
+    }
+
+    /// **A warning has no deadline at all** — #227.
+    ///
+    /// The distinction is the whole reason `warn` exists beside `notify`: a
+    /// config problem is true for the session, and four seconds of it at startup
+    /// is four seconds competing with every other notice a launch fires.
+    ///
+    /// **Asserted on the absence of a deadline, not on surviving one.** The
+    /// first version called `expire_status` and checked the text was still
+    /// there, which a four-second deadline also satisfies — it had not come due
+    /// yet. That test passed against a `warn` that was `notify` under another
+    /// name, which is the whole thing it exists to rule out.
+    ///
+    /// **The first half is the instrument**: the same `expire_status` must be
+    /// seen to clear an ordinary notice, or "no deadline" and "deadlines are
+    /// never checked" are the same observation.
+    #[test]
+    fn a_warning_has_no_deadline_to_expire() {
+        let store = fixture();
+        let mut ui = ui_of(&store, true);
+
+        ui.notify("passing");
+        assert!(
+            ui.status_until.is_some(),
+            "a notice should carry a deadline"
+        );
+        ui.status_until = Some(Instant::now() - Duration::from_secs(1));
+        ui.expire_status();
+        assert!(
+            ui.status.is_empty(),
+            "an ordinary notice outlived its deadline, so the check below \
+             proves nothing about expiry"
+        );
+
+        ui.warn("lasting");
+        assert!(
+            ui.status_until.is_none(),
+            "a warning was given a deadline; a config problem is a condition, \
+             not an event"
+        );
+        ui.expire_status();
+        assert_eq!(ui.status, "lasting", "the warning was cleared anyway");
+    }
+
+    /// **Browsing never touches the playhead** — #227, D-17.
+    ///
+    /// Moving a cursor is the most-pressed thing in the program and the playhead
+    /// is the most expensive thing to disturb, so the coupling this forbids is
+    /// the kind that arrives by accident — a `set_cursor` that helpfully loads
+    /// what it landed on, a paging command that stops playback to avoid a stale
+    /// row. Nothing does that today; the point is that nothing starts to.
+    ///
+    /// **Asserted as "asks the transport for nothing"** rather than by comparing
+    /// a position, because a position that did not change is also what you get
+    /// from a seek to where you already were.
+    ///
+    /// **The second half is the instrument.** An empty `asked` is the same shape
+    /// whether nothing was asked or nothing was wired — §13's standing warning
+    /// about asserting an absence — so the same double must be seen to record
+    /// something when a command that *should* reach it runs.
+    #[test]
+    fn browsing_asks_the_transport_for_nothing() {
+        #[derive(Default)]
+        struct Noted(std::sync::Mutex<Vec<String>>);
+        impl Noted {
+            fn note(&self, what: &str) {
+                self.0.lock().expect("noted").push(what.into());
+            }
+            fn asked(&self) -> Vec<String> {
+                self.0.lock().expect("noted").clone()
+            }
+        }
+        impl transport::Transport for Noted {
+            fn state(&self) -> crate::audio::State {
+                crate::audio::State::Playing
+            }
+            fn position(&self) -> Duration {
+                Duration::ZERO
+            }
+            fn play(&self) {
+                self.note("play");
+            }
+            fn pause(&self) {
+                self.note("pause");
+            }
+            fn toggle(&self) {
+                self.note("toggle");
+            }
+            fn stop(&self) {
+                self.note("stop");
+            }
+            fn load(&self, _what: transport::Loading) -> transport::Accepted {
+                self.note("load");
+                transport::Accepted::Yes
+            }
+            fn seek(&self, _to: crate::audio::SeekTo) {
+                self.note("seek");
+            }
+            fn volume(&self) -> f32 {
+                1.0
+            }
+            fn set_volume(&self, _position: f32) {
+                self.note("set_volume");
+            }
+            fn underruns(&self) -> u32 {
+                0
+            }
+            fn last_short_frames(&self) -> u32 {
+                0
+            }
+        }
+
+        let store = fixture();
+        let noted = Noted::default();
+        let ctx = Context {
+            library: lib_of(&store),
+            player: Some(&noted),
+            gapless: None,
+        };
+
+        let mut ui = ui_of(&store, true);
+        expand_to_tracks(&mut ui, &store);
+
+        let browsing = [
+            Command::Down,
+            Command::Down,
+            Command::Up,
+            Command::Bottom,
+            Command::Top,
+            Command::PageDown,
+            Command::PageUp,
+            Command::HalfPageDown,
+            Command::HalfPageUp,
+        ];
+        let moves = browsing.len();
+        for cmd in browsing {
+            execute(&mut ui, &ctx, cmd);
+        }
+        assert!(moves >= 9, "only {moves} movements exercised");
+        assert!(
+            noted.asked().is_empty(),
+            "browsing reached the transport: {:?}",
+            noted.asked()
+        );
+
+        // The instrument: the same double, wired to the same `ctx`, does record
+        // a command that is supposed to reach it.
+        execute(&mut ui, &ctx, Command::Pause);
+        assert!(
+            !noted.asked().is_empty(),
+            "the transport double recorded nothing at all, so the check above \
+             proved only that it was never connected"
+        );
     }
 
     /// **A transport that is somewhere else**, like the engine over a socket.

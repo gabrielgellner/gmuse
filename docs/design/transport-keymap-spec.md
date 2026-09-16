@@ -15,6 +15,18 @@ nowhere in the tree, there are no decks, and there is no beat grid, so all three
 `gmuse-proto`'s header already rules that out: inventing the types to hold nothing makes a method name public API before
 its payload is designed. It waits on cue points (#229) and a grid, not on anyone's time.
 
+**§6's modes were mostly already built, and criterion 2 is now met** (#227). `Context::Transport` is the one context
+that does not fall through to `Common`, and `-- TRANSPORT --` is drawn persistently with a fallback for when the panel
+will not fit, so D-15 and D-16 hold and are tested. What was missing was the reporting: a bad binding was **counted**
+rather than named, its detail went to an `eprintln!` that `ratatui::init` covers a few lines later, and a chord written
+two ways was not detected at all — the binding table is a map, so the loser vanished. A duplicate is now an error that
+names both spellings, the first offender is named on a notice that does not expire, and every problem is written to the
+audit. It still launches: a typo disables one key, and refusing to start would cost the player.
+
+D-17 has a test now — browsing asks the transport for nothing. D-19 (load behind a modifier) is deferred on #226's
+grounds: its argument is about clobbering a live deck during a mix, and with one player "play the selection" on a bare
+key is what cmus does and what is wanted.
+
 **Where this sits.** It is the missing design for the `deck.*` and `param.*` method families that
 [`gmuse-engine-architecture.md`](gmuse-engine-architecture.md) §7.4 names and #215 deliberately did not implement,
 because their payloads — `DeckId`, `When`, `Lane`, `BindingTarget` — had no design. This is that design.

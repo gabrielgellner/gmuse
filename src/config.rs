@@ -250,6 +250,16 @@ pub fn parse_text(text: &str) -> Loaded {
         }
     }
 
+    // **Two spellings of one chord are a duplicate, and TOML cannot see it** —
+    // #227. A repeated key *name* is a TOML error before this runs, but
+    // `space` and `<leader>` are different names for the same sequence, and the
+    // binding table is a map, so the loser vanished with nothing said. Keyed by
+    // the parsed sequence, and recorded per TOML entry rather than per emitted
+    // command — a list value is one entry that emits several, so counting
+    // commands would report every list as a duplicate of itself (#266).
+    let mut bound: std::collections::HashMap<(Context, keys::Seq), String> =
+        std::collections::HashMap::new();
+
     for (ctx_name, table) in &config.keys {
         let Some(ctx) = Context::parse(ctx_name) else {
             out.errors.push(ConfigError {
@@ -269,6 +279,15 @@ pub fn parse_text(text: &str) -> Loaded {
                     continue;
                 }
             };
+            if let Some(first) = bound.insert((ctx, key.clone()), key_name.clone()) {
+                out.errors.push(ConfigError {
+                    where_: format!("keys.{ctx_name}.{key_name}"),
+                    message: format!(
+                        "{} is already bound in this context as `{first}`",
+                        keys::format_seq(&key)
+                    ),
+                });
+            }
             for text in binding.commands() {
                 match parse::command(text) {
                     Ok(cmd) => out.commands.push(Command::Bind {
@@ -525,6 +544,75 @@ mod tests {
         assert_eq!(*ctx, Context::Common);
         assert_eq!(keys::format_seq(key), "^n");
         assert_eq!(**cmd, Command::Next);
+    }
+
+    /// **Two spellings of one chord are a duplicate** — #227.
+    ///
+    /// TOML rejects a repeated key name before this runs, so the only duplicate
+    /// that can reach here is one written two ways — and `keys::parse` has real
+    /// aliases (`^x`/`C-x`, `enter`/`return`, `pgup`/`pageup`) that make it an
+    /// ordinary mistake rather than a contrived one. The binding table is a map,
+    /// so the loser used to vanish with nothing said.
+    ///
+    /// **The first half is the instrument.** Both lines here are individually
+    /// valid — a good command, a parseable chord — so a test that only checked
+    /// "some error" would pass on an implementation that rejected either one for
+    /// the wrong reason.
+    #[test]
+    fn one_chord_written_two_ways_is_reported_not_silently_overwritten() {
+        let fine = parse_text(
+            r#"
+            [keys.library]
+            "^x" = "play"
+            "^y" = "pause"
+            "#,
+        );
+        assert!(
+            fine.errors.is_empty(),
+            "two different chords are not a duplicate: {:?}",
+            fine.errors
+        );
+        assert_eq!(fine.commands.len(), 2, "both should bind");
+
+        let clash = parse_text(
+            r#"
+            [keys.library]
+            "^x" = "play"
+            "C-x" = "pause"
+            "#,
+        );
+        assert_eq!(
+            clash.errors.len(),
+            1,
+            "one chord under two spellings should be reported once: {:?}",
+            clash.errors
+        );
+        let said = clash.errors[0].to_string();
+        assert!(
+            said.contains("already bound"),
+            "the error should say what is wrong: {said}"
+        );
+        assert!(
+            said.contains("^x") && said.contains("C-x"),
+            "the error should name both spellings so it can be found: {said}"
+        );
+    }
+
+    /// A list is one entry, so it is not a duplicate of itself — #266.
+    #[test]
+    fn a_list_is_not_reported_as_a_duplicate() {
+        let loaded = parse_text(
+            r#"
+            [keys.library]
+            o = ["add-queue", "next"]
+            "#,
+        );
+        assert!(
+            loaded.errors.is_empty(),
+            "a list value was mistaken for a repeated binding: {:?}",
+            loaded.errors
+        );
+        assert_eq!(loaded.commands.len(), 2, "both commands should still bind");
     }
 
     /// A list value is a macro. That falls out of TOML for free, and it is the

@@ -265,7 +265,19 @@ pub fn defaults() -> Bindings {
     for line in DEFAULTS {
         match parse::command(line) {
             Ok(Command::Bind { ctx, key, cmd }) => {
-                bindings.insert((ctx, key), *cmd);
+                // **A duplicate is a lost binding, not a last-one-wins** — #227.
+                // The other two arms already panic on a malformed default; this
+                // one silently overwrote, so a second `bind common zz …` would
+                // disable the first with nothing to show for it. It is keyed by
+                // the *parsed* sequence, so two spellings of one chord collide
+                // here even though they are different lines.
+                if let Some(had) = bindings.insert((ctx, key.clone()), *cmd) {
+                    panic!(
+                        "default {line:?} rebinds {} {}, which already ran {had:?}",
+                        ctx.name(),
+                        keys::format_seq(&key),
+                    );
+                }
             }
             Ok(other) => panic!("default {line:?} is not a bind: {other:?}"),
             Err(e) => panic!("default {line:?} failed to parse: {e}"),
@@ -404,6 +416,35 @@ mod tests {
     use ratatui::crossterm::event::KeyCode;
 
     /// The defaults are text, so they are only correct if the parser agrees.
+    /// **Every default reaches the table** — #227.
+    ///
+    /// `defaults()` builds a map and a map loses a collision, so a second
+    /// `bind common zz …` would have disabled the first with nothing to show.
+    /// Comparing the two lengths is the whole check: if any two lines collide
+    /// the map is shorter than the list, and it catches it whether or not the
+    /// panic beside it fires.
+    ///
+    /// **The length assertion is the instrument**, in the shape §13 asks for. A
+    /// `DEFAULTS` that failed to parse into anything would satisfy
+    /// `len() == len()` at zero, and an empty keymap is exactly the failure this
+    /// is meant to notice.
+    #[test]
+    fn no_default_binding_is_shadowed_by_another() {
+        assert!(
+            DEFAULTS.len() > 100,
+            "only {} defaults — the list did not load",
+            DEFAULTS.len()
+        );
+        let built = defaults();
+        assert_eq!(
+            built.len(),
+            DEFAULTS.len(),
+            "{} defaults became {} bindings, so some share a key",
+            DEFAULTS.len(),
+            built.len()
+        );
+    }
+
     #[test]
     fn every_default_parses() {
         for line in DEFAULTS {

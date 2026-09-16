@@ -2697,9 +2697,29 @@ fn run_tui(
             state.audit.line("unreadable", &path.display().to_string());
         }
     }
+    // **Say which one, and keep saying it** — #227, acceptance criterion 2.
+    //
+    // This counted. A count tells you something is wrong and not what, and the
+    // detail went to `eprintln!` — which runs before `ratatui::init` takes the
+    // screen, so it is legible only after you quit. In session you got
+    // "3 problem(s) in the config" for four seconds, during the same startup
+    // that fires several other notices.
+    //
+    // So: the first offender by name, the rest counted, and it does not expire.
+    // Every one of them also goes to the audit, which is what the block above
+    // does with unreadable tags and what this one should always have done.
+    //
+    // It still starts. A typo in one binding disables one key; refusing to
+    // launch over it would cost the whole player, and the failure it prevents
+    // is already visible the moment you press that key.
     if !loaded.errors.is_empty() {
-        state.notify(format!("{} problem(s) in the config", loaded.errors.len()));
+        let first = &loaded.errors[0];
+        state.warn(match loaded.errors.len() - 1 {
+            0 => format!("config: {first}"),
+            more => format!("config: {first} (+{more} more)"),
+        });
         for e in &loaded.errors {
+            state.audit.line("config", &e.to_string());
             eprintln!("config: {e}");
         }
     }
