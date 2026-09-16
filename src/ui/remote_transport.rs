@@ -82,6 +82,8 @@ impl Default for Heard {
 pub struct Remote {
     client: Arc<Client>,
     heard: Arc<Mutex<Heard>>,
+    /// Set by the reader on its way out, so its ending is visible from here.
+    gone: Arc<std::sync::atomic::AtomicBool>,
     /// Kept so the reader stops when this does.
     _reader: Arc<ReaderStop>,
 }
@@ -161,24 +163,35 @@ impl Remote {
 
         let heard = Arc::new(Mutex::new(seed));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         {
             let heard = Arc::clone(&heard);
             let client = Arc::clone(&client);
             let stopping = Arc::clone(&stop);
+            let went = Arc::clone(&gone);
             std::thread::Builder::new()
                 .name("gmuse-tui-playback".into())
                 .spawn(move || {
                     while !stopping.load(std::sync::atomic::Ordering::Acquire) {
-                        let Ok(event) = client.next_event(Duration::from_millis(250)) else {
-                            continue;
-                        };
-                        if event.topic != Topic::Playback {
-                            continue;
+                        // **`Closed` ends this thread; a timeout does not** — #264. Both
+                        // used to be `Err` and both used to `continue`, and a closed
+                        // channel answers instantly, so the loop became a spin at 100%
+                        // of a core the moment the engine went away. There is no event
+                        // coming and no timeout left to wait out.
+                        match client.next_event(Duration::from_millis(250)) {
+                            Ok(event) => {
+                                if event.topic != Topic::Playback {
+                                    continue;
+                                }
+                                let mut held = heard.lock().expect("heard");
+                                absorb(&mut held, &event.body);
+                            }
+                            Err(gmuse_client::ClientError::Closed) => break,
+                            Err(_) => continue,
                         }
-                        let mut held = heard.lock().expect("heard");
-                        absorb(&mut held, &event.body);
                     }
+                    went.store(true, std::sync::atomic::Ordering::Release);
                 })
                 .ok();
         }
@@ -186,8 +199,24 @@ impl Remote {
         Ok(Self {
             client,
             heard,
+            gone,
             _reader: Arc::new(ReaderStop(stop)),
         })
+    }
+
+    /// Whether the thread that keeps this cache fresh has stopped.
+    ///
+    /// **Here to make #264 checkable.** The bug was a loop that never ended, and
+    /// "the loop ends" is not observable from outside a thread that owns nothing
+    /// the caller can see — so the fix would have been a claim in a comment, which
+    /// §13 calls the fourth way to be green and wrong. The test kills a real engine
+    /// and waits for this.
+    ///
+    /// It also answers the question a status line will want when there is one to
+    /// ask it: this view is still attached, but nothing is reporting any more, so
+    /// `heard` is a last known position rather than a current one.
+    pub fn detached(&self) -> bool {
+        self.gone.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The connection, for the calls that are not transport.

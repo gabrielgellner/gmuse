@@ -4340,3 +4340,94 @@ fn what_the_library_has_heard_crosses_whole() {
     }
     assert_eq!(theirs, **mine, "what crossed is not what was folded");
 }
+
+/// **A closed connection is not a timeout** — #264.
+///
+/// `next_event` mapped every `recv_timeout` failure to `TimedOut`, which reads as
+/// "nothing yet, ask again" and is exactly wrong once `demultiplex` has returned
+/// and dropped the only `Sender`: the channel is disconnected, `recv_timeout`
+/// answers **instantly**, and a caller that retries on error spins.
+///
+/// **Both arms are asserted, and that is the point.** A `next_event` that always
+/// said `Closed` would satisfy the second assertion alone, and one that always
+/// said `TimedOut` would satisfy the first alone. The claim is that they are
+/// *distinguishable*, so the test has to see each of them happen.
+#[test]
+fn a_timeout_and_a_dead_engine_do_not_report_the_same_thing() {
+    let (mut engine, _recording) = start_with_a_track("two-failures");
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+    client
+        .subscribe(&[gmuse_proto::Topic::Playback])
+        .expect("subscribe");
+    while client.next_event(Duration::from_millis(300)).is_ok() {}
+
+    // Alive and quiet: nothing to report, so ask again.
+    let quiet = client
+        .next_event(Duration::from_millis(400))
+        .expect_err("the engine published with nothing happening");
+    assert!(
+        matches!(quiet, gmuse_client::ClientError::TimedOut(_)),
+        "a live but idle engine should read as a timeout, got {quiet:?}"
+    );
+
+    let _ = engine.child.kill();
+    let _ = engine.child.wait();
+
+    // Gone: there is nobody to ask again.
+    let mut closed = None;
+    for _ in 0..40 {
+        match client.next_event(Duration::from_millis(250)) {
+            Err(gmuse_client::ClientError::TimedOut(_)) | Ok(_) => continue,
+            other => {
+                closed = Some(other);
+                break;
+            }
+        }
+    }
+    let closed = closed.expect("the connection never reported the engine had gone");
+    assert!(
+        matches!(closed, Err(gmuse_client::ClientError::Closed)),
+        "a dead engine should read as closed, got {closed:?}"
+    );
+}
+
+/// **The reader stops when the engine goes** — #264, and the reason `detached`
+/// exists.
+///
+/// This is the bug as the machine felt it: `gmuse-tui-playback` retried on every
+/// error, a disconnected channel errored without waiting, and the thread burned
+/// 100% of a core for the rest of the session — 20 minutes of one 37-minute run,
+/// spent entirely inside the `Instant::now` of a 250 ms deadline it never waited
+/// on.
+///
+/// A loop that spins never leaves, so **`detached` going true is the proof it no
+/// longer spins.** The assertion before the kill is what keeps that from being
+/// vacuous: a `detached` stuck at `true` would pass the second check alone.
+#[test]
+fn the_playback_reader_leaves_when_the_engine_does() {
+    use std::sync::Arc;
+
+    let (mut engine, _recording) = start_with_a_track("reader-leaves");
+    let client = Arc::new(Client::connect(&engine.socket, "test", "0").expect("connect"));
+    let remote = gmuse::ui::remote_transport::Remote::attach(Arc::clone(&client)).expect("attach");
+
+    assert!(
+        !remote.detached(),
+        "the reader was gone before the engine was"
+    );
+
+    let _ = engine.child.kill();
+    let _ = engine.child.wait();
+
+    let left = (0..100).any(|_| {
+        if remote.detached() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        false
+    });
+    assert!(
+        left,
+        "the reader was still running 10s after the engine died — this is the spin"
+    );
+}

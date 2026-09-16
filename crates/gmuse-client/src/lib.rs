@@ -282,11 +282,28 @@ impl Client {
         &self.events
     }
 
-    /// Wait for one event, or give up.
+    /// Wait for one event, or say why not.
+    ///
+    /// **Two failures, and collapsing them cost 100% of a core** — #264. This
+    /// mapped every `recv_timeout` error to `TimedOut`, but the channel fails two
+    /// ways: it times out, or it is *disconnected* because `demultiplex` returned
+    /// and dropped the only `Sender`. A disconnected `recv_timeout` returns **at
+    /// once**, so a caller that retries on error — which is the obvious way to use
+    /// a function whose only error means "nothing yet" — spins as fast as the
+    /// scheduler allows.
+    ///
+    /// That is what a view whose engine had gone did: `gmuse-tui-playback` burned
+    /// a core for 20 minutes of a 37-minute session, entirely inside
+    /// `Instant::now`, because each pass computed a 250 ms deadline it then never
+    /// waited on.
+    ///
+    /// `Closed` is the existing name for the far end being gone, so a caller can
+    /// tell "ask again" from "there is nobody to ask".
     pub fn next_event(&self, within: Duration) -> Result<Event, ClientError> {
-        self.events
-            .recv_timeout(within)
-            .map_err(|_| ClientError::TimedOut(within))
+        self.events.recv_timeout(within).map_err(|e| match e {
+            crossbeam_channel::RecvTimeoutError::Timeout => ClientError::TimedOut(within),
+            crossbeam_channel::RecvTimeoutError::Disconnected => ClientError::Closed,
+        })
     }
 }
 

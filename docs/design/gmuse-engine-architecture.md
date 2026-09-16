@@ -798,6 +798,12 @@ packets. A position that matched the handed-over count exactly would be the bug 
   the client must re-query. A client that stays over the limit MAY be disconnected.
 - A malformed line produces a `-32700` or `-32600` error response. The connection remains open.
 - Client disconnect is a non-event for the engine: its subscriptions are dropped and nothing else changes.
+- **The other direction is not symmetric, and a client must be able to tell it apart from silence** — #264. An engine
+  that goes away leaves an attached client with a receiver that is _disconnected_ rather than empty, and the two look
+  the same to anything that reports only "no event". They must not: "nothing yet" invites asking again, and a
+  disconnected channel answers instantly, so asking again is a spin. `gmuse-client` reports `Closed` for the second, and
+  a reader that sees it stops rather than retrying. Measured before the fix: 100% of one core, 20 minutes of user time
+  in a 37-minute session, spent entirely computing a timeout deadline that was never waited on.
 
 ### 7.11 Queries
 
