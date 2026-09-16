@@ -469,7 +469,7 @@ class TestASilentServerIsNotAnEmptyAnswer:
         """No answer is not an answer of nothing."""
         monkeypatch.setattr(ing.bronze, "get", self.answering(ing.bronze.UNANSWERED, None))
         monkeypatch.setattr(ing, "cache", lambda: None)
-        with pytest.raises(ing.UnansweredError):
+        with pytest.raises(ing.bronze.UnansweredError):
             ing.asked("https://example.invalid/release", {})
 
     def test_an_answer_of_nothing_is_still_an_answer(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -496,5 +496,5 @@ class TestASilentServerIsNotAnEmptyAnswer:
         """
         monkeypatch.setattr(ing.bronze, "get", self.answering(ing.bronze.UNANSWERED, None))
         monkeypatch.setattr(ing, "cache", lambda: None)
-        with pytest.raises(ing.UnansweredError):
+        with pytest.raises(ing.bronze.UnansweredError):
             ing.identify("Possessed by Paul James", "Feed the Family", ["Texas Rose"])

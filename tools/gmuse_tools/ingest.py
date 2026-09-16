@@ -215,7 +215,7 @@ def identified(folder: Path, wanted: Wanted, ours: list[str]) -> Match | None:
             if wanted.release
             else identify(wanted.artist, wanted.album or folder.name, ours)
         )
-    except UnansweredError as why:
+    except bronze.UnansweredError as why:
         say_unanswered(why)
         return None
     return match if report(match, ours) else None
@@ -232,14 +232,6 @@ def say_unanswered(why: Exception) -> None:
     print("  Nothing was searched, so nothing is known about this album yet.")
     print("  Try again in a minute — `gmuse-tools cache stats` shows what is kept, and a")
     print("  cached answer costs no request.")
-
-
-class UnansweredError(Exception):
-    """MusicBrainz did not answer — which is not the same as answering "nothing"."""
-
-    def __init__(self, url: str) -> None:
-        """Name what went unanswered, so the message says which ask it was."""
-        super().__init__(f"MusicBrainz did not answer ({url})")
 
 
 def asked(url: str, params: dict[str, str]) -> dict[str, Any] | None:
@@ -268,7 +260,7 @@ def asked(url: str, params: dict[str, str]) -> dict[str, Any] | None:
     # **An exception rather than a third return value**, because the bug was a caller ignoring
     # a distinction it had been handed. One that must be caught cannot be ignored by accident.
     if status == bronze.UNANSWERED:
-        raise UnansweredError(url)
+        raise bronze.UnansweredError(url)
     if status != HTTP_OK or not isinstance(body, dict):
         return None
     return body
@@ -1256,7 +1248,7 @@ def tracklist(root: Path, out: Path) -> None:
             continue
         try:
             release = asked(f"{MB}/release/{mbid}", {"inc": INC, "fmt": "json"})
-        except UnansweredError:
+        except bronze.UnansweredError:
             # Its own bucket: "not found" is a claim about MusicBrainz, and this pass walks
             # every album — a throttle part-way through would otherwise report the rest of the
             # library as missing from an authority that simply stopped answering.

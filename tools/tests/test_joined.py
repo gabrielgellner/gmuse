@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+import gmuse_tools.joined as jnd
+from gmuse_tools import bronze
 from gmuse_tools.joined import (
     Verdict,
     all_solo,
@@ -544,3 +546,33 @@ def test_a_single_credited_the_same_way_at_both_levels_is_corrected_at_both() ->
     ]
     got = attribute(rows, {"mb1": ("Okain", "Onno")}.get)
     assert [x.get("album") for x in got.splits] == [None, "g1"]
+
+
+class TestASilentAuthorityIsNotAnUnknownArtist:
+    """**A throttle is not "MusicBrainz has never heard of them"** — #262.
+
+    `ask_musicbrainz` folded "no answer was obtained" into "not a 200" and returned
+    `None`, and the caller memoises per name — so one silence would have stood for that
+    name for the rest of the run, and this pass proposes splits from exactly that
+    signal.
+    """
+
+    @staticmethod
+    def silent(*_args: object, **_kwargs: object) -> tuple[int, object]:
+        """A `bronze.get` that never obtained an answer."""
+        return bronze.UNANSWERED, None
+
+    def test_a_silent_lookup_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A name nobody answered about is undecided, not unknown."""
+        monkeypatch.setattr(jnd.bronze, "get", self.silent)
+        with pytest.raises(bronze.UnansweredError):
+            jnd.ask_musicbrainz(None, "Sonya Elise")
+
+    def test_an_authority_with_no_such_artist_still_answers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The instrument. "Nobody by that name" is a real answer and this pass acts on it."""
+
+        def get(*_args: object, **_kwargs: object) -> tuple[int, object]:
+            return 200, {"artists": []}
+
+        monkeypatch.setattr(jnd.bronze, "get", get)
+        assert jnd.ask_musicbrainz(None, "Nobody At All") is None

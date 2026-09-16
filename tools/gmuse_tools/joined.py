@@ -263,6 +263,10 @@ def ask_musicbrainz(con: sqlite3.Connection, name: str) -> dict[str, str] | None
         {"query": f'artist:"{name}" OR alias:"{name}"', "fmt": "json", "limit": "5"},
         headers=USER_AGENT,
     )
+    # **A throttle is not "MusicBrainz has never heard of them"** — #262, and this pass caches
+    # its answer per name, so one silence would stand for the rest of the run.
+    if status == bronze.UNANSWERED:
+        raise bronze.UnansweredError(MB_ARTIST)
     if status != HTTP_OK or not isinstance(body, dict):
         return None
     for a in body.get("artists", []):
@@ -330,16 +334,29 @@ def settle(corpus: list[str], *, offline: bool = False) -> dict[str, Verdict]:
         return decided
     con = bronze.open_cache()
     cache: dict[str, dict[str, str] | None] = {}
+    silent: set[str] = set()
 
     def ask(name: str) -> dict[str, str] | None:
         if name not in cache:
-            cache[name] = ask_musicbrainz(con, name)
+            try:
+                cache[name] = ask_musicbrainz(con, name)
+            except bronze.UnansweredError:
+                # **Not cached, and that is the point** (#262). This memoises per name, so
+                # caching a silence as `None` would make one throttle stand for "MusicBrainz
+                # has never heard of them" for the rest of the run.
+                silent.add(name)
+                return None
         return cache[name]
 
     unsure = [v for v in decided.values() if v.verdict == "unsure"]
     for i, v in enumerate(unsure, 1):
         print(f"  {i}/{len(unsure)} asking about {v.credit}", file=sys.stderr)
         decided[v.credit] = resolve(v, ask)
+    if silent:
+        print(
+            f"  {len(silent)} name(s) went unanswered — those are undecided rather than unknown to MusicBrainz",
+            file=sys.stderr,
+        )
     return decided
 
 

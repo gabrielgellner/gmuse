@@ -12,8 +12,12 @@ artist of a joined credit — are tested in `src/model/ingest.rs`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
+import gmuse_tools.identify as idf
+from gmuse_tools import bronze
 from gmuse_tools.identify import (
     SAME_MIX,
     SAME_RECORDING,
@@ -543,3 +547,52 @@ def test_the_duration_acoustid_sends_is_a_float() -> None:
 
     floated = {"recordings": [{"id": "a", "duration": 560.0}, {"id": "b", "duration": 90.0}]}
     assert sounds_like(floated, 560.0)["id"] == "a", "a float duration was ignored"
+
+
+class TestASilentAuthorityIsNotAnAbsence:
+    """**A throttle must not be able to produce this pass's own finding** — #262.
+
+    `search` and `heard` folded "no answer was obtained" into "not a 200", so a run of
+    503s part-way through a pass tallied the rest of the library as `no candidates` —
+    and, for the fingerprint rung, as `nothing MusicBrainz has linked`. That second one
+    is exactly the conclusion `identify fingerprint` exists to reach, so a silence could
+    manufacture the very finding the pass is trusted for.
+
+    `bronze` had always drawn the distinction; the callers dropped it.
+    """
+
+    @staticmethod
+    def silent(*_args: object, **_kwargs: object) -> tuple[int, object]:
+        """A `bronze.get` that never obtained an answer."""
+        return bronze.UNANSWERED, None
+
+    @staticmethod
+    def answering(body: object) -> Callable[..., tuple[int, object]]:
+        """A `bronze.get` that answers, with whatever is given."""
+
+        def get(*_args: object, **_kwargs: object) -> tuple[int, object]:
+            return 200, body
+
+        return get
+
+    def test_a_recording_search_raises_rather_than_finding_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Otherwise the row is tallied as having no candidates, which is a claim."""
+        monkeypatch.setattr(idf.bronze, "get", self.silent)
+        with pytest.raises(bronze.UnansweredError):
+            idf.search(None, "Possessed by Paul James", "Texas Rose")
+
+    def test_an_empty_result_set_is_still_an_answer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The instrument: if every non-200 raised, a genuine absence would read as a throttle."""
+        monkeypatch.setattr(idf.bronze, "get", self.answering({"recordings": []}))
+        assert idf.search(None, "Nobody", "Nothing") == {"recordings": []}
+
+    def test_a_fingerprint_lookup_raises_rather_than_linking_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`nothing MusicBrainz has linked` is the finding; a silence must not make it."""
+        monkeypatch.setattr(idf.bronze, "get", self.silent)
+        with pytest.raises(bronze.UnansweredError):
+            idf.heard(None, "key", "fingerprint", 180)
+
+    def test_a_fingerprint_that_linked_nothing_still_answers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """AcoustID answering with no results is a real finding and stays one."""
+        monkeypatch.setattr(idf.bronze, "get", self.answering({"results": []}))
+        assert idf.heard(None, "key", "fingerprint", 180) == []

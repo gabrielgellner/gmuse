@@ -232,6 +232,25 @@ def _ask(url: str, params: dict[str, str] | None, headers: dict[str, str]) -> tu
 UNANSWERED: Final = 0
 
 
+class UnansweredError(Exception):
+    """The authority did not answer — which is not the same as answering "nothing".
+
+    **Here rather than in each pass**, because the distinction is this module's: `get`
+    is what knows a run of 503s from a 404, and every caller that folded the two into
+    "not a 200" turned a transport failure into a claim about what the authority holds
+    (#262).
+
+    **An exception rather than a third return value**, because the bug was a caller
+    ignoring a distinction it had been handed. One that must be caught cannot be ignored
+    by accident — and what each pass then does with it differs: a single album stops, a
+    walk of the whole library tallies it and goes on.
+    """
+
+    def __init__(self, url: str) -> None:
+        """Name what went unanswered, so the message says which ask it was."""
+        super().__init__(f"the authority did not answer ({url})")
+
+
 def stats(con: sqlite3.Connection) -> dict[str, int]:
     """What is in here, for a person deciding whether to keep it."""
     rows = con.execute("SELECT status, COUNT(*), SUM(LENGTH(body)) FROM response GROUP BY status").fetchall()

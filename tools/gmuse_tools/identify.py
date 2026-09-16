@@ -412,6 +412,11 @@ def search(con: sqlite3.Connection, artist: str, title: str) -> dict[str, Any] |
     better query adds rows and the old ones stay readable (#58).
     """
     status, body = bronze.get(con, MB_RECORDING, params_for(artist, title), headers=USER_AGENT)
+    # **A throttle is not an empty result set** — #262. Folded together, a run of 503s part-way
+    # through a pass tallies the rest of the library as `no candidates`, which is a claim about
+    # MusicBrainz rather than a report of what happened.
+    if status == bronze.UNANSWERED:
+        raise bronze.UnansweredError(MB_RECORDING)
     return body if status == HTTP_OK and isinstance(body, dict) else None
 
 
@@ -940,13 +945,20 @@ def fetch(*, limit: int | None) -> None:
     if problem := unreadable(todo):
         print(f"refusing to ask MusicBrainz: {problem}")
         return
-    asked = cached = 0
+    asked = cached = silent = 0
     for index, (path, tags) in enumerate(todo, start=1):
         artist, title, _ = asked_about(tags, path.stem)
         if not title:
             continue
         before = con.execute("SELECT 1 FROM response WHERE key = ?", (query_key(artist, title),)).fetchone()
-        search(con, artist, title)
+        try:
+            search(con, artist, title)
+        except bronze.UnansweredError:
+            # **Counted apart from a request that was answered** (#262). This loop exists to
+            # warm the cache, and a silence warms nothing — reporting it as "asked" says the
+            # work was done when the next pass will have to do it again.
+            silent += 1
+            continue
         if before is None:
             asked += 1
         else:
@@ -954,6 +966,8 @@ def fetch(*, limit: int | None) -> None:
         if index % 25 == 0:
             print(f"  {index}/{len(todo)}  ({asked} asked, {cached} already cached)", flush=True)
     print(f"done: {asked} asked, {cached} already cached")
+    if silent:
+        print(f"  {silent} went unanswered — nothing is known about those, and a rerun will ask again")
 
 
 def derivations(out: Path, *, limit: int | None) -> None:
@@ -997,7 +1011,14 @@ def derivations(out: Path, *, limit: int | None) -> None:
                 continue
             # **The library's length, not the file's.** See `Work.seconds`.
             seconds = row.seconds
-            body = search(con, artist, title)
+            try:
+                body = search(con, artist, title)
+            except bronze.UnansweredError:
+                # **Its own bucket, not "no candidates".** A long pass must survive one bad
+                # row — losing the run loses every rate limit spent reaching it — but the row
+                # is unknown rather than answered (#262).
+                counts["MusicBrainz did not answer"] += 1
+                continue
             candidates = (body or {}).get("recordings") or []
             chosen = best(candidates, seconds, remixer) if candidates else None
             if chosen is None:
@@ -1045,7 +1066,11 @@ def propose(out: Path, *, limit: int | None) -> None:
     with out.open("w", encoding="utf-8") as sink:
         for row, path, tags, seconds in todo:
             artist, title, remixer = asked_about(tags, path.stem)
-            body = search(con, artist, title) if title else None
+            try:
+                body = search(con, artist, title) if title else None
+            except bronze.UnansweredError:
+                counts["MusicBrainz did not answer"] += 1
+                continue
             candidates = (body or {}).get("recordings") or []
             if not candidates:
                 counts["nothing"] += 1
@@ -1174,6 +1199,11 @@ def heard(con: sqlite3.Connection, key: str, fingerprint: str, seconds: int) -> 
         },
         headers=USER_AGENT,
     )
+    # **The same distinction, and AcoustID throttles harder than MusicBrainz.** An empty list
+    # here reads as "nothing has linked this audio", which is exactly the finding a
+    # fingerprint pass exists to produce — so a silence must not be able to produce it.
+    if status == bronze.UNANSWERED:
+        raise bronze.UnansweredError(ACOUSTID)
     if status != HTTP_OK or not isinstance(body, dict):
         return []
     found: list[dict[str, Any]] = [r for r in (body.get("results") or []) if r.get("recordings")]
@@ -1282,7 +1312,12 @@ def listened(
     printed = fingerprinted(path)
     if not printed:
         return None, None, "fpcalc could not read it"
-    results = heard(con, key, printed[0], printed[1])
+    try:
+        results = heard(con, key, printed[0], printed[1])
+    except bronze.UnansweredError as why:
+        # Said as what it is. "Nothing has linked this audio" is the finding this pass
+        # exists to produce, and a silence must not be able to produce it (#262).
+        return None, None, str(why)
     if not results:
         return None, None, "nothing MusicBrainz has linked"
     best = results[0]

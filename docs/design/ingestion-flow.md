@@ -232,10 +232,24 @@ back to hand-work.
   ```
 
   `bronze` had always drawn the distinction — `UNANSWERED` is named and its docstring says a caller must not cache it —
-  and every caller in `ingest` folded it into "not a 200" anyway. So `asked` raises rather than returning a third value:
-  the bug was a caller ignoring a distinction it had been handed, and one that must be caught cannot be ignored by
-  accident. `ingest tracklist` tallies it in its own bucket for the same reason — a throttle part-way through a walk of
-  the whole library would otherwise report the rest of it as missing from an authority that simply stopped answering.
+  and every caller folded it into "not a 200" anyway. So `bronze.UnansweredError` is raised rather than a third value
+  returned: the bug was a caller ignoring a distinction it had been handed, and one that must be caught cannot be
+  ignored by accident.
+
+  **What each pass does with it differs, which is why it is raised rather than decided centrally.** `ingest apply` is
+  one album and stops. The passes that walk the library survive the row and tally it apart, because losing the run loses
+  every rate limit spent reaching it:
+
+  | pass                   | used to record it as               |
+  | ---------------------- | ---------------------------------- |
+  | `ingest tracklist`     | `release not found`                |
+  | `identify propose`     | `no candidates` / `nothing`        |
+  | `identify fingerprint` | `nothing MusicBrainz has linked`   |
+  | `joined`               | MusicBrainz not knowing the artist |
+
+  The fingerprint one is the worst of them: _nothing has linked this audio_ is the finding that rung exists to produce,
+  so a silence could manufacture the conclusion the pass is trusted for. `joined`'s is next, because it memoises per
+  name — one throttle stood for that artist for the rest of the run.
 
 - **Choosing a release means choosing a medium, and the tool shows the tracklist.** _Classics_ has twenty pressings in
   its release group. `ingest`'s own search surfaced a 2×12" vinyl at 85%, and asserting it with `--release` wrote
