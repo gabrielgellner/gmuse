@@ -690,8 +690,14 @@ A reader is built per view rather than retuned, because `Holding::sorted` lends 
 narrowed view scrolls fewer rows in view 2. Paging the unnarrowed flat list is ~0.8 s, so it became a `OnceLock` filled
 the first time anybody asks; the tree never does, and a narrowed view's is tiny.
 
-**A rebuild still asks**, to put view 2's cursor back by index, which is why returning to the whole library costs about
-what it did before. Restoring that cursor by mark rather than by index would remove it, and is not done.
+**A rebuild no longer asks.** It did, to put view 2's cursor back by index — which is the one thing that forced the
+ordering on every rating and every counted play, ~570ms cold, to move a cursor nobody was looking at. The cursor is a
+mark now, the way the tree's already was, and it is resolved when the pane is next read: a pane being read has the
+ordering in hand anyway.
+
+The index survives as a _hint_. Checking it is one lookup and it is right whenever the list has not moved underneath,
+which is almost always; the scan for the mark is what a rebuild costs instead. The hint is not written back on a read,
+because reading takes `&Ui` — the next motion sets it.
 
 ## 19. The picker asked a library that had never been played
 
@@ -786,5 +792,6 @@ that can see the mapping above being wrong.
   info panel's territory and `info-panel.md` has the rule for them. §1 is why they have to land in the same milestone.
 - **What a picker does with the spans.** The rows carry them (§21); no pane draws an underline yet, because #261's
   remaining goals are where a `Context` stops carrying a `Librarian` at all.
-- **Where view 2's cursor comes back from.** It is restored by index, which forces the flat ordering on every rebuild —
-  see §18. A mark would not, and marks are what the tree already uses.
+- ~~**Where view 2's cursor comes back from.**~~ It is a mark now, resolved when the pane is next read, so a rebuild no
+  longer pages the flat ordering in — ~570ms cold, on every rating and every counted play. The index is kept as a hint
+  and checked in one lookup; the scan is what a rebuild costs instead.

@@ -246,6 +246,16 @@ impl Remote {
         })
     }
 
+    /// **Whether the flat ordering has been paged in yet** — #261.
+    ///
+    /// For a test asserting that something did *not* ask for it. Paging the whole library's
+    /// flat list is ~0.8 s, and the reason view 2's cursor is a mark is so a rebuild never
+    /// triggers it; "the cursor came back" is true whether or not that happened, so the
+    /// absence needs its own witness.
+    pub fn ordering_is_here(&self) -> bool {
+        self.inner.sorted.get().is_some()
+    }
+
     /// Which view this reader is showing, so a caller can tell whether to build another.
     pub fn shows(&self) -> &Showing {
         &self.inner.showing

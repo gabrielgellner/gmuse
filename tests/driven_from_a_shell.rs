@@ -1863,6 +1863,66 @@ fn a_programme_outlives_the_engine_that_held_it() {
     );
 }
 
+/// **A rebuild does not page in the flat ordering** — #261.
+///
+/// View 2's cursor used to be put back by reading the old index out of the flat ordering and
+/// searching the new one for it, which forced that ordering into existence: ~0.8 s of paging
+/// for the whole library, on every rating and every counted play, to move a cursor nobody was
+/// looking at. It is a mark now, resolved when the pane is next read — and a pane being read
+/// has the ordering in hand anyway.
+///
+/// **The absence needs its own witness.** "The cursor came back" is true whether or not the
+/// ordering was paged in, so this asks the reader directly.
+#[test]
+fn rebuilding_the_library_does_not_page_in_the_flat_ordering() {
+    let (engine, _recording) = start_with_a_track("no-ordering");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+    let remote = gmuse::ui::holding_remote::Remote::open(std::sync::Arc::clone(&client));
+
+    // The instrument: if it were already here, the assertion below would hold for the wrong
+    // reason for ever.
+    assert!(
+        !remote.ordering_is_here(),
+        "a fresh reader had already paged the ordering in"
+    );
+
+    let mut ui = gmuse::ui::Ui::new(Box::new(remote.clone()));
+    ui.reader = Some(remote.clone());
+    ui.engine = Some(std::sync::Arc::clone(&client));
+    let held = gmuse::librarian::Desk::read_only(
+        Default::default(),
+        gmuse::model::id::Id::derived(b"no-ordering"),
+        0,
+        engine.dir.join("xdg").join("gmuse"),
+    )
+    .current();
+    let ctx = gmuse::ui::Context {
+        library: &held.library,
+        player: None,
+        gapless: None,
+    };
+
+    gmuse::ui::refresh_library(&mut ui, &ctx);
+
+    // **The reader the rebuild installed, not the one handed in.** `holding::of` builds a
+    // fresh `Remote` whenever the view it is showing differs, so watching the original proves
+    // nothing about the one that ended up in `ui.library` — which is how the first version of
+    // this test passed with the eager resolve put back.
+    let after = ui.reader.clone().expect("the rebuild kept a reader");
+    assert!(
+        !after.ordering_is_here(),
+        "a rebuild paged the flat ordering in to move a cursor nobody is looking at"
+    );
+
+    // And it is still reachable: asking for it is what pages it in.
+    assert!(
+        !gmuse::browse::Holding::sorted(&after).is_empty(),
+        "the ordering came back empty"
+    );
+    assert!(after.ordering_is_here(), "asking did not page it in");
+}
+
 /// Driven through `ui::push_the_queue` and `ui::read_the_queue` rather than raw
 /// calls, because what is being tested is the view's half.
 #[test]

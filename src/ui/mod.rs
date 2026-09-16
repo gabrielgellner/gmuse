@@ -617,6 +617,15 @@ pub struct Ui {
     /// this a one-off notice sits in the status line for the rest of the
     /// session, hiding what is actually playing.
     status_until: Option<Instant>,
+    /// **Which row view 2's cursor is on, by identity** — #261.
+    ///
+    /// `sorted` is the index and this is what it means. A rebuild used to put the cursor back
+    /// by reading the old index out of the flat ordering and searching the new one for it,
+    /// which forced that ordering into existence — ~0.8 s of paging for the whole library, on
+    /// every rating and every counted play, to move a cursor nobody was looking at. The tree
+    /// already keeps its cursor as a mark for the same reason; this is that answer for the
+    /// other pane.
+    sorted_mark: Option<CopyId>,
     quit: bool,
 }
 
@@ -694,6 +703,7 @@ impl Ui {
             engine: None,
             reader: None,
             queue_mirror: Vec::new(),
+            sorted_mark: None,
             queue_version: 0,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
@@ -2536,7 +2546,7 @@ fn choose_from_picker(ui: &mut Ui, ctx: &Context<'_>) {
             ui.levels = crate::shelf::Levels::Flat;
             switch_view(ui, View::Tree);
             if let Some(at) = ui.library.sorted().iter().position(|r| *r == id) {
-                ui.sorted = at;
+                point_sorted_at(ui, at);
             }
         }
         Chosen::Collection(name) => {
@@ -3724,7 +3734,7 @@ fn rows_at_cursor(ui: &Ui, n: usize) -> Vec<CopyId> {
         }
         View::Playlist => return Vec::new(),
         View::Queue => (ui.queue.entries().copied().collect(), ui.queue_sel),
-        View::Tree if ui.levels.is_flat() => (ui.library.sorted().to_vec(), ui.sorted),
+        View::Tree if ui.levels.is_flat() => (ui.library.sorted().to_vec(), sorted_cursor(ui)),
         _ => return Vec::new(),
     };
     entries.into_iter().skip(at).take(n).collect()
@@ -4575,7 +4585,6 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // shelf is replaced, because a mark names a row by its path or its copy and both
     // are read out of the list that is about to go.
     let was = ui.tree.mark(&ui.library);
-    let was_sorted = ui.library.sorted().get(ui.sorted).copied();
 
     ui.library = holding::of(
         ctx.library.whole(),
@@ -4595,11 +4604,11 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // been keyed on the ident path from the start "so expansion survives a re-sort or a
     // rescan"; the cursor is the same question and was answered differently.
     ui.tree.point_at(&ui.library, was);
-    ui.sorted = was_sorted
-        .and_then(|id| ui.library.sorted().iter().position(|got| *got == id))
-        // Gone from the list: stay where you were, clamped. Row 0 is a guess that is
-        // wrong every time the list is longer than one.
-        .unwrap_or_else(|| ui.sorted.min(ui.library.sorted().len().saturating_sub(1)));
+    // **View 2's cursor is a mark and stays one**, so nothing here asks for the flat ordering.
+    // Resolving it eagerly is what forced that ordering into existence — ~0.8 s of paging for
+    // the whole library, on every rating and every counted play, to move a cursor nobody was
+    // looking at. `sorted_cursor` resolves the mark the next time the pane is read, which is a
+    // pane that has the ordering in hand anyway.
     // Playlists and the queue are deliberately untouched: they hold TrackIds
     // straight into the Scan and are meant to cross catalogs.
     //
@@ -5185,7 +5194,7 @@ fn go_to_playing(ui: &mut Ui, _ctx: &Context<'_>) {
         View::Tree if ui.levels.is_flat() => {
             match ui.library.sorted().iter().position(|t| *t == id) {
                 Some(at) => {
-                    ui.sorted = at;
+                    point_sorted_at(ui, at);
                     true
                 }
                 None => false,
@@ -5491,9 +5500,31 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
     }
 }
 
+/// Where view 2's cursor is, resolving the mark when the index has gone stale.
+///
+/// **The index is a hint and the mark is the truth.** Checking the hint is one lookup and it is
+/// right whenever the list has not moved under it, which is almost always; the scan is what a
+/// rebuild costs instead of the ~0.8 s it used to spend paging the ordering in to avoid one.
+///
+/// Read-only, so the hint is not written back here — the next motion sets it, through
+/// [`set_cursor`].
+fn sorted_cursor(ui: &Ui) -> usize {
+    let rows = ui.library.sorted();
+    match ui.sorted_mark {
+        Some(mark) if rows.get(ui.sorted) == Some(&mark) => ui.sorted,
+        Some(mark) => rows
+            .iter()
+            .position(|row| *row == mark)
+            // Gone from the list: stay where you were, clamped. Row 0 is a guess that is wrong
+            // every time the list is longer than one.
+            .unwrap_or_else(|| ui.sorted.min(rows.len().saturating_sub(1))),
+        None => ui.sorted.min(rows.len().saturating_sub(1)),
+    }
+}
+
 fn current_cursor(ui: &Ui) -> usize {
     match ui.view {
-        View::Tree if ui.levels.is_flat() => ui.sorted,
+        View::Tree if ui.levels.is_flat() => sorted_cursor(ui),
         View::Tree => ui.tree.selected,
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlists_sel,
@@ -5508,10 +5539,18 @@ fn current_cursor(ui: &Ui) -> usize {
     }
 }
 
+/// Move view 2's cursor to a row, and remember which row that is.
+///
+/// The ordering is certainly here: a motion in view 2 happens in a pane that has drawn.
+fn point_sorted_at(ui: &mut Ui, next: usize) {
+    ui.sorted = next;
+    ui.sorted_mark = ui.library.sorted().get(next).copied();
+}
+
 fn set_cursor(ui: &mut Ui, next: usize) {
     match ui.view {
         View::Info => ui.info_sel = next,
-        View::Tree if ui.levels.is_flat() => ui.sorted = next,
+        View::Tree if ui.levels.is_flat() => point_sorted_at(ui, next),
         View::Tree => ui.tree.selected = next,
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlists_sel = next,
@@ -5796,7 +5835,7 @@ fn draw_body(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, view: Vi
             TrackList {
                 scroll: &ui.sorted_scroll,
                 ids: ui.library.sorted(),
-                selected: ui.sorted,
+                selected: sorted_cursor(ui),
                 title: "sorted",
                 focused,
                 divide: true,
@@ -10458,12 +10497,69 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = catalog_ui(&store);
         flat_view(&mut ui);
-        ui.sorted = ui.library.sorted().len() - 1;
+        // Through the setter, because view 2's cursor is a mark and the index is its hint —
+        // assigning the index alone says nothing about where the cursor is (#261).
+        let last = ui.library.sorted().len() - 1;
+        point_sorted_at(&mut ui, last);
 
         select_view(&mut ui, &ctx, "paak");
         assert!(
-            ui.sorted < ui.library.sorted().len(),
+            sorted_cursor(&ui) < ui.library.sorted().len(),
             "the cursor is past the end of the narrowed list"
+        );
+    }
+
+    /// **The cursor comes back to the same row, not merely to somewhere in bounds** — #261.
+    ///
+    /// `a_rebuilt_list_leaves_the_cursor_in_bounds` next door cannot tell the mark being found
+    /// from the index being clamped: both land inside the list, and clamping was the old
+    /// fallback. This is the claim the mark exists for — a rebuild that moves the row still
+    /// leaves the cursor on it.
+    #[test]
+    fn view_two_comes_back_to_the_row_it_was_on() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+        flat_view(&mut ui);
+
+        let before = ui.library.sorted().to_vec();
+        // **A row the narrowing keeps, whose index it changes** — row 0 would be clamped to
+        // correctly by accident. Which saved view moves one is the fixture's business, and
+        // hard-coding it is one tag change from a vacuous test.
+        let (view, was_at, row) = ["paak", "va"]
+            .into_iter()
+            .find_map(|name| {
+                let mut narrowed = catalog_ui(&store);
+                flat_view(&mut narrowed);
+                select_view(&mut narrowed, &ctx, name);
+                let kept = narrowed.library.sorted().to_vec();
+                before.iter().enumerate().find_map(|(at, r)| {
+                    kept.iter()
+                        .position(|k| k == r)
+                        .is_some_and(|k| k != at)
+                        .then_some((name, at, *r))
+                })
+            })
+            .expect("no saved view moves a row it keeps");
+
+        point_sorted_at(&mut ui, was_at);
+        select_view(&mut ui, &ctx, view);
+
+        let now = ui.library.sorted().to_vec();
+        let expected = now
+            .iter()
+            .position(|r| *r == row)
+            .expect("the row is still in the list");
+        // The instrument: if it did not move, a clamp and the mark agree and nothing below
+        // distinguishes them.
+        assert_ne!(
+            expected, was_at,
+            "the row did not move, so this proves nothing"
+        );
+        assert_eq!(
+            sorted_cursor(&ui),
+            expected,
+            "the cursor left the row it was on"
         );
     }
 
@@ -15949,15 +16045,16 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         flat_view(&mut ui);
-        ui.sorted = 0;
+        point_sorted_at(&mut ui, 0);
 
         press(&mut ui, &ctx, "}");
         press(&mut ui, &ctx, "}");
-        let twice = ui.sorted;
+        let twice = sorted_cursor(&ui);
+        assert!(twice > 0, "`}}` did not move");
 
-        ui.sorted = 0;
+        point_sorted_at(&mut ui, 0);
         press(&mut ui, &ctx, "2 }");
-        assert_eq!(ui.sorted, twice, "`2}}` should be `}}` twice");
+        assert_eq!(sorted_cursor(&ui), twice, "`2}}` should be `}}` twice");
     }
 
     /// Two albums by one artist, followed by another artist — the shape that
