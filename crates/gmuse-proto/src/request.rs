@@ -335,6 +335,16 @@ pub enum Request {
     PlayerTransport {
         verb: Transport,
     },
+    /// **Seek, as a number rather than as a sentence** — #265.
+    ///
+    /// This went over the wire as the text `seek 12`, built with `format!` from a
+    /// `Duration` by way of `as_secs()` — so an attached view's seek lost its
+    /// fraction, and a session restore landed up to a second early. Both ends
+    /// already held the value typed: `SeekTo` on one side, `Command::Seek` on the
+    /// other. Only the middle spelled it out and read it back.
+    PlayerSeek {
+        to: Seek,
+    },
     /// **What is playing, right now, asked rather than waited for** — #243, #248.
     ///
     /// The `playback` topic reports *discontinuities* and §7.8 forbids a steady
@@ -373,6 +383,24 @@ pub enum Request {
         operation: LibraryOp,
         params: serde_json::Value,
     },
+}
+
+/// **Where to seek to, in seconds** — #265.
+///
+/// Seconds rather than frames because a view does not know the device rate, and
+/// `f64` rather than whole seconds because the fraction is the whole point: a
+/// session restore seeks to `position_secs`, and rounding that down is audible
+/// as a lost half-second every time a view reattaches.
+///
+/// Two variants rather than a number and a flag, so "seek to 5" and "seek on by
+/// 5" cannot be confused by a caller that forgot the flag.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Seek {
+    /// From the start of the track.
+    Absolute(f64),
+    /// Forwards (positive) or backwards (negative) from where it is now.
+    Relative(f64),
 }
 
 /// **Which transport verb** — #225, `transport-keymap-spec.md` D-6 to D-8.
@@ -528,6 +556,7 @@ pub mod method {
     pub const TIME_NOW: &str = "time.now";
     pub const PLAYER_LOAD: &str = "player.load";
     pub const PLAYER_TRANSPORT: &str = "player.transport";
+    pub const PLAYER_SEEK: &str = "player.seek";
     pub const PLAYBACK_GET: &str = "playback.get";
     pub const QUERY_PARSE: &str = "query.parse";
     pub const QUERY_RUN: &str = "query.run";
@@ -581,6 +610,7 @@ pub mod method {
         QUERY_REVEAL,
         QUERY_UNDER,
         PLAYER_TRANSPORT,
+        PLAYER_SEEK,
         QUERY_ROW,
         QUERY_HOLDINGS,
         QUERY_RECORDING,
@@ -663,6 +693,14 @@ impl Request {
                 }
                 let p: P = typed(method, params)?;
                 Ok(Self::PlayerTransport { verb: p.verb })
+            }
+            method::PLAYER_SEEK => {
+                #[derive(Deserialize)]
+                struct P {
+                    to: Seek,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::PlayerSeek { to: p.to })
             }
             method::PLAYER_LOAD => {
                 #[derive(Deserialize)]
@@ -994,6 +1032,7 @@ impl Request {
             Self::TimeNow => method::TIME_NOW,
             Self::PlayerLoad { .. } => method::PLAYER_LOAD,
             Self::PlayerTransport { .. } => method::PLAYER_TRANSPORT,
+            Self::PlayerSeek { .. } => method::PLAYER_SEEK,
             Self::PlaybackGet { .. } => method::PLAYBACK_GET,
             Self::QueryParse { .. } => method::QUERY_PARSE,
             Self::QueryRun { .. } => method::QUERY_RUN,
@@ -1059,7 +1098,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 37, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 38, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

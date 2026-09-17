@@ -358,11 +358,25 @@ impl Transport for Remote {
         true
     }
 
+    /// **Typed, because `as_secs()` threw the fraction away** — #265.
+    ///
+    /// This built a `seek 12` and sent it down the text line. `SeekTo::Absolute`
+    /// carries a `Duration` and `as_secs()` truncates, so an attached view's seek
+    /// landed up to a second early — reachable from a session restore, which
+    /// seeks to `saved.position_secs` and would resume before where it left off.
+    ///
+    /// The text language was never the limit: `cmd::parse::clock` reads each
+    /// `:`-separated part as `f64`, so `seek 12.5` already parsed. It was the
+    /// formatter. Sending the number instead of a sentence removes the question.
     fn seek(&self, to: SeekTo) {
-        match to {
-            SeekTo::Absolute(d) => self.line(&format!("seek {}", d.as_secs())),
-            SeekTo::Relative(d) => self.line(&format!("seek {d:+}")),
-        }
+        let to = match to {
+            SeekTo::Absolute(d) => gmuse_proto::request::Seek::Absolute(d.as_secs_f64()),
+            SeekTo::Relative(secs) => gmuse_proto::request::Seek::Relative(secs),
+        };
+        let _ = self.client.notify(
+            gmuse_proto::request::method::PLAYER_SEEK,
+            Some(serde_json::json!({ "to": to })),
+        );
     }
 
     fn volume(&self) -> f32 {

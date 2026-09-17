@@ -804,9 +804,15 @@ packets. A position that matched the handed-over count exactly would be the bug 
   disconnected channel answers instantly, so asking again is a spin. `gmuse-client` reports `Closed` for the second, and
   a reader that sees it stops rather than retrying. Measured before the fix: 100% of one core, 20 minutes of user time
   in a 37-minute session, spent entirely computing a timeout deadline that was never waited on.
-- **And a view must then say so.** Every consequence of a lost engine is silent and separate: rows the view had not
-  cached draw `<missing>`, `gp` finds no target, and a rating lands on whatever was playing when the connection dropped.
-  That is three bugs to the person looking at them and one to the person who knows, so the status line names the cause.
+- **A value that is already typed at both ends does not become a sentence in the middle** — #265. Seek crossed as the
+  text `seek 12`, built from a `Duration` with `as_secs()`, so an attached view lost the fraction and a session restore
+  resumed up to a second early. `player.seek` carries `{absolute|relative: seconds}` as a number. The text line stays a
+  door — `cmd.exec_line` parses `seek 12.5` perfectly well — but it is the door for _text_, not the way a typed value
+  travels.
+- **And a view must then say so.**- **And a view must then say so.** Every consequence of a lost engine is silent and
+  separate: rows the view had not cached draw `<missing>`, `gp` finds no target, and a rating lands on whatever was
+  playing when the connection dropped. That is three bugs to the person looking at them and one to the person who knows,
+  so the status line names the cause.
 
 ### 7.11 Queries
 

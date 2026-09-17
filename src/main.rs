@@ -4301,6 +4301,23 @@ fn run_engine(
                     Ok(serde_json::json!({ "accepted": true }))
                 }
 
+                // **Seconds in, frames at the far end** — #265. The view has no
+                // device rate, so the conversion belongs where the rate is known;
+                // what crosses is the number the person asked for.
+                Call::PlayerSeek { to } => {
+                    use gmuse_proto::request::Seek;
+                    let what = gmuse_engine::instruction::Instruction::Seek(match to {
+                        Seek::Absolute(secs) => gmuse::audio::SeekTo::Absolute(
+                            std::time::Duration::from_secs_f64(secs.max(0.0)),
+                        ),
+                        Seek::Relative(secs) => gmuse::audio::SeekTo::Relative(secs),
+                    });
+                    if !self.control.ask(gmuse::engine::control::Ask::Do(what)) {
+                        return Err(RpcError::new(code::INTERNAL, "the player is not running"));
+                    }
+                    Ok(serde_json::json!({ "accepted": true }))
+                }
+
                 Call::PlayerLoad { recording } => {
                     let Ok(uuid) = recording.parse::<uuid::Uuid>() else {
                         return Err(RpcError::invalid_params(

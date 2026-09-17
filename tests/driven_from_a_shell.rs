@@ -4831,3 +4831,147 @@ fn a_preview_starts_at_the_mark_and_does_not_move_it() {
         "it snapped to the start, which is what losing the mark looks like"
     );
 }
+
+/// **An attached seek keeps its fraction** — #265.
+///
+/// `remote_transport::seek` built the text `seek 12` with `as_secs()`, which
+/// truncates a `Duration`. Reachable from a session restore, which seeks to
+/// `saved.position_secs`: reattaching resumed up to a second before where it
+/// left off, every time.
+///
+/// **Asserted on a position that is not a whole second**, because every
+/// truncating implementation agrees with a correct one at 12.0. The fixture is
+/// 24,000 frames at the device rate, so 0.35s is inside it and far enough from
+/// 0.0 to tell a rounding from a failure.
+#[test]
+fn seeking_over_the_wire_does_not_round_to_the_second() {
+    let (engine, recording) = start_with_a_track("seek-fraction");
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+
+    let now = || -> (String, u64) {
+        let got = client
+            .call(gmuse_proto::method::PLAYBACK_GET, None)
+            .expect("playback.get");
+        (
+            got["state"].as_str().unwrap_or("?").to_string(),
+            got["pos_frames"].as_u64().unwrap_or(0),
+        )
+    };
+    let settle = |want: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if now().0 == want {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("the engine never reached {want}, it is {}", now().0);
+    };
+
+    client
+        .call(
+            gmuse_proto::method::PLAYER_LOAD,
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+    settle("playing");
+    client
+        .call(
+            gmuse_proto::method::PLAYER_TRANSPORT,
+            Some(serde_json::json!({ "verb": "pause" })),
+        )
+        .expect("pause");
+    settle("paused");
+
+    client
+        .call(
+            gmuse_proto::method::PLAYER_SEEK,
+            Some(serde_json::json!({ "to": { "absolute": 0.35 } })),
+        )
+        .expect("seek");
+    std::thread::sleep(Duration::from_millis(200));
+
+    // 0.35s at the device rate. Truncating to whole seconds lands at 0.
+    let landed = now().1;
+    let rate = client
+        .call(gmuse_proto::method::PLAYBACK_GET, None)
+        .expect("playback.get")["sample_rate"]
+        .as_u64()
+        .expect("a sample rate");
+    let want = (0.35 * rate as f64) as u64;
+    assert!(
+        want > 5_000,
+        "the fixture rate makes 0.35s only {want} frames — too close to zero to tell"
+    );
+    assert!(
+        landed.abs_diff(want) < 2_000,
+        "seeking to 0.35s landed at {landed} frames, not near {want}"
+    );
+}
+
+/// **And through the seam the bug was actually in** — #265.
+///
+/// `seeking_over_the_wire_does_not_round_to_the_second` calls `player.seek`
+/// directly, which is the wire's half. It does not go through
+/// `remote_transport::seek` — the function that held the `as_secs()` — so
+/// putting the truncation back there leaves that test green. This one drives a
+/// real `Remote`, which is the path a view takes.
+///
+/// The two are not redundant: one pins the protocol, this pins the caller.
+#[test]
+fn a_remote_seek_keeps_its_fraction_too() {
+    use gmuse::ui::transport::Transport;
+    use std::sync::Arc;
+
+    let (engine, recording) = start_with_a_track("seek-seam");
+    let client = Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+    let remote = gmuse::ui::remote_transport::Remote::attach(Arc::clone(&client)).expect("attach");
+
+    let now = || -> (String, u64) {
+        let got = client
+            .call(gmuse_proto::method::PLAYBACK_GET, None)
+            .expect("playback.get");
+        (
+            got["state"].as_str().unwrap_or("?").to_string(),
+            got["pos_frames"].as_u64().unwrap_or(0),
+        )
+    };
+    let settle = |want: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if now().0 == want {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("the engine never reached {want}, it is {}", now().0);
+    };
+
+    client
+        .call(
+            gmuse_proto::method::PLAYER_LOAD,
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+    settle("playing");
+    remote.pause();
+    settle("paused");
+
+    remote.seek(gmuse::audio::SeekTo::Absolute(Duration::from_secs_f64(
+        0.35,
+    )));
+    std::thread::sleep(Duration::from_millis(250));
+
+    let rate = client
+        .call(gmuse_proto::method::PLAYBACK_GET, None)
+        .expect("playback.get")["sample_rate"]
+        .as_u64()
+        .expect("a sample rate");
+    let want = (0.35 * rate as f64) as u64;
+    assert!(want > 5_000, "0.35s is only {want} frames at this rate");
+    let landed = now().1;
+    assert!(
+        landed.abs_diff(want) < 2_000,
+        "a Remote seek to 0.35s landed at {landed} frames, not near {want}"
+    );
+}
