@@ -2369,11 +2369,19 @@ fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     ui.help_scroll = 0;
     ui.pending.push(key);
     match bind::resolve(&ui.bindings, ui.context(), &ui.pending) {
-        bind::Resolved::Exact(cmd) => {
-            let cmd = cmd.clone();
+        bind::Resolved::Exact(cmds) => {
+            let cmds = cmds.to_vec();
             let count = ui.count.take();
             ui.pending.clear();
-            execute_counted(ui, ctx, cmd, count);
+            // **The count goes to the first, not to each** — #266. `3o` with
+            // `o = ["add-queue", "next"]` means three of what `o` does, and
+            // handing 3 to every command in the list would queue three and skip
+            // three. The first is the one the count was typed for; the rest are
+            // what follows it.
+            let mut count = count;
+            for cmd in cmds {
+                execute_counted(ui, ctx, cmd, count.take());
+            }
         }
         // Wait for the rest of the chord. The status line renders the pending
         // keys straight from this state — see `Ui::pending_label` — rather than
@@ -2770,7 +2778,10 @@ fn handle_prompt_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
 /// verb stays reachable in both places, which is what criterion 7 asks.
 fn released(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     let seq = [Key::from_event(key)];
-    if let Some(Command::CuePreview) = bind::lookup(&ui.bindings, ui.context(), &seq) {
+    // **Exactly one command, and it is the momentary one.** A macro is not
+    // holdable: "what does releasing `add-queue then next` mean" has no answer,
+    // and guessing one would run half a list on a key coming up.
+    if let Some([Command::CuePreview]) = bind::lookup(&ui.bindings, ui.context(), &seq) {
         preview(ui, ctx, transport::KeyPhase::Release);
     }
 }
@@ -3200,10 +3211,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Bind {
             ctx: bctx,
             key,
-            cmd,
+            cmds,
         } => {
             let key = crate::cmd::keys::resolve_leader(&key, ui.leader);
-            ui.bindings.insert((bctx, key), *cmd);
+            ui.bindings.insert((bctx, key), cmds);
         }
         Command::Unbind { ctx: bctx, key } => {
             let key = crate::cmd::keys::resolve_leader(&key, ui.leader);
@@ -3707,7 +3718,7 @@ fn show_help(ui: &mut Ui) {
         }
         for (ctx, key, cmd) in bind::sorted(&ui.bindings) {
             if ctx == want {
-                rows.push(format!("{key}  {}", crate::cmd::parse::format(cmd)));
+                rows.push(format!("{key}  {}", crate::cmd::parse::one_line(cmd)));
             }
         }
     }
@@ -6425,7 +6436,7 @@ fn which_key_rows(ui: &Ui, now: Instant) -> Option<Vec<String>> {
     let rows: Vec<String> = bind::continuations(&ui.bindings, ui.context(), &ui.pending)
         .into_iter()
         .map(|(key, next)| match next {
-            bind::Next::Runs(cmd) => format!("{key}  {}", crate::cmd::parse::format(cmd)),
+            bind::Next::Runs(cmd) => format!("{key}  {}", crate::cmd::parse::one_line(cmd)),
             // which-key's `+prefix`, and the `+` is why it is not mistaken for
             // a command name.
             bind::Next::More(n) => format!("{key}  +{n} more"),
@@ -10171,7 +10182,7 @@ mod tests {
             let Command::Bind {
                 ctx: bctx,
                 key,
-                cmd,
+                cmds,
             } = crate::cmd::parse::command(line).unwrap()
             else {
                 panic!("{line:?} is not a bind")
@@ -10200,10 +10211,12 @@ mod tests {
             // `<leader>`. Resolving here is what makes them comparable.
             let key = crate::cmd::keys::resolve_leader(&key, ui.leader);
             let found = crate::cmd::bind::lookup(&ui.bindings, ui.context(), &key);
-            assert_eq!(found, Some(&*cmd), "{line:?} did not resolve");
+            assert_eq!(found, Some(cmds.as_slice()), "{line:?} did not resolve");
 
             // And running it must not panic, whatever the view state.
-            execute(&mut ui, &ctx, *cmd);
+            for cmd in cmds {
+                execute(&mut ui, &ctx, cmd);
+            }
         }
     }
 
@@ -15182,7 +15195,7 @@ mod tests {
     fn going_deeper_does_not_pay_the_delay_again() {
         let mut bindings = bind::defaults();
         let seq = crate::cmd::keys::parse_seq("g q x").expect("test keys");
-        bindings.insert((crate::cmd::Context::Common, seq), Command::Quit);
+        bindings.insert((crate::cmd::Context::Common, seq), vec![Command::Quit]);
 
         let store = fixture();
         let ctx = ctx_of(&store);
@@ -15883,6 +15896,119 @@ mod tests {
         );
     }
 
+    /// **A macro key runs every command it was given** — #266.
+    ///
+    /// The claim `config.rs` has made since lists were added and never
+    /// delivered: `o = ["add-queue", "next"]` bound two `Command::Bind`s with
+    /// one key into a map, so the second replaced the first and `add-queue` was
+    /// discarded without a word.
+    ///
+    /// **Pressed, not inspected.** The old test read the parse output and
+    /// checked there were two commands in it; both were there and the feature
+    /// still did not work, because what went wrong happened between parsing and
+    /// the table. This goes through `:bind`, the keymap and `handle_key` — the
+    /// path a person takes.
+    ///
+    /// **Both halves are asserted.** A macro that ran only its first command is
+    /// as broken as one that ran only its last, and checking a single effect
+    /// cannot tell the two apart.
+    #[test]
+    fn a_macro_key_runs_every_command_it_was_given() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        expand_to_tracks(&mut ui, &store);
+
+        // Put the cursor on a track, so `add-queue` has something to take.
+        while !matches!(
+            ui.tree.rows(&ui.library).get(ui.tree.selected),
+            Some(tree::Row::Track { .. })
+        ) {
+            press(&mut ui, &ctx, "j");
+        }
+        let was = ui.tree.selected;
+        assert!(
+            ui.queue.is_empty(),
+            "the queue started with something in it"
+        );
+
+        let loaded = crate::config::parse_text(
+            r#"
+            [keys.library]
+            "z 9" = ["add-queue", "down"]
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        for cmd in loaded.commands {
+            execute(&mut ui, &ctx, cmd);
+        }
+
+        ui.view = View::from_id(ViewId::Library);
+        press(&mut ui, &ctx, "z 9");
+
+        assert_eq!(
+            ui.queue.len(),
+            1,
+            "the first command in the list did not run"
+        );
+        assert_eq!(
+            ui.tree.selected,
+            was + 1,
+            "the second command in the list did not run"
+        );
+    }
+
+    /// **A count belongs to the first command, not to each** — #266.
+    ///
+    /// `3o` with `o = ["down", "down"]` means three of what `o` does — so the
+    /// count goes to the command it was typed in front of, and the rest of the
+    /// list is what follows. Handing 3 to every command would move six rows
+    /// instead of four, which is the kind of thing nobody notices until a macro
+    /// does something six times.
+    ///
+    /// **Written because a mutation survived.** Passing `count` to every command
+    /// rather than `count.take()` broke nothing in 596 tests: the rule was a
+    /// sentence in a comment beside the loop, §13's fourth way to be green and
+    /// wrong.
+    ///
+    /// The arithmetic is what makes it falsifiable: 3 + 1 and 3 + 3 are
+    /// different numbers, where 1 + 1 and 3 + 3 would both just be "it moved".
+    #[test]
+    fn a_count_goes_to_the_first_command_of_a_macro() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        expand_to_tracks(&mut ui, &store);
+        ui.view = View::from_id(ViewId::Library);
+
+        // **Enough room for both answers to be reachable.** Four rows and six
+        // rows both have to fit, or the wrong one clamps to the right one and
+        // the test passes by accident.
+        let rows = ui.tree.rows(&ui.library).len();
+        assert!(rows > 6, "only {rows} rows — not enough to count across");
+
+        let loaded = crate::config::parse_text(
+            r#"
+            [keys.library]
+            "z 8" = ["down", "down"]
+            "#,
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        for cmd in loaded.commands {
+            execute(&mut ui, &ctx, cmd);
+        }
+
+        press(&mut ui, &ctx, "g g");
+        let was = ui.tree.selected;
+        press(&mut ui, &ctx, "3 z 8");
+        assert_eq!(
+            ui.tree.selected - was,
+            4,
+            "three downs then one down is four rows; giving the count to both \
+             would be six"
+        );
+    }
+
     /// **The leader still plays what the cursor is on** — #229.
     ///
     /// `Enter` opens an album and an artist; it only reaches for sound on a
@@ -15974,7 +16100,7 @@ mod tests {
         let seq = crate::cmd::keys::parse_seq("%").expect("test keys");
         assert_eq!(
             bind::lookup(&ui.bindings, crate::cmd::Context::Transport, &seq),
-            Some(&Command::SeekPercent)
+            Some(&[Command::SeekPercent][..])
         );
         press(&mut ui, &ctx, "2");
         press(&mut ui, &ctx, "5");
@@ -16023,7 +16149,7 @@ mod tests {
 
         let mut bindings = bind::defaults();
         let seq = keys::parse_seq("z o").expect("parses");
-        bindings.insert((crate::cmd::Context::Queue, seq), Command::Quit);
+        bindings.insert((crate::cmd::Context::Queue, seq), vec![Command::Quit]);
 
         let under_z = keys::parse_seq("z").expect("parses");
         let rows = continuations(&bindings, crate::cmd::Context::Queue, &under_z);
@@ -16031,7 +16157,11 @@ mod tests {
             .iter()
             .find(|(k, _)| k == "o")
             .expect("`o` should still be offered");
-        assert_eq!(o.1, Next::Runs(&Command::Quit), "the queue's own wins");
+        assert_eq!(
+            o.1,
+            Next::Runs(&[Command::Quit][..]),
+            "the queue's own wins"
+        );
         assert_eq!(
             rows.iter().filter(|(k, _)| k == "o").count(),
             1,
@@ -16052,7 +16182,7 @@ mod tests {
                 crate::cmd::Context::Common,
                 keys::parse_seq("z o x").unwrap(),
             ),
-            Command::Quit,
+            vec![Command::Quit],
         );
 
         let rows = continuations(

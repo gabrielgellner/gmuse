@@ -795,7 +795,12 @@ pub enum Command {
     Bind {
         ctx: Context,
         key: keys::Seq,
-        cmd: Box<Command>,
+        /// **A list, because a key binds one** — #266.
+        ///
+        /// `:bind` parses exactly one and this is a one-element vector; a TOML
+        /// list is the only thing that makes it longer, which is the macro
+        /// `config.rs` has documented all along and never delivered.
+        cmds: Vec<Command>,
     },
     Unbind {
         ctx: Context,

@@ -10,13 +10,27 @@ use std::collections::HashMap;
 use super::keys::{self, Key, Seq};
 use super::{Command, Context, parse};
 
-pub type Bindings = HashMap<(Context, Seq), Command>;
+/// **A key binds a list, because a list is what a key can be given** — #266.
+///
+/// One `Command` per key for most of this project's life, and `config.rs` has
+/// documented a TOML list as a macro for just as long: `o = ["add-queue",
+/// "next"]`. It emitted two `Command::Bind`s with the same key into a map, so
+/// the second replaced the first and `add-queue` was discarded without a word.
+/// Measured: two in, one entry out, holding `next`.
+///
+/// The text language is unchanged — `:bind` still takes exactly one command,
+/// and a separator there would collide permanently with the free-form arguments
+/// `add`, `view` and the filters carry.
+pub type Bindings = HashMap<(Context, Seq), Vec<Command>>;
 
 /// What a partially typed key sequence means so far.
 #[derive(Debug, PartialEq)]
 pub enum Resolved<'a> {
     /// A complete binding. Run it and clear the pending keys.
-    Exact(&'a Command),
+    ///
+    /// A slice: a binding is a list of commands run in order (#266), and all but
+    /// a TOML macro are one long.
+    Exact(&'a [Command]),
     /// The start of at least one longer binding. Keep waiting.
     Prefix,
     /// Nothing can match. Clear the pending keys.
@@ -290,14 +304,14 @@ pub fn defaults() -> Bindings {
     let mut bindings = Bindings::new();
     for line in DEFAULTS {
         match parse::command(line) {
-            Ok(Command::Bind { ctx, key, cmd }) => {
+            Ok(Command::Bind { ctx, key, cmds }) => {
                 // **A duplicate is a lost binding, not a last-one-wins** — #227.
                 // The other two arms already panic on a malformed default; this
                 // one silently overwrote, so a second `bind common zz …` would
                 // disable the first with nothing to show for it. It is keyed by
                 // the *parsed* sequence, so two spellings of one chord collide
                 // here even though they are different lines.
-                if let Some(had) = bindings.insert((ctx, key.clone()), *cmd) {
+                if let Some(had) = bindings.insert((ctx, key.clone()), cmds) {
                     panic!(
                         "default {line:?} rebinds {} {}, which already ran {had:?}",
                         ctx.name(),
@@ -312,13 +326,19 @@ pub fn defaults() -> Bindings {
     bindings
 }
 
-/// Find the command for a key sequence, falling back to `Common`.
-pub fn lookup<'a>(bindings: &'a Bindings, ctx: Context, keys: &[Key]) -> Option<&'a Command> {
-    bindings.get(&(ctx, keys.to_vec())).or_else(|| {
-        ctx.inherits_common()
-            .then(|| bindings.get(&(Context::Common, keys.to_vec())))
-            .flatten()
-    })
+/// Find what a key sequence runs, falling back to `Common`.
+///
+/// A slice, because a binding is a list (#266). Every default is one command
+/// long; a TOML list is what makes it longer.
+pub fn lookup<'a>(bindings: &'a Bindings, ctx: Context, keys: &[Key]) -> Option<&'a [Command]> {
+    bindings
+        .get(&(ctx, keys.to_vec()))
+        .or_else(|| {
+            ctx.inherits_common()
+                .then(|| bindings.get(&(Context::Common, keys.to_vec())))
+                .flatten()
+        })
+        .map(Vec::as_slice)
 }
 
 /// Resolve a partially typed sequence.
@@ -350,8 +370,8 @@ type Order = (String, bool, String);
 /// What one key could be followed by, and what it would then mean.
 #[derive(Debug, PartialEq)]
 pub enum Next<'a> {
-    /// Pressing it runs this.
-    Runs(&'a Command),
+    /// Pressing it runs these, in order.
+    Runs(&'a [Command]),
     /// It is itself a prefix, with this many bindings under it.
     More(usize),
 }
@@ -369,8 +389,8 @@ pub fn continuations<'a>(
     ctx: Context,
     prefix: &[Key],
 ) -> Vec<(String, Next<'a>)> {
-    let mut best: HashMap<&Seq, (Context, &Command)> = HashMap::new();
-    for ((c, seq), cmd) in bindings {
+    let mut best: HashMap<&Seq, (Context, &[Command])> = HashMap::new();
+    for ((c, seq), cmds) in bindings {
         let inherited = *c == Context::Common && ctx.inherits_common();
         if (*c != ctx && !inherited) || seq.len() <= prefix.len() {
             continue;
@@ -381,7 +401,7 @@ pub fn continuations<'a>(
         match best.get(seq) {
             Some((held, _)) if *held != Context::Common => {}
             _ => {
-                best.insert(seq, (*c, cmd));
+                best.insert(seq, (*c, cmds.as_slice()));
             }
         }
     }
@@ -390,15 +410,15 @@ pub fn continuations<'a>(
     // They are a pair to anyone reading the panel; two separate alphabets —
     // every capital, then every minuscule — is how ASCII orders them and not
     // how a keymap is read.
-    let mut groups: std::collections::BTreeMap<Order, Vec<(&Seq, &'a Command)>> =
+    let mut groups: std::collections::BTreeMap<Order, Vec<(&Seq, &'a [Command])>> =
         std::collections::BTreeMap::new();
-    for (seq, (_, cmd)) in best {
+    for (seq, (_, cmds)) in best {
         let key = keys::format_seq(&seq[prefix.len()..prefix.len() + 1]);
         let shifted = key.chars().next().is_some_and(char::is_uppercase);
         groups
             .entry((key.to_lowercase(), shifted, key.clone()))
             .or_default()
-            .push((seq, cmd));
+            .push((seq, cmds));
     }
 
     groups
@@ -426,10 +446,10 @@ pub fn continuations<'a>(
 /// Sorted by context then key *name*, because `KeyCode` has no meaningful
 /// ordering of its own and a listing that reshuffled itself between frames
 /// would be unusable.
-pub fn sorted(bindings: &Bindings) -> Vec<(Context, String, &Command)> {
-    let mut rows: Vec<(Context, String, &Command)> = bindings
+pub fn sorted(bindings: &Bindings) -> Vec<(Context, String, &[Command])> {
+    let mut rows: Vec<(Context, String, &[Command])> = bindings
         .iter()
-        .map(|((ctx, seq), cmd)| (*ctx, keys::format_seq(seq), cmd))
+        .map(|((ctx, seq), cmds)| (*ctx, keys::format_seq(seq), cmds.as_slice()))
         .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     rows
@@ -496,19 +516,19 @@ mod tests {
         // Nothing library-specific: the common binding answers.
         assert_eq!(
             lookup(&bindings, Context::Library, &key),
-            Some(&Command::Down)
+            Some(&[Command::Down][..])
         );
 
         // A context-specific binding wins over it.
-        bindings.insert((Context::Library, key.clone()), Command::Next);
+        bindings.insert((Context::Library, key.clone()), vec![Command::Next]);
         assert_eq!(
             lookup(&bindings, Context::Library, &key),
-            Some(&Command::Next)
+            Some(&[Command::Next][..])
         );
         // ...and only in that context.
         assert_eq!(
             lookup(&bindings, Context::Queue, &key),
-            Some(&Command::Down)
+            Some(&[Command::Down][..])
         );
     }
 
@@ -524,11 +544,11 @@ mod tests {
         let mut bindings = defaults();
 
         // Rebind, as a user would.
-        let Command::Bind { ctx, key, cmd } = parse::command("bind library J seek +30").unwrap()
+        let Command::Bind { ctx, key, cmds } = parse::command("bind library J seek +30").unwrap()
         else {
             panic!("not a bind")
         };
-        bindings.insert((ctx, key), *cmd);
+        bindings.insert((ctx, key), cmds);
 
         // Write the whole table out the way view 7 and a saved rc would.
         let text: Vec<String> = sorted(&bindings)
@@ -539,17 +559,17 @@ mod tests {
                 } else {
                     key.clone()
                 };
-                format!("bind {} {} {}", ctx.name(), quoted, parse::format(cmd))
+                format!("bind {} {} {}", ctx.name(), quoted, parse::one_line(cmd))
             })
             .collect();
 
         // Read it back.
         let mut reloaded = Bindings::new();
         for line in &text {
-            let Command::Bind { ctx, key, cmd } = parse::command(line).unwrap() else {
+            let Command::Bind { ctx, key, cmds } = parse::command(line).unwrap() else {
                 panic!("{line:?} is not a bind")
             };
-            reloaded.insert((ctx, key), *cmd);
+            reloaded.insert((ctx, key), cmds);
         }
 
         assert_eq!(reloaded.len(), bindings.len());
@@ -600,7 +620,7 @@ mod tests {
     #[test]
     fn another_views_bindings_are_not_offered() {
         let mut b = defaults();
-        b.insert((Context::Queue, seq("z 9")), Command::Quit);
+        b.insert((Context::Queue, seq("z 9")), vec![Command::Quit]);
 
         let here = continuations(&b, Context::Library, &seq("z"));
         assert!(!offered(&here, "9"), "the queue's binding leaked: {here:?}");
@@ -614,8 +634,8 @@ mod tests {
     #[test]
     fn a_key_that_only_goes_deeper_is_shown_as_a_prefix() {
         let mut b = defaults();
-        b.insert((Context::Common, seq("z q w")), Command::Quit);
-        b.insert((Context::Common, seq("z q e")), Command::Top);
+        b.insert((Context::Common, seq("z q w")), vec![Command::Quit]);
+        b.insert((Context::Common, seq("z q e")), vec![Command::Top]);
 
         let rows = continuations(&b, Context::Common, &seq("z"));
         let q = rows
@@ -642,7 +662,7 @@ mod tests {
             ("z r", Command::Quit),
             ("z m", Command::Quit),
         ] {
-            b.insert((Context::Queue, seq(key)), cmd);
+            b.insert((Context::Queue, seq(key)), vec![cmd]);
         }
 
         let rows = continuations(&b, Context::Queue, &seq("z"));
@@ -650,7 +670,7 @@ mod tests {
             let found = rows.iter().find(|(k, _)| k == key).expect("still offered");
             assert_eq!(
                 found.1,
-                Next::Runs(&Command::Quit),
+                Next::Runs(&[Command::Quit][..]),
                 "{key:?} should be the queue's, not the common one"
             );
             assert_eq!(

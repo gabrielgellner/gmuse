@@ -292,7 +292,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             Command::Bind {
                 ctx,
                 key,
-                cmd: Box::new(command(cmd_text)?),
+                cmds: vec![command(cmd_text)?],
             }
         }
         "unbind" => {
@@ -840,6 +840,17 @@ fn setting_value(key: SettingKey, text: &str) -> Result<SettingValue, ParseError
 ///
 /// Must round-trip through [`command`], or `:bind` shown in the settings view
 /// would not be the binding that is actually in force.
+/// **How a list of commands reads on one line** — #266.
+///
+/// `then` is a *display* word and not a parseable one, which is deliberate:
+/// there is no command separator in this language, because one would collide
+/// permanently with the free-form arguments `add`, `view` and the filters carry
+/// — `view artist="A;B"` has no unambiguous reading. A macro is built from a
+/// TOML list and shown like this; `:bind` still takes exactly one command.
+pub fn one_line(cmds: &[Command]) -> String {
+    cmds.iter().map(format).collect::<Vec<_>>().join(" then ")
+}
+
 pub fn format(cmd: &Command) -> String {
     match cmd {
         Command::Up => "up".into(),
@@ -911,14 +922,14 @@ pub fn format(cmd: &Command) -> String {
         Command::Redo => "redo".into(),
         Command::Set { key, value } => format!("set {}={}", key.name(), value),
         Command::Toggle(key) => format!("toggle {}", key.name()),
-        Command::Bind { ctx, key, cmd } => {
+        Command::Bind { ctx, key, cmds } => {
             let keys = keys::format_seq(key);
             let quoted = if key.len() > 1 {
                 format!("\"{keys}\"")
             } else {
                 keys
             };
-            format!("bind {} {} {}", ctx.name(), quoted, format(cmd))
+            format!("bind {} {} {}", ctx.name(), quoted, one_line(cmds))
         }
         Command::Unbind { ctx, key } => {
             let keys = keys::format_seq(key);
@@ -1225,16 +1236,16 @@ mod tests {
             Command::Bind {
                 ctx: Context::Common,
                 key: vec![keys::Key::ctrl(KeyCode::Char('n'))],
-                cmd: Box::new(Command::Next),
+                cmds: vec![Command::Next],
             }
         );
 
         // Including one with arguments of its own.
         let got = command("bind library J seek +30").unwrap();
-        let Command::Bind { cmd, .. } = got else {
+        let Command::Bind { cmds, .. } = got else {
             panic!("not a bind")
         };
-        assert_eq!(*cmd, Command::Seek(SeekSpec::Relative(30.0)));
+        assert_eq!(cmds, vec![Command::Seek(SeekSpec::Relative(30.0))]);
     }
 
     #[test]
@@ -1316,12 +1327,12 @@ mod tests {
             Command::Bind {
                 ctx: Context::Library,
                 key: vec![keys::Key::ctrl(KeyCode::Char('n'))],
-                cmd: Box::new(Command::Next),
+                cmds: vec![Command::Next],
             },
             Command::Bind {
                 ctx: Context::Common,
                 key: vec![keys::Key::new(KeyCode::F(5))],
-                cmd: Box::new(Command::Seek(SeekSpec::Relative(30.0))),
+                cmds: vec![Command::Seek(SeekSpec::Relative(30.0))],
             },
             Command::Unbind {
                 ctx: Context::Queue,

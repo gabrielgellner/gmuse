@@ -115,6 +115,15 @@ Bind your own in the config, where `<leader>` stands for whatever `leader` says:
     [keys.common]
     "<leader> p" = "playlist list"
 
+A **list** binds several commands to one key, run in order — the one thing the flat rc file could not express:
+
+    [keys.library]
+    o = ["add-queue", "down"]
+
+A count goes to the first of them, so `3o` there queues three tracks and then moves down once. `:bind` still takes
+exactly one command: there is no separator in the command language, because one would collide with the free-form
+arguments that `add`, `view` and the filters carry.
+
 ## Transport lives behind the leader
 
     <leader>p    play what the cursor is on

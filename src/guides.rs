@@ -103,7 +103,7 @@ fn keymap(bindings: &crate::cmd::bind::Bindings) -> String {
         }
         // Two spaces between the columns, because that is what `kind` reads as
         // an example row and what the guide audit splits on.
-        let _ = writeln!(out, "    {key}  {}", crate::cmd::parse::format(cmd));
+        let _ = writeln!(out, "    {key}  {}", crate::cmd::parse::one_line(cmd));
     }
     out
 }
@@ -422,7 +422,7 @@ mod tests {
         let seq = crate::cmd::keys::parse_seq("g z q").expect("test keys");
         bindings.insert(
             (crate::cmd::Context::Common, seq),
-            crate::cmd::Command::Quit,
+            vec![crate::cmd::Command::Quit],
         );
 
         let listed = keymap(&bindings);
@@ -458,7 +458,7 @@ mod tests {
                 crate::cmd::Context::Common,
                 crate::cmd::keys::parse_seq("z 9").expect("parses"),
             ),
-            crate::cmd::Command::Quit,
+            vec![crate::cmd::Command::Quit],
         );
         assert_eq!(
             untaught(&bindings),

@@ -288,18 +288,34 @@ pub fn parse_text(text: &str) -> Loaded {
                     ),
                 });
             }
+            // **One binding, however many commands it names** — #266.
+            //
+            // This pushed a `Bind` per command, and the binding table is a map,
+            // so a TOML list left only its last: `o = ["add-queue", "next"]`
+            // bound `next` and discarded `add-queue` without a word, while the
+            // doc comment above called a list a macro. Measured: two in, one
+            // entry out.
+            //
+            // A command that fails to parse is reported and *skipped*, not fatal
+            // to the rest of the list — the same choice #227 made for the file
+            // as a whole, and it keeps a typo in the second command from
+            // silently costing the first.
+            let mut cmds = Vec::new();
             for text in binding.commands() {
                 match parse::command(text) {
-                    Ok(cmd) => out.commands.push(Command::Bind {
-                        ctx,
-                        key: key.clone(),
-                        cmd: Box::new(cmd),
-                    }),
+                    Ok(cmd) => cmds.push(cmd),
                     Err(e) => out.errors.push(ConfigError {
                         where_: format!("keys.{ctx_name}.{key_name}"),
                         message: e.to_string(),
                     }),
                 }
+            }
+            if !cmds.is_empty() {
+                out.commands.push(Command::Bind {
+                    ctx,
+                    key: key.clone(),
+                    cmds,
+                });
             }
         }
     }
@@ -538,12 +554,12 @@ mod tests {
         );
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
         assert_eq!(loaded.commands.len(), 1);
-        let Command::Bind { ctx, key, cmd } = &loaded.commands[0] else {
+        let Command::Bind { ctx, key, cmds } = &loaded.commands[0] else {
             panic!("not a bind")
         };
         assert_eq!(*ctx, Context::Common);
         assert_eq!(keys::format_seq(key), "^n");
-        assert_eq!(**cmd, Command::Next);
+        assert_eq!(cmds, &vec![Command::Next]);
     }
 
     /// **Two spellings of one chord are a duplicate** — #227.
@@ -612,11 +628,22 @@ mod tests {
             "a list value was mistaken for a repeated binding: {:?}",
             loaded.errors
         );
-        assert_eq!(loaded.commands.len(), 2, "both commands should still bind");
+        assert_eq!(loaded.commands.len(), 1, "a list is one binding");
     }
 
     /// A list value is a macro. That falls out of TOML for free, and it is the
     /// main thing the flat rc file could not express.
+    ///
+    /// **This used to check the parser and claim the feature** — #266. It
+    /// asserted `commands.len() == 2` and that both were `Bind`s in
+    /// `Context::Library`; both were true, and neither was the macro. Two
+    /// `Bind`s with one key went into a map and the second replaced the first,
+    /// so `o` ran `next` and `add-queue` was discarded. The name is what made it
+    /// look covered — §13's second shape, a harness doing less than it says.
+    ///
+    /// It is one binding now, carrying both commands in order. That the *key*
+    /// runs both is asserted where there is a `Ui` to press it:
+    /// `a_macro_key_runs_every_command_it_was_given`.
     #[test]
     fn a_list_binds_several_commands_to_one_key() {
         let loaded = parse_text(
@@ -626,13 +653,27 @@ mod tests {
             "#,
         );
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
-        assert_eq!(loaded.commands.len(), 2, "both commands should bind");
-        for cmd in &loaded.commands {
-            let Command::Bind { ctx, .. } = cmd else {
-                panic!("not a bind")
-            };
-            assert_eq!(*ctx, Context::Library);
-        }
+        assert_eq!(
+            loaded.commands.len(),
+            1,
+            "a list is one binding, not one per command: {:?}",
+            loaded.commands
+        );
+        let Command::Bind { ctx, cmds, .. } = &loaded.commands[0] else {
+            panic!("not a bind")
+        };
+        assert_eq!(*ctx, Context::Library);
+        assert_eq!(
+            cmds,
+            &vec![
+                Command::Add {
+                    target: crate::cmd::AddTarget::Queue,
+                    path: None
+                },
+                Command::Next
+            ],
+            "both commands, in the order they were written"
+        );
     }
 
     #[test]
@@ -715,7 +756,7 @@ mod tests {
         )));
         assert!(loaded.commands.iter().any(|c| matches!(
             c,
-            Command::Bind { cmd, .. } if **cmd == Command::Down
+            Command::Bind { cmds, .. } if cmds == &vec![Command::Down]
         )));
 
         // And each problem is reported with where it is.
@@ -750,10 +791,10 @@ mod tests {
             "#,
         );
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
-        let Command::Bind { cmd, .. } = &loaded.commands[0] else {
+        let Command::Bind { cmds, .. } = &loaded.commands[0] else {
             panic!("not a bind")
         };
-        assert_eq!(**cmd, Command::Seek(SeekSpec::Relative(30.0)));
+        assert_eq!(cmds, &vec![Command::Seek(SeekSpec::Relative(30.0))]);
     }
     /// A track row sits beside an artist row in the tree, so it gets its own
     /// template — and a bad one names the key it came from.
