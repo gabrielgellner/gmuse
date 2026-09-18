@@ -96,6 +96,12 @@ it, and a token does not. A token the programme no longer holds pages from the h
 because a view cannot tell an empty page from an empty programme — and "your queue is empty" is the wrong thing to draw
 over a library that is playing.
 
+**And the reply says which of those happened** — `anchored: true` when the page starts at the entry asked for, `false`
+when it started over. `at: 0` alone cannot tell them apart, and a view whose queue is "what follows" needs to: with the
+first entry taken as one more queued row, the queue pane and the transport panel both named the track already playing as
+up next, and a `queue.set` computed from that mirror put it at the head of the new programme — so every edit replayed
+the current track when it ended.
+
 **The anchor comes from the engine and the page from the librarian**, which is the triangle doing what §1 says: _where
 am I_ is a playback question and _what is the order_ is a library one. `playback.get` reports the entry so a client can
 anchor its own paging.

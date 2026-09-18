@@ -285,10 +285,10 @@ pub(crate) fn answer(
             // nothing playing shows. A token this programme no longer holds is the same case:
             // the alternative is an empty page, which a view cannot tell from an empty
             // programme.
-            let at = from
+            let found = from
                 .map(EntryToken::from_u64)
-                .and_then(|t| plan.position(t))
-                .unwrap_or(0);
+                .and_then(|t| plan.position(t));
+            let at = found.unwrap_or(0);
             let entries: Vec<Shown> = plan
                 .entries()
                 .iter()
@@ -307,6 +307,7 @@ pub(crate) fn answer(
                     .get(at + entries.len())
                     .map(|e| e.token.as_u64()),
                 entries,
+                anchored: found.is_some(),
             }
         }
     }
@@ -1196,6 +1197,7 @@ mod tests {
                 at,
                 next,
                 standing,
+                anchored,
             } = ask(&mut plan, &l, Ask::Look { from, limit: 4 })
             else {
                 panic!("a look did not answer with one");
@@ -1206,6 +1208,9 @@ mod tests {
                 seen.len(),
                 "the page did not start where the last ended"
             );
+            // The head is not anchored — nothing was asked for — and every page after it is,
+            // because each starts at a token the previous one handed back.
+            assert_eq!(anchored, from.is_some(), "page {pages} at {at}");
             seen.extend(entries.iter().map(|e| e.row));
             pages += 1;
             assert!(pages < 10, "paging did not terminate");
@@ -1240,17 +1245,27 @@ mod tests {
         );
         let fourth = plan.entries()[3];
 
-        let Reply::Look { entries, at, .. } = ask(
+        let Reply::Look {
+            entries,
+            at,
+            anchored,
+            ..
+        } = ask(
             &mut plan,
             &l,
             Ask::Look {
                 from: Some(fourth.token.as_u64()),
                 limit: 2,
             },
-        ) else {
+        )
+        else {
             panic!("no look");
         };
         assert_eq!(at, 3, "the page did not report where it starts");
+        assert!(
+            anchored,
+            "it started where it was asked to and did not say so"
+        );
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0].token,
@@ -1277,18 +1292,31 @@ mod tests {
                 base: None,
             },
         );
-        let Reply::Look { entries, at, .. } = ask(
+        let Reply::Look {
+            entries,
+            at,
+            anchored,
+            ..
+        } = ask(
             &mut plan,
             &l,
             Ask::Look {
                 from: Some(9_999),
                 limit: 2,
             },
-        ) else {
+        )
+        else {
             panic!("no look");
         };
         assert_eq!(at, 0, "an unknown token did not page from the head");
         assert_eq!(entries.len(), 2, "it answered with nothing");
+        // **And says it started over.** `at: 0` is also what a page anchored at the first
+        // entry reports, so without this a view that asked for what is sounding would draw
+        // the head of the programme as the track that is playing.
+        assert!(
+            !anchored,
+            "a page from the head claimed to start at the token asked for"
+        );
     }
 }
 

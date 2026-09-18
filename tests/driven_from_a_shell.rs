@@ -2910,6 +2910,204 @@ fn an_attached_view_learns_what_is_playing_from_the_event_stream() {
     );
 }
 
+/// **"Up next" is what follows the track that is playing, not the track that is playing** —
+/// #257, `playback-programme.md` §2.
+///
+/// `queue.get` pages the programme from what is sounding: `[the track playing, then what
+/// follows it…]`. The view took the whole page as its queue, so the pane's first row and the
+/// transport panel's `next` line both named the track already playing — and a `queue.set`
+/// computed from that mirror put it at the head of the new programme, so every edit made the
+/// engine play the current track again when it ended.
+///
+/// The second half: a track ending moves the anchor and not the version, so no `queue` event
+/// says so. The view has to notice the engine moving on and read its page again.
+///
+/// **The instrument is the raw page.** The engine must really be anchored at the playing
+/// track for "the mirror does not begin with it" to be a claim about anything.
+#[test]
+fn up_next_does_not_begin_with_the_track_that_is_playing() {
+    use gmuse::ui::transport::Transport;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (engine, recording) = start_with_a_track("up-next-anchor");
+    let data = engine.dir.join("xdg").join("gmuse");
+
+    // Two connections, as the TUI holds them: one for the transport's event stream, one
+    // for the queue and the library — a `Client` has one receiver, so they cannot share.
+    let queue =
+        std::sync::Arc::new(Client::connect(&engine.socket, "queue", "0").expect("connect"));
+    let remote = gmuse::ui::remote_transport::Remote::attach(std::sync::Arc::new(
+        Client::connect(&engine.socket, "transport", "0").expect("connect"),
+    ))
+    .expect("attach");
+
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    let held = desk.current();
+    let ctx = gmuse::ui::Context {
+        library: &held.library,
+        player: Some(&remote),
+        gapless: None,
+    };
+    let row_named = |r: &str| {
+        gmuse::model::rows::Listing::rows(&held.library)
+            .into_iter()
+            .find(|id| {
+                gmuse::model::rows::Listing::recording_of(&held.library, *id).map(|x| x.to_string())
+                    == Some(r.to_string())
+            })
+            .expect("the imported row")
+    };
+    let title_of = |id| {
+        gmuse::model::rows::Listing::listed(&held.library, id)
+            .expect("a listed row")
+            .title
+    };
+
+    // Play the first track and hold it there: under the null renderer it is a second long,
+    // and a page anchored at a track that has finished would prove the wrong thing.
+    let accepted = remote.load(gmuse::ui::transport::Loading {
+        recording: Some(recording.parse().expect("a recording id")),
+        source: gmuse::audio::TrackSource {
+            path: std::path::PathBuf::from("/nonexistent/ignored-over-the-wire.wav"),
+            gain: 1.0,
+        },
+    });
+    assert_eq!(accepted, gmuse::ui::transport::Accepted::Yes);
+    assert!(
+        wait_until(|| remote.state() == gmuse::audio::State::Playing),
+        "the engine never started"
+    );
+    remote.pause();
+    assert!(
+        wait_until(|| remote.state() == gmuse::audio::State::Paused),
+        "the engine did not pause"
+    );
+    assert_eq!(
+        remote.playing().map(|r| r.to_string()),
+        Some(recording.clone()),
+        "paused on something other than what was loaded"
+    );
+
+    // The instrument: the raw page really does begin with the track that is sounding.
+    let page = queue.call("queue.get", None).expect("queue.get");
+    assert_eq!(
+        page["anchored"].as_bool(),
+        Some(true),
+        "the page was not anchored at what is playing: {page}"
+    );
+    assert_eq!(
+        page["entries"][0].as_str(),
+        Some(recording.as_str()),
+        "the page does not begin with what is playing: {page}"
+    );
+    let on_page = page["entries"].as_array().map_or(0, Vec::len);
+    assert!(
+        on_page >= 2,
+        "a programme of one has nothing to be next: {page}"
+    );
+
+    // One tick of following the engine: adopt what is playing, offer nothing, read the page.
+    let mut ui = gmuse::ui::Ui::new(Default::default());
+    ui.engine = Some(std::sync::Arc::clone(&queue));
+    gmuse::ui::keep_up(&mut ui, &ctx);
+
+    let playing = row_named(&recording);
+    assert_eq!(
+        ui.playback.current,
+        Some(playing),
+        "the view did not follow the engine"
+    );
+    let mirrored: Vec<_> = ui.queue.entries().copied().collect();
+    assert_eq!(
+        mirrored.len(),
+        on_page - 1,
+        "the mirror is not the page less the track that is playing: {mirrored:?}"
+    );
+    assert_ne!(
+        mirrored.first(),
+        Some(&playing),
+        "up next begins with the track that is already playing"
+    );
+    let following = mirrored[0];
+
+    // **And the transport panel says the same.** `i` raises it, and its `next` line was
+    // the surface this was reported on.
+    ui.mode = gmuse::cmd::Mode::Transport;
+    let drawn = |ui: &gmuse::ui::Ui| -> String {
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).expect("a backend");
+        terminal
+            .draw(|f| gmuse::ui::draw(f, ui, &ctx))
+            .expect("a frame");
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let out = drawn(&ui);
+    let next_line = out
+        .lines()
+        .find(|l| l.contains("next  "))
+        .unwrap_or_else(|| panic!("no next line in the panel:\n{out}"));
+    assert!(
+        next_line.contains(&title_of(following)),
+        "the panel does not name what follows: {next_line:?}"
+    );
+    assert!(
+        !next_line.contains(&format!(" {} ", title_of(playing)))
+            && !next_line.ends_with(&title_of(playing)),
+        "the panel names the track that is playing as next: {next_line:?}"
+    );
+
+    // **Then the engine moves on**, and nothing about the programme's version changes —
+    // so the only way the view can learn its page is stale is by noticing what it follows.
+    let version = ui.queue_version();
+    let follows = gmuse::model::rows::Listing::recording_of(&held.library, following);
+    assert!(follows.is_some(), "the following row names no recording");
+    remote.play();
+    assert!(
+        wait_until(|| remote.playing() == follows),
+        "the engine never reached the second track: it says {:?}",
+        remote.playing().map(|r| r.to_string())
+    );
+    remote.pause();
+    assert!(
+        wait_until(|| remote.state() == gmuse::audio::State::Paused),
+        "the engine did not pause on the second track"
+    );
+
+    gmuse::ui::keep_up(&mut ui, &ctx);
+    assert_eq!(
+        ui.queue_version(),
+        version,
+        "the version moved, so this proves nothing about following the anchor"
+    );
+    assert_eq!(
+        ui.playback.current,
+        Some(following),
+        "the view did not follow the advance"
+    );
+    let mirrored: Vec<_> = ui.queue.entries().copied().collect();
+    assert_ne!(
+        mirrored.first(),
+        Some(&following),
+        "after the advance, up next still begins with the track now playing"
+    );
+    assert!(
+        !mirrored.contains(&playing),
+        "the track that finished is still listed as up next: {mirrored:?}"
+    );
+}
+
 /// **A file the library has no row for cannot be asked for over a socket** —
 /// I17, #219.
 ///

@@ -1077,6 +1077,14 @@ pub enum Reply {
         /// A token rather than an offset, for the same reason a refill is addressed by one: an
         /// index shifts when somebody inserts above it, and a token does not.
         next: Option<u64>,
+        /// **Whether the page begins at the entry asked for.**
+        ///
+        /// A token the programme no longer holds pages from the head rather than answering
+        /// with nothing, so `at == 0` cannot say which of the two happened. A view anchored at
+        /// what is sounding needs to know: when this is true the first entry *is* the one
+        /// playing, and "up next" is everything after it. `false` when nothing was asked for
+        /// too, since then nothing was anchored.
+        anchored: bool,
     },
     /// A mutation landed.
     Settled { standing: Standing },

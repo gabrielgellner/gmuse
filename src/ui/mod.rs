@@ -464,6 +464,15 @@ pub struct Ui {
     /// The version [`push_the_queue`] computes an edit against. Zero means "not
     /// read yet", which is why a push waits for the first `queue.get`.
     queue_version: u64,
+    /// **The engine moved on to another track, so the page the mirror holds is anchored
+    /// at one that has finished.**
+    ///
+    /// `queue.get` pages from what is sounding, and a track ending moves that anchor
+    /// without moving the programme's version — so no `queue` event says so, and the
+    /// mirror kept naming the track that had just finished as what would play next.
+    /// Set by [`follow_the_engine`], taken by the read that follows the push, so the
+    /// order §8.8 asks for (out before in) still holds.
+    queue_anchor_moved: bool,
     /// A restored track has been loaded but its seek has not landed yet.
     ///
     /// Loading emits `Loaded`, which is a save point — and at that instant the
@@ -719,6 +728,7 @@ impl Ui {
             queue_mirror: Vec::new(),
             sorted_mark: None,
             queue_version: 0,
+            queue_anchor_moved: false,
             resuming: false,
             audit: crate::audit::Audit::disabled(),
             seen_underruns: 0,
@@ -1056,18 +1066,27 @@ where
             }
         }
         drain_player_events(ui, ctx);
-        follow_the_engine(ui, ctx);
-        // **Out before in.** A local edit is offered first, then the engine's
-        // answer is taken — so `read_the_queue` never discards an edit nobody had
-        // seen, and a refusal is reported by the push that caused it.
-        push_the_queue(ui, ctx);
-        follow_the_engine_topics(ui, ctx);
+        keep_up(ui, ctx);
         note_play_progress(ui, ctx);
         audit_underruns(ui, ctx);
         note_finished_scans(ui);
         ui.expire_status();
     }
     Ok(Stop::Quit)
+}
+
+/// **What a tick does to stay in step with an engine**, in the order that makes it safe.
+///
+/// `pub` so a test can drive one tick of it against a real engine without a terminal:
+/// the claim that a view re-reads its page when the engine moves on is a claim about
+/// this sequence, and nothing shorter than the sequence can check it.
+pub fn keep_up(ui: &mut Ui, ctx: &Context<'_>) {
+    follow_the_engine(ui, ctx);
+    // **Out before in.** A local edit is offered first, then the engine's
+    // answer is taken — so `read_the_queue` never discards an edit nobody had
+    // seen, and a refusal is reported by the push that caused it.
+    push_the_queue(ui, ctx);
+    follow_the_engine_topics(ui, ctx);
 }
 
 /// **Read the log again when the engine says there is more of it** — #236, §8.7.
@@ -1118,7 +1137,11 @@ fn follow_the_engine_topics(ui: &mut Ui, ctx: &Context<'_>) {
     // the version *changes*, so a view that attached to a settled engine would
     // never hear one and would never learn the queue. Self-healing rather than
     // ordered against the subscription in `main`.
-    if queue_moved || ui.queue_version == 0 {
+    // **Or because what is sounding moved**, which no `queue` event announces: the
+    // programme's version is the same list at the same version, paged from a different
+    // place.
+    let anchor_moved = std::mem::take(&mut ui.queue_anchor_moved);
+    if queue_moved || anchor_moved || ui.queue_version == 0 {
         read_the_queue(ui, ctx);
     }
 
@@ -1169,12 +1192,26 @@ pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
         }
     };
 
+    // **The page begins with the track that is sounding, and that row is not "up next".**
+    //
+    // `queue.get` anchors at what is playing — `[the track playing, then what follows it…]`,
+    // `playback-programme.md` §2 — which is right for a caller paging the programme and
+    // wrong for this mirror, which is the list of what *follows*. Kept as it was, the pane's
+    // first row and the transport panel's `next` line both named the track already playing;
+    // and a `queue.set` computed from it put that track at the head of the new programme, so
+    // every edit made the engine play the current track again when it ended.
+    //
+    // **`anchored`, not a comparison of recordings.** A programme can hold one recording
+    // twice, and a page from the head — a token the programme no longer holds — starts at
+    // `0` just as an anchored one does; the reply says which, and only it can.
+    let sounding_first = answer["anchored"].as_bool().unwrap_or(false);
     // The engine's queue names recordings; the pane draws copies. Named first, then asked
     // about once (#261).
     let queued: Vec<Option<Id<Recording>>> = answer["entries"]
         .as_array()
         .into_iter()
         .flatten()
+        .skip(usize::from(sounding_first))
         .map(|name| {
             name.as_str()
                 .and_then(|s| s.parse::<uuid::Uuid>().ok())
@@ -1216,7 +1253,12 @@ pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
     //
     // The mirror is emptied rather than set, so the next `push_the_queue` sees a difference
     // and offers it. Nothing is sent from here — reading is not writing (§8.8).
-    let restored = entries.is_empty() && ui.queue_version == 0 && !ui.queue.is_empty();
+    //
+    // **"None" is the page before the sounding entry was dropped**, or an engine playing the
+    // last thing it has would look like an engine with nothing, and a stale session would
+    // replace a programme somebody is listening to.
+    let engine_has_none = answer["entries"].as_array().is_none_or(|a| a.is_empty());
+    let restored = engine_has_none && ui.queue_version == 0 && !ui.queue.is_empty();
     if restored {
         ui.queue_mirror = Vec::new();
     } else {
@@ -1335,6 +1377,8 @@ fn follow_the_engine(ui: &mut Ui, ctx: &Context<'_>) {
         return;
     }
     ui.followed = said;
+    // The mirror is a page anchored at what is sounding, and that just moved.
+    ui.queue_anchor_moved = true;
 
     let rows: &dyn Listing = ctx.library;
     // A walk, and it runs once per track change rather than once per tick,
@@ -3512,9 +3556,31 @@ const UP_NEXT: usize = 200;
 /// Costs nothing new: shuffle is a seeded permutation, so `next()` already
 /// materialises the whole play order on every call and keeps one element. This
 /// reads the rest of it.
+///
+/// **Attached, the mirror is the whole answer** — #257. The programme the engine plays from
+/// is one list, and `read_the_queue` holds a page of it; the pool walk `upcoming` appends
+/// after the queue is this view's own guess from its own seed, which the engine never
+/// consulted. Drawn after the page it listed the same tracks a second time in an order
+/// nothing would play, under a heading that called it what would happen.
 fn up_next(ui: &Ui, ctx: &Context<'_>) -> Vec<(crate::model::rows::CopyId, crate::next::Upcoming)> {
     let _ = ctx;
-    crate::next::upcoming(&next_input(ui), UP_NEXT)
+    let mut rows = crate::next::upcoming(&next_input(ui), UP_NEXT);
+    if ui.engine.is_some() {
+        rows.retain(|(_, from)| *from == crate::next::Upcoming::Queued);
+    }
+    rows
+}
+
+/// The one track that would play next, for a line that has room for one.
+///
+/// [`up_next`]'s first row, so the transport panel and view 4 cannot disagree — except under
+/// `repeat_current`, where the projection is deliberately empty (nothing *else* is coming)
+/// and the honest answer to "next" is the track that is playing.
+fn what_is_next(ui: &Ui, ctx: &Context<'_>) -> Option<CopyId> {
+    if ui.playback.repeat_current {
+        return ui.playback.current;
+    }
+    up_next(ui, ctx).first().map(|(id, _)| *id)
 }
 
 /// Whether the row under the cursor in view 4 is one the queue owns.
@@ -6630,9 +6696,9 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
     }
 
     // What is next is worth a line precisely because shuffle makes it
-    // unguessable, and `next()` is pure so asking costs nothing.
-    let next = crate::next::next_with_source(next_input(ui))
-        .and_then(|(id, _)| files.listed(id))
+    // unguessable, and the projection is pure so asking costs nothing.
+    let next = what_is_next(ui, ctx)
+        .and_then(|id| files.listed(id))
         .map(|row| format!("next  {}", ui.now_playing.render(&row.listed())))
         .unwrap_or_else(|| "next  —".to_string());
     lines.push(Line::from(Span::styled(next, dim)));

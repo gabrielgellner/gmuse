@@ -3250,6 +3250,7 @@ fn run_engine(
                     entries,
                     at,
                     next,
+                    anchored,
                 } => {
                     use gmuse_library::programme::Mode;
                     // **Recordings on the wire, rows underneath** — I17: only user-facing
@@ -3267,6 +3268,12 @@ fn run_engine(
                         // programme rather than leaving them to guess.
                         "at": at,
                         "next": next,
+                        // **Whether the first entry is the one sounding.** The default anchor
+                        // is what is playing, and a token the programme no longer holds pages
+                        // from the head instead — so `at: 0` alone cannot tell a view whether
+                        // to draw the first row as "now" or as "next". A caller that passed
+                        // its own `from` reads this as "the page starts where I asked".
+                        "anchored": anchored,
                         // **The same four fields the `queue` event carries** (#233), so a view
                         // that just attached can draw the queue correctly without waiting for
                         // one of them to change.
