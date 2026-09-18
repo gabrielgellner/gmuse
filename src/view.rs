@@ -256,11 +256,28 @@ impl Stack {
     }
 
     /// Drop one term, so a composition can be taken apart as well as built.
-    pub fn drop_at(&mut self, at: usize) {
-        if at < self.terms.len() {
-            self.terms.remove(at);
+    /// Drop the term at `at`, or say there is none: `false` is "the view has no such
+    /// term", which the caller reports rather than letting `:view drop 2` on a one-term
+    /// view redraw the same list in silence.
+    pub fn drop_at(&mut self, at: usize) -> bool {
+        if at >= self.terms.len() {
+            return false;
         }
+        self.terms.remove(at);
         self.normalise();
+        true
+    }
+
+    /// **Take the whole composition apart** — what a bare `:view` means.
+    ///
+    /// Not [`clear_predicates`], which is `:filter`'s clear and keeps `in=` and `saved=`
+    /// on purpose: that was the right split while a catalog was a second kind of term,
+    /// and since #119 made it an ordinary one it left `:view` unable to clear a crate —
+    /// `:view in="Dance"` then `:view` drew Dance again and said `view: all`.
+    ///
+    /// [`clear_predicates`]: Stack::clear_predicates
+    pub fn clear(&mut self) {
+        self.terms.clear();
     }
 
     /// Put the stack back into a shape that means what it says.

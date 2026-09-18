@@ -3342,9 +3342,25 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Compose(term) => {
             use crate::cmd::ViewTerm;
             match term {
-                ViewTerm::Clear => ui.composed.clear_predicates(),
+                ViewTerm::Clear => ui.composed.clear(),
                 // 1-based, as the line shows them.
-                ViewTerm::Drop(n) => ui.composed.drop_at(n.saturating_sub(1)),
+                ViewTerm::Drop(n) => {
+                    if !ui.composed.drop_at(n.saturating_sub(1)) {
+                        let terms = ui.composed.terms().len();
+                        ui.notify(match terms {
+                            0 => "nothing composed — no term to drop".to_string(),
+                            1 => format!(
+                                "no term {n} — the view is one term: {}",
+                                ui.composed.label()
+                            ),
+                            _ => format!(
+                                "no term {n} — the view has {terms}: {}",
+                                ui.composed.label()
+                            ),
+                        });
+                        return;
+                    }
+                }
                 ViewTerm::Compose(op, what, first) => {
                     if first {
                         ui.composed.set(*what);
@@ -12823,6 +12839,70 @@ mod tests {
 
         press(&mut ui, &ctx, "y y");
         assert_eq!(ui.register.len(), under, "{}", ui.status);
+    }
+
+    /// **A bare `:view` takes the whole composition apart, crates included.**
+    ///
+    /// It called `clear_predicates`, which is `:filter`'s clear and keeps `in=` and
+    /// `saved=` by design — so `:view in="Dance"` then `:view` drew Dance again while
+    /// saying `view: all`. The existing tests of the clear only ever composed a `Where`
+    /// term, which is the one it did drop.
+    #[test]
+    fn a_bare_view_clears_a_crate_term_too() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        let everything = ui.library.len();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Paak""#);
+        assert!(
+            !ui.composed.is_empty(),
+            "the instrument: nothing was composed"
+        );
+        assert_ne!(
+            ui.library.len(),
+            everything,
+            "in= did not narrow: {}",
+            ui.status
+        );
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+        assert!(
+            ui.composed.is_empty(),
+            "the crate term survived: {}",
+            ui.composed.label()
+        );
+        assert_eq!(ui.library.len(), everything, "{}", ui.status);
+        assert!(ui.status.starts_with("view: all"), "{}", ui.status);
+    }
+
+    /// **Dropping a term that is not there says so**, rather than redrawing the same
+    /// list under a message that reads as success.
+    #[test]
+    fn dropping_a_term_that_is_not_there_says_so() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Paak""#);
+        let label = ui.composed.label();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view drop 2");
+        assert!(ui.status.contains("no term 2"), "{}", ui.status);
+        assert_eq!(ui.composed.label(), label, "something was dropped anyway");
+
+        // The one that is there goes.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view drop 1");
+        assert!(ui.composed.is_empty(), "{}", ui.status);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view drop 1");
+        assert!(ui.status.contains("nothing composed"), "{}", ui.status);
     }
 
     /// **A level with nothing to climb is refused by name** — #79.
