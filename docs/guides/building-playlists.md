@@ -47,6 +47,9 @@ To move a track to another playlist:
 
 `yy` instead of `dd` copies rather than moves, which is usually what you want — a track can live in several playlists.
 
+The same keys file into a **crate** or any other authored view — `yy`, then `:view in="Dance"`, then `p`. That writes a
+fact rather than a list entry; the saved-rules guide says which facts, and which views refuse.
+
 ## Undo
 
     u       undo

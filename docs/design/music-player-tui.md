@@ -6080,6 +6080,29 @@ Append here as decisions are made. Format: date, decision, rationale.
   to the reference and waits there, so the release sends a plain `cue`. A pair of commands could disagree about where
   the reference was; one cannot.
 
+- **2026-09-17** **The register is the way into a view, and `dd` is the way out** (#96's other half). `add-view` could
+  only reach rows already in the view, because the view is what the cursor walks — so adding to `in="Dance"` re-asserted
+  a membership every row already had, and the test admitted it: _"otherwise narrowing to an authored view empties the
+  very list the rows would be selected from."_ The row you want filed is by definition somewhere else. vim's answer is
+  the register: `yy` there, `:view in="Dance"`, `p` here — and `p` into a composed view is `add-view` of what the
+  register holds. On a node it is the node: `yy` over an artist yanks the artist, as `a` and `e` already read the tree.
+
+  **`dd` retracts the fact that made the row true, kind for kind, and every one is a shadow.** A crate entry by
+  `CollectionEntryRemoved` at the key the entry _has_ — the 6,311 seeded by the folder pass are not all at the key
+  `:collect` uses. A concept by `ConceptRetracted` from a person, which `query-language.md` §4 called "a schema question
+  and not a UI one": it was answered by #96's precedence and the panel's _ruled out_ row, and this is the first control
+  that writes it. A rating by `None`, because leaving `rating=4` cannot say which other number was meant. The rows land
+  in the register, so `p` is the undo.
+
+  **The refusals are one function.** `view_claim` is the ladder both gestures climb — nothing composed, `A or B`,
+  observed, correctable — so `p` and `dd` cannot disagree about which views are editable, and a correctable field is
+  refused "not by adding" and "not by removing" from the same line. With nothing composed the library says it is a
+  projection rather than "nothing to put into here", because the second is true and unhelpful.
+
+  **Not built, and named so it is not mistaken for forgotten:** `K` on an artist row opens the first track's page rather
+  than the artist's, and the info panel's "filed in" section is still a reader. Both are the panel-as-editor
+  `info-panel.md` §4 reserves, and they share the picker `:crate` would need.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

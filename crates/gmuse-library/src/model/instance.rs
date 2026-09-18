@@ -1712,6 +1712,13 @@ mod tests {
                 Source::Manual,
                 Confidence::Confirmed,
             );
+            log.retract_concept(
+                1_000,
+                Described::Recording(song),
+                "genre",
+                "house",
+                Source::Manual,
+            );
         }
 
         /// Every fact in a log, as it would go on the wire.
@@ -1733,13 +1740,13 @@ mod tests {
         let mut empty = Instance::new(device(1));
         everything(&mut empty);
         let from_nothing = facts(&empty);
-        // **Nine from eight calls**, because `assert_concept` emits the term and
+        // **Ten from nine calls**, because `assert_concept` emits the term and
         // the assertion. Counted rather than assumed: it is how `ConceptCatalogued`
         // turned out to be a fact a view emits, which the first cut of
         // `Fact::is_an_edit` refused.
         assert_eq!(
             from_nothing.len(),
-            9,
+            10,
             "nothing was conditional even on an empty log"
         );
 
@@ -1763,6 +1770,13 @@ mod tests {
             "house",
             Source::Manual,
             Confidence::Confirmed,
+        );
+        history.retract_concept(
+            2_000,
+            Described::Recording(song),
+            "genre",
+            "techno",
+            Source::TagVariant,
         );
         let before = facts(&history);
 

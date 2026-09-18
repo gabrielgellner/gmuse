@@ -3912,6 +3912,10 @@ fn rows_at_cursor(ui: &Ui, n: usize) -> Vec<CopyId> {
         View::Playlist => return Vec::new(),
         View::Queue => (ui.queue.entries().copied().collect(), ui.queue_sel),
         View::Tree if ui.levels.is_flat() => (ui.library.sorted().to_vec(), sorted_cursor(ui)),
+        // **A node is everything under it**, as `a` and `e` already read the tree: `yy` on
+        // an artist yanks the artist. The count is a number of *rows*, and a closed node is
+        // one row however many tracks it covers, so it does not multiply here.
+        View::Tree => return ui.tree.tracks_for(&ui.library),
         _ => return Vec::new(),
     };
     entries.into_iter().skip(at).take(n).collect()
@@ -3998,6 +4002,15 @@ fn put_rows(ui: &mut Ui, ctx: &Context<'_>, before: bool, times: usize) {
             ui.queue_sel = at;
             ui.notify(format!("put {count}"));
         }
+        // **Into the view — which is into the facts that make it** (#96). The library is
+        // a projection and has no list to put a row into; a composed view does, by
+        // asserting what it is composed of. `yy` over Aphex Twin in the whole library,
+        // `:view in="Dance"`, `p`: the register is filed. Before or after means nothing to
+        // a set, and neither does putting it twice, so the register goes once, as it is.
+        View::Tree if ui.composed.is_empty() => {
+            ui.notify("the library is a projection — `:view in=\"…\"` first, then `p` puts into it")
+        }
+        View::Tree => add_to_view(ui, ctx, &ui.register.clone()),
         _ => ui.notify("nothing to put into here"),
     }
 }
@@ -4037,6 +4050,21 @@ fn remove_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
                 }
             }
             ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
+        }
+        View::Tree if ui.composed.is_empty() => ui.notify(
+            "the library is a projection — `:view in=\"…\"` first, then `dd` takes out of it",
+        ),
+        // **Out of the view, by retracting what put it there** — and into the register, so
+        // `p` is the undo. The refusals are `p`'s, said the other way round.
+        View::Tree => {
+            // **Whether a view can be edited does not depend on the cursor** (#96), so
+            // an empty selection still reaches the refusal — and does not empty the
+            // register on the way.
+            let rows = rows_at_cursor(ui, n);
+            if !rows.is_empty() {
+                ui.register = rows.clone();
+            }
+            remove_from_view(ui, ctx, &rows);
         }
         _ => ui.notify("nothing to remove here"),
     }
@@ -4967,13 +4995,177 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
 ///   rewrite a release date because somebody dragged a row.
 fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
     use crate::model::entity::Collection;
+
+    let Some(write) = view_claim(ui, "adding") else {
+        return;
+    };
+    let songs = recordings_of(ctx, ids);
+    // **The fact is named even with nothing selected**, for the same
+    // reason the refusals are: what a view would write does not depend
+    // on where the cursor is, and "nothing selected" alone would hide
+    // the one thing worth knowing.
+    if songs.is_empty() {
+        ui.notify(format!("nothing selected — would {}", write.names()));
+        return;
+    }
+    // Taken before the closure, which owns both from here on.
+    let names = write.names().to_string();
+    let count = songs.len();
+    let now = crate::history::now_ms();
+    record(ui, now, move |log| match &write {
+        Assert::Member(name) => {
+            let id = Id::<Collection>::of_name(name);
+            for song in &songs {
+                // **A membership claim, not a positioning one.** The
+                // same reasoning `:collect` uses for a set: adding to
+                // a view says this belongs in the crate and says
+                // nothing about where, so spreading keys here would
+                // invent a running order out of the selection's.
+                log.add_to_collection(now, id, *song, crate::model::ord::OrdKey::first());
+            }
+        }
+        Assert::Concept { facet, label } => {
+            for song in &songs {
+                log.assert_concept(
+                    now,
+                    crate::model::facet::Described::Recording(*song),
+                    facet,
+                    label,
+                    // **A person said so**, which is what outranks an
+                    // import on the next sync (#96's precedence).
+                    crate::model::reference::Source::Manual,
+                    crate::model::ingest::Confidence::Confirmed,
+                );
+            }
+        }
+        Assert::Rating(stars) => {
+            for song in &songs {
+                log.rate(now, *song, Some(*stars));
+            }
+        }
+    });
+    // **The confirmation names the fact, not the list.** "Added to
+    // list" hides what was written; the point of going further than
+    // iTunes is that the translation can be shown.
+    ui.notify(format!("{names} {count}"));
+    // **The view is resolved by the librarian, so the row it now holds is not on screen
+    // until the fold is.** Without this a `p` into `in="Dance"` wrote the fact and drew
+    // the same list, which reads as the put having failed.
+    ui.stop = Some(Stop::Refold);
+}
+
+/// **`dd` in a composed view retracts the fact that made the row true** — the other half
+/// of [`add_to_view`], and the half that makes a view an editor rather than a funnel.
+///
+/// `add-view` could only reach rows already in the view, because the view is what the
+/// cursor walks; the row you want to file is by definition somewhere else. vim's answer is
+/// the register — `yy` there, `p` here — and `p` lands in `add_to_view`. This is `dd`: the
+/// rows leave the view by the fact that put them in it, and land in the register, so `p`
+/// is the undo.
+///
+/// **Each kind retracts by its own shape**, and every one of them is a shadow rather than a
+/// delete, for the reason `query-language.md` §4 gives — the log is append-only and merges
+/// by union, so a deleted fact would return on the next sync:
+///
+/// - membership: `CollectionEntryRemoved`, one per entry the crate actually holds — the
+///   entries are keyed by position, and the 6,311 seeded by the folder pass do not all sit
+///   at the key `:collect` uses, so the retraction names the key the entry has rather than
+///   the key a fresh one would get
+/// - a concept: `ConceptRetracted` by a person, which outranks an import on the next sync
+///   (#96) and draws as *ruled out* in the info panel rather than vanishing
+/// - a rating: `None` — leaving `rating=4` cannot say which other number was meant, and the
+///   one retraction a rating has is not having one
+fn remove_from_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
+    use crate::model::entity::Collection;
+
+    let Some(write) = view_claim(ui, "removing") else {
+        return;
+    };
+    let songs = recordings_of(ctx, ids);
+    if songs.is_empty() {
+        ui.notify(format!("nothing selected — would {}", write.undoes()));
+        return;
+    }
+    let undoes = write.undoes().to_string();
+    let count = songs.len();
+    let now = crate::history::now_ms();
+    // **The entries as the crate holds them**, looked up before the closure because the
+    // closure crosses to the engine as a list of facts (I15) and cannot read anything back.
+    let held: Vec<(Id<Recording>, crate::model::ord::OrdKey)> = match &write {
+        Assert::Member(name) => {
+            let id = Id::<Collection>::of_name(name);
+            ui.listened
+                .entries
+                .iter()
+                .filter(|(c, _, r)| *c == id && songs.contains(r))
+                .map(|(_, ord, r)| (*r, ord.clone()))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    record(ui, now, move |log| match &write {
+        Assert::Member(name) => {
+            let id = Id::<Collection>::of_name(name);
+            for (song, ord) in &held {
+                log.remove_from_collection(now, id, *song, ord.clone());
+            }
+        }
+        Assert::Concept { facet, label } => {
+            for song in &songs {
+                log.retract_concept(
+                    now,
+                    crate::model::facet::Described::Recording(*song),
+                    facet,
+                    label,
+                    crate::model::reference::Source::Manual,
+                );
+            }
+        }
+        Assert::Rating(_) => {
+            for song in &songs {
+                log.rate(now, *song, None);
+            }
+        }
+    });
+    ui.notify(format!("{undoes} {count}"));
+    ui.stop = Some(Stop::Refold);
+}
+
+/// The recordings a selection of copies names — the grain a fact is about.
+///
+/// A recording held twice is one entry, so this may be shorter than `ids`; the count a
+/// confirmation shows is this one, which is the number of facts written.
+fn recordings_of(ctx: &Context<'_>, ids: &[CopyId]) -> Vec<Id<Recording>> {
+    let mut seen = std::collections::HashSet::new();
+    ids.iter()
+        .filter_map(|id| crate::model::rows::Listing::recording_of(ctx.library, *id))
+        .filter(|r| seen.insert(*r))
+        .collect()
+}
+
+/// **What the composed view asserts of a member**, or why it asserts nothing.
+///
+/// The refusal ladder [`add_to_view`] and [`remove_from_view`] share, so they cannot
+/// disagree about which views are editable. `by` is the gesture — "adding", "removing" —
+/// because a refusal names the thing you did.
+///
+/// Three refusals, and each says why rather than doing nothing:
+///
+/// - **nothing composed** — there is no fact to write, because there is no
+///   claim being made about what you are looking at
+/// - **`A or B`** — ambiguous, and choosing one silently is exactly the kind
+///   of guess this project refuses elsewhere
+/// - **an observed or correctable field** — the whole point of #96's
+///   classification. `year>=2015` translates perfectly well and must not
+///   rewrite a release date because somebody dragged a row.
+fn view_claim(ui: &mut Ui, by: &str) -> Option<Assert> {
     use crate::model::view::Op;
     use crate::query::format::Authorship;
 
     let terms = ui.composed.terms();
     if terms.is_empty() {
         ui.notify("nothing composed — there is no fact to write");
-        return;
+        return None;
     }
     // **Only a narrowing has one answer.** `A or B` cannot say which to
     // assert, so it is refused by name rather than resolved by guess.
@@ -4982,12 +5174,12 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
             "ambiguous — {} says two things; add to one of them",
             ui.composed.label()
         ));
-        return;
+        return None;
     }
 
     // The last term is what "this view" means; the ones before it are the
     // scope it narrows.
-    let Some(last) = terms.last() else { return };
+    let last = terms.last()?;
     let (what, clause, fact) = match &last.what {
         crate::view::What::Collection(name) => (
             Authorship::Authored,
@@ -5004,18 +5196,18 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
                     "{} names no single fact — add to one clause of it",
                     ui.composed.label()
                 ));
-                return;
+                return None;
             }
         },
         crate::view::What::Saved(name) => {
             ui.notify(format!(
                 "{name} is a definition — edit what it names, not the name"
             ));
-            return;
+            return None;
         }
         crate::view::What::Everything => {
             ui.notify("everything is not a claim about anything");
-            return;
+            return None;
         }
         // A group is a composition, so it is the union case again: it may name
         // several facts and cannot say which one membership turns on.
@@ -5024,77 +5216,28 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
                 "({}) is composed — add to one term of it",
                 inner.label()
             ));
-            return;
+            return None;
         }
     };
 
     match what {
         Authorship::Observed => {
             ui.notify(format!("{clause} is observed — there is nothing to assert"));
+            None
         }
         Authorship::Correctable => {
             ui.notify(format!(
-                "{clause} is read off the world — correct it deliberately, not by adding"
+                "{clause} is read off the world — correct it deliberately, not by {by}"
             ));
+            None
         }
-        Authorship::Authored => {
-            let Some(write) = fact else {
+        Authorship::Authored => match fact {
+            Some(write) => Some(write),
+            None => {
                 ui.notify(format!("{clause} names no single value to assert"));
-                return;
-            };
-            let songs: Vec<_> = ids
-                .iter()
-                .filter_map(|id| crate::model::rows::Listing::recording_of(ctx.library, *id))
-                .collect();
-            // **The fact is named even with nothing selected**, for the same
-            // reason the refusals are: what a view would write does not depend
-            // on where the cursor is, and "nothing selected" alone would hide
-            // the one thing worth knowing.
-            if songs.is_empty() {
-                ui.notify(format!("nothing selected — would {}", write.names()));
-                return;
+                None
             }
-            // Taken before the closure, which owns both from here on.
-            let names = write.names().to_string();
-            let count = songs.len();
-            let now = crate::history::now_ms();
-            record(ui, now, move |log| match &write {
-                Assert::Member(name) => {
-                    let id = Id::<Collection>::of_name(name);
-                    for song in &songs {
-                        // **A membership claim, not a positioning one.** The
-                        // same reasoning `:collect` uses for a set: adding to
-                        // a view says this belongs in the crate and says
-                        // nothing about where, so spreading keys here would
-                        // invent a running order out of the selection's.
-                        log.add_to_collection(now, id, *song, crate::model::ord::OrdKey::first());
-                    }
-                }
-                Assert::Concept { facet, label } => {
-                    for song in &songs {
-                        log.assert_concept(
-                            now,
-                            crate::model::facet::Described::Recording(*song),
-                            facet,
-                            label,
-                            // **A person said so**, which is what outranks an
-                            // import on the next sync (#96's precedence).
-                            crate::model::reference::Source::Manual,
-                            crate::model::ingest::Confidence::Confirmed,
-                        );
-                    }
-                }
-                Assert::Rating(stars) => {
-                    for song in &songs {
-                        log.rate(now, *song, Some(*stars));
-                    }
-                }
-            });
-            // **The confirmation names the fact, not the list.** "Added to
-            // list" hides what was written; the point of going further than
-            // iTunes is that the translation can be shown.
-            ui.notify(format!("{names} {count}"));
-        }
+        },
     }
 }
 
@@ -5137,6 +5280,15 @@ impl Assert {
             Assert::Member(name) => format!("put in the {name} collection"),
             Assert::Concept { facet, label } => format!("assign {facet} {label} to"),
             Assert::Rating(stars) => format!("rate {stars} star(s)"),
+        }
+    }
+
+    /// What taking a row out of the view writes — see [`remove_from_view`].
+    fn undoes(&self) -> String {
+        match self {
+            Assert::Member(name) => format!("took out of the {name} collection"),
+            Assert::Concept { facet, label } => format!("ruled out {facet} {label} for"),
+            Assert::Rating(_) => "unrated".to_string(),
         }
     }
 }
@@ -10482,11 +10634,16 @@ mod tests {
         press(&mut ui, &ctx, "d d");
         assert_eq!(ui.playlist.len(), before - 1);
 
-        // In the tree there is nothing to remove, and it must say so rather
-        // than deleting something else.
+        // In the tree there is no list to remove from, and it must say so rather
+        // than deleting something else — the playlist is untouched.
         ui.view = View::Tree;
         press(&mut ui, &ctx, "d d");
-        assert!(ui.status.contains("nothing to remove"), "{}", ui.status);
+        assert!(ui.status.contains("projection"), "{}", ui.status);
+        assert_eq!(
+            ui.playlist.len(),
+            before - 1,
+            "dd in the tree edited the playlist"
+        );
     }
 
     #[test]
@@ -11726,6 +11883,7 @@ mod tests {
             "save_view",
             "froze",
             "assert_concept",
+            "retract_concept",
             // Only reached from tests, which build their own facts directly.
             "append_fact",
             "merge",
@@ -12448,6 +12606,223 @@ mod tests {
             "the affordance named a fact and wrote nothing: {}",
             ui.status
         );
+    }
+
+    /// **The way into a view is the register** — `yy` there, `p` here.
+    ///
+    /// `add-view` could only reach rows already in the view, because the view is what
+    /// the cursor walks — so adding to `in="Dance"` re-asserted a membership every row
+    /// already had, and the row you actually wanted filed was somewhere else. vim's
+    /// answer is the register, and `p` into a composed view is `add-view` of what it
+    /// holds.
+    #[test]
+    fn p_into_a_crate_view_files_the_register() {
+        let store = fixture();
+        let mut ui = ui_with_history(&store, "put-into-view");
+        flat_view(&mut ui);
+
+        // A crate holding one artist, made the way one is made today.
+        let ctx = ctx_of(&store);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view artist="Anderson .Paak""#);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "collect Paak");
+        let ctx = refolded(&store, &ui);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+
+        // A row of somebody else, yanked from the whole library.
+        let all = ui.library.sorted().to_vec();
+        let stranger = all
+            .iter()
+            .position(|id| {
+                Listing::listed(ctx.library, *id)
+                    .is_some_and(|slip| slip.listed().file_under != "Anderson .Paak")
+            })
+            .expect("a row by somebody other than Paak");
+        let yanked = all[stranger];
+        set_cursor(&mut ui, stranger);
+        press(&mut ui, &ctx, "y y");
+        assert_eq!(ui.register, vec![yanked], "{}", ui.status);
+
+        // **The instrument**: the crate view does not hold it, so there is something to put.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Paak""#);
+        let before = ui.library.len();
+        assert!(before > 0, "the crate is empty: {}", ui.status);
+        assert!(
+            !ui.library.sorted().contains(&yanked),
+            "the yanked row is already in the crate"
+        );
+
+        press(&mut ui, &ctx, "p");
+        assert!(
+            ui.status.contains("put in the Paak collection 1"),
+            "{}",
+            ui.status
+        );
+        assert_eq!(
+            ui.stop,
+            Some(Stop::Refold),
+            "the view was not asked to refold"
+        );
+
+        // After the refold `main` does, the view holds it.
+        let ctx = refolded(&store, &ui);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Paak""#);
+        assert_eq!(ui.library.len(), before + 1, "{}", ui.status);
+        assert!(
+            ui.library.sorted().contains(&yanked),
+            "the put row is not in the crate"
+        );
+    }
+
+    /// **`dd` takes a row out of a crate by retracting the entry, and `p` is the undo.**
+    ///
+    /// The retraction names the key the entry *has*, not the key a fresh one would get:
+    /// the crate here was filled by `:collect`, which spreads no keys for a set, but the
+    /// 6,311 entries the folder pass seeded are not all at that key and a `dd` that
+    /// missed them would report a removal it did not make.
+    #[test]
+    fn dd_in_a_crate_view_retracts_the_entry_and_p_puts_it_back() {
+        let store = fixture();
+        let mut ui = ui_with_history(&store, "dd-in-view");
+        flat_view(&mut ui);
+
+        let ctx = ctx_of(&store);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view artist="Anderson .Paak""#);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "collect Paak");
+        let ctx = refolded(&store, &ui);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Paak""#);
+        let before = ui.library.len();
+        assert!(before >= 1, "the crate is empty: {}", ui.status);
+        set_cursor(&mut ui, 0);
+        let gone = ui.library.sorted()[0];
+
+        press(&mut ui, &ctx, "d d");
+        assert!(
+            ui.status.contains("took out of the Paak collection 1"),
+            "{}",
+            ui.status
+        );
+        assert_eq!(ui.register, vec![gone], "dd did not cut into the register");
+
+        let ctx = refolded(&store, &ui);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Paak""#);
+        assert_eq!(ui.library.len(), before - 1, "the entry was not retracted");
+        assert!(!ui.library.sorted().contains(&gone));
+
+        // And back, which is what makes `dd` safe to press.
+        press(&mut ui, &ctx, "p");
+        let ctx = refolded(&store, &ui);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Paak""#);
+        assert_eq!(ui.library.len(), before, "p did not put it back");
+    }
+
+    /// **`dd` out of a concept view rules the concept out, and says so.**
+    ///
+    /// Not a delete — `query-language.md` §4: the log merges by union, so a deleted
+    /// assertion returns on the next sync. `ConceptRetracted` by a person shadows it and
+    /// outranks the import that made it (#96).
+    #[test]
+    fn dd_in_a_genre_view_rules_the_concept_out() {
+        use crate::model::facet::Described;
+
+        let store = fixture();
+        let mut ui = ui_with_history(&store, "dd-genre");
+        let seeded = {
+            let ctx = ctx_of(&store);
+            Listing::recording_of(ctx.library, Listing::rows(ctx.library)[0])
+                .expect("a fixture row is a recording")
+        };
+        ui.desk
+            .appender()
+            .expect("a test desk appends")
+            .say(move |log| {
+                log.assert_concept(
+                    1,
+                    Described::Recording(seeded),
+                    "genre",
+                    "techno",
+                    crate::model::reference::Source::TagVariant,
+                    crate::model::ingest::Confidence::Matched,
+                );
+            });
+        ui.desk.settled();
+        refresh_listened(&mut ui);
+        let ctx = refolded(&store, &ui);
+        flat_view(&mut ui);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view genre="techno""#);
+        assert_eq!(
+            ui.library.len(),
+            1,
+            "the seed is not in the view: {}",
+            ui.status
+        );
+        set_cursor(&mut ui, 0);
+
+        press(&mut ui, &ctx, "d d");
+        assert!(
+            ui.status.contains("ruled out genre techno for 1"),
+            "{}",
+            ui.status
+        );
+
+        let ctx = refolded(&store, &ui);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view genre="techno""#);
+        assert_eq!(ui.library.len(), 0, "the concept was not ruled out");
+    }
+
+    /// **The refusals are `add-view`'s, said the other way round** — and the library
+    /// itself, with nothing composed, has no list to put into or take out of.
+    #[test]
+    fn p_and_dd_in_the_tree_refuse_by_name() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "tree-refusals");
+        flat_view(&mut ui);
+        set_cursor(&mut ui, 0);
+        press(&mut ui, &ctx, "y y");
+        assert!(!ui.register.is_empty(), "nothing yanked: {}", ui.status);
+
+        press(&mut ui, &ctx, "p");
+        assert!(ui.status.contains("projection"), "{}", ui.status);
+        press(&mut ui, &ctx, "d d");
+        assert!(ui.status.contains("projection"), "{}", ui.status);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view year>=2015");
+        press(&mut ui, &ctx, "d d");
+        assert!(
+            ui.status.contains("not by removing"),
+            "a correctable field was not refused by name: {}",
+            ui.status
+        );
+        press(&mut ui, &ctx, "p");
+        assert!(ui.status.contains("not by adding"), "{}", ui.status);
+    }
+
+    /// **`yy` on a node yanks everything under it**, as `a` and `e` already read the tree.
+    #[test]
+    fn yy_on_an_artist_node_yanks_the_artist() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        let under = ui.tree.tracks_for(&ui.library).len();
+        assert!(under > 1, "the cursor is not on a multi-track node");
+
+        press(&mut ui, &ctx, "y y");
+        assert_eq!(ui.register.len(), under, "{}", ui.status);
     }
 
     /// **A level with nothing to climb is refused by name** — #79.

@@ -129,6 +129,12 @@ an import. That is a schema question and not a UI one, and it is the difference 
 and one that does not. The model already has the shape for it — `EncodingBound` carries what it replaced, and `Merges`
 has `bar`/`unbar` for exactly "I have decided otherwise".
 
+**Answered: `ConceptRetracted`, and `dd` writes it** (Decision Log, 2026-09-17). Cutting a row out of `genre="techno"`
+rules the concept out by a person, which outranks the import on the next sync and draws as _ruled out_ in the info
+panel. A crate entry retracts by `CollectionEntryRemoved`; a rating by `None`. The rows land in the register, so `p` is
+the undo — and `p` into a composed view is how a row that is _not_ in it gets in, which `:add-view` alone could never
+do.
+
 The rule that keeps all of it safe: never a control that quietly does nothing. Either the fact is named and written, or
 the affordance is not offered.
 

@@ -52,6 +52,20 @@ fact before it does:
 
     assign genre techno to 3
 
+The row you want to add is, by definition, not in the view — so the way in is the register, the same way a track crosses
+between playlists:
+
+    yy                      copy it, anywhere in the library — an artist row copies the artist
+    :view in="Dance"        compose the view
+    p                       put it in: the fact is written, and the row appears
+    dd                      take it out, by retracting that fact; `p` puts it back
+
+`dd` is the mirror of `p`, kind for kind. Out of a crate it retracts the entry. Out of `genre="techno"` it **rules the
+genre out** — the imported claim stays in the log, shadowed by yours, which is what stops it coming back on the next
+sync and what the info panel draws as _ruled out_. Out of `rating=4` it unrates, because leaving a rating cannot say
+which other number was meant. With nothing composed there is nothing to put into or take out of: the library is a
+projection, and `p` and `dd` say so.
+
 Whether it is offered at all depends on **who authors the field**:
 
 | the rule is about                  | what `:add-view` does                                           |
