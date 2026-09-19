@@ -809,10 +809,17 @@ packets. A position that matched the handed-over count exactly would be the bug 
   resumed up to a second early. `player.seek` carries `{absolute|relative: seconds}` as a number. The text line stays a
   door — `cmd.exec_line` parses `seek 12.5` perfectly well — but it is the door for _text_, not the way a typed value
   travels.
-- **And a view must then say so.**- **And a view must then say so.** Every consequence of a lost engine is silent and
-  separate: rows the view had not cached draw `<missing>`, `gp` finds no target, and a rating lands on whatever was
-  playing when the connection dropped. That is three bugs to the person looking at them and one to the person who knows,
-  so the status line names the cause.
+- **A socket that accepts and does not answer is named once, and not waited on** (2026-09-19). #264 bounded the
+  handshake at five seconds; `attach` then retried the same silence every 50 ms for twenty seconds, three times over at
+  start-up — an engine wedged with its socket bound holds the lock too, so the spawned replacement exits and nothing
+  ever takes the socket over. Measured: 30.7 s with nothing on screen, reported as "gmuse is slow to start".
+  `Client::connect` now answers a silent handshake with `Unresponsive` rather than `TimedOut`, because the two want
+  opposite responses — a timeout on a call is worth asking again, this is worth stopping — and `attach` returns it at
+  once, naming the holder's pid from `engine.lock`. The repair is to stop that engine, which only a message can say;
+  "start one" is the wrong advice, and `ctl` no longer gives it in this case.
+- **And a view must then say so.** Every consequence of a lost engine is silent and separate: rows the view had not
+  cached draw `<missing>`, `gp` finds no target, and a rating lands on whatever was playing when the connection dropped.
+  That is three bugs to the person looking at them and one to the person who knows, so the status line names the cause.
 
 ### 7.11 Queries
 

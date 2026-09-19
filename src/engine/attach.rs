@@ -34,10 +34,21 @@ use gmuse_client::{Client, ClientError};
 const START_WITHIN: Duration = Duration::from_secs(20);
 
 /// Connect, starting an engine if nothing answers.
+///
+/// **A refused connection and a silent one are different facts, and only one of them is
+/// worth a spawn.** Refused means nothing is listening, so an engine is started and waited
+/// for. A handshake that times out means something *is* listening and cannot talk (#264's
+/// shape: an engine wedged with its socket bound) — and having bound the socket it holds
+/// the lock, so a spawned engine loses the lock and exits, and every retry in the window
+/// below reconnects to the same silence at five seconds a time. Three attaches at start-up
+/// made that thirty seconds of nothing on screen, reported as "gmuse is slow to start".
+/// So a silent socket is answered once, by name, and not retried.
 pub fn attach(name: &str, version: &str) -> Result<Client, ClientError> {
     let path = super::socket::default_path();
-    if let Ok(client) = Client::connect(&path, name, version) {
-        return Ok(client);
+    match Client::connect(&path, name, version) {
+        Ok(client) => return Ok(client),
+        Err(ClientError::Unresponsive { .. }) => return Err(unresponsive(&path)),
+        Err(_) => {}
     }
 
     spawn_engine();
@@ -47,11 +58,31 @@ pub fn attach(name: &str, version: &str) -> Result<Client, ClientError> {
     while Instant::now() < deadline {
         match Client::connect(&path, name, version) {
             Ok(client) => return Ok(client),
+            // The engine that just started answers; one that accepts and says nothing is
+            // not it, and will not become it by being asked again.
+            Err(ClientError::Unresponsive { .. }) => return Err(unresponsive(&path)),
             Err(e) => last = Some(e),
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     Err(last.unwrap_or(ClientError::TimedOut(START_WITHIN)))
+}
+
+/// [`ClientError::Unresponsive`] with the holder's pid, where the lock beside the socket
+/// still says who that is. The client crate names the path; only this side knows the lock.
+///
+/// **Read for a message, never for a decision** — the lock crate's own rule. Whether an
+/// engine is there was answered by the handshake; the pid only makes the repair one line.
+fn unresponsive(path: &Path) -> ClientError {
+    let pid = path
+        .parent()
+        .map(|dir| dir.join(super::socket::LOCK))
+        .and_then(|lock| std::fs::read_to_string(lock).ok())
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    ClientError::Unresponsive {
+        path: path.display().to_string(),
+        pid,
+    }
 }
 
 /// Start a detached engine and do not wait for it.

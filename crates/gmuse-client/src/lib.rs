@@ -49,6 +49,21 @@ pub enum ClientError {
     Malformed(String),
     #[error("timed out after {0:?}")]
     TimedOut(Duration),
+    /// **Something is listening and not talking** — the engine at `path` accepted the
+    /// connection and never answered `hello`.
+    ///
+    /// Its own variant rather than [`ClientError::TimedOut`], because the two ask for
+    /// opposite responses: a timeout on an ordinary call is worth asking again, and this
+    /// is worth stopping. A wedged engine holds the socket and, having bound it, the lock
+    /// — so nothing a client does reaches it and no second engine can start. The only
+    /// repair is to stop it, which is why the message names its pid when the lock beside
+    /// the socket still says.
+    #[error(
+        "an engine at {path} accepts connections and does not answer{} — `gmuse ctl` cannot reach it either; stop it{} and try again",
+        match pid { Some(p) => format!(" (pid {p})"), None => String::new() },
+        match pid { Some(p) => format!(" (kill {p})"), None => String::new() },
+    )]
+    Unresponsive { path: String, pid: Option<u32> },
 }
 
 impl ClientError {
@@ -136,8 +151,18 @@ impl Client {
         // unix socket; anything that cannot manage it in five seconds is not going to.
         const HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(5);
         let params = HelloParams::new(name, version);
-        let result =
-            client.call_within("hello", Some(serde_json::to_value(&params)?), HANDSHAKE)?;
+        let result = client
+            .call_within("hello", Some(serde_json::to_value(&params)?), HANDSHAKE)
+            // **Named for what it is, not for how long it took.** A handshake that times
+            // out is a listener that will not talk, and every caller wants to say so and
+            // stop — not report five seconds and try again.
+            .map_err(|e| match e {
+                ClientError::TimedOut(_) => ClientError::Unresponsive {
+                    path: path.display().to_string(),
+                    pid: None,
+                },
+                other => other,
+            })?;
         let hello: HelloResult = serde_json::from_value(result)
             .map_err(|e| ClientError::Malformed(format!("hello result: {e}")))?;
 

@@ -2783,6 +2783,111 @@ fn attaching_starts_an_engine_when_none_is_listening() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A socket that accepts and never answers is named once, not retried for twenty
+/// seconds** — #264's shape, seen from the client.
+///
+/// An engine wedged with its socket bound holds the lock too, so a spawned replacement
+/// exits and every reconnect in `attach`'s window meets the same silence at five seconds a
+/// time. Three attaches at start-up made that thirty seconds with nothing on screen,
+/// reported as "gmuse is slow to start". The repair is to stop the wedged engine, which
+/// only a message can say — so the handshake timeout is its own error, and it is final.
+///
+/// **Two clocks, both asserted.** Under twelve seconds proves the retry window was not
+/// spent; over four proves the handshake was actually waited for, which is what separates
+/// "it gave up" from "it never connected".
+#[test]
+fn a_silent_engine_is_named_and_not_waited_on() {
+    use std::os::unix::net::UnixListener;
+
+    let dir = std::env::temp_dir().join(format!("gmuse-silent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let socket = dir.join("engine.sock");
+    // **The lock beside it, held** — as a wedged engine holds it, having bound before it
+    // wedged. This is what makes the old behaviour cost twenty seconds rather than ten: a
+    // spawned engine loses the lock and exits, so nothing ever takes the socket over and
+    // every retry meets the same silence. It is also what keeps this test from starting a
+    // real engine against the real library, which a fake that only *looked* held did.
+    let _held_lock = gmuse::lock::acquire(&dir.join("engine.lock")).expect("hold the lock");
+    // The pid the lock wrote is this test's; the message should carry it.
+    let pid = std::process::id().to_string();
+
+    // **Accepts, reads nothing, answers nothing** — held open, so the client's handshake
+    // has to time out rather than see a close.
+    let listener = UnixListener::bind(&socket).expect("bind the fake");
+    let held = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let keep = std::sync::Arc::clone(&held);
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            keep.lock().expect("held").push(conn);
+        }
+    });
+
+    // `ctl` is the plain client: one connect, one handshake.
+    let started = std::time::Instant::now();
+    let out = Command::new(binary())
+        .args(["ctl", "engine.status"])
+        .env("GMUSE_SOCKET", &socket)
+        .output()
+        .expect("run gmuse ctl");
+    let took = started.elapsed();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "ctl claimed to reach a silent engine"
+    );
+    assert!(
+        said.contains("accepts connections and does not answer"),
+        "ctl did not say what it found: {said}"
+    );
+    assert!(
+        !said.contains("Start one with"),
+        "ctl told you to start an engine beside one that is wedged: {said}"
+    );
+    assert!(
+        took > Duration::from_secs(4) && took < Duration::from_secs(12),
+        "ctl took {took:?}: under four is a handshake never waited for, over twelve is the \
+         retry window being spent"
+    );
+    assert!(
+        !held.lock().expect("held").is_empty(),
+        "the fake accepted nothing, so nothing was silent at"
+    );
+
+    // The view attaches through `attach`, which spawns and retries; against silence it
+    // must do neither for long. No terminal is needed: attaching is the first thing it
+    // does, and the failure is reported before the screen is taken.
+    let started = std::time::Instant::now();
+    let out = Command::new(binary())
+        .args(["--no-lock", "--no-config"])
+        .env("GMUSE_SOCKET", &socket)
+        // Belt and braces: the lock above stops a spawned engine, and this stops one that
+        // somehow started from touching anything real.
+        .env("GMUSE_DATA_DIR", dir.join("data"))
+        .env("GMUSE_ROOTS", "")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run gmuse");
+    let took = started.elapsed();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "the view claimed to attach to a silent engine"
+    );
+    assert!(
+        said.contains("accepts connections and does not answer")
+            && said.contains(&format!("pid {pid}")),
+        "the view did not name the silent engine and its pid: {said}"
+    );
+    assert!(
+        took > Duration::from_secs(4) && took < Duration::from_secs(12),
+        "attach took {took:?}: the retry window was spent against a socket that will never \
+         answer"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **The second implementor of the seam, over a real socket** — #219.
 ///
 /// This is what lets the TUI hold no audio device: it asks the engine and renders

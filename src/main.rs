@@ -220,10 +220,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // mean two processes holding it, and on CoreAudio the second one simply gets
     // silence rather than an error.
     let player = if args.attached() {
-        let client = std::sync::Arc::new(gmuse::engine::attach::attach(
-            "gmuse-tui",
-            env!("CARGO_PKG_VERSION"),
-        )?);
+        // `die`, not `?`: `main` prints its error in `Debug`, and an engine that will not
+        // answer is exactly the failure whose message is the repair.
+        let client = std::sync::Arc::new(
+            gmuse::engine::attach::attach("gmuse-tui", env!("CARGO_PKG_VERSION"))
+                .unwrap_or_else(|e| die(e)),
+        );
         let hz = client.hello().sample_rate;
         let remote = gmuse::ui::remote_transport::Remote::attach(client)?;
         println!("gmuse — attached to the engine, device at {hz} Hz");
@@ -4574,11 +4576,17 @@ fn run_engine(
 fn connect() -> Result<gmuse_client::Client, String> {
     let path = gmuse::engine::socket::default_path();
     gmuse_client::Client::connect(&path, "gmuse-cli", env!("CARGO_PKG_VERSION")).map_err(|e| {
-        // **Not a stack trace and not a bare io error.** The overwhelmingly
-        // likely cause is that no engine is running, and saying so with the
-        // command that starts one is the whole difference between a usable CLI
-        // and one you have to already understand.
-        format!("{e}\n\nStart one with: gmuse engine --foreground")
+        match e {
+            // **One is running and will not talk**, so "start one" is the wrong advice: it
+            // would lose the lock to the wedged one and exit. The error already says what
+            // to do.
+            gmuse_client::ClientError::Unresponsive { .. } => e.to_string(),
+            // **Not a stack trace and not a bare io error.** The overwhelmingly
+            // likely cause is that no engine is running, and saying so with the
+            // command that starts one is the whole difference between a usable CLI
+            // and one you have to already understand.
+            _ => format!("{e}\n\nStart one with: gmuse engine --foreground"),
+        }
     })
 }
 
