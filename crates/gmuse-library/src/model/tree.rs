@@ -156,12 +156,19 @@ fn artist_shaped(field: Field) -> bool {
 fn stand_in(field: Field) -> String {
     match field {
         Field::Album => NO_ALBUM.to_string(),
-        _ => "Nothing said".to_string(),
+        _ => NOTHING_SAID.to_string(),
     }
 }
 
 /// Shown for a recording that belongs to no album.
 pub const NO_ALBUM: &str = "No Album";
+
+/// Shown where a level has no value — a row with no genre under `levels genre`.
+///
+/// **`pub` so a client can tell the stand-in from a term**: it is drawn as a node like
+/// any other, and `K` over it has to say "nothing is said" rather than look for a genre
+/// called that.
+pub const NOTHING_SAID: &str = "Nothing said";
 
 impl Tree {
     /// Build the tree a library describes, grouped by two chosen fields.

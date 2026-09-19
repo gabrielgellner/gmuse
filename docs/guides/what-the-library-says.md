@@ -6,8 +6,13 @@
     ^o         back
     escape     leave the panel
 
-`K` is vim's "look up the thing under the cursor", and that is what this is. It opens view 8 on the **recording** the
-row holds — the performance, not the file — and everything else is one hop from there.
+`K` is vim's "look up the thing under the cursor", and that is what this is. On a track it opens view 8 on the
+**recording** — the performance, not the file — and everything else is one hop from there.
+
+On a node it opens what the node _is_, which the grouping decides: an artist row opens the artist, an album row opens
+its release group, and under `:view levels genre,album` the top row is a genre and opens the concept. A level the
+library has no page for — a year, a label — says so rather than opening a track instead, and the "Nothing said" row says
+that nothing is said.
 
 ## Reaching things that are not rows
 

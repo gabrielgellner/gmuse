@@ -6377,38 +6377,11 @@ fn open_info(ui: &mut Ui, ctx: &Context<'_>, what: Option<crate::cmd::Named>) {
                 format!("{} called {name:?}", kind.word()),
             ),
         };
-        match found {
-            Found::One(focus) => {
-                ui.focus = vec![focus];
-                ui.info_sel = 0;
-                switch_view(ui, View::Info);
-            }
-            // **It does not choose — it offers** (#130). Looking at a list of
-            // candidates and picking one is what a picker is for, and the
-            // candidates are already in hand: going back to the library for
-            // them would be a second search that could disagree with the
-            // first.
-            Found::Several(several) => {
-                let what = match &named {
-                    crate::cmd::Named::Called(kind, _) => kind.word(),
-                    crate::cmd::Named::Exactly(_) => "things",
-                };
-                ui.notify(format!("{} match — pick one", several.len()));
-                ui.picker = Some(crate::ui::picker::Picker::among(
-                    what,
-                    several
-                        .into_iter()
-                        .map(|(focus, name)| crate::ui::picker::Candidate {
-                            label: name,
-                            detail: focus.kind().to_string(),
-                            chosen: crate::ui::picker::Chosen::Look(focus),
-                        })
-                        .collect(),
-                ));
-                refresh_picker(ui, ctx);
-            }
-            Found::Nothing => ui.notify(format!("no {asked}")),
-        }
+        let what = match &named {
+            crate::cmd::Named::Called(kind, _) => kind.word(),
+            crate::cmd::Named::Exactly(_) => "things",
+        };
+        land(ui, ctx, found, &asked, what);
         return;
     }
 
@@ -6417,22 +6390,186 @@ fn open_info(ui: &mut Ui, ctx: &Context<'_>, what: Option<crate::cmd::Named>) {
     if ui.view == View::Info {
         return;
     }
-    let Some(copy) = ui.selected_track(ctx) else {
-        ui.notify("nothing under the cursor to look up");
-        return;
+    match under_cursor(ui, ctx) {
+        Ok((found, asked, what)) => land(ui, ctx, found, &asked, what),
+        Err(why) => ui.notify(why),
+    }
+}
+
+/// **What the cursor is on, as a thing the panel can be about** — the row's own kind.
+///
+/// `K` resolved the cursor through `selected_track`, which is the right question for `x`
+/// — a closed album plays from the top — and the wrong one here: `K` over Aphex Twin
+/// opened the page of the first track under him, and the artist's page, which is where
+/// "filed in" for the artist would go, was reachable only as `:info artist "Aphex Twin"`.
+///
+/// A node is what its *level* says it is, not what the row variant is called: the tree's
+/// `Artist` row is the outer key, and `:view levels genre,album` makes that a concept.
+/// So the field decides — an artist field finds the artist by name, a facet finds the
+/// concept on that axis, and an album reaches its release group through the first track
+/// under it, because album titles are not unique and a group is not found by name.
+///
+/// **Refused by name where the library has no page.** A year or a label is a value the
+/// tree can group by and nothing the panel can be about; saying which is what stops `K`
+/// from silently opening a track instead.
+///
+/// Returns what was found, what was asked for (for the "no such" message), and the word
+/// for the kind (for the picker's title).
+fn under_cursor(
+    ui: &Ui,
+    ctx: &Context<'_>,
+) -> Result<(crate::model::about::Found, String, &'static str), String> {
+    use crate::model::about::{Found, Kind};
+    use crate::model::focus::Focus;
+    use crate::query::format::Field;
+    use crate::ui::tree::Row;
+
+    let listing = ctx.library;
+    let recording_page = |copy: Option<CopyId>| -> Result<_, String> {
+        let Some(copy) = copy else {
+            return Err("nothing under the cursor to look up".to_string());
+        };
+        // **A row with no recording says so.** A file nothing has identified is an
+        // ordinary row (§1) and it has no performance to describe; opening an
+        // empty page would read as "nothing is known", which is a different claim.
+        let Some(recording) = crate::model::rows::Listing::recording_of(listing, copy) else {
+            return Err("this row names no recording — nothing to say about it".to_string());
+        };
+        Ok((
+            Found::One(Focus::Recording(recording)),
+            "recording".to_string(),
+            "recordings",
+        ))
     };
-    // **A row with no recording says so.** A file nothing has identified is an
-    // ordinary row (§1) and it has no performance to describe; opening an
-    // empty page would read as "nothing is known", which is a different claim.
-    let Some(recording) = crate::model::rows::Listing::recording_of(ctx.library, copy) else {
-        ui.notify("this row names no recording — nothing to say about it");
-        return;
+
+    let Some((outer, inner)) = ui.levels.pair().filter(|_| ui.view == View::Tree) else {
+        return recording_page(ui.selected_track(ctx));
     };
-    // A fresh look-up starts a fresh path: `K` from the library is a new
-    // question, not a step in the one before it.
-    ui.focus = vec![crate::model::focus::Focus::Recording(recording)];
-    ui.info_sel = 0;
-    switch_view(ui, View::Info);
+    let Some(row) = ui.tree.here(&ui.library) else {
+        return recording_page(None);
+    };
+    // **The record a node is on**, through the first track's own page — which is how the
+    // library says what record a row is on; a title is not an identity and cannot be
+    // looked up.
+    let record = || -> Result<_, String> {
+        let first = ui.tree.tracks_for(&ui.library).into_iter().next();
+        let Some(recording) =
+            first.and_then(|copy| crate::model::rows::Listing::recording_of(listing, copy))
+        else {
+            return Err("this album names no recording — nothing to say about it".to_string());
+        };
+        let about = crate::model::rows::Listing::about(listing, Focus::Recording(recording), &[]);
+        let group = about
+            .sections
+            .iter()
+            .flat_map(|s| &s.rows)
+            .find_map(|row| match row {
+                crate::model::about::Row::Link {
+                    to: to @ Focus::ReleaseGroup(_),
+                    ..
+                } => Some(*to),
+                _ => None,
+            });
+        match group {
+            Some(focus) => Ok((Found::One(focus), "release group".to_string(), "records")),
+            None => Err("this album is on no release the library knows — K on a track".to_string()),
+        }
+    };
+
+    let (level, display) = match row {
+        Row::Track { id, .. } => return recording_page(Some(id)),
+        Row::Artist { display, .. } => (outer, display),
+        Row::Album { display, .. } => (inner, display),
+        // A disc is part of its record, and the record is what has a page.
+        Row::Disc { .. } => return record(),
+    };
+    // **A field the library has no page for is refused before its value is read**: a
+    // year node has no page whether it says 2015 or nothing at all.
+    if !matches!(
+        level.field,
+        Field::Artist | Field::AlbumArtist | Field::FileUnder | Field::Facet(_) | Field::Album
+    ) {
+        return Err(format!(
+            "a {} has no page — K on a track or an artist",
+            level.field.name()
+        ));
+    }
+    // **The stand-in is a node and not a thing.** A row with no genre is drawn under
+    // "Nothing said", and looking that up as a genre would report no genre by that name —
+    // true, and the wrong answer.
+    if display == crate::model::tree::NOTHING_SAID {
+        return Err(format!(
+            "nothing is said about these — there is no {} to look up",
+            level.field.name()
+        ));
+    }
+    if display == crate::model::tree::NO_ALBUM {
+        return Err("these are on no record the library knows — K on a track".to_string());
+    }
+    match level.field {
+        Field::Artist | Field::AlbumArtist | Field::FileUnder => Ok((
+            crate::model::rows::Listing::find(listing, Kind::Artist, &display),
+            format!("artist called {display:?}"),
+            "artists",
+        )),
+        Field::Facet(facet) => {
+            let Some((key, _)) = crate::model::facet::ALL.iter().find(|(key, _)| {
+                crate::model::id::Id::<crate::model::entity::Facet>::of_key(key) == facet
+            }) else {
+                return Err("that axis has no page".to_string());
+            };
+            Ok((
+                crate::model::rows::Listing::find(listing, Kind::Concept(key), &display),
+                format!("{key} called {display:?}"),
+                "concepts",
+            ))
+        }
+        // The list above and this match are the same claim twice, so a field added to
+        // one without the other is unreachable rather than wrong.
+        _ => record(),
+    }
+}
+
+/// **Open what was found, offer what was several, say what was nothing** — one landing
+/// for the named path and the cursor path, so `K` and `:info` cannot disagree about it.
+fn land(
+    ui: &mut Ui,
+    ctx: &Context<'_>,
+    found: crate::model::about::Found,
+    asked: &str,
+    what: &'static str,
+) {
+    use crate::model::about::Found;
+    match found {
+        Found::One(focus) => {
+            // A fresh look-up starts a fresh path: `K` from the library is a new
+            // question, not a step in the one before it.
+            ui.focus = vec![focus];
+            ui.info_sel = 0;
+            switch_view(ui, View::Info);
+        }
+        // **It does not choose — it offers** (#130). Looking at a list of
+        // candidates and picking one is what a picker is for, and the
+        // candidates are already in hand: going back to the library for
+        // them would be a second search that could disagree with the
+        // first.
+        Found::Several(several) => {
+            ui.notify(format!("{} match — pick one", several.len()));
+            ui.picker = Some(crate::ui::picker::Picker::among(
+                what,
+                several
+                    .into_iter()
+                    .map(|(focus, name)| crate::ui::picker::Candidate {
+                        label: name,
+                        detail: focus.kind().to_string(),
+                        chosen: crate::ui::picker::Chosen::Look(focus),
+                    })
+                    .collect(),
+            ));
+            refresh_picker(ui, ctx);
+        }
+        Found::Nothing => ui.notify(format!("no {asked}")),
+    }
 }
 
 /// The info panel — #126, `info-panel.md`.
@@ -12994,6 +13131,153 @@ mod tests {
             out.contains("said about it") || out.contains("where it sits"),
             "{out}"
         );
+    }
+
+    /// **`K` over an artist row opens the artist**, not the first track under it.
+    ///
+    /// The cursor was resolved through `selected_track`, which is `x`'s question — a
+    /// closed album plays from the top — and answered `K` over Aphex Twin with the page
+    /// of whatever track happened to be first. The artist's own page was reachable only
+    /// as `:info artist "…"`.
+    #[test]
+    fn k_on_an_artist_row_opens_the_artist() {
+        use crate::model::focus::Focus;
+        use crate::ui::tree::Row;
+
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        let Some(Row::Artist { display, .. }) = ui.tree.here(&ui.library) else {
+            panic!("the cursor is not on an artist row");
+        };
+
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert!(
+            matches!(ui.focus.last(), Some(Focus::Artist(_))),
+            "it opened {:?} rather than the artist",
+            ui.focus.last()
+        );
+        let about = info_about(&ui, &ctx).expect("a page");
+        assert_eq!(about.title, display, "it opened a different artist");
+    }
+
+    /// **`K` over an album row opens its release group**, reached through the record the
+    /// first track is on — a title is not an identity and cannot be looked up.
+    #[test]
+    fn k_on_an_album_row_opens_its_release_group() {
+        use crate::model::focus::Focus;
+        use crate::ui::tree::Row;
+
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        // Open the artist and step onto its first album.
+        press(&mut ui, &ctx, "o");
+        press(&mut ui, &ctx, "j");
+        let Some(Row::Album { display, .. }) = ui.tree.here(&ui.library) else {
+            panic!(
+                "the cursor is not on an album row: {:?}",
+                ui.tree.here(&ui.library)
+            );
+        };
+
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert!(
+            matches!(ui.focus.last(), Some(Focus::ReleaseGroup(_))),
+            "it opened {:?} rather than the record",
+            ui.focus.last()
+        );
+        let about = info_about(&ui, &ctx).expect("a page");
+        assert_eq!(about.title, display, "it opened a different record");
+    }
+
+    /// **A node is what its level says it is.** The tree's `Artist` row is the outer key,
+    /// and under `levels genre,album` that is a concept — so `K` opens the concept.
+    #[test]
+    fn k_on_a_genre_node_opens_the_concept() {
+        use crate::model::facet::Described;
+        use crate::model::focus::Focus;
+        use crate::ui::tree::Row;
+
+        let store = fixture();
+        let mut ui = ui_with_history(&store, "k-genre");
+        // The fixture says no genre of anything, so one is said here — otherwise the only
+        // node is the stand-in and the test could not tell a concept page from nothing.
+        let seeded = {
+            let ctx = ctx_of(&store);
+            Listing::recording_of(ctx.library, Listing::rows(ctx.library)[0])
+                .expect("a fixture row is a recording")
+        };
+        ui.desk
+            .appender()
+            .expect("a test desk appends")
+            .say(move |log| {
+                log.assert_concept(
+                    1,
+                    Described::Recording(seeded),
+                    "genre",
+                    "techno",
+                    crate::model::reference::Source::Manual,
+                    crate::model::ingest::Confidence::Confirmed,
+                );
+            });
+        ui.desk.settled();
+        refresh_listened(&mut ui);
+        let ctx = refolded(&store, &ui);
+        ui.view = View::Tree;
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels genre,album");
+        assert!(
+            ui.library.artist_count() > 1,
+            "no genre node beside the stand-in: {}",
+            ui.status
+        );
+
+        // **The stand-in first.** Rows with no genre sit under "Nothing said", which is
+        // a node and not a term, and `K` there has to say so rather than look one up.
+        let is_stand_in = |ui: &Ui| {
+            matches!(ui.tree.here(&ui.library), Some(Row::Artist { display, .. })
+                if display == crate::model::tree::NOTHING_SAID)
+        };
+        if is_stand_in(&ui) {
+            press(&mut ui, &ctx, "K");
+            assert_ne!(ui.view, View::Info, "it opened a page for the stand-in");
+            assert!(ui.status.contains("nothing is said"), "{}", ui.status);
+            press(&mut ui, &ctx, "j");
+        }
+        assert!(
+            !is_stand_in(&ui) && matches!(ui.tree.here(&ui.library), Some(Row::Artist { .. })),
+            "the cursor is not on a genre node: {:?}",
+            ui.tree.here(&ui.library)
+        );
+
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert!(
+            matches!(ui.focus.last(), Some(Focus::Concept(_))),
+            "it opened {:?} rather than the concept",
+            ui.focus.last()
+        );
+    }
+
+    /// **A level the library has no page for is refused by name**, rather than `K`
+    /// quietly opening a track instead.
+    #[test]
+    fn k_on_a_year_node_says_a_year_has_no_page() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels year,album");
+
+        press(&mut ui, &ctx, "K");
+        assert_ne!(ui.view, View::Info, "it opened something anyway");
+        assert!(ui.status.contains("has no page"), "{}", ui.status);
     }
 
     /// **Enter follows, `^o` comes back, and the trail says where you are** —
