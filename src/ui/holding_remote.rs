@@ -748,6 +748,18 @@ impl crate::model::rows::Listing for Remote {
         .unwrap_or_default()
     }
 
+    fn covers(
+        &self,
+        focus: crate::model::focus::Focus,
+    ) -> Vec<Id<crate::model::entity::Recording>> {
+        self.read(
+            "query.covers",
+            serde_json::json!({ "focus": serde_json::to_value(focus).unwrap_or_default() }),
+        )
+        .and_then(|r| serde_json::from_value(r.get("recordings")?.clone()).ok())
+        .unwrap_or_default()
+    }
+
     fn find(&self, of: crate::model::about::Kind, name: &str) -> crate::model::about::Found {
         self.read(
             "query.name",

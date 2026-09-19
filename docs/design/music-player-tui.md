@@ -6103,6 +6103,29 @@ Append here as decisions are made. Format: date, decision, rationale.
   than the artist's, and the info panel's "filed in" section is still a reader. Both are the panel-as-editor
   `info-panel.md` §4 reserves, and they share the picker `:crate` would need.
 
+- **2026-09-19** **The panel files, and that is the one edit it makes** (`info-panel.md` §4's reserved exception). `K`
+  over Aphex Twin, `a`, pick Dance: the page is where filing is _seen_, so it is where filing is done. The section that
+  shows it is the one that edits it, and the rest of the page stays a reader.
+
+  **A crate edit on a container is an edit to each recording it covers, and the page shows the fraction rather than a
+  tick.** A crate holds recordings — `CollectionEntryAdded` names one — so an artist is in a crate only to the extent
+  their recordings are, and the artist's `filed in` says `12 of 40`. `Librarian::covers` is the one answer to "what does
+  this page stand for": a recording is itself; a record is every recording on its releases; an artist is everything
+  credited to them at any grain, so a compilation track is theirs though the tree files it under _Various Artists_; a
+  concept is nothing, because a genre is asserted _of_ rows and does not contain them. On the wire it is `query.covers`,
+  so an attached view files the same forty a detached one would.
+
+  **`:file <name>` is the per-thing verb beside `:collect`'s per-view one.** It files what is here — the page's subject,
+  or the rows under the cursor in a list, or the node in the tree — and a name nobody has used makes the crate, so
+  making one is typing its name and not a second verb. The picker `a` opens says the same: every crate with its count,
+  and the typed name as a new one when it matches none. A playlist is refused by name: filing into a sequence would give
+  every entry one key and invent an order out of nothing.
+
+  **Only a filing can be unfiled here.** `dd` on a claim row says it is a claim and points at the `genre=` view, where
+  the fact retracted is the one in front of you; on a link to a record it says that is where the thing sits, not what it
+  is in. A retraction names the key each entry _has_, for the reason `remove_from_view` does. Nothing lands in the
+  register — a page is not a list — and `a` is the way back.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

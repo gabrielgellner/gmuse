@@ -3770,6 +3770,29 @@ fn a_remote_library_answers_what_a_local_one_does() {
         (ours.open, ours.at),
         "the two disagree about what a reveal has to open"
     );
+
+    // **What a page stands for**, which is what filing from the panel writes one fact per.
+    // The fan-out — an artist to their recordings — is `Librarian::covers` and is checked
+    // where a library has artists (`ui::tests`); an unidentified import mints none, so
+    // what this can show is that the question crosses the wire and comes back the same.
+    {
+        use gmuse::model::focus::Focus;
+        use gmuse::model::rows::Listing;
+        let lib: &dyn Listing = &answer.library;
+        let recording = lib.recording_of(track).expect("the track is a recording");
+        let ours = lib.covers(Focus::Recording(recording));
+        assert_eq!(ours, vec![recording], "a recording covers itself");
+        assert_eq!(
+            Listing::covers(&remote, Focus::Recording(recording)),
+            ours,
+            "the two disagree about what a recording stands for"
+        );
+        // And a focus the library has nothing for answers nothing, rather than the socket
+        // answering nothing and looking the same.
+        let nobody = Focus::Artist(gmuse::model::id::Id::derived(b"nobody"));
+        assert!(lib.covers(nobody).is_empty());
+        assert!(Listing::covers(&remote, nobody).is_empty());
+    }
 }
 
 /// **An attached view draws the library it does not hold** — #261.

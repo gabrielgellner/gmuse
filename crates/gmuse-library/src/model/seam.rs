@@ -1230,6 +1230,80 @@ impl Librarian {
             .collect()
     }
 
+    /// **The recordings a focus stands for** — the grain a crate holds, and so the
+    /// grain a page is edited at.
+    ///
+    /// A crate entry is a recording (`CollectionEntryAdded`), so filing an artist means
+    /// filing each recording of theirs, and the artist's page has to say which crates
+    /// hold *how many* of them rather than drawing a tick. This is the list both
+    /// questions are asked of.
+    ///
+    /// An artist covers what is credited to them at any grain — a recording, or every
+    /// recording on a release group or release credited to them — so a compilation
+    /// track credited to the artist is theirs even though the tree files it under
+    /// *Various Artists*. A concept covers nothing: a genre is asserted *of* rows and
+    /// does not contain them, and a crate edit on one would be a query result
+    /// mistaken for a thing.
+    pub fn covers(&self, focus: crate::model::focus::Focus) -> Vec<Id<Recording>> {
+        use crate::model::focus::Focus;
+        let mut out: Vec<Id<Recording>> = match focus {
+            Focus::Recording(r) => vec![r],
+            Focus::Encoding(e) => self
+                .encodings
+                .encodings
+                .get(&e)
+                .and_then(|enc| enc.recording.as_ref())
+                .map(|r| r.id())
+                .into_iter()
+                .collect(),
+            Focus::Release(rel) => self
+                .spine
+                .tracks
+                .values()
+                .filter(|t| {
+                    self.spine
+                        .media
+                        .get(&t.medium.id())
+                        .is_some_and(|m| m.release.id() == rel)
+                })
+                .map(|t| t.recording.id())
+                .collect(),
+            Focus::ReleaseGroup(g) => self
+                .spine
+                .releases
+                .values()
+                .filter(|r| r.group.id() == g)
+                .flat_map(|r| self.covers(Focus::Release(r.id)))
+                .collect(),
+            Focus::Work(w) => self
+                .spine
+                .recordings
+                .values()
+                .filter(|r| r.work.as_ref().is_some_and(|it| it.id() == w))
+                .map(|r| r.id)
+                .collect(),
+            Focus::Artist(a) => self
+                .reference
+                .credits
+                .iter()
+                .filter(|c| c.artist.id() == a)
+                .flat_map(|c| match c.subject {
+                    CreditOn::Recording(r) => vec![r],
+                    CreditOn::ReleaseGroup(g) => self.covers(Focus::ReleaseGroup(g)),
+                    CreditOn::Release(rel) => self.covers(Focus::Release(rel)),
+                    CreditOn::Work(w) => self.covers(Focus::Work(w)),
+                })
+                .collect(),
+            Focus::Collection(c) => crate::model::rows::Listing::entries_of(self, c),
+            Focus::Concept(_) => Vec::new(),
+        };
+        // **Distinct, in first-seen order.** A recording credited on both the record and
+        // the track is one recording, and the count on a page is a count of those.
+        let mut seen = BTreeSet::new();
+        out.retain(|r| seen.insert(*r));
+        out
+    }
+
     /// The collections holding this recording.
     pub fn crates_holding(&self, recording: Id<Recording>) -> Vec<Id<Collection>> {
         let mut out: Vec<_> = self
@@ -1875,6 +1949,10 @@ impl crate::model::rows::Listing for Librarian {
 
     fn find(&self, of: crate::model::about::Kind, name: &str) -> crate::model::about::Found {
         crate::model::about::find(self, of, name)
+    }
+
+    fn covers(&self, focus: crate::model::focus::Focus) -> Vec<Id<Recording>> {
+        Librarian::covers(self, focus)
     }
 
     fn label_of(&self, focus: crate::model::focus::Focus) -> String {

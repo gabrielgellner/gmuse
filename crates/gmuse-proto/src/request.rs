@@ -234,6 +234,10 @@ pub enum Request {
     QueryEntries {
         collection: String,
     },
+    /// **The recordings a focus stands for** — what filing from a page writes one fact per.
+    QueryCovers {
+        focus: serde_json::Value,
+    },
     /// **What the library has heard** — #261.
     ///
     /// The whole of it in one reply: plays, ratings, when things were acquired and last played,
@@ -570,6 +574,7 @@ pub mod method {
     pub const QUERY_NAME: &str = "query.name";
     pub const QUERY_PLACES: &str = "query.places";
     pub const QUERY_ENTRIES: &str = "query.entries";
+    pub const QUERY_COVERS: &str = "query.covers";
     pub const QUERY_LISTENED: &str = "query.listened";
     pub const QUEUE_GET: &str = "queue.get";
     pub const QUEUE_ENQUEUE: &str = "queue.enqueue";
@@ -618,6 +623,7 @@ pub mod method {
         QUERY_NAME,
         QUERY_PLACES,
         QUERY_ENTRIES,
+        QUERY_COVERS,
         QUERY_LISTENED,
         QUEUE_GET,
         QUEUE_ENQUEUE,
@@ -925,6 +931,14 @@ impl Request {
                     collection: p.collection,
                 })
             }
+            method::QUERY_COVERS => {
+                #[derive(Deserialize)]
+                struct P {
+                    focus: serde_json::Value,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryCovers { focus: p.focus })
+            }
             method::QUERY_LISTENED => Ok(Self::QueryListened),
             method::QUEUE_GET => {
                 #[derive(Deserialize)]
@@ -1046,6 +1060,7 @@ impl Request {
             Self::QueryName { .. } => method::QUERY_NAME,
             Self::QueryPlaces { .. } => method::QUERY_PLACES,
             Self::QueryEntries { .. } => method::QUERY_ENTRIES,
+            Self::QueryCovers { .. } => method::QUERY_COVERS,
             Self::QueryListened => method::QUERY_LISTENED,
             Self::QueueGet { .. } => method::QUEUE_GET,
             Self::QueueEnqueue { .. } => method::QUEUE_ENQUEUE,
@@ -1098,7 +1113,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 38, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 39, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

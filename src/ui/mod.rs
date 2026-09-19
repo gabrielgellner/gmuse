@@ -813,6 +813,7 @@ impl Ui {
         crate::cmd::complete::World {
             // Completion over saved views, which is what `saved="…"` takes.
             catalogs: saved_views(self).into_iter().map(|(n, _)| n).collect(),
+            crates: crates(self).into_iter().map(|(n, _)| n).collect(),
             playlists: known_playlists(self),
             bound: bind::sorted(&self.bindings)
                 .into_iter()
@@ -2574,6 +2575,28 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
             out.sort_by(|a, b| a.label.cmp(&b.label));
             out
         }
+        Source::Crates => {
+            let known = crates(ui);
+            let mut out: Vec<Candidate> = known
+                .iter()
+                .map(|(name, n)| Candidate {
+                    label: name.clone(),
+                    detail: format!("crate · {n}"),
+                    chosen: Chosen::File(name.clone()),
+                })
+                .collect();
+            // **A name nobody has used is a crate to make.** Offered last so the fuzzy
+            // ranking above it still finds the one you meant when you typed half of it.
+            let typed = needle.trim();
+            if !typed.is_empty() && !known.iter().any(|(name, _)| name == typed) {
+                out.push(Candidate {
+                    label: typed.to_string(),
+                    detail: "new crate".into(),
+                    chosen: Chosen::File(typed.to_string()),
+                });
+            }
+            out
+        }
     };
 
     let shown = crate::ui::picker::rank(candidates, &needle);
@@ -2665,6 +2688,9 @@ fn choose_from_picker(ui: &mut Ui, ctx: &Context<'_>) {
             ui.info_sel = 0;
             switch_view(ui, View::Info);
         }
+        // The view under the picker is still the one the crate was offered for, so the
+        // subjects are read now rather than carried.
+        Chosen::File(name) => file_into(ui, ctx, &name),
     }
 }
 
@@ -3097,6 +3123,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             crate::cmd::PlaylistSpec::List => list_playlists(ui),
         },
         Command::Collect(name) => collect(ui, ctx, &name),
+        Command::File(name) => match name {
+            Some(name) => file_into(ui, ctx, &name),
+            None => offer_crates(ui, ctx),
+        },
         Command::Find(source) => open_picker(ui, ctx, source),
         // **The other pane starts on something else**, because a split
         // showing the same list twice is what `g<Tab>` already gives you and
@@ -3686,6 +3716,32 @@ fn refresh_playlist_rows(ui: &mut Ui) {
 /// where the parent has a member *set*. So this is not a separate store to
 /// keep in step with anything — it is a question asked of the one the library
 /// already holds.
+/// The crates — the unordered collections — by name, with how many each holds.
+///
+/// The other half of [`saved_lists`], which is the ordered ones. Same source, and a
+/// collection holding one recording twice holds one.
+fn crates(ui: &Ui) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = ui
+        .listened
+        .collections
+        .iter()
+        .filter(|(_, c)| !c.ordered)
+        .map(|(id, c)| {
+            let n = ui
+                .listened
+                .entries
+                .iter()
+                .filter(|(coll, _, _)| coll == id)
+                .map(|(_, _, r)| *r)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            (c.name.clone(), n)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 fn saved_lists(ui: &Ui) -> Vec<(String, usize)> {
     let mut out: Vec<(String, usize)> = ui
         .listened
@@ -4067,6 +4123,9 @@ fn remove_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
             }
             ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
         }
+        // **The panel: `dd` on a "filed in" row unfiles what the page stands for.** The
+        // page is not a list, so nothing lands in the register; `a` is the way back.
+        View::Info => unfile_at_cursor(ui, ctx),
         View::Tree if ui.composed.is_empty() => ui.notify(
             "the library is a projection — `:view in=\"…\"` first, then `dd` takes out of it",
         ),
@@ -4599,6 +4658,193 @@ fn freeze_open_rule(ui: &mut Ui, ctx: &Context<'_>, name: &str, rule: &str) {
     let said = format!("froze {rule} as {name} — {filed} tracks, from {source}");
     ui.audit.line("freeze", &said);
     ui.notify(said);
+    ui.stop = Some(Stop::Refold);
+}
+
+/// **What is here, as recordings** — the grain a crate holds.
+///
+/// In the panel it is what the page stands for: one recording, or every recording an
+/// artist or a record covers, asked of the library so an attached view gets the same
+/// answer (`Listing::covers`). In a list it is the rows under the cursor, and in the
+/// grouped tree the node — the same rule `a` and `e` read it by.
+///
+/// The word says what it was, for the confirmation: "filed Aphex Twin in Dance" is what
+/// a person did; "filed 40 in Dance" is what the library recorded, and both are said.
+fn subjects_here(ui: &Ui, ctx: &Context<'_>) -> Result<(Vec<Id<Recording>>, String), String> {
+    if ui.view == View::Info {
+        let Some(focus) = ui.focus.last().copied() else {
+            return Err("nothing in focus".to_string());
+        };
+        let covered = crate::model::rows::Listing::covers(ctx.library, focus);
+        if covered.is_empty() {
+            return Err(format!(
+                "a {} stands for no recording — nothing to file",
+                focus.kind()
+            ));
+        }
+        let name = crate::model::rows::Listing::label_of(ctx.library, focus);
+        return Ok((covered, name));
+    }
+    let ids: Vec<CopyId> = match ui.view {
+        View::Tree if !ui.levels.is_flat() => ui.tree.tracks_for(&ui.library),
+        _ => rows_at_cursor(ui, 1),
+    };
+    let songs = recordings_of(ctx, &ids);
+    if songs.is_empty() {
+        return Err("nothing under the cursor to file".to_string());
+    }
+    let what = match songs.len() {
+        1 => "1 recording".to_string(),
+        n => format!("{n} recordings"),
+    };
+    Ok((songs, what))
+}
+
+/// `:file <name>` — file what is here into a crate, making the crate if it is new.
+///
+/// **A membership claim, not a positioning one**, so every entry takes the first key,
+/// the same as `:collect` for a set and `p` into `in=`. Idempotent by construction:
+/// entries are row existence, so filing an artist twice files nothing the second time.
+fn file_into(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+    use crate::model::entity::Collection;
+    use crate::model::ord::OrdKey;
+
+    let name = name.trim();
+    if name.is_empty() {
+        ui.notify("a crate needs a name");
+        return;
+    }
+    if ui.data_dir.is_none() {
+        ui.notify("filing needs somewhere to record it");
+        return;
+    }
+    let (songs, what) = match subjects_here(ui, ctx) {
+        Ok(found) => found,
+        Err(why) => {
+            ui.notify(why);
+            return;
+        }
+    };
+    // **A playlist is not a crate.** Filing into an ordered collection would give every
+    // entry the same key and invent a running order out of nothing; `:playlist open` and
+    // `a` are how a track joins one.
+    if saved_lists(ui).iter().any(|(n, _)| n == name) {
+        ui.notify(format!(
+            "{name} is a playlist — `:playlist open {name}` and `a` add to it"
+        ));
+        return;
+    }
+    let id = Id::<Collection>::of_name(name);
+    let is_new = !crates(ui).iter().any(|(n, _)| n == name);
+    let count = songs.len();
+    let named = name.to_string();
+    let now = crate::history::now_ms();
+    record(ui, now, move |log| {
+        if is_new {
+            log.name_collection(now, id, &named, false);
+        }
+        for song in &songs {
+            log.add_to_collection(now, id, *song, OrdKey::first());
+        }
+    });
+    ui.notify(format!(
+        "filed {what} in {name}{} ({count} recording{})",
+        if is_new { " — new crate" } else { "" },
+        if count == 1 { "" } else { "s" }
+    ));
+    ui.stop = Some(Stop::Refold);
+}
+
+/// **`a` in the panel, and `:file` with no name: pick a crate.**
+///
+/// The picker lists the crates with how much each holds, and a name that matches none
+/// is offered as a new crate — so making one is typing its name, not a separate verb.
+fn offer_crates(ui: &mut Ui, ctx: &Context<'_>) {
+    // Said now rather than after a pick: a picker over nothing to file is a control that
+    // opens, closes and does nothing.
+    if let Err(why) = subjects_here(ui, ctx) {
+        ui.notify(why);
+        return;
+    }
+    ui.picker = Some(crate::ui::picker::Picker::new(
+        crate::ui::picker::Source::Crates,
+    ));
+    refresh_picker(ui, ctx);
+}
+
+/// `dd` in the panel: take what the page stands for out of the crate under the cursor.
+///
+/// Only a "filed in" row is a filing. A claim row is a different kind of fact with a
+/// different retraction (`dd` in a `genre=` view rules one out), and a link to a record
+/// or an artist is not something the page's subject is *in* — so those say what the row
+/// is rather than doing nothing.
+fn unfile_at_cursor(ui: &mut Ui, ctx: &Context<'_>) {
+    use crate::model::entity::Collection;
+    use crate::model::focus::Focus;
+
+    let Some(about) = info_about(ui, ctx) else {
+        ui.notify("nothing in focus");
+        return;
+    };
+    let lines = info_lines(ui, &about);
+    let crate_id: Option<Id<Collection>> = match lines.get(ui.info_sel) {
+        Some(InfoLine::Row(crate::model::about::Row::Link {
+            to: Focus::Collection(c),
+            ..
+        })) => Some(*c),
+        Some(InfoLine::Row(crate::model::about::Row::Claim { .. })) => {
+            ui.notify("that is a claim, not a filing — `dd` in a `genre=` view rules one out");
+            return;
+        }
+        Some(InfoLine::Header { .. }) => {
+            ui.notify("`dd` on a row, not a heading");
+            return;
+        }
+        _ => {
+            ui.notify("only a `filed in` row can be removed here");
+            return;
+        }
+    };
+    let Some(crate_id) = crate_id else { return };
+    let (songs, what) = match subjects_here(ui, ctx) {
+        Ok(found) => found,
+        Err(why) => {
+            ui.notify(why);
+            return;
+        }
+    };
+    let crate_name =
+        crate::model::rows::Listing::label_of(ctx.library, Focus::Collection(crate_id));
+    // **The entries as the crate holds them** — the key each has, not the key a fresh one
+    // would get; the folder-pass seeds are not all at `OrdKey::first()`.
+    let held: Vec<(Id<Recording>, crate::model::ord::OrdKey)> = ui
+        .listened
+        .entries
+        .iter()
+        .filter(|(c, _, r)| *c == crate_id && songs.contains(r))
+        .map(|(_, ord, r)| (*r, ord.clone()))
+        .collect();
+    if held.is_empty() {
+        ui.notify(format!("{what} is not in {crate_name}"));
+        return;
+    }
+    let count = held
+        .iter()
+        .map(|(r, _)| *r)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let now = crate::history::now_ms();
+    record(ui, now, move |log| {
+        for (song, ord) in &held {
+            log.remove_from_collection(now, crate_id, *song, ord.clone());
+        }
+    });
+    ui.notify(format!(
+        "took {what} out of {crate_name} ({count} recording{})",
+        if count == 1 { "" } else { "s" }
+    ));
+    // The row is gone from the page once the fold says so; the cursor stays put and
+    // lands on whatever is drawn there next.
     ui.stop = Some(Stop::Refold);
 }
 
@@ -13280,6 +13526,285 @@ mod tests {
         assert!(ui.status.contains("has no page"), "{}", ui.status);
     }
 
+    /// Put the tree's cursor on the artist node called `name`.
+    fn onto_artist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+        use crate::ui::tree::Row;
+        ui.view = View::Tree;
+        ui.levels = crate::shelf::Levels::default();
+        rebuild_library(ui, ctx);
+        press(ui, ctx, "g g");
+        for _ in 0..200 {
+            if matches!(ui.tree.here(&ui.library), Some(Row::Artist { display, .. }) if display == name)
+            {
+                return;
+            }
+            press(ui, ctx, "j");
+        }
+        panic!("no artist row called {name:?}");
+    }
+
+    /// The `filed in` rows on the open page: `(label, crate name)`.
+    fn filed_in(ui: &Ui, ctx: &Context<'_>) -> Vec<(String, String)> {
+        use crate::model::about::Row;
+        use crate::model::focus::Focus;
+        let about = info_about(ui, ctx).expect("a page");
+        about
+            .sections
+            .iter()
+            .filter(|s| s.title == "filed in")
+            .flat_map(|s| &s.rows)
+            .filter_map(|r| match r {
+                Row::Link {
+                    label,
+                    name,
+                    to: Focus::Collection(_),
+                } => Some((label.clone(), name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **An artist's page says which crates hold how many of their recordings.**
+    ///
+    /// One recording is in a crate or not; an artist is in one to the extent their
+    /// recordings are, and a tick would be a lie in either direction. The fraction is the
+    /// section, and the section is where filing an artist is seen.
+    #[test]
+    fn the_artist_page_says_which_crates_hold_how_many() {
+        let store = fixture();
+        let mut ui = ui_with_history(&store, "filed-fraction");
+        let ctx = ctx_of(&store);
+
+        // One of Paak's tracks into a crate, from the flat list.
+        flat_view(&mut ui);
+        let all = ui.library.sorted().to_vec();
+        let paak = all
+            .iter()
+            .position(|id| {
+                Listing::listed(ctx.library, *id)
+                    .is_some_and(|slip| slip.listed().file_under == "Anderson .Paak")
+            })
+            .expect("a Paak row");
+        set_cursor(&mut ui, paak);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "file Half");
+        assert!(
+            ui.status.contains("filed 1 recording in Half — new crate"),
+            "{}",
+            ui.status
+        );
+
+        let ctx = refolded(&store, &ui);
+        onto_artist(&mut ui, &ctx, "Anderson .Paak");
+        let of = ui.tree.tracks_for(&ui.library).len();
+        assert!(
+            of > 1,
+            "the instrument: Paak has one track, so no fraction can show"
+        );
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        let filed = filed_in(&ui, &ctx);
+        assert_eq!(
+            filed,
+            vec![(format!("1 of {of}"), "Half".to_string())],
+            "the page did not say how much of the artist is filed"
+        );
+    }
+
+    /// **`a` in the panel files what the page stands for into a picked crate**, and a name
+    /// nobody has used makes one.
+    #[test]
+    fn a_in_the_panel_files_the_page_into_a_picked_crate() {
+        let store = fixture();
+        let mut ui = ui_with_history(&store, "panel-file");
+        let ctx = ctx_of(&store);
+        onto_artist(&mut ui, &ctx, "Anderson .Paak");
+        let of = ui.tree.tracks_for(&ui.library).len();
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert!(filed_in(&ui, &ctx).is_empty(), "already filed somewhere");
+
+        press(&mut ui, &ctx, "a");
+        let picker = ui.picker.as_ref().expect("no picker opened");
+        assert!(picker.title().starts_with("file in"), "{}", picker.title());
+        // Nothing exists yet, so the typed name is the only candidate, and it is new.
+        type_line(&mut ui, &ctx, "Fresh");
+        assert!(ui.picker.is_none(), "the pick did not close the picker");
+        assert!(
+            ui.status
+                .contains("filed Anderson .Paak in Fresh — new crate")
+                && ui.status.contains(&format!("({of} recording")),
+            "{}",
+            ui.status
+        );
+
+        // The page shows it once the fold does — `main` refolds on `Stop::Refold` and
+        // `refresh_library` drops the page cache — and the crate holds the artist.
+        assert_eq!(ui.stop, Some(Stop::Refold), "nothing asked for a refold");
+        let ctx = refolded(&store, &ui);
+        refresh_library(&mut ui, &ctx);
+        assert_eq!(
+            filed_in(&ui, &ctx),
+            vec![(format!("{of} of {of}"), "Fresh".to_string())]
+        );
+        press(&mut ui, &ctx, "escape");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Fresh""#);
+        assert_eq!(ui.library.len(), of, "{}", ui.status);
+
+        // **And an existing crate is offered, not re-made.** The second pick names the
+        // same crate; the status says nothing about it being new.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+        onto_artist(&mut ui, &ctx, "Anderson .Paak");
+        press(&mut ui, &ctx, "K");
+        press(&mut ui, &ctx, "a");
+        let offered: Vec<String> = ui
+            .picker
+            .as_ref()
+            .expect("no picker")
+            .shown
+            .iter()
+            .map(|c| format!("{} · {}", c.label, c.detail))
+            .collect();
+        assert!(
+            offered
+                .iter()
+                .any(|o| o == &format!("Fresh · crate · {of}")),
+            "the crate was not offered with its count: {offered:?}"
+        );
+        type_line(&mut ui, &ctx, "Fresh");
+        assert!(!ui.status.contains("new crate"), "{}", ui.status);
+    }
+
+    /// **`dd` on a `filed in` row takes the page's subject out of that crate** — every
+    /// recording it covers, by the key each entry has.
+    #[test]
+    fn dd_on_a_filed_in_row_unfiles_the_page() {
+        let store = fixture();
+        let mut ui = ui_with_history(&store, "panel-unfile");
+        let ctx = ctx_of(&store);
+        onto_artist(&mut ui, &ctx, "Anderson .Paak");
+        let of = ui.tree.tracks_for(&ui.library).len();
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "file Box");
+        let ctx = refolded(&store, &ui);
+        onto_artist(&mut ui, &ctx, "Anderson .Paak");
+        press(&mut ui, &ctx, "K");
+        assert_eq!(
+            filed_in(&ui, &ctx).len(),
+            1,
+            "the instrument: nothing to unfile"
+        );
+
+        // Onto the filed-in row.
+        let about = info_about(&ui, &ctx).expect("a page");
+        let at = info_lines(&ui, &about)
+            .iter()
+            .position(|l| {
+                matches!(
+                    l,
+                    InfoLine::Row(crate::model::about::Row::Link {
+                        to: crate::model::focus::Focus::Collection(_),
+                        ..
+                    })
+                )
+            })
+            .expect("no filed-in row");
+        ui.info_sel = at;
+        press(&mut ui, &ctx, "d d");
+        assert!(
+            ui.status.contains("took Anderson .Paak out of Box")
+                && ui.status.contains(&format!("({of} recording")),
+            "{}",
+            ui.status
+        );
+
+        assert_eq!(ui.stop, Some(Stop::Refold), "nothing asked for a refold");
+        let ctx = refolded(&store, &ui);
+        refresh_library(&mut ui, &ctx);
+        assert!(
+            filed_in(&ui, &ctx).is_empty(),
+            "the page still shows the crate"
+        );
+        press(&mut ui, &ctx, "escape");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Box""#);
+        assert_eq!(
+            ui.library.len(),
+            0,
+            "the crate still holds the artist: {}",
+            ui.status
+        );
+    }
+
+    /// **Only a filing can be unfiled**, and the other rows say what they are.
+    #[test]
+    fn dd_in_the_panel_refuses_rows_that_are_not_filings() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_with_history(&store, "panel-dd-refuse");
+        flat_view(&mut ui);
+        press(&mut ui, &ctx, "K");
+        let about = info_about(&ui, &ctx).expect("a page");
+        let lines = info_lines(&ui, &about);
+
+        let header = lines
+            .iter()
+            .position(|l| matches!(l, InfoLine::Header { .. }))
+            .expect("a heading");
+        ui.info_sel = header;
+        press(&mut ui, &ctx, "d d");
+        assert!(ui.status.contains("not a heading"), "{}", ui.status);
+
+        let fact = lines
+            .iter()
+            .position(|l| matches!(l, InfoLine::Row(crate::model::about::Row::Fact { .. })))
+            .expect("a fact");
+        ui.info_sel = fact;
+        press(&mut ui, &ctx, "d d");
+        assert!(ui.status.contains("only a `filed in` row"), "{}", ui.status);
+    }
+
+    /// **`:file` from the tree files the node**, the same rows `a` and `e` read — and a
+    /// playlist is not a crate.
+    #[test]
+    fn file_from_the_tree_files_the_node_and_refuses_a_playlist() {
+        let store = fixture();
+        let mut ui = ui_with_history(&store, "tree-file");
+        let ctx = ctx_of(&store);
+        onto_artist(&mut ui, &ctx, "Anderson .Paak");
+        let of = ui.tree.tracks_for(&ui.library).len();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "file Tree");
+        assert!(
+            ui.status
+                .contains(&format!("filed {of} recordings in Tree — new crate")),
+            "{}",
+            ui.status
+        );
+        // **Written, not only said.** A status line naming a fact is the cheapest thing
+        // to get right; the crate holding the rows is the claim.
+        let ctx = refolded(&store, &ui);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view in="Tree""#);
+        assert_eq!(
+            ui.library.len(),
+            of,
+            "the crate does not hold the node: {}",
+            ui.status
+        );
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+
+        new_playlist(&mut ui, &ctx, "mix");
+        onto_artist(&mut ui, &ctx, "Anderson .Paak");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "file mix");
+        assert!(ui.status.contains("is a playlist"), "{}", ui.status);
+    }
+
     /// **Enter follows, `^o` comes back, and the trail says where you are** —
     /// #127. The step that makes it a browser rather than a page.
     #[test]
@@ -17517,6 +18042,12 @@ mod a_pane_asks_for_a_screenful {
         }
         fn find(&self, of: crate::model::about::Kind, name: &str) -> crate::model::about::Found {
             self.inner.find(of, name)
+        }
+        fn covers(
+            &self,
+            focus: crate::model::focus::Focus,
+        ) -> Vec<crate::model::id::Id<crate::model::entity::Recording>> {
+            self.inner.covers(focus)
         }
         fn label_of(&self, focus: crate::model::focus::Focus) -> String {
             self.inner.label_of(focus)

@@ -441,6 +441,14 @@ pub trait Listing {
     /// Resolve a name to a thing — #129.
     fn find(&self, of: crate::model::about::Kind, name: &str) -> crate::model::about::Found;
 
+    /// **The recordings a focus stands for** — the grain a crate edit is made at.
+    ///
+    /// `Librarian::covers` says what each kind covers. Here so an attached view can ask
+    /// it too: the panel's "filed in" section fans an artist out to their recordings, and
+    /// filing or unfiling from that page writes one fact per recording.
+    fn covers(&self, focus: crate::model::focus::Focus)
+    -> Vec<Id<crate::model::entity::Recording>>;
+
     /// What to call one thing, without building the page about it — #128.
     ///
     /// Its own question because a breadcrumb wants five names and no pages,

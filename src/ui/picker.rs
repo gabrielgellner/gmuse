@@ -52,6 +52,11 @@ pub enum Source {
     /// `:info artist="Bodzin"` matches four things and will not choose
     /// between them, and choosing between things is what a picker is.
     Among(&'static str),
+    /// **A crate to file into** — `a` in the info panel, `:file` with no name.
+    ///
+    /// The unordered collections with how much each holds, plus the name typed as a new
+    /// crate when it matches none: making a crate is typing its name, not a second verb.
+    Crates,
 }
 
 /// What one row of the picker is, once chosen.
@@ -69,6 +74,9 @@ pub enum Chosen {
     /// force `Focus` to grow a variant nothing could describe. The picker
     /// learns to hand back a focus without becoming one.
     Look(crate::model::focus::Focus),
+    /// **File what is here into this crate** — by name, because a crate that does not
+    /// exist yet has no id until the fact that names it is written.
+    File(String),
 }
 
 /// One candidate: what it looks like, what it is, and what to say about it.
@@ -136,7 +144,7 @@ impl Picker {
     /// these are not rows, and reading part of the input as a filter would
     /// silently drop it.
     pub fn all_needle(&self) -> bool {
-        matches!(self.source, Source::Among(_))
+        matches!(self.source, Source::Among(_) | Source::Crates)
     }
 
     /// What the title says it is doing.
@@ -148,6 +156,7 @@ impl Picker {
             Source::Tracks => "tracks",
             Source::Groups => "groups",
             Source::Among(kind) => kind,
+            Source::Crates => "file in",
         };
         let mut parts = vec![what.to_string()];
         if let Some(bad) = &self.bad_predicate {

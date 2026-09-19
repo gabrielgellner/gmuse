@@ -293,6 +293,11 @@ pub const DEFAULTS: &[&str] = &[
     // an artist can be arrived at from a recording, a release group or a
     // concept, and there is no parent to climb to. `h` would promise one.
     "bind info ^o back",
+    // **`a` files, because the panel is where filing is seen.** `a` is `add-playlist`
+    // everywhere else and a page has no rows to add, so the key was dead here; filing
+    // what the page stands for is the one "add" a page has. `dd` on a `filed in` row is
+    // the other half, through `remove`, which the panel answers for itself.
+    "bind info a file",
 ];
 
 /// Build the default table.

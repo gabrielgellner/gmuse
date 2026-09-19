@@ -345,16 +345,40 @@ fn recording(l: &Librarian, id: Id<Recording>, about: &mut About) {
     }
     about.sections.push(section("history", history));
 
-    let crates = l
-        .crates_holding(id)
+    about.sections.push(filed_in(l, &[id]));
+}
+
+/// **Which crates hold what a page stands for, and how much of it.**
+///
+/// One recording is *in* a crate or not. An artist is in a crate to the extent their
+/// recordings are — `12 of 40` — and a tick would be a lie in either direction. The
+/// fraction is the label because it is what the eye compares down the column, and it
+/// is the whole reason a container's page has this section at all: it is where filing
+/// an artist happens, and a person filing has to see what is already filed.
+///
+/// Every collection, ordered ones too: a track on a playlist is filed there in the sense
+/// this section answers, and hiding it would make `!collected?` and this page disagree.
+fn filed_in(l: &Librarian, subjects: &[Id<Recording>]) -> Section {
+    let mut held: std::collections::BTreeMap<Id<Collection>, usize> = Default::default();
+    for recording in subjects {
+        for c in l.crates_holding(*recording) {
+            *held.entry(c).or_default() += 1;
+        }
+    }
+    let of = subjects.len();
+    let rows = held
         .into_iter()
-        .map(|c| Row::Link {
-            label: "in".into(),
+        .map(|(c, n)| Row::Link {
+            label: if of == 1 {
+                "in".into()
+            } else {
+                format!("{n} of {of}")
+            },
             name: label_of(l, Focus::Collection(c)),
             to: Focus::Collection(c),
         })
         .collect();
-    about.sections.push(section("filed in", crates));
+    section("filed in", rows)
 }
 
 /// Every claim on every axis, retracted ones included and marked.
@@ -468,6 +492,9 @@ fn release_group(l: &Librarian, id: Id<crate::model::entity::ReleaseGroup>, abou
         })
         .collect();
     about.sections.push(section("editions", releases));
+    about
+        .sections
+        .push(filed_in(l, &l.covers(Focus::ReleaseGroup(id))));
 }
 
 fn release(l: &Librarian, id: Id<crate::model::entity::Release>, about: &mut About) {
@@ -510,6 +537,9 @@ fn artist(l: &Librarian, id: Id<crate::model::entity::Artist>, about: &mut About
             query: format!("artist={}", quoted(&name)),
         }],
     ));
+    about
+        .sections
+        .push(filed_in(l, &l.covers(Focus::Artist(id))));
 }
 
 fn concept(l: &Librarian, id: Id<Concept>, about: &mut About) {

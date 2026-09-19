@@ -3,6 +3,8 @@
     K          look up the row under the cursor
     :info      the same thing, typed
     enter      follow the link under the cursor
+    a          file what the page is about into a crate
+    dd         take it out of the crate under the cursor
     ^o         back
     escape     leave the panel
 
@@ -69,9 +71,27 @@ That is the whole reason this panel exists. The tags in your files are a seriali
 | where it sits | the release, the group, the track number               |
 | copies        | every file holding it, here or on another machine      |
 | history       | plays and rating                                       |
-| filed in      | the crates it is in                                    |
+| filed in      | the crates it is in — and the one section you can edit |
 
 A section with nothing in it is not drawn. Empty headings would say the library knows less than it does.
+
+## Filing from the page
+
+The panel shows claims and who made them, and it does not let you edit them — except the one claim that is only ever
+yours: which crate a thing is in.
+
+    a              pick a crate; a name nobody has used makes one
+    dd             on a `filed in` row, take it out
+    :file Dance    the same, by name, from here or from any list
+
+On a recording, `filed in` says which crates hold it. On an artist or a record it says **how much** of them is filed —
+`12 of 40` — because a crate holds recordings and an artist is in one only to the extent their recordings are. `a` on
+the artist's page files every recording they cover; `dd` on a row takes every one of them out. The status line says both
+what you did and what was written: _filed Aphex Twin in Dance (40 recordings)_.
+
+The other rows say what they are rather than doing nothing. A claim is not a filing — ruling a genre out is `dd` in a
+`genre=` view, where the fact it retracts is the one in front of you. A link to a record is where the thing sits, not
+something it is in.
 
 ## Which copies matter
 

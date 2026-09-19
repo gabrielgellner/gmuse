@@ -51,6 +51,7 @@ pub const VERBS: &[&str] = &[
     "clear-queue",
     "collect",
     "down",
+    "file",
     "edit",
     "export",
     "find",
@@ -356,6 +357,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             }
             Command::Collect(rest.to_string())
         }
+        "file" => Command::File((!rest.is_empty()).then(|| rest.to_string())),
         "freeze" => {
             if rest.is_empty() {
                 return Err(ParseError::Missing {
@@ -954,6 +956,10 @@ pub fn format(cmd: &Command) -> String {
             PlaylistSpec::New(n) => format!("playlist new {n}"),
         },
         Command::Collect(name) => format!("collect {name}"),
+        Command::File(name) => match name {
+            Some(name) => format!("file {name}"),
+            None => "file".into(),
+        },
         Command::Export(path) => format!("export {path}"),
         Command::Split(crate::ui::Axis::Horizontal) => "split".into(),
         Command::Split(crate::ui::Axis::Vertical) => "vsplit".into(),
@@ -966,6 +972,8 @@ pub fn format(cmd: &Command) -> String {
             // `:info` finding several, so there is no line that produces one
             // and nothing for this to write back.
             crate::ui::picker::Source::Among(_) => "find".into(),
+            // Opened by `:file` with no name, which is the line that writes it back.
+            crate::ui::picker::Source::Crates => "file".into(),
         },
         Command::Freeze(name) => format!("freeze {name}"),
         // Round-trips through `command`, which is what `:bind` shown in the

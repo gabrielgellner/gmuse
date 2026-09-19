@@ -191,8 +191,11 @@ precedent for a content view with its own navigation. Anyone who wants the list 
 
 ## 4. What it is not
 
-- **Not an editor.** #96 decided how a view is edited and by what authority; nothing here writes. A later issue may put
-  `:add-view`'s affordance on a claim, and it will go through the same authorship rules or not at all.
+- **Not an editor — with one exception, built.** #96 decided how a view is edited and by what authority. The panel
+  writes exactly one kind of fact: crate membership, from the `filed in` section (`a` files, `dd` unfiles — Decision
+  Log, 2026-09-19). It is the one claim that is only ever a person's, so the authorship rules pass it without a
+  question; every other row says what it is rather than offering a control. A claim's affordance, if it ever comes, goes
+  through the same rules or not at all.
 - **Not a tag viewer.** It shows what the _library_ says. What the file's tags say is a different question with a
   different answer, and conflating them is the mistake `library-is-the-truth` is about. If the tags become worth
   showing, they are their own section, labelled as the serialization they are.

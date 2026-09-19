@@ -3611,6 +3611,11 @@ fn run_engine(
                     let collection = collection.parse().map_err(|_| bad("collection"))?;
                     serde_json::json!({ "entries": lib.entries_of(collection) })
                 }
+                Request::QueryCovers { focus } => {
+                    let focus = serde_json::from_value(focus)
+                        .map_err(|e| RpcError::invalid_params("focus", e.to_string()))?;
+                    serde_json::json!({ "recordings": lib.covers(focus) })
+                }
                 other => {
                     return Err(RpcError::new(
                         gmuse_proto::error::code::METHOD_NOT_FOUND,
@@ -4172,6 +4177,7 @@ fn run_engine(
                 | Call::QueryName { .. }
                 | Call::QueryPlaces { .. }
                 | Call::QueryEntries { .. }
+                | Call::QueryCovers { .. }
                 | Call::QueryListened) => self.reading(read),
 
                 // **A page, anchored where playback is** — #257.

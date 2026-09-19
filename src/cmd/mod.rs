@@ -832,6 +832,14 @@ pub enum Command {
     /// had callers only in tests, so the Dance collection had to be seeded by
     /// a tool pass reading a folder.
     Collect(String),
+    /// `:file [name]` — file what is here into a crate, or pick one to file it into.
+    ///
+    /// **The per-thing write, beside `:collect`'s per-view one.** `:collect` files a whole
+    /// composed view; this files what the cursor is on — the rows under it in a list, or
+    /// what the page stands for in the info panel, where an artist fans out to their
+    /// recordings. With no name it opens the crate picker, which is what `a` in the panel
+    /// runs.
+    File(Option<String>),
     /// `:export <path>` — write what view 3 holds as an `.m3u8`.
     ///
     /// **The only thing m3u is for** (#118). It was the playlist's storage,

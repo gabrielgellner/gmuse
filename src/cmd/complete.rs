@@ -16,6 +16,8 @@ use super::{Context, Fold, Motion, Place, SettingKey, parse};
 #[derive(Debug, Default, Clone)]
 pub struct World {
     pub catalogs: Vec<String>,
+    /// Every crate — the unordered collections — for `:file <Tab>`.
+    pub crates: Vec<String>,
     /// Every name `:playlist open` accepts — rules and saved files alike,
     /// because they are one vocabulary (#15, #22).
     pub playlists: Vec<String>,
@@ -122,6 +124,9 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
         "playlist" if words.len() == 2 && matches!(words[1], "open" | "save") => {
             world.playlists.clone()
         }
+
+        // A crate to file into. A new name is typed rather than offered.
+        "file" => world.crates.clone(),
 
         // Catalogs accept a list, so they keep completing.
         "catalog" | "cat" => {
@@ -264,6 +269,7 @@ mod tests {
     fn world() -> World {
         World {
             catalogs: vec!["general".into(), "dance".into()],
+            crates: vec!["Dance".into(), "General".into()],
             playlists: vec!["fresh".into(), "neglected".into()],
             bound: vec![
                 (Context::Common, "j".into()),
