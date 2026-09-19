@@ -252,6 +252,14 @@ bench-write:
 memory:
     cargo run --release --features measure-memory -- engine --null-audio
 
+# What the running processes cost at rest: CPU over a 20s window and physical footprint
+# (#255). Needs a running engine — and a view, or a playing track, if that is the
+# shape being measured. `ps` RSS is deliberately not printed: it double-counts the
+# dyld shared cache and follows the peak, which is how #255 opened at "1.1 GB".
+[group('test')]
+at-rest secs="20":
+    tools/at_rest.sh {{secs}}
+
 # What a query costs, and what the locator costs it (#261). Needs the real library.
 [group('test')]
 query-cost data="~/MusicLibrary/.gmuse":

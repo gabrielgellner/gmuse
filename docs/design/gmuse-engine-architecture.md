@@ -223,11 +223,21 @@ There is a single `gmuse` binary, following the tmux model:
 This superseded `--remote <CMD>`, a second ad-hoc IPC mechanism over the same socket-shaped problem, which was removed
 in #243.
 
-**`--attach` is opt-in** (#219). Attached, playback is entirely the engine's: a view loads by recording, learns what is
-playing from the `playback` topic, and going away does not stop it.
+**Attaching is the default** (#233; it was opt-in under #219). Attached, playback is entirely the engine's: a view loads
+by recording, learns what is playing from the `playback` topic, and going away does not stop it.
+
+**What the second process costs, measured** (#255, 2026-09-19, `just at-rest`). The fear was that attaching bought a
+daemon by doubling memory — two processes, two folds. It does not: an attached view reads the projection snapshot rather
+than folding the log (#261), and holds **14–22 MB** beside an engine at **161–215 MB**, against **207 MB** for
+`--no-attach` doing both jobs in one process. Idle CPU is 0.25% of a core apiece either way, and playing an MP3 through
+the FFT resampler the pair costs **1.2%** (engine 0.95, view 0.25) where the single process costs **1.45–1.5%**. So the
+split is ~20 MB and no CPU, and the single-process path is the one that runs warmer. Where the 0.25% idle floor goes — a
+50 ms control loop, an `Announcer` polling `desk.current()`, the view's tick — has not been attributed; it clears the
+§13 target with room, so it has not needed to be.
 
 An attached view cannot _append_, and that is a capability rather than a check. It holds a `Desk::read_only`, which
-folds the log — I15 permits that, and it is what keeps browsing off the socket — and has no `Appender`. The reason is
+reads the projection snapshot the engine leaves behind on every commit — and folds the log only when no snapshot exists
+yet (#261). I15 permits either, and it is what keeps browsing off the socket. It has no `Appender`. The reason is
 sharper than two writers racing: `durable::log_path` is one file per **device**, the device comes from `machine_id`, and
 `Stamp.device` exists so that "two devices cannot produce an equal stamp". Two processes on one machine would be two
 appenders claiming to be one device.

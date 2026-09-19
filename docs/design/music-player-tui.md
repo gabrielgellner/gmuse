@@ -6126,6 +6126,35 @@ Append here as decisions are made. Format: date, decision, rationale.
   is in. A retraction names the key each entry _has_, for the reason `remove_from_view` does. Nothing lands in the
   register — a page is not a list — and `a` is the way back.
 
+- **2026-09-19** **Two processes cost twenty megabytes and no CPU, and the single process is the warmer one** (#255,
+  closing it). The issue opened on "1.1 GB in `btop`" and asked two things nobody had measured: what the
+  engine-plus-view shape costs at rest against the 2026-08-27 target of ~1% of a core, which was only ever checked
+  single-process, and whether attaching doubled memory to buy a daemon. On the real library (7,285 rows, 87 MB log), M5
+  MacBook Air, 20 s windows, an MP3 at 44.1 k on a 48 k device:
+
+  | shape                      | cpu, idle     | cpu, playing             | footprint             |
+  | -------------------------- | ------------- | ------------------------ | --------------------- |
+  | engine alone               | 0.20–0.30%    | —                        | 192 MB (peak 221)     |
+  | engine + attached view     | 0.25% + 0.25% | **0.95% + 0.25% = 1.2%** | 161–215 MB + 14–22 MB |
+  | `--no-attach`, one process | 0.50%         | **1.45–1.50%**           | 207 MB (peak 248)     |
+
+  **The view is not a second fold.** `828a033` made it read the snapshot (#261) and this is the first time the shape was
+  measured as a whole: a view is 14–22 MB, so attaching costs ~20 MB, not the ~120 MB a fold would have. The doubling
+  #255 supposed never happened at the moment it was looked for; what `btop` showed was RSS, which counts the dyld shared
+  cache in every process and follows the peak. `ps` RSS is not printed by anything here any more.
+
+  **The playing pair is over the target by a fifth, and the single process by half.** 1.2% against ~1%, on the resampled
+  path — the 2026-08-27 table had "mp3, no resample" at 0.65% and "opus + FFT" at 0.55% in one process, so the engine's
+  0.95% is the same audio work on top of a 0.25% idle floor that did not exist then. That floor is the polling: a 50 ms
+  control loop, `Announcer` on `desk.current()`, the view's tick. It has not been attributed further because it clears
+  the target with room; it is the first thing to look at if that ever stops being true. Why `--no-attach` runs 0.3%
+  warmer than the pair while doing the same work is not known — the local player and its view share a process and a
+  tick, and that path is the one being retired — and it is noted rather than chased.
+
+  **The first sample of the day read 65%.** The window overlapped the startup scan and fold, which is what a `cputime`
+  delta is for: a lifetime average would have shown 3% and hidden it. `just at-rest` is that sampler — CPU over a window
+  and `footprint`, for every `gmuse` process it finds, and it refuses when it finds none.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
