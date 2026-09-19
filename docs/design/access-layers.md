@@ -314,8 +314,10 @@ per-fact application is a requirement and not an optimisation, and it has three 
 | **wide**    | `ArtistMerged`, `RecordingMerged`                     | touch every row crediting the loser — still incremental, just broader |
 | **rebuild** | a fact whose effect cannot be localised at all        | a full replay                                                         |
 
-**Settled, and only three facts are wide.** All 53 variants are classified by `Fact::blast()`, an exhaustive `match` —
-so a new fact does not compile until it has a tier.
+**Settled, and six facts are wide.** All variants are classified by `Fact::blast()`, an exhaustive `match` — so a new
+fact does not compile until it has a tier. Three are the merges. The other three — `ReleaseCatalogued`,
+`MediumCatalogued`, `TrackPlaced` — were narrow until #261 read the fold against the classification rather than the
+classification against its own doc; see **the shapes that reach backwards** below.
 
 The first pass classified eight as wide and **seven of those were wrong**, for one reason: they were being read against
 the _drawn rows_ rather than against the projection. `ArtistNamed` looked wide because every row showing that artist
@@ -351,6 +353,31 @@ Three tests hold it, and each was checked by breaking it: the rebuild tier is em
 compiler's exhaustiveness check stays meaningful and a future fact cannot be silently classified as the cheapest tier;
 and every variant is named rather than swallowed by a grouping, because the compiler proves the match is _exhaustive_
 and not that each variant was _considered_.
+
+**The shapes that reach backwards, audited** (#261 Goal 2, `projection::past`). Reading `fold` end to end against
+`blast()` found three ways a fact's effect is not a lookup, and the classification had named one:
+
+| shape                                  | facts                                                                  | what an incremental apply needs                                            |
+| -------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| a first pass, resolved through         | the three merges                                                       | wide — re-resolve what is already there                                    |
+| a pass **after** the loop, best-of-all | `EncodingPlaced`, `EncodingBound`, the two retitles                    | the **candidate set** the pass ranks over, which the catalogue drops today |
+| …and the facts that pass ranks _by_    | `ReleaseCatalogued`, `MediumCatalogued`, `TrackPlaced`                 | **wide** — a pressing arriving re-ranks placements it never names          |
+| last-writer-wins, by stamp             | `ratings`, `artist_names`, `claims`, the credit shadow, retire/restore | correct only in stamp order; the catalogue holds no stamp to notice        |
+
+The second row is Goal 3's "what does best-evidenced cost": on the real library it is 9,467 placements, 9,730 bindings
+and 33 retitles — **under a megabyte** to retain against the 83.5 MB of records it would let go of. So the projection
+keeps the candidates, and no fact goes to the rebuild tier for wanting them.
+
+The fourth row is the sync case. A `merge` brings another device's records with stamps below everything already folded,
+and applying them in arrival order gives the older record the last word. The log has one device today, so the rule costs
+nothing yet and is simple: **a record stamped below anything already folded is a rebuild.** Sync is rare and local
+appends are always newest, which is the case an incremental fold exists for.
+
+The net for all of it is `advancing_lands_where_rebuilding_would_whatever_the_order`: nine scenarios in arrival order,
+one per shape, checked batch by batch against a rebuild and against their own expectation. It was written while
+`advance ≡ rebuild` holds by construction, and broken two ways to see what each catches — an arrival-order apply fails
+all five slower-clock scenarios, a single watermark fails only the binding one, and **no other test in the suite sees
+either**.
 
 **If the third tier ever gains a member, it is named here as well as in the match.** A fact that quietly needs a rebuild
 is a stutter nobody can predict; a fact that is _documented_ to need one is a known cost a person can be told about.

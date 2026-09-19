@@ -6155,6 +6155,53 @@ Append here as decisions are made. Format: date, decision, rationale.
   delta is for: a lifetime average would have shown 3% and hidden it. `just at-rest` is that sampler — CPU over a window
   and `footprint`, for every `gmuse` process it finds, and it refuses when it finds none.
 
+- **2026-09-19** **What an incremental fold has to keep, what it has to refuse, and what it is worth** (#261, the
+  brief's five answers). `advance` refolds today, so `advance ≡ rebuild` holds by construction; this is the audit done
+  while that is still true, and the net written before the thing it catches.
+
+  **Goal 2 — three shapes reach backwards, and `blast()` had named one.** Reading `fold` end to end: the merges (a first
+  pass, resolved through — wide, and classified so); the facts resolved in a pass **after** the loop against every
+  candidate — `EncodingPlaced` ranks all placements a copy was ever given, `EncodingBound` is last-by-stamp over all
+  bindings with `conflicts` from the set, a retitle outranks a `RecordingCatalogued` whatever its stamp; and every
+  last-writer-wins map, correct only because the set is folded in stamp order. The one the classification got wrong: a
+  placement's rung is computed _from the release row_, so `ReleaseCatalogued`, `MediumCatalogued` and `TrackPlaced`
+  arriving after the placements that sit on them re-rank encodings they never name. The arm said a pressing "cannot
+  reach past the pressing it identifies"; `projection::past` has the scenario where it does, and **the three are wide
+  now** — six wide facts, not three. `every_fact_names_its_blast_radius` and its neighbours still hold.
+
+  **Goal 3 — best-evidenced costs under a megabyte.** The candidate sets the post-loop passes rank over, counted on the
+  real log: 9,467 placements, 9,730 bindings, 33 retitles. Against 83.5 MB of records that is nothing, so the projection
+  **retains the candidates** and no fact goes to the rebuild tier for wanting them. The alternative — classify those
+  facts as rebuild — was on the table and is not needed.
+
+  **The sync case has a rule, and it costs nothing yet.** A `merge` brings another device's records stamped below
+  everything folded; applied in arrival order the older record gets the last word, and the catalogue holds no stamp to
+  notice. The log has **one device**, so until Library sync (%2) lands this cannot happen. The rule: **a record stamped
+  below anything already folded is a rebuild.** Sync is rare; a local append is always newest, and that is the case an
+  incremental fold exists for.
+
+  **Goal 4 — the net.** `advancing_lands_where_rebuilding_would_whatever_the_order`: nine scenarios in _arrival_ order,
+  one per shape, checked batch by batch against a rebuild and against their own expected semantics. Its instrument check
+  has two shapes, because the scenarios do — an in-order batch must move the catalogue, a slower-clock batch must move
+  it _if applied as newest_. Broken two ways: an arrival-order `advance` fails all five slower-clock scenarios; a single
+  watermark that drops older records fails only the binding one, because a last-writer map gets the right answer by
+  accident when the loser is what was thrown away. **Every other projection test stayed green both times**, which is
+  what a net written after the fact would not have been able to say.
+
+  **Goal 5 — what it is worth, and to whom.** Not the view: an attached view is 14–22 MB since `828a033` and has no
+  records to lose. The engine: 118.5 MB live of which 83.5 is records, so ~80 MB; and a write at O(new) instead of the
+  46 ms refold on 110,500 records that every rating and every half-track play pays today. That is the whole of the case,
+  and it is enough — but the peak (162 MB) is set by the startup parse, which an incremental fold does not touch.
+
+  **Goal 1 — closed at reachability, and the rewrite is declined.** `Enquiries` already makes `programme` and `compact`
+  unreachable from a follower by the type. What remains — a view consuming `query.tree` nodes instead of holding a
+  `Shelf` and a `Librarian` — is a rewrite of the TUI's data model (196 sites) for 28.5 MB. Not worth it while the view
+  is 22 MB resident; reopen if that changes.
+
+  **The order for the fold itself, when it is built:** (1) the below-the-watermark rule, (2) the candidate sets into the
+  `Catalogue` behind a snapshot version bump, (3) narrow facts applied in place with the two post-loop rankings re-run
+  for the encoding touched, (4) wide facts rebuild. The net is the gate on each step.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

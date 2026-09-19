@@ -34,6 +34,10 @@
 //! recorded on Tuesday has to move a rating given on Monday. An incremental
 //! path is therefore a second implementation of those semantics, which is the
 //! real cost of it — and the equivalence test is what makes paying it safe.
+//!
+//! `past` is that test, and the audit behind it (#261): which facts reach
+//! backwards, in what shape, and what an incremental `advance` has to keep or
+//! refuse for each. Read it before writing the thing it is a net for.
 
 // **The model ahead of its callers**, which is this project's ordinary
 // sequence: #194 persists a projection and is the first thing that has to ask
@@ -45,6 +49,8 @@
 
 pub mod catalogue;
 pub mod heard;
+#[cfg(test)]
+mod past;
 
 use std::collections::{BTreeMap, BTreeSet};
 

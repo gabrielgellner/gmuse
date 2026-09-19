@@ -1531,7 +1531,6 @@ impl Fact {
             | Fact::EncodingPlaced { .. }
             | Fact::EncodingRetired { .. }
             | Fact::EncodingRestored { .. }
-            | Fact::TrackPlaced { .. }
             | Fact::WorkPerformed { .. } => Blast::Narrow,
 
             // **Two recordings, not one** — the encoding leaves `from` and
@@ -1554,9 +1553,7 @@ impl Fact {
             // superseded — an id derives from exactly one mbid — so it cannot
             // reach past the pressing it identifies.
             | Fact::ReleaseIdentified { .. }
-            | Fact::ReleaseGroupCatalogued { .. }
-            | Fact::ReleaseCatalogued { .. }
-            | Fact::MediumCatalogued { .. } => Blast::Narrow,
+            | Fact::ReleaseGroupCatalogued { .. } => Blast::Narrow,
 
             // **Narrow, and this pair is why the tiers had to be re-read.**
             //
@@ -1606,6 +1603,19 @@ impl Fact {
             Fact::RecordingMerged { .. }
             | Fact::ReleaseGroupMerged { .. }
             | Fact::ArtistMerged { .. } => Blast::Wide,
+
+            // **The spine, and these were narrow until the fold was read
+            // against them** — #261. A placement is ranked in a pass after
+            // the loop, and the rung is computed *from* the release row: a
+            // release minted from a MusicBrainz id outranks one minted from
+            // a name. So a pressing, a disc or a slot arriving after the
+            // placements that sit on it re-ranks every one of them — a set
+            // the fact does not name, which is what wide means. The arm above
+            // used to say a pressing "cannot reach past the pressing it
+            // identifies"; `projection::past` has the scenario where it does.
+            Fact::ReleaseCatalogued { .. }
+            | Fact::MediumCatalogued { .. }
+            | Fact::TrackPlaced { .. } => Blast::Wide,
 
             // **One entry.** `credits` is keyed by
             // `(subject, artist, role, source)`, so asserting a credit inserts
