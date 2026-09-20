@@ -112,6 +112,12 @@ the placement is the librarian's, because which entries a person queued is a fac
 and a view that edited its mirrored _page_ and sent it back as `queue.set` replaced the programme with the page. Neither
 is a queue anyone would use.
 
+**Every other edit names its entry the same way.** A page comes back with a token and a by-hand mark beside each entry;
+`queue.remove` takes tokens, a put is `queue.enqueue` at `next` after the token under the cursor, and `queue.clear` with
+`queued_only` forgets what was queued by hand and leaves the programme. A view that holds a page never sends the page
+back as the programme (#271). What a view cannot yet do is undo one of these — a snapshot of a page is not a snapshot of
+the programme — so `dd` leaves its rows in the register and `p` is the way back.
+
 **The anchor comes from the engine and the page from the librarian**, which is the triangle doing what §1 says: _where
 am I_ is a playback question and _what is the order_ is a library one. `playback.get` reports the entry so a client can
 anchor its own paging.
