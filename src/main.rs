@@ -4354,7 +4354,7 @@ fn run_engine(
                     Ok(serde_json::json!({ "accepted": true }))
                 }
 
-                Call::PlayerLoad { recording } => {
+                Call::PlayerLoad { recording, view } => {
                     let Ok(uuid) = recording.parse::<uuid::Uuid>() else {
                         return Err(RpcError::invalid_params(
                             "recording",
@@ -4362,8 +4362,31 @@ fn run_engine(
                         ));
                     };
                     let recording = gmuse::model::id::Id::from_uuid(uuid);
+                    // **The view, resolved here and handed down as rows.** The programme
+                    // is built by the librarian from what it is given, and what it was
+                    // given was the whole library — so a shuffle wandered out of the
+                    // view a person pressed play in. This is the one place that holds
+                    // both the parser and the fold, which is why the engine gets a set
+                    // and never the text (`layers.md`).
+                    let within = match view.as_deref().map(gmuse::view::Stack::parse) {
+                        None => None,
+                        Some(Err(e)) => {
+                            return Err(RpcError::invalid_params("view", e.to_string()));
+                        }
+                        Some(Ok(stack)) => {
+                            let answer = self.desk.current();
+                            let env = gmuse::query::filter::Env {
+                                listened: Some(&*answer.listened),
+                                named: None,
+                                now: gmuse::history::now(),
+                            };
+                            let (members, _, _) =
+                                stack.members(&answer.library, &*answer.listened, env);
+                            Some(std::sync::Arc::new(members))
+                        }
+                    };
                     self.control
-                        .ask(gmuse::engine::control::Ask::Load { recording });
+                        .ask(gmuse::engine::control::Ask::Load { recording, within });
                     // **Accepted, not played** — §7.4's acknowledgement
                     // semantics. Whether it sounded arrives as a `playback`
                     // event, and a load of something this device does not hold

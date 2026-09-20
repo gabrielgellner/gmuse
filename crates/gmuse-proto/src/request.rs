@@ -324,6 +324,9 @@ pub enum Request {
     /// deck exists.
     PlayerLoad {
         recording: String,
+        /// The view the play came from, in the same terms `query.tree` takes — so
+        /// what follows is drawn from what the person was looking at.
+        view: Option<String>,
     },
     /// **Play, pause and toggle, as three distinct verbs** — #225,
     /// `transport-keymap-spec.md` D-6 to D-8.
@@ -712,10 +715,13 @@ impl Request {
                 #[derive(Deserialize)]
                 struct Load {
                     recording: String,
+                    #[serde(default)]
+                    view: Option<String>,
                 }
                 let p: Load = typed(method, params)?;
                 Ok(Self::PlayerLoad {
                     recording: p.recording,
+                    view: p.view,
                 })
             }
             // **`format` is optional and absent is not empty.** A caller that wants

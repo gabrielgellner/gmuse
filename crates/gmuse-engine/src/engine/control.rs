@@ -55,7 +55,12 @@ pub enum Ask {
     /// Going the other way is what is forbidden: deriving a recording *from* a
     /// path means hashing the file's audio, which is a read this thread may not
     /// do. So a `playback` event names what was asked for, not what was found.
-    Load { recording: Id<Recording> },
+    Load {
+        recording: Id<Recording>,
+        /// The rows of the view the play came from, resolved by the socket handler; the
+        /// programme is built inside them. `None` is the whole library.
+        within: Option<std::sync::Arc<std::collections::HashSet<gmuse_ids::copy::CopyId>>>,
+    },
     /// **What is playing, as one answer** — #243, #248.
     ///
     /// Asked rather than derived from the event stream, because the events are
@@ -411,8 +416,8 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
             // doing nothing. It is loaded on the tick its answer arrives, so the `playback`
             // event follows the sound rather than the request — which is what §7.8 says an
             // event is for.
-            Ok(Ask::Load { recording }) => {
-                held.queue.start(recording);
+            Ok(Ask::Load { recording, within }) => {
+                held.queue.start(recording, within);
                 false
             }
             // **Answered from the same three sources the event is built from**, and

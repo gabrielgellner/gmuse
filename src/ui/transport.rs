@@ -50,6 +50,9 @@ pub struct Loading {
     /// plays locally through the `playable` fallback and cannot be named to the
     /// engine at all, which is what [`Accepted::NotNamed`] reports.
     pub recording: Option<Id<Recording>>,
+    /// The composed view the play came from, in the terms the engine's `query.tree`
+    /// takes — so what follows is drawn from it. `None` is the whole library.
+    pub view: Option<String>,
     /// This device's copy, with its gain already resolved.
     pub source: TrackSource,
 }

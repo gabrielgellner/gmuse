@@ -92,6 +92,9 @@ pub struct Playing {
     flight: Option<(crossbeam_channel::Receiver<Reply>, Awaiting)>,
     /// Seeds the next reshuffle, bumped per reshuffle so two are different orders.
     seed: u64,
+    /// The rows of the view last played from, so a rebuild stays inside it — see
+    /// [`Playing::start`]. `None` is the whole library.
+    within: Option<std::sync::Arc<std::collections::HashSet<gmuse_ids::copy::CopyId>>>,
 }
 
 impl Playing {
@@ -102,6 +105,7 @@ impl Playing {
             queued: std::collections::VecDeque::new(),
             flight: None,
             seed: 0x5EED,
+            within: None,
         }
     }
 
@@ -310,6 +314,7 @@ impl Playing {
     ) -> Option<Cue> {
         let rx = desk.programme_later(Ask::Start {
             recording,
+            within: None,
             window: 1,
         })?;
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
@@ -319,11 +324,21 @@ impl Playing {
     }
 
     /// **Play this recording, opening a programme around it.** Acts on a later tick.
-    pub fn start(&mut self, recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>) {
+    ///
+    /// `within` is the view the play came from, already resolved to rows by the socket
+    /// handler — this crate cannot parse a view and must not (`layers.md`). It is kept, so
+    /// a later scope change or an empty-programme `next` rebuilds inside the same view.
+    pub fn start(
+        &mut self,
+        recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
+        within: Option<std::sync::Arc<std::collections::HashSet<gmuse_ids::copy::CopyId>>>,
+    ) {
+        self.within = within.clone();
         self.supersede();
         self.push(
             Ask::Start {
                 recording,
+                within,
                 window: KEEP,
             },
             Awaiting::LoadFirst,
@@ -349,12 +364,14 @@ impl Playing {
         None
     }
 
-    /// A programme over the whole library, in the narrowing and order already in force.
+    /// A programme over the library — or the view last played from — in the narrowing
+    /// and order already in force.
     fn over_the_library(&self, window: usize) -> Ask {
         Ask::Open {
             at: None,
             scope: self.standing.scope,
             shuffle: self.standing.shuffled,
+            within: self.within.clone(),
             seed: self.seed,
             window,
         }
@@ -417,6 +434,7 @@ impl Playing {
                 at,
                 scope,
                 shuffle: self.standing.shuffled,
+                within: self.within.clone(),
                 seed: self.seed,
                 window: KEEP,
             },
@@ -576,7 +594,7 @@ mod tests {
         playing.resync();
         assert_eq!(playing.queued.len(), 1, "the resync was not queued");
 
-        playing.start(gmuse_ids::id::Id::derived(b"a recording"));
+        playing.start(gmuse_ids::id::Id::derived(b"a recording"), None);
 
         assert!(
             !playing.queued.iter().any(|(_, w)| *w == Awaiting::Resync),

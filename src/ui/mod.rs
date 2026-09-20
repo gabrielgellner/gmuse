@@ -2051,6 +2051,7 @@ pub fn restore_session(
                 ui.playback.playing = encoding;
                 let _ = player.load(crate::ui::transport::Loading {
                     recording: recording_of(ctx, id),
+                    view: playing_within(ui),
                     source,
                 });
             }
@@ -2239,6 +2240,7 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: CopyId) {
     if let Some(player) = ctx.player {
         let accepted = player.load(crate::ui::transport::Loading {
             recording: recording_of(ctx, id),
+            view: playing_within(ui),
             source,
         });
         if accepted == crate::ui::transport::Accepted::NotNamed {
@@ -2254,6 +2256,13 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: CopyId) {
     // An explicit play discards whatever was queued up to be spliced on; the
     // player drops it too, on `Load`.
     ui.pending_next = None;
+}
+
+/// **The view a play is made from**, in the terms the engine resolves — the same string
+/// `query.tree` is sent, so the programme that follows is built from what is on screen.
+/// Empty composition means the whole library, which is `None` rather than `""`.
+fn playing_within(ui: &Ui) -> Option<String> {
+    (!ui.composed.is_empty()).then(|| ui.composed.label())
 }
 
 /// Whether a popup is up **and has something hidden to scroll to**.

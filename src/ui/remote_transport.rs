@@ -334,7 +334,10 @@ impl Transport for Remote {
         };
         let _ = self.client.notify(
             gmuse_proto::request::method::PLAYER_LOAD,
-            Some(serde_json::json!({ "recording": recording.to_string() })),
+            Some(serde_json::json!({
+                "recording": recording.to_string(),
+                "view": what.view,
+            })),
         );
         Accepted::Yes
     }

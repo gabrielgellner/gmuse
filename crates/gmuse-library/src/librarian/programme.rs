@@ -88,12 +88,13 @@ pub(crate) fn answer(
             at,
             scope,
             shuffle,
+            within,
             seed,
             window,
         } => {
-            let ordered = pool(library, at, scope, shuffle, seed);
+            let ordered = pool(library, at, scope, shuffle, seed, within.as_deref());
             plan.replace(ordered);
-            plan.made_by(scope, shuffle);
+            plan.made_by(scope, shuffle, within);
 
             // **Cue from the row the person picked, not from the head.** `at` may be
             // absent (play the album) or no longer in the pool at all — a scope narrowed
@@ -110,7 +111,11 @@ pub(crate) fn answer(
             }
         }
 
-        Ask::Start { recording, window } => {
+        Ask::Start {
+            recording,
+            within,
+            window,
+        } => {
             // **A scan of the rows, and that is the right answer for one.** #123's entry is
             // the precedent: building an index of every recording to ask about one track is
             // worse than walking them, and pressing play happens at human speed.
@@ -125,6 +130,7 @@ pub(crate) fn answer(
                     at,
                     scope: plan.scope(),
                     shuffle: plan.shuffled(),
+                    within,
                     seed: 0,
                     window,
                 },
@@ -190,7 +196,7 @@ pub(crate) fn answer(
                 shelf.sorted().to_vec()
             };
             plan.reorder_by_row(&ordered);
-            plan.made_by(plan.scope(), on);
+            plan.made_by(plan.scope(), on, plan.within());
             Reply::Settled {
                 standing: standing(plan),
             }
@@ -200,6 +206,7 @@ pub(crate) fn answer(
             at,
             scope,
             shuffle,
+            within,
             seed,
             window,
         } => {
@@ -216,6 +223,7 @@ pub(crate) fn answer(
                     at: anchor,
                     scope,
                     shuffle,
+                    within,
                     seed,
                     window,
                 },
@@ -326,14 +334,25 @@ pub(crate) fn answer(
 /// `next::split_mix64` does not advance its argument, so a canonical SplitMix64 produces a
 /// different permutation from the same seed. One implementation is the only version of
 /// that check which cannot rot.
+///
+/// **`within` is the view, resolved.** Before the programme moved here (#257) the pool
+/// was the TUI's own composed view, so playing from `in=General` played General; the
+/// move made it the whole library, and a shuffle wandered out of the view a person was
+/// looking at. The socket handler resolves the view's terms to rows the same way
+/// `query.tree` does and hands the set down; here it is the members, and `scope`
+/// narrows within it as before.
 fn pool(
     library: &crate::model::seam::Librarian,
     at: Option<CopyId>,
     scope: crate::next::Scope,
     shuffle: bool,
     seed: u64,
+    within: Option<&std::collections::HashSet<CopyId>>,
 ) -> Vec<CopyId> {
-    let members: std::collections::HashSet<CopyId> = Listing::rows(library).into_iter().collect();
+    let members: std::collections::HashSet<CopyId> = Listing::rows(library)
+        .into_iter()
+        .filter(|row| within.is_none_or(|w| w.contains(row)))
+        .collect();
     let shelf = crate::shelf::Shelf::from_members(library, members, true);
     let narrowed = crate::next::scoped(&shelf, at, scope);
     if shuffle {
@@ -821,6 +840,7 @@ mod tests {
                 at: Some(picked),
                 scope: crate::next::Scope::All,
                 shuffle: false,
+                within: None,
                 seed: 0,
                 window: 2,
             },
@@ -834,6 +854,92 @@ mod tests {
             plan.first_of(picked).map(|e| e.token.as_u64()),
             Some(cues[0].token),
             "the first cue was not the row that was picked"
+        );
+    }
+
+    /// **A play from inside a view stays inside it** — `in=General` plays General.
+    ///
+    /// The pool was the TUI's own composed view until #257 moved the programme to the
+    /// librarian, where it became the whole library, and a shuffle wandered out of what a
+    /// person was looking at. The view arrives resolved to rows; the pool is those rows,
+    /// and every entry — shuffled, and after a rescope — is one of them.
+    #[test]
+    fn a_programme_opened_within_a_view_draws_only_from_it() {
+        let (l, rows) = library(12);
+        // The instrument: the view is a strict subset, so a pool that ignored it shows.
+        let view: std::collections::HashSet<CopyId> = rows[3..7].iter().copied().collect();
+        assert!(
+            view.len() < rows.len() / 2,
+            "the view is most of the library"
+        );
+        let within = Some(std::sync::Arc::new(view.clone()));
+
+        let mut plan = Programme::new();
+        let Reply::Window { cues, .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Open {
+                at: Some(rows[4]),
+                scope: crate::next::Scope::All,
+                shuffle: true,
+                within: within.clone(),
+                seed: 7,
+                window: 3,
+            },
+        ) else {
+            panic!("an open did not answer with a window");
+        };
+        assert_eq!(
+            plan.len(),
+            view.len(),
+            "the programme is not the view's rows"
+        );
+        assert!(
+            plan.entries().iter().all(|e| view.contains(&e.row)),
+            "the programme holds a row from outside the view"
+        );
+        // From the picked row to the end of a shuffled order: one to three.
+        assert!(!cues.is_empty(), "nothing was cued");
+
+        // A scope change rebuilds — inside the same view, because the plan kept it.
+        let kept = plan.within();
+        assert_eq!(kept.as_deref(), Some(&view), "the view was not kept");
+        let Reply::Window { .. } = ask(
+            &mut plan,
+            &l,
+            Ask::Rescope {
+                at: None,
+                scope: crate::next::Scope::All,
+                shuffle: false,
+                within: kept,
+                seed: 0,
+                window: 2,
+            },
+        ) else {
+            panic!("a rescope did not answer with a window");
+        };
+        assert_eq!(
+            plan.len(),
+            view.len(),
+            "a rescope drew from outside the view"
+        );
+
+        // And `Start` — the play gesture over the socket — carries it the same way.
+        let recording = l.recording_of(rows[5]).expect("a recording");
+        let mut fresh = Programme::new();
+        let _ = ask(
+            &mut fresh,
+            &l,
+            Ask::Start {
+                recording,
+                within,
+                window: 2,
+            },
+        );
+        assert_eq!(
+            fresh.len(),
+            view.len(),
+            "a start drew from outside the view"
         );
     }
 
@@ -852,6 +958,7 @@ mod tests {
                 at: Some(rows[0]),
                 scope: crate::next::Scope::All,
                 shuffle: false,
+                within: None,
                 seed: 0,
                 window: 3,
             },
@@ -886,6 +993,7 @@ mod tests {
                 at: None,
                 scope: crate::next::Scope::All,
                 shuffle: true,
+                within: None,
                 seed: 12_345,
                 window: 1,
             },
@@ -922,6 +1030,7 @@ mod tests {
                 at: None,
                 scope: crate::next::Scope::Inner,
                 shuffle: false,
+                within: None,
                 seed: 0,
                 window: 1,
             },
@@ -1000,6 +1109,7 @@ mod tests {
                 at: Some(rows[0]),
                 scope: crate::next::Scope::All,
                 shuffle: false,
+                within: None,
                 seed: 0,
                 window: 1,
             },
@@ -1088,6 +1198,7 @@ mod tests {
                 at: Some(rows[2]),
                 scope: crate::next::Scope::All,
                 shuffle: false,
+                within: None,
                 seed: 0,
                 window: 1,
             },
@@ -1106,6 +1217,7 @@ mod tests {
                 at: Some(playing.as_u64()),
                 scope: crate::next::Scope::Inner,
                 shuffle: false,
+                within: None,
                 seed: 0,
                 window: 1,
             },
@@ -1144,6 +1256,7 @@ mod tests {
                 at: Some(rows[0]),
                 scope: crate::next::Scope::Outer,
                 shuffle: true,
+                within: None,
                 seed: 5,
                 window: 1,
             },
@@ -1419,7 +1532,9 @@ pub mod durable {
         }
 
         let mut plan = crate::programme::Programme::of(rows);
-        plan.made_by(written.scope, written.shuffled);
+        // `within` is not written down (see the field): a restored programme is its
+        // entries, and the next play from a view says what a refill draws from.
+        plan.made_by(written.scope, written.shuffled, None);
         plan.set_mode(written.mode);
         Some(plan)
     }

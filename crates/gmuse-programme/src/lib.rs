@@ -194,6 +194,21 @@ pub struct Programme {
     /// reason it lived in the engine no longer holds.
     scope: Scope,
     shuffled: bool,
+    /// **The rows the programme was drawn from, when a view narrowed them.**
+    ///
+    /// A person who presses play inside `in=General` expects General to play,
+    /// and the pool used to be whatever their view held. Now the librarian
+    /// builds the pool and it needs telling — so this is the member set the
+    /// view resolved to at the moment of the open, kept beside `scope` and
+    /// `shuffled` because it is the same kind of thing: a standing rule about
+    /// what a refill may draw from. `None` is the whole library.
+    ///
+    /// A set and not the view's text, because only the socket handler can
+    /// resolve a view (it holds the fold and the parser) and the engine must
+    /// not. Not persisted: after a restart a rescope draws from everything
+    /// until the next play from a view says otherwise.
+    #[serde(skip)]
+    within: Option<std::sync::Arc<std::collections::HashSet<CopyId>>>,
     version: Version,
     /// The next token to hand out. **Never reset**, including by [`Programme::replace`],
     /// which is what makes a token from an older version fail to match rather than
@@ -213,6 +228,7 @@ impl Default for Programme {
             mode: Mode::default(),
             scope: Scope::default(),
             shuffled: false,
+            within: None,
             version: Version(1),
             minting: 0,
         }
@@ -258,9 +274,20 @@ impl Programme {
 
     /// Record how an order was made. **Called by whoever made it**, not by a person
     /// toggling a switch — the toggle is a reorder, and this says what the reorder was.
-    pub fn made_by(&mut self, scope: Scope, shuffled: bool) {
+    pub fn made_by(
+        &mut self,
+        scope: Scope,
+        shuffled: bool,
+        within: Option<std::sync::Arc<std::collections::HashSet<CopyId>>>,
+    ) {
         self.scope = scope;
         self.shuffled = shuffled;
+        self.within = within;
+    }
+
+    /// The rows a refill may draw from, if a view narrowed them — see the field.
+    pub fn within(&self) -> Option<std::sync::Arc<std::collections::HashSet<CopyId>>> {
+        self.within.clone()
     }
 
     pub fn version(&self) -> Version {
@@ -807,6 +834,8 @@ pub enum Ask {
         at: Option<CopyId>,
         scope: Scope,
         shuffle: bool,
+        /// The view's rows, resolved by whoever could — see `Programme::within`.
+        within: Option<std::sync::Arc<std::collections::HashSet<CopyId>>>,
         /// Seeds the permutation. **The same seed shuffles the same pool the same way**, so
         /// a reshuffle is a new seed rather than a hidden `rand` call, and a test can assert
         /// an order.
@@ -846,6 +875,8 @@ pub enum Ask {
     /// a track does not silently reset them.
     Start {
         recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
+        /// The view the play came from, resolved — see `Programme::within`.
+        within: Option<std::sync::Arc<std::collections::HashSet<CopyId>>>,
         window: usize,
     },
     /// **A window from the *end* of the programme, changing nothing.**
@@ -899,6 +930,7 @@ pub enum Ask {
         at: Option<u64>,
         scope: Scope,
         shuffle: bool,
+        within: Option<std::sync::Arc<std::collections::HashSet<CopyId>>>,
         seed: u64,
         window: usize,
     },

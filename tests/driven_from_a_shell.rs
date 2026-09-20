@@ -2966,6 +2966,7 @@ fn an_attached_view_learns_what_is_playing_from_the_event_stream() {
         assert_eq!(
             view.load(gmuse::ui::transport::Loading {
                 recording: Some(recording.parse().expect("a recording id")),
+                view: None,
                 // **Ignored, and deliberately a path that does not exist.** A
                 // locator does not cross (I17); the engine opens the copy its own
                 // projection names. If this were the half being used, nothing would
@@ -3075,6 +3076,7 @@ fn up_next_does_not_begin_with_the_track_that_is_playing() {
     // and a page anchored at a track that has finished would prove the wrong thing.
     let accepted = remote.load(gmuse::ui::transport::Loading {
         recording: Some(recording.parse().expect("a recording id")),
+        view: None,
         source: gmuse::audio::TrackSource {
             path: std::path::PathBuf::from("/nonexistent/ignored-over-the-wire.wav"),
             gain: 1.0,
@@ -3229,6 +3231,7 @@ fn an_attached_view_refuses_to_load_what_the_library_cannot_name() {
 
     let answer = view.load(Loading {
         recording: None,
+        view: None,
         source: gmuse::audio::TrackSource {
             path: std::path::PathBuf::from("/tmp/a-file-nobody-imported.wav"),
             gain: 1.0,
