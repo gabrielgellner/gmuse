@@ -5304,3 +5304,122 @@ fn a_remote_seek_keeps_its_fraction_too() {
         "a Remote seek to 0.35s landed at {landed} frames, not near {want}"
     );
 }
+
+/// **`queue.enqueue` lands after what is sounding, not after the programme** — what `e`
+/// has always meant.
+///
+/// Under one list it was a push to the end, which on a real library is after seven
+/// thousand shuffled rows; and the TUI's `e` was worse, a `queue.set` of the page it
+/// mirrored that replaced the programme with that page. Now the engine anchors the
+/// insert at the sounding entry — `queued` after what a person already queued, `next`
+/// right after the track — and the programme keeps its tail.
+#[test]
+fn an_enqueue_lands_after_what_is_sounding() {
+    let (engine, first) = start_with_a_track("enqueue-anchored");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    // The fixture imported two; the other one is the row to queue.
+    let rows = client
+        .call(
+            "query.run",
+            Some(serde_json::json!({ "filter": "any=\"*tone*\"", "limit": 10 })),
+        )
+        .expect("query.run")["rows"]
+        .as_array()
+        .cloned()
+        .expect("rows");
+    let second = rows
+        .iter()
+        .filter_map(|r| r["recording"].as_str())
+        .find(|r| *r != first)
+        .expect("a second recording")
+        .to_string();
+
+    client
+        .subscribe(&[gmuse_proto::Topic::Playback])
+        .expect("subscribe");
+    client
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": first })),
+        )
+        .expect("the load is accepted");
+    let mut sounding = false;
+    for _ in 0..100 {
+        let Ok(event) = client.next_event(Duration::from_millis(200)) else {
+            continue;
+        };
+        if event.topic == gmuse_proto::Topic::Playback && event.body["recording"] == first {
+            sounding = true;
+            break;
+        }
+    }
+    assert!(
+        sounding,
+        "the first track never started, so there is nothing to anchor on"
+    );
+
+    // The instrument: the programme is longer than one entry, so "after what is
+    // sounding" and "at the end" are different places.
+    let before = client.call("queue.get", None).expect("queue.get");
+    assert!(
+        before["total"].as_u64().is_some_and(|n| n >= 2),
+        "the programme is {:?} long, so the end is next and the test proves nothing",
+        before["total"]
+    );
+
+    let v = |r: &str| serde_json::Value::from(r);
+    let page_after = |what: &str| -> Vec<serde_json::Value> {
+        let page = client.call("queue.get", None).expect("queue.get");
+        assert_eq!(
+            page["anchored"], true,
+            "{what}: the page did not start at what is sounding"
+        );
+        page["entries"].as_array().cloned().expect("entries")
+    };
+
+    // `e` twice: second, then first — after what is sounding, in the order pressed, and
+    // the pool's own second entry still after both. A push to the end would put them
+    // after it instead, which is the difference the third position shows.
+    for r in [&second, &first] {
+        client
+            .call(
+                "queue.enqueue",
+                Some(serde_json::json!({ "recordings": [r] })),
+            )
+            .expect("enqueue");
+    }
+    let entries = page_after("two `e`s");
+    assert_eq!(
+        &entries[..4],
+        &[v(&first), v(&second), v(&first), v(&second)],
+        "`queued` did not land after what is sounding, in order: {entries:?}"
+    );
+    assert_eq!(
+        entries.len() as u64,
+        before["total"].as_u64().unwrap() + 2,
+        "the programme lost its tail"
+    );
+
+    // `next` cuts in front of what was queued.
+    client
+        .call(
+            "queue.enqueue",
+            Some(serde_json::json!({ "recordings": [second], "at": "next" })),
+        )
+        .expect("enqueue next");
+    let entries = page_after("`E`");
+    assert_eq!(
+        &entries[..5],
+        &[v(&first), v(&second), v(&second), v(&first), v(&second)],
+        "`next` did not cut in front of the queued run: {entries:?}"
+    );
+
+    // And a place that is not a place is refused, not the end.
+    let refused = client.call(
+        "queue.enqueue",
+        Some(serde_json::json!({ "recordings": [second], "at": "soon" })),
+    );
+    assert!(refused.is_err(), "a misspelt placement was accepted");
+}

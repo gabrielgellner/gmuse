@@ -102,6 +102,16 @@ first entry taken as one more queued row, the queue pane and the transport panel
 up next, and a `queue.set` computed from that mirror put it at the head of the new programme — so every edit replayed
 the current track when it ended.
 
+**"Add to the queue" is an insert relative to what is sounding, and the entries say who put them there.** Under the
+two-tier model a queue was only ever what somebody chose, and `e` meant _after those, before the pool resumes_. One list
+has no seam between the two unless the entries carry it — so an entry records whether it was queued **by hand**, and
+`queue.enqueue` takes a placement: `next` lands right after the sounding entry, `queued` (the default, and what `e`
+means) after the run of by-hand entries that follows it, `end` at the end. The anchor is the engine's, like a page's;
+the placement is the librarian's, because which entries a person queued is a fact about the programme. A push to the end
+— which is what the first cut did, "because a programme is one list" — is after seven thousand rows on a real library,
+and a view that edited its mirrored _page_ and sent it back as `queue.set` replaced the programme with the page. Neither
+is a queue anyone would use.
+
 **The anchor comes from the engine and the page from the librarian**, which is the triangle doing what §1 says: _where
 am I_ is a playback question and _what is the order_ is a library one. `playback.get` reports the entry so a client can
 anchor its own paging.

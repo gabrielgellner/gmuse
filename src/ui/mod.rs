@@ -5215,6 +5215,24 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
             persist_open(ui, ctx);
             ui.notify(format!("added {count} to {name}"));
         }
+        // **Asked of the engine, relative to what is sounding, when there is one.** The
+        // mirror is a page of the programme, and an edit pushed as `queue.set` replaces the
+        // whole programme with that page — so `e` landed after a hundred shuffled rows and
+        // dropped the other seven thousand. `queue.enqueue` lands where `e` always meant:
+        // after what was already queued by hand, before the programme resumes; `E` right
+        // after what is playing. The mirror is read back rather than edited, so nothing
+        // here has to guess where the engine put them.
+        AddTarget::Queue | AddTarget::QueueNext if ui.engine.is_some() => {
+            let next = target == AddTarget::QueueNext;
+            enqueue_with_the_engine(ui, ctx, &ids, next);
+            read_the_queue(ui, ctx);
+            ui.notify(match (count, next) {
+                (1, true) => "queued next".to_string(),
+                (n, true) => format!("queued {n} next"),
+                (1, false) => "queued — after what you already queued".to_string(),
+                (n, false) => format!("queued {n} — after what you already queued"),
+            });
+        }
         AddTarget::Queue => {
             for id in ids {
                 ui.queue.push_back(id);
@@ -5243,6 +5261,45 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
         }
         // Handled above, before the cursor is consulted.
         AddTarget::View => {}
+    }
+}
+
+/// **Queue rows with the engine**, at `next` or after what was queued by hand.
+///
+/// One call, versioned against the last read like every other queue edit; a refused
+/// version is reported and the mirror re-read, which is what `push_the_queue` does for
+/// a stale `queue.set`.
+fn enqueue_with_the_engine(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId], next: bool) {
+    let Some(client) = ui.engine.clone() else {
+        return;
+    };
+    let recordings: Vec<String> = ids
+        .iter()
+        .filter_map(|id| recording_of(ctx, *id))
+        .map(|r| r.to_string())
+        .collect();
+    if recordings.len() != ids.len() {
+        ui.notify("that row is one the library cannot name, so it was not queued");
+        return;
+    }
+    let mut params = serde_json::json!({
+        "recordings": recordings,
+        "at": if next { "next" } else { "queued" },
+    });
+    if ui.queue_version > 0
+        && let Some(map) = params.as_object_mut()
+    {
+        map.insert("base_version".into(), ui.queue_version.into());
+    }
+    match client.call_within(
+        gmuse_proto::request::method::QUEUE_ENQUEUE,
+        Some(params),
+        std::time::Duration::from_secs(2),
+    ) {
+        Ok(answer) => {
+            ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
+        }
+        Err(e) => ui.notify(format!("the engine did not queue it: {e}")),
     }
 }
 

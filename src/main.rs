@@ -4221,6 +4221,7 @@ fn run_engine(
                 Call::QueueEnqueue {
                     recordings,
                     base_version,
+                    at,
                 } => {
                     // **Recordings on the wire, rows underneath** — I17: only
                     // user-facing grains cross, and a recording is what a person
@@ -4245,11 +4246,27 @@ fn run_engine(
                             }
                         }
                     }
-                    // **`enqueue` is an insert at the end**, because a programme is one
-                    // list. The two-tier model — a queue that won unconditionally over a
-                    // pool walk — collapsed into a position in it (#257).
-                    self.programme(gmuse::librarian::programme::Ask::Push {
+                    // **Relative to what is sounding**, which only this side knows — the
+                    // same anchor `queue.get` pages from. This was a push to the end,
+                    // "because a programme is one list" (#257) — and under one list the
+                    // end is after seven thousand rows. What `e` had always meant was
+                    // "after what I queued, before the pool resumes", and the programme
+                    // can say which entries those are now.
+                    let at = match at {
+                        gmuse_proto::request::Placement::Next => {
+                            gmuse::librarian::programme::Placement::Next
+                        }
+                        gmuse_proto::request::Placement::Queued => {
+                            gmuse::librarian::programme::Placement::Queued
+                        }
+                        gmuse_proto::request::Placement::End => {
+                            gmuse::librarian::programme::Placement::End
+                        }
+                    };
+                    self.programme(gmuse::librarian::programme::Ask::Enqueue {
                         rows: ids,
+                        anchor: self.playing_entry(),
+                        at,
                         base: base_version,
                     })
                 }

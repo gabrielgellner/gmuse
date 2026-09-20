@@ -64,6 +64,17 @@ pub struct Anchor {
     pub id: Option<gmuse_ids::copy::CopyId>,
 }
 
+/// Where `queue.enqueue` lands, relative to what is sounding.
+///
+/// The wire's spelling of `gmuse_programme::Placement`, which this crate cannot name
+/// (§4.3: the protocol depends on nothing above it); the engine maps one to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    Next,
+    Queued,
+    End,
+}
+
 /// What a client asked for, once it is a type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
@@ -284,6 +295,11 @@ pub enum Request {
     QueueEnqueue {
         recordings: Vec<String>,
         base_version: Option<u64>,
+        /// Where it lands, relative to what is sounding: `"next"`, `"queued"` (after
+        /// what was already queued by hand — the default, and what `e` means), or
+        /// `"end"`. Parsed here, so a misspelling is refused rather than landing at
+        /// the end.
+        at: Placement,
     },
     /// **The queue is now this list** — #233, §7.7.
     ///
@@ -975,11 +991,26 @@ impl Request {
                     recordings: Vec<String>,
                     #[serde(default)]
                     base_version: Option<u64>,
+                    #[serde(default)]
+                    at: Option<String>,
                 }
                 let p: P = typed(method, params)?;
+                let at = match p.at.as_deref() {
+                    None => Placement::Queued,
+                    Some("next") => Placement::Next,
+                    Some("queued") => Placement::Queued,
+                    Some("end") => Placement::End,
+                    Some(other) => {
+                        return Err(RpcError::invalid_params(
+                            "at",
+                            format!("{other:?} is not a place — next, queued or end"),
+                        ));
+                    }
+                };
                 Ok(Self::QueueEnqueue {
                     recordings: p.recordings,
                     base_version: p.base_version,
+                    at,
                 })
             }
             method::QUEUE_SET => {

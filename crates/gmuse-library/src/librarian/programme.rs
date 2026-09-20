@@ -34,7 +34,7 @@ use gmuse_ids::copy::CopyId;
 /// The words moved to the crate both actors can name; what stayed is everything that needs
 /// the fold. `answer` resolves a row to a path and `pool` projects a shelf, and neither is
 /// something the audio engine may do.
-pub use gmuse_programme::{Ask, Cued, Reply, Shown, Standing};
+pub use gmuse_programme::{Ask, Cued, Placement, Reply, Shown, Standing};
 
 use crate::model::rows::Listing;
 
@@ -266,6 +266,15 @@ pub(crate) fn answer(
 
         Ask::Push { rows, .. } => {
             plan.push(rows);
+            Reply::Settled {
+                standing: standing(plan),
+            }
+        }
+
+        Ask::Enqueue {
+            rows, anchor, at, ..
+        } => {
+            plan.enqueue(anchor.map(EntryToken::from_u64), rows, at);
             Reply::Settled {
                 standing: standing(plan),
             }
@@ -940,6 +949,103 @@ mod tests {
             fresh.len(),
             view.len(),
             "a start drew from outside the view"
+        );
+    }
+
+    /// **`e` lands after what was queued by hand, `E` right after what is sounding**, and
+    /// the programme resumes after both.
+    ///
+    /// Under one list "add to the queue" had become a push to the end — after seven
+    /// thousand shuffled rows — because nothing said which entries a person had put there.
+    /// Now the entries do, and the answer is the librarian's: pressing `e` three times
+    /// plays those three in order, `E` cuts in front of them, and `end` is still there for
+    /// a caller that means it.
+    #[test]
+    fn an_enqueue_lands_after_the_run_queued_by_hand() {
+        use crate::programme::Placement;
+        let (l, rows) = library(8);
+        let mut plan = Programme::new();
+        let _ = ask(
+            &mut plan,
+            &l,
+            Ask::Open {
+                at: Some(rows[0]),
+                scope: crate::next::Scope::All,
+                shuffle: false,
+                within: None,
+                seed: 0,
+                window: 2,
+            },
+        );
+        let pool: Vec<CopyId> = plan.entries().iter().map(|e| e.row).collect();
+        assert_eq!(pool.len(), 8, "the fixture is not the programme");
+        let sounding = plan.entries()[0].token.as_u64();
+        let order =
+            |plan: &Programme| -> Vec<CopyId> { plan.entries().iter().map(|e| e.row).collect() };
+        let enqueue = |plan: &mut Programme, row: CopyId, at: Placement| {
+            let reply = ask(
+                plan,
+                &l,
+                Ask::Enqueue {
+                    rows: vec![row],
+                    anchor: Some(sounding),
+                    at,
+                    base: None,
+                },
+            );
+            assert!(matches!(reply, Reply::Settled { .. }), "{reply:?}");
+        };
+
+        // `e` twice: after what is sounding, in the order pressed.
+        enqueue(&mut plan, rows[5], Placement::Queued);
+        enqueue(&mut plan, rows[6], Placement::Queued);
+        assert_eq!(
+            &order(&plan)[..4],
+            &[rows[0], rows[5], rows[6], rows[1]],
+            "`e` did not land after the queued run"
+        );
+        // `E`: in front of both.
+        enqueue(&mut plan, rows[7], Placement::Next);
+        assert_eq!(
+            &order(&plan)[..5],
+            &[rows[0], rows[7], rows[5], rows[6], rows[1]],
+            "`E` did not land right after what is sounding"
+        );
+        // Another `e` goes after all three, not after the first.
+        enqueue(&mut plan, rows[4], Placement::Queued);
+        assert_eq!(
+            &order(&plan)[..6],
+            &[rows[0], rows[7], rows[5], rows[6], rows[4], rows[1]]
+        );
+        // And the rest of the programme is still there, after them.
+        assert_eq!(order(&plan).len(), 12, "the programme lost its tail");
+        assert!(
+            plan.entries()[1..5].iter().all(|e| e.by_hand),
+            "queued rows are not marked"
+        );
+        assert!(
+            !plan.entries()[5].by_hand,
+            "a pool row is marked as queued by hand"
+        );
+
+        // `end` means the end; and with nothing sounding, the head.
+        enqueue(&mut plan, rows[3], Placement::End);
+        assert_eq!(order(&plan).last(), Some(&rows[3]));
+        let mut idle = Programme::of(pool.clone());
+        let _ = ask(
+            &mut idle,
+            &l,
+            Ask::Enqueue {
+                rows: vec![rows[7]],
+                anchor: None,
+                at: Placement::Queued,
+                base: None,
+            },
+        );
+        assert_eq!(
+            order(&idle)[0],
+            rows[7],
+            "with nothing sounding, `e` is not first"
         );
     }
 

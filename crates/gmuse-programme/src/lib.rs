@@ -120,6 +120,16 @@ impl EntryToken {
 pub struct Entry {
     pub token: EntryToken,
     pub row: CopyId,
+    /// **Put here by a person, not by the pool** — what `e` means.
+    ///
+    /// Under the two-tier model a queue was only ever what somebody chose,
+    /// and "add to the queue" meant *after those, before the pool resumes*.
+    /// One list has no seam between the two unless the entries say which
+    /// they are, so an enqueue marks its rows and [`Programme::enqueue`]
+    /// lands after the run of marked entries that follows what is sounding.
+    /// Rows a play gesture or a reshuffle put in are not marked.
+    #[serde(default)]
+    pub by_hand: bool,
 }
 
 /// What happens when an entry ends.
@@ -526,7 +536,57 @@ impl Programme {
     fn mint(&mut self, row: CopyId) -> Entry {
         let token = EntryToken(self.minting);
         self.minting += 1;
-        Entry { token, row }
+        Entry {
+            token,
+            row,
+            by_hand: false,
+        }
+    }
+
+    /// **Queue rows relative to what is sounding** — the `e` and `E` of a player.
+    ///
+    /// `anchor` is the entry that is playing, or `None` when nothing is; the
+    /// insertion is after it. `Placement::Next` lands immediately after it;
+    /// `Placement::Queued` lands after the run of by-hand entries that
+    /// follows it — so pressing `e` three times plays those three in order,
+    /// and then the programme resumes where it was; `Placement::End` is the
+    /// end. Everything inserted is marked by hand.
+    ///
+    /// An anchor the programme no longer holds is treated as nothing playing,
+    /// for the reason a page from a stale token starts at the head: the
+    /// caller cannot tell, and refusing would lose the rows.
+    pub fn enqueue(
+        &mut self,
+        anchor: Option<EntryToken>,
+        rows: impl IntoIterator<Item = CopyId>,
+        at: Placement,
+    ) {
+        let after = anchor
+            .and_then(|t| self.entries.iter().position(|e| e.token == t))
+            .map_or(0, |i| i + 1);
+        let index = match at {
+            Placement::Next => after,
+            Placement::Queued => {
+                let mut i = after;
+                while i < self.entries.len() && self.entries[i].by_hand {
+                    i += 1;
+                }
+                i
+            }
+            Placement::End => self.entries.len(),
+        };
+        let fresh: Vec<Entry> = rows
+            .into_iter()
+            .map(|row| Entry {
+                by_hand: true,
+                ..self.mint(row)
+            })
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        self.entries.splice(index..index, fresh);
+        self.bump();
     }
 
     fn bump(&mut self) {
@@ -810,6 +870,30 @@ mod tests {
 
 // ── What the librarian and the engine say to each other ─────────────────────
 
+/// Where an enqueue lands, relative to what is sounding — see [`Programme::enqueue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Placement {
+    /// Immediately after what is playing.
+    Next,
+    /// After what was already queued by hand, before the programme resumes.
+    /// The default, because it is what "add to the queue" has always meant.
+    #[default]
+    Queued,
+    /// The end of the programme.
+    End,
+}
+
+impl Placement {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "next" => Some(Self::Next),
+            "queued" => Some(Self::Queued),
+            "end" => Some(Self::End),
+            _ => None,
+        }
+    }
+}
+
 /// What to do to the programme, or ask of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ask {
@@ -849,6 +933,14 @@ pub enum Ask {
     /// *is* a lost update, so a mutation carries the version it was computed against.
     Push {
         rows: Vec<CopyId>,
+        base: Option<u64>,
+    },
+    /// Queue rows relative to what is sounding — [`Programme::enqueue`].
+    Enqueue {
+        rows: Vec<CopyId>,
+        /// The sounding entry's token, from the engine; `None` when nothing plays.
+        anchor: Option<u64>,
+        at: Placement,
         base: Option<u64>,
     },
     /// **Take out the entry at this index** — what `queue.remove` is.
@@ -978,6 +1070,7 @@ impl Ask {
             Ask::Play { .. }
             | Ask::Open { .. }
             | Ask::Push { .. }
+            | Ask::Enqueue { .. }
             | Ask::RemoveAt { .. }
             | Ask::Clear { .. }
             | Ask::Reorder { .. }
@@ -1001,6 +1094,7 @@ impl Ask {
         match self {
             Ask::Play { base, .. }
             | Ask::Push { base, .. }
+            | Ask::Enqueue { base, .. }
             | Ask::RemoveAt { base, .. }
             | Ask::Clear { base } => *base,
             // Reads, and the asks whose whole job is to replace what a caller holds.
