@@ -478,18 +478,16 @@ impl Desk {
                             Err(_) => continue,
                         },
                     };
-                    // **Measured against the log before the job**, so what is
-                    // published is what this job did rather than what the log
-                    // happens to hold. A scan that appends nothing is not a
-                    // change, however many files it walked.
-                    let before = needs_a_before(&job).then(|| log.records().clone());
+                    // **What moved is what the projection applied** — #269. A job that
+                    // changes the log advances the projection, and `advance` reports the
+                    // entries the facts it applied touched — so nothing here needs a copy
+                    // of the log to compare against. That copy was 83.5 MB per rating.
                     let mut moved = Changed::Nothing;
                     let mut scanned = None;
                     let settled = match job {
                         Job::Say(say) => {
                             say(&mut log);
-                            projected.advance(log.records());
-                            moved = since(log.records(), before.as_ref());
+                            moved = changed_by(projected.advance(log.records()));
                             if let Some((dir, appending)) = &writing {
                                 // A failed commit is not fatal: the in-memory
                                 // log is still right, and refusing the fact
@@ -754,23 +752,13 @@ impl Desk {
                         Job::Reread => {
                             if let Some(dir) = &read_from {
                                 let (fresh, whole) = reread(dir, device, now, &mut ends);
-                                // **Compared against the log itself, not a copy of it** — #261.
-                                //
-                                // A before-picture is only needed when the mutation happens
-                                // first, which is `Job::Say`. Here nothing has merged yet, so
-                                // `log.records()` *is* the before — and a tail read returns only
-                                // what is new, so in the ordinary case there is nothing to
-                                // compare at all.
-                                //
-                                // Narrow either way, which is the point: a rating another client
-                                // wrote is one `Touched`, not a `Rebuild` (#223).
-                                moved = if whole {
-                                    Changed::of(fresh.difference(log.records()))
-                                } else {
-                                    Changed::of(&fresh)
-                                };
                                 log.merge(now, &fresh);
-                                projected.advance(log.records());
+                                // **Narrow either way, which is the point**: a rating another
+                                // client wrote is one `Touched`, not a `Rebuild` (#223). And
+                                // it is `advance` that says so — a whole re-read is only
+                                // `Wide` if something in it was.
+                                let _ = whole;
+                                moved = changed_by(projected.advance(log.records()));
                             }
                             None
                         }
@@ -1299,65 +1287,35 @@ pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Proj
     match crate::cache::current_projection(&at, &print) {
         Some(ready) => ready,
         None => {
-            // **Through `advance`, not a bare fold.** It is the only entry
-            // point, so the caught-up case costs one comparison per device
-            // rather than being a fold nobody checked the need for.
+            // **A fold from nothing, and named as one.** The snapshot was absent
+            // or behind, so there is nothing to advance from; `advance` on an
+            // empty projection would apply 280,000 facts one at a time to reach
+            // what one fold reaches.
             let (log, _) = Instance::open(data_dir, device, now);
-            let mut folded = Projected::default();
-            folded.advance(log.records());
+            let folded = Projected::rebuild(log.records());
             crate::cache::save_projection(&at, &print, &folded);
             folded
         }
     }
 }
 
-/// **Whether this job needs a before-picture of the log** — #255.
+/// **What a publish says moved, from what the projection did** — #269.
 ///
-/// `Changed::of(difference)` is how a *narrow* `Changed` is computed, and it needs the record
-/// set as it was. That clone is **83.5 MB on the real library**, and it was taken before
-/// *every* job — including a `queue.get`, which #257's programme made frequent.
+/// `advance` applied the facts in place and knows what they touched, or it refolded
+/// because one of them was wide or from below the watermark — and a reader told `Wide`
+/// re-queries whatever it displays, which is right for both. `AlreadyThere` is the
+/// case where a job changed nothing: a scan that found what was already asserted.
 ///
-/// The cost was not the clone's 8ms. A resident set tracks the **peak**, not the live heap:
-/// the engine holds 118.5 MB and its RSS is 390 MB, because an 83.5 MB transient kept coming
-/// back and the allocator kept the pages. That is what "1.1 GB in btop" was.
-///
-/// **Exhaustive, so a new job has to say.** A `false` that should be `true` publishes a
-/// `Changed` too narrow to refresh a view, which is the failure that does not announce itself
-/// — so the default a catch-all would give is the wrong one.
-fn needs_a_before(job: &Job) -> bool {
-    match job {
-        // **Only the one that mutates before it can look.** `say` is an opaque closure: it
-        // has changed the log by the time anything can compare, so the comparison needs a
-        // copy. `Reread` merges *after* it decides, so `log.records()` is its before-picture
-        // and no copy is needed (#261).
-        Job::Say(_) => true,
-        // These say what moved without comparing — a scan is `Wide`, a compact names its own —
-        // or move nothing at all, which is every read.
-        Job::Holdings(_)
-        | Job::Scan { .. }
-        | Job::Walked(_)
-        | Job::Compact
-        | Job::Advance
-        | Job::Reread
-        | Job::Records(_)
-        | Job::History { .. }
-        | Job::Programme { .. }
-        | Job::Settled(_) => false,
-    }
-}
-
-/// What changed, against a before-picture.
-///
-/// **`None` reports `Wide`, not `Nothing`.** It cannot happen — only the two jobs that ask for
-/// a before-picture call this — but a change nobody measured is a change every view must
-/// re-read, and the other default silently leaves a stale screen.
-fn since(
-    now: &BTreeSet<crate::facts::Record>,
-    before: Option<&BTreeSet<crate::facts::Record>>,
-) -> Changed {
-    match before {
-        Some(before) => Changed::of(now.difference(before)),
-        None => Changed::Wide,
+/// This replaced a before-picture of the log taken before every `Say` — 83.5 MB on the
+/// real library, cloned per rating, and the reason the engine's resident set sat at
+/// three times its live heap (#255).
+fn changed_by(advanced: crate::projection::Advanced) -> Changed {
+    match advanced {
+        crate::projection::Advanced::AlreadyThere => Changed::Nothing,
+        crate::projection::Advanced::Folded => Changed::Wide,
+        crate::projection::Advanced::Applied(touched) => {
+            Changed::These(touched.into_iter().collect())
+        }
     }
 }
 
@@ -2170,30 +2128,109 @@ mod what_a_write_costs {
         scan
     }
 
-    /// **An unmeasured change is `Wide`, not `Nothing`** — #255.
+    /// **What a publish says moved comes from what the projection did** — #269.
     ///
-    /// `since` guards a case that cannot happen: only the two jobs asking for a before-picture
-    /// call it. But which way it fails is the load-bearing half — a change reported as
+    /// The load-bearing half is which way the unlocatable case falls: a refold reported as
     /// `Nothing` leaves every view showing what was true a moment ago, and nothing announces
-    /// that. `Wide` costs a re-query.
-    ///
-    /// Tested directly because no job reaches it, and a guard nothing tests is a guard that is
-    /// not there.
+    /// that. `Wide` costs a re-query. And the narrow case has to name what was touched, or
+    /// a rating would be a `Wide` too and #223's narrowness would be gone.
     #[test]
-    fn a_change_nobody_measured_is_reported_wide() {
-        let mut log = Instance::new(crate::fixture::device());
-        log.rate(100, Id::derived(b"a recording"), Some(4));
-        assert!(!log.records().is_empty(), "nothing was appended to compare");
-
+    fn what_moved_is_what_the_projection_applied() {
+        use crate::projection::Advanced;
+        assert_eq!(super::changed_by(Advanced::AlreadyThere), Changed::Nothing);
         assert_eq!(
-            super::since(log.records(), None),
+            super::changed_by(Advanced::Folded),
             Changed::Wide,
-            "an unmeasured change was reported as narrow"
+            "a refold was reported as narrower than it is"
         );
+        let touched = crate::facts::Touched::Recording(Id::derived(b"a recording"));
         assert_eq!(
-            super::since(log.records(), Some(log.records())),
-            Changed::Nothing,
-            "a log compared against itself reported a change"
+            super::changed_by(Advanced::Applied(vec![touched])),
+            Changed::These([touched].into_iter().collect()),
+            "an applied fact was not reported by what it touched"
+        );
+    }
+
+    /// **A write does not copy the log either** — #269.
+    ///
+    /// The neighbour below proved a *read* took no before-picture (#255); `Say` still did,
+    /// because it mutates before anything can compare — 83.5 MB per rating on the real
+    /// library, freed at once and visible only in the peak. `advance` reports what it applied
+    /// now, so the write compares nothing.
+    #[test]
+    fn a_write_does_not_copy_the_record_set() {
+        let device = crate::fixture::device();
+        let mut log = Instance::new(device);
+        log.ingest(100, &scan_of(200, 650));
+        let records = log.records().len();
+        assert!(
+            records > 50_000,
+            "only {records} records, so no clone of them would be large enough to see"
+        );
+        let recording = *log
+            .catalogue()
+            .recordings
+            .keys()
+            .next()
+            .expect("the ingest catalogued one");
+        // **On the settled path, and asserted to be.** A log that has never asserted
+        // holdings takes the bootstrap — a scratch `Instance` of every record, 83 MB at
+        // peak here — which is a first launch and not a write. `bench-write` was measuring
+        // that for as long as it existed; this test found it again in its first run.
+        log.assert_holdings(150, Default::default());
+        assert!(
+            log.catalogue().holdings.contains_key(&device),
+            "the fixture asserts no holdings, so this would measure the bootstrap"
+        );
+
+        // **What one copy costs, measured here** rather than estimated, and the bound is
+        // half of it: a restored clone fails by a whole copy, not by the kilobyte a bound
+        // of exactly one copy left — seen, and too fine for a counter every thread shares.
+        let (_, one_copy, _) = crate::accounting::measure(|| log.records().clone());
+        assert!(
+            one_copy > 20 * 1024 * 1024,
+            "a copy of {records} records is only {} MB — the instrument is not attached",
+            crate::accounting::mb(one_copy)
+        );
+
+        // **Spawned the engine's way**: `derives = false`. A local desk derives its
+        // `Librarian` on every publish — 23 MB on this fixture, L2's materialisation and
+        // not a copy of the log — and the engine, which is what this is about, does not.
+        let projected = crate::projection::Projected::rebuild(log.records());
+        let desk = Desk::spawn(
+            log,
+            projected,
+            Holdings::default(),
+            device,
+            100,
+            None,
+            true,
+            false,
+        );
+        desk.settled();
+
+        let (_, _kept, peak) = crate::accounting::measure(|| {
+            desk.appender()
+                .expect("a desk that appends")
+                .say(move |log| log.rate(200, recording, Some(4)));
+            desk.settled();
+        });
+        // **The instrument**: the rating landed, narrowly.
+        assert_eq!(
+            desk.current().listened.ratings.get(&recording).copied(),
+            Some(4),
+            "the rating did not land, so nothing was measured"
+        );
+        assert!(
+            matches!(&desk.current().changed, Changed::These(t) if t.len() == 1),
+            "one rating did not publish as one entry: {:?}",
+            desk.current().changed
+        );
+        assert!(
+            peak < one_copy / 2,
+            "a write allocated {} MB at peak, and one copy of the log is {} MB — it was copied",
+            crate::accounting::mb(peak),
+            crate::accounting::mb(one_copy)
         );
     }
 
@@ -2266,20 +2303,18 @@ mod what_a_write_costs {
         // The projection the thread holds, current before the write — #267.
         let mut projected = crate::projection::Projected::rebuild(log.records());
 
-        // 1. What the job loop does before running the job at all.
-        let t = Instant::now();
-        let before = log.records().clone();
-        let snapshot = t.elapsed();
-
-        // 2. The append itself.
+        // 1. The append itself.
         let t = Instant::now();
         log.rate(200, recording, Some(4));
         let append = t.elapsed();
 
-        // 3. Working out what moved.
+        // 2. What the job loop *used* to do around it — #269: clone the log before,
+        // diff it after. Timed so the table says what was removed, not just what is.
         let t = Instant::now();
+        let before = log.records().clone();
         let moved = Changed::of(log.records().difference(&before));
-        let diff = t.elapsed();
+        let _ = moved;
+        let before_and_diff = t.elapsed();
 
         // 4. The publish, in the order `fold` actually does it — #256.
         //
@@ -2298,11 +2333,12 @@ mod what_a_write_costs {
         // the write is the mistake this test has already made once.
         let t = Instant::now();
         let advanced = projected.advance(log.records());
+        let moved = changed_by(advanced.clone());
         let applied = t.elapsed();
         assert_eq!(
-            advanced,
-            crate::projection::Advanced::Applied(1),
-            "a rating is one narrow fact above the watermark, and the projection did not apply it"
+            advanced.applied(),
+            1,
+            "a rating is one narrow fact above the watermark, and the projection did not apply it: {advanced:?}"
         );
         assert_eq!(
             projected.catalogue(),
@@ -2343,12 +2379,10 @@ mod what_a_write_costs {
         let positioned = t.elapsed();
         let _ = head;
 
-        let total = snapshot + append + diff + publish;
+        let total = append + publish;
         eprintln!(
             "\n{records} records, one rating appended\n  \
-             records().clone()   {snapshot:>9.1?}\n  \
              rate()              {append:>9.1?}\n  \
-             Changed::of(diff)   {diff:>9.1?}\n  \
              publish, of which:  {publish:>9.1?}\n    \
                log.catalogue()   {catalogued:>9.1?}   (the refold the thread no longer does)\n    \
                advance()         {applied:>9.1?}   (what it does instead — #267)\n    \
@@ -2358,7 +2392,8 @@ mod what_a_write_costs {
                librarian_from    {bootstrap:>9.1?}\n  \
              ---\n  \
              one write           {total:>9.1?}\n\n  \
-             Position::of        {positioned:>9.1?}   (what §8.5 wants a caught-up advance to cost)\n"
+             Position::of        {positioned:>9.1?}   (what §8.5 wants a caught-up advance to cost)\n  \
+             clone + diff        {before_and_diff:>9.1?}   (the before-picture a write no longer takes — #269)\n"
         );
 
         assert!(

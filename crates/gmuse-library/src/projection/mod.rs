@@ -57,7 +57,7 @@ mod past;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::facts::{Blast, Fact, Record};
+use crate::facts::{Blast, Fact, Record, Touched};
 use crate::model::clock::Stamp;
 use crate::model::entity::Device;
 use crate::model::id::Id;
@@ -124,15 +124,27 @@ impl Position {
 ///
 /// Reported rather than inferred, because "it did nothing" is the case a read
 /// depends on being cheap and the only way to assert it is to be told.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Advanced {
     /// Already covered the records offered. One comparison, no work.
     AlreadyThere,
     /// Refolded from every record, and this is where it got to.
     Folded,
-    /// Applied in place: this many facts, none of them wide, none of them
-    /// from below the watermark — #267.
-    Applied(usize),
+    /// Applied in place, and this is what the facts touched — none of them
+    /// wide, none of them from below the watermark — #267. What it names is
+    /// what `Changed::These` names, so a publish needs no before-picture of
+    /// the log to say what moved (#269).
+    Applied(Vec<Touched>),
+}
+
+impl Advanced {
+    /// How many facts were applied in place; zero for the other two.
+    pub fn applied(&self) -> usize {
+        match self {
+            Advanced::Applied(touched) => touched.len(),
+            _ => 0,
+        }
+    }
 }
 
 /// A folded catalogue that knows how far it folded.
@@ -170,12 +182,12 @@ impl Projected {
         if self.at.covers(&head) {
             return Advanced::AlreadyThere;
         }
-        // **From nothing is a fold**, not 280,000 applies: the merges pass has
-        // to run before anything is resolved through it.
-        if self.at.is_empty() {
-            *self = Projected::rebuild(records);
-            return Advanced::Folded;
-        }
+        // **No special case for an empty position.** From nothing, narrow
+        // facts applied one by one *are* the fold — the merges pass has nothing
+        // to do until a merge arrives, and a merge is wide and rebuilds. What
+        // this buys is that an engine's first rating on an empty library is
+        // reported by what it touched rather than as a refold (#269); a caller
+        // that knows it is folding from nothing calls `rebuild` and says so.
         let watermark = self.at.newest();
         let mut arrived = Vec::new();
         for record in records {
@@ -191,7 +203,9 @@ impl Projected {
         }
         // Stamp order, which `BTreeSet` iteration already is — and the loop above
         // has just proved every one of these is above everything folded.
+        let mut touched = Vec::with_capacity(arrived.len());
         for Record { stamp, fact } in &arrived {
+            touched.extend(fact.touches());
             apply_one(&mut self.catalogue, stamp, fact);
             match fact {
                 Fact::EncodingPlaced { encoding, .. } => {
@@ -205,7 +219,7 @@ impl Projected {
             }
         }
         self.at = head;
-        Advanced::Applied(arrived.len())
+        Advanced::Applied(touched)
     }
 
     /// How far the log has been folded in. The whole of staleness.
@@ -365,7 +379,7 @@ mod tests {
         let mut back = crate::cache::current_projection(&at, &crate::cache::LogPrint::default())
             .unwrap_or_default();
         // Nine narrow facts above the watermark: applied, not folded (#267).
-        assert_eq!(back.advance(&both), Advanced::Applied(9));
+        assert_eq!(back.advance(&both).applied(), 9);
         assert_eq!(
             back.catalogue(),
             Projected::rebuild(&both).catalogue(),
@@ -409,7 +423,7 @@ mod tests {
         both.extend(authored(d, 7, 5_000));
 
         let mut advanced = Projected::rebuild(&first);
-        assert_eq!(advanced.advance(&both), Advanced::Applied(7));
+        assert_eq!(advanced.advance(&both).applied(), 7);
 
         let rebuilt = Projected::rebuild(&both);
         assert_eq!(
@@ -503,7 +517,7 @@ mod tests {
         // one fact, which is what this issue exists to stop.
         assert_eq!(
             p.advance(i.records()),
-            Advanced::Applied(1),
+            Advanced::Applied(vec![crate::facts::Touched::Recording(recording)]),
             "a rating was appended and the projection folded everything, or nothing"
         );
         assert_eq!(
