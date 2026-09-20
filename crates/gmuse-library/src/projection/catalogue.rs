@@ -107,6 +107,11 @@ fn retract_edge<K: Ord + Clone>(live: &mut BTreeSet<K>, retracted: &mut BTreeSet
     retracted.insert(edge);
 }
 
+/// An encoding and the recording it was bound *from*, which is what one
+/// binding's competitors share: a relink away from A and a first binding are
+/// different questions, and `conflicts` are counted per question.
+pub type BindingKey = (Id<Encoding>, Option<Id<Recording>>);
+
 /// What the catalogue looks like after folding a set of records.
 ///
 /// Every collection is ordered, because "both devices fold to the same result"
@@ -323,6 +328,21 @@ pub struct Catalogue {
     pub holdings: BTreeMap<Id<Device>, Asserted>,
     /// Structural disagreements. Never resolved silently — §4.
     pub conflicts: Vec<Conflict>,
+    /// **The candidates the post-loop rankings rank over** — #267. Kept in the
+    /// catalogue rather than dropped at the end of a fold, so one fact arriving
+    /// can be ranked against what came before it without the log in hand.
+    /// Measured on the real library: 9,467 placements, 9,730 bindings and 33
+    /// retitles, under a megabyte together.
+    ///
+    /// Every placement each copy has ever been given, in stamp order.
+    pub placements: BTreeMap<Id<Encoding>, Vec<(Id<Track>, Source)>>,
+    /// Every binding asserted per `(encoding, base)`, with the stamp that
+    /// orders them. `bound` and `conflicts` are computed from this.
+    pub bindings: BTreeMap<BindingKey, Vec<(Stamp, Id<Recording>)>>,
+    /// A retitle stands over any cataloguing, whenever either was written — so
+    /// it is kept, and a scan re-cataloguing the row asks it first.
+    pub retitles: BTreeMap<Id<Recording>, String>,
+    pub group_retitles: BTreeMap<Id<ReleaseGroup>, String>,
 }
 
 /// One device's holdings, as of one moment.
@@ -466,8 +486,6 @@ impl Conflict {
 /// Grouping by the **base** is what distinguishes a disagreement from a
 /// correction: two writes from the same base disagree, where a write from a
 /// base someone else established is a correction of it.
-type Bindings = BTreeMap<(Id<Encoding>, Option<Id<Recording>>), Vec<(Stamp, Id<Recording>)>>;
-
 /// Fold a set of records into the catalogue they describe.
 ///
 /// Sorting first is what makes the result independent of the order records
@@ -475,10 +493,6 @@ type Bindings = BTreeMap<(Id<Encoding>, Option<Id<Recording>>), Vec<(Stamp, Id<R
 /// merge A into B or B into A and the answer is the same.
 pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
     let mut cat = Catalogue::default();
-    let mut bindings: Bindings = BTreeMap::new();
-    // Every placement each copy has ever been given, in stamp order, so the
-    // pass below can prefer the best-evidenced rather than the last.
-    let mut claimed: BTreeMap<Id<Encoding>, Vec<(Id<Track>, Source)>> = BTreeMap::new();
 
     // **Merges first, in their own pass.** A merge recorded on Tuesday has to
     // move a rating given on Monday, so it cannot be applied as it is reached
@@ -497,653 +511,729 @@ pub fn fold(records: &BTreeSet<Record>) -> Catalogue {
             _ => {}
         }
     }
-    let of = |r: &Id<Recording>| cat.merges.resolve(*r);
-    let group_of = |g: &Id<ReleaseGroup>| cat.group_merges.resolve(*g);
-    // **Every artist named below**, because a merge has to move a credit given
-    // before it just as it moves a rating. The name goes through too: the
-    // loser's label lands on the winner and the last writer wins, which is the
-    // same rule `RecordingCatalogued`'s title already follows through `of`.
-    let who = |a: &Id<Artist>| cat.artist_merges.resolve(*a);
-    let described = |s: &Described| match s {
-        Described::Recording(r) => Described::Recording(cat.merges.resolve(*r)),
-        // A genre asserted on the loser is a genre on the album — #156.
-        Described::ReleaseGroup(g) => Described::ReleaseGroup(cat.group_merges.resolve(*g)),
-    };
-    let credit_on = |s: &CreditOn| match s {
-        CreditOn::Recording(r) => CreditOn::Recording(cat.merges.resolve(*r)),
-        // And so is the album credit, which is what `file_under` asks for
-        // first: a merge that left it behind would file the two halves of one
-        // record under different artists.
-        CreditOn::ReleaseGroup(g) => CreditOn::ReleaseGroup(cat.group_merges.resolve(*g)),
-        other => *other,
-    };
-
+    // **Every id below goes through the merges** — a recording's, an artist's,
+    // an album's — because a merge has to move a credit given before it just
+    // as it moves a rating. The name goes through too: the loser's label lands
+    // on the winner and the last writer wins.
     for Record { stamp, fact } in records {
-        match fact {
-            Fact::ArtistNamed { artist, name } => {
-                // Last writer wins, and the set is already in stamp order.
-                cat.artist_names.insert(who(artist), name.clone());
+        apply_one(&mut cat, stamp, fact);
+    }
+
+    // **The rankings, over every candidate at once.** Each is the function one
+    // arriving fact runs for its own key (#267); a fold runs them for all.
+    let encodings: Vec<_> = cat.placements.keys().copied().collect();
+    for encoding in encodings {
+        rank_placement(&mut cat, encoding);
+    }
+    let keys: Vec<_> = cat.bindings.keys().copied().collect();
+    for key in keys {
+        rank_binding(&mut cat, key);
+    }
+    cat
+}
+
+/// **Fold one record into a catalogue whose merges are already known.**
+///
+/// The body of the fold's main loop, and the body of an incremental `advance`
+/// (#267): one implementation of what a fact does, so the two cannot drift.
+/// Every id is resolved through the merges, which is why the merges have to be
+/// in `cat` first — a merge is [`Blast::Wide`](crate::facts::Blast::Wide) and
+/// arrives by rebuild, never here.
+pub(crate) fn apply_one(cat: &mut Catalogue, stamp: &Stamp, fact: &Fact) {
+    match fact {
+        Fact::ArtistNamed { artist, name } => {
+            // Last writer wins, and the set is already in stamp order.
+            cat.artist_names
+                .insert(cat.artist_merges.resolve(*artist), name.clone());
+        }
+        Fact::RecordingCatalogued {
+            recording,
+            title,
+            artist,
+        } => {
+            let at = cat.merges.resolve(*recording);
+            cat.recordings.insert(
+                at,
+                Recorded {
+                    // Curation outranks a reading, whenever it was written.
+                    title: cat
+                        .retitles
+                        .get(&at)
+                        .cloned()
+                        .unwrap_or_else(|| title.clone()),
+                    artist: cat.artist_merges.resolve(*artist),
+                },
+            );
+        }
+        Fact::EncodingDescribed {
+            encoding,
+            audio,
+            format,
+            bitrate,
+            length_ms,
+            sample_rate,
+            channels,
+        } => {
+            cat.encodings.entry(*encoding).or_insert(Encoded {
+                audio: *audio,
+                // The binding, if one was ranked before these bytes were described.
+                recording: cat.bound.get(encoding).copied(),
+                format: *format,
+                bitrate: *bitrate,
+                length_ms: *length_ms,
+                sample_rate: *sample_rate,
+                channels: *channels,
+            });
+        }
+        Fact::EncodingBound { encoding, from, to } => {
+            let key = (*encoding, from.map(|f| cat.merges.resolve(f)));
+            let to = cat.merges.resolve(*to);
+            cat.bindings.entry(key).or_default().push((*stamp, to));
+        }
+        Fact::ViewSaved { view, name, source } => {
+            cat.views.insert(
+                *view,
+                SavedView {
+                    name: name.clone(),
+                    source: source.clone(),
+                },
+            );
+            cat.views_dropped.remove(view);
+        }
+        Fact::ViewDropped { view } => {
+            cat.views.remove(view);
+            cat.views_dropped.insert(*view);
+        }
+        Fact::CollectionNamed {
+            collection,
+            name,
+            ordered,
+        } => {
+            // The source survives a rename: it is a claim about where the
+            // membership came from, not about what the list is called.
+            let from = cat.collections.get(collection).and_then(|c| c.from.clone());
+            cat.collections.insert(
+                *collection,
+                Collected {
+                    name: name.clone(),
+                    ordered: *ordered,
+                    from,
+                },
+            );
+        }
+        Fact::CollectionFrozen { collection, source } => {
+            if let Some(c) = cat.collections.get_mut(collection) {
+                c.from = Some(source.clone());
             }
-            Fact::RecordingCatalogued {
-                recording,
-                title,
-                artist,
-            } => {
-                cat.recordings.insert(
-                    of(recording),
-                    Recorded {
-                        title: title.clone(),
-                        artist: who(artist),
-                    },
-                );
-            }
-            Fact::EncodingDescribed {
-                encoding,
-                audio,
-                format,
-                bitrate,
-                length_ms,
-                sample_rate,
-                channels,
-            } => {
-                cat.encodings.entry(*encoding).or_insert(Encoded {
-                    audio: *audio,
-                    recording: None,
-                    format: *format,
-                    bitrate: *bitrate,
-                    length_ms: *length_ms,
-                    sample_rate: *sample_rate,
-                    channels: *channels,
-                });
-            }
-            Fact::EncodingBound { encoding, from, to } => {
-                bindings
-                    .entry((*encoding, from.map(|f| of(&f))))
-                    .or_default()
-                    .push((*stamp, of(to)));
-            }
-            Fact::ViewSaved { view, name, source } => {
-                cat.views.insert(
-                    *view,
-                    SavedView {
-                        name: name.clone(),
-                        source: source.clone(),
-                    },
-                );
-                cat.views_dropped.remove(view);
-            }
-            Fact::ViewDropped { view } => {
-                cat.views.remove(view);
-                cat.views_dropped.insert(*view);
-            }
-            Fact::CollectionNamed {
-                collection,
-                name,
-                ordered,
-            } => {
-                // The source survives a rename: it is a claim about where the
-                // membership came from, not about what the list is called.
-                let from = cat.collections.get(collection).and_then(|c| c.from.clone());
-                cat.collections.insert(
-                    *collection,
-                    Collected {
-                        name: name.clone(),
-                        ordered: *ordered,
-                        from,
-                    },
-                );
-            }
-            Fact::CollectionFrozen { collection, source } => {
-                if let Some(c) = cat.collections.get_mut(collection) {
-                    c.from = Some(source.clone());
-                }
-            }
-            Fact::CollectionEntryAdded {
-                collection,
-                recording,
-                ord,
-            } => assert_edge(
-                &mut cat.entries,
-                &mut cat.entries_retracted,
-                (*collection, ord.clone(), of(recording)),
-            ),
-            Fact::CollectionEntryRemoved {
-                collection,
-                recording,
-                ord,
-            } => retract_edge(
-                &mut cat.entries,
-                &mut cat.entries_retracted,
-                (*collection, ord.clone(), of(recording)),
-            ),
-            Fact::FacetDefined { facet, key, label } => {
-                cat.facets.insert(
-                    *facet,
-                    FacetRecord {
-                        key: key.clone(),
-                        label: label.clone(),
-                    },
-                );
-            }
-            Fact::ConceptCatalogued {
-                facet,
-                concept,
-                label,
-                node_label,
-            } => {
-                cat.concepts.insert(
-                    *concept,
-                    ConceptRecord {
-                        facet: *facet,
-                        label: label.clone(),
-                        node_label: *node_label,
-                    },
-                );
-            }
-            Fact::HierarchyDefined {
-                hierarchy,
-                facet,
-                name,
-            } => {
-                cat.hierarchies.insert(*hierarchy, (*facet, name.clone()));
-            }
-            Fact::EncodingDerived { from, to } => assert_edge(
-                &mut cat.encoding_derived,
-                &mut cat.encoding_derived_retracted,
-                (*from, *to),
-            ),
-            Fact::EncodingDerivationRetracted { from, to } => retract_edge(
-                &mut cat.encoding_derived,
-                &mut cat.encoding_derived_retracted,
-                (*from, *to),
-            ),
-            Fact::RecordingDerived { from, to, kind } => assert_edge(
-                &mut cat.derived,
-                &mut cat.derived_retracted,
-                (*from, *to, *kind),
-            ),
-            Fact::RecordingDerivationRetracted { from, to, kind } => retract_edge(
-                &mut cat.derived,
-                &mut cat.derived_retracted,
-                (*from, *to, *kind),
-            ),
-            Fact::WorkDerived { from, to, kind } => assert_edge(
-                &mut cat.work_derived,
-                &mut cat.work_derived_retracted,
-                (*from, *to, *kind),
-            ),
-            Fact::WorkDerivationRetracted { from, to, kind } => retract_edge(
-                &mut cat.work_derived,
-                &mut cat.work_derived_retracted,
-                (*from, *to, *kind),
-            ),
-            Fact::HierarchyNarrowed {
-                hierarchy,
-                parent,
-                child,
-            } => assert_edge(
-                &mut cat.narrows,
-                &mut cat.narrows_retracted,
-                (*hierarchy, *parent, *child),
-            ),
-            Fact::HierarchyNarrowRetracted {
-                hierarchy,
-                parent,
-                child,
-            } => retract_edge(
-                &mut cat.narrows,
-                &mut cat.narrows_retracted,
-                (*hierarchy, *parent, *child),
-            ),
-            Fact::ConceptAsserted {
-                subject,
-                concept,
-                basis,
-                confidence,
-            } => assign(
+        }
+        Fact::CollectionEntryAdded {
+            collection,
+            recording,
+            ord,
+        } => assert_edge(
+            &mut cat.entries,
+            &mut cat.entries_retracted,
+            (*collection, ord.clone(), cat.merges.resolve(*recording)),
+        ),
+        Fact::CollectionEntryRemoved {
+            collection,
+            recording,
+            ord,
+        } => retract_edge(
+            &mut cat.entries,
+            &mut cat.entries_retracted,
+            (*collection, ord.clone(), cat.merges.resolve(*recording)),
+        ),
+        Fact::FacetDefined { facet, key, label } => {
+            cat.facets.insert(
+                *facet,
+                FacetRecord {
+                    key: key.clone(),
+                    label: label.clone(),
+                },
+            );
+        }
+        Fact::ConceptCatalogued {
+            facet,
+            concept,
+            label,
+            node_label,
+        } => {
+            cat.concepts.insert(
+                *concept,
+                ConceptRecord {
+                    facet: *facet,
+                    label: label.clone(),
+                    node_label: *node_label,
+                },
+            );
+        }
+        Fact::HierarchyDefined {
+            hierarchy,
+            facet,
+            name,
+        } => {
+            cat.hierarchies.insert(*hierarchy, (*facet, name.clone()));
+        }
+        Fact::EncodingDerived { from, to } => assert_edge(
+            &mut cat.encoding_derived,
+            &mut cat.encoding_derived_retracted,
+            (*from, *to),
+        ),
+        Fact::EncodingDerivationRetracted { from, to } => retract_edge(
+            &mut cat.encoding_derived,
+            &mut cat.encoding_derived_retracted,
+            (*from, *to),
+        ),
+        Fact::RecordingDerived { from, to, kind } => assert_edge(
+            &mut cat.derived,
+            &mut cat.derived_retracted,
+            (*from, *to, *kind),
+        ),
+        Fact::RecordingDerivationRetracted { from, to, kind } => retract_edge(
+            &mut cat.derived,
+            &mut cat.derived_retracted,
+            (*from, *to, *kind),
+        ),
+        Fact::WorkDerived { from, to, kind } => assert_edge(
+            &mut cat.work_derived,
+            &mut cat.work_derived_retracted,
+            (*from, *to, *kind),
+        ),
+        Fact::WorkDerivationRetracted { from, to, kind } => retract_edge(
+            &mut cat.work_derived,
+            &mut cat.work_derived_retracted,
+            (*from, *to, *kind),
+        ),
+        Fact::HierarchyNarrowed {
+            hierarchy,
+            parent,
+            child,
+        } => assert_edge(
+            &mut cat.narrows,
+            &mut cat.narrows_retracted,
+            (*hierarchy, *parent, *child),
+        ),
+        Fact::HierarchyNarrowRetracted {
+            hierarchy,
+            parent,
+            child,
+        } => retract_edge(
+            &mut cat.narrows,
+            &mut cat.narrows_retracted,
+            (*hierarchy, *parent, *child),
+        ),
+        Fact::ConceptAsserted {
+            subject,
+            concept,
+            basis,
+            confidence,
+        } => {
+            let subject = cat.described(subject);
+            assign(
                 &mut cat.assertions,
                 &mut cat.assertions_retracted,
-                described(subject),
+                subject,
                 *concept,
                 *basis,
                 *confidence,
-            ),
-            Fact::AliasAsserted {
-                subject,
-                value,
-                kind,
-            } => {
-                cat.aliases.insert((*subject, value.clone(), *kind));
+            )
+        }
+        Fact::AliasAsserted {
+            subject,
+            value,
+            kind,
+        } => {
+            cat.aliases.insert((*subject, value.clone(), *kind));
+        }
+        // Both, and deliberately: a heading the library retired is still a
+        // name it answers to, so it lands in `aliases` too — as an
+        // `ArtistName`, because it was the authorised one and a printed
+        // name is what it stays.
+        Fact::HeadingRetired { subject, value } => {
+            cat.aliases
+                .insert((*subject, value.clone(), AliasKind::ArtistName));
+            cat.retired_headings.insert((*subject, value.clone()));
+        }
+        Fact::ArtistRelated {
+            from,
+            to,
+            kind,
+            period,
+        } => {
+            // **Both ends resolved through the merges**, because a merge
+            // that ran after the relation was stated would otherwise
+            // leave an edge pointing at a row nothing else uses.
+            let edge = (
+                cat.artist_merges.resolve(*from),
+                cat.artist_merges.resolve(*to),
+                *kind,
+            );
+            cat.artist_relations.insert(edge);
+            if let Some(span) = period {
+                cat.relation_periods.insert(edge, *span);
             }
-            // Both, and deliberately: a heading the library retired is still a
-            // name it answers to, so it lands in `aliases` too — as an
-            // `ArtistName`, because it was the authorised one and a printed
-            // name is what it stays.
-            Fact::HeadingRetired { subject, value } => {
-                cat.aliases
-                    .insert((*subject, value.clone(), AliasKind::ArtistName));
-                cat.retired_headings.insert((*subject, value.clone()));
-            }
-            Fact::ArtistRelated {
-                from,
-                to,
-                kind,
-                period,
-            } => {
-                // **Both ends resolved through the merges**, because a merge
-                // that ran after the relation was stated would otherwise
-                // leave an edge pointing at a row nothing else uses.
-                let edge = (
-                    cat.artist_merges.resolve(*from),
-                    cat.artist_merges.resolve(*to),
-                    *kind,
-                );
-                cat.artist_relations.insert(edge);
-                if let Some(span) = period {
-                    cat.relation_periods.insert(edge, *span);
-                }
-            }
-            Fact::ConceptRetracted {
-                subject,
-                concept,
-                basis,
-            } => retract(
+        }
+        Fact::ConceptRetracted {
+            subject,
+            concept,
+            basis,
+        } => {
+            let subject = cat.described(subject);
+            retract(
                 &mut cat.assertions,
                 &mut cat.assertions_retracted,
-                described(subject),
+                subject,
                 *concept,
                 *basis,
-            ),
-            Fact::HoldingsAsserted { device, held } => {
-                // Records arrive in stamp order, so the last one simply wins.
-                cat.holdings.insert(
-                    *device,
-                    Asserted {
-                        at: *stamp,
-                        held: held.clone(),
-                    },
-                );
-            }
-            Fact::ReleaseGroupCatalogued {
-                group,
-                title,
-                artist,
-                first_released,
-                kind,
-                secondary,
-            } => {
-                cat.groups.insert(
-                    // **Through the merge**, so the loser keeps no album row
-                    // of its own — the same shape `RecordingCatalogued` takes,
-                    // and what stops a merged album still drawing a node.
-                    group_of(group),
-                    Grouped {
-                        title: title.clone(),
-                        // **Through the merge too**, and this is the one that
-                        // reaches a folder: `file_under` asks the group for its
-                        // artist first, so a split left here files the two
-                        // halves of one artist's record apart.
-                        artist: who(artist),
-                        first_released: *first_released,
-                        kind: *kind,
-                        secondary: secondary.clone(),
-                    },
-                );
-            }
-            Fact::WorkCatalogued { work, title } => {
-                cat.works.insert(*work, title.clone());
-            }
-            Fact::WorkPerformed { recording, work } => {
-                cat.performances.insert((of(recording), *work));
-            }
-            Fact::RoleDefined { role, name, class } => {
-                cat.roles.insert(*role, (name.clone(), *class));
-            }
-            Fact::CreditAsserted {
-                subject,
-                artist,
-                role,
-                basis,
-                position,
-                as_credited,
-                join_phrase,
-            } => {
-                // **A later assertion lifts the shadow**, because the two
-                // are one question answered twice and the later answer stands.
-                cat.credits_retracted
-                    .remove(&(credit_on(subject), who(artist), *role));
-                cat.credits.insert(
-                    // **The artist through the merge**, which is what collapses
-                    // the two halves of a split credit into one row rather than
-                    // leaving `line_of` to render the same person twice.
-                    (credit_on(subject), who(artist), *role, *basis),
-                    Credited {
-                        position: *position,
-                        as_credited: as_credited.clone(),
-                        join_phrase: join_phrase.clone(),
-                    },
-                );
-            }
-            // Applied in the pass below, because a retitle has to outlast a
-            // scan rather than merely follow it.
-            Fact::RecordingRetitled { .. } | Fact::ReleaseGroupRetitled { .. } => {}
-            Fact::EncodingClaimed {
-                encoding,
-                artist,
-                title,
-            } => {
-                // Last writer wins, as every descriptive fact does: a retag
-                // that changes what the file says changes what it claims.
-                cat.claims
-                    .insert(*encoding, (artist.clone(), title.clone()));
-            }
-            Fact::CreditRetracted {
-                subject,
-                artist,
-                role,
-                basis,
-            } => {
-                let key = (credit_on(subject), who(artist), *role);
-                // Every basis at once — see the fact's own doc for why it is
-                // keyed one field shorter than the assertion it shadows.
-                cat.credits.retain(|(s, a, r, _), _| (*s, *a, *r) != key);
-                // The strongest voice that ruled it out, so a weaker
-                // retraction arriving later cannot weaken a person's.
-                let at = cat.credits_retracted.entry(key).or_insert(*basis);
-                *at = (*at).max(*basis);
-            }
-            Fact::EncodingPlaced {
-                encoding,
-                track,
-                basis,
-            } => {
-                // Kept in full and resolved below, because the last word is
-                // not always the best one — see the pass after this loop.
-                cat.placed.insert(*encoding, *track);
-                claimed.entry(*encoding).or_default().push((*track, *basis));
-            }
-            // **Last word wins**, because these come in a pair: a copy retired
-            // and brought back and retired again is retired, and the set is
-            // already in stamp order.
-            Fact::EncodingProcessed { encoding, basis } => {
-                cat.processed.entry(*encoding).or_default().insert(*basis);
-            }
-            Fact::EncodingRetired { encoding } => {
-                cat.retired.insert(*encoding);
-            }
-            Fact::EncodingRestored { encoding } => {
-                cat.retired.remove(encoding);
-            }
-            Fact::EncodingLevelled { encoding, levels } => {
-                // Last writer wins: re-tagging a file is a correction, and
-                // there is nothing to reconcile between two claims about one
-                // encoding's loudness.
-                cat.levels.insert(*encoding, *levels);
-            }
-            Fact::LabelNamed { label, name } => {
-                cat.label_names.insert(*label, name.clone());
-            }
-            // **Additive, and never superseded** — #204. An id derives from
-            // exactly one mbid, so two devices saying so union and nothing
-            // here can disagree.
-            Fact::ReleaseIdentified {
-                release,
-                musicbrainz,
-            } => {
-                let at = *release;
-                if let Some(pressing) = cat.releases.get_mut(&at) {
-                    pressing.musicbrainz = Some(*musicbrainz);
-                } else {
-                    cat.release_basis.insert(at, *musicbrainz);
-                }
-            }
-
-            Fact::ReleaseCatalogued {
-                release,
-                group,
-                title,
-                released,
-                label,
-                media,
-            } => {
-                cat.releases.insert(
-                    *release,
-                    Released {
-                        // **The pressing stays; only which album it is on
-                        // moves.** That is the whole point of merging at this
-                        // level: *Barton Hollow* is one album holding a
-                        // standard edition and a deluxe, and folding the
-                        // releases together would lose the difference.
-                        group: group_of(group),
-                        title: title.clone(),
-                        // **Kept across a restatement** — #204. The pressing
-                        // is taken wholesale, and the id it was derived from
-                        // is not the sort of thing a retitle revises.
-                        musicbrainz: cat
-                            .releases
-                            .get(release)
-                            .and_then(|r| r.musicbrainz)
-                            .or_else(|| cat.release_basis.get(release).copied()),
-                        released: *released,
-                        label: *label,
-                        media: *media,
-                    },
-                );
-            }
-            Fact::MediumCatalogued {
-                medium,
-                release,
-                position,
-                format,
-                tracks,
-            } => {
-                cat.media.insert(
-                    *medium,
-                    Pressed {
-                        release: *release,
-                        position: *position,
-                        format: format.clone(),
-                        tracks: *tracks,
-                    },
-                );
-            }
-            Fact::TrackPlaced {
-                track,
-                medium,
-                recording,
-                position,
-                title_on_release,
-            } => {
-                cat.tracks.insert(
-                    *track,
-                    Placed {
-                        medium: *medium,
-                        recording: of(recording),
-                        position: *position,
-                        title_on_release: title_on_release.clone(),
-                    },
-                );
-            }
-            Fact::EncodingMeasured {
-                encoding,
-                cutoff_hz,
-                cliff_db,
-                analyser,
-            } => {
-                // Last measurement wins, which is what a re-measure means.
-                cat.measurements.insert(
-                    *encoding,
-                    Spectrum {
-                        cutoff_hz: *cutoff_hz,
-                        cliff_db: *cliff_db,
-                        analyser: *analyser,
-                    },
-                );
-            }
-            Fact::RecordingRated { recording, stars } => {
-                // Records arrive in stamp order, so the last simply wins.
-                match stars {
-                    Some(n) => {
-                        cat.ratings.insert(of(recording), *n);
-                    }
-                    None => {
-                        cat.ratings.remove(&of(recording));
-                    }
-                }
-            }
-            Fact::RecordingPlayed { recording, .. } => {
-                *cat.plays.entry(of(recording)).or_insert(0) += 1;
-                // The latest play, by the wall time the play happened, which
-                // is what "days since played" is asking about. The stamp
-                // orders the log; this answers the question.
-                //
-                // **In seconds**, like every other fact and like the filter
-                // language's clock. A stamp is in milliseconds, and handing
-                // that straight out made "played a minute ago" read as fifty
-                // years from now.
-                let seconds = stamp.wall / 1_000;
-                let latest = cat.last_played.entry(of(recording)).or_insert(seconds);
-                *latest = (*latest).max(seconds);
-            }
-            Fact::RecordingIdentified { recording, basis } => {
-                // **No conflict rule, because there cannot be a conflict.**
-                //
-                // The id is `of_basis(basis)`, so two different bases reaching
-                // one recording would be a UUIDv5 collision. Every fact naming
-                // this id carries the same basis, and the only thing two
-                // devices can disagree about is whether they have said it yet.
-                //
-                // A "best rung wins" comparison was written here first and is
-                // gone: a mutation that reversed it failed no test, which is
-                // the signature of a branch that cannot run. A file that later
-                // gains a MusicBrainz id does not update this row — it mints a
-                // *different* recording, and the two are joined by a merge.
-                cat.identified
-                    .entry(*recording)
-                    .or_insert_with(|| basis.clone());
-            }
-            // Applied in the pass above, because a merge has to move what was
-            // said before it.
-            Fact::RecordingMerged { .. }
-            | Fact::ReleaseGroupMerged { .. }
-            | Fact::ArtistMerged { .. } => {}
-            Fact::RecordingAcquired { recording, at } => {
-                let first = cat.acquired.entry(of(recording)).or_insert(*at);
-                *first = (*first).min(*at);
-            }
+            )
         }
-    }
-
-    // **A placement onto a MusicBrainz release outranks one onto a name.**
-    //
-    // Last writer wins was the rule and it loses real information. A release
-    // is minted from its MusicBrainz id where the tags carry one and from its
-    // release group otherwise (`of_release`), and **identical audio is one
-    // encoding however many files hold it** — so scanning a badly tagged copy
-    // re-places the well tagged one.
-    //
-    // Measured: `Luna` is held under `~/MusicLibrary` with a MusicBrainz album
-    // id and was held under `~/DanceMusic-staging` with seven tags and none.
-    // Same audio, so the same 32 encodings — and importing the staging folder
-    // moved all 32 onto a medium minted from the album *name*, off the
-    // MusicBrainz-derived medium where their catalogued tracklist sits. The
-    // tracklist then appeared to have attached to nothing. 39 files across the
-    // library were sitting on the weaker medium when this was written.
-    //
-    // The rung is computable rather than recorded: a release equal to
-    // `of_release(None, group)` was minted from the group, and anything else
-    // came from an id. So no fact needs a new field to say which it was.
-    //
-    // Resolved after the loop because a placement can be folded before the
-    // release it points at, and the rung is a property of that release.
-    // **And who said so outranks both** — #170. Where two placements name
-    // MusicBrainz-derived releases the computed rung cannot separate them, so
-    // recency decides and a scan is always the most recent thing that ran.
-    // `Source` is what breaks that tie: a pass that read a whole tracklist and
-    // matched it against every file held says more than a tag does.
-    for (encoding, tracks) in &claimed {
-        let rung = |t: &Id<Track>| {
-            cat.tracks
-                .get(t)
-                .and_then(|slot| cat.media.get(&slot.medium))
-                .and_then(|m| cat.releases.get(&m.release).map(|r| (m.release, r.group)))
-                .is_some_and(|(release, group)| release != Id::<Release>::of_release(None, group))
-        };
-        let strongest = tracks.iter().map(|(_, b)| *b).max();
-        if let Some(best) = tracks
-            .iter()
-            .rev()
-            .filter(|(_, b)| Some(*b) == strongest)
-            .find(|(t, _)| rung(t))
-            .or_else(|| tracks.iter().rev().find(|(_, b)| Some(*b) == strongest))
-        {
-            cat.placed.insert(*encoding, best.0);
+        Fact::HoldingsAsserted { device, held } => {
+            // Records arrive in stamp order, so the last one simply wins.
+            cat.holdings.insert(
+                *device,
+                Asserted {
+                    at: *stamp,
+                    held: held.clone(),
+                },
+            );
         }
-    }
-
-    // **Retitles last, and that is a rung rather than an ordering trick.**
-    //
-    // Last writer wins is the rule for a descriptive fact, and it does not
-    // work here: `query` and `apply` bring their view up to date by scanning
-    // the disk, and a scan re-asserts `RecordingCatalogued` from the tags with
-    // a fresh stamp. Worse, it asserts it against the *current* recording id —
-    // so after a relink the fact is new rather than a repeat, `drop_repeats`
-    // keeps it, and it lands on top of anything written earlier.
-    //
-    // Measured the hard way: 23 retitles applied cleanly and not one of them
-    // was visible afterwards, because the next read re-scanned over them.
-    //
-    // So a retitle is curation and a scan is a reading, and curation outranks
-    // a reading whenever it was written. That is the same relationship
-    // `Source` encodes for a claim; `RecordingCatalogued` carries no rung, and
-    // giving it one is a larger change than this needs.
-    for Record { fact, .. } in records {
-        match fact {
-            Fact::RecordingRetitled { recording, title } => {
-                if let Some(recorded) = cat.recordings.get_mut(&of(recording)) {
-                    recorded.title = title.clone();
-                }
-            }
-            Fact::ReleaseGroupRetitled { group, title } => {
-                if let Some(album) = cat.groups.get_mut(&group_of(group)) {
-                    album.title = title.clone();
-                }
-            }
-            _ => {}
+        Fact::ReleaseGroupCatalogued {
+            group,
+            title,
+            artist,
+            first_released,
+            kind,
+            secondary,
+        } => {
+            let at = cat.group_merges.resolve(*group);
+            cat.groups.insert(
+                // **Through the merge**, so the loser keeps no album row
+                // of its own — the same shape `RecordingCatalogued` takes,
+                // and what stops a merged album still drawing a node.
+                at,
+                Grouped {
+                    title: cat
+                        .group_retitles
+                        .get(&at)
+                        .cloned()
+                        .unwrap_or_else(|| title.clone()),
+                    // **Through the merge too**, and this is the one that
+                    // reaches a folder: `file_under` asks the group for its
+                    // artist first, so a split left here files the two
+                    // halves of one artist's record apart.
+                    artist: cat.artist_merges.resolve(*artist),
+                    first_released: *first_released,
+                    kind: *kind,
+                    secondary: secondary.clone(),
+                },
+            );
         }
-    }
-
-    for ((encoding, base), mut asserted) in bindings {
-        asserted.sort();
-        let distinct: BTreeSet<_> = asserted.iter().map(|(_, r)| *r).collect();
-        let winner = asserted.last().expect("non-empty by construction").1;
-
-        // **Recorded whether or not anyone has described these bytes.**
+        Fact::WorkCatalogued { work, title } => {
+            cat.works.insert(*work, title.clone());
+        }
+        Fact::WorkPerformed { recording, work } => {
+            cat.performances
+                .insert((cat.merges.resolve(*recording), *work));
+        }
+        Fact::RoleDefined { role, name, class } => {
+            cat.roles.insert(*role, (name.clone(), *class));
+        }
+        Fact::CreditAsserted {
+            subject,
+            artist,
+            role,
+            basis,
+            position,
+            as_credited,
+            join_phrase,
+        } => {
+            // **A later assertion lifts the shadow**, because the two
+            // are one question answered twice and the later answer stands.
+            cat.credits_retracted.remove(&(
+                cat.credit_on(subject),
+                cat.artist_merges.resolve(*artist),
+                *role,
+            ));
+            cat.credits.insert(
+                // **The artist through the merge**, which is what collapses
+                // the two halves of a split credit into one row rather than
+                // leaving `line_of` to render the same person twice.
+                (
+                    cat.credit_on(subject),
+                    cat.artist_merges.resolve(*artist),
+                    *role,
+                    *basis,
+                ),
+                Credited {
+                    position: *position,
+                    as_credited: as_credited.clone(),
+                    join_phrase: join_phrase.clone(),
+                },
+            );
+        }
+        // **A retitle is a rung rather than an ordering trick.** Last writer
+        // wins is the rule for a descriptive fact, and it does not work here:
+        // `query` and `apply` bring their view up to date by scanning the
+        // disk, and a scan re-asserts `RecordingCatalogued` from the tags with
+        // a fresh stamp — against the *current* recording id, so after a
+        // relink the fact is new rather than a repeat and lands on top of
+        // anything written earlier. Measured the hard way: 23 retitles
+        // applied cleanly and not one was visible afterwards.
         //
-        // This used to write the binding onto the `Encoded` row and drop it
-        // when there was none, which made a relink invisible to anything that
-        // had not also scanned. `ingest` checks exactly this before minting —
-        // "a binding someone made wins over the one we would mint" — so
-        // dropping it defeated the one guard stopping a scan from silently
-        // undoing an identification. Applying 377 of them left the work list
-        // where it was, and that is how it was found.
-        //
-        // A binding is a fact about an encoding *id*. Whether its bytes have
-        // been described is a different fact and a different question.
-        cat.bound.insert(encoding, winner);
-        if let Some(d) = cat.encodings.get_mut(&encoding) {
-            d.recording = Some(winner);
+        // So a retitle is curation and a scan is a reading, and curation
+        // outranks a reading whenever it was written. It used to be a pass
+        // after the loop; it is applied now if the row exists and **kept**
+        // either way, and a cataloguing arriving later asks for it — the same
+        // answer, in the form one fact at a time can give (#267).
+        Fact::RecordingRetitled { recording, title } => {
+            let at = cat.merges.resolve(*recording);
+            cat.retitles.insert(at, title.clone());
+            if let Some(recorded) = cat.recordings.get_mut(&at) {
+                recorded.title = title.clone();
+            }
         }
-        if distinct.len() > 1 {
-            cat.conflicts.push(Conflict {
-                encoding,
-                base,
-                asserted,
-            });
+        Fact::ReleaseGroupRetitled { group, title } => {
+            let at = cat.group_merges.resolve(*group);
+            cat.group_retitles.insert(at, title.clone());
+            if let Some(album) = cat.groups.get_mut(&at) {
+                album.title = title.clone();
+            }
+        }
+        Fact::EncodingClaimed {
+            encoding,
+            artist,
+            title,
+        } => {
+            // Last writer wins, as every descriptive fact does: a retag
+            // that changes what the file says changes what it claims.
+            cat.claims
+                .insert(*encoding, (artist.clone(), title.clone()));
+        }
+        Fact::CreditRetracted {
+            subject,
+            artist,
+            role,
+            basis,
+        } => {
+            let key = (
+                cat.credit_on(subject),
+                cat.artist_merges.resolve(*artist),
+                *role,
+            );
+            // Every basis at once — see the fact's own doc for why it is
+            // keyed one field shorter than the assertion it shadows.
+            cat.credits.retain(|(s, a, r, _), _| (*s, *a, *r) != key);
+            // The strongest voice that ruled it out, so a weaker
+            // retraction arriving later cannot weaken a person's.
+            let at = cat.credits_retracted.entry(key).or_insert(*basis);
+            *at = (*at).max(*basis);
+        }
+        Fact::EncodingPlaced {
+            encoding,
+            track,
+            basis,
+        } => {
+            // Kept in full and resolved below, because the last word is
+            // not always the best one — see the pass after this loop.
+            cat.placed.insert(*encoding, *track);
+            cat.placements
+                .entry(*encoding)
+                .or_default()
+                .push((*track, *basis));
+        }
+        // **Last word wins**, because these come in a pair: a copy retired
+        // and brought back and retired again is retired, and the set is
+        // already in stamp order.
+        Fact::EncodingProcessed { encoding, basis } => {
+            cat.processed.entry(*encoding).or_default().insert(*basis);
+        }
+        Fact::EncodingRetired { encoding } => {
+            cat.retired.insert(*encoding);
+        }
+        Fact::EncodingRestored { encoding } => {
+            cat.retired.remove(encoding);
+        }
+        Fact::EncodingLevelled { encoding, levels } => {
+            // Last writer wins: re-tagging a file is a correction, and
+            // there is nothing to reconcile between two claims about one
+            // encoding's loudness.
+            cat.levels.insert(*encoding, *levels);
+        }
+        Fact::LabelNamed { label, name } => {
+            cat.label_names.insert(*label, name.clone());
+        }
+        // **Additive, and never superseded** — #204. An id derives from
+        // exactly one mbid, so two devices saying so union and nothing
+        // here can disagree.
+        Fact::ReleaseIdentified {
+            release,
+            musicbrainz,
+        } => {
+            let at = *release;
+            if let Some(pressing) = cat.releases.get_mut(&at) {
+                pressing.musicbrainz = Some(*musicbrainz);
+            } else {
+                cat.release_basis.insert(at, *musicbrainz);
+            }
+        }
+
+        Fact::ReleaseCatalogued {
+            release,
+            group,
+            title,
+            released,
+            label,
+            media,
+        } => {
+            cat.releases.insert(
+                *release,
+                Released {
+                    // **The pressing stays; only which album it is on
+                    // moves.** That is the whole point of merging at this
+                    // level: *Barton Hollow* is one album holding a
+                    // standard edition and a deluxe, and folding the
+                    // releases together would lose the difference.
+                    group: cat.group_merges.resolve(*group),
+                    title: title.clone(),
+                    // **Kept across a restatement** — #204. The pressing
+                    // is taken wholesale, and the id it was derived from
+                    // is not the sort of thing a retitle revises.
+                    musicbrainz: cat
+                        .releases
+                        .get(release)
+                        .and_then(|r| r.musicbrainz)
+                        .or_else(|| cat.release_basis.get(release).copied()),
+                    released: *released,
+                    label: *label,
+                    media: *media,
+                },
+            );
+        }
+        Fact::MediumCatalogued {
+            medium,
+            release,
+            position,
+            format,
+            tracks,
+        } => {
+            cat.media.insert(
+                *medium,
+                Pressed {
+                    release: *release,
+                    position: *position,
+                    format: format.clone(),
+                    tracks: *tracks,
+                },
+            );
+        }
+        Fact::TrackPlaced {
+            track,
+            medium,
+            recording,
+            position,
+            title_on_release,
+        } => {
+            cat.tracks.insert(
+                *track,
+                Placed {
+                    medium: *medium,
+                    recording: cat.merges.resolve(*recording),
+                    position: *position,
+                    title_on_release: title_on_release.clone(),
+                },
+            );
+        }
+        Fact::EncodingMeasured {
+            encoding,
+            cutoff_hz,
+            cliff_db,
+            analyser,
+        } => {
+            // Last measurement wins, which is what a re-measure means.
+            cat.measurements.insert(
+                *encoding,
+                Spectrum {
+                    cutoff_hz: *cutoff_hz,
+                    cliff_db: *cliff_db,
+                    analyser: *analyser,
+                },
+            );
+        }
+        Fact::RecordingRated { recording, stars } => {
+            // Records arrive in stamp order, so the last simply wins.
+            match stars {
+                Some(n) => {
+                    cat.ratings.insert(cat.merges.resolve(*recording), *n);
+                }
+                None => {
+                    cat.ratings.remove(&cat.merges.resolve(*recording));
+                }
+            }
+        }
+        Fact::RecordingPlayed { recording, .. } => {
+            *cat.plays.entry(cat.merges.resolve(*recording)).or_insert(0) += 1;
+            // The latest play, by the wall time the play happened, which
+            // is what "days since played" is asking about. The stamp
+            // orders the log; this answers the question.
+            //
+            // **In seconds**, like every other fact and like the filter
+            // language's clock. A stamp is in milliseconds, and handing
+            // that straight out made "played a minute ago" read as fifty
+            // years from now.
+            let seconds = stamp.wall / 1_000;
+            let latest = cat
+                .last_played
+                .entry(cat.merges.resolve(*recording))
+                .or_insert(seconds);
+            *latest = (*latest).max(seconds);
+        }
+        Fact::RecordingIdentified { recording, basis } => {
+            // **No conflict rule, because there cannot be a conflict.**
+            //
+            // The id is `of_basis(basis)`, so two different bases reaching
+            // one recording would be a UUIDv5 collision. Every fact naming
+            // this id carries the same basis, and the only thing two
+            // devices can disagree about is whether they have said it yet.
+            //
+            // A "best rung wins" comparison was written here first and is
+            // gone: a mutation that reversed it failed no test, which is
+            // the signature of a branch that cannot run. A file that later
+            // gains a MusicBrainz id does not update this row — it mints a
+            // *different* recording, and the two are joined by a merge.
+            cat.identified
+                .entry(*recording)
+                .or_insert_with(|| basis.clone());
+        }
+        // Applied in the pass above, because a merge has to move what was
+        // said before it.
+        Fact::RecordingMerged { .. }
+        | Fact::ReleaseGroupMerged { .. }
+        | Fact::ArtistMerged { .. } => {}
+        Fact::RecordingAcquired { recording, at } => {
+            let first = cat
+                .acquired
+                .entry(cat.merges.resolve(*recording))
+                .or_insert(*at);
+            *first = (*first).min(*at);
         }
     }
-    cat.conflicts.sort_by_key(|c| c.encoding);
-    cat
+}
+
+/// **A placement onto a MusicBrainz release outranks one onto a name.**
+///
+/// Last writer wins was the rule and it loses real information. A release
+/// is minted from its MusicBrainz id where the tags carry one and from its
+/// release group otherwise (`of_release`), and **identical audio is one
+/// encoding however many files hold it** — so scanning a badly tagged copy
+/// re-places the well tagged one.
+///
+/// Measured: `Luna` is held under `~/MusicLibrary` with a MusicBrainz album
+/// id and was held under `~/DanceMusic-staging` with seven tags and none.
+/// Same audio, so the same 32 encodings — and importing the staging folder
+/// moved all 32 onto a medium minted from the album *name*, off the
+/// MusicBrainz-derived medium where their catalogued tracklist sits. The
+/// tracklist then appeared to have attached to nothing. 39 files across the
+/// library were sitting on the weaker medium when this was written.
+///
+/// The rung is computable rather than recorded: a release equal to
+/// `of_release(None, group)` was minted from the group, and anything else
+/// came from an id. So no fact needs a new field to say which it was.
+///
+/// Ranked after the loop because a placement can be folded before the
+/// release it points at, and the rung is a property of that release —
+/// which is also why a pressing arriving later is wide (#261).
+/// **And who said so outranks both** — #170. Where two placements name
+/// MusicBrainz-derived releases the computed rung cannot separate them, so
+/// recency decides and a scan is always the most recent thing that ran.
+/// `Source` is what breaks that tie: a pass that read a whole tracklist and
+/// matched it against every file held says more than a tag does.
+pub(crate) fn rank_placement(cat: &mut Catalogue, encoding: Id<Encoding>) {
+    let Some(tracks) = cat.placements.get(&encoding) else {
+        return;
+    };
+    let rung = |t: &Id<Track>| {
+        cat.tracks
+            .get(t)
+            .and_then(|slot| cat.media.get(&slot.medium))
+            .and_then(|m| cat.releases.get(&m.release).map(|r| (m.release, r.group)))
+            .is_some_and(|(release, group)| release != Id::<Release>::of_release(None, group))
+    };
+    let strongest = tracks.iter().map(|(_, b)| *b).max();
+    if let Some(best) = tracks
+        .iter()
+        .rev()
+        .filter(|(_, b)| Some(*b) == strongest)
+        .find(|(t, _)| rung(t))
+        .or_else(|| tracks.iter().rev().find(|(_, b)| Some(*b) == strongest))
+    {
+        let best = best.0;
+        cat.placed.insert(encoding, best);
+    }
+}
+
+/// **Rank one `(encoding, base)`'s bindings**: the last by stamp shows, and two
+/// distinct answers are a conflict.
+pub(crate) fn rank_binding(cat: &mut Catalogue, key: BindingKey) {
+    let (encoding, base) = key;
+    let Some(asserted) = cat.bindings.get_mut(&key) else {
+        return;
+    };
+    asserted.sort();
+    let asserted = asserted.clone();
+    let distinct: BTreeSet<_> = asserted.iter().map(|(_, r)| *r).collect();
+    let winner = asserted.last().expect("non-empty by construction").1;
+
+    // **Recorded whether or not anyone has described these bytes.**
+    //
+    // This used to write the binding onto the `Encoded` row and drop it
+    // when there was none, which made a relink invisible to anything that
+    // had not also scanned. `ingest` checks exactly this before minting —
+    // "a binding someone made wins over the one we would mint" — so
+    // dropping it defeated the one guard stopping a scan from silently
+    // undoing an identification. Applying 377 of them left the work list
+    // where it was, and that is how it was found.
+    //
+    // A binding is a fact about an encoding *id*. Whether its bytes have
+    // been described is a different fact and a different question.
+    cat.bound.insert(encoding, winner);
+    if let Some(d) = cat.encodings.get_mut(&encoding) {
+        d.recording = Some(winner);
+    }
+    // One entry per key, replaced rather than appended, so ranking a key
+    // twice — a fold ranks all, an advance ranks one — says it once.
+    cat.conflicts
+        .retain(|c| (c.encoding, c.base) != (encoding, base));
+    if distinct.len() > 1 {
+        cat.conflicts.push(Conflict {
+            encoding,
+            base,
+            asserted,
+        });
+        cat.conflicts.sort_by_key(|c| (c.encoding, c.base));
+    }
+}
+
+impl Catalogue {
+    /// A described subject, through the merges: a genre asserted on the loser
+    /// is a genre on the album — #156.
+    fn described(&self, s: &Described) -> Described {
+        match s {
+            Described::Recording(r) => Described::Recording(self.merges.resolve(*r)),
+            Described::ReleaseGroup(g) => Described::ReleaseGroup(self.group_merges.resolve(*g)),
+        }
+    }
+
+    /// A credited subject, through the merges. The album credit follows too,
+    /// which is what `file_under` asks for first: a merge that left it behind
+    /// would file the two halves of one record under different artists.
+    fn credit_on(&self, s: &CreditOn) -> CreditOn {
+        match s {
+            CreditOn::Recording(r) => CreditOn::Recording(self.merges.resolve(*r)),
+            CreditOn::ReleaseGroup(g) => CreditOn::ReleaseGroup(self.group_merges.resolve(*g)),
+            other => *other,
+        }
+    }
 }
 
 #[allow(

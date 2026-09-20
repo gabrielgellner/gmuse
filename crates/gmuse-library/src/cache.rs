@@ -163,7 +163,7 @@ pub fn projection_path(data_dir: &Path) -> PathBuf {
 /// **Which is often**, and deliberately cheap: the snapshot is derived, so a
 /// bump costs one slow run and never a migration. That is the invariant that
 /// makes changing the projection's shape ordinary rather than dangerous.
-const PROJECTION_VERSION: u32 = 1;
+const PROJECTION_VERSION: u32 = 2;
 
 /// **What the logs looked like when a snapshot was taken** — #194.
 ///
