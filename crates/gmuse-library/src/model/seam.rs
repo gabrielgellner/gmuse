@@ -1092,11 +1092,15 @@ impl Librarian {
         let mut out: Vec<Happened> = records
             .iter()
             .filter_map(|r| {
-                let wire = serde_json::to_value(&r.fact).ok()?;
-                let (name, fields) = wire.as_object()?.iter().next()?;
-                if !wire.to_string().contains(&id) {
+                // **The text once, and the tree only for a match.** This built a
+                // `Value` for every record and then printed it again to search it —
+                // twice the work, for the 97% of records that mention nothing.
+                let text = serde_json::to_string(&r.fact).ok()?;
+                if !text.contains(&id) {
                     return None;
                 }
+                let wire: serde_json::Value = serde_json::from_str(&text).ok()?;
+                let (name, fields) = wire.as_object()?.iter().next()?;
                 Some(Happened {
                     at: r.stamp.wall,
                     device: r.stamp.device.to_string(),

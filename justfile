@@ -285,6 +285,12 @@ pairing-cost:
 tree-cost data="~/MusicLibrary/.gmuse":
     cargo run --release --example where_the_tree_goes -- {{data}}
 
+# What the info panel's history costs, step by step — the K-over-an-artist lag. Needs
+# the real library.
+[group('test')]
+history-cost data="~/MusicLibrary/.gmuse":
+    cargo run --release --example what_history_costs -- {{data}}
+
 # What each part of a fold costs, attributed (#255). Needs the real library.
 [group('test')]
 memory-parts data="~/MusicLibrary/.gmuse" roots="~/MusicLibrary":

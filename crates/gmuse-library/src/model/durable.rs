@@ -124,6 +124,43 @@ pub fn read(path: &Path) -> (BTreeSet<Record>, Vec<Damage>) {
     (records, damage)
 }
 
+/// **Every record whose fact mentions an id, read without parsing the rest.**
+///
+/// The info panel's history is "every fact naming this thing" (`facts_about`),
+/// and its rule is that a fact mentions a focus if its wire form carries the
+/// id. The log on disk *is* the wire form, one record a line — so the test is
+/// a substring search on each line, and only the lines that pass are parsed.
+/// On the real library that is one pass over 87 MB of text against parsing
+/// 280,000 records and serialising each one again to look inside it.
+///
+/// Searched from the fact onward, so a device id in the stamp does not make
+/// every record of that device a mention of it.
+pub fn mentioning(data_dir: &Path, id: &str) -> BTreeSet<Record> {
+    let mut out = BTreeSet::new();
+    for path in logs_in(data_dir) {
+        // Whole, then split: a `String` per line was most of the cost of the
+        // pass, and the file is one allocation this way.
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.split('\n') {
+            // One search for the 97% of lines that mention nothing. A hit in
+            // the stamp — a focus that is also a writing device — is searched
+            // past, from the fact: seen to matter, by a test whose device is an
+            // artist.
+            let Some(hit) = line.find(id) else { continue };
+            let fact = line.find("\"fact\"").unwrap_or(0);
+            if hit < fact && !line[fact..].contains(id) {
+                continue;
+            }
+            if let Ok(record) = serde_json::from_str::<Record>(line) {
+                out.insert(record);
+            }
+        }
+    }
+    out
+}
+
 /// **How far each log has been read, so the next read can start there** — #258.
 ///
 /// A byte offset per file. The log is append-only, so everything before it is already held
@@ -371,6 +408,55 @@ mod tests {
                 fact: some_fact(i),
             })
             .collect()
+    }
+
+    /// **A mention is in the fact, not the stamp** — the info panel's history.
+    ///
+    /// `mentioning` searches the line's text, and every line carries the writing
+    /// device's id in its stamp. A focus on that id must not make every record the
+    /// device ever wrote a fact *about* it — and the search must still find the fact
+    /// that names it. The device here is deliberately also an artist id.
+    #[test]
+    fn a_mention_is_in_the_fact_and_not_the_stamp() {
+        let d = dir("mentioning");
+        let who = device(7);
+        let mut records = authored(who, 5);
+        // One fact that genuinely names the device's uuid, as an artist.
+        let mut clock = HybridClock::new(who);
+        for _ in 0..5 {
+            let _ = clock.stamp(1_000);
+        }
+        records.insert(Record {
+            stamp: clock.stamp(9_000),
+            fact: some_fact(7),
+        });
+        append(&log_path(&d, who), &records).unwrap();
+        // The instrument: every line carries the id in its stamp.
+        let text = std::fs::read_to_string(log_path(&d, who)).unwrap();
+        let id = who.as_uuid().to_string();
+        assert_eq!(
+            text.lines().filter(|l| l.contains(&id)).count(),
+            6,
+            "the fixture's stamps do not carry the id, so the rule is untested"
+        );
+
+        let found = mentioning(&d, &id);
+        assert_eq!(
+            found.len(),
+            1,
+            "a device id in the stamp counted as a mention: {found:?}"
+        );
+        assert!(
+            matches!(found.iter().next().map(|r| &r.fact), Some(Fact::ArtistNamed { artist, .. }) if artist.as_uuid() == who.as_uuid()),
+            "the one fact that names the id was not the one found"
+        );
+        // And what facts_about over the whole log would say, for the same focus.
+        let all = read_all(&d).0;
+        let by_walk = all
+            .iter()
+            .filter(|r| serde_json::to_string(&r.fact).unwrap().contains(&id))
+            .count();
+        assert_eq!(by_walk, found.len(), "the grep and the walk disagree");
     }
 
     /// **A rewrite replaces the log and loses nothing** — #201.

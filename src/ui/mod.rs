@@ -6055,7 +6055,11 @@ pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<crate::model::about::Abo
     // **Asked, and only when the history pane is open** — #256. It used to be a flag on
     // a fold that carried a clone of the whole log; the log's owner answers it now, and
     // the cache above means a focus change asks once rather than a redraw asking always.
-    let happened = if history {
+    // **And not at all when the library is the engine's.** `Remote::about` ignores what
+    // it is handed and has the engine read its own history, so an attached view asking
+    // its reading desk first was parsing 87 MB and walking 280,000 records for an answer
+    // nobody read — ~670 ms per K press, and again on every play counted.
+    let happened = if history && ui.reader.is_none() {
         ui.desk.history(focus)
     } else {
         Vec::new()

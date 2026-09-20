@@ -568,11 +568,18 @@ impl Desk {
                             // a question rather than a copy (#256): asked on a focus change and
                             // cached per focus, so reading the log for it is a cost a person
                             // pays when they open the panel.
+                            // **Only the lines that mention the focus are parsed** —
+                            // the log is the wire form, so the search runs on the text.
+                            // 87 MB grepped against 280,000 records parsed and serialised
+                            // again each: the difference between a K press and a wait.
                             let records = match holds_records {
                                 true => None,
-                                false => read_from
-                                    .as_deref()
-                                    .map(|dir| crate::model::durable::read_all(dir).0),
+                                false => read_from.as_deref().map(|dir| {
+                                    crate::model::durable::mentioning(
+                                        dir,
+                                        &focus.uuid().to_string(),
+                                    )
+                                }),
                             };
                             let _ = reply.send(
                                 answer
