@@ -346,8 +346,8 @@ impl Desk {
         now: i64,
         data_dir: Option<PathBuf>,
     ) -> Desk {
-        let catalogue = catalogued(&log);
-        Desk::spawn(log, catalogue, held, device, now, data_dir, true, true)
+        let projected = Projected::rebuild(log.records());
+        Desk::spawn(log, projected, held, device, now, data_dir, true, true)
     }
 
     /// Start the thread. **`holds_records` is the difference between a librarian and a
@@ -355,7 +355,7 @@ impl Desk {
     #[allow(clippy::too_many_arguments)]
     fn spawn(
         log: Instance,
-        catalogue: Arc<Catalogue>,
+        projected: Projected,
         held: Holdings,
         device: Id<Device>,
         now: i64,
@@ -380,7 +380,7 @@ impl Desk {
             .map(crate::model::durable::ends_in)
             .unwrap_or_default();
         let current = Arc::new(ArcSwap::from_pointee(fold(
-            &catalogue,
+            projected.catalogue(),
             log.records(),
             &held,
             device,
@@ -427,10 +427,12 @@ impl Desk {
             .spawn(move || {
                 let mut log = log;
                 let mut held = held;
-                // **Refreshed where the log changes, and nowhere else** — #261. `Job::Say`,
+                // **Advanced where the log changes, and nowhere else** — #261. `Job::Say`,
                 // `Job::Reread`, `Job::Walked` and `Job::Compact` are the four that change it;
-                // everything else publishes from the catalogue it already has.
-                let mut catalogue = catalogue;
+                // everything else publishes from the catalogue it already has. And advanced
+                // rather than refolded (#267): a rating is one fact applied in place, and the
+                // snapshot `commit` leaves behind is this projection, not a second fold.
+                let mut projected = projected;
                 // **Playback state, not a fact.** It is not folded, not published
                 // and never written to the log — the programme says what will play,
                 // and what was played is a `RecordingPlayed` fact like any other.
@@ -486,14 +488,14 @@ impl Desk {
                     let settled = match job {
                         Job::Say(say) => {
                             say(&mut log);
-                            catalogue = catalogued(&log);
+                            projected.advance(log.records());
                             moved = since(log.records(), before.as_ref());
                             if let Some((dir, appending)) = &writing {
                                 // A failed commit is not fatal: the in-memory
                                 // log is still right, and refusing the fact
                                 // because the disk refused it would lose the
                                 // rating as well as the write.
-                                let _ = commit(&mut log, dir, appending);
+                                let _ = commit_projected(&mut log, &projected, dir, appending);
                             }
                             None
                         }
@@ -588,7 +590,7 @@ impl Desk {
                                 // the whole of it rather than for the instant it takes to
                                 // spawn.
                                 published.store(Arc::new(fold(
-                                    &catalogue,
+                                    projected.catalogue(),
                                     log.records(),
                                     &held,
                                     device,
@@ -668,10 +670,9 @@ impl Desk {
                             // finds it through the store, and holdings are about
                             // copies of records the library has.
                             //
-                            // The catalogue costs a fold (~0.15s on the live log)
-                            // and this is the most expensive job there is, so it
-                            // is paid here rather than avoided by guessing.
-                            let known = log.catalogue();
+                            // The projection is current — nothing appends between
+                            // an advance and here — so this costs no fold (#267).
+                            let known = projected.catalogue();
                             let asserting: std::collections::BTreeMap<_, _> = fresh
                                 .iter()
                                 .map(|h| {
@@ -688,11 +689,19 @@ impl Desk {
                             ) {
                                 crate::operations::populate::Assertion::Write => {
                                     log.assert_holdings(now, asserting);
+                                    // **Advanced before the commit, not after it.** The
+                                    // snapshot `commit_projected` leaves behind is this
+                                    // projection, and one saved a fact behind the log it
+                                    // is printed against is stale in the one way the print
+                                    // cannot see. Found by a view that opened a locator
+                                    // from the holdings *before* the scan's.
+                                    projected.advance(log.records());
                                     if let Some((dir, appending)) = &writing {
                                         // Same reasoning as `Job::Say`: a refused
                                         // disk is not a reason to lose the answer
                                         // in memory.
-                                        let _ = commit(&mut log, dir, appending);
+                                        let _ =
+                                            commit_projected(&mut log, &projected, dir, appending);
                                     }
                                 }
                                 crate::operations::populate::Assertion::Unchanged => {}
@@ -707,9 +716,6 @@ impl Desk {
                                     )
                                 }
                             }
-                            // The holdings assertion above may have appended, so the
-                            // catalogue has moved.
-                            catalogue = catalogued(&log);
                             scanned = Some(report);
                             moved = Changed::Wide;
                             held = Arc::new(fresh);
@@ -741,7 +747,7 @@ impl Desk {
                                 } else {
                                     Changed::of(&fresh)
                                 };
-                                catalogue = Arc::new(reading(dir, device, now).into_catalogue());
+                                projected = reading(dir, device, now);
                             }
                             None
                         }
@@ -764,7 +770,7 @@ impl Desk {
                                     Changed::of(&fresh)
                                 };
                                 log.merge(now, &fresh);
-                                catalogue = catalogued(&log);
+                                projected.advance(log.records());
                             }
                             None
                         }
@@ -779,9 +785,11 @@ impl Desk {
                             // **Defensive, and known to be.** `compaction_cannot_change_what_
                             // the_library_says` in `model/round_trip.rs` is the invariant: a
                             // compact drops records nothing reads, so the catalogue it folds to
-                            // is the same one. Refreshed anyway, because the day that stops
-                            // being true a stale catalogue would be published silently.
-                            catalogue = catalogued(&log);
+                            // is the same one. Refolded anyway — `advance` would say it is
+                            // covered, which is the invariant and not a check of it — because
+                            // the day that stops being true a stale catalogue would be
+                            // published silently.
+                            projected = Projected::rebuild(log.records());
                             if log.records().len() != was {
                                 if let Some((dir, appending)) = &writing
                                     && let Err(e) = rewrite_all(&log, dir, appending)
@@ -803,7 +811,7 @@ impl Desk {
                     // looked between the two would be told nothing happened.
                     if moved != Changed::Nothing {
                         published.store(Arc::new(fold(
-                            &catalogue,
+                            projected.catalogue(),
                             log.records(),
                             &held,
                             device,
@@ -857,12 +865,11 @@ impl Desk {
         // `reading` folds the log itself if the snapshot is stale or absent, so a first launch
         // beside an engine that has never committed is slow and correct rather than wrong.
         let projected = reading(&data_dir, device, now);
-        let catalogue = Arc::new(projected.into_catalogue());
         // Empty, and it stays empty: a reading desk cannot `Say` — there is no `Appender` to
         // queue one — so nothing ever appends to this.
         let mut desk = Desk::spawn(
             Instance::new(device),
-            catalogue,
+            projected,
             held,
             device,
             now,
@@ -921,7 +928,7 @@ impl Desk {
     pub fn elsewhere(device: Id<Device>) -> Desk {
         let mut desk = Desk::spawn(
             Instance::new(device),
-            Arc::default(),
+            Projected::default(),
             Holdings::default(),
             device,
             0,
@@ -1203,7 +1210,7 @@ pub fn rewrite_all(
     }
     // **Compaction changes the log as much as an append does** — #258. Same records,
     // different bytes, so `LogPrint` would not notice on its own.
-    refresh_snapshot(log, data_dir);
+    refresh_snapshot(&Projected::rebuild(log.records()), data_dir);
     Ok(total)
 }
 
@@ -1241,7 +1248,7 @@ pub fn commit(
     _appending: &Appending,
 ) -> Result<usize, LogError> {
     let wrote = log.flush(data_dir)?;
-    refresh_snapshot(log, data_dir);
+    refresh_snapshot(&Projected::rebuild(log.records()), data_dir);
     Ok(wrote)
 }
 
@@ -1250,14 +1257,29 @@ pub fn commit(
 /// Separate so [`rewrite_all`] can call it too: compacting changes the log as much as
 /// appending does, and a snapshot describing the pre-compaction file would be stale in
 /// the one way `LogPrint` cannot see — same records, different bytes on disk.
-fn refresh_snapshot(log: &Instance, data_dir: &std::path::Path) {
-    let mut folded = crate::projection::Projected::default();
-    folded.advance(log.records());
+fn refresh_snapshot(projected: &Projected, data_dir: &std::path::Path) {
     crate::cache::save_projection(
         &crate::cache::projection_path(data_dir),
         &crate::cache::LogPrint::of(data_dir),
-        &folded,
+        projected,
     );
+}
+
+/// [`commit`] for the thread that already holds the projection — #267.
+///
+/// The thread advanced it when the fact was said, so the snapshot it leaves behind is
+/// that projection and not a second fold of the log. `commit` below folds because its
+/// callers — `shelf` operations, `apply` — hold a log and nothing else, and each is one
+/// process that exits.
+pub(crate) fn commit_projected(
+    log: &mut Instance,
+    projected: &Projected,
+    data_dir: &std::path::Path,
+    _appending: &Appending,
+) -> Result<usize, LogError> {
+    let wrote = log.flush(data_dir)?;
+    refresh_snapshot(projected, data_dir);
+    Ok(wrote)
 }
 
 /// The projection as it stands, for a read.
@@ -1403,7 +1425,7 @@ fn fold(
     //
     // It is also what lets a reading desk exist without the records: its catalogue comes from
     // the projection snapshot, which the engine refreshes on every commit.
-    catalogue: &Arc<crate::projection::catalogue::Catalogue>,
+    catalogue: &Catalogue,
     records: &BTreeSet<crate::facts::Record>,
     held: &Arc<Holdings>,
     device: Id<Device>,
@@ -1436,16 +1458,6 @@ fn fold(
         holdings: Arc::clone(held),
         scanning,
     }
-}
-
-/// **The catalogue to publish from** — one fold of the log, named so the four places that
-/// refresh it read the same.
-///
-/// The holdings bootstrap is *not* here: `bridge::librarian_from` still owns it, because it is
-/// the thing that needs a `Librarian` with holdings and the rule for standing the scan's map in
-/// belongs with it (#261).
-fn catalogued(log: &Instance) -> Arc<Catalogue> {
-    Arc::new(log.catalogue())
 }
 
 #[cfg(test)]
@@ -2251,6 +2263,9 @@ mod what_a_write_costs {
             .copied()
             .unwrap_or_else(|| Id::derived(b"absent"));
 
+        // The projection the thread holds, current before the write — #267.
+        let mut projected = crate::projection::Projected::rebuild(log.records());
+
         // 1. What the job loop does before running the job at all.
         let t = Instant::now();
         let before = log.records().clone();
@@ -2276,6 +2291,25 @@ mod what_a_write_costs {
         let t = Instant::now();
         let catalogue = log.catalogue();
         let catalogued = t.elapsed();
+
+        // **What the thread does instead** — #267: one fact applied to the projection it
+        // already holds. Reported beside the fold it replaced, and asserted to be on the
+        // path it claims, because a benchmark that measures the refold and reports it as
+        // the write is the mistake this test has already made once.
+        let t = Instant::now();
+        let advanced = projected.advance(log.records());
+        let applied = t.elapsed();
+        assert_eq!(
+            advanced,
+            crate::projection::Advanced::Applied(1),
+            "a rating is one narrow fact above the watermark, and the projection did not apply it"
+        );
+        assert_eq!(
+            projected.catalogue(),
+            &catalogue,
+            "the applied projection disagrees with the fold"
+        );
+
         let t = Instant::now();
         let library = crate::bridge::librarian_from(&catalogue, &held, log.records(), device, 200);
         let bootstrap = t.elapsed();
@@ -2299,7 +2333,7 @@ mod what_a_write_costs {
         let library =
             crate::bridge::librarian_from(&settled, &held, asserted.records(), device, 200);
         let drawn = t.elapsed();
-        let publish = drawn + catalogued;
+        let publish = drawn + applied;
         let _ = (library, catalogue);
 
         // And what the position comparison costs, for the same log — the thing
@@ -2315,8 +2349,9 @@ mod what_a_write_costs {
              records().clone()   {snapshot:>9.1?}\n  \
              rate()              {append:>9.1?}\n  \
              Changed::of(diff)   {diff:>9.1?}\n  \
-             fold(), of which:   {publish:>9.1?}\n    \
-               log.catalogue()   {catalogued:>9.1?}\n    \
+             publish, of which:  {publish:>9.1?}\n    \
+               log.catalogue()   {catalogued:>9.1?}   (the refold the thread no longer does)\n    \
+               advance()         {applied:>9.1?}   (what it does instead — #267)\n    \
                librarian_from    {drawn:>9.1?}\n  \
              ---\n  \
              a first launch, where the scan's map is the bootstrap:\n    \

@@ -365,8 +365,9 @@ and not that each variant was _considered_.
 | last-writer-wins, by stamp             | `ratings`, `artist_names`, `claims`, the credit shadow, retire/restore | correct only in stamp order; the catalogue holds no stamp to notice        |
 
 The second row is Goal 3's "what does best-evidenced cost": on the real library it is 9,467 placements, 9,730 bindings
-and 33 retitles — **under a megabyte** to retain against the 83.5 MB of records it would let go of. So the projection
-keeps the candidates, and no fact goes to the rebuild tier for wanting them.
+and 33 retitles — under a megabyte by count, **3.1 MB kept** once each encoding's `Vec` and the map nodes are paid for
+(the fold went 11.8 → 14.9 MB, #267) — against the 83.5 MB of records it lets go of. So the projection keeps the
+candidates, and no fact goes to the rebuild tier for wanting them.
 
 The fourth row is the sync case. A `merge` brings another device's records with stamps below everything already folded,
 and applying them in arrival order gives the older record the last word. The log has one device today, so the rule costs

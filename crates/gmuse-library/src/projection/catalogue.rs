@@ -332,7 +332,7 @@ pub struct Catalogue {
     /// catalogue rather than dropped at the end of a fold, so one fact arriving
     /// can be ranked against what came before it without the log in hand.
     /// Measured on the real library: 9,467 placements, 9,730 bindings and 33
-    /// retitles, under a megabyte together.
+    /// retitles — 3.1 MB kept, once each encoding's `Vec` is paid for.
     ///
     /// Every placement each copy has ever been given, in stamp order.
     pub placements: BTreeMap<Id<Encoding>, Vec<(Id<Track>, Source)>>,

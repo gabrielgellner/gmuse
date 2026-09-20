@@ -29,8 +29,10 @@
 //!   needs is that a record stamped below anything already folded is a rebuild.
 //!
 //! The candidate sets the second shape needs are small: on the real library 9,467 placements,
-//! 9,730 bindings and 33 retitles, under a megabyte against the 83.5 MB of records they would
-//! let go of. Retaining them is the trade; classifying those facts as rebuild is not needed.
+//! 9,730 bindings and 33 retitles — under a megabyte by count, **3.1 MB kept** once every
+//! encoding's `Vec` and the map nodes are paid for (`just memory-parts`, 11.8 → 14.9 MB for
+//! the fold) — against the 83.5 MB of records they let go of. Retaining them is the trade;
+//! classifying those facts as rebuild is not needed.
 
 use std::collections::BTreeSet;
 
