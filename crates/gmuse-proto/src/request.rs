@@ -64,6 +64,13 @@ pub struct Anchor {
     pub id: Option<gmuse_ids::copy::CopyId>,
 }
 
+/// What `queue.remove` names — see the parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    At(usize),
+    Tokens(Vec<u64>),
+}
+
 /// Where `queue.enqueue` lands, relative to what is sounding.
 ///
 /// The wire's spelling of `gmuse_programme::Placement`, which this crate cannot name
@@ -87,9 +94,7 @@ pub enum Request {
     /// against `--repl` — and that parser belongs to the engine, not to a wire
     /// crate that must not depend on it (§4.3). The boundary is real; it is one
     /// layer in.
-    ExecLine {
-        line: String,
-    },
+    ExecLine { line: String },
     /// What the engine is doing.
     EngineStatus,
     /// Ask it to stop.
@@ -106,9 +111,7 @@ pub enum Request {
     /// `QueryParse { message, span }`", and returning an AST means committing to a wire shape
     /// for it — which §7.11 itself says the surface/core round-tripping issues block. A client
     /// sends text to `query.run`; the AST would only save re-parsing it.
-    QueryParse {
-        text: String,
-    },
+    QueryParse { text: String },
     /// **The browse tree, grouped** — §7.11, #261.
     ///
     /// The grouping is a library question and `Shelf::grouped` is the library's answer; the
@@ -218,9 +221,7 @@ pub enum Request {
     /// A recording held as several encodings answers with one of them, which is the same
     /// answer the whole-library walk gave and the same one a pane can draw. Which copy to
     /// prefer is `shelf copies`' question and is not decidable here.
-    QueryHoldings {
-        recordings: Vec<String>,
-    },
+    QueryHoldings { recordings: Vec<String> },
     /// **What the library says about one recording** — #261. The row it would draw, and which
     /// file to play for it on the devices given.
     QueryRecording {
@@ -229,26 +230,15 @@ pub enum Request {
         here: Vec<String>,
     },
     /// **What the library says about one thing, and who said it** — `info-panel.md`, #261.
-    QueryAbout {
-        focus: serde_json::Value,
-    },
+    QueryAbout { focus: serde_json::Value },
     /// **Resolve a name to a thing** — #129.
-    QueryName {
-        kind: String,
-        name: String,
-    },
+    QueryName { kind: String, name: String },
     /// Whether a facet places a row in the tree — one bit, asked per level.
-    QueryPlaces {
-        facet: String,
-    },
+    QueryPlaces { facet: String },
     /// What a collection holds.
-    QueryEntries {
-        collection: String,
-    },
+    QueryEntries { collection: String },
     /// **The recordings a focus stands for** — what filing from a page writes one fact per.
-    QueryCovers {
-        focus: serde_json::Value,
-    },
+    QueryCovers { focus: serde_json::Value },
     /// **What the library has heard** — #261.
     ///
     /// The whole of it in one reply: plays, ratings, when things were acquired and last played,
@@ -300,6 +290,9 @@ pub enum Request {
         /// `"end"`. Parsed here, so a misspelling is refused rather than landing at
         /// the end.
         at: Placement,
+        /// The entry to place relative to, by token, instead of what is sounding —
+        /// a `p` at the cursor of the queue pane. `None` is the engine's anchor.
+        after: Option<u64>,
     },
     /// **The queue is now this list** — #233, §7.7.
     ///
@@ -318,17 +311,18 @@ pub enum Request {
     },
     /// Remove one entry by position.
     QueueRemove {
-        index: usize,
+        which: Removal,
         base_version: Option<u64>,
     },
     QueueClear {
         base_version: Option<u64>,
+        /// Only what was queued by hand — `:clear-queue`'s meaning under one list.
+        /// Everything, and the programme is empty until the next play.
+        queued_only: bool,
     },
     /// What plays after this one runs out — §6 calls it control state because
     /// it decides what plays next.
-    SetScope {
-        mode: String,
-    },
+    SetScope { mode: String },
     /// Play this recording on the main player — #230.
     ///
     /// **The one method here that §7.4's table does not list.** That table has
@@ -355,9 +349,7 @@ pub enum Request {
     ///
     /// **No `DeckSel` yet.** #224 settled the selector's shape, and nothing has decks — a
     /// parameter with one reachable value would be a wire commitment bought with nothing.
-    PlayerTransport {
-        verb: Transport,
-    },
+    PlayerTransport { verb: Transport },
     /// **Seek, as a number rather than as a sentence** — #265.
     ///
     /// This went over the wire as the text `seek 12`, built with `format!` from a
@@ -365,9 +357,7 @@ pub enum Request {
     /// fraction, and a session restore landed up to a second early. Both ends
     /// already held the value typed: `SeekTo` on one side, `Command::Seek` on the
     /// other. Only the middle spelled it out and read it back.
-    PlayerSeek {
-        to: Seek,
-    },
+    PlayerSeek { to: Seek },
     /// **What is playing, right now, asked rather than waited for** — #243, #248.
     ///
     /// The `playback` topic reports *discontinuities* and §7.8 forbids a steady
@@ -385,17 +375,11 @@ pub enum Request {
     /// config and the `:` line use. It exists because this library's `now_playing`
     /// puts the **title last**, so a bar that truncated a pre-rendered line would
     /// throw away the field it was looking at (§13, 2026-09-01).
-    PlaybackGet {
-        format: Option<String>,
-    },
+    PlaybackGet { format: Option<String> },
     /// Start receiving events on these topics (§7.8).
-    Subscribe {
-        topics: Vec<crate::Topic>,
-    },
+    Subscribe { topics: Vec<crate::Topic> },
     /// Stop receiving them.
-    Unsubscribe {
-        topics: Vec<crate::Topic>,
-    },
+    Unsubscribe { topics: Vec<crate::Topic> },
     /// One of §8.4's named write operations.
     ///
     /// **A single variant carrying the operation**, rather than eight, because
@@ -993,6 +977,8 @@ impl Request {
                     base_version: Option<u64>,
                     #[serde(default)]
                     at: Option<String>,
+                    #[serde(default)]
+                    after: Option<u64>,
                 }
                 let p: P = typed(method, params)?;
                 let at = match p.at.as_deref() {
@@ -1011,6 +997,7 @@ impl Request {
                     recordings: p.recordings,
                     base_version: p.base_version,
                     at,
+                    after: p.after,
                 })
             }
             method::QUEUE_SET => {
@@ -1028,13 +1015,29 @@ impl Request {
             method::QUEUE_REMOVE => {
                 #[derive(Deserialize)]
                 struct P {
-                    index: usize,
+                    #[serde(default)]
+                    index: Option<usize>,
+                    #[serde(default)]
+                    tokens: Option<Vec<u64>>,
                     #[serde(default)]
                     base_version: Option<u64>,
                 }
                 let p: P = typed(method, params)?;
+                // **By token, or by index, and one of them.** A view that read a page holds
+                // tokens and names what it removed; an index is for a caller with none
+                // (`gmuse ctl`), and shifts under an insert above it (#271).
+                let which = match (p.tokens, p.index) {
+                    (Some(tokens), None) if !tokens.is_empty() => Removal::Tokens(tokens),
+                    (None, Some(index)) => Removal::At(index),
+                    _ => {
+                        return Err(RpcError::invalid_params(
+                            "tokens",
+                            "queue.remove takes {tokens: [...]} or {index: n}, one of them",
+                        ));
+                    }
+                };
                 Ok(Self::QueueRemove {
-                    index: p.index,
+                    which,
                     base_version: p.base_version,
                 })
             }
@@ -1043,10 +1046,13 @@ impl Request {
                 struct P {
                     #[serde(default)]
                     base_version: Option<u64>,
+                    #[serde(default)]
+                    queued_only: bool,
                 }
                 let p: P = typed(method, params)?;
                 Ok(Self::QueueClear {
                     base_version: p.base_version,
+                    queued_only: p.queued_only,
                 })
             }
             method::SET_SCOPE => {

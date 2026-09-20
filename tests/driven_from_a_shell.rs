@@ -5423,3 +5423,162 @@ fn an_enqueue_lands_after_what_is_sounding() {
     );
     assert!(refused.is_err(), "a misspelt placement was accepted");
 }
+
+/// **A queue-pane edit touches the entry it names and nothing else** — #271.
+///
+/// The view mirrors a *page* of the programme, and every edit used to go back as
+/// `queue.set` of that page — which `Ask::Play` applies by replacing the whole programme.
+/// On a real library that turned a `dd` into "the next hundred, and then silence". Now a
+/// page carries tokens, a removal names them, a put anchors on one, and a clear forgets
+/// only what was queued by hand.
+///
+/// **The instrument is a programme longer than a page.** With one shorter, replacing the
+/// programme with the page is indistinguishable from editing it.
+#[test]
+fn a_queue_edit_by_token_keeps_the_rest_of_the_programme() {
+    let (engine, first) = start_with_a_track("edit-by-token");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+    let rows = client
+        .call(
+            "query.run",
+            Some(serde_json::json!({ "filter": "any=\"*tone*\"", "limit": 10 })),
+        )
+        .expect("query.run")["rows"]
+        .as_array()
+        .cloned()
+        .expect("rows");
+    let second = rows
+        .iter()
+        .filter_map(|r| r["recording"].as_str())
+        .find(|r| *r != first)
+        .expect("a second recording")
+        .to_string();
+
+    client
+        .subscribe(&[gmuse_proto::Topic::Playback])
+        .expect("subscribe");
+    client
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": first })),
+        )
+        .expect("the load is accepted");
+    let mut sounding = false;
+    for _ in 0..100 {
+        let Ok(event) = client.next_event(Duration::from_millis(200)) else {
+            continue;
+        };
+        if event.topic == gmuse_proto::Topic::Playback && event.body["recording"] == first {
+            sounding = true;
+            break;
+        }
+    }
+    assert!(sounding, "the first track never started");
+
+    // Grow the programme past a page: the pool, then a hundred and twenty at the end.
+    for _ in 0..120 {
+        client
+            .call(
+                "queue.enqueue",
+                Some(serde_json::json!({ "recordings": [second], "at": "end" })),
+            )
+            .expect("enqueue at the end");
+    }
+    let page = client.call("queue.get", None).expect("queue.get");
+    let total = page["total"].as_u64().expect("a total");
+    let shown = page["entries"].as_array().expect("entries").len() as u64;
+    assert!(
+        shown < total,
+        "the page ({shown}) is the whole programme ({total}), so a replace would look like an edit"
+    );
+    let tokens: Vec<u64> = page["tokens"]
+        .as_array()
+        .expect("tokens beside the entries")
+        .iter()
+        .filter_map(|v| v.as_u64())
+        .collect();
+    assert_eq!(
+        tokens.len() as u64,
+        shown,
+        "a token for every entry on the page"
+    );
+    assert!(
+        page["by_hand"]
+            .as_array()
+            .expect("marks")
+            .iter()
+            .skip(2)
+            .all(|m| m == true),
+        "the enqueued rows are not marked as queued by hand"
+    );
+
+    // `dd`: remove the third entry on the page — one queued by hand — by token.
+    let doomed = tokens[2];
+    client
+        .call(
+            "queue.remove",
+            Some(serde_json::json!({ "tokens": [doomed], "base_version": page["version"] })),
+        )
+        .expect("remove by token");
+    let after = client.call("queue.get", None).expect("queue.get");
+    assert_eq!(
+        after["total"].as_u64(),
+        Some(total - 1),
+        "a removal by token did not leave the rest of the programme"
+    );
+    assert!(
+        !after["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t.as_u64() == Some(doomed)),
+        "the removed entry is still on the page"
+    );
+
+    // `p`: put a row right after the third entry on the page, by its token.
+    let anchor = after["tokens"][2].as_u64().expect("a token");
+    client
+        .call(
+            "queue.enqueue",
+            Some(serde_json::json!({ "recordings": [first], "at": "next", "after": anchor })),
+        )
+        .expect("put after a token");
+    let put = client.call("queue.get", None).expect("queue.get");
+    assert_eq!(
+        put["total"].as_u64(),
+        Some(total),
+        "a put changed more than one entry"
+    );
+    assert_eq!(put["tokens"][2].as_u64(), Some(anchor), "the anchor moved");
+    assert_eq!(
+        put["entries"][3], first,
+        "the put row did not land right after its anchor"
+    );
+
+    // `:clear-queue`: only what was queued by hand goes; the pool stays.
+    client
+        .call(
+            "queue.clear",
+            Some(serde_json::json!({ "queued_only": true })),
+        )
+        .expect("clear queued");
+    let cleared = client.call("queue.get", None).expect("queue.get");
+    let left = cleared["total"].as_u64().expect("a total");
+    assert_eq!(
+        left, 2,
+        "clearing what was queued left {left} of {total} — the pool is the two the play opened"
+    );
+    assert!(
+        cleared["by_hand"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m == false),
+        "a by-hand entry survived the clear"
+    );
+
+    // And a removal that names nothing is refused, not applied to whatever is at index 0.
+    let refused = client.call("queue.remove", Some(serde_json::json!({})));
+    assert!(refused.is_err(), "a removal naming nothing was accepted");
+}

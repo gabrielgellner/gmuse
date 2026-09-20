@@ -3257,14 +3257,25 @@ fn run_engine(
                     use gmuse_library::programme::Mode;
                     // **Recordings on the wire, rows underneath** — I17: only user-facing
                     // grains cross, and a recording is what a person chooses.
-                    let named: Vec<String> = entries
+                    // **Tokens and marks beside the names, one filter for all three** — #271.
+                    // A page is what a view edits from, and an edit that names a token
+                    // touches that entry wherever the programme has moved it since; one
+                    // that named an index would touch whatever is there now.
+                    let shown: Vec<(String, u64, bool)> = entries
                         .iter()
-                        .filter_map(|e| self.recording_of(e.row))
-                        .map(|r| r.to_string())
+                        .filter_map(|e| {
+                            self.recording_of(e.row)
+                                .map(|r| (r.to_string(), e.token, e.by_hand))
+                        })
                         .collect();
+                    let named: Vec<&String> = shown.iter().map(|(n, _, _)| n).collect();
+                    let tokens: Vec<u64> = shown.iter().map(|(_, t, _)| *t).collect();
+                    let by_hand: Vec<bool> = shown.iter().map(|(_, _, h)| *h).collect();
                     Ok(serde_json::json!({
                         "version": standing.version,
                         "entries": named,
+                        "tokens": tokens,
+                        "by_hand": by_hand,
                         "total": standing.total,
                         // **Where this page sits**, so a view can say where a person is in a
                         // programme rather than leaving them to guess.
@@ -4222,6 +4233,7 @@ fn run_engine(
                     recordings,
                     base_version,
                     at,
+                    after,
                 } => {
                     // **Recordings on the wire, rows underneath** — I17: only
                     // user-facing grains cross, and a recording is what a person
@@ -4265,7 +4277,9 @@ fn run_engine(
                     };
                     self.programme(gmuse::librarian::programme::Ask::Enqueue {
                         rows: ids,
-                        anchor: self.playing_entry(),
+                        // A caller that named an entry places relative to it — `p` at the
+                        // cursor; one that did not places relative to what is sounding.
+                        anchor: after.or_else(|| self.playing_entry()),
                         at,
                         base: base_version,
                     })
@@ -4304,15 +4318,26 @@ fn run_engine(
                     })
                 }
                 Call::QueueRemove {
-                    index,
+                    which,
                     base_version,
-                } => self.programme(gmuse::librarian::programme::Ask::RemoveAt {
-                    index,
+                } => match which {
+                    gmuse_proto::request::Removal::At(index) => {
+                        self.programme(gmuse::librarian::programme::Ask::RemoveAt {
+                            index,
+                            base: base_version,
+                        })
+                    }
+                    gmuse_proto::request::Removal::Tokens(tokens) => {
+                        self.programme(gmuse::librarian::programme::Ask::Remove { tokens })
+                    }
+                },
+                Call::QueueClear {
+                    base_version,
+                    queued_only,
+                } => self.programme(gmuse::librarian::programme::Ask::Clear {
                     base: base_version,
+                    queued_only,
                 }),
-                Call::QueueClear { base_version } => {
-                    self.programme(gmuse::librarian::programme::Ask::Clear { base: base_version })
-                }
                 Call::SetScope { mode } => {
                     let Some(mode) = gmuse::next::Scope::parse(&mode) else {
                         return Err(RpcError::invalid_params(

@@ -461,6 +461,12 @@ pub struct Ui {
     /// Empty, at version 0, when playback is in this process — there is nothing to
     /// mirror.
     queue_mirror: Vec<CopyId>,
+    /// **The page's tokens, beside its rows** — #271. An edit names what it touched
+    /// by token, so the engine touches that entry wherever the programme has moved it;
+    /// the mirror's index would name whatever is there now. Parallel to `queue`.
+    queue_tokens: Vec<u64>,
+    /// Which of the page's rows a person queued, parallel to `queue`.
+    queue_by_hand: Vec<bool>,
     /// The version [`push_the_queue`] computes an edit against. Zero means "not
     /// read yet", which is why a push waits for the first `queue.get`.
     queue_version: u64,
@@ -726,6 +732,8 @@ impl Ui {
             engine: None,
             reader: None,
             queue_mirror: Vec::new(),
+            queue_tokens: Vec::new(),
+            queue_by_hand: Vec::new(),
             sorted_mark: None,
             queue_version: 0,
             queue_anchor_moved: false,
@@ -1220,12 +1228,34 @@ pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
         })
         .collect();
     let here = holdings_here(ctx, &queued.iter().flatten().copied().collect::<Vec<_>>());
+    let tokens: Vec<u64> = answer["tokens"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .skip(usize::from(sounding_first))
+        .filter_map(|v| v.as_u64())
+        .collect();
+    let by_hand: Vec<bool> = answer["by_hand"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .skip(usize::from(sounding_first))
+        .map(|v| v.as_bool().unwrap_or(false))
+        .collect();
     let mut entries = Vec::new();
+    let mut kept_tokens = Vec::new();
+    let mut kept_by_hand = Vec::new();
     let mut absent = 0;
-    for name in queued {
+    for (i, name) in queued.into_iter().enumerate() {
         let found = name.and_then(|r| here.get(&r).copied());
         match found {
-            Some(id) => entries.push(id),
+            // **Its token and mark go with it** — #271 — or an edit at index n would
+            // name the entry at n + 1 once a row with no copy here was left out.
+            Some(id) => {
+                entries.push(id);
+                kept_tokens.push(tokens.get(i).copied().unwrap_or(0));
+                kept_by_hand.push(by_hand.get(i).copied().unwrap_or(false));
+            }
             // **Counted, not dropped in silence.** The engine can queue a recording
             // this device holds no copy of, and a pane shorter than the engine's
             // queue is one whose indices do not line up with it.
@@ -1268,6 +1298,8 @@ pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
             ui.queue.push_back(*id);
         }
         ui.queue_mirror = entries;
+        ui.queue_tokens = kept_tokens;
+        ui.queue_by_hand = kept_by_hand;
         ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
     }
     ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
@@ -1299,6 +1331,12 @@ pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
 /// **Optimistic, which §8.8 says is right for a queue.** Two views reordering at
 /// once *is* a lost update, so the version the edit was computed against goes with
 /// it, and a stale one is refused rather than silently winning.
+///
+/// **And a `queue.set` replaces the whole programme with this page** — #271 — which is
+/// why, attached, no gesture edits the mirror any more: `e`, `E`, `p`, `P`, `dd` and
+/// `:clear-queue` name what they touch by token and read the page back. The one edit
+/// that still arrives here from an attached view is the queue restored at launch onto
+/// an engine that has none, which *means* "this is the programme".
 pub fn push_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(client) = ui.engine.clone() else {
         return;
@@ -3098,6 +3136,15 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // **The whole queue, from any view.** `dd` empties it a row at a time and only from
         // view 4; a queue is saved and restored, so it accumulates across sessions and the
         // thing you want is usually "not these hundred". Undoable like every other queue edit.
+        // **What was queued by hand, when the engine holds the programme** — #271. Under
+        // one list the programme is the play order, and emptying it is not what "clear
+        // the queue" asks; forgetting what a person put in front of it is.
+        Command::ClearQueue if ui.engine.is_some() => {
+            clear_queued_with_the_engine(ui);
+            read_the_queue(ui, ctx);
+            ui.queue_sel = 0;
+            ui.notify("cleared what was queued by hand; the programme carries on");
+        }
         Command::ClearQueue => {
             let had = ui.queue.entries().count();
             ui.queue.clear();
@@ -3621,7 +3668,16 @@ fn up_next(ui: &Ui, ctx: &Context<'_>) -> Vec<(crate::model::rows::CopyId, crate
     let _ = ctx;
     let mut rows = crate::next::upcoming(&next_input(ui), UP_NEXT);
     if ui.engine.is_some() {
+        // **The mirror is the whole page, and the engine says which rows a person queued**
+        // — #271. Under one list "queued" and "the pool" are one programme, but the pane's
+        // divider and `dd`'s gate still mean what they meant: what you put there, and what
+        // follows it. The marks come back with the page, parallel to the rows.
         rows.retain(|(_, from)| *from == crate::next::Upcoming::Queued);
+        for (i, row) in rows.iter_mut().enumerate() {
+            if !ui.queue_by_hand.get(i).copied().unwrap_or(false) {
+                row.1 = crate::next::Upcoming::Pool;
+            }
+        }
     }
     rows
 }
@@ -3937,6 +3993,12 @@ fn snapshot_of(ui: &Ui, key: &crate::undo::Key) -> crate::undo::Snapshot {
 /// it is not.
 fn remember(ui: &mut Ui, cmd: &Command) {
     if let Some(key) = edited_key(ui, cmd) {
+        // **Not the engine's programme** — #271. A snapshot here is the mirrored page, and
+        // restoring one would send it back as the whole programme. `dd` leaves its rows in
+        // the register, which `p` puts back; the rest has no undo yet, and says so.
+        if key == crate::undo::Key::Queue && ui.engine.is_some() {
+            return;
+        }
         let now = snapshot_of(ui, &key);
         ui.undo.record(key, now);
     }
@@ -3948,6 +4010,10 @@ fn step_history(ui: &mut Ui, ctx: &Context<'_>, back: bool) {
         ui.notify("nothing here keeps an undo history");
         return;
     };
+    if key == crate::undo::Key::Queue && ui.engine.is_some() {
+        ui.notify("the engine's programme has no undo yet — `p` puts back what `dd` took");
+        return;
+    }
     let now = snapshot_of(ui, &key);
     let step = if back {
         ui.undo.undo(&key, now)
@@ -4069,6 +4135,25 @@ fn put_rows(ui: &mut Ui, ctx: &Context<'_>, before: bool, times: usize) {
             persist_open(ui, ctx);
             ui.notify(format!("put {count}"));
         }
+        // **Named by token, when the engine holds the programme** — #271. `p` is "right
+        // after the row under the cursor", `P` "right after the one above it" — and above
+        // the first row is what is sounding, which the engine anchors on when no token is
+        // given. Editing the mirror instead and sending it back as `queue.set` replaced
+        // the programme with the page.
+        View::Queue if ui.engine.is_some() => {
+            let after = if ui.queue.is_empty() {
+                None
+            } else if before {
+                ui.queue_sel
+                    .checked_sub(1)
+                    .and_then(|i| ui.queue_tokens.get(i).copied())
+            } else {
+                ui.queue_tokens.get(ui.queue_sel).copied()
+            };
+            enqueue_with_the_engine(ui, ctx, &rows, true, after);
+            read_the_queue(ui, ctx);
+            ui.notify(format!("put {count}"));
+        }
         View::Queue => {
             let at = if ui.queue.is_empty() {
                 0
@@ -4123,6 +4208,21 @@ fn remove_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
             persist_open(ui, ctx);
         }
         View::Queue if !queued_at_cursor(ui, ctx) => ui.notify(projected("remove")),
+        // **By token** — #271, see `p` above. The register still takes the rows, so `p`
+        // puts back what `dd` took, which is the undo the engine's programme has.
+        View::Queue if ui.engine.is_some() => {
+            ui.register = rows_at_cursor(ui, n);
+            let tokens: Vec<u64> = ui
+                .queue_tokens
+                .iter()
+                .skip(ui.queue_sel)
+                .take(n)
+                .copied()
+                .collect();
+            remove_with_the_engine(ui, tokens);
+            read_the_queue(ui, ctx);
+            ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
+        }
         View::Queue => {
             ui.register = rows_at_cursor(ui, n);
             for _ in 0..n {
@@ -5224,7 +5324,7 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
         // here has to guess where the engine put them.
         AddTarget::Queue | AddTarget::QueueNext if ui.engine.is_some() => {
             let next = target == AddTarget::QueueNext;
-            enqueue_with_the_engine(ui, ctx, &ids, next);
+            enqueue_with_the_engine(ui, ctx, &ids, next, None);
             read_the_queue(ui, ctx);
             ui.notify(match (count, next) {
                 (1, true) => "queued next".to_string(),
@@ -5269,7 +5369,13 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
 /// One call, versioned against the last read like every other queue edit; a refused
 /// version is reported and the mirror re-read, which is what `push_the_queue` does for
 /// a stale `queue.set`.
-fn enqueue_with_the_engine(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId], next: bool) {
+fn enqueue_with_the_engine(
+    ui: &mut Ui,
+    ctx: &Context<'_>,
+    ids: &[CopyId],
+    next: bool,
+    after: Option<u64>,
+) {
     let Some(client) = ui.engine.clone() else {
         return;
     };
@@ -5286,10 +5392,13 @@ fn enqueue_with_the_engine(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId], next:
         "recordings": recordings,
         "at": if next { "next" } else { "queued" },
     });
-    if ui.queue_version > 0
-        && let Some(map) = params.as_object_mut()
-    {
-        map.insert("base_version".into(), ui.queue_version.into());
+    if let Some(map) = params.as_object_mut() {
+        if ui.queue_version > 0 {
+            map.insert("base_version".into(), ui.queue_version.into());
+        }
+        if let Some(token) = after {
+            map.insert("after".into(), token.into());
+        }
     }
     match client.call_within(
         gmuse_proto::request::method::QUEUE_ENQUEUE,
@@ -5300,6 +5409,55 @@ fn enqueue_with_the_engine(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId], next:
             ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
         }
         Err(e) => ui.notify(format!("the engine did not queue it: {e}")),
+    }
+}
+
+/// **Take entries out of the engine's programme, by token** — #271.
+fn remove_with_the_engine(ui: &mut Ui, tokens: Vec<u64>) {
+    let Some(client) = ui.engine.clone() else {
+        return;
+    };
+    if tokens.is_empty() {
+        return;
+    }
+    let mut params = serde_json::json!({ "tokens": tokens });
+    if ui.queue_version > 0
+        && let Some(map) = params.as_object_mut()
+    {
+        map.insert("base_version".into(), ui.queue_version.into());
+    }
+    match client.call_within(
+        gmuse_proto::request::method::QUEUE_REMOVE,
+        Some(params),
+        std::time::Duration::from_secs(2),
+    ) {
+        Ok(answer) => {
+            ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
+        }
+        Err(e) => ui.notify(format!("the engine did not remove it: {e}")),
+    }
+}
+
+/// **Forget what was queued by hand**, leaving the programme — #271.
+fn clear_queued_with_the_engine(ui: &mut Ui) {
+    let Some(client) = ui.engine.clone() else {
+        return;
+    };
+    let mut params = serde_json::json!({ "queued_only": true });
+    if ui.queue_version > 0
+        && let Some(map) = params.as_object_mut()
+    {
+        map.insert("base_version".into(), ui.queue_version.into());
+    }
+    match client.call_within(
+        gmuse_proto::request::method::QUEUE_CLEAR,
+        Some(params),
+        std::time::Duration::from_secs(2),
+    ) {
+        Ok(answer) => {
+            ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
+        }
+        Err(e) => ui.notify(format!("the engine did not clear it: {e}")),
     }
 }
 

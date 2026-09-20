@@ -532,6 +532,18 @@ impl Programme {
         }
     }
 
+    /// **Forget what was queued by hand**, and leave the programme — what
+    /// `:clear-queue` means under one list. Returns how many went.
+    pub fn clear_queued(&mut self) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| !e.by_hand);
+        let gone = before - self.entries.len();
+        if gone > 0 {
+            self.bump();
+        }
+        gone
+    }
+
     /// A fresh entry. **`minting` only ever goes up**, across a `replace` too.
     fn mint(&mut self, row: CopyId) -> Entry {
         let token = EntryToken(self.minting);
@@ -1041,6 +1053,8 @@ pub enum Ask {
     },
     Clear {
         base: Option<u64>,
+        /// Only the by-hand entries — see [`Programme::clear_queued`].
+        queued_only: bool,
     },
     /// **A page of the programme, for drawing it.**
     ///
@@ -1096,7 +1110,7 @@ impl Ask {
             | Ask::Push { base, .. }
             | Ask::Enqueue { base, .. }
             | Ask::RemoveAt { base, .. }
-            | Ask::Clear { base } => *base,
+            | Ask::Clear { base, .. } => *base,
             // Reads, and the asks whose whole job is to replace what a caller holds.
             Ask::Open { .. }
             | Ask::Start { .. }
@@ -1158,6 +1172,8 @@ pub struct Cued {
 pub struct Shown {
     pub token: u64,
     pub row: CopyId,
+    /// Queued by a person — see `Entry::by_hand`.
+    pub by_hand: bool,
 }
 
 /// **What is true of the programme, carried by every reply** — #259.

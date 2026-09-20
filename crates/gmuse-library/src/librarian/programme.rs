@@ -290,8 +290,12 @@ pub(crate) fn answer(
             }
         }
 
-        Ask::Clear { .. } => {
-            plan.clear();
+        Ask::Clear { queued_only, .. } => {
+            if queued_only {
+                plan.clear_queued();
+            } else {
+                plan.clear();
+            }
             Reply::Settled {
                 standing: standing(plan),
             }
@@ -314,6 +318,7 @@ pub(crate) fn answer(
                 .map(|e| Shown {
                     token: e.token.as_u64(),
                     row: e.row,
+                    by_hand: e.by_hand,
                 })
                 .collect();
             Reply::Look {
