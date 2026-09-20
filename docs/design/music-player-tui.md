@@ -6241,6 +6241,33 @@ Append here as decisions are made. Format: date, decision, rationale.
   from-empty fold rule went too: it made an engine's first rating on an empty library a `Wide`, and the shell-driven
   test that names what changed said so.
 
+- **2026-09-19** **The engine keeps its `Librarian`, derived per publish — the cost a person felt was the tree, and the
+  tree was a walk per row** (#270, decided). The brief asked whether 26.5 MB and 46 ms of L2 per publish was needed, and
+  named three shapes: derive it lazily, answer `Listing` from the catalogue instead, or advance it incrementally.
+  Measured before choosing, inside the running engine — `GMUSE_TRACE=1` prints every socket method with its cost.
+
+  **What reads it, and when.** After one rating over the socket the attached view calls `query.listened`, then
+  `query.tree` twice — the grouped tree and the flat ordering are two cache keys — then pages. The programme resolves
+  through it too. So it is read after _every_ publish, and shape (1) buys nothing.
+
+  **What it cost, and it was not the Librarian.** Each `query.tree` took **620–640 ms**; the derive is 46 ms. Split with
+  `just tree-cost`: `Tree::grouped`, the shape, was 526 of 830 ms, and `describe` over every row 2 ms.
+  `shown_copy(On(track))` walked every one of 7,374 placements to find the copies on one track, and the tree asks it
+  twice per row — fifty million comparisons. #123's precedent, _walking them costs less than an index_, was written for
+  one row. `placed_on` is `placed` the other way round: **the tree is 57 ms now, and the two after a rating are 54 + 61
+  ms where they were 620 + 640.**
+
+  **Shape (2) is the one that changes the number, and it is declined.** Answering `Listing` from the catalogue means the
+  indexes the Librarian holds — `placed_on`, `here(device)`'s two locator maps, `held`, `described_by` — live somewhere
+  else, and the only somewhere is L1, where they become derivations the fold has to advance and §5a's rule (_never patch
+  a derivation incrementally_) applies to them. That is the same bytes under a rule that is harder to keep. Shape (3) is
+  what §5a was written against. So: **the Librarian stays, derived whole per publish, and 53 MB is the engine's budget**
+  until something other than a rating makes it the thing a person waits for.
+
+  A publish is now ~2 ms to advance, 46 to derive, and ~115 for the two trees the view asks for next. The trees are the
+  next thing if any of it is — a rating changes no tree node, and the cache is keyed by library version rather than by
+  what a `Changed` could say — but that is a caching question over a fast tree, not a design question.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
