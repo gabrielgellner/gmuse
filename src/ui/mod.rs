@@ -6100,7 +6100,20 @@ fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
                 lines.saturating_sub(height) + 1
             }
         },
-        View::Info => info_about(ui, ctx).map_or(0, |a| info_lines(ui, &a).len()),
+        // Counted, not built: the lines are a `Vec` of every row every call, and this is
+        // asked on every motion.
+        View::Info => info_about(ui, ctx).map_or(0, |a| {
+            a.sections
+                .iter()
+                .map(|s| {
+                    1 + if ui.info_folded.contains(&s.title) {
+                        0
+                    } else {
+                        s.rows.len()
+                    }
+                })
+                .sum()
+        }),
     }
 }
 
@@ -6880,7 +6893,34 @@ fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused:
     // about the model and should not know how tall a header is drawn.
     let above = items.len();
 
-    for line in info_lines(ui, &about) {
+    // **The path, and it is the stack rather than a rendering of one.** If the
+    // two could disagree, one of them is lying about where the reader is.
+    let [body, trail] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(body);
+
+    // **A screenful, not the page** — the same change the tree and the lists got. This
+    // built a `ListItem` for every line and handed the widget the lot; an artist with
+    // 9,400 history rows was 9,400 `format!`s a frame, felt as a small lag on every
+    // keystroke in the panel. The window is decided first, from the count alone, and
+    // only the lines in it are formatted.
+    let lines = info_lines(ui, &about);
+    let total = above + lines.len();
+    let height = view_height(body);
+    let mut top = ui.info_scroll.window(ui.info_sel + above, total, height);
+    // **The head comes with the first section.** The title and kind are above the first
+    // selectable line, and "scroll the least" would leave them just off the top after
+    // `gg` from the end of a long page — which is where a person looks for the title.
+    if top <= above {
+        top = 0;
+        ui.info_scroll.top.set(0);
+    }
+    let end = (top + height).min(total);
+    // The head rows are built already; keep the ones in the window.
+    items.drain(..top.min(above));
+    for line in lines
+        .into_iter()
+        .skip(top.saturating_sub(above))
+        .take(end.saturating_sub(top.max(above)))
+    {
         items.push(ListItem::new(match line {
             InfoLine::Header {
                 title,
@@ -6969,9 +7009,6 @@ fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused:
         }));
     }
 
-    // **The path, and it is the stack rather than a rendering of one.** If the
-    // two could disagree, one of them is lying about where the reader is.
-    let [body, trail] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(body);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" {}", breadcrumb(ui, ctx)),
@@ -6980,10 +7017,13 @@ fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused:
         trail,
     );
 
-    let mut state =
-        ui.info_scroll
-            .state_within(Some(ui.info_sel + above), items.len(), view_height(body));
-    pad_to_view(&mut items, theme, body, state.offset());
+    // Offset zero and the selection made relative: the widget is handed the window and
+    // nothing else, so its coordinates are the window's. `Scroll::window` above recorded
+    // where it starts, which is why `remember` is not called.
+    let mut state = ListState::default()
+        .with_selected((ui.info_sel + above).checked_sub(top))
+        .with_offset(0);
+    pad_to_view(&mut items, theme, body, 0);
     frame.render_stateful_widget(
         List::new(items)
             .block(pane_block(theme, "info", focused))
@@ -6991,7 +7031,6 @@ fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused:
         body,
         &mut state,
     );
-    ui.info_scroll.remember(&state);
 }
 
 fn draw_picker(frame: &mut Frame, body: Rect, ui: &Ui, picker: &crate::ui::picker::Picker) {
@@ -13389,6 +13428,81 @@ mod tests {
         assert!(
             out.contains("said about it") || out.contains("where it sits"),
             "{out}"
+        );
+    }
+
+    /// **The panel draws a window, and the cursor stays in it** — the K-over-an-artist lag.
+    ///
+    /// `draw_info` built a `ListItem` for every line of the page and let the widget pick
+    /// the offset; an artist with 9,400 history rows was 9,400 `format!`s a frame. It
+    /// draws a screenful now, which means the offset is `Scroll::window`'s — and a window
+    /// that forgot to scroll would draw the head with the cursor somewhere below the pane.
+    #[test]
+    fn the_panel_scrolls_over_a_window() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        let copy = ui.selected_track(&ctx).expect("a row under the cursor");
+        let recording =
+            crate::model::rows::Listing::recording_of(ctx.library, copy).expect("a recording");
+
+        // A page longer than any screen: many facts about one recording.
+        ui.desk
+            .appender()
+            .expect("a test desk appends")
+            .say(move |log| {
+                for n in 0..80 {
+                    log.rate(1_000 + n, recording, Some((n % 5) as u8 + 1));
+                }
+            });
+        ui.desk.settled();
+        // The history section is folded by default; the long page is behind it.
+        ui.info_folded.remove(crate::model::about::FACTS);
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view, View::Info);
+        let total = current_len(&ui, &ctx);
+        assert!(
+            total > 60,
+            "only {total} lines — the page is not longer than a screen"
+        );
+
+        // The head line, exactly as it is drawn: the title, then the kind.
+        let head = {
+            let about = info_about(&ui, &ctx).expect("a page");
+            format!("  {}   {}", about.title, about.kind)
+        };
+
+        // At the top: the head is on screen and the cursor is visible.
+        let out = render(&ui, &ctx, 90, 14);
+        assert!(
+            out.contains(&head),
+            "the head is not drawn at the top:\n{out}"
+        );
+        assert!(
+            highlighted(&ui, &ctx, 90, 14).is_some(),
+            "no selection is visible at the top"
+        );
+
+        // At the bottom: the window moved, so the head is gone and the cursor is still in view.
+        press(&mut ui, &ctx, "G");
+        assert_eq!(ui.info_sel + 1, total, "`G` did not reach the last line");
+        let out = render(&ui, &ctx, 90, 14);
+        assert!(
+            !out.contains(&head),
+            "the head is still drawn with the cursor at the end — the window did not scroll:\n{out}"
+        );
+        assert!(
+            highlighted(&ui, &ctx, 90, 14).is_some(),
+            "the cursor scrolled out of the window:\n{out}"
+        );
+
+        // And back: `gg` scrolls up again, which a rule that only ever scrolls down would not.
+        press(&mut ui, &ctx, "g g");
+        let out = render(&ui, &ctx, 90, 14);
+        assert!(
+            out.contains(&head),
+            "scrolling back did not redraw the head:\n{out}"
         );
     }
 
