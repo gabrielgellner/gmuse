@@ -1498,6 +1498,55 @@ impl Instance {
         )
     }
 
+    /// **Resume where a projection got to, holding no records** — #269.
+    ///
+    /// What the engine opens instead of parsing the log: the projection's
+    /// position is the highest stamp folded per device, which is exactly what
+    /// the clock has to have seen — so everything stamped from here sorts
+    /// after everything on disk — and, for this device, exactly where a flush
+    /// resumes. The records themselves stay on disk, where `Desk::records`,
+    /// `Desk::history` and `compact` read them back when asked.
+    ///
+    /// **What it does not have.** `drifts` and `collisions` are found by
+    /// reading every record, and an instance that read none reports none. A
+    /// snapshot that was behind is folded from a full read on the way here,
+    /// so a launch that parsed the log anyway could report them; one that
+    /// started from a current snapshot cannot. That is the trade, and it is
+    /// the same one every reader of the snapshot already made.
+    pub fn resume(device: Id<Device>, at: &crate::projection::Position, now: i64) -> Self {
+        let mut clock = HybridClock::new(device);
+        let mut drifts = Vec::new();
+        for (_, stamp) in at.each() {
+            if let Drift::Implausible { ahead_ms } = clock.observe(&stamp, now) {
+                drifts.push(Drift::Implausible { ahead_ms });
+            }
+        }
+        Instance {
+            clock,
+            records: BTreeSet::new(),
+            drifts,
+            collisions: 0,
+            flushed: at.of_device(device),
+        }
+    }
+
+    /// **Let go of what is on disk** — #269.
+    ///
+    /// Our own records up to the flush mark have been written and another
+    /// device's came from its file, so after a commit an instance that
+    /// resumed from a position has nothing left to hold. What stays is the
+    /// unflushed tail, which is normally nothing.
+    ///
+    /// Only meaningful for an instance that never held the log; one that
+    /// opened it whole is the log's only copy in memory, and `Desk` does not
+    /// call this on one of those.
+    pub fn shed(&mut self) {
+        let device = self.clock.device();
+        let mark = self.flushed;
+        self.records
+            .retain(|r| r.stamp.device == device && mark.is_none_or(|m| r.stamp > m));
+    }
+
     /// Append everything this device has said since the last flush.
     ///
     /// **Only our own records.** Another device's records came from its file

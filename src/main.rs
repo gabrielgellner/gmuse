@@ -4418,14 +4418,16 @@ fn run_engine(
     let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
     let device = gmuse::model::id::Id::derived(machine.as_bytes());
     let now_ms = gmuse::history::now_ms();
-    let (log, _damage) = gmuse::model::instance::Instance::open(&loaded.data_dir, device, now_ms);
     let roots = loaded.library.clone();
-    let desk = Arc::new(gmuse::librarian::Desk::open(
-        log,
+    // **From the snapshot, holding no records** — #269. The last engine left a
+    // projection that says where it got to; this one resumes there and reads the
+    // log files back only for what the projection does not hold. An 87 MB parse
+    // at every start, and 83.5 MB held for the life of the process, both go.
+    let desk = Arc::new(gmuse::librarian::Desk::resume(
         Default::default(),
         device,
         now_ms,
-        Some(loaded.data_dir.clone()),
+        loaded.data_dir.clone(),
     ));
 
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4457,7 +4459,7 @@ fn run_engine(
     // and have no way to learn better.
     // **The engine reaches the librarian through channels, not a `Desk`** — #257. The relay
     // owns this side of them; the engine cannot name a librarian at all.
-    mark("Desk::open (the first fold)");
+    mark("Desk::resume (the snapshot)");
     let relay = gmuse::wiring::relay::Relay::start(Arc::clone(&desk));
     let control = Arc::new(
         gmuse::engine::control::Control::start(

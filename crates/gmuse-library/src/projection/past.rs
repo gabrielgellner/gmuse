@@ -333,6 +333,32 @@ fn scenarios() -> Vec<Scenario> {
             },
         },
         Scenario {
+            name: "a second device's records arrive above the watermark",
+            batches: vec![
+                vec![at(
+                    here,
+                    1_000,
+                    Fact::ArtistNamed {
+                        artist: who,
+                        name: "Here".into(),
+                    },
+                )],
+                // Newer than anything folded, from a device never heard from: applied,
+                // and the position has to remember both devices afterwards.
+                vec![at(
+                    slow,
+                    5_000,
+                    Fact::ArtistNamed {
+                        artist: Id::<Artist>::derived(b"another"),
+                        name: "Elsewhere".into(),
+                    },
+                )],
+            ],
+            check: |cat| {
+                assert_eq!(cat.artist_names.len(), 2, "one of the two names is missing");
+            },
+        },
+        Scenario {
             name: "a rating from a slower clock arrives last",
             batches: vec![
                 vec![
@@ -504,7 +530,7 @@ fn as_if_newest(before: &BTreeSet<Record>, batch: &[Record]) -> BTreeSet<Record>
 #[test]
 fn every_batch_could_fail_the_property() {
     let all = scenarios();
-    assert!(all.len() >= 11, "the table was not built: {}", all.len());
+    assert!(all.len() >= 12, "the table was not built: {}", all.len());
     for s in &all {
         assert!(
             s.batches.len() >= 2,
@@ -568,6 +594,83 @@ fn advancing_lands_where_rebuilding_would_whatever_the_order() {
         }
     }
     assert!(failed.is_empty(), "advance ≠ rebuild for: {failed:#?}");
+}
+
+/// **Applied from the tail alone, it lands in the same place** — #269.
+///
+/// The engine holds no records: each batch reaches it as the tail that was just
+/// read, and `apply` sees only that. So this runs every scenario handing `apply`
+/// the batch and nothing else, and expects one of two things — the same catalogue
+/// a rebuild of everything so far gives, or a refusal exactly where the whole-set
+/// `advance` would have refolded. A refusal is then answered the way the engine
+/// answers it: a rebuild from the whole log, which here is in hand.
+///
+/// Seen to fail: with the position *replaced* by the tail's rather than absorbed,
+/// "a second device's records arrive above the watermark" forgets the first
+/// device — and nothing else notices, which is why that scenario exists.
+#[test]
+fn applying_the_tail_lands_where_rebuilding_everything_would() {
+    let mut failed = Vec::new();
+    let mut refused = 0;
+    for s in scenarios() {
+        let outcome = std::panic::catch_unwind(|| {
+            let mut tailed = Projected::rebuild(&through(&s, 0));
+            let mut refusals = 0;
+            for n in 1..s.batches.len() {
+                let tail: BTreeSet<Record> = s.batches[n].iter().cloned().collect();
+                let everything = through(&s, n);
+                let mut whole = Projected::rebuild(&through(&s, n - 1));
+                let whole_said = whole.advance(&everything);
+                match tailed.apply(&tail) {
+                    Advanced::Refused(_) => {
+                        assert_eq!(
+                            whole_said,
+                            Advanced::Folded,
+                            "the tail was refused where the whole set was applied"
+                        );
+                        refusals += 1;
+                        tailed = Projected::rebuild(&everything);
+                    }
+                    Advanced::Applied(_) => {
+                        assert!(
+                            matches!(whole_said, Advanced::Applied(_)),
+                            "the tail was applied where the whole set refolded"
+                        );
+                    }
+                    Advanced::AlreadyThere | Advanced::Folded => {
+                        panic!("a tail that arrived was neither applied nor refused")
+                    }
+                }
+                let rebuilt = Projected::rebuild(&everything);
+                assert_eq!(
+                    tailed.catalogue(),
+                    rebuilt.catalogue(),
+                    "after batch {n}, the tail did not land where rebuilding would"
+                );
+                assert_eq!(
+                    tailed.position(),
+                    rebuilt.position(),
+                    "after batch {n}, the position forgot a device"
+                );
+            }
+            (s.check)(tailed.catalogue());
+            refusals
+        });
+        match outcome {
+            Ok(n) => refused += n,
+            Err(_) => failed.push(s.name),
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "apply from the tail ≠ rebuild for: {failed:#?}"
+    );
+    // The instrument: both arms ran. Seven scenarios refuse — five slower clocks,
+    // the merge and the release — and the rest apply.
+    assert!(
+        refused >= 7,
+        "only {refused} refusals, so the refuse arm was barely exercised"
+    );
 }
 
 /// **The net covers every tier a fact can be in.**

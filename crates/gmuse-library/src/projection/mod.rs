@@ -22,8 +22,11 @@
 //!
 //! ## How `advance` decides
 //!
-//! `advance` is handed the whole record set and finds what it does not cover.
-//! Then, in order (#267, the order #261 settled):
+//! `advance` is handed the whole record set and finds what it does not cover;
+//! `apply` is handed only what arrived and does the same, refusing rather than
+//! refolding when it cannot (#269) — the engine holds no records to refold
+//! from, and reads the log back for exactly that. Then, in order (#267, the
+//! order #261 settled):
 //!
 //! 1. **A record stamped below anything already folded is a rebuild.** The fold
 //!    is correct because it runs in stamp order — every last-writer-wins map
@@ -109,6 +112,35 @@ impl Position {
         self.0.values().max().copied()
     }
 
+    /// Take the other position's watermarks where they are ahead.
+    ///
+    /// **Never behind**, which is what lets a projection be advanced from a
+    /// *tail* rather than the whole log (#269): the tail's own position names
+    /// only the devices it holds records for, and replacing this one with it
+    /// would forget every other device's watermark.
+    fn absorb(&mut self, other: &Position) {
+        for (device, stamp) in &other.0 {
+            self.0
+                .entry(*device)
+                .and_modify(|held| {
+                    if stamp > held {
+                        *held = *stamp;
+                    }
+                })
+                .or_insert(*stamp);
+        }
+    }
+
+    /// The stamp folded for one device, if any.
+    pub fn of_device(&self, device: Id<Device>) -> Option<Stamp> {
+        self.0.get(&device).copied()
+    }
+
+    /// Every device and where it was folded to.
+    pub fn each(&self) -> impl Iterator<Item = (Id<Device>, Stamp)> + '_ {
+        self.0.iter().map(|(d, s)| (*d, *s))
+    }
+
     /// How many devices this has folded anything from.
     pub fn devices(&self) -> usize {
         self.0.len()
@@ -130,6 +162,11 @@ pub enum Advanced {
     AlreadyThere,
     /// Refolded from every record, and this is where it got to.
     Folded,
+    /// **Could not be applied in place, and was not refolded either** — #269.
+    /// Only [`Projected::apply`] says this: it is handed a tail and has
+    /// nothing to refold from, so the owner of the log has to. The reason is
+    /// carried so the owner can say why a keystroke cost a fold.
+    Refused(Refusal),
     /// Applied in place, and this is what the facts touched — none of them
     /// wide, none of them from below the watermark — #267. What it names is
     /// what `Changed::These` names, so a publish needs no before-picture of
@@ -137,8 +174,19 @@ pub enum Advanced {
     Applied(Vec<Touched>),
 }
 
+/// Why a fact could not be applied in place — the two rules of the three
+/// that end in a rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// A record stamped below something already folded: a slower clock's,
+    /// which a stamp-ordered fold would have placed earlier.
+    BelowTheWatermark,
+    /// A fact whose reach is not derivable from it.
+    Wide,
+}
+
 impl Advanced {
-    /// How many facts were applied in place; zero for the other two.
+    /// How many facts were applied in place; zero for the others.
     pub fn applied(&self) -> usize {
         match self {
             Advanced::Applied(touched) => touched.len(),
@@ -178,26 +226,42 @@ impl Projected {
     /// The case a write pays is the next one: the facts that arrived, applied in
     /// place. The module doc has the three rules; `past` is what holds them.
     pub fn advance(&mut self, records: &BTreeSet<Record>) -> Advanced {
-        let head = Position::of(records);
+        match self.apply(records) {
+            Advanced::Refused(_) => {
+                *self = Projected::rebuild(records);
+                Advanced::Folded
+            }
+            done => done,
+        }
+    }
+
+    /// **Apply what arrived, or say why it cannot be** — #269.
+    ///
+    /// The half of [`advance`](Self::advance) that needs no log: `fresh` may
+    /// be the whole record set or only the tail that was just read, and a
+    /// projection advanced from tails never holds — or needs — the records
+    /// behind it. The position absorbs the tail's watermarks rather than
+    /// taking them, so a device the tail has nothing from is not forgotten.
+    ///
+    /// It never refolds. A refusal is the caller's to answer, because only
+    /// the owner of the log knows where the whole of it is — on disk, for
+    /// the engine, which reads it back for exactly this and lets it go again.
+    pub fn apply(&mut self, fresh: &BTreeSet<Record>) -> Advanced {
+        let head = Position::of(fresh);
         if self.at.covers(&head) {
             return Advanced::AlreadyThere;
         }
-        // **No special case for an empty position.** From nothing, narrow
-        // facts applied one by one *are* the fold — the merges pass has nothing
-        // to do until a merge arrives, and a merge is wide and rebuilds. What
-        // this buys is that an engine's first rating on an empty library is
-        // reported by what it touched rather than as a refold (#269); a caller
-        // that knows it is folding from nothing calls `rebuild` and says so.
         let watermark = self.at.newest();
         let mut arrived = Vec::new();
-        for record in records {
+        for record in fresh {
             if self.at.covers_stamp(&record.stamp) {
                 continue;
             }
-            let below = watermark.is_some_and(|newest| record.stamp < newest);
-            if below || record.fact.blast() != Blast::Narrow {
-                *self = Projected::rebuild(records);
-                return Advanced::Folded;
+            if watermark.is_some_and(|newest| record.stamp < newest) {
+                return Advanced::Refused(Refusal::BelowTheWatermark);
+            }
+            if record.fact.blast() != Blast::Narrow {
+                return Advanced::Refused(Refusal::Wide);
             }
             arrived.push(record);
         }
@@ -218,7 +282,7 @@ impl Projected {
                 _ => {}
             }
         }
-        self.at = head;
+        self.at.absorb(&head);
         Advanced::Applied(touched)
     }
 

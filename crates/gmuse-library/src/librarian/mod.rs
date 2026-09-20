@@ -350,8 +350,38 @@ impl Desk {
         Desk::spawn(log, projected, held, device, now, data_dir, true, true)
     }
 
-    /// Start the thread. **`holds_records` is the difference between a librarian and a
-    /// follower** — see [`Desk::read_only`].
+    /// **Open the library without parsing its log** — #269.
+    ///
+    /// What the engine opens. The projection comes from the snapshot the last
+    /// engine left (`reading`: 6.9 MB of postcard, or a fold from the log if
+    /// the snapshot is absent or behind), and the log is resumed from that
+    /// projection's position — the clock seeded, the flush mark set, and
+    /// **no records held**. They stay on disk: `records`, `history` and
+    /// `compact` read them back when asked, every commit sheds what it wrote,
+    /// and a fact that cannot be applied in place refolds from the file.
+    ///
+    /// The same shape as [`Desk::read_only`] with one difference — this one
+    /// claims the append. A follower and an engine differ in who won the
+    /// lock, not in what they hold.
+    pub fn resume(held: Holdings, device: Id<Device>, now: i64, data_dir: PathBuf) -> Desk {
+        let projected = reading(&data_dir, device, now);
+        let log = Instance::resume(device, projected.position(), now);
+        Desk::spawn(
+            log,
+            projected,
+            held,
+            device,
+            now,
+            Some(data_dir),
+            false,
+            true,
+        )
+    }
+
+    /// Start the thread. **`holds_records` is whether `log` is the whole log** — the
+    /// difference between a desk opened over a parsed log (`open`, and every test) and one
+    /// that resumed from a projection (`resume`, `read_only`) and reads the files for
+    /// anything the projection does not hold (#269).
     #[allow(clippy::too_many_arguments)]
     fn spawn(
         log: Instance,
@@ -487,13 +517,22 @@ impl Desk {
                     let settled = match job {
                         Job::Say(say) => {
                             say(&mut log);
-                            moved = changed_by(projected.advance(log.records()));
+                            moved = changed_by(bring_up(
+                                &mut projected,
+                                log.records(),
+                                read_from.as_deref(),
+                                device,
+                                now,
+                            ));
                             if let Some((dir, appending)) = &writing {
                                 // A failed commit is not fatal: the in-memory
                                 // log is still right, and refusing the fact
                                 // because the disk refused it would lose the
                                 // rating as well as the write.
                                 let _ = commit_projected(&mut log, &projected, dir, appending);
+                                if !holds_records {
+                                    log.shed();
+                                }
                             }
                             None
                         }
@@ -681,10 +720,13 @@ impl Desk {
                                 })
                                 .filter(|(encoding, _)| known.encodings.contains_key(encoding))
                                 .collect();
-                            match crate::operations::populate::worth_asserting(
-                                &asserting,
-                                log.holdings_asserted(device),
-                            ) {
+                            // **From the projection, not the log** — #269. The catalogue
+                            // holds the last assertion per device; walking the records
+                            // from the newest was the cheap way when they were in hand.
+                            let standing =
+                                projected.catalogue().holdings.get(&device).map(|a| &a.held);
+                            match crate::operations::populate::worth_asserting(&asserting, standing)
+                            {
                                 crate::operations::populate::Assertion::Write => {
                                     log.assert_holdings(now, asserting);
                                     // **Advanced before the commit, not after it.** The
@@ -693,13 +735,22 @@ impl Desk {
                                     // is printed against is stale in the one way the print
                                     // cannot see. Found by a view that opened a locator
                                     // from the holdings *before* the scan's.
-                                    projected.advance(log.records());
+                                    bring_up(
+                                        &mut projected,
+                                        log.records(),
+                                        read_from.as_deref(),
+                                        device,
+                                        now,
+                                    );
                                     if let Some((dir, appending)) = &writing {
                                         // Same reasoning as `Job::Say`: a refused
                                         // disk is not a reason to lose the answer
                                         // in memory.
                                         let _ =
                                             commit_projected(&mut log, &projected, dir, appending);
+                                        if !holds_records {
+                                            log.shed();
+                                        }
                                     }
                                 }
                                 crate::operations::populate::Assertion::Unchanged => {}
@@ -737,28 +788,29 @@ impl Desk {
                         // refreshed the snapshot (`commit`, #258), so the fold is already on
                         // disk. The tail is still read, because `Changed` has to be narrow: a
                         // rating another client wrote is one `Touched`, not a `Rebuild` (#223).
-                        Job::Reread if !holds_records => {
-                            if let Some(dir) = &read_from {
-                                let (fresh, whole) = reread(dir, device, now, &mut ends);
-                                moved = if whole {
-                                    Changed::Wide
-                                } else {
-                                    Changed::of(&fresh)
-                                };
-                                projected = reading(dir, device, now);
-                            }
-                            None
-                        }
                         Job::Reread => {
                             if let Some(dir) = &read_from {
-                                let (fresh, whole) = reread(dir, device, now, &mut ends);
+                                let (fresh, _whole) = reread(dir, device, now, &mut ends);
+                                // **The tail is applied, whoever holds the log** — #269. A
+                                // follower and an engine both hand the projection what was
+                                // just read; a desk holding the whole log merges it in
+                                // first, and one that does not sheds it again once the
+                                // projection has it. Narrow either way, which is the
+                                // point: a rating another client wrote is one `Touched`,
+                                // not a `Rebuild` (#223), and a whole re-read is `Wide`
+                                // only if something in it was.
                                 log.merge(now, &fresh);
-                                // **Narrow either way, which is the point**: a rating another
-                                // client wrote is one `Touched`, not a `Rebuild` (#223). And
-                                // it is `advance` that says so — a whole re-read is only
-                                // `Wide` if something in it was.
-                                let _ = whole;
-                                moved = changed_by(projected.advance(log.records()));
+                                let in_hand = if holds_records { log.records() } else { &fresh };
+                                moved = changed_by(bring_up(
+                                    &mut projected,
+                                    in_hand,
+                                    Some(dir),
+                                    device,
+                                    now,
+                                ));
+                                if !holds_records {
+                                    log.shed();
+                                }
                             }
                             None
                         }
@@ -767,6 +819,25 @@ impl Desk {
                         // device and drops the rest; on the live library one of those
                         // is 957 KB, so what this reclaims is real. `commit` only
                         // ever adds, which is why this rewrites instead.
+                        Job::Compact if !holds_records => {
+                            // **Read back, compacted, rewritten, let go** — #269. The
+                            // records are on disk and this is the one job that rewrites
+                            // them, so it reads them for the duration and no longer.
+                            if let Some((dir, appending)) = &writing {
+                                let (mut all, _) = Instance::open(dir, device, now);
+                                let was = all.records().len();
+                                all.compact();
+                                if all.records().len() != was {
+                                    if let Err(e) = rewrite_all(&all, dir, appending) {
+                                        eprintln!("compact: {e}");
+                                    }
+                                    ends = crate::model::durable::ends_in(dir);
+                                }
+                                projected = Projected::rebuild(all.records());
+                                moved = Changed::Wide;
+                            }
+                            None
+                        }
                         Job::Compact => {
                             let was = log.records().len();
                             log.compact();
@@ -1299,6 +1370,39 @@ pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Proj
     }
 }
 
+/// **Advance the projection from what is in hand, and from the disk when that is not
+/// enough** — #269.
+///
+/// `fresh` is whatever the caller has: the whole log for a desk that holds one, the tail
+/// it just read or appended for one that does not. `apply` takes it either way and refuses
+/// when a fact cannot be applied in place — a merge, a slower clock's record — and then
+/// the whole log is the only thing to refold from. A desk holding it refolds from what it
+/// holds; one that does not reads the files for the purpose and lets them go again.
+///
+/// `Refused` with nowhere to read from cannot happen in production — a desk with no
+/// directory holds its whole log in `fresh` — and is answered by a refold of `fresh`,
+/// which is what `advance` did before this existed.
+fn bring_up(
+    projected: &mut Projected,
+    fresh: &BTreeSet<crate::facts::Record>,
+    read_from: Option<&std::path::Path>,
+    device: Id<Device>,
+    now: i64,
+) -> crate::projection::Advanced {
+    match projected.apply(fresh) {
+        crate::projection::Advanced::Refused(_) => {
+            let mut whole = match read_from {
+                Some(dir) => Instance::open(dir, device, now).0.records().clone(),
+                None => BTreeSet::new(),
+            };
+            whole.extend(fresh.iter().cloned());
+            *projected = Projected::rebuild(&whole);
+            crate::projection::Advanced::Folded
+        }
+        done => done,
+    }
+}
+
 /// **What a publish says moved, from what the projection did** — #269.
 ///
 /// `advance` applied the facts in place and knows what they touched, or it refolded
@@ -1312,7 +1416,9 @@ pub fn reading(data_dir: &std::path::Path, device: Id<Device>, now: i64) -> Proj
 fn changed_by(advanced: crate::projection::Advanced) -> Changed {
     match advanced {
         crate::projection::Advanced::AlreadyThere => Changed::Nothing,
-        crate::projection::Advanced::Folded => Changed::Wide,
+        crate::projection::Advanced::Folded | crate::projection::Advanced::Refused(_) => {
+            Changed::Wide
+        }
         crate::projection::Advanced::Applied(touched) => {
             Changed::These(touched.into_iter().collect())
         }

@@ -6202,6 +6202,45 @@ Append here as decisions are made. Format: date, decision, rationale.
   `Catalogue` behind a snapshot version bump, (3) narrow facts applied in place with the two post-loop rankings re-run
   for the encoding touched, (4) wide facts rebuild. The net is the gate on each step.
 
+- **2026-09-19** **The engine holds no records: a clock, a device and the unflushed tail** (#269, closing it). #267's
+  incremental fold left the engine at 125 MB live because `Instance` kept 83.5 MB of parsed records for four readers the
+  fold no longer was. Each is answered, and the shape #269 proposed is the one built:
+
+  | reader                         | needed the records for                     | now                                                              |
+  | ------------------------------ | ------------------------------------------ | ---------------------------------------------------------------- |
+  | the fold                       | everything                                 | `Projected::apply` takes the **tail** and refuses what it cannot |
+  | `Say`'s before-picture         | `Changed::of(difference)`                  | `Applied` carries what it touched; `needs_a_before` is gone      |
+  | `Walked`'s `holdings_asserted` | the newest assertion, walked from the back | the catalogue's `holdings[device]`                               |
+  | the holdings bootstrap         | a scratch fold with a synthetic assertion  | the scan's map stood in on the **Librarian** — L2, never stored  |
+  | `compact`                      | the set it rewrites                        | read from disk, rewritten, let go                                |
+  | `records`, `history`           | a copy, a walk                             | read from disk when asked — the path a follower already took     |
+  | `flush`, `append`, `merge`     | the unflushed tail                         | the unflushed tail, and `shed` after every commit                |
+
+  **`apply`, not `advance`.** A projection advanced from tails never holds — or needs — the records behind it, so its
+  position _absorbs_ a tail's watermarks rather than taking them, and it **refuses** rather than refolds when a fact
+  cannot be applied in place: only the owner of the log knows where the whole of it is. The engine reads the files back
+  for that and lets them go again. `advance` is `apply` with a refold on refusal, for a caller holding the whole set.
+
+  **`Desk::resume`** is what the engine opens: the snapshot's projection, and an `Instance::resume`d from its position —
+  the clock seeded from the per-device stamps, the flush mark set to this device's, nothing held. It is `read_only` with
+  the append claimed; a follower and an engine differ in who won the lock, not in what they hold.
+
+  **Measured**, `just memory` on the real library: live **125 → 53 MB** (48.5 before the first scan publishes), peak
+  **158 → 81 MB**, and the `Instance::open` mark that used to read 87 MB of parse before anything else is gone.
+  `just at-rest`: the engine's footprint **192 → 131 MB**. What is left is the `Librarian` the engine derives per
+  publish (26.5 MB) and the fold (14.9).
+
+  **What it gave up, and says so.** `drifts` and `collisions` are found by reading every record; an engine that started
+  from a current snapshot read none and reports none. A launch whose snapshot was behind parsed the log anyway and could
+  — that is the same trade every reader of the snapshot already made.
+
+  **The net grew a scenario and an arm.** `applying_the_tail_lands_where_rebuilding_everything_would` hands every
+  scenario's batch to `apply` alone and expects either the rebuild's catalogue or a refusal exactly where `advance`
+  would have refolded; seven refuse. With the position _replaced_ rather than absorbed, only "a second device's records
+  arrive above the watermark" failed — and nothing else noticed, which is why that scenario had to be written. The
+  from-empty fold rule went too: it made an engine's first rating on an empty library a `Wide`, and the shell-driven
+  test that names what changed said so.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

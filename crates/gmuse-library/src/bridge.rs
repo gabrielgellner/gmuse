@@ -91,11 +91,25 @@ pub fn librarian_from(
     device: Id<Device>,
     now: i64,
 ) -> Librarian {
-    if !catalogue.holdings.contains_key(&device) {
-        // No assertion in the log yet. The scan's map is the bootstrap, and it needs a scratch.
-        return librarian(held, records, device, now);
-    }
     let mut l = Librarian::from_catalogue(catalogue);
+    if !catalogue.holdings.contains_key(&device) {
+        // **No assertion in the log yet, so the scan's map stands in — on the
+        // librarian, not the catalogue** (#269). This used to go through a scratch
+        // `Instance` of every record with a synthetic `HoldingsAsserted` folded in,
+        // which was the honest route while a fold was the only way a holding could
+        // land — and a copy of the log for a launch that happens once per library.
+        // The librarian is L2: derived, rebuilt per publish, never stored. Standing
+        // a row in here puts nothing in a second place, because the projection is
+        // untouched and the first `Job::Scan` writes the real assertion (#237).
+        for h in held.iter() {
+            l.encodings.holdings.push(crate::model::encoding::Holding {
+                encoding: crate::model::id::Ref::to(Id::<Encoding>::of_audio(&h.audio)),
+                device: crate::model::id::Ref::to(device),
+                locator: h.at.to_string_lossy().into_owned(),
+            });
+        }
+        let _ = now;
+    }
     l.record_count = records.len();
     l.here(device);
     l
