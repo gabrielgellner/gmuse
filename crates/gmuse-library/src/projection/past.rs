@@ -266,6 +266,71 @@ fn scenarios() -> Vec<Scenario> {
             },
         },
         Scenario {
+            name: "a worse-evidenced placement arrives after a better one",
+            batches: vec![
+                vec![
+                    at(here, 1_000, catalogued(a, "Triton")),
+                    at(here, 1_001, pressing(named)),
+                    at(here, 1_002, pressing(minted)),
+                    at(here, 1_003, disc(minted, good)),
+                    at(here, 1_004, disc(named, weak)),
+                    at(here, 1_005, slot(on_good, good)),
+                    at(here, 1_006, slot(on_weak, weak)),
+                    at(here, 1_007, placed(on_good)),
+                ],
+                // Narrow, and the last word — which is not the best one.
+                vec![at(here, 2_000, placed(on_weak))],
+            ],
+            check: |cat| {
+                let copy = Id::<Encoding>::derived(b"a copy");
+                let a = Id::<Recording>::derived(b"a");
+                let minted = Id::<Release>::of_musicbrainz(uuid::Uuid::from_u128(0xdc70));
+                let on_good = Id::<Track>::of_track(Id::<Medium>::of_medium(minted, 1), a);
+                assert_eq!(
+                    cat.placed.get(&copy),
+                    Some(&on_good),
+                    "the later, worse-evidenced placement won"
+                );
+            },
+        },
+        Scenario {
+            name: "a second binding arrives and is a conflict",
+            batches: vec![
+                vec![at(
+                    here,
+                    1_000,
+                    Fact::EncodingBound {
+                        encoding: copy,
+                        from: None,
+                        to: a,
+                    },
+                )],
+                vec![at(
+                    here,
+                    2_000,
+                    Fact::EncodingBound {
+                        encoding: copy,
+                        from: None,
+                        to: b,
+                    },
+                )],
+            ],
+            check: |cat| {
+                let copy = Id::<Encoding>::derived(b"a copy");
+                let b = Id::<Recording>::derived(b"b");
+                assert_eq!(
+                    cat.bound.get(&copy),
+                    Some(&b),
+                    "the later binding does not show"
+                );
+                assert_eq!(
+                    cat.conflicts.len(),
+                    1,
+                    "two answers and no conflict recorded"
+                );
+            },
+        },
+        Scenario {
             name: "a rating from a slower clock arrives last",
             batches: vec![
                 vec![
@@ -437,7 +502,7 @@ fn as_if_newest(before: &BTreeSet<Record>, batch: &[Record]) -> BTreeSet<Record>
 #[test]
 fn every_batch_could_fail_the_property() {
     let all = scenarios();
-    assert!(all.len() >= 9, "the table was not built: {}", all.len());
+    assert!(all.len() >= 11, "the table was not built: {}", all.len());
     for s in &all {
         assert!(
             s.batches.len() >= 2,
@@ -481,9 +546,9 @@ fn advancing_lands_where_rebuilding_would_whatever_the_order() {
             let mut advanced = Projected::rebuild(&through(&s, 0));
             for n in 1..s.batches.len() {
                 let so_far = through(&s, n);
-                assert_eq!(
+                assert_ne!(
                     advanced.advance(&so_far),
-                    Advanced::Folded,
+                    Advanced::AlreadyThere,
                     "batch {n} arrived and the projection thought it was covered"
                 );
                 let rebuilt = Projected::rebuild(&so_far);

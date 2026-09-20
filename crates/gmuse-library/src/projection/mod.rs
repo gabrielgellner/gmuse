@@ -20,24 +20,27 @@
 //! positions compare by covering rather than by ordering: `a` covers `b` when
 //! it has folded at least as far for every device `b` names.
 //!
-//! ## What is not here yet
+//! ## How `advance` decides
 //!
-//! `advance` refolds when it is behind. That makes `advance ≡ rebuild` true by
-//! construction rather than by test — deliberately, because the test is what
-//! any incremental version must be checked against and it is worth locking in
-//! first. The case that already pays is the other one: a caught-up read costs
-//! one comparison per device rather than 44ms.
+//! `advance` is handed the whole record set and finds what it does not cover.
+//! Then, in order (#267, the order #261 settled):
 //!
-//! Applying **one fact** to an existing projection is the next step and needs
-//! #192's tiers. It is not a slice of [`fold`]: that pass applies merges
-//! first and resolves everything through the finished set, because a merge
-//! recorded on Tuesday has to move a rating given on Monday. An incremental
-//! path is therefore a second implementation of those semantics, which is the
-//! real cost of it — and the equivalence test is what makes paying it safe.
+//! 1. **A record stamped below anything already folded is a rebuild.** The fold
+//!    is correct because it runs in stamp order — every last-writer-wins map
+//!    depends on it — and a record from a slower clock applied in arrival order
+//!    would have the last word it does not deserve. The log has one device
+//!    today, so this fires only when sync brings another's records.
+//! 2. **A wide fact is a rebuild.** The merges, and the three spine facts that a
+//!    placement's rung is computed from (`ReleaseCatalogued`, `MediumCatalogued`,
+//!    `TrackPlaced`). Their reach is not derivable from the fact.
+//! 3. **Everything else is applied in place**, by the same [`catalogue::apply_one`]
+//!    the fold runs, and then ranked for its own key by the same
+//!    [`catalogue::rank_placement`] and [`catalogue::rank_binding`] the fold
+//!    runs for every key. One implementation, so the two cannot drift.
 //!
-//! `past` is that test, and the audit behind it (#261): which facts reach
-//! backwards, in what shape, and what an incremental `advance` has to keep or
-//! refuse for each. Read it before writing the thing it is a net for.
+//! `past` is the net: every shape that reaches backwards, in arrival order,
+//! checked against a rebuild batch by batch. Read it before changing any of
+//! the three rules.
 
 // **The model ahead of its callers**, which is this project's ordinary
 // sequence: #194 persists a projection and is the first thing that has to ask
@@ -54,11 +57,11 @@ mod past;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::facts::Record;
+use crate::facts::{Blast, Fact, Record};
 use crate::model::clock::Stamp;
 use crate::model::entity::Device;
 use crate::model::id::Id;
-use crate::projection::catalogue::{Catalogue, fold};
+use crate::projection::catalogue::{Catalogue, apply_one, fold, rank_binding, rank_placement};
 
 /// How far a projection has folded, per device.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -95,6 +98,17 @@ impl Position {
             .all(|(device, stamp)| self.0.get(device).is_some_and(|held| held >= stamp))
     }
 
+    /// Whether one stamp is already folded.
+    fn covers_stamp(&self, stamp: &Stamp) -> bool {
+        self.0.get(&stamp.device).is_some_and(|held| held >= stamp)
+    }
+
+    /// The newest stamp folded from any device — the watermark a slower
+    /// clock's record falls below.
+    fn newest(&self) -> Option<Stamp> {
+        self.0.values().max().copied()
+    }
+
     /// How many devices this has folded anything from.
     pub fn devices(&self) -> usize {
         self.0.len()
@@ -114,8 +128,11 @@ impl Position {
 pub enum Advanced {
     /// Already covered the records offered. One comparison, no work.
     AlreadyThere,
-    /// Folded, and this is where it got to.
+    /// Refolded from every record, and this is where it got to.
     Folded,
+    /// Applied in place: this many facts, none of them wide, none of them
+    /// from below the watermark — #267.
+    Applied(usize),
 }
 
 /// A folded catalogue that knows how far it folded.
@@ -141,30 +158,54 @@ impl Projected {
 
     /// **Bring it up to date, or find out it already is.**
     ///
-    /// Today this refolds when it is behind, which makes `advance ≡ rebuild`
-    /// true by construction rather than by test — deliberately, because the
-    /// test is what any incremental version has to be checked against and it
-    /// is worth locking in before the optimisation exists.
-    ///
-    /// The case that already pays is the other one. A read that is caught up
-    /// costs a comparison over one stamp per device, not the 44ms that folding
+    /// The case that pays most often is the cheapest: a read that is caught up
+    /// costs a comparison over one stamp per device, not the 46ms that folding
     /// 279,000 records costs, and that is what lets a query advance freely
     /// (§3a) instead of a person having to know when to.
     ///
-    /// **Incremental application is the next step and needs #192's tiers:**
-    /// a narrow fact can be applied to the rows it names, and a wide one —
-    /// where the affected set is not derivable from the fact — refolds. The
-    /// fold is multi-pass (merges first, then everything resolved through the
-    /// finished set), so an incremental path is a second implementation of its
-    /// semantics rather than a slice of it. That is the cost, and the
-    /// equivalence test is what makes paying it safe.
+    /// The case a write pays is the next one: the facts that arrived, applied in
+    /// place. The module doc has the three rules; `past` is what holds them.
     pub fn advance(&mut self, records: &BTreeSet<Record>) -> Advanced {
         let head = Position::of(records);
         if self.at.covers(&head) {
             return Advanced::AlreadyThere;
         }
-        *self = Projected::rebuild(records);
-        Advanced::Folded
+        // **From nothing is a fold**, not 280,000 applies: the merges pass has
+        // to run before anything is resolved through it.
+        if self.at.is_empty() {
+            *self = Projected::rebuild(records);
+            return Advanced::Folded;
+        }
+        let watermark = self.at.newest();
+        let mut arrived = Vec::new();
+        for record in records {
+            if self.at.covers_stamp(&record.stamp) {
+                continue;
+            }
+            let below = watermark.is_some_and(|newest| record.stamp < newest);
+            if below || record.fact.blast() != Blast::Narrow {
+                *self = Projected::rebuild(records);
+                return Advanced::Folded;
+            }
+            arrived.push(record);
+        }
+        // Stamp order, which `BTreeSet` iteration already is — and the loop above
+        // has just proved every one of these is above everything folded.
+        for Record { stamp, fact } in &arrived {
+            apply_one(&mut self.catalogue, stamp, fact);
+            match fact {
+                Fact::EncodingPlaced { encoding, .. } => {
+                    rank_placement(&mut self.catalogue, *encoding);
+                }
+                Fact::EncodingBound { encoding, from, .. } => {
+                    let key = (*encoding, from.map(|f| self.catalogue.merges.resolve(f)));
+                    rank_binding(&mut self.catalogue, key);
+                }
+                _ => {}
+            }
+        }
+        self.at = head;
+        Advanced::Applied(arrived.len())
     }
 
     /// How far the log has been folded in. The whole of staleness.
@@ -323,7 +364,8 @@ mod tests {
 
         let mut back = crate::cache::current_projection(&at, &crate::cache::LogPrint::default())
             .unwrap_or_default();
-        assert_eq!(back.advance(&both), Advanced::Folded);
+        // Nine narrow facts above the watermark: applied, not folded (#267).
+        assert_eq!(back.advance(&both), Advanced::Applied(9));
         assert_eq!(
             back.catalogue(),
             Projected::rebuild(&both).catalogue(),
@@ -367,7 +409,7 @@ mod tests {
         both.extend(authored(d, 7, 5_000));
 
         let mut advanced = Projected::rebuild(&first);
-        assert_eq!(advanced.advance(&both), Advanced::Folded);
+        assert_eq!(advanced.advance(&both), Advanced::Applied(7));
 
         let rebuilt = Projected::rebuild(&both);
         assert_eq!(
@@ -455,10 +497,14 @@ mod tests {
             },
         );
 
+        // **`Applied(1)`, and that is the instrument** — #267's done-when. A
+        // rating is narrow and newest, so it is applied to the catalogue in
+        // place; `Folded` here would mean the whole log was replayed to land
+        // one fact, which is what this issue exists to stop.
         assert_eq!(
             p.advance(i.records()),
-            Advanced::Folded,
-            "a fact was appended and the projection did not notice"
+            Advanced::Applied(1),
+            "a rating was appended and the projection folded everything, or nothing"
         );
         assert_eq!(
             p.catalogue(),
