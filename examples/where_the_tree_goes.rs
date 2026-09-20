@@ -24,6 +24,30 @@ fn main() {
     let levels = gmuse::shelf::Levels::default();
     println!("{} rows", members.len());
 
+    // **The grouping's two halves** — #270. `Tree::grouped` decides where every row goes;
+    // `describe` per row writes the line that is drawn. Which of them is the 800 ms decides
+    // whether a tree could be cached across a rating (the shape) or must be re-derived (the
+    // lines).
+    let pair = levels.pair().expect("grouped");
+    let t = std::time::Instant::now();
+    let tree = gmuse::model::tree::Tree::grouped(&library, pair, true, &members);
+    let shaping = t.elapsed();
+    let t = std::time::Instant::now();
+    let described = members
+        .iter()
+        .filter_map(|id| library.describe(*id))
+        .count();
+    let describing = t.elapsed();
+    assert!(
+        described > 100,
+        "describe answered {described} rows — nothing was measured"
+    );
+    println!(
+        "  Tree::grouped (the shape):    {shaping:>8.1?}   {} artists",
+        tree.artists().count()
+    );
+    println!("  describe() over every row:    {describing:>8.1?}   {described} rows");
+
     let t = std::time::Instant::now();
     let shelf = gmuse::shelf::Shelf::grouped(&library, members.clone(), levels, true);
     let grouping = t.elapsed();

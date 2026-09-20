@@ -156,6 +156,18 @@ pub struct Librarian {
     /// it, `album_of` asked a *recording* which album it was on, and a
     /// recording is on every release that holds it.
     pub placed: std::collections::BTreeMap<Id<Encoding>, Id<Track>>,
+    /// `placed` the other way round: which copies sit in each slot — #270.
+    ///
+    /// **The index that took a tree from 830 ms to a fraction of it.** `shown_copy`
+    /// walked every entry of `placed` to find the copies on one track, and
+    /// `Tree::grouped` asks it twice per row — 7,285 rows over 7,374 placements is
+    /// fifty million comparisons for the shape of the tree, which was 526 ms of
+    /// the tree's 830. #123's precedent, "walking them costs less than an index",
+    /// was written for one row; a walk per row is the case it did not cover.
+    ///
+    /// Kept beside `placed` by [`Librarian::reindex_placed`]; a test that writes
+    /// `placed` directly reindexes after, or `shown_copy` answers nothing for it.
+    placed_on: std::collections::BTreeMap<Id<Track>, Vec<Id<Encoding>>>,
 }
 
 impl Default for Librarian {
@@ -361,6 +373,7 @@ impl Librarian {
             record_count: 0,
             collected: Default::default(),
             placed: Default::default(),
+            placed_on: Default::default(),
         }
     }
 
@@ -761,6 +774,7 @@ impl Librarian {
             .filter(|(id, _)| !cat.retired.contains(id))
             .map(|(id, slot)| (*id, *slot))
             .collect();
+        l.reindex_placed();
         l.held = held_index(&l.spine, &l.placed);
 
         // Names are a register: whatever the fold settled on is the label.
@@ -1357,6 +1371,15 @@ impl Librarian {
             .collect()
     }
 
+    /// Rebuild `placed_on` from `placed` — see the field. Called by
+    /// `from_catalogue`, and by anything that writes `placed` by hand.
+    pub fn reindex_placed(&mut self) {
+        self.placed_on.clear();
+        for (copy, slot) in &self.placed {
+            self.placed_on.entry(*slot).or_default().push(*copy);
+        }
+    }
+
     /// Say which device this is, so rows know where they can be opened.
     pub fn here(&mut self, device: Id<Device>) {
         let mine = || {
@@ -1711,10 +1734,11 @@ impl Librarian {
         use crate::model::rows::CopyId;
         match id {
             CopyId::On(track) => self
-                .placed
-                .iter()
-                .filter(|(_, on)| **on == track)
-                .filter_map(|(c, _)| self.encodings.encodings.get(c))
+                .placed_on
+                .get(&track)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| self.encodings.encodings.get(c))
                 .max_by_key(|e| crate::model::encoding::canonical_key(e))
                 .map(|e| e.id),
             CopyId::Loose(recording) => self.encodings.canonical(recording).map(|e| e.id),

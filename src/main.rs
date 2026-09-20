@@ -4045,6 +4045,27 @@ fn run_engine(
             &self,
             request: gmuse_proto::Call,
         ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            // **What each method costs, when asked** — #270. `GMUSE_TRACE=1` prints one
+            // line per call to stderr, which is what "measure inside the running player"
+            // means for the socket: which methods a view actually calls after a change,
+            // and what each took. Off, it is one env read per call.
+            let traced = std::env::var_os("GMUSE_TRACE").is_some_and(|v| v != "0");
+            let name = request.method();
+            let started = traced.then(std::time::Instant::now);
+            let out = self.answer(request);
+            if let Some(t) = started {
+                eprintln!("trace: {name:<20} {:>9.1?}", t.elapsed());
+            }
+            out
+        }
+    }
+
+    impl Bare {
+        fn answer(
+            &self,
+            request: gmuse_proto::Call,
+        ) -> Result<serde_json::Value, gmuse_proto::RpcError> {
+            use gmuse::engine::Answers;
             use gmuse_proto::{Call, RpcError, error::code};
             match request {
                 // Served by the connection before this is reached: the
