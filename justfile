@@ -349,9 +349,18 @@ changelog-full:
 next-version:
     @git-cliff --bumped-version
 
-# Bump version: update Cargo.toml + CHANGELOG.md, commit, tag.
 # First release needs an explicit version: just bump v0.1.0
-# Does NOT push — review with `git log --oneline -5`, then `just release`.
+#
+# **`main` is protected, so a release is an MR like anything else.** Push
+# access is "No one" (see CLAUDE.md), which is what makes plv's
+# `git push origin HEAD` fail here. So this cuts `chore/release-vX.Y.Z` from
+# `main` when run there, and the bump commit lands through a merge request.
+# The tag rides along: merges are fast-forward, so the commit it points at is
+# the one that reaches `main` — a squash would orphan it.
+#
+# Does NOT push — review with `git log --oneline -5`, then `glab mr create`.
+#
+# Bump version: every crate's Cargo.toml + CHANGELOG.md, commit, tag — on a branch
 [group('release')]
 bump version="":
     #!/usr/bin/env bash
@@ -361,31 +370,45 @@ bump version="":
         NEXT="{{ version }}"
         [[ "$NEXT" == v* ]] || NEXT="v$NEXT"
     else
-        NEXT=$(git-cliff --bumped-version) || {
+        NEXT=$(git-cliff --bumped-version 2>/dev/null) || {
             echo ""
             echo "ERROR: could not calculate next version (no tags found?)."
-            echo "For the first release run:  just bump 0.1.0"
+            echo "For the first release run:  just bump v0.1.0"
             exit 1
         }
     fi
 
     VER="${NEXT#v}"
-    echo "Bumping to $NEXT"
+    [ -z "$(git status --porcelain)" ] || { echo "ERROR: working tree is not clean." >&2; exit 1; }
+    # git-cliff answers a stale version when nothing has landed since the
+    # last tag ("There is nothing to bump"), so this is also the no-op guard.
+    ! git rev-parse -q --verify "refs/tags/$NEXT" >/dev/null || { echo "ERROR: tag $NEXT already exists — nothing to release?" >&2; exit 1; }
 
-    cargo set-version "$VER"
+    if [ "$(git branch --show-current)" = "main" ]; then
+        git switch -c "chore/release-$NEXT"
+    fi
+    echo "Bumping to $NEXT on $(git branch --show-current)"
+
+    # Every crate carries its own `version`, so bump them together — without
+    # `--workspace` only the root moves and the members stay at 0.1.0 forever.
+    cargo set-version --workspace "$VER"
+    # CHANGELOG.md is in .prettierignore: git-cliff owns that file.
     git-cliff --tag "$NEXT" -o CHANGELOG.md
-    prettier --write CHANGELOG.md >/dev/null 2>&1 || true
 
-    git add Cargo.toml Cargo.lock CHANGELOG.md
+    git add Cargo.toml Cargo.lock crates/*/Cargo.toml CHANGELOG.md
     git commit -m "chore(release): $NEXT"
     git tag -a "$NEXT" -m "Release $NEXT"
 
     echo ""
     echo "Created commit and tag $NEXT."
     echo "Review with:  git log --oneline -5"
-    echo "Then run:     just release"
+    echo "Then:         git push -u origin HEAD && glab mr create --fill"
+    echo "Once merged:  git switch main && git pull --ff-only && just release"
 
-# Push the current branch + latest tag, then create the GitLab release.
+# Run on `main` after the bump MR has merged — the tag has to point at a
+# commit `main` already holds, because nothing can push to `main` directly.
+#
+# Push the latest tag and create the GitLab release
 [group('release')]
 release:
     #!/usr/bin/env bash
@@ -393,10 +416,18 @@ release:
 
     TAG=$(git describe --tags --abbrev=0)
 
-    git push origin HEAD
+    git fetch origin main --quiet
+    git merge-base --is-ancestor "$TAG" origin/main || {
+        echo "ERROR: $TAG is not on origin/main yet — merge the release MR first." >&2
+        exit 1
+    }
+
     git push origin "$TAG"
 
-    NOTES=$(git-cliff --latest --strip all)
+    # Release notes = this tag's section of the changelog, from the first
+    # group heading on. The version heading is dropped: the release is already
+    # titled for its version, so repeating it inside the notes is noise.
+    NOTES=$(git-cliff --latest --strip all | awk 'f || /^###/ { f = 1; print }')
 
     glab release create "$TAG" \
         --name "Release $TAG" \

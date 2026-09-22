@@ -239,11 +239,19 @@ git-cliff builds the changelog from commit history:
 ```sh
 just changelog-preview   # what would land
 just next-version        # what the version would become
-just bump v0.1.0         # version + changelog + commit + tag, no push
-just release             # push branch and tag, create the GitLab release
+just bump                # cut chore/release-vX.Y.Z, bump every crate, write CHANGELOG.md, commit, tag
+git push -u origin HEAD && glab mr create --fill
+just release             # on main, once merged: push the tag, create the GitLab release
 ```
 
-The first release needs an explicit version because there is no tag to bump from.
+**A release is an MR, because nothing can push to `main`.** This is where the flow differs from plv's: `bump` runs on a
+branch it cuts itself, the bump commit lands through a merge request like any other, and `release` refuses until the tag
+is an ancestor of `origin/main`. The tag survives the merge because merges are fast-forward — the commit it points at is
+the commit that reaches `main`. A squash would orphan it, which is one more reason squash stays off.
+
+`bump` uses `cargo set-version --workspace`: every crate carries its own `version`, and without the flag only the root
+moves. The first release needs an explicit version (`just bump v0.1.0`) because there is no tag to bump from; after that
+git-cliff derives it from the commit types, and a hand-picked one overrides it when that answer is wrong.
 
 ## Code style
 
