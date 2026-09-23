@@ -55,6 +55,20 @@ pub const DEFAULTS: &[&str] = &[
     // `]b`; what differs is the count, which repeats here and selects on `gt`.
     "bind common \"] b\" view-forward",
     "bind common \"[ b\" view-back",
+    // The programme, on the prefix `]]` and `[z` already taught the hand to
+    // reach for. `gq` opens it because the panel is **not** a view and `4gt`
+    // would say it was; `]q`/`[q` reach into it from wherever you are — a
+    // cursor, never a transport verb, because `z` and `v` are already those
+    // (#274).
+    //
+    // **`gq` is vim's format operator, and is taken here anyway.** Nothing in
+    // gmuse formats text, so nothing is shadowed in practice — and on this
+    // prefix `gt` already means "go to a view", which makes `gq` "go to the
+    // queue" rather than a borrowed verb doing something else. Recorded because
+    // the collision is real and the next reader should see it was weighed.
+    "bind common \"g q\" queue-panel",
+    "bind common \"] q\" queue-next",
+    "bind common \"[ q\" queue-prev",
     // navigation
     "bind common j down",
     "bind common k up",

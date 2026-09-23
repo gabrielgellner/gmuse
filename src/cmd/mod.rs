@@ -825,6 +825,22 @@ pub enum Command {
     /// surprising one would have been a bracket key that did not.
     ViewForward,
     ViewBack,
+    /// `gq` — show or hide the programme in the bottom panel (#274).
+    ///
+    /// A panel and not a view: toggling it leaves the active projection alone,
+    /// which is what lets you collect into the queue while looking at the
+    /// library. vim's `:copen`, where the quickfix window appears and the
+    /// buffer you were editing stays put.
+    QueuePanel,
+    /// `]q` and `[q` — step the cursor **within the programme**, from whatever
+    /// projection is active.
+    ///
+    /// **Not next and previous track.** `z` and `v` are those, they are
+    /// DJ-derived, and they take a deck as an operand
+    /// (`transport-keymap-spec.md` §7). Two vocabularies for one verb is what
+    /// that spec exists to prevent, so these move a cursor and play nothing.
+    QueueNext,
+    QueuePrev,
     /// `i` and `<Esc>` — which keymap the keyboard is in (#33).
     Mode(Mode),
     /// `50%` — seek to that much of the way through the track, as vim's `50%`

@@ -19,6 +19,23 @@ That is the difference the numbers used to hide. `2` was never a different set f
 is `:view levels flat` — see [the library tree](the-library-tree.md). And `6` was a list you scrolled; it is a fuzzy
 picker now, the same one `<leader>fg` opens.
 
+## The queue, without leaving where you are
+
+`gq` shows the programme in a panel along the bottom, and hides it again. **It is not a view**, which is the point: the
+list you were on stays where it is, so you can dig through the library and watch what you are collecting at the same
+time.
+
+    gq       show or hide the panel
+    ]q       down a row in the programme
+    [q       up a row
+
+`]q` and `[q` reach into the panel from whatever you are looking at, and they **move a cursor — they do not play
+anything**. Next and previous track are `z` and `v`, in the transport row, and they stay that whether the panel is open
+or shut.
+
+The panel is as tall as the programme needs, up to a point, and never more than half the screen. It is the same rows
+view `4` shows, drawn small — one cursor between them, so moving in one moves in the other.
+
 ## Two panes
 
 `g<Tab>` moves _between_ two lists. A split shows both — for digging in one while collecting into the other.

@@ -582,6 +582,13 @@ pub struct Ui {
     // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// Whether the programme is shown in the bottom panel — `gq` (#274).
+    ///
+    /// **Not a view, which is the whole point.** Toggling it does not change
+    /// which projection is active, so you can collect into the queue while
+    /// looking at the library — vim's `:copen`, where the quickfix window
+    /// appears without the buffer you were editing going anywhere.
+    pub queue_panel: bool,
     /// The second pane, when there is one (#97).
     ///
     /// **`ui.view` is the focused pane**, which is why every other match in
@@ -690,6 +697,7 @@ impl Ui {
     fn bare(library: Box<dyn crate::browse::Holding>) -> Self {
         Self {
             stop: None,
+            queue_panel: false,
             split: None,
             levels: crate::shelf::Levels::default(),
             picker: None,
@@ -3416,6 +3424,27 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // A count repeats here and selects on `gt` — see `Command::ViewForward`.
         Command::ViewForward => switch_view(ui, ui.view.forward(n)),
         Command::ViewBack => switch_view(ui, ui.view.back(n)),
+        // **No `switch_view`.** The panel is not a projection, so opening it
+        // must not touch `ui.view` — that is the whole distinction #274 draws,
+        // and calling `switch_view` here would quietly make it a view again.
+        Command::QueuePanel => {
+            ui.queue_panel = !ui.queue_panel;
+            let state = if ui.queue_panel { "shown" } else { "hidden" };
+            ui.notify(format!("queue panel {state}"));
+        }
+        // The cursor only. `z` and `v` play things; these move where you are
+        // looking in the programme, from whatever projection is active.
+        Command::QueueNext | Command::QueuePrev => {
+            let rows = up_next(ui, ctx).len();
+            if rows == 0 {
+                ui.notify("nothing queued".to_string());
+            } else {
+                ui.queue_sel = match cmd {
+                    Command::QueuePrev => ui.queue_sel.saturating_sub(n),
+                    _ => (ui.queue_sel + n).min(rows - 1),
+                };
+            }
+        }
         Command::ViewLast => switch_view(ui, ui.previous_view),
         Command::Search { pattern, dir } => {
             if pattern.is_empty() {
@@ -6557,9 +6586,21 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         _ => 0,
     };
 
-    let [tabs, body, menu, status] = Layout::vertical([
+    // The panel is as tall as it needs to be, capped twice: at twelve rows, and
+    // at half the frame — so a long programme cannot squeeze the view it is
+    // meant to sit beside, and an eighty-row terminal does not get a panel
+    // taller than the library above it. Closed, it is a zero-height slot and
+    // costs the layout nothing.
+    let queue_height = if ui.queue_panel {
+        queue_panel_height(up_next(ui, ctx).len(), frame.area().height)
+    } else {
+        0
+    };
+
+    let [tabs, body, queue, menu, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
+        Constraint::Length(queue_height),
         Constraint::Length(menu_height),
         Constraint::Length(1),
     ])
@@ -6643,6 +6684,14 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         }
     }
 
+    // After the body, so it takes room from it rather than covering it — the
+    // difference between a panel and the transport overlay below. Never
+    // focused: the keys still go to the projection, and `]q`/`[q` are what
+    // reach into it (#274).
+    if queue_height > 0 {
+        draw_queue(frame, queue, ui, ctx, false);
+    }
+
     // **Last, and over the middle of the view.** #34 put this in the bottom
     // slot, where it read as one more transient helper beside the completion
     // menu — and a mode you do not notice is a mode you press navigation keys
@@ -6674,6 +6723,62 @@ const PICKER_HEIGHT: u16 = 18;
 /// per view *kind*, so two panes showing different views already have their
 /// own — and two showing the same view share one, which is the honest
 /// limitation of not giving a pane its own state.
+/// How tall the queue panel is: as tall as the programme wants, capped twice.
+///
+/// Twelve rows, so a long programme cannot take the screen; and half the frame,
+/// so a short terminal keeps a usable view above it. Three is the floor — two
+/// rows of border and one of content, which is the smallest thing that still
+/// reads as a list.
+///
+/// **A function rather than three chained calls inside `draw`**, because the
+/// cap is the claim and a claim wants somewhere to be asserted. Testing it
+/// through `render` did not work: at eight rows the string that was supposed to
+/// prove the body survived (`One Artist`) is also in the panel's own track
+/// rows, so the assertion passed with the half-frame cap deleted (§13).
+fn queue_panel_height(rows: usize, frame_height: u16) -> u16 {
+    let wanted = u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2);
+    wanted.clamp(3, 12).min(frame_height / 2)
+}
+
+/// The programme, wherever it is drawn — view 4's body or `gq`'s panel.
+///
+/// **One renderer, because they are one set of rows** (#274). The proposal this
+/// came from modelled the queue as a quickfix *list*, which is a different
+/// thing from a quickfix *window*: the panel is a second place to put the same
+/// page, not a second copy of it. A panel that built its own rows could
+/// disagree with view 4 about what is next, which is the failure `up_next`
+/// exists to prevent — it is already the single source the transport line and
+/// view 4 share.
+///
+/// The cursor is `queue_sel` in both, for the same reason: #97 made cursors
+/// per view *kind*, and the queue drawn small is still the queue.
+fn draw_queue(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, focused: bool) {
+    let rows = up_next(ui, ctx);
+    let entries: Vec<_> = rows.iter().map(|(id, _)| *id).collect();
+    let queued = rows
+        .iter()
+        .take_while(|(_, from)| *from == crate::next::Upcoming::Queued)
+        .count();
+    draw_tracks(
+        frame,
+        area,
+        ui,
+        ctx,
+        TrackList {
+            scroll: &ui.queue_scroll,
+            ids: &entries,
+            selected: ui.queue_sel,
+            title: "up next",
+            focused,
+            divide: false,
+            // Drawn above the first row the queue does not own, so the line
+            // between "you can move this" and "this is what would happen" is
+            // shown rather than described.
+            section: (queued < entries.len()).then(|| (queued, "the pool, from here".to_string())),
+        },
+    )
+}
+
 fn draw_body(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, view: View, focused: bool) {
     let playlist_title = match &ui.open {
         Some(o) => o.name().to_string(),
@@ -6720,33 +6825,7 @@ fn draw_body(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, view: Vi
                 },
             );
         }
-        View::Queue => {
-            let rows = up_next(ui, ctx);
-            let entries: Vec<_> = rows.iter().map(|(id, _)| *id).collect();
-            let queued = rows
-                .iter()
-                .take_while(|(_, from)| *from == crate::next::Upcoming::Queued)
-                .count();
-            draw_tracks(
-                frame,
-                body,
-                ui,
-                ctx,
-                TrackList {
-                    scroll: &ui.queue_scroll,
-                    ids: &entries,
-                    selected: ui.queue_sel,
-                    title: "up next",
-                    focused,
-                    divide: false,
-                    // Drawn above the first row the queue does not own, so the
-                    // line between "you can move this" and "this is what would
-                    // happen" is shown rather than described.
-                    section: (queued < entries.len())
-                        .then(|| (queued, "the pool, from here".to_string())),
-                },
-            )
-        }
+        View::Queue => draw_queue(frame, body, ui, ctx, focused),
         View::Guide => draw_guides(frame, body, ui),
         View::Info => draw_info(frame, body, ui, ctx, focused),
     }
@@ -16979,7 +17058,12 @@ mod tests {
     #[test]
     fn going_deeper_does_not_pay_the_delay_again() {
         let mut bindings = bind::defaults();
-        let seq = crate::cmd::keys::parse_seq("g q x").expect("test keys");
+        // **The scratch chord has to stay unbound**, and `g q x` stopped being
+        // so when `gq` became the queue panel (#274): a two-key prefix that is
+        // *itself* a binding fires instead of going deeper, so the popup this
+        // asserts on never appears and the failure reads as a which-key bug.
+        // `g y` is free; if it ever is not, move this rather than the binding.
+        let seq = crate::cmd::keys::parse_seq("g y x").expect("test keys");
         bindings.insert((crate::cmd::Context::Common, seq), vec![Command::Quit]);
 
         let store = fixture();
@@ -16991,7 +17075,7 @@ mod tests {
         press(&mut ui, &ctx, "g");
         waited(&mut ui);
         let before = ui.pending_since.expect("a chord is pending");
-        press(&mut ui, &ctx, "q");
+        press(&mut ui, &ctx, "y");
 
         assert_eq!(
             ui.pending_since,
@@ -17301,6 +17385,162 @@ mod tests {
 
     /// View 4 shows what would play next, not just what was queued — the queue
     /// first, then the pool's own order, with a divider between them.
+    /// **The claim the panel exists to make**: `gq` shows the programme without
+    /// changing what you are looking at (#274).
+    ///
+    /// `assert_eq!(ui.view, View::Tree)` alone would pass if `gq` were unbound,
+    /// did nothing, or crashed before touching anything — an unchanged value is
+    /// the weakest possible evidence. So the panel has to be shown to be *on
+    /// screen*, beside the library it did not replace.
+    #[test]
+    fn gq_shows_the_programme_without_changing_the_projection() {
+        let store = big_fixture(8);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        ui.playback.current = ui.library.sorted().first().copied();
+        ui.queue.push_back(ui.library.sorted()[5]);
+
+        let before = render(&ui, &ctx, 62, 20);
+        assert!(
+            !before.contains("up next"),
+            "the panel is showing before `gq`, so this test proves nothing:\n{before}"
+        );
+
+        press(&mut ui, &ctx, "g q");
+        let after = render(&ui, &ctx, 62, 20);
+
+        // The instrument: the panel is actually drawn.
+        assert!(
+            after.contains("up next"),
+            "`gq` did not draw the panel:\n{after}"
+        );
+        // And the claim: the projection is untouched, and still on screen.
+        assert_eq!(ui.view, View::Tree, "`gq` changed the active projection");
+        assert!(
+            after.contains("1:library"),
+            "the library went away:\n{after}"
+        );
+
+        press(&mut ui, &ctx, "g q");
+        assert!(
+            !render(&ui, &ctx, 62, 20).contains("up next"),
+            "`gq` does not hide it again"
+        );
+    }
+
+    /// `]q`/`[q` move a cursor in the programme. **They are not transport** —
+    /// `z` and `v` are next and previous track, and two vocabularies for one
+    /// verb is what `transport-keymap-spec.md` §7 exists to prevent.
+    #[test]
+    fn bracket_q_moves_the_queue_cursor_and_plays_nothing() {
+        let store = big_fixture(8);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        let first = ui.library.sorted().first().copied();
+        ui.playback.current = first;
+
+        // The instrument: there must be somewhere to move to, or a cursor that
+        // stayed at 0 would look like success.
+        assert!(
+            up_next(&ui, &ctx).len() > 2,
+            "the fixture has nothing to step through"
+        );
+
+        press(&mut ui, &ctx, "] q");
+        press(&mut ui, &ctx, "] q");
+        assert_eq!(ui.queue_sel, 2, "]q did not move the cursor");
+        press(&mut ui, &ctx, "[ q");
+        assert_eq!(ui.queue_sel, 1, "[q is not ]q's inverse");
+
+        // And the claim: nothing played. The cursor moved, the deck did not.
+        assert_eq!(
+            ui.playback.current, first,
+            "]q changed what is playing; that is `z`/`v`'s job"
+        );
+    }
+
+    /// One cursor, wherever the programme is drawn — and **the panel has to
+    /// follow it on screen**, not merely share the field.
+    ///
+    /// The first version of this test asserted `ui.queue_sel` after switching to
+    /// view 4, which cannot fail while there is one field: it stayed green
+    /// against a panel rendering `selected: 0`. So it steps far enough down that
+    /// the panel must *scroll* to keep the cursor visible, and reads the rows
+    /// that are actually drawn — the cheapest observable proof that the cursor
+    /// reached the renderer (§13).
+    #[test]
+    fn the_panel_follows_the_cursor_it_shares_with_view_four() {
+        let store = big_fixture(60);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.view = View::Tree;
+        ui.playback.current = ui.library.sorted().first().copied();
+        press(&mut ui, &ctx, "g q");
+
+        let top = render(&ui, &ctx, 62, 24);
+        // The instrument: the programme starts at the beginning, so a panel that
+        // ignored the cursor would keep showing exactly this.
+        assert!(
+            top.contains("Track 0002"),
+            "the panel starts elsewhere:\n{top}"
+        );
+
+        // Two presses: `press` takes one key, and `0` extends a count rather
+        // than starting one — which is what makes `30` reachable at all.
+        press(&mut ui, &ctx, "3");
+        press(&mut ui, &ctx, "0");
+        press(&mut ui, &ctx, "] q");
+        assert_eq!(ui.queue_sel, 30, "30]q did not step thirty rows");
+
+        let scrolled = render(&ui, &ctx, 62, 24);
+        assert!(
+            !scrolled.contains("Track 0002"),
+            "the panel did not scroll to the cursor:\n{scrolled}"
+        );
+
+        // And the same cursor is what view 4 opens on.
+        press(&mut ui, &ctx, "4");
+        press(&mut ui, &ctx, "g t");
+        assert_eq!(ui.view, View::Queue, "4gt did not reach the queue");
+        assert_eq!(
+            ui.queue_sel, 30,
+            "view 4 has a cursor of its own; the panel is a second copy"
+        );
+    }
+
+    /// The two caps, asserted on the function rather than through a frame.
+    ///
+    /// **This started as a `render` test and was green against a broken cap.**
+    /// At eight rows the evidence that the body survived was `One Artist`,
+    /// which the panel's own rows also contain — so deleting `.min(height / 2)`
+    /// changed nothing the assertion could see. The lesson is §13's second
+    /// shape: the harness was measuring something other than what it claimed.
+    #[test]
+    fn the_panel_is_capped_at_twelve_rows_and_at_half_the_frame() {
+        // The twelve-row cap, with room to spare.
+        assert_eq!(queue_panel_height(60, 40), 12, "the twelve-row cap");
+        // The half-frame cap, which is the tighter one here.
+        assert_eq!(queue_panel_height(60, 8), 4, "half of an eight-row frame");
+        assert!(
+            queue_panel_height(60, 8) < queue_panel_height(60, 40),
+            "the frame cap must bind before the row cap, or this proves nothing"
+        );
+        // The floor, and a programme shorter than it.
+        assert_eq!(queue_panel_height(1, 40), 3, "the three-row floor");
+        // The property rather than one more example: every row count lands
+        // inside both caps. **No claim about the `u16` cast** — `clamp(3, 12)`
+        // swallows every large value, so `rows as u16` returns the same answer
+        // for every input and an assertion about the conversion could not fail.
+        // `try_from` is there to keep the truncation lint quiet, not to change
+        // a result.
+        for rows in [0, 1, 11, 12, 13, 400, usize::MAX] {
+            let h = queue_panel_height(rows, 40);
+            assert!((3..=12).contains(&h), "{rows} rows gave {h}");
+        }
+    }
+
     #[test]
     fn view_four_projects_the_pool_after_the_queue() {
         let store = big_fixture(8);
