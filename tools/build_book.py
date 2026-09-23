@@ -244,6 +244,13 @@ INTERACTION = [
                 split=True,
             ),
             Doc(
+                file="view-model.md",
+                title="What a view is",
+                standing="**A review of a proposal.** Mostly a record of decisions already made: "
+                "what #97 removed, why the digits are counts, and what is actually left to build.",
+                split=True,
+            ),
+            Doc(
                 file="info-panel.md",
                 title="The info panel",
                 standing="**Proposal, not built.** The surface that shows what the library says "
