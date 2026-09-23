@@ -268,6 +268,15 @@ possibly over a socket. The decision is to build both and **learn by doing**, wi
 than the starting point. What makes this safe is that the fall-back is a subtraction: dropping the expensive direction
 leaves a working feature, so being wrong costs a revert and not a redesign.
 
+**Half of this is built — #276, 2026-09-23.** The cheap direction is done: the focus follows the focused window's
+cursor, so a panel beside a list is live. Two things kept it cheap. It resolves **after a key rather than per frame**,
+and **only when a window is actually showing the panel** — with no panel on screen it is two comparisons, so `j` pays
+nothing for a surface nobody is looking at. A cursor move **replaces** the path rather than pushing, because it is a new
+question; that is what `K` has always meant, and moving the cursor is the same act without the keystroke.
+
+The expensive direction — a projection relocating to a focus — is **not built**, and the nearest-ancestor rule below is
+what it will need when it is.
+
 **A projection that cannot show the focus goes to the nearest ancestor it can.** A `Concept` has no row in the tree, so
 the tree goes to the nearest thing it does hold. This is the same bargain a diff view or a fold already makes — you land
 near the thing rather than on it, and you can see that you did. "No movement" was the alternative and it is the one that

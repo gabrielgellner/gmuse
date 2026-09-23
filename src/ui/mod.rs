@@ -2528,7 +2528,54 @@ fn scroll_popup(ui: &mut Ui, key: KeyEvent) -> bool {
 /// normalised, looked up in the bindings (context first, then `Common`), and
 /// the resulting [`Command`] is handed to [`execute`] — which is the only
 /// place UI state is mutated, per §6.
+/// One door for every key: dispatch it, then let the focus catch up (#276).
+///
+/// **A wrapper rather than a second call in `run`**, because the tests press
+/// keys through here and a tracking step they did not take would be a rule that
+/// held only in production.
 fn handle_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
+    dispatch_key(key, ui, ctx);
+    track_focus(ui, ctx);
+}
+
+/// **The focus follows the cursor** — #276, `view-model.md` §3 and §10.
+///
+/// Resolved after a key rather than on every frame, and **only when a window is
+/// actually showing the panel**: working out what a row is about reads the
+/// library, and paying that for a `j` nobody is watching is exactly the cost §3
+/// weighed. With no panel on screen this is two comparisons.
+///
+/// A projection cursor moving is a **new question**, so it replaces the path
+/// rather than pushing onto it. That is what `K` has always meant — "a fresh
+/// look-up starts a fresh path" — and moving the cursor is the same act without
+/// the keystroke.
+///
+/// **Only when the keys are in a projection.** Moving inside the panel is
+/// navigating it, and `info_sel` is not a cursor this should read; a prompt or
+/// picker is taking the keys, so the cursor underneath has not moved at all.
+fn track_focus(ui: &mut Ui, ctx: &Context<'_>) {
+    use crate::model::about::Found;
+
+    if ui.view() == View::Info
+        || ui.prompt.is_some()
+        || ui.picker.is_some()
+        || !ui.windows.all().iter().any(|w| w.view == View::Info)
+    {
+        return;
+    }
+    // Anything the cursor is not unambiguously *about* leaves the panel where it
+    // is: a row that resolves to several candidates is a question for the picker
+    // (#130), and answering it by guessing would be the panel choosing.
+    let Ok((Found::One(focus), _, _)) = under_cursor(ui, ctx) else {
+        return;
+    };
+    if ui.focus.last() != Some(&focus) {
+        ui.focus = vec![focus];
+        ui.info_sel = 0;
+    }
+}
+
+fn dispatch_key(key: KeyEvent, ui: &mut Ui, ctx: &Context<'_>) {
     // `^d`/`^u` belong to the popup while one is up, and act *on* it rather
     // than through it — which is why they are the exception to the
     // any-key-dismisses rule below rather than a hole in it. which-key does
@@ -2919,7 +2966,7 @@ fn choose_from_picker(ui: &mut Ui, ctx: &Context<'_>) {
         Chosen::Look(focus) => {
             ui.focus = vec![focus];
             ui.info_sel = 0;
-            switch_view(ui, View::Info);
+            show_info(ui);
         }
         // The view under the picker is still the one the crate was offered for, so the
         // subjects are read now rather than carried.
@@ -7114,6 +7161,20 @@ fn follow_link(ui: &mut Ui, ctx: &Context<'_>) {
     ui.info_sel = 0;
 }
 
+/// Put the panel where the reader can see it, **without taking a window that is
+/// already showing something else** (#276).
+///
+/// With one window this is what it always was: `K` switches to the panel. With
+/// the panel already open in another window, `K` is a question asked *of that
+/// window* — switching this one too would answer it by covering the list the
+/// question was about.
+fn show_info(ui: &mut Ui) {
+    if ui.windows.all().iter().any(|w| w.view == View::Info) {
+        return;
+    }
+    switch_view(ui, View::Info);
+}
+
 /// Back to where the reader came from — #127.
 ///
 /// **Popping past the bottom leaves the panel**, because the way in is the way
@@ -7318,7 +7379,7 @@ fn land(
             // question, not a step in the one before it.
             ui.focus = vec![focus];
             ui.info_sel = 0;
-            switch_view(ui, View::Info);
+            show_info(ui);
         }
         // **It does not choose — it offers** (#130). Looking at a list of
         // candidates and picking one is what a picker is for, and the
@@ -15195,6 +15256,112 @@ mod tests {
             ui.status.contains("add to one of them"),
             "the refusal did not say what to do instead: {}",
             ui.status
+        );
+    }
+
+    /// **What #276 is for**: the panel beside a list follows the cursor (§3).
+    ///
+    /// The focus was only ever set by `K`, a link, or the picker — so an info
+    /// window beside the library showed whatever you last asked about, however
+    /// far the cursor had since moved.
+    #[test]
+    fn the_panel_beside_a_list_follows_the_cursor() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // The panel in one window, the library in the other.
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view(), View::Info, "K did not open the panel");
+        press(&mut ui, &ctx, "^w v");
+        assert_eq!(ui.windows.count(), 2, "no split: {}", ui.status);
+        // Put the keys in the window that is *not* the panel.
+        if ui.view() == View::Info {
+            press(&mut ui, &ctx, "^w w");
+        }
+        assert_ne!(ui.view(), View::Info, "both windows are the panel");
+
+        // **The instrument does not go through the focus.** Asking `under_cursor`
+        // directly says what the row is about whether or not anything follows
+        // it — so "the two rows differ" and "the panel followed" stay separate
+        // claims. Comparing two focuses instead made a broken `track_focus` fail
+        // with the instrument's message, blaming the fixture (§13).
+        let on_row = |ui: &Ui| match under_cursor(ui, &ctx) {
+            Ok((crate::model::about::Found::One(f), _, _)) => f,
+            other => panic!("the cursor is not on one thing: {:?}", other.map(|t| t.1)),
+        };
+
+        let row_before = on_row(&ui);
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "j");
+        let row_after = on_row(&ui);
+        assert_ne!(
+            row_before, row_after,
+            "the cursor did not reach a different thing; nothing to follow"
+        );
+
+        // The claim.
+        assert_eq!(
+            ui.focus.last(),
+            Some(&row_after),
+            "the panel did not follow the cursor"
+        );
+        // And the path is replaced, not pushed: a cursor move is a new question.
+        assert_eq!(ui.focus.len(), 1, "moving the cursor grew the jump list");
+    }
+
+    /// **Nothing follows anything while the panel is not on screen.** Resolving
+    /// what a row is about reads the library, and `j` must not pay for a panel
+    /// nobody is looking at (§3's expensive direction, kept cheap).
+    #[test]
+    fn the_focus_does_not_track_when_no_window_shows_the_panel() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "K");
+        let asked = *ui.focus.last().expect("a focus");
+        // Back to the library, one window, panel gone from the screen.
+        press(&mut ui, &ctx, "g tab");
+        assert_ne!(ui.view(), View::Info, "still in the panel");
+
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "j");
+        assert_eq!(
+            *ui.focus.last().expect("a focus"),
+            asked,
+            "the focus tracked the cursor with no panel to show it"
+        );
+    }
+
+    /// `K` with the panel already open elsewhere is a question asked of *that*
+    /// window — switching this one too would cover the list it was about.
+    #[test]
+    fn k_does_not_take_a_second_window_for_the_panel() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "K");
+        press(&mut ui, &ctx, "^w v");
+        if ui.view() == View::Info {
+            press(&mut ui, &ctx, "^w w");
+        }
+        let was = ui.view();
+        // The instrument: this window is showing something else, so "it did not
+        // change" is a claim with content.
+        assert_ne!(was, View::Info, "this window is already the panel");
+
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view(), was, "K took the window the list was in");
+        assert_eq!(
+            ui.windows
+                .all()
+                .iter()
+                .filter(|w| w.view == View::Info)
+                .count(),
+            1,
+            "the panel is in two windows at once"
         );
     }
 
