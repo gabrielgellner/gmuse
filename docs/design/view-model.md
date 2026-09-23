@@ -154,6 +154,20 @@ What survives the correction, and is genuinely new:
 - **Saved queues as `:colder` / `:cnewer`** is the interesting idea in the whole proposal, and it has to be a librarian
   query rather than a UI stack, for the reason above. Unowned.
 
+### View 4 is redundant, and cannot go yet — found 2026-09-23
+
+Once the panel exists, view 4 and the panel are two placements of one set of rows — which is what §1's test removed
+`Sorted` and `Filters` for. So the expectation was that #274 would retire it.
+
+**It cannot, and the reason is not scope.** Every queue _edit_ dispatches on `ui.view == View::Queue`: `dd` removing by
+token, `p` putting the register back, the move commands, the undo key, `set_cursor`, `current_len`. The panel is drawn
+unfocused, so none of that is reachable from it — retiring view 4 today would **delete** queue editing rather than move
+it.
+
+A panel that can hold focus _is_ per-window projections. So this is #275's to unlock, and it is the first concrete thing
+that refactor buys rather than merely enables — worth knowing, because §8 could otherwise read as a refactor whose
+payoff is only in principle.
+
 ---
 
 ## 7. The detail view is a view because it needs the room
@@ -207,7 +221,7 @@ projections have nothing to share a focus between.
 3. **The queue panel is a page of the programme** — #274. `gq` toggles it; it holds a cursor and a version, not a list
    and an index. §6.
 4. **`ui.view` becomes per-window** — #275. `windows[focused].view`, and every match that today needs no notion of a
-   split acquires one. §8. The refactor the rest waits on.
+   split acquires one. §8. The refactor the rest waits on — **including retiring view 4**, see §6.
 5. **One focus, shared across windows** — #276. The focus only — never the cursor, which #97 decided. §3.
 6. **A projection picker** — #277 — under `<leader>f` with the other two (#54, #119). Speculative on purpose: five
    projections do not need one, and the set is expected to grow.
