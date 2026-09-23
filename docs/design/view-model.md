@@ -242,7 +242,8 @@ projections have nothing to share a focus between.
    and an index. §6.
 4. **`ui.view` becomes per-window** — #275. `windows[focused].view`, and every match that today needs no notion of a
    split acquires one. §8. The refactor the rest waits on — **including retiring view 4**, see §6.
-5. **One focus, shared across windows** — #276. The focus only — never the cursor, which #97 decided. §3.
+5. **One focus, shared across windows** — #276 for the cheap direction, done: the panel follows the cursor. #281 for the
+   expensive one: a projection relocating to the focus. The focus only — never the cursor, which #97 decided. §3.
 6. **A projection picker** — #277 — under `<leader>f` with the other two (#54, #119). Speculative on purpose: five
    projections do not need one, and the set is expected to grow.
 
@@ -274,8 +275,9 @@ and **only when a window is actually showing the panel** — with no panel on sc
 nothing for a surface nobody is looking at. A cursor move **replaces** the path rather than pushing, because it is a new
 question; that is what `K` has always meant, and moving the cursor is the same act without the keystroke.
 
-The expensive direction — a projection relocating to a focus — is **not built**, and the nearest-ancestor rule below is
-what it will need when it is.
+The expensive direction — a projection relocating to a focus — is **not built**, and is #281. The nearest-ancestor rule
+below is what it will need, and #281 is where both of these decisions are either confirmed or spent: they were made
+before anyone had felt the cost, which was deliberate, and that is exactly what makes the measurement the point.
 
 **A projection that cannot show the focus goes to the nearest ancestor it can.** A `Concept` has no row in the tree, so
 the tree goes to the nearest thing it does hold. This is the same bargain a diff view or a fold already makes — you land
