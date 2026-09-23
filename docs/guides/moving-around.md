@@ -8,9 +8,10 @@ those already live on. **The count is the one difference between the two spellin
 three views along from here. Both of those are vim, which is why neither is wrong and why it is worth knowing which you
 are typing.
 
-    1 library    3 playlist   4 queue      7 guide
+    1 library    3 playlist   4 queue      7 guide      8 info
 
-Three of them hold rows, and the guide holds prose. `2` and `6` still work and are **not views**:
+Three of them hold rows, the guide holds prose, and `8` is what the library says about one thing. `2` and `6` still work
+— by either spelling, `2gt` or `:view 2` — and are **not views**:
 
     2   the library, drawn flat — the same rows, ungrouped
     6   the picker over your saved views and collections

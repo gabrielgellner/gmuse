@@ -3651,36 +3651,13 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         }
 
         // ---- views
-        Command::View(id) => {
-            // **`1` and `2` set `levels`, and the drawing follows** (#97).
-            // They were two views; they are one view drawn two ways, and the
-            // number key is the shorthand for saying which. Kept in step here
-            // rather than by remembering, so they cannot disagree.
-            // **The number names a value or a picker, not a view** (#97).
-            // `1` and `2` were two views and are one drawn two ways, so the
-            // digit sets `levels`; `6` was a list and is the picker.
-            let wanted = match id {
-                ViewId::Library => Some(crate::shelf::Levels::default()),
-                ViewId::Sorted => Some(crate::shelf::Levels::Flat),
-                ViewId::Filters => {
-                    open_picker(ui, ctx, crate::ui::picker::Source::Groups);
-                    return;
-                }
-                _ => None,
-            };
-            if let Some(levels) = wanted
-                && levels != ui.levels()
-            {
-                ui.set_levels(levels);
-                rebuild_library(ui, ctx);
-            }
-            switch_view(ui, View::from_id(id));
-        }
-        // `gt` steps forward; `<count>gt` goes straight to that view.
+        Command::View(id) => go_to_numbered_view(ui, ctx, id),
+        // `gt` steps forward; `<count>gt` goes straight to that view — **through
+        // the same door `:view <n>` uses**, which is #280.
         Command::ViewNext => match count {
             Some(n) => {
                 if let Some(id) = ViewId::from_number(n as u8) {
-                    switch_view(ui, View::from_id(id));
+                    go_to_numbered_view(ui, ctx, id);
                 }
             }
             None => switch_view(ui, ui.view().next()),
@@ -5543,6 +5520,38 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
     // different reason: it did not cross a catalog boundary, the *store* may
     // have changed under it.
     refresh_smart(ui, ctx);
+}
+
+/// Go where a **number** names, for both spellings of it: `:view <n>` and `<n>gt`.
+///
+/// **One path, which is the whole of #280.** A digit carries more than a view:
+/// `1` and `2` are one library drawn two ways and set `levels`, and `6` is a
+/// picker rather than a view at all. `Command::ViewNext` reached `switch_view`
+/// directly, so `2gt` moved the view and left the drawing — landing on view 1
+/// and looking like it had done nothing, because the grouped tree is what you
+/// were already on.
+///
+/// #97 wrote "kept in step here rather than by remembering, so they cannot
+/// disagree" about exactly this logic. A second caller that skipped it is how
+/// they came to disagree anyway, so now there is no second caller.
+fn go_to_numbered_view(ui: &mut Ui, ctx: &Context<'_>, id: ViewId) {
+    // **The number names a value or a picker, not always a view** (#97).
+    let wanted = match id {
+        ViewId::Library => Some(crate::shelf::Levels::default()),
+        ViewId::Sorted => Some(crate::shelf::Levels::Flat),
+        ViewId::Filters => {
+            open_picker(ui, ctx, crate::ui::picker::Source::Groups);
+            return;
+        }
+        _ => None,
+    };
+    if let Some(levels) = wanted
+        && levels != ui.levels()
+    {
+        ui.set_levels(levels);
+        rebuild_library(ui, ctx);
+    }
+    switch_view(ui, View::from_id(id));
 }
 
 /// Change view, remembering where we came from so `g<Tab>` can go back.
@@ -12307,6 +12316,62 @@ mod tests {
             "the picker changed the view without the drawing — it is not going \
              through `Command::View`"
         );
+    }
+
+    /// **`2gt` and `:view 2` are one thing** — #280, and the assertion that was
+    /// missing.
+    ///
+    /// A digit carries more than a view: `1` and `2` are one library drawn two
+    /// ways. `ViewNext` reached `switch_view` directly, so `2gt` moved the view
+    /// and left the drawing — landing on view 1 and **looking like it had done
+    /// nothing**, because the grouped tree is what you were already on. Every
+    /// existing test asserted the view, which was the half that was right.
+    #[test]
+    fn a_number_means_the_same_thing_typed_or_pressed() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+
+        // The instrument: the default is grouped, so "flat" below is a change
+        // that something has to make.
+        let fresh = ui_of(&store, true);
+        assert!(!fresh.levels().is_flat(), "the fixture starts flat");
+        drop(fresh);
+
+        let mut pressed = ui_of(&store, true);
+        press(&mut pressed, &ctx, "2");
+        press(&mut pressed, &ctx, "g t");
+
+        let mut typed = ui_of(&store, true);
+        press(&mut typed, &ctx, ":");
+        type_line(&mut typed, &ctx, "view 2");
+
+        // The claim: the two spellings agree, on both halves of what `2` means.
+        assert_eq!(
+            (pressed.view(), pressed.levels().is_flat()),
+            (typed.view(), typed.levels().is_flat()),
+            "`2gt` and `:view 2` disagree"
+        );
+        // And in case they ever agree on the *wrong* answer, which the equality
+        // above would not notice.
+        assert_eq!(pressed.view(), View::Tree, "2 is the library");
+        assert!(pressed.levels().is_flat(), "2 is the flat drawing");
+    }
+
+    /// `6` is a picker rather than a view, and `<count>gt` has to mean that too.
+    #[test]
+    fn six_gt_opens_the_picker_like_view_six_does() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = catalog_ui(&store);
+
+        // The instrument: nothing is open, so the picker below is a change.
+        assert!(ui.picker.is_none(), "a picker is already open");
+
+        press(&mut ui, &ctx, "6");
+        press(&mut ui, &ctx, "g t");
+        let picker = ui.picker.as_ref().expect("6gt did not open the picker");
+        assert_eq!(picker.source, crate::ui::picker::Source::Groups);
+        assert_ne!(ui.view(), View::Info, "6gt moved the view as well");
     }
 
     /// **View 6 was a list and is the picker** (#97, #119). `6` opens it.
