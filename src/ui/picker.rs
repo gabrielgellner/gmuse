@@ -52,6 +52,14 @@ pub enum Source {
     /// `:info artist="Bodzin"` matches four things and will not choose
     /// between them, and choosing between things is what a picker is.
     Among(&'static str),
+    /// **The views, and the drawings of them** — `<leader>fv`, #277.
+    ///
+    /// Speculative on purpose and cheap to delete, per `view-model.md` §10. What
+    /// keeps it from being a second `gt`: the tab strip shows *views*, and two
+    /// of these rows are **drawings** of one view. `library, flat` is `levels:
+    /// flat`, which no number key reaches and which nobody would guess is
+    /// spelled `:view 2`.
+    Views,
     /// **A crate to file into** — `a` in the info panel, `:file` with no name.
     ///
     /// The unordered collections with how much each holds, plus the name typed as a new
@@ -63,6 +71,13 @@ pub enum Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Chosen {
     Track(CopyId),
+    /// A view to show, by the number that names it — #277.
+    ///
+    /// **The `ViewId`, not the `View`**, so choosing goes through the same
+    /// `Command::View` the `:` line does: that is where a digit's other meaning
+    /// lives, and `2` setting `levels` is the whole reason this picker is more
+    /// than a list of tabs.
+    Show(crate::cmd::ViewId),
     /// `in="<name>"` — a collection.
     Collection(String),
     /// `saved="<name>"` — a definition.
@@ -156,6 +171,7 @@ impl Picker {
             Source::Tracks => "tracks",
             Source::Groups => "groups",
             Source::Among(kind) => kind,
+            Source::Views => "views",
             Source::Crates => "file in",
         };
         let mut parts = vec![what.to_string()];

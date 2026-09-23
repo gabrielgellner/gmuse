@@ -180,6 +180,9 @@ pub const DEFAULTS: &[&str] = &[
     "bind common \"^w o\" only",
     "bind common \"<leader> f f\" find",
     "bind common \"<leader> f g\" find groups",
+    // The views, and the two *drawings* of view 1 that the numbered strip shows
+    // as one tab (#277). Speculative and cheap to delete — `view-model.md` §10.
+    "bind common \"<leader> f v\" find views",
     // `Z` was snacks' close-all, and `M-e` its opposite. Both are gone: `zM`
     // and `zR` say the same thing in the vocabulary the rest of the keymap
     // already speaks, and `zm`/`zr` add the graduated version neither had.

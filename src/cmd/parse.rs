@@ -710,9 +710,10 @@ fn picker_source(rest: &str) -> Result<crate::ui::picker::Source, ParseError> {
     match rest.trim() {
         "" | "tracks" => Ok(crate::ui::picker::Source::Tracks),
         "groups" => Ok(crate::ui::picker::Source::Groups),
+        "views" => Ok(crate::ui::picker::Source::Views),
         other => Err(ParseError::Bad(
             other.into(),
-            "picker source — `tracks` or `groups`",
+            "picker source — `tracks`, `groups` or `views`",
         )),
     }
 }
@@ -986,6 +987,7 @@ pub fn format(cmd: &Command) -> String {
         Command::Find(source) => match source {
             crate::ui::picker::Source::Tracks => "find".into(),
             crate::ui::picker::Source::Groups => "find groups".into(),
+            crate::ui::picker::Source::Views => "find views".into(),
             // **Not a `:find` anybody types.** A handed-over set is opened by
             // `:info` finding several, so there is no line that produces one
             // and nothing for this to write back.

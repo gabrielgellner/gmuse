@@ -305,6 +305,16 @@ argued it is worth paying.
 **The projection picker gets built and may get removed.** At five projections it is not needed. The set is expected to
 grow, the key is free, and a picker that feels wrong is one deletion — so the cheap experiment is to have it.
 
+Built as `<leader>fv` (#277), and the case against it was stronger than §5 recorded: **the tab strip is already the
+picker's own display**, permanently on screen, over items reachable in one keystroke. A picker whose entire content is
+always visible is a second `gt`.
+
+It earns its place on one row. `library, flat` — views 1 and 2 are one library drawn two ways, the strip has a single
+tab for both, and **no number key reaches the flat one**: it is `:view 2` if you know and unreachable if you do not. The
+rows go through `Command::View`, which is where a digit's other meaning lives, so the picker cannot drift from the `:`
+line. That row, not the picker, is what would be missed if this were deleted — which is the shape of the argument for
+keeping it, and an honest reason it might still go.
+
 ---
 
 ## Related

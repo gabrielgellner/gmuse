@@ -14,6 +14,7 @@ Typing a capital still asks for case to matter. It never asks for the mark back 
 
     <leader>ff   the whole library
     <leader>fg   the groups you have made
+    <leader>fv   the views
     escape       back to where you were
     enter        go to it
 
@@ -29,6 +30,11 @@ filter cannot parse the title says that instead of quietly ranking it as text.
 
 `enter` **goes** to the row rather than playing it, the same way `gp` and `x` are different keys. `<leader>fg` picks a
 collection or a saved view instead, and shows which kind each is.
+
+`<leader>fv` picks a view. The numbered strip along the top already names them, so this is mostly a slower `gt` — with
+one exception that is the reason it exists: **`library, flat`**. Views 1 and 2 are one library drawn two ways, the strip
+has a single tab for both, and no number key reaches the flat one. It is `:view 2` if you know, and a row in this picker
+if you do not.
 
 This is not what `/` is for. `/` moves the cursor inside the list you are looking at; the picker searches everything and
 takes you there.

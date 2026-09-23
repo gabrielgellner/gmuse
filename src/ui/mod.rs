@@ -2876,6 +2876,34 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
             out.sort_by(|a, b| a.label.cmp(&b.label));
             out
         }
+        Source::Views => {
+            // **In the order the numbers are in**, because the tab strip is
+            // numbered and a picker that reordered them would be teaching a
+            // second layout of the same five things.
+            //
+            // `6` is absent: it *is* a picker (the groups one), and a row that
+            // opens another picker is a corridor rather than a choice.
+            [
+                (ViewId::Library, "view 1 · grouped"),
+                (ViewId::Sorted, "view 2 · one row a track"),
+                (ViewId::Playlist, "view 3"),
+                (ViewId::Queue, "view 4 · what is up next"),
+                (ViewId::Guide, "view 7 · how to do things"),
+                (ViewId::Info, "view 8 · what the library says"),
+            ]
+            .into_iter()
+            .map(|(id, detail)| Candidate {
+                label: match id {
+                    // The two drawings of view 1 need telling apart, and the
+                    // strip cannot do it: it has one tab for both.
+                    ViewId::Sorted => "library, flat".to_string(),
+                    _ => View::from_id(id).title().to_string(),
+                },
+                detail: detail.to_string(),
+                chosen: Chosen::Show(id),
+            })
+            .collect()
+        }
         Source::Crates => {
             let known = crates(ui);
             let mut out: Vec<Candidate> = known
@@ -2972,6 +3000,9 @@ fn choose_from_picker(ui: &mut Ui, ctx: &Context<'_>) {
                 point_sorted_at(ui, at);
             }
         }
+        // **Through `Command::View`**, so the picker cannot drift from `:view 2`
+        // — that arm is where a digit's other meaning lives (#277).
+        Chosen::Show(id) => execute(ui, ctx, Command::View(id)),
         Chosen::Collection(name) => {
             ui.composed.set(crate::view::What::Collection(name));
             rebuild_library(ui, ctx);
@@ -12224,6 +12255,57 @@ mod tests {
             ui.tree.mark(&ui.library),
             on,
             "and it is on the same row, which is the claim that survives a re-sort"
+        );
+    }
+
+    /// **The one row that is not a slower `gt`** — #277.
+    ///
+    /// The numbered strip already names the views, so a picker over them is
+    /// mostly a longer way to press `gt`. `library, flat` is the exception and
+    /// the justification: views 1 and 2 are one library drawn two ways, the strip
+    /// has a single tab for both, and no number key reaches the flat one — it is
+    /// `:view 2` if you know, and a row here if you do not.
+    #[test]
+    fn the_view_picker_reaches_the_flat_drawing() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // The instrument: the strip shows one tab for views 1 and 2, so the row
+        // below is naming something the strip cannot.
+        let strip = render(&ui, &ctx, 110, 6);
+        assert!(strip.contains("1:library"), "no strip:\n{strip}");
+        assert!(
+            !strip.contains("2:"),
+            "the strip already names view 2; this picker adds nothing:\n{strip}"
+        );
+
+        press(&mut ui, &ctx, "<leader> f v");
+        let picker = ui.picker.as_ref().expect("no picker");
+        assert_eq!(picker.source, crate::ui::picker::Source::Views);
+        let names: Vec<&str> = picker.shown.iter().map(|c| c.label.as_str()).collect();
+        assert!(names.contains(&"library, flat"), "{names:?}");
+        // `6` is absent on purpose: a row that opens another picker is a
+        // corridor rather than a choice.
+        assert!(!names.iter().any(|n| n.contains("filter")), "{names:?}");
+
+        // Choosing it goes through `Command::View`, so it sets the grouping the
+        // way `:view 2` does rather than only changing the view.
+        assert!(!ui.levels().is_flat(), "already flat; nothing to change");
+        let at = picker
+            .shown
+            .iter()
+            .position(|c| c.label == "library, flat")
+            .expect("the row is shown");
+        for _ in 0..at {
+            press(&mut ui, &ctx, "down");
+        }
+        press(&mut ui, &ctx, "enter");
+        assert_eq!(ui.view(), View::Tree, "did not reach the library");
+        assert!(
+            ui.levels().is_flat(),
+            "the picker changed the view without the drawing — it is not going \
+             through `Command::View`"
         );
     }
 
